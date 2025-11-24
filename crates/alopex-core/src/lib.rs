@@ -1,14 +1,17 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! The core crate for AlopexDB, providing low-level storage primitives.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#![deny(missing_docs)]
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub mod error;
+pub mod kv;
+pub mod log;
+pub mod storage;
+pub mod txn;
+pub mod types;
+pub mod vector;
+
+pub use error::{Error, Result};
+pub use kv::memory::{MemoryKV, MemoryTransaction, MemoryTxnManager};
+pub use kv::{KVStore, KVTransaction};
+pub use txn::TxnManager;
+pub use types::{Key, Value, TxnId, TxnMode};
