@@ -24,6 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Testing
 criterion = "0.5"
+rand = "0.8"
 
 [profile.release]
 opt-level = 3

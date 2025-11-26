@@ -100,6 +100,28 @@ Alopex DB is built in **Rust** for safety and performance.
 
 -----
 
+## 🎬 Demos
+
+Embedded KV demo (basic CRUD + flush/WAL replay):
+
+```bash
+./examples/embedded-kv/demo.sh
+```
+
+This runs a minimal flow for the embedded key-value API to show transaction semantics and durability.
+
+Vector demo:
+
+```bash
+./examples/embedded-vector/demo_vector.sh
+```
+
+What it does:
+- Runs a flat search benchmark (`search_flat`) on 10k×128 vectors (cosine / L2) to show baseline performance.
+- Executes embedded API E2E tests: vector upsert/search with filters and checksum corruption detection.
+
+-----
+
 ## 🛣 Roadmap
 
   * **v0.1 (Current):** Embedded Key-Value store with basic Vector support.
