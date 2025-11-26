@@ -189,7 +189,8 @@ impl SstableWriter {
             checksum,
         };
 
-        self.writer.write_all(&build_footer(footer.entry_count, footer.checksum))?;
+        self.writer
+            .write_all(&build_footer(footer.entry_count, footer.checksum))?;
         self.writer.flush()?;
         self.writer.sync_all()?;
 
@@ -304,7 +305,11 @@ impl SstableReader {
         };
 
         let file = reader.into_inner();
-        Ok(Self { file, index, footer })
+        Ok(Self {
+            file,
+            index,
+            footer,
+        })
     }
 
     /// Returns the number of entries in the SSTable.
@@ -401,7 +406,11 @@ mod tests {
 
         // Corrupt the file by flipping a byte in the value.
         {
-            let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
             file.seek(SeekFrom::Start(
                 HEADER_SIZE + 8 + "a".len() as u64, // skip header + len fields + key
             ))

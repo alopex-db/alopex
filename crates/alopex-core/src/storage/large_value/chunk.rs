@@ -1,3 +1,7 @@
+//! 大容量チャンクフォーマットの writer/reader 実装。
+//! バックプレッシャは `chunk_size` で制御し、writer/reader ともに同時保持は 1 チャンク分に限定する。
+//! crc32 でボディを保護し、Blob/Typed いずれも同じレイアウトを用いる。
+
 use crate::error::{Error, Result};
 use crc32fast::Hasher;
 use std::fs::{remove_file, File, OpenOptions};
@@ -69,7 +73,9 @@ fn read_header(file: &mut File) -> Result<(LargeValueMeta, u32)> {
     file.read_exact(&mut buf)?;
 
     if &buf[0..4] != HEADER_MAGIC {
-        return Err(Error::InvalidFormat("invalid large_value header magic".into()));
+        return Err(Error::InvalidFormat(
+            "invalid large_value header magic".into(),
+        ));
     }
     let version = u16::from_le_bytes(buf[4..6].try_into().unwrap());
     if version != VERSION {
@@ -112,7 +118,9 @@ fn read_footer(file: &mut File, footer_start: u64) -> Result<(u32, u32)> {
     let mut buf = [0u8; FOOTER_SIZE as usize];
     file.read_exact(&mut buf)?;
     if &buf[0..4] != FOOTER_MAGIC {
-        return Err(Error::InvalidFormat("invalid large_value footer magic".into()));
+        return Err(Error::InvalidFormat(
+            "invalid large_value footer magic".into(),
+        ));
     }
     let chunk_count = u32::from_le_bytes(buf[4..8].try_into().unwrap());
     let checksum = u32::from_le_bytes(buf[8..12].try_into().unwrap());
@@ -399,11 +407,8 @@ mod tests {
         let data = b"abcdefghi";
 
         {
-            let mut writer = LargeValueWriter::create(
-                &path,
-                blob_meta(data.len() as u64, 4),
-            )
-            .unwrap();
+            let mut writer =
+                LargeValueWriter::create(&path, blob_meta(data.len() as u64, 4)).unwrap();
             writer.write_chunk(&data[..4]).unwrap();
             writer.write_chunk(&data[4..8]).unwrap();
             writer.write_chunk(&data[8..]).unwrap();
@@ -427,15 +432,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.lv");
         {
-            let mut writer =
-                LargeValueWriter::create(&path, blob_meta(3, 4)).unwrap();
+            let mut writer = LargeValueWriter::create(&path, blob_meta(3, 4)).unwrap();
             writer.write_chunk(b"abc").unwrap();
             writer.finish().unwrap();
         }
 
         // Corrupt one byte in the body.
         {
-            let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
             file.seek(SeekFrom::Start(HEADER_SIZE + 8 + 1)).unwrap(); // header + chunk header + 1 byte into payload
             let mut b = [0u8; 1];
             file.read_exact(&mut b).unwrap();
@@ -454,8 +462,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.lv");
         {
-            let writer =
-                LargeValueWriter::create(&path, blob_meta(3, 4)).unwrap();
+            let writer = LargeValueWriter::create(&path, blob_meta(3, 4)).unwrap();
             writer.cancel().unwrap();
         }
         assert!(!path.exists());

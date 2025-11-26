@@ -18,4 +18,4 @@ pub use storage::large_value::{
     DEFAULT_CHUNK_SIZE,
 };
 pub use txn::TxnManager;
-pub use types::{Key, Value, TxnId, TxnMode};
+pub use types::{Key, TxnId, TxnMode, Value};

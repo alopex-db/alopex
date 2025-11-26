@@ -1,7 +1,7 @@
 use alopex_core::storage::large_value::{
     LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter,
 };
-use alopex_core::{MemoryKV, TxnMode, TxnManager, KVStore, KVTransaction};
+use alopex_core::{KVStore, KVTransaction, MemoryKV, TxnManager, TxnMode};
 use std::io::{Read, Seek, Write};
 use tempfile::tempdir;
 

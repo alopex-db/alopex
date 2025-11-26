@@ -4,8 +4,8 @@
 
 pub use alopex_core::TxnMode;
 use alopex_core::{
-    kv::memory::MemoryTransaction, LargeValueKind, LargeValueMeta, LargeValueReader,
-    LargeValueWriter, KVStore, KVTransaction, MemoryKV, TxnManager, DEFAULT_CHUNK_SIZE,
+    kv::memory::MemoryTransaction, KVStore, KVTransaction, LargeValueKind, LargeValueMeta,
+    LargeValueReader, LargeValueWriter, MemoryKV, TxnManager, DEFAULT_CHUNK_SIZE,
 };
 use std::path::Path;
 use std::result;

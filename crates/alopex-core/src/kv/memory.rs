@@ -369,11 +369,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
 
         // Read-through to SSTable if not found in memory.
         if let Some(value) = self.manager.sstable_get(key)? {
-            let version = self
-                .manager
-                .state
-                .commit_version
-                .load(Ordering::Acquire);
+            let version = self.manager.state.commit_version.load(Ordering::Acquire);
             self.read_set.insert(key.clone(), version);
             return Ok(Some(value));
         }
