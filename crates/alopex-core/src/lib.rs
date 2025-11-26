@@ -19,3 +19,4 @@ pub use storage::large_value::{
 };
 pub use txn::TxnManager;
 pub use types::{Key, TxnId, TxnMode, Value};
+pub use vector::{score, validate_dimensions, Metric, VectorType};

@@ -30,4 +30,20 @@ pub enum Error {
     /// A checksum validation failed.
     #[error("checksum mismatch")]
     ChecksumMismatch,
+
+    /// A vector with an unexpected dimension was provided.
+    #[error("dimension mismatch: expected {expected}, got {actual}")]
+    DimensionMismatch {
+        /// Expected dimension.
+        expected: usize,
+        /// Dimension of the provided vector.
+        actual: usize,
+    },
+
+    /// A metric that is not supported was requested.
+    #[error("unsupported metric: {metric}")]
+    UnsupportedMetric {
+        /// Name of the unsupported metric.
+        metric: String,
+    },
 }

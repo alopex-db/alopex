@@ -4,9 +4,11 @@
 
 pub use alopex_core::TxnMode;
 use alopex_core::{
-    kv::memory::MemoryTransaction, KVStore, KVTransaction, LargeValueKind, LargeValueMeta,
-    LargeValueReader, LargeValueWriter, MemoryKV, TxnManager, DEFAULT_CHUNK_SIZE,
+    kv::memory::MemoryTransaction, score, validate_dimensions, Key, KVStore, KVTransaction,
+    LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter, MemoryKV, Metric,
+    TxnManager, VectorType, DEFAULT_CHUNK_SIZE,
 };
+use std::convert::TryInto;
 use std::path::Path;
 use std::result;
 
@@ -100,6 +102,19 @@ pub struct Transaction<'a> {
     db: &'a Database,
 }
 
+/// A search result row containing key, metadata, and similarity score.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchResult {
+    /// User key associated with the vector.
+    pub key: Key,
+    /// Opaque metadata payload stored alongside the vector.
+    pub metadata: Vec<u8>,
+    /// Similarity score for the query/vector pair.
+    pub score: f32,
+}
+
+const VECTOR_INDEX_KEY: &[u8] = b"__alopex_vector_index";
+
 impl<'a> Transaction<'a> {
     /// Retrieves the value for a given key.
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -116,6 +131,106 @@ impl<'a> Transaction<'a> {
     /// Deletes a key-value pair.
     pub fn delete(&mut self, key: &[u8]) -> Result<()> {
         self.inner_mut()?.delete(key.to_vec()).map_err(Error::Core)
+    }
+
+    /// Upserts a vector and metadata under the provided key after validating dimensions and metric.
+    ///
+    /// A small internal index is maintained to enable scanning for similarity search.
+    pub fn upsert_vector(
+        &mut self,
+        key: &[u8],
+        metadata: &[u8],
+        vector: &[f32],
+        metric: Metric,
+    ) -> Result<()> {
+        if vector.is_empty() {
+            return Err(Error::Core(alopex_core::Error::InvalidFormat(
+                "vector cannot be empty".into(),
+            )));
+        }
+        let vt = VectorType::new(vector.len(), metric);
+        vt.validate(vector).map_err(Error::Core)?;
+
+        let payload = encode_vector_entry(vt, metadata, vector);
+        let txn = self.inner_mut()?;
+        txn.put(key.to_vec(), payload).map_err(Error::Core)?;
+
+        let mut keys = self.load_vector_index()?;
+        if !keys.iter().any(|k| k == key) {
+            keys.push(key.to_vec());
+            self.persist_vector_index(&keys)?;
+        }
+        Ok(())
+    }
+
+    /// Executes a flat similarity search over stored vectors using the provided metric and query.
+    ///
+    /// The optional `filter_keys` restricts the scan to the given keys; otherwise the full
+    /// vector index is scanned. Results are sorted by descending score and truncated to `top_k`.
+    pub fn search_similar(
+        &mut self,
+        query_vector: &[f32],
+        metric: Metric,
+        top_k: usize,
+        filter_keys: Option<&[Key]>,
+    ) -> Result<Vec<SearchResult>> {
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut keys = match filter_keys {
+            Some(keys) => keys.to_vec(),
+            None => self.load_vector_index()?,
+        };
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut rows = Vec::new();
+        let txn = self.inner_mut()?;
+        for key in keys.drain(..) {
+            let Some(raw) = txn.get(&key).map_err(Error::Core)? else {
+                continue;
+            };
+            let decoded = decode_vector_entry(&raw).map_err(Error::Core)?;
+            if decoded.metric != metric {
+                return Err(Error::Core(alopex_core::Error::UnsupportedMetric {
+                    metric: metric.as_str().to_string(),
+                }));
+            }
+            validate_dimensions(decoded.dim, query_vector.len()).map_err(Error::Core)?;
+            let score = score(metric, query_vector, &decoded.vector).map_err(Error::Core)?;
+            rows.push(SearchResult {
+                key,
+                metadata: decoded.metadata,
+                score,
+            });
+        }
+
+        rows.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.key.cmp(&b.key))
+        });
+        if rows.len() > top_k {
+            rows.truncate(top_k);
+        }
+        Ok(rows)
+    }
+
+    fn load_vector_index(&mut self) -> Result<Vec<Key>> {
+        let txn = self.inner_mut()?;
+        let Some(raw) = txn.get(&VECTOR_INDEX_KEY.to_vec()).map_err(Error::Core)? else {
+            return Ok(Vec::new());
+        };
+        decode_index(&raw).map_err(Error::Core)
+    }
+
+    fn persist_vector_index(&mut self, keys: &[Key]) -> Result<()> {
+        let txn = self.inner_mut()?;
+        let encoded = encode_index(keys)?;
+        txn.put(VECTOR_INDEX_KEY.to_vec(), encoded)
+            .map_err(Error::Core)
     }
 
     /// Commits the transaction, applying all changes.
@@ -145,6 +260,124 @@ impl<'a> Drop for Transaction<'a> {
             let _ = self.db.store.txn_manager().rollback(txn);
         }
     }
+}
+
+fn metric_to_byte(metric: Metric) -> u8 {
+    match metric {
+        Metric::Cosine => 0,
+        Metric::L2 => 1,
+        Metric::InnerProduct => 2,
+    }
+}
+
+fn byte_to_metric(byte: u8) -> result::Result<Metric, alopex_core::Error> {
+    match byte {
+        0 => Ok(Metric::Cosine),
+        1 => Ok(Metric::L2),
+        2 => Ok(Metric::InnerProduct),
+        other => Err(alopex_core::Error::UnsupportedMetric {
+            metric: format!("unknown({other})"),
+        }),
+    }
+}
+
+fn encode_vector_entry(vector_type: VectorType, metadata: &[u8], vector: &[f32]) -> Vec<u8> {
+    let dim = vector_type.dim() as u32;
+    let meta_len = metadata.len() as u32;
+    let mut buf = Vec::with_capacity(
+        1 + 4 + 4 + metadata.len() + vector.len() * std::mem::size_of::<f32>(),
+    );
+    buf.push(metric_to_byte(vector_type.metric()));
+    buf.extend_from_slice(&dim.to_le_bytes());
+    buf.extend_from_slice(&meta_len.to_le_bytes());
+    buf.extend_from_slice(metadata);
+    for v in vector {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    buf
+}
+
+struct DecodedEntry {
+    metric: Metric,
+    dim: usize,
+    metadata: Vec<u8>,
+    vector: Vec<f32>,
+}
+
+fn decode_vector_entry(bytes: &[u8]) -> result::Result<DecodedEntry, alopex_core::Error> {
+    if bytes.len() < 9 {
+        return Err(alopex_core::Error::InvalidFormat(
+            "vector entry too short".into(),
+        ));
+    }
+    let metric = byte_to_metric(bytes[0])?;
+    let dim = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+    let meta_len = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
+
+    let header = 9;
+    let expected_len = header + meta_len + dim * std::mem::size_of::<f32>();
+    if bytes.len() < expected_len {
+        return Err(alopex_core::Error::InvalidFormat(
+            "vector entry truncated".into(),
+        ));
+    }
+
+    let metadata = bytes[header..header + meta_len].to_vec();
+    let mut vector = Vec::with_capacity(dim);
+    let vec_bytes = &bytes[header + meta_len..expected_len];
+    for chunk in vec_bytes.chunks_exact(4) {
+        vector.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    }
+
+    Ok(DecodedEntry {
+        metric,
+        dim,
+        metadata,
+        vector,
+    })
+}
+
+fn encode_index(keys: &[Key]) -> result::Result<Vec<u8>, alopex_core::Error> {
+    let mut buf = Vec::new();
+    let count = keys.len() as u32;
+    buf.extend_from_slice(&count.to_le_bytes());
+    for key in keys {
+        let len: u32 = key
+            .len()
+            .try_into()
+            .map_err(|_| alopex_core::Error::InvalidFormat("key too long".into()))?;
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(key);
+    }
+    Ok(buf)
+}
+
+fn decode_index(bytes: &[u8]) -> result::Result<Vec<Key>, alopex_core::Error> {
+    if bytes.len() < 4 {
+        return Err(alopex_core::Error::InvalidFormat(
+            "index too short".into(),
+        ));
+    }
+    let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let mut pos = 4;
+    let mut keys = Vec::with_capacity(count);
+    for _ in 0..count {
+        if pos + 4 > bytes.len() {
+            return Err(alopex_core::Error::InvalidFormat(
+                "index truncated".into(),
+            ));
+        }
+        let len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + len > bytes.len() {
+            return Err(alopex_core::Error::InvalidFormat(
+                "index key truncated".into(),
+            ));
+        }
+        keys.push(bytes[pos..pos + len].to_vec());
+        pos += len;
+    }
+    Ok(keys)
 }
 
 #[cfg(test)]
@@ -294,5 +527,71 @@ mod tests {
             buf.extend_from_slice(&chunk);
         }
         assert_eq!(buf, payload);
+    }
+
+    #[test]
+    fn upsert_and_search_same_txn() {
+        let db = Database::new();
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+        txn.upsert_vector(b"k1", b"meta1", &[1.0, 0.0], Metric::Cosine)
+            .unwrap();
+
+        let results = txn
+            .search_similar(&[1.0, 0.0], Metric::Cosine, 1, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, b"k1");
+        assert_eq!(results[0].metadata, b"meta1");
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn upsert_and_search_across_txn() {
+        let db = Database::new();
+        {
+            let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+            txn.upsert_vector(b"k1", b"meta1", &[1.0, 1.0], Metric::Cosine)
+                .unwrap();
+            txn.commit().unwrap();
+        }
+
+        let mut ro = db.begin(TxnMode::ReadOnly).unwrap();
+        let results = ro
+            .search_similar(&[1.0, 1.0], Metric::Cosine, 1, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, b"k1");
+    }
+
+    #[test]
+    fn read_only_upsert_rejected() {
+        let db = Database::new();
+        let mut ro = db.begin(TxnMode::ReadOnly).unwrap();
+        let err = ro
+            .upsert_vector(b"k1", b"m", &[1.0, 0.0], Metric::Cosine)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Core(alopex_core::Error::TxnConflict)
+        ));
+    }
+
+    #[test]
+    fn dimension_mismatch_on_search() {
+        let db = Database::new();
+        {
+            let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+            txn.upsert_vector(b"k1", b"m", &[1.0, 0.0], Metric::Cosine)
+                .unwrap();
+            txn.commit().unwrap();
+        }
+        let mut ro = db.begin(TxnMode::ReadOnly).unwrap();
+        let err = ro
+            .search_similar(&[1.0, 0.0, 1.0], Metric::Cosine, 1, None)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Core(alopex_core::Error::DimensionMismatch { .. })
+        ));
     }
 }
