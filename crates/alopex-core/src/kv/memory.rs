@@ -4,10 +4,11 @@
 use crate::error::{Error, Result};
 use crate::kv::{KVStore, KVTransaction};
 use crate::log::wal::{WalReader, WalRecord, WalWriter};
+use crate::storage::sstable::{SstableReader, SstableWriter};
 use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, TxnState, Value};
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -21,16 +22,26 @@ impl MemoryKV {
     /// Creates a new, purely transient in-memory KV store.
     pub fn new() -> Self {
         Self {
-            manager: Arc::new(MemoryTxnManager::new(None)),
+            manager: Arc::new(MemoryTxnManager::new(None, None, None)),
         }
     }
 
     /// Opens a persistent in-memory KV store from a file path.
     pub fn open(path: &Path) -> Result<Self> {
         let wal_writer = WalWriter::new(path)?;
-        let manager = Arc::new(MemoryTxnManager::new(Some(wal_writer)));
-        manager.replay(path)?;
+        let sstable_path = path.with_extension("sst");
+        let manager = Arc::new(MemoryTxnManager::new(
+            Some(wal_writer),
+            Some(path.to_path_buf()),
+            Some(sstable_path),
+        ));
+        manager.recover()?;
         Ok(Self { manager })
+    }
+
+    /// Flushes the in-memory data to an SSTable.
+    pub fn flush(&self) -> Result<()> {
+        self.manager.flush()
     }
 }
 
@@ -66,6 +77,12 @@ struct MemorySharedState {
     commit_version: AtomicU64,
     /// The WAL writer. If None, the store is transient.
     wal_writer: Option<RwLock<WalWriter>>,
+    /// Optional WAL path for replay on reopen.
+    wal_path: Option<PathBuf>,
+    /// Optional SSTable reader for read-through.
+    sstable: RwLock<Option<SstableReader>>,
+    /// Optional SSTable path for flush/reopen.
+    sstable_path: Option<PathBuf>,
 }
 
 /// A transaction manager backed by an in-memory map and optional WAL.
@@ -74,26 +91,59 @@ pub struct MemoryTxnManager {
 }
 
 impl MemoryTxnManager {
-    fn new(wal_writer: Option<WalWriter>) -> Self {
+    fn new(
+        wal_writer: Option<WalWriter>,
+        wal_path: Option<PathBuf>,
+        sstable_path: Option<PathBuf>,
+    ) -> Self {
         Self {
             state: Arc::new(MemorySharedState {
                 data: RwLock::new(BTreeMap::new()),
                 next_txn_id: AtomicU64::new(1),
                 commit_version: AtomicU64::new(0),
                 wal_writer: wal_writer.map(RwLock::new),
+                wal_path,
+                sstable: RwLock::new(None),
+                sstable_path,
             }),
         }
     }
 
+    /// Flushes the current in-memory data to an SSTable file.
+    pub fn flush(&self) -> Result<()> {
+        let path = self
+            .state
+            .sstable_path
+            .as_ref()
+            .ok_or_else(|| Error::InvalidFormat("sstable path is not configured".into()))?;
+
+        let data = self.state.data.read().unwrap();
+        let mut writer = SstableWriter::create(path)?;
+        for (key, (value, _version)) in data.iter() {
+            writer.append(key, value)?;
+        }
+        drop(data);
+
+        let _footer = writer.finish()?;
+        let reader = SstableReader::open(path)?;
+        let mut slot = self.state.sstable.write().unwrap();
+        *slot = Some(reader);
+        Ok(())
+    }
+
     /// Replays the WAL to restore the state of the in-memory map.
-    fn replay(&self, path: &Path) -> Result<()> {
+    fn replay(&self) -> Result<()> {
+        let path = match &self.state.wal_path {
+            Some(p) => p,
+            None => return Ok(()),
+        };
         if !path.exists() || std::fs::metadata(path)?.len() == 0 {
             return Ok(());
         }
 
         let mut data = self.state.data.write().unwrap();
         let mut max_txn_id = 0;
-        let mut max_version = 0;
+        let mut max_version = self.state.commit_version.load(Ordering::Acquire);
         let reader = WalReader::new(path)?;
         let mut pending_txns: HashMap<TxnId, Vec<(Key, Option<Value>)>> = HashMap::new();
 
@@ -136,6 +186,53 @@ impl MemoryTxnManager {
             .commit_version
             .store(max_version, Ordering::SeqCst);
         Ok(())
+    }
+
+    fn load_sstable(&self) -> Result<()> {
+        let path = match &self.state.sstable_path {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let mut reader = SstableReader::open(path)?;
+        let mut data = self.state.data.write().unwrap();
+        let mut version = self.state.commit_version.load(Ordering::Acquire);
+
+        let keys: Vec<Key> = reader
+            .index()
+            .iter()
+            .map(|entry| entry.key.clone())
+            .collect();
+
+        for key in keys {
+            if let Some(value) = reader.get(&key)? {
+                version += 1;
+                data.insert(key, (value, version));
+            }
+        }
+
+        self.state.commit_version.store(version, Ordering::SeqCst);
+        let mut slot = self.state.sstable.write().unwrap();
+        *slot = Some(reader);
+        Ok(())
+    }
+
+    /// Loads SSTable then replays WAL to restore state.
+    fn recover(&self) -> Result<()> {
+        self.load_sstable()?;
+        self.replay()?;
+        Ok(())
+    }
+
+    fn sstable_get(&self, key: &Key) -> Result<Option<Value>> {
+        let mut guard = self.state.sstable.write().unwrap();
+        if let Some(reader) = guard.as_mut() {
+            return reader.get(key);
+        }
+        Ok(None)
     }
 
     fn begin_internal(&self, mode: TxnMode) -> Result<MemoryTransaction<'_>> {
@@ -260,14 +357,28 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
             return Ok(value.clone());
         }
 
-        let data = self.manager.state.data.read().unwrap();
-        let result = data.get(key);
+        let result = {
+            let data = self.manager.state.data.read().unwrap();
+            data.get(key).cloned()
+        };
 
-        if let Some((_value, version)) = result {
-            self.read_set.insert(key.clone(), *version);
+        if let Some((v, version)) = result {
+            self.read_set.insert(key.clone(), version);
+            return Ok(Some(v));
         }
 
-        Ok(result.map(|(v, _)| v.clone()))
+        // Read-through to SSTable if not found in memory.
+        if let Some(value) = self.manager.sstable_get(key)? {
+            let version = self
+                .manager
+                .state
+                .commit_version
+                .load(Ordering::Acquire);
+            self.read_set.insert(key.clone(), version);
+            return Ok(Some(value));
+        }
+
+        Ok(None)
     }
 
     fn put(&mut self, key: Key, value: Value) -> Result<()> {
@@ -305,6 +416,7 @@ impl<'a> Drop for MemoryTransaction<'a> {
 mod tests {
     use super::*;
     use crate::{KVTransaction, TxnManager};
+    use tempfile::tempdir;
 
     fn key(s: &str) -> Key {
         s.as_bytes().to_vec()
@@ -400,5 +512,47 @@ mod tests {
         let res = txn.get(&key("non-existent"));
         assert!(res.is_ok());
         assert!(res.unwrap().is_none());
+    }
+
+    #[test]
+    fn flush_and_reopen_reads_from_sstable() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("wal.log");
+        {
+            let store = MemoryKV::open(&wal_path).unwrap();
+            let manager = store.txn_manager();
+            let mut txn = manager.begin(TxnMode::ReadWrite).unwrap();
+            txn.put(key("k1"), value("v1")).unwrap();
+            manager.commit(txn).unwrap();
+            store.flush().unwrap();
+        }
+
+        let reopened = MemoryKV::open(&wal_path).unwrap();
+        let manager = reopened.txn_manager();
+        let mut txn = manager.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(txn.get(&key("k1")).unwrap(), Some(value("v1")));
+    }
+
+    #[test]
+    fn wal_overlays_sstable_on_reopen() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("wal.log");
+        {
+            let store = MemoryKV::open(&wal_path).unwrap();
+            let manager = store.txn_manager();
+            let mut txn = manager.begin(TxnMode::ReadWrite).unwrap();
+            txn.put(key("k1"), value("v1")).unwrap();
+            manager.commit(txn).unwrap();
+            store.flush().unwrap();
+
+            let mut txn2 = manager.begin(TxnMode::ReadWrite).unwrap();
+            txn2.put(key("k1"), value("v2")).unwrap();
+            manager.commit(txn2).unwrap();
+        }
+
+        let reopened = MemoryKV::open(&wal_path).unwrap();
+        let manager = reopened.txn_manager();
+        let mut txn = manager.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(txn.get(&key("k1")).unwrap(), Some(value("v2")));
     }
 }

@@ -1,5 +1,4 @@
-//! ストレージレイヤーの将来拡張用プレースホルダー。
-//!
-//! v0.1 ではWALとメモリ実装のみを提供するため、空モジュールで公開面を満たす。
+//! Storage layer modules for durable data paths.
 
-// 将来の永続ストレージ実装はここに追加する。
+pub mod sstable;
+pub mod large_value;

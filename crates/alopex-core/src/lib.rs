@@ -13,5 +13,9 @@ pub mod vector;
 pub use error::{Error, Result};
 pub use kv::memory::{MemoryKV, MemoryTransaction, MemoryTxnManager};
 pub use kv::{KVStore, KVTransaction};
+pub use storage::large_value::{
+    LargeValueChunkInfo, LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter,
+    DEFAULT_CHUNK_SIZE,
+};
 pub use txn::TxnManager;
 pub use types::{Key, Value, TxnId, TxnMode};

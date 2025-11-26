@@ -22,4 +22,12 @@ pub enum Error {
     /// An underlying I/O error occurred.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// The on-disk format is invalid or corrupted.
+    #[error("invalid format: {0}")]
+    InvalidFormat(String),
+
+    /// A checksum validation failed.
+    #[error("checksum mismatch")]
+    ChecksumMismatch,
 }
