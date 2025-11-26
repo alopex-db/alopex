@@ -31,6 +31,13 @@ pub enum Error {
     #[error("checksum mismatch")]
     ChecksumMismatch,
 
+    /// On-disk segment is corrupted (e.g., checksum failure).
+    #[error("corrupted segment: {reason}")]
+    CorruptedSegment {
+        /// Reason for corruption detection.
+        reason: String,
+    },
+
     /// A vector with an unexpected dimension was provided.
     #[error("dimension mismatch: expected {expected}, got {actual}")]
     DimensionMismatch {

@@ -5,6 +5,7 @@ use crate::error::{Error, Result};
 use crate::kv::{KVStore, KVTransaction};
 use crate::log::wal::{WalReader, WalRecord, WalWriter};
 use crate::storage::sstable::{SstableReader, SstableWriter};
+use crate::storage::flush::write_empty_vector_segment;
 use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, TxnState, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -126,6 +127,10 @@ impl MemoryTxnManager {
 
         let _footer = writer.finish()?;
         let reader = SstableReader::open(path)?;
+        // Also emit a placeholder vector segment alongside SSTable for future vector recovery.
+        let vec_path = path.with_extension("vec");
+        write_empty_vector_segment(&vec_path)?;
+
         let mut slot = self.state.sstable.write().unwrap();
         *slot = Some(reader);
         Ok(())

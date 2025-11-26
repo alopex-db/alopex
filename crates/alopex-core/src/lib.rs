@@ -3,14 +3,21 @@
 #![deny(missing_docs)]
 
 pub mod error;
+pub mod columnar;
 pub mod kv;
 pub mod log;
 pub mod storage;
 pub mod txn;
 pub mod types;
 pub mod vector;
+pub mod obs;
 
 pub use error::{Error, Result};
+pub use columnar::encoding::{
+    decode_column, encode_column, Column, Compression, Encoding, LogicalType,
+};
+pub use columnar::segment::{write_segment, ChunkIter, SegmentMeta, SegmentReader};
+pub use vector::flat::{search_flat, ScoredItem};
 pub use kv::memory::{MemoryKV, MemoryTransaction, MemoryTxnManager};
 pub use kv::{KVStore, KVTransaction};
 pub use storage::large_value::{
