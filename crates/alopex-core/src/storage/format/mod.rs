@@ -7,6 +7,7 @@ pub mod footer;
 pub mod header;
 pub mod reader;
 pub mod section;
+pub mod value_separator;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod writer;
 
@@ -18,6 +19,7 @@ pub use reader::AlopexFileReader;
 pub use reader::{AlopexFileReader, WasmReaderConfig};
 pub use reader::{FileReader, FileSource, PrefetchFuture};
 pub use section::{SectionEntry, SectionIndex, SectionType};
+pub use value_separator::{LargeValuePointer, ValueRef, ValueSeparationConfig, ValueSeparator};
 #[cfg(not(target_arch = "wasm32"))]
 pub use writer::AlopexFileWriter;
 
