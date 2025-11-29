@@ -322,12 +322,13 @@ impl AlopexFileReader {
     fn from_buffer(buffer: Vec<u8>, config: WasmReaderConfig) -> Result<Self, FormatError> {
         // 閾値超過時、range_loaderがあればIndexedDB経路へフォールバック。
         if buffer.len() > config.full_load_threshold_bytes {
-            if let Some(loader) = config.range_loader {
+            let mut cfg = config;
+            if let Some(loader) = cfg.range_loader.take() {
                 return Self::from_indexed_db(
                     buffer.len() as u64,
                     WasmReaderConfig {
                         range_loader: Some(loader),
-                        ..config
+                        ..cfg
                     },
                 );
             } else {
