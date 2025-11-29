@@ -1,0 +1,108 @@
+name: Compatibility
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native:
+    name: Native Compatibility (${{ matrix.target }} | ${{ matrix.compression }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            compression: none
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            compression: snappy
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            compression: zstd
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            compression: lz4
+          - runner: ubuntu-24.04-arm64
+            target: aarch64-unknown-linux-gnu
+            compression: none
+          - runner: ubuntu-24.04-arm64
+            target: aarch64-unknown-linux-gnu
+            compression: snappy
+          - runner: ubuntu-24.04-arm64
+            target: aarch64-unknown-linux-gnu
+            compression: zstd
+          - runner: ubuntu-24.04-arm64
+            target: aarch64-unknown-linux-gnu
+            compression: lz4
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-compat-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-compat-git-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache target directory
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-compat-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Select compression features
+        run: |
+          case "${{ matrix.compression }}" in
+            zstd) echo "FEATURE_FLAGS=--features compression-zstd" >> $GITHUB_ENV ;;
+            lz4) echo "FEATURE_FLAGS=--features compression-lz4" >> $GITHUB_ENV ;;
+            *) echo "FEATURE_FLAGS=" >> $GITHUB_ENV ;;
+          esac
+
+      - name: Run compatibility tests
+        env:
+          ALOPEX_COMPAT_COMPRESSION: ${{ matrix.compression }}
+        run: cargo test -p alopex-core --tests format_compatibility_test $FEATURE_FLAGS
+
+  wasm:
+    name: WASM Compatibility (${{ matrix.compression }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compression: [none, snappy]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.3
+        with:
+          version: latest
+
+      - name: Install Firefox for headless wasm-bindgen-test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y firefox
+
+      - name: Run wasm compatibility tests
+        env:
+          ALOPEX_COMPAT_COMPRESSION: ${{ matrix.compression }}
+        run: |
+          wasm-pack test --firefox --headless crates/alopex-core -- --test format_compatibility_test --test format_wasm_large_file_test

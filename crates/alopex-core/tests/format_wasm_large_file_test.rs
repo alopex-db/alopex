@@ -5,6 +5,9 @@ use alopex_core::storage::format::{
     WasmReaderConfig, HEADER_SIZE,
 };
 use std::sync::{Arc, Mutex};
+use wasm_bindgen_test::*;
+
+wasm_bindgen_test_configure!(run_in_browser);
 
 struct MockRangeLoader {
     inner: BufferRangeLoader,
@@ -60,7 +63,7 @@ fn build_minimal_file() -> Vec<u8> {
     file
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn below_threshold_uses_buffer() {
     let file = build_minimal_file();
     let cfg = WasmReaderConfig {
@@ -75,7 +78,7 @@ fn below_threshold_uses_buffer() {
     assert_eq!(reader.section_index().entries.len(), 0);
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn above_threshold_without_loader_errors() {
     let file = build_minimal_file();
     let cfg = WasmReaderConfig {
@@ -93,7 +96,7 @@ fn above_threshold_without_loader_errors() {
     ));
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn above_threshold_with_loader_reads_ranges() {
     let file = build_minimal_file();
     let len = file.len();
@@ -123,7 +126,7 @@ fn above_threshold_with_loader_reads_ranges() {
         .any(|(off, len)| *off == 0 && *len == HEADER_SIZE as u64));
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn threshold_boundary_cases() {
     let file = build_minimal_file();
     let len = file.len();
