@@ -3,6 +3,7 @@
 //! ヘッダー/フッター/セクションのサイズやマジックナンバーは全プラットフォームで
 //! 同一となるため、ここで集約して管理する。
 
+pub mod backpressure;
 pub mod footer;
 pub mod header;
 pub mod reader;
@@ -11,6 +12,7 @@ pub mod value_separator;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod writer;
 
+pub use backpressure::{CompactionDebtTracker, WriteThrottleConfig};
 pub use footer::FileFooter;
 pub use header::{FileFlags, FileHeader};
 #[cfg(not(target_arch = "wasm32"))]
