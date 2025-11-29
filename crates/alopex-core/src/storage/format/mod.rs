@@ -6,6 +6,8 @@
 pub mod backpressure;
 pub mod footer;
 pub mod header;
+pub mod ingest;
+pub mod models;
 pub mod reader;
 pub mod section;
 pub mod value_separator;
@@ -15,6 +17,12 @@ pub mod writer;
 pub use backpressure::{CompactionDebtTracker, WriteThrottleConfig};
 pub use footer::FileFooter;
 pub use header::{FileFlags, FileHeader};
+pub use ingest::{ExternalSectionIngest, KeyRange};
+pub use models::{
+    bincode_config, ColumnDefinition, EphemeralDataGcConfig, IndexDefinition, IntentEntry,
+    IntentSection, IntentType, LockEntry, LockSection, LockType, Metadata, RaftEntryType,
+    RaftLogEntry, RaftLogSection, RangeMetadata, TableSchema, VectorIndexMetadata, VectorMetric,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use reader::AlopexFileReader;
 #[cfg(target_arch = "wasm32")]
@@ -166,5 +174,21 @@ pub enum FormatError {
         expected: u64,
         /// 実測値。
         found: u64,
+    },
+
+    /// キー範囲が不正（start >= end など）。
+    #[error("Invalid key range: start={start:?}, end={end:?}")]
+    InvalidKeyRange {
+        /// 範囲開始（包含）。
+        start: Vec<u8>,
+        /// 範囲終了（排他）。
+        end: Vec<u8>,
+    },
+
+    /// 外部セクションの検証に失敗。
+    #[error("Invalid external section: {message}")]
+    IngestValidationFailed {
+        /// 検証失敗理由。
+        message: &'static str,
     },
 }
