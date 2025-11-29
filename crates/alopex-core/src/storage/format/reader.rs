@@ -267,7 +267,6 @@ impl FileReader for AlopexFileReader {
 
 /// WASM向けの読み取り挙動設定。
 #[cfg(target_arch = "wasm32")]
-#[derive(Debug, Clone)]
 pub struct WasmReaderConfig {
     /// このサイズ未満なら全体をバッファにロードする。
     pub full_load_threshold_bytes: usize,
@@ -364,7 +363,7 @@ impl AlopexFileReader {
 
         // サイズが閾値未満なら全体をロードしてバッファ経路に切替
         if (length as usize) <= config.full_load_threshold_bytes {
-            let full = loader(0, length)?;
+            let full = loader.load_range(0, length)?;
             return Self::from_buffer(
                 full,
                 WasmReaderConfig {
@@ -378,7 +377,7 @@ impl AlopexFileReader {
         let footer_start = length
             .checked_sub(FOOTER_SIZE as u64)
             .ok_or(FormatError::IncompleteWrite)?;
-        let footer_bytes = loader(footer_start, FOOTER_SIZE as u64)?;
+        let footer_bytes = loader.load_range(footer_start, FOOTER_SIZE as u64)?;
         let footer_array: [u8; FOOTER_SIZE] = footer_bytes
             .try_into()
             .map_err(|_| FormatError::IncompleteWrite)?;
@@ -387,17 +386,17 @@ impl AlopexFileReader {
         // セクションインデックスを取得
         let index_offset = footer.section_index_offset;
         // 最低でもcount + entries分だけ読む
-        let count_bytes = loader(index_offset, 4)?;
+        let count_bytes = loader.load_range(index_offset, 4)?;
         let count_arr: [u8; 4] = count_bytes
             .try_into()
             .map_err(|_| FormatError::IncompleteWrite)?;
         let count = u32::from_le_bytes(count_arr);
         let total_size = 4 + count as usize * SectionEntry::SIZE;
-        let index_bytes = loader(index_offset, total_size as u64)?;
+        let index_bytes = loader.load_range(index_offset, total_size as u64)?;
         let section_index = SectionIndex::from_bytes(&index_bytes)?;
 
         // ヘッダー取得
-        let header_bytes = loader(0, HEADER_SIZE as u64)?;
+        let header_bytes = loader.load_range(0, HEADER_SIZE as u64)?;
         let header_array: [u8; HEADER_SIZE] = header_bytes
             .try_into()
             .map_err(|_| FormatError::IncompleteWrite)?;
@@ -510,7 +509,7 @@ impl FileReader for AlopexFileReader {
             }
             None => {
                 let loader = self.loader.as_ref().ok_or(FormatError::IncompleteWrite)?;
-                loader(entry.offset, entry.compressed_length)
+                loader.load_range(entry.offset, entry.compressed_length)
             }
         }
     }

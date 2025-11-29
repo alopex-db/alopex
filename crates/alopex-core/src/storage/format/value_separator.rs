@@ -26,6 +26,8 @@ impl Default for ValueSeparationConfig {
 pub enum ValueRef {
     /// インライン値。
     Inline(Vec<u8>),
+    /// 分離予定（セクションID未確定）。
+    Pending(LargeValuePointer),
     /// 分離された大型値への参照。
     Separated(LargeValuePointer),
 }
@@ -63,7 +65,7 @@ impl ValueSeparator {
             // rawデータでは8バイトの長さプレフィックスを付与する。
             self.raw_len = self.raw_len.saturating_add(8 + length);
             self.large_values.push((value, checksum));
-            ValueRef::Separated(LargeValuePointer {
+            ValueRef::Pending(LargeValuePointer {
                 section_id: 0,
                 offset,
                 length,
@@ -122,16 +124,37 @@ impl ValueSeparator {
     }
 
     /// 生成済みのポインタを呼び出し側が保持するValueRefに反映するヘルパー。
-    pub fn hydrate_pointers(&self, pointers: &[LargeValuePointer], refs: &mut [ValueRef]) {
+    pub fn hydrate_pointers(
+        &self,
+        pointers: &[LargeValuePointer],
+        refs: &mut [ValueRef],
+    ) -> Result<(), FormatError> {
         for value_ref in refs {
-            if let ValueRef::Separated(ptr) = value_ref {
-                if let Some(new_ptr) = pointers.iter().find(|p| {
-                    p.offset == ptr.offset && p.length == ptr.length && p.checksum == ptr.checksum
-                }) {
-                    *ptr = *new_ptr;
+            match value_ref {
+                ValueRef::Pending(ptr) => {
+                    let new_ptr = pointers
+                        .iter()
+                        .find(|p| {
+                            p.offset == ptr.offset
+                                && p.length == ptr.length
+                                && p.checksum == ptr.checksum
+                        })
+                        .ok_or(FormatError::IncompleteWrite)?;
+                    *value_ref = ValueRef::Separated(*new_ptr);
                 }
+                ValueRef::Separated(ptr) => {
+                    if let Some(new_ptr) = pointers.iter().find(|p| {
+                        p.offset == ptr.offset
+                            && p.length == ptr.length
+                            && p.checksum == ptr.checksum
+                    }) {
+                        *ptr = *new_ptr;
+                    }
+                }
+                ValueRef::Inline(_) => {}
             }
         }
+        Ok(())
     }
 
     /// ポインタを解決して値を返す。呼び出し側でセクションデータを提供する。
@@ -140,6 +163,9 @@ impl ValueSeparator {
         pointer: &LargeValuePointer,
         section_data: &[u8],
     ) -> Result<Vec<u8>, FormatError> {
+        if pointer.section_id == 0 {
+            return Err(FormatError::IncompleteWrite);
+        }
         let mut cursor = pointer.offset as usize;
         if cursor + 8 > section_data.len() {
             return Err(FormatError::IncompleteWrite);
