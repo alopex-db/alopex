@@ -5,10 +5,16 @@
 
 pub mod footer;
 pub mod header;
+pub mod reader;
 pub mod section;
 
 pub use footer::FileFooter;
 pub use header::{FileFlags, FileHeader};
+#[cfg(not(target_arch = "wasm32"))]
+pub use reader::AlopexFileReader;
+#[cfg(target_arch = "wasm32")]
+pub use reader::{AlopexFileReader, WasmReaderConfig};
+pub use reader::{FileReader, FileSource, PrefetchFuture};
 pub use section::{SectionEntry, SectionIndex, SectionType};
 
 use thiserror::Error;
