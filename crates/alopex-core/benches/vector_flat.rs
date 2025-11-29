@@ -1,6 +1,6 @@
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId, BatchSize};
-use rand::Rng;
 use alopex_core::{search_flat, Metric, ScoredItem};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use rand::Rng;
 
 fn bench_search_similar(c: &mut Criterion) {
     let dims = 128;

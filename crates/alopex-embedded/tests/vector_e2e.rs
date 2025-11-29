@@ -1,6 +1,6 @@
-use alopex_core::{Metric, MemoryKV, TxnMode};
+use alopex_core::columnar::encoding::{Column, Compression, Encoding, LogicalType};
 use alopex_core::columnar::segment::{write_segment, SegmentMeta, SegmentReader};
-use alopex_core::columnar::encoding::{Column, LogicalType, Encoding, Compression};
+use alopex_core::{MemoryKV, Metric, TxnMode};
 use alopex_embedded::Database;
 
 fn key(bytes: &[u8]) -> Vec<u8> {
@@ -12,13 +12,17 @@ fn upsert_and_search_end_to_end_with_filter() {
     let db = Database::new();
     {
         let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
-        txn.upsert_vector(b"k1", b"meta1", &[1.0, 0.0], Metric::Cosine).unwrap();
-        txn.upsert_vector(b"k2", b"meta2", &[0.0, 1.0], Metric::Cosine).unwrap();
+        txn.upsert_vector(b"k1", b"meta1", &[1.0, 0.0], Metric::Cosine)
+            .unwrap();
+        txn.upsert_vector(b"k2", b"meta2", &[0.0, 1.0], Metric::Cosine)
+            .unwrap();
         txn.commit().unwrap();
     }
 
     let mut ro = db.begin(TxnMode::ReadOnly).unwrap();
-    let res = ro.search_similar(&[1.0, 0.0], Metric::Cosine, 2, None).unwrap();
+    let res = ro
+        .search_similar(&[1.0, 0.0], Metric::Cosine, 2, None)
+        .unwrap();
     assert_eq!(res.len(), 2);
     assert_eq!(res[0].key, b"k1");
 

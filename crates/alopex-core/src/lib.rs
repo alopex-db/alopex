@@ -2,22 +2,21 @@
 
 #![deny(missing_docs)]
 
-pub mod error;
 pub mod columnar;
+pub mod error;
 pub mod kv;
 pub mod log;
+pub mod obs;
 pub mod storage;
 pub mod txn;
 pub mod types;
 pub mod vector;
-pub mod obs;
 
-pub use error::{Error, Result};
 pub use columnar::encoding::{
     decode_column, encode_column, Column, Compression, Encoding, LogicalType,
 };
 pub use columnar::segment::{write_segment, ChunkIter, SegmentMeta, SegmentReader};
-pub use vector::flat::{search_flat, ScoredItem};
+pub use error::{Error, Result};
 pub use kv::memory::{MemoryKV, MemoryTransaction, MemoryTxnManager};
 pub use kv::{KVStore, KVTransaction};
 pub use storage::large_value::{
@@ -26,4 +25,5 @@ pub use storage::large_value::{
 };
 pub use txn::TxnManager;
 pub use types::{Key, TxnId, TxnMode, Value};
+pub use vector::flat::{search_flat, ScoredItem};
 pub use vector::{score, validate_dimensions, Metric, VectorType};

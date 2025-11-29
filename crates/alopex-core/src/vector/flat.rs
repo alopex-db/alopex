@@ -55,11 +55,7 @@ where
         });
     }
 
-    results.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
-            .then_with(|| a.key.cmp(&b.key))
-    });
+    results.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.key.cmp(&b.key)));
     if results.len() > top_k {
         results.truncate(top_k);
     }
@@ -89,8 +85,14 @@ mod tests {
                 vector: &[0.0, 1.0],
             },
         ];
-        let res = search_flat(&query, Metric::Cosine, 10, items, Some(|c: &Candidate| c.key != b"b"))
-            .unwrap();
+        let res = search_flat(
+            &query,
+            Metric::Cosine,
+            10,
+            items,
+            Some(|c: &Candidate| c.key != b"b"),
+        )
+        .unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].key, b"a");
     }
@@ -110,7 +112,14 @@ mod tests {
                 vector: &[1.0, 0.0],
             },
         ];
-        let res = search_flat(&query, Metric::Cosine, 10, items, None::<fn(&Candidate) -> bool>).unwrap();
+        let res = search_flat(
+            &query,
+            Metric::Cosine,
+            10,
+            items,
+            None::<fn(&Candidate) -> bool>,
+        )
+        .unwrap();
         // same score, sorted by key for determinism
         assert_eq!(res[0].key, b"a");
         assert_eq!(res[1].key, b"b");
@@ -131,7 +140,8 @@ mod tests {
                 vector: &[0.0, 2.0],
             },
         ];
-        let res = search_flat(&query, Metric::L2, 1, items, None::<fn(&Candidate) -> bool>).unwrap();
+        let res =
+            search_flat(&query, Metric::L2, 1, items, None::<fn(&Candidate) -> bool>).unwrap();
         // L2 negative distance: closer is higher (less negative), so "a" should win.
         assert_eq!(res[0].key, b"a");
     }
@@ -145,7 +155,14 @@ mod tests {
             vector: &[1.0, 0.0, 1.0],
         }];
         use crate::Error;
-        let err = search_flat(&query, Metric::Cosine, 1, items, None::<fn(&Candidate) -> bool>).unwrap_err();
+        let err = search_flat(
+            &query,
+            Metric::Cosine,
+            1,
+            items,
+            None::<fn(&Candidate) -> bool>,
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::DimensionMismatch { .. }));
     }
 }

@@ -1,8 +1,8 @@
 //! Helpers for flushing vector segments alongside KV data.
 use std::path::Path;
 
+use crate::columnar::encoding::{Column, Compression, Encoding, LogicalType};
 use crate::columnar::segment::{write_segment, SegmentMeta};
-use crate::columnar::encoding::{Column, LogicalType, Encoding, Compression};
 use crate::Result;
 
 /// Writes an empty vector segment file at the given path.

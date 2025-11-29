@@ -3,8 +3,8 @@
 //! Counters are stored in-process and are lightweight; they are not exported to an external backend.
 //! Latencies are sampled in-memory to approximate p50/p95 for debugging/CI assertions.
 
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// In-memory metrics store.
 struct Metrics {
@@ -42,9 +42,7 @@ pub struct MetricsSnapshot {
 
 /// Record a successful vector write.
 pub fn record_vector_written() {
-    metrics()
-        .vectors_written
-        .fetch_add(1, Ordering::Relaxed);
+    metrics().vectors_written.fetch_add(1, Ordering::Relaxed);
     tracing::debug!("vector written");
 }
 

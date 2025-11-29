@@ -85,8 +85,8 @@ pub fn encode_column(
             .len()
             .try_into()
             .map_err(|_| Error::InvalidFormat("payload too large for lz4".into()))?;
-        let compressed =
-            lz4::block::compress(&payload, None, false).map_err(|e| Error::InvalidFormat(e.to_string()))?;
+        let compressed = lz4::block::compress(&payload, None, false)
+            .map_err(|e| Error::InvalidFormat(e.to_string()))?;
         let mut buf = Vec::with_capacity(4 + compressed.len());
         buf.extend_from_slice(&orig_len.to_le_bytes());
         buf.extend_from_slice(&compressed);
@@ -260,9 +260,7 @@ fn decode_plain(bytes: &[u8], logical: LogicalType) -> Result<Column> {
             }
             Ok(Column::Bool(out))
         }
-        LogicalType::Binary => {
-            decode_varlen(&bytes[4..], count).map(Column::Binary)
-        }
+        LogicalType::Binary => decode_varlen(&bytes[4..], count).map(Column::Binary),
         LogicalType::Fixed(len) => {
             if bytes.len() < pos + 2 {
                 return Err(Error::InvalidFormat("fixed header truncated".into()));
@@ -312,7 +310,11 @@ fn encode_dictionary(column: &Column) -> Result<Vec<u8>> {
     let values = match column {
         Column::Binary(v) => v,
         Column::Fixed { values, .. } => values,
-        _ => return Err(Error::InvalidFormat("dictionary encoding requires binary data".into())),
+        _ => {
+            return Err(Error::InvalidFormat(
+                "dictionary encoding requires binary data".into(),
+            ))
+        }
     };
 
     let mut dict: Vec<Vec<u8>> = Vec::new();
@@ -402,8 +404,12 @@ fn decode_dictionary(bytes: &[u8], logical: LogicalType) -> Result<Column> {
 
 fn encode_rle(column: &Column) -> Result<Vec<u8>> {
     match column {
-        Column::Int64(values) => encode_rle_nums(values.iter().map(|v| v.to_le_bytes().to_vec()), 8),
-        Column::Float64(values) => encode_rle_nums(values.iter().map(|v| v.to_le_bytes().to_vec()), 8),
+        Column::Int64(values) => {
+            encode_rle_nums(values.iter().map(|v| v.to_le_bytes().to_vec()), 8)
+        }
+        Column::Float64(values) => {
+            encode_rle_nums(values.iter().map(|v| v.to_le_bytes().to_vec()), 8)
+        }
         Column::Bool(values) => {
             let mut runs = Vec::new();
             let mut iter = values.iter().copied();
@@ -429,7 +435,9 @@ fn encode_rle(column: &Column) -> Result<Vec<u8>> {
             }
             Ok(buf)
         }
-        _ => Err(Error::InvalidFormat("rle only supports numeric/bool".into())),
+        _ => Err(Error::InvalidFormat(
+            "rle only supports numeric/bool".into(),
+        )),
     }
 }
 
@@ -606,18 +614,28 @@ mod tests {
     #[test]
     fn plain_int64_roundtrip() {
         let col = Column::Int64(vec![1, -2, 3]);
-        let encoded = encode_column(&col, Encoding::Plain, Compression::None, true, LogicalType::Int64).unwrap();
-        let decoded = decode_column(&encoded, LogicalType::Int64, Encoding::Plain, Compression::None, true).unwrap();
+        let encoded = encode_column(
+            &col,
+            Encoding::Plain,
+            Compression::None,
+            true,
+            LogicalType::Int64,
+        )
+        .unwrap();
+        let decoded = decode_column(
+            &encoded,
+            LogicalType::Int64,
+            Encoding::Plain,
+            Compression::None,
+            true,
+        )
+        .unwrap();
         assert_eq!(col, decoded);
     }
 
     #[test]
     fn dictionary_binary_roundtrip_lz4() {
-        let col = Column::Binary(vec![
-            b"aa".to_vec(),
-            b"bb".to_vec(),
-            b"aa".to_vec(),
-        ]);
+        let col = Column::Binary(vec![b"aa".to_vec(), b"bb".to_vec(), b"aa".to_vec()]);
         let encoded = encode_column(
             &col,
             Encoding::Dictionary,
@@ -640,17 +658,30 @@ mod tests {
     #[test]
     fn rle_bool_roundtrip() {
         let col = Column::Bool(vec![true, true, true, false, false, true]);
-        let encoded =
-            encode_column(&col, Encoding::Rle, Compression::None, false, LogicalType::Bool).unwrap();
-        let decoded =
-            decode_column(&encoded, LogicalType::Bool, Encoding::Rle, Compression::None, false)
-                .unwrap();
+        let encoded = encode_column(
+            &col,
+            Encoding::Rle,
+            Compression::None,
+            false,
+            LogicalType::Bool,
+        )
+        .unwrap();
+        let decoded = decode_column(
+            &encoded,
+            LogicalType::Bool,
+            Encoding::Rle,
+            Compression::None,
+            false,
+        )
+        .unwrap();
         assert_eq!(col, decoded);
     }
 
     #[test]
     fn bitpack_bool_roundtrip() {
-        let col = Column::Bool(vec![true, false, true, true, false, false, false, true, true]);
+        let col = Column::Bool(vec![
+            true, false, true, true, false, false, false, true, true,
+        ]);
         let encoded = encode_column(
             &col,
             Encoding::Bitpack,
@@ -673,9 +704,14 @@ mod tests {
     #[test]
     fn checksum_mismatch_detected() {
         let col = Column::Int64(vec![42]);
-        let mut encoded =
-            encode_column(&col, Encoding::Plain, Compression::None, true, LogicalType::Int64)
-                .unwrap();
+        let mut encoded = encode_column(
+            &col,
+            Encoding::Plain,
+            Compression::None,
+            true,
+            LogicalType::Int64,
+        )
+        .unwrap();
         encoded[5] ^= 0xFF; // flip a byte in payload
         let err = decode_column(
             &encoded,

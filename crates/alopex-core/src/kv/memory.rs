@@ -4,8 +4,8 @@
 use crate::error::{Error, Result};
 use crate::kv::{KVStore, KVTransaction};
 use crate::log::wal::{WalReader, WalRecord, WalWriter};
-use crate::storage::sstable::{SstableReader, SstableWriter};
 use crate::storage::flush::write_empty_vector_segment;
+use crate::storage::sstable::{SstableReader, SstableWriter};
 use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, TxnState, Value};
 use std::collections::{BTreeMap, HashMap};

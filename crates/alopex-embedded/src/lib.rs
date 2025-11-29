@@ -4,7 +4,7 @@
 
 pub use alopex_core::TxnMode;
 use alopex_core::{
-    kv::memory::MemoryTransaction, score, validate_dimensions, Key, KVStore, KVTransaction,
+    kv::memory::MemoryTransaction, score, validate_dimensions, KVStore, KVTransaction, Key,
     LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter, MemoryKV, Metric,
     TxnManager, VectorType, DEFAULT_CHUNK_SIZE,
 };
@@ -207,11 +207,7 @@ impl<'a> Transaction<'a> {
             });
         }
 
-        rows.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| a.key.cmp(&b.key))
-        });
+        rows.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.key.cmp(&b.key)));
         if rows.len() > top_k {
             rows.truncate(top_k);
         }
@@ -284,9 +280,8 @@ fn byte_to_metric(byte: u8) -> result::Result<Metric, alopex_core::Error> {
 fn encode_vector_entry(vector_type: VectorType, metadata: &[u8], vector: &[f32]) -> Vec<u8> {
     let dim = vector_type.dim() as u32;
     let meta_len = metadata.len() as u32;
-    let mut buf = Vec::with_capacity(
-        1 + 4 + 4 + metadata.len() + vector.len() * std::mem::size_of::<f32>(),
-    );
+    let mut buf =
+        Vec::with_capacity(1 + 4 + 4 + metadata.len() + vector.len() * std::mem::size_of::<f32>());
     buf.push(metric_to_byte(vector_type.metric()));
     buf.extend_from_slice(&dim.to_le_bytes());
     buf.extend_from_slice(&meta_len.to_le_bytes());
@@ -354,18 +349,14 @@ fn encode_index(keys: &[Key]) -> result::Result<Vec<u8>, alopex_core::Error> {
 
 fn decode_index(bytes: &[u8]) -> result::Result<Vec<Key>, alopex_core::Error> {
     if bytes.len() < 4 {
-        return Err(alopex_core::Error::InvalidFormat(
-            "index too short".into(),
-        ));
+        return Err(alopex_core::Error::InvalidFormat("index too short".into()));
     }
     let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let mut pos = 4;
     let mut keys = Vec::with_capacity(count);
     for _ in 0..count {
         if pos + 4 > bytes.len() {
-            return Err(alopex_core::Error::InvalidFormat(
-                "index truncated".into(),
-            ));
+            return Err(alopex_core::Error::InvalidFormat("index truncated".into()));
         }
         let len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
@@ -570,10 +561,7 @@ mod tests {
         let err = ro
             .upsert_vector(b"k1", b"m", &[1.0, 0.0], Metric::Cosine)
             .unwrap_err();
-        assert!(matches!(
-            err,
-            Error::Core(alopex_core::Error::TxnConflict)
-        ));
+        assert!(matches!(err, Error::Core(alopex_core::Error::TxnConflict)));
     }
 
     #[test]

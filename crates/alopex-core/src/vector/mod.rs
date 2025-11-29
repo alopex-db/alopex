@@ -182,7 +182,10 @@ mod tests {
     fn parses_metric_from_str() {
         assert_eq!(Metric::from_str("cosine").unwrap(), Metric::Cosine);
         assert_eq!(Metric::from_str("L2").unwrap(), Metric::L2);
-        assert_eq!(Metric::from_str("inner_product").unwrap(), Metric::InnerProduct);
+        assert_eq!(
+            Metric::from_str("inner_product").unwrap(),
+            Metric::InnerProduct
+        );
 
         let err = Metric::from_str("chebyshev").unwrap_err();
         assert!(matches!(err, Error::UnsupportedMetric { .. }));

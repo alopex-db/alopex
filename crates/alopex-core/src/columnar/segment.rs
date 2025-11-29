@@ -35,7 +35,11 @@ pub fn write_segment(path: &Path, column: &Column, meta: &SegmentMeta) -> Result
     // Header
     file.write_all(MAGIC)?;
     file.write_all(&VERSION.to_le_bytes())?;
-    file.write_all(&[logical_to_byte(meta.logical_type), encoding_to_byte(meta.encoding), compression_to_byte(meta.compression)])?;
+    file.write_all(&[
+        logical_to_byte(meta.logical_type),
+        encoding_to_byte(meta.encoding),
+        compression_to_byte(meta.compression),
+    ])?;
     file.write_all(&(meta.chunk_rows as u32).to_le_bytes())?;
     file.write_all(&[meta.chunk_checksum as u8])?;
 
@@ -286,7 +290,10 @@ fn slice_column(column: &Column, start: usize, len: usize) -> Result<Column> {
         Column::Float64(v) => Ok(Column::Float64(v[start..start + len].to_vec())),
         Column::Bool(v) => Ok(Column::Bool(v[start..start + len].to_vec())),
         Column::Binary(v) => Ok(Column::Binary(v[start..start + len].to_vec())),
-        Column::Fixed { len: fixed_len, values } => Ok(Column::Fixed {
+        Column::Fixed {
+            len: fixed_len,
+            values,
+        } => Ok(Column::Fixed {
             len: *fixed_len,
             values: values[start..start + len].to_vec(),
         }),
@@ -411,7 +418,12 @@ mod tests {
         }
         assert_eq!(
             out,
-            vec![b"aa".to_vec(), b"bb".to_vec(), b"aa".to_vec(), b"cc".to_vec()]
+            vec![
+                b"aa".to_vec(),
+                b"bb".to_vec(),
+                b"aa".to_vec(),
+                b"cc".to_vec()
+            ]
         );
     }
 }
