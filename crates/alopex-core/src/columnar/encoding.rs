@@ -81,16 +81,25 @@ pub fn encode_column(
     };
 
     if let Compression::Lz4 = compression {
-        let orig_len: u32 = payload
-            .len()
-            .try_into()
-            .map_err(|_| Error::InvalidFormat("payload too large for lz4".into()))?;
-        let compressed = lz4::block::compress(&payload, None, false)
-            .map_err(|e| Error::InvalidFormat(e.to_string()))?;
-        let mut buf = Vec::with_capacity(4 + compressed.len());
-        buf.extend_from_slice(&orig_len.to_le_bytes());
-        buf.extend_from_slice(&compressed);
-        payload = buf;
+        #[cfg(feature = "compression-lz4")]
+        {
+            let orig_len: u32 = payload
+                .len()
+                .try_into()
+                .map_err(|_| Error::InvalidFormat("payload too large for lz4".into()))?;
+            let compressed = lz4::block::compress(&payload, None, false)
+                .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+            let mut buf = Vec::with_capacity(4 + compressed.len());
+            buf.extend_from_slice(&orig_len.to_le_bytes());
+            buf.extend_from_slice(&compressed);
+            payload = buf;
+        }
+        #[cfg(not(feature = "compression-lz4"))]
+        {
+            return Err(Error::InvalidFormat(
+                "lz4 compression is disabled (feature compression-lz4)".into(),
+            ));
+        }
     }
 
     if checksum {
@@ -131,12 +140,21 @@ pub fn decode_column(
     let decompressed = match compression {
         Compression::None => data.to_vec(),
         Compression::Lz4 => {
-            if data.len() < 4 {
-                return Err(Error::InvalidFormat("lz4 header too short".into()));
+            #[cfg(feature = "compression-lz4")]
+            {
+                if data.len() < 4 {
+                    return Err(Error::InvalidFormat("lz4 header too short".into()));
+                }
+                let orig_len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as i32;
+                lz4::block::decompress(&data[4..], Some(orig_len as i32))
+                    .map_err(|e| Error::InvalidFormat(e.to_string()))?
             }
-            let orig_len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as i32;
-            lz4::block::decompress(&data[4..], Some(orig_len as i32))
-                .map_err(|e| Error::InvalidFormat(e.to_string()))?
+            #[cfg(not(feature = "compression-lz4"))]
+            {
+                return Err(Error::InvalidFormat(
+                    "lz4 compression is disabled (feature compression-lz4)".into(),
+                ));
+            }
         }
     };
 
@@ -633,6 +651,7 @@ mod tests {
         assert_eq!(col, decoded);
     }
 
+    #[cfg(feature = "compression-lz4")]
     #[test]
     fn dictionary_binary_roundtrip_lz4() {
         let col = Column::Binary(vec![b"aa".to_vec(), b"bb".to_vec(), b"aa".to_vec()]);

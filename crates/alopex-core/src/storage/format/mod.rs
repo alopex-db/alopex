@@ -127,6 +127,27 @@ pub enum FormatError {
         algorithm: u8,
     },
 
+    /// 圧縮処理に失敗した。
+    #[error("Compression failed for algorithm {algorithm}")]
+    CompressionFailed {
+        /// 対象アルゴリズム。
+        algorithm: u8,
+    },
+
+    /// 解凍処理に失敗した。
+    #[error("Decompression failed for algorithm {algorithm}")]
+    DecompressionFailed {
+        /// 対象アルゴリズム。
+        algorithm: u8,
+    },
+
+    /// 未サポートのチェックサムアルゴリズム。
+    #[error("Checksum algorithm {algorithm} is not supported in this build")]
+    UnsupportedChecksum {
+        /// 対象アルゴリズム。
+        algorithm: u8,
+    },
+
     /// チェックサム不一致。
     #[error("Checksum mismatch: expected {expected:#x}, found {found:#x}")]
     ChecksumMismatch {

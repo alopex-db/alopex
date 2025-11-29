@@ -32,7 +32,7 @@ pub fn compute(data: &[u8], algorithm: ChecksumAlgorithm) -> Result<u64, FormatE
             }
             #[cfg(not(feature = "checksum-xxh64"))]
             {
-                Err(FormatError::UnsupportedCompression {
+                Err(FormatError::UnsupportedChecksum {
                     algorithm: algorithm as u8,
                 })
             }
@@ -85,7 +85,7 @@ pub fn compute_stream<R: Read>(
             }
             #[cfg(not(feature = "checksum-xxh64"))]
             {
-                Err(FormatError::UnsupportedCompression {
+                Err(FormatError::UnsupportedChecksum {
                     algorithm: algorithm as u8,
                 })
             }

@@ -114,7 +114,7 @@ impl FileHeader {
         let checksum_algorithm = match bytes[10] {
             0 => ChecksumAlgorithm::Crc32,
             1 => ChecksumAlgorithm::Xxh64,
-            other => return Err(FormatError::UnsupportedCompression { algorithm: other }),
+            other => return Err(FormatError::UnsupportedChecksum { algorithm: other }),
         };
 
         let compression_algorithm = match bytes[11] {

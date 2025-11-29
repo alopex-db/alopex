@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["compression-lz4"]
+default = []
 compression-zstd = ["zstd"]
 compression-lz4 = ["lz4"]
 checksum-xxh64 = ["xxhash-rust/xxh64"]

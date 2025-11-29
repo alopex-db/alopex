@@ -389,6 +389,7 @@ mod tests {
         assert!(matches!(err, Error::CorruptedSegment { .. }));
     }
 
+    #[cfg(feature = "compression-lz4")]
     #[test]
     fn lz4_dictionary_roundtrip() {
         let dir = tempdir().unwrap();

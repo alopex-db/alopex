@@ -30,7 +30,7 @@ pub fn compress(data: &[u8], algorithm: CompressionAlgorithm) -> Result<Vec<u8>,
         CompressionAlgorithm::None => Ok(data.to_vec()),
         CompressionAlgorithm::Snappy => {
             snap::raw::Encoder::new().compress_vec(data).map_err(|_| {
-                FormatError::UnsupportedCompression {
+                FormatError::CompressionFailed {
                     algorithm: algorithm as u8,
                 }
             })
@@ -39,7 +39,7 @@ pub fn compress(data: &[u8], algorithm: CompressionAlgorithm) -> Result<Vec<u8>,
             #[cfg(feature = "compression-zstd")]
             {
                 zstd::stream::encode_all(Cursor::new(data), 0).map_err(|_| {
-                    FormatError::UnsupportedCompression {
+                    FormatError::CompressionFailed {
                         algorithm: algorithm as u8,
                     }
                 })
@@ -55,7 +55,7 @@ pub fn compress(data: &[u8], algorithm: CompressionAlgorithm) -> Result<Vec<u8>,
             #[cfg(feature = "compression-lz4")]
             {
                 lz4::block::compress(data, None, false).map_err(|_| {
-                    FormatError::UnsupportedCompression {
+                    FormatError::CompressionFailed {
                         algorithm: algorithm as u8,
                     }
                 })
@@ -79,7 +79,7 @@ pub fn decompress(data: &[u8], algorithm: CompressionAlgorithm) -> Result<Vec<u8
         CompressionAlgorithm::None => Ok(data.to_vec()),
         CompressionAlgorithm::Snappy => {
             snap::raw::Decoder::new().decompress_vec(data).map_err(|_| {
-                FormatError::UnsupportedCompression {
+                FormatError::DecompressionFailed {
                     algorithm: algorithm as u8,
                 }
             })
@@ -88,7 +88,7 @@ pub fn decompress(data: &[u8], algorithm: CompressionAlgorithm) -> Result<Vec<u8
             #[cfg(feature = "compression-zstd")]
             {
                 zstd::stream::decode_all(Cursor::new(data)).map_err(|_| {
-                    FormatError::UnsupportedCompression {
+                    FormatError::DecompressionFailed {
                         algorithm: algorithm as u8,
                     }
                 })
@@ -103,10 +103,8 @@ pub fn decompress(data: &[u8], algorithm: CompressionAlgorithm) -> Result<Vec<u8
         CompressionAlgorithm::Lz4 => {
             #[cfg(feature = "compression-lz4")]
             {
-                lz4::block::decompress(data, None).map_err(|_| {
-                    FormatError::UnsupportedCompression {
-                        algorithm: algorithm as u8,
-                    }
+                lz4::block::decompress(data, None).map_err(|_| FormatError::DecompressionFailed {
+                    algorithm: algorithm as u8,
                 })
             }
             #[cfg(not(feature = "compression-lz4"))]

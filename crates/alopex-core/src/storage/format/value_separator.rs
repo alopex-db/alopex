@@ -47,6 +47,7 @@ pub struct LargeValuePointer {
 #[derive(Debug, Default)]
 pub struct ValueSeparator {
     large_values: Vec<(Vec<u8>, u32)>, // (data, checksum)
+    raw_len: u64,
 }
 
 impl ValueSeparator {
@@ -57,12 +58,15 @@ impl ValueSeparator {
         } else {
             let checksum =
                 checksum::compute(&value, checksum::ChecksumAlgorithm::Crc32).unwrap_or(0) as u32;
+            let offset = self.raw_len;
+            let length = value.len() as u64;
+            // rawデータでは8バイトの長さプレフィックスを付与する。
+            self.raw_len = self.raw_len.saturating_add(8 + length);
             self.large_values.push((value, checksum));
-            // offset/section_idはbuild_large_value_sectionで確定するため仮値を入れる。
             ValueRef::Separated(LargeValuePointer {
                 section_id: 0,
-                offset: 0,
-                length: 0,
+                offset,
+                length,
                 checksum,
             })
         }
@@ -73,7 +77,7 @@ impl ValueSeparator {
     pub fn build_large_value_section(
         &self,
         section_id: u32,
-        compress: bool,
+        config: &ValueSeparationConfig,
     ) -> Result<(SectionEntry, Vec<u8>, Vec<LargeValuePointer>), FormatError> {
         let mut offsets = Vec::with_capacity(self.large_values.len());
         let mut raw = Vec::new();
@@ -85,7 +89,7 @@ impl ValueSeparator {
             offsets.push((offset, *checksum, value.len() as u64));
         }
 
-        let algorithm = if compress {
+        let algorithm = if config.compress_large_values {
             crate::storage::compression::CompressionAlgorithm::Snappy
         } else {
             crate::storage::compression::CompressionAlgorithm::None
@@ -115,6 +119,19 @@ impl ValueSeparator {
             .collect();
 
         Ok((entry, compressed, pointers))
+    }
+
+    /// 生成済みのポインタを呼び出し側が保持するValueRefに反映するヘルパー。
+    pub fn hydrate_pointers(&self, pointers: &[LargeValuePointer], refs: &mut [ValueRef]) {
+        for value_ref in refs {
+            if let ValueRef::Separated(ptr) = value_ref {
+                if let Some(new_ptr) = pointers.iter().find(|p| {
+                    p.offset == ptr.offset && p.length == ptr.length && p.checksum == ptr.checksum
+                }) {
+                    *ptr = *new_ptr;
+                }
+            }
+        }
     }
 
     /// ポインタを解決して値を返す。呼び出し側でセクションデータを提供する。
