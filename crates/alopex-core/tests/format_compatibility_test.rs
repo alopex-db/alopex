@@ -97,7 +97,10 @@ fn reads_v0_1_golden_file() {
 fn newer_version_is_rejected() {
     let (_dir, path) = generate_v0_1_test_file();
     let bumped = mutate_version(&path, FileVersion::new(FileVersion::CURRENT.major + 1, 0, 0));
-    let err = AlopexFileReader::open(FileSource::Path(bumped)).expect_err("should reject newer");
+    let err = match AlopexFileReader::open(FileSource::Path(bumped)) {
+        Ok(_) => panic!("should reject newer"),
+        Err(e) => e,
+    };
     match err {
         FormatError::IncompatibleVersion { file, reader } => {
             assert!(file > reader, "file {:?} should be newer than reader {:?}", file, reader);
@@ -155,8 +158,10 @@ mod wasm {
         let buffer = generate_v0_1_test_bytes();
         let bumped =
             mutate_version_bytes(buffer, FileVersion::new(FileVersion::CURRENT.major + 1, 0, 0));
-        let err =
-            AlopexFileReader::open(FileSource::Buffer(bumped)).expect_err("should reject newer");
+        let err = match AlopexFileReader::open(FileSource::Buffer(bumped)) {
+            Ok(_) => panic!("should reject newer"),
+            Err(e) => e,
+        };
         match err {
             FormatError::IncompatibleVersion { file, reader } => assert!(file > reader),
             other => panic!("unexpected error: {:?}", other),

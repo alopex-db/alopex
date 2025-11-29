@@ -54,7 +54,9 @@ pub fn compress(data: &[u8], algorithm: CompressionAlgorithm) -> Result<Vec<u8>,
         CompressionAlgorithm::Lz4 => {
             #[cfg(feature = "compression-lz4")]
             {
-                lz4::block::compress(data, None, false).map_err(|_| {
+                // Enable content size in the block header so decompression does not require
+                // the caller to supply the original length.
+                lz4::block::compress(data, None, true).map_err(|_| {
                     FormatError::CompressionFailed {
                         algorithm: algorithm as u8,
                     }

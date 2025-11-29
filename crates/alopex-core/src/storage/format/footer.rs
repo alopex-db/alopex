@@ -37,7 +37,7 @@ impl FileFooter {
     /// フッターサイズ（バイト）。
     pub const SIZE: usize = FOOTER_SIZE;
 
-    /// 新しいフッターを生成する。チェックサムは別途 [`compute_and_set_checksum`] で計算する。
+    /// 新しいフッターを生成する。チェックサムは別途 [`Self::compute_and_set_checksum`] で計算する。
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         section_index_offset: u64,

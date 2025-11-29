@@ -1,7 +1,62 @@
-//! 統一データファイル形式で共有する定数とエラー型。
+//! # Alopex Unified Data File Format
 //!
-//! ヘッダー/フッター/セクションのサイズやマジックナンバーは全プラットフォームで
-//! 同一となるため、ここで集約して管理する。
+//! Alopex DB が共通で読み書きする `.alopex` バイナリファイル形式の
+//! 定数・型・エラーをまとめ、Native/WASM 両ターゲットで同一フォーマットを提供する。
+//!
+//! ## 主な構造体
+//! - [`FileHeader`], [`FileFooter`] — マジック・バージョン・統計・チェックサムを保持
+//! - [`SectionEntry`], [`SectionIndex`] — セクションメタデータ（圧縮方式・オフセット・長さ）
+//! - [`AlopexFileWriter`] (native) — ヘッダー書き込み → セクション追加 → フッター確定 → アトミックリネーム
+//! - [`AlopexFileReader`] (native/wasm) — ヘッダー/フッター/インデックスを検証し、圧縮後データのチェックサムを照合
+//! - [`ValueSeparator`] — 大型値を専用セクションに分離するユーティリティ
+//!
+//! ## フォーマット特性
+//! - バイトオーダー: Little Endian 固定
+//! - セクションデータのチェックサムは「圧縮後バイト列」に対して計算
+//! - バージョン互換性: `file.version` が [`FileVersion::CURRENT`] を超える場合、 [`FormatError::IncompatibleVersion`] を返す
+//! - 圧縮: None / Snappy（デフォルト）/ Zstd / LZ4 （feature で有効化）
+//! - ターゲット: x86_64 / ARM64 / WASM（WASMは Snappy/None のみをデフォルトサポート）
+//!
+//! ## 典型的な書き込みフロー（native）
+//! ```rust,no_run
+//! use alopex_core::storage::format::{
+//!     AlopexFileWriter, FileFlags, FileVersion, SectionType, FormatError,
+//! };
+//!
+//! fn write_file() -> Result<(), FormatError> {
+//!     let mut writer = AlopexFileWriter::new(
+//!         "example.alopex".into(),
+//!         FileVersion::CURRENT,
+//!         FileFlags(0),
+//!     )?;
+//!     // 非圧縮メタデータ
+//!     writer.add_section(SectionType::Metadata, b"meta-v1", false)?;
+//!     // デフォルト圧縮（Snappy）でSSTableを書き込む
+//!     writer.add_section(SectionType::SSTable, b"sstable-bytes", true)?;
+//!     writer.finalize()?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## 典型的な読み取りフロー（native）
+//! ```rust,no_run
+//! use alopex_core::storage::format::{AlopexFileReader, FileReader, FileSource, FormatError};
+//!
+//! fn read_and_validate() -> Result<(), FormatError> {
+//!     let reader = AlopexFileReader::open(FileSource::Path("example.alopex".into()))?;
+//!     reader.validate_all()?; // ヘッダー/フッター/各セクションの整合性を検証
+//!     let meta = reader.read_section(0)?; // 解凍済みバイト列
+//!     let data_raw = reader.read_section_raw(1)?; // 圧縮後バイト列
+//!     assert!(!meta.is_empty());
+//!     assert!(!data_raw.is_empty());
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## WASM 読み取りフローの留意点
+//! - `full_load_threshold_bytes` 未満のサイズは全体をバッファにロード。
+//! - 閾値超過時は IndexedDB などの範囲ローダーでストリーミング読み取り。
+//! - デフォルトで Snappy/None のみをサポートし、Zstd/LZ4 はビルドサイズ・メモリ上限の理由で無効化。
 
 pub mod backpressure;
 pub mod footer;
