@@ -148,6 +148,17 @@ pub enum FormatError {
         algorithm: u8,
     },
 
+    /// ポインタ情報が不正または未解決。
+    #[error("Invalid pointer: section_id={section_id}, offset={offset}, length={length}")]
+    InvalidPointer {
+        /// セクションID（未解決時は0）。
+        section_id: u32,
+        /// オフセット。
+        offset: u64,
+        /// 長さ。
+        length: u64,
+    },
+
     /// チェックサム不一致。
     #[error("Checksum mismatch: expected {expected:#x}, found {found:#x}")]
     ChecksumMismatch {

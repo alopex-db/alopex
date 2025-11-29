@@ -139,7 +139,11 @@ impl ValueSeparator {
                                 && p.length == ptr.length
                                 && p.checksum == ptr.checksum
                         })
-                        .ok_or(FormatError::IncompleteWrite)?;
+                        .ok_or(FormatError::InvalidPointer {
+                            section_id: 0,
+                            offset: ptr.offset,
+                            length: ptr.length,
+                        })?;
                     *value_ref = ValueRef::Separated(*new_ptr);
                 }
                 ValueRef::Separated(ptr) => {
@@ -164,7 +168,11 @@ impl ValueSeparator {
         section_data: &[u8],
     ) -> Result<Vec<u8>, FormatError> {
         if pointer.section_id == 0 {
-            return Err(FormatError::IncompleteWrite);
+            return Err(FormatError::InvalidPointer {
+                section_id: 0,
+                offset: pointer.offset,
+                length: pointer.length,
+            });
         }
         let mut cursor = pointer.offset as usize;
         if cursor + 8 > section_data.len() {
