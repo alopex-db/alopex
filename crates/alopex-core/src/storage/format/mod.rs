@@ -3,6 +3,14 @@
 //! ヘッダー/フッター/セクションのサイズやマジックナンバーは全プラットフォームで
 //! 同一となるため、ここで集約して管理する。
 
+pub mod footer;
+pub mod header;
+pub mod section;
+
+pub use footer::FileFooter;
+pub use header::{FileFlags, FileHeader};
+pub use section::{SectionEntry, SectionIndex, SectionType};
+
 use thiserror::Error;
 
 /// ファイル先頭のマジックナンバー ("ALPX")。
