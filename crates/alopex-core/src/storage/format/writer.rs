@@ -81,12 +81,14 @@ impl AlopexFileWriter {
         data: &[u8],
         compress: bool,
     ) -> Result<u32, FormatError> {
-        let compression = if compress {
+        let chosen_alg = if compress {
+            // ヘッダーデフォルトの圧縮アルゴリズムをそのまま使用。
             self.header.compression_algorithm
         } else {
+            // 非圧縮を明示。
             compression::CompressionAlgorithm::None
         };
-        self.add_section_with_compression(section_type, data, compression)
+        self.add_section_with_compression(section_type, data, chosen_alg)
     }
 
     /// 圧縮アルゴリズムを明示指定してセクションを追加する。
