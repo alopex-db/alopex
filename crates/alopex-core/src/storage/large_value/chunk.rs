@@ -174,6 +174,23 @@ impl LargeValueWriter {
         })
     }
 
+    /// Returns the metadata describing this large value.
+    pub fn meta(&self) -> LargeValueMeta {
+        self.meta
+    }
+
+    /// Returns remaining bytes expected before the writer reaches total_len.
+    pub fn remaining(&self) -> u64 {
+        self.meta
+            .total_len
+            .saturating_sub(self.written.min(self.meta.total_len))
+    }
+
+    /// Maximum chunk size permitted for this writer.
+    pub fn chunk_size(&self) -> u32 {
+        self.meta.chunk_size
+    }
+
     /// Writes a single chunk. Chunks must respect the configured chunk_size and total_len.
     pub fn write_chunk(&mut self, chunk: &[u8]) -> Result<()> {
         if self.finished {
@@ -425,6 +442,41 @@ mod tests {
         }
         assert_eq!(collected, data);
         assert_eq!(reader.meta().total_len, data.len() as u64);
+    }
+
+    #[test]
+    fn typed_payload_roundtrip_and_partial_read() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("typed.lv");
+        let data = b"012345";
+        let meta = LargeValueMeta {
+            kind: LargeValueKind::Typed(42),
+            total_len: data.len() as u64,
+            chunk_size: 4,
+        };
+
+        {
+            let mut writer = LargeValueWriter::create(&path, meta).unwrap();
+            writer.write_chunk(&data[..4]).unwrap();
+            writer.write_chunk(&data[4..]).unwrap();
+            assert_eq!(writer.remaining(), 0);
+            writer.finish().unwrap();
+        }
+
+        let mut reader = LargeValueReader::open(&path).unwrap();
+        assert!(matches!(reader.meta().kind, LargeValueKind::Typed(42)));
+
+        // Partial read: only consume first chunk, ensure iterator can continue.
+        let first = reader.next_chunk().unwrap().unwrap();
+        assert_eq!(first.0.index, 0);
+        assert!(!first.0.is_last);
+        assert_eq!(first.1, b"0123");
+
+        let second = reader.next_chunk().unwrap().unwrap();
+        assert_eq!(second.0.index, 1);
+        assert!(second.0.is_last);
+        assert_eq!(second.1, b"45");
+        assert!(reader.next_chunk().unwrap().is_none());
     }
 
     #[test]
