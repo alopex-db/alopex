@@ -1,10 +1,10 @@
 use alopex_core::storage::compression::CompressionAlgorithm;
+#[cfg(not(target_arch = "wasm32"))]
+use alopex_core::storage::format::AlopexFileWriter;
 use alopex_core::storage::format::{
     AlopexFileReader, FileFlags, FileReader, FileSource, FileVersion, FormatError, SectionType,
     HEADER_SIZE,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use alopex_core::storage::format::AlopexFileWriter;
 use std::env;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -30,8 +30,8 @@ fn mutate_version(path: &std::path::Path, file_version: FileVersion) -> std::pat
     let mut bytes = std::fs::read(path).expect("read file");
     let mut header = [0u8; HEADER_SIZE];
     header.copy_from_slice(&bytes[..HEADER_SIZE]);
-    let mut header = alopex_core::storage::format::FileHeader::from_bytes(&header)
-        .expect("parse header");
+    let mut header =
+        alopex_core::storage::format::FileHeader::from_bytes(&header).expect("parse header");
     header.version = file_version;
     let serialized = header.to_bytes();
     bytes[..HEADER_SIZE].copy_from_slice(&serialized);
@@ -45,8 +45,8 @@ fn mutate_version(path: &std::path::Path, file_version: FileVersion) -> std::pat
 fn mutate_version_bytes(mut bytes: Vec<u8>, file_version: FileVersion) -> Vec<u8> {
     let mut header_bytes = [0u8; HEADER_SIZE];
     header_bytes.copy_from_slice(&bytes[..HEADER_SIZE]);
-    let mut header = alopex_core::storage::format::FileHeader::from_bytes(&header_bytes)
-        .expect("parse header");
+    let mut header =
+        alopex_core::storage::format::FileHeader::from_bytes(&header_bytes).expect("parse header");
     header.version = file_version;
     let serialized = header.to_bytes();
     bytes[..HEADER_SIZE].copy_from_slice(&serialized);
@@ -87,8 +87,7 @@ fn reads_v0_1_golden_file() {
     assert_eq!(reader.read_section(1).unwrap(), b"compat-data-v0.1");
     // ensure footer layout aligns with index offsets
     assert!(
-        reader.footer().section_index_offset
-            >= alopex_core::storage::format::HEADER_SIZE as u64
+        reader.footer().section_index_offset >= alopex_core::storage::format::HEADER_SIZE as u64
     );
 }
 
@@ -96,14 +95,22 @@ fn reads_v0_1_golden_file() {
 #[test]
 fn newer_version_is_rejected() {
     let (_dir, path) = generate_v0_1_test_file();
-    let bumped = mutate_version(&path, FileVersion::new(FileVersion::CURRENT.major + 1, 0, 0));
+    let bumped = mutate_version(
+        &path,
+        FileVersion::new(FileVersion::CURRENT.major + 1, 0, 0),
+    );
     let err = match AlopexFileReader::open(FileSource::Path(bumped)) {
         Ok(_) => panic!("should reject newer"),
         Err(e) => e,
     };
     match err {
         FormatError::IncompatibleVersion { file, reader } => {
-            assert!(file > reader, "file {:?} should be newer than reader {:?}", file, reader);
+            assert!(
+                file > reader,
+                "file {:?} should be newer than reader {:?}",
+                file,
+                reader
+            );
         }
         other => panic!("unexpected error: {:?}", other),
     }
@@ -156,8 +163,10 @@ mod wasm {
     #[wasm_bindgen_test]
     fn newer_version_is_rejected() {
         let buffer = generate_v0_1_test_bytes();
-        let bumped =
-            mutate_version_bytes(buffer, FileVersion::new(FileVersion::CURRENT.major + 1, 0, 0));
+        let bumped = mutate_version_bytes(
+            buffer,
+            FileVersion::new(FileVersion::CURRENT.major + 1, 0, 0),
+        );
         let err = match AlopexFileReader::open(FileSource::Buffer(bumped)) {
             Ok(_) => panic!("should reject newer"),
             Err(e) => e,

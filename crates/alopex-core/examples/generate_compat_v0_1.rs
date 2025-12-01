@@ -8,10 +8,10 @@
 use std::fs;
 use std::path::PathBuf;
 
+use alopex_core::storage::compression::CompressionAlgorithm;
 use alopex_core::storage::format::{
     AlopexFileWriter, FileFlags, FileHeader, FileVersion, SectionType, HEADER_SIZE,
 };
-use alopex_core::storage::compression::CompressionAlgorithm;
 
 fn main() {
     let output = PathBuf::from("crates/alopex-core/tests/data/compatibility/v0_1.alopex");

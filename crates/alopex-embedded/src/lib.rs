@@ -2,11 +2,12 @@
 
 #![deny(missing_docs)]
 
+pub use alopex_core::Metric;
 pub use alopex_core::TxnMode;
 use alopex_core::{
     kv::memory::MemoryTransaction, score, validate_dimensions, KVStore, KVTransaction, Key,
-    LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter, MemoryKV, Metric,
-    TxnManager, VectorType, DEFAULT_CHUNK_SIZE,
+    LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter, MemoryKV, TxnManager,
+    VectorType, DEFAULT_CHUNK_SIZE,
 };
 use std::convert::TryInto;
 use std::path::Path;

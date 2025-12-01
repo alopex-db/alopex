@@ -69,8 +69,8 @@ mod tests {
         let payload = b"hello chunk streaming";
 
         {
-            let mut writer = LargeValueWriter::create(&path, typed_meta(payload.len() as u64, 5))
-                .unwrap();
+            let mut writer =
+                LargeValueWriter::create(&path, typed_meta(payload.len() as u64, 5)).unwrap();
             let bytes = copy_from_reader(&mut writer, Cursor::new(payload)).unwrap();
             assert_eq!(bytes, payload.len() as u64);
             writer.finish().unwrap();
