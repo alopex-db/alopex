@@ -2,9 +2,11 @@
 //! - Database 初期化（インメモリ）
 //! - upsert_vector でメタデータ付きベクトルを格納
 //! - search_similar で Cosine / L2 / InnerProduct を検索
+//! - メトリクごとに別インメモリ DB を使い、UnsupportedMetric を避けつつ挙動を独立検証する
 
 use alopex_embedded::{Database, Metric, SearchResult, TxnMode};
 
+// search_similar の結果をキー・スコア・メタデータ付きで整形表示するヘルパ。
 fn print_results(title: &str, results: &[SearchResult]) {
     println!("\n=== {title} ===");
     if results.is_empty() {
