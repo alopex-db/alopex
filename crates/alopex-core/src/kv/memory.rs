@@ -97,7 +97,7 @@ struct MemorySharedState {
     /// Optional SSTable path for flush/reopen.
     sstable_path: Option<PathBuf>,
     /// Optional memory upper limit (bytes) for in-memory mode。
-    memory_limit: Option<usize>,
+    memory_limit: RwLock<Option<usize>>,
     /// Current memory consumption (bytes) tracked across operations。
     current_memory: AtomicUsize,
 }
@@ -105,7 +105,7 @@ struct MemorySharedState {
 impl MemorySharedState {
     /// Check whether adding `additional` bytes would exceed the memory limit.
     fn check_memory_limit(&self, additional: usize) -> Result<()> {
-        if let Some(limit) = self.memory_limit {
+        if let Some(limit) = *self.memory_limit.read().unwrap() {
             let current = self.current_memory.load(Ordering::Relaxed);
             let requested = current.saturating_add(additional);
             if requested > limit {
@@ -177,7 +177,7 @@ impl MemoryTxnManager {
                 wal_path,
                 sstable: RwLock::new(None),
                 sstable_path,
-                memory_limit,
+                memory_limit: RwLock::new(memory_limit),
                 current_memory: AtomicUsize::new(0),
             }),
         }
@@ -199,6 +199,12 @@ impl MemoryTxnManager {
     /// Returns current memory usage statistics.
     pub fn memory_stats(&self) -> MemoryStats {
         self.state.memory_stats()
+    }
+
+    /// Update the configured memory limit at runtime.
+    pub fn set_memory_limit(&self, limit: Option<usize>) {
+        let mut guard = self.state.memory_limit.write().unwrap();
+        *guard = limit;
     }
 
     /// Returns a snapshot clone of all key/value pairs.
@@ -229,7 +235,7 @@ impl MemoryTxnManager {
     where
         F: FnOnce() -> Result<()>,
     {
-        if let Some(limit) = self.state.memory_limit {
+        if let Some(limit) = *self.state.memory_limit.read().unwrap() {
             let current = self.state.current_memory.load(Ordering::Relaxed);
             // predicted usage after compaction: current - input + output (clamped at 0)
             let prospective = current
@@ -480,7 +486,7 @@ impl<'a> TxnManager<'a, MemoryTransaction<'a>> for &'a MemoryTxnManager {
 
         if delta > 0 {
             self.state.check_memory_limit(delta as usize)?;
-        } else if let Some(limit) = self.state.memory_limit {
+        } else if let Some(limit) = *self.state.memory_limit.read().unwrap() {
             if prospective > limit {
                 return Err(Error::MemoryLimitExceeded {
                     limit,

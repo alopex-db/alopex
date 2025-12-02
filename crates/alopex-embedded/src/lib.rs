@@ -154,6 +154,20 @@ impl Database {
         txn.commit()
     }
 
+    /// Updates the memory limit in bytes for the underlying in-memory store.
+    pub fn set_memory_limit(&self, bytes: Option<usize>) {
+        self.store.txn_manager().set_memory_limit(bytes);
+    }
+
+    /// Returns a read-only snapshot of all key-value pairs.
+    pub fn snapshot(&self) -> Vec<(Key, Vec<u8>)> {
+        self.store
+            .txn_manager()
+            .snapshot()
+            .into_iter()
+            .collect()
+    }
+
     /// Creates a chunked large value writer for opaque blobs (beta).
     pub fn create_blob_writer(
         &self,
