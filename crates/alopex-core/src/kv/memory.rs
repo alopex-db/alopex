@@ -8,6 +8,7 @@ use crate::storage::flush::write_empty_vector_segment;
 use crate::storage::sstable::{SstableReader, SstableWriter};
 use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, TxnState, Value};
+use tracing::warn;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -143,6 +144,16 @@ impl MemorySharedState {
             index_bytes: 0,
         }
     }
+
+    /// Recompute tracked memory usage from existing data (used after recovery).
+    fn recompute_current_memory(&self) {
+        let data = self.data.read().unwrap();
+        let mut total = 0usize;
+        for (k, (v, _)) in data.iter() {
+            total = total.saturating_add(k.len() + v.len());
+        }
+        self.current_memory.store(total, Ordering::Relaxed);
+    }
 }
 
 /// A transaction manager backed by an in-memory map and optional WAL.
@@ -151,10 +162,11 @@ pub struct MemoryTxnManager {
 }
 
 impl MemoryTxnManager {
-    fn new(
+    fn new_with_params(
         wal_writer: Option<WalWriter>,
         wal_path: Option<PathBuf>,
         sstable_path: Option<PathBuf>,
+        memory_limit: Option<usize>,
     ) -> Self {
         Self {
             state: Arc::new(MemorySharedState {
@@ -165,10 +177,93 @@ impl MemoryTxnManager {
                 wal_path,
                 sstable: RwLock::new(None),
                 sstable_path,
-                memory_limit: None,
+                memory_limit,
                 current_memory: AtomicUsize::new(0),
             }),
         }
+    }
+
+    fn new(
+        wal_writer: Option<WalWriter>,
+        wal_path: Option<PathBuf>,
+        sstable_path: Option<PathBuf>,
+    ) -> Self {
+        Self::new_with_params(wal_writer, wal_path, sstable_path, None)
+    }
+
+    /// Creates an in-memory manager with an optional memory limit.
+    pub fn new_with_limit(limit: Option<usize>) -> Self {
+        Self::new_with_params(None, None, None, limit)
+    }
+
+    /// Returns current memory usage statistics.
+    pub fn memory_stats(&self) -> MemoryStats {
+        self.state.memory_stats()
+    }
+
+    /// Runs compaction if it can fit within the configured memory limit.
+    /// Returns Ok(true) when compaction executed, Ok(false) when skipped.
+    pub fn compact_with_limit<F>(
+        &self,
+        input_bytes: usize,
+        output_bytes: usize,
+        run: F,
+    ) -> Result<bool>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        if let Some(limit) = self.state.memory_limit {
+            let current = self.state.current_memory.load(Ordering::Relaxed);
+            // predicted usage after compaction: current - input + output (clamped at 0)
+            let prospective = current
+                .saturating_sub(input_bytes)
+                .saturating_add(output_bytes);
+            if prospective > limit {
+                warn!(
+                    limit,
+                    requested = prospective,
+                    "compaction skipped due to memory limit"
+                );
+                return Ok(false);
+            }
+        }
+
+        run()?;
+
+        // Update tracked memory to reflect compaction result.
+        let current = self.state.current_memory.load(Ordering::Relaxed);
+        let new_usage = current
+            .saturating_sub(input_bytes)
+            .saturating_add(output_bytes);
+        self.state
+            .current_memory
+            .store(new_usage, Ordering::Relaxed);
+        Ok(true)
+    }
+
+    /// In-memory compaction entrypoint that rebuilds the map while honoring memory limits.
+    pub fn compact_in_memory(&self) -> Result<bool> {
+        let snapshot_bytes = {
+            let data = self.state.data.read().unwrap();
+            let mut bytes = 0usize;
+            for (k, (v, _)) in data.iter() {
+                bytes = bytes.saturating_add(k.len() + v.len());
+            }
+            bytes
+        };
+
+        self.compact_with_limit(snapshot_bytes, snapshot_bytes, || {
+            let data = self.state.data.read().unwrap();
+            let mut rebuilt = BTreeMap::new();
+            for (k, (v, version)) in data.iter() {
+                rebuilt.insert(k.clone(), (v.clone(), *version));
+            }
+            drop(data);
+
+            let mut write_guard = self.state.data.write().unwrap();
+            *write_guard = rebuilt;
+            Ok(())
+        })
     }
 
     /// Flushes the current in-memory data to an SSTable file.
@@ -290,6 +385,7 @@ impl MemoryTxnManager {
     fn recover(&self) -> Result<()> {
         self.load_sstable()?;
         self.replay()?;
+        self.state.recompute_current_memory();
         Ok(())
     }
 
@@ -344,6 +440,38 @@ impl<'a> TxnManager<'a, MemoryTransaction<'a>> for &'a MemoryTxnManager {
             }
         }
 
+        // Compute prospective memory usage and enforce limits before mutating state.
+        let mut delta: isize = 0;
+        for (key, value) in &txn.writes {
+            let current_size = data
+                .get(key)
+                .map(|(v, _)| key.len() + v.len())
+                .unwrap_or(0);
+            let new_size = match value {
+                Some(v) => key.len() + v.len(),
+                None => 0,
+            };
+            delta += new_size as isize - current_size as isize;
+        }
+
+        let current_mem = self.state.current_memory.load(Ordering::Relaxed);
+        let prospective = if delta >= 0 {
+            current_mem.saturating_add(delta as usize)
+        } else {
+            current_mem.saturating_sub(delta.unsigned_abs())
+        };
+
+        if delta > 0 {
+            self.state.check_memory_limit(delta as usize)?;
+        } else if let Some(limit) = self.state.memory_limit {
+            if prospective > limit {
+                return Err(Error::MemoryLimitExceeded {
+                    limit,
+                    requested: prospective,
+                });
+            }
+        }
+
         let commit_version = self.state.commit_version.fetch_add(1, Ordering::AcqRel) + 1;
 
         if let Some(wal_lock) = &self.state.wal_writer {
@@ -366,6 +494,10 @@ impl<'a> TxnManager<'a, MemoryTransaction<'a>> for &'a MemoryTxnManager {
                 data.remove(&key);
             }
         }
+
+        self.state
+            .current_memory
+            .store(prospective, Ordering::Relaxed);
 
         txn.state = TxnState::Committed;
         Ok(())
