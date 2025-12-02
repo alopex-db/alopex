@@ -1,5 +1,7 @@
 use alopex_embedded::{Database, TxnMode};
 use std::fs;
+use std::sync::{Arc, Barrier};
+use std::thread;
 use tempfile::tempdir;
 
 fn key(s: &str) -> Vec<u8> {
@@ -134,4 +136,42 @@ fn clone_to_memory_is_independent() {
     // Original sees new value.
     let mut read_orig = db.begin(TxnMode::ReadOnly).unwrap();
     assert_eq!(read_orig.get(&key("k1")).unwrap(), Some(val("v2")));
+}
+
+#[test]
+fn concurrent_reads_and_writes_do_not_race() {
+    let db = Arc::new(Database::open_in_memory().expect("in-memory db"));
+    let threads = 4;
+    let per_thread = 50;
+    let barrier = Arc::new(Barrier::new(threads));
+
+    let mut handles = Vec::new();
+    for t in 0..threads {
+        let dbc = db.clone();
+        let b = barrier.clone();
+        handles.push(thread::spawn(move || {
+            // synchronize start
+            b.wait();
+            for i in 0..per_thread {
+                let k = format!("t{}:k{}", t, i).into_bytes();
+                let v = format!("v{}", i).into_bytes();
+                let mut txn = dbc.begin(TxnMode::ReadWrite).unwrap();
+                txn.put(&k, &v).unwrap();
+                txn.commit().unwrap();
+
+                // Read back in a read-only txn.
+                let mut rtxn = dbc.begin(TxnMode::ReadOnly).unwrap();
+                let got = rtxn.get(&k).unwrap();
+                assert_eq!(got, Some(v));
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().expect("thread join");
+    }
+
+    // Verify total keys written.
+    let snapshot = db.snapshot();
+    assert_eq!(snapshot.len(), threads * per_thread);
 }
