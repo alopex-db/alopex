@@ -9,3 +9,9 @@ thiserror = "1.0"
 
 [dev-dependencies]
 tempfile = "3.8"
+criterion = { workspace = true }
+rand = { workspace = true }
+
+[[bench]]
+name = "memory_vs_disk"
+harness = false
