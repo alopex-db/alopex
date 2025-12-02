@@ -628,6 +628,9 @@ mod tests {
     use super::*;
     use crate::{KVTransaction, TxnManager};
     use tempfile::tempdir;
+    use tracing::Level;
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
+    use tracing_subscriber::fmt::MakeWriter;
 
     fn key(s: &str) -> Key {
         s.as_bytes().to_vec()
@@ -765,5 +768,112 @@ mod tests {
         let manager = reopened.txn_manager();
         let mut txn = manager.begin(TxnMode::ReadOnly).unwrap();
         assert_eq!(txn.get(&key("k1")).unwrap(), Some(value("v2")));
+    }
+
+    #[test]
+    fn memory_stats_tracks_put_and_delete() {
+        let store = MemoryKV::new();
+        let manager = store.txn_manager();
+
+        let stats = manager.memory_stats();
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.kv_bytes, 0);
+        assert_eq!(stats.index_bytes, 0);
+
+        // Insert a value and commit.
+        let mut txn = manager.begin(TxnMode::ReadWrite).unwrap();
+        txn.put(key("a"), value("1234")).unwrap(); // key=1, value=4 => 5 bytes
+        manager.commit(txn).unwrap();
+
+        let stats = manager.memory_stats();
+        assert_eq!(stats.total_bytes, 5);
+        assert_eq!(stats.kv_bytes, 5);
+        assert_eq!(stats.index_bytes, 0);
+
+        // Delete and ensure usage returns to zero.
+        let mut txn = manager.begin(TxnMode::ReadWrite).unwrap();
+        txn.delete(key("a")).unwrap();
+        manager.commit(txn).unwrap();
+
+        let stats = manager.memory_stats();
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.kv_bytes, 0);
+    }
+
+    #[test]
+    fn memory_limit_error_does_not_break_reads() {
+        let manager = MemoryTxnManager::new_with_limit(Some(10));
+
+        // First insert within limit: key(2) + value(4) = 6.
+        let mut txn = manager.begin_internal(TxnMode::ReadWrite).unwrap();
+        txn.put(key("k1"), value("vvvv")).unwrap();
+        manager.commit(txn).unwrap();
+
+        // Next insert would exceed limit: key(2) + value(6) + existing(6) -> 14 > 10.
+        let mut txn2 = manager.begin_internal(TxnMode::ReadWrite).unwrap();
+        txn2.put(key("k2"), value("vvvvvv")).unwrap();
+        let result = manager.commit(txn2);
+        assert!(matches!(result, Err(Error::MemoryLimitExceeded { .. })));
+
+        // Read still works and existing data intact.
+        let mut read_txn = manager.begin_internal(TxnMode::ReadOnly).unwrap();
+        let got = read_txn.get(&key("k1")).unwrap();
+        assert_eq!(got, Some(value("vvvv")));
+
+        // Memory usage stays at the previous successful commit.
+        let stats = manager.memory_stats();
+        assert_eq!(stats.total_bytes, 6);
+    }
+
+    struct VecWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for VecWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut guard = self.0.lock().unwrap();
+            guard.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn compaction_skips_when_over_limit_and_logs_warning() {
+        let manager = MemoryTxnManager::new_with_limit(Some(12));
+
+        // Populate data to track current memory: key(2)+val(6)=8 bytes.
+        let mut txn = manager.begin_internal(TxnMode::ReadWrite).unwrap();
+        txn.put(key("k1"), value("123456")).unwrap();
+        manager.commit(txn).unwrap();
+
+        // Prepare log capture.
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let make_writer = {
+            let buf = buffer.clone();
+            move || VecWriter(buf.clone())
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(Level::WARN)
+            .with_writer(make_writer)
+            .without_time()
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // input=2 (assume one entry), output=10 => projected 8-2+10=16 > 12 -> skip.
+        let ran = manager.compact_with_limit(2, 10, || Ok(())).unwrap();
+        assert!(!ran);
+
+        // Memory usage unchanged.
+        assert_eq!(manager.memory_stats().total_bytes, 8);
+
+        // Verify warning was logged.
+        let log = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert!(
+            log.contains("compaction skipped due to memory limit"),
+            "expected warning log, got: {}",
+            log
+        );
     }
 }

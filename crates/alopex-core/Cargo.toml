@@ -26,6 +26,7 @@ tempfile = "3.8"
 criterion = { workspace = true }
 rand = { workspace = true }
 proptest = "1.4"
+tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 memmap2 = "0.9"
