@@ -1,6 +1,6 @@
 use alopex_core::kv::memory::MemoryKV;
 use alopex_core::vector::flat::{search_flat, Candidate};
-use alopex_core::{Metric, TxnMode};
+use alopex_core::{KVStore, KVTransaction, Metric, TxnManager, TxnMode};
 
 fn encode_vec(v: &[f32]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(v.len() * 4);
@@ -72,6 +72,7 @@ fn memorykv_vector_search_respects_l2_metric() {
         vector: v,
     });
 
-    let res = search_flat(&[0.0, 0.0], Metric::L2, 2, candidates, None::<fn(&_) -> bool>).unwrap();
+    let res =
+        search_flat(&[0.0, 0.0], Metric::L2, 2, candidates, None::<fn(&_) -> bool>).unwrap();
     assert_eq!(res[0].key, b"near");
 }

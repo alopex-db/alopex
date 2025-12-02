@@ -1,6 +1,6 @@
 use alopex_core::columnar::encoding::{Column, Compression, Encoding, LogicalType};
 use alopex_core::columnar::segment::{write_segment, SegmentMeta, SegmentReader};
-use alopex_core::{MemoryKV, Metric, TxnMode};
+use alopex_core::{Metric, TxnMode};
 use alopex_embedded::Database;
 
 fn key(bytes: &[u8]) -> Vec<u8> {

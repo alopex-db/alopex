@@ -622,8 +622,6 @@ mod tests {
     use crate::{KVTransaction, TxnManager};
     use tempfile::tempdir;
     use tracing::Level;
-    use tracing_subscriber::fmt::writer::BoxMakeWriter;
-    use tracing_subscriber::fmt::MakeWriter;
 
     fn key(s: &str) -> Key {
         s.as_bytes().to_vec()
@@ -795,7 +793,8 @@ mod tests {
 
     #[test]
     fn memory_limit_error_does_not_break_reads() {
-        let manager = MemoryTxnManager::new_with_limit(Some(10));
+        let store = MemoryKV::new_with_limit(Some(10));
+        let manager = store.txn_manager();
 
         // First insert within limit: key(2) + value(4) = 6.
         let mut txn = manager.begin_internal(TxnMode::ReadWrite).unwrap();
@@ -834,7 +833,8 @@ mod tests {
 
     #[test]
     fn compaction_skips_when_over_limit_and_logs_warning() {
-        let manager = MemoryTxnManager::new_with_limit(Some(12));
+        let store = MemoryKV::new_with_limit(Some(12));
+        let manager = store.txn_manager();
 
         // Populate data to track current memory: key(2)+val(6)=8 bytes.
         let mut txn = manager.begin_internal(TxnMode::ReadWrite).unwrap();
