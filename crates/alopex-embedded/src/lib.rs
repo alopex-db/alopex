@@ -2,15 +2,19 @@
 
 #![deny(missing_docs)]
 
-pub use alopex_core::Metric;
-pub use alopex_core::TxnMode;
+pub mod options;
+
+pub use alopex_core::{MemoryStats, Metric, TxnMode};
+pub use crate::options::DatabaseOptions;
 use alopex_core::{
-    kv::memory::MemoryTransaction, score, validate_dimensions, KVStore, KVTransaction, Key,
-    LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter, MemoryKV, TxnManager,
-    VectorType, DEFAULT_CHUNK_SIZE,
+    kv::memory::MemoryTransaction, score, storage::flush::write_empty_vector_segment,
+    storage::sstable::SstableWriter, validate_dimensions, KVStore, KVTransaction, Key,
+    LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter, MemoryKV, StorageFactory,
+    TxnManager, VectorType, DEFAULT_CHUNK_SIZE,
 };
 use std::convert::TryInto;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::result;
 
 /// A convenience `Result` type for database operations.
@@ -46,9 +50,108 @@ impl Database {
         Self { store }
     }
 
+    /// Opens a database in in-memory mode with default options.
+    pub fn open_in_memory() -> Result<Self> {
+        Self::open_in_memory_with_options(DatabaseOptions::in_memory())
+    }
+
+    /// Opens a database in in-memory mode with the given options.
+    pub fn open_in_memory_with_options(opts: DatabaseOptions) -> Result<Self> {
+        if !opts.memory_mode() {
+            return Err(Error::Core(alopex_core::Error::InvalidFormat(
+                "memory_mode must be enabled for in-memory open".into(),
+            )));
+        }
+        let store = StorageFactory::create(opts.to_storage_mode(None)).map_err(Error::Core)?;
+        Ok(Self { store })
+    }
+
     /// Flushes the current in-memory data to an SSTable on disk (beta).
     pub fn flush(&self) -> Result<()> {
         self.store.flush().map_err(Error::Core)
+    }
+
+    /// Returns current memory usage statistics.
+    pub fn memory_usage(&self) -> MemoryStats {
+        self.store.txn_manager().memory_stats()
+    }
+
+    /// Persists the current in-memory database to disk atomically.
+    pub fn persist_to_disk(&self, wal_path: &Path) -> Result<()> {
+        let sst_path = wal_path.with_extension("sst");
+        let vec_path = wal_path.with_extension("vec");
+        if let Some(existing) = [&wal_path, &sst_path, &vec_path]
+            .iter()
+            .find(|p| p.exists())
+        {
+            return Err(Error::Core(alopex_core::Error::PathExists(
+                (*existing).to_path_buf(),
+            )));
+        }
+
+        let tmp_sst = temp_path(&sst_path);
+        let tmp_vec = temp_path(&vec_path);
+
+        let snapshot = self.store.txn_manager().snapshot();
+
+        let write_result = (|| -> Result<()> {
+            let mut writer = SstableWriter::create(&tmp_sst).map_err(Error::Core)?;
+            for (key, value) in snapshot {
+                writer.append(&key, &value).map_err(Error::Core)?;
+            }
+            writer.finish().map_err(Error::Core)?;
+            write_empty_vector_segment(&tmp_vec).map_err(Error::Core)?;
+            Ok(())
+        })();
+
+        if let Err(e) = write_result {
+            let _ = fs::remove_file(&tmp_sst);
+            let _ = fs::remove_file(&tmp_vec);
+            return Err(e);
+        }
+
+        fs::rename(&tmp_sst, &sst_path).map_err(Error::Core)?;
+        fs::rename(&tmp_vec, &vec_path).map_err(Error::Core)?;
+        let _ = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(wal_path);
+        Ok(())
+    }
+
+    /// Creates a fully in-memory clone of the current database.
+    pub fn clone_to_memory(&self) -> Result<Self> {
+        let snapshot = self.store.txn_manager().snapshot();
+        let cloned = Database::open_in_memory()?;
+        if snapshot.is_empty() {
+            return Ok(cloned);
+        }
+
+        let mut txn = cloned.begin(TxnMode::ReadWrite)?;
+        for (key, value) in snapshot {
+            txn.put(&key, &value)?;
+        }
+        txn.commit()?;
+        Ok(cloned)
+    }
+
+    /// Clears all data while keeping the database usable.
+    pub fn clear(&self) -> Result<()> {
+        let keys: Vec<Key> = self
+            .store
+            .txn_manager()
+            .snapshot()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let mut txn = self.begin(TxnMode::ReadWrite)?;
+        for key in keys {
+            txn.delete(&key)?;
+        }
+        txn.commit()
     }
 
     /// Creates a chunked large value writer for opaque blobs (beta).
@@ -115,6 +218,17 @@ pub struct SearchResult {
 }
 
 const VECTOR_INDEX_KEY: &[u8] = b"__alopex_vector_index";
+
+fn temp_path(path: &Path) -> PathBuf {
+    let mut p = path.to_path_buf();
+    p.set_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("tmp")
+    ));
+    p
+}
 
 impl<'a> Transaction<'a> {
     /// Retrieves the value for a given key.

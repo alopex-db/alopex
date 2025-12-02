@@ -201,6 +201,23 @@ impl MemoryTxnManager {
         self.state.memory_stats()
     }
 
+    /// Returns a snapshot clone of all key/value pairs.
+    pub fn snapshot(&self) -> Vec<(Key, Value)> {
+        let data = self.state.data.read().unwrap();
+        data.iter()
+            .map(|(k, (v, _))| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Clears all data and resets memory accounting.
+    pub fn clear_all(&self) {
+        let mut data = self.state.data.write().unwrap();
+        data.clear();
+        drop(data);
+        self.state.current_memory.store(0, Ordering::Relaxed);
+        self.state.commit_version.store(0, Ordering::Relaxed);
+    }
+
     /// Runs compaction if it can fit within the configured memory limit.
     /// Returns Ok(true) when compaction executed, Ok(false) when skipped.
     pub fn compact_with_limit<F>(
