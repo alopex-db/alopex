@@ -17,7 +17,8 @@ pub use columnar::encoding::{
 };
 pub use columnar::segment::{write_segment, ChunkIter, SegmentMeta, SegmentReader};
 pub use error::{Error, Result};
-pub use kv::memory::{MemoryKV, MemoryTransaction, MemoryTxnManager};
+pub use kv::memory::{MemoryKV, MemoryStats, MemoryTransaction, MemoryTxnManager};
+pub use kv::storage::{StorageFactory, StorageMode};
 pub use kv::{KVStore, KVTransaction};
 pub use storage::large_value::{
     LargeValueChunkInfo, LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter,

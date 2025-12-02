@@ -1,4 +1,5 @@
 //! Error and Result types for AlopexDB.
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// A convenience `Result` type.
@@ -62,4 +63,8 @@ pub enum Error {
         /// Requested memory (bytes) that triggered the limit.
         requested: usize,
     },
+
+    /// The provided path already exists and cannot be overwritten.
+    #[error("path exists: {0}")]
+    PathExists(PathBuf),
 }
