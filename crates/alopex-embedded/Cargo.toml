@@ -15,3 +15,7 @@ rand = { workspace = true }
 [[bench]]
 name = "memory_vs_disk"
 harness = false
+
+[[bench]]
+name = "in_memory"
+harness = false
