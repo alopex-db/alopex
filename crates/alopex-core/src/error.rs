@@ -53,4 +53,13 @@ pub enum Error {
         /// Name of the unsupported metric.
         metric: String,
     },
+
+    /// Memory usage exceeded configured limit.
+    #[error("memory limit exceeded: limit={limit}, requested={requested}")]
+    MemoryLimitExceeded {
+        /// Maximum allowed memory (bytes).
+        limit: usize,
+        /// Requested memory (bytes) that triggered the limit.
+        requested: usize,
+    },
 }

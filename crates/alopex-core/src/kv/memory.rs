@@ -10,8 +10,19 @@ use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, TxnState, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
+
+/// メモリ使用量の統計（バイト単位）。
+#[derive(Debug, Clone, Default)]
+pub struct MemoryStats {
+    /// 全体のメモリ使用量。
+    pub total_bytes: usize,
+    /// KV データのメモリ使用量。
+    pub kv_bytes: usize,
+    /// 補助インデックスのメモリ使用量。
+    pub index_bytes: usize,
+}
 
 /// An in-memory key-value store.
 #[derive(Clone)]
@@ -84,6 +95,54 @@ struct MemorySharedState {
     sstable: RwLock<Option<SstableReader>>,
     /// Optional SSTable path for flush/reopen.
     sstable_path: Option<PathBuf>,
+    /// Optional memory upper limit (bytes) for in-memory mode。
+    memory_limit: Option<usize>,
+    /// Current memory consumption (bytes) tracked across operations。
+    current_memory: AtomicUsize,
+}
+
+impl MemorySharedState {
+    /// Check whether adding `additional` bytes would exceed the memory limit.
+    fn check_memory_limit(&self, additional: usize) -> Result<()> {
+        if let Some(limit) = self.memory_limit {
+            let current = self.current_memory.load(Ordering::Relaxed);
+            let requested = current.saturating_add(additional);
+            if requested > limit {
+                return Err(Error::MemoryLimitExceeded { limit, requested });
+            }
+        }
+        Ok(())
+    }
+
+    /// Track newly allocated bytes.
+    fn add_memory(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.current_memory.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Track freed bytes, clamping at zero to avoid underflow.
+    fn remove_memory(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        let _ = self.current_memory.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| Some(current.saturating_sub(bytes)),
+        );
+    }
+
+    /// Return current memory usage statistics.
+    fn memory_stats(&self) -> MemoryStats {
+        let kv_bytes = self.current_memory.load(Ordering::Relaxed);
+        MemoryStats {
+            total_bytes: kv_bytes,
+            kv_bytes,
+            index_bytes: 0,
+        }
+    }
 }
 
 /// A transaction manager backed by an in-memory map and optional WAL.
@@ -106,6 +165,8 @@ impl MemoryTxnManager {
                 wal_path,
                 sstable: RwLock::new(None),
                 sstable_path,
+                memory_limit: None,
+                current_memory: AtomicUsize::new(0),
             }),
         }
     }
