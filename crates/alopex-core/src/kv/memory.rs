@@ -39,6 +39,13 @@ impl MemoryKV {
         }
     }
 
+    /// Creates a new in-memory KV store with an optional memory limit.
+    pub fn new_with_limit(limit: Option<usize>) -> Self {
+        Self {
+            manager: Arc::new(MemoryTxnManager::new_with_limit(limit)),
+        }
+    }
+
     /// Opens a persistent in-memory KV store from a file path.
     pub fn open(path: &Path) -> Result<Self> {
         let wal_writer = WalWriter::new(path)?;
@@ -113,26 +120,6 @@ impl MemorySharedState {
             }
         }
         Ok(())
-    }
-
-    /// Track newly allocated bytes.
-    fn add_memory(&self, bytes: usize) {
-        if bytes == 0 {
-            return;
-        }
-        self.current_memory.fetch_add(bytes, Ordering::Relaxed);
-    }
-
-    /// Track freed bytes, clamping at zero to avoid underflow.
-    fn remove_memory(&self, bytes: usize) {
-        if bytes == 0 {
-            return;
-        }
-        let _ = self.current_memory.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |current| Some(current.saturating_sub(bytes)),
-        );
     }
 
     /// Return current memory usage statistics.

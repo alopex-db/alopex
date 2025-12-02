@@ -80,7 +80,7 @@ impl Database {
     pub fn persist_to_disk(&self, wal_path: &Path) -> Result<()> {
         let sst_path = wal_path.with_extension("sst");
         let vec_path = wal_path.with_extension("vec");
-        if let Some(existing) = [&wal_path, &sst_path, &vec_path]
+        if let Some(existing) = [wal_path, sst_path.as_path(), vec_path.as_path()]
             .iter()
             .find(|p| p.exists())
         {
@@ -110,8 +110,8 @@ impl Database {
             return Err(e);
         }
 
-        fs::rename(&tmp_sst, &sst_path).map_err(Error::Core)?;
-        fs::rename(&tmp_vec, &vec_path).map_err(Error::Core)?;
+        fs::rename(&tmp_sst, &sst_path).map_err(|e| Error::Core(e.into()))?;
+        fs::rename(&tmp_vec, &vec_path).map_err(|e| Error::Core(e.into()))?;
         let _ = fs::OpenOptions::new()
             .create(true)
             .write(true)

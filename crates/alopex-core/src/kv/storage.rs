@@ -5,9 +5,15 @@ use std::path::PathBuf;
 /// Storage mode selection for the KV store.
 pub enum StorageMode {
     /// Disk-backed storage using WAL.
-    Disk { path: PathBuf },
+    Disk {
+        /// Path to the WAL file (SSTable is derived from this path).
+        path: PathBuf,
+    },
     /// Pure in-memory storage with optional memory cap.
-    Memory { max_size: Option<usize> },
+    Memory {
+        /// Optional memory cap in bytes; None means unlimited.
+        max_size: Option<usize>,
+    },
 }
 
 /// Factory for creating storage instances based on mode.

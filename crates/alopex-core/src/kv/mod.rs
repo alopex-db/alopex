@@ -5,6 +5,7 @@ use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, Value};
 
 pub mod memory;
+/// Storage mode selection helpers (disk vs memory).
 pub mod storage;
 
 /// A transaction for interacting with the key-value store.
