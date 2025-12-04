@@ -6,7 +6,13 @@ pub mod error;
 pub mod parser;
 pub mod tokenizer;
 
-pub use ast::span::{Location, Span};
+pub use ast::{
+    Statement, StatementKind,
+    ddl::*,
+    dml::*,
+    expr::*,
+    span::{Location, Span, Spanned},
+};
 pub use dialect::AlopexDialect;
 pub use error::{ParserError, Result};
 pub use tokenizer::Tokenizer;
