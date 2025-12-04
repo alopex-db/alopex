@@ -460,20 +460,4 @@ impl<'a> Parser<'a> {
             }),
         }
     }
-
-    fn expect_keyword(&mut self, expected: &str, kw: Keyword) -> Result<()> {
-        let tok = self.peek().clone();
-        if let Token::Word(Word { keyword, .. }) = tok.token {
-            if keyword == kw {
-                self.advance();
-                return Ok(());
-            }
-        }
-        Err(ParserError::ExpectedToken {
-            line: tok.span.start.line,
-            column: tok.span.start.column,
-            expected: expected.to_string(),
-            found: format!("{:?}", tok.token),
-        })
-    }
 }

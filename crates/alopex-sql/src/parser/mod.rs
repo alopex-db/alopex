@@ -1,7 +1,9 @@
+pub mod ddl;
 pub mod expr;
 pub mod precedence;
 pub mod recursion;
 
+use crate::Span;
 use crate::ast::Expr;
 use crate::dialect::Dialect;
 use crate::error::{ParserError, Result};
@@ -113,6 +115,43 @@ impl<'a> Parser<'a> {
             }
         }
         false
+    }
+
+    pub(crate) fn parse_identifier(&mut self) -> Result<(String, Span)> {
+        let tok = self.expect_token("identifier", |t| {
+            matches!(
+                t,
+                Token::Word(Word {
+                    keyword: crate::tokenizer::keyword::Keyword::NoKeyword,
+                    ..
+                })
+            )
+        })?;
+        if let Token::Word(Word { value, .. }) = tok.token {
+            Ok((value, tok.span))
+        } else {
+            unreachable!()
+        }
+    }
+
+    pub(crate) fn expect_keyword(
+        &mut self,
+        expected: &str,
+        kw: crate::tokenizer::keyword::Keyword,
+    ) -> Result<Span> {
+        let tok = self.peek().clone();
+        if let Token::Word(Word { keyword, .. }) = tok.token {
+            if keyword == kw {
+                self.advance();
+                return Ok(tok.span);
+            }
+        }
+        Err(ParserError::ExpectedToken {
+            line: tok.span.start.line,
+            column: tok.span.start.column,
+            expected: expected.to_string(),
+            found: format!("{:?}", tok.token),
+        })
     }
 
     pub(crate) fn next_precedence(&self) -> u8 {
