@@ -13,7 +13,7 @@ pub use ast::{
     expr::*,
     span::{Location, Span, Spanned},
 };
-pub use dialect::AlopexDialect;
+pub use dialect::{AlopexDialect, Dialect};
 pub use error::{ParserError, Result};
 pub use parser::Parser;
 pub use tokenizer::Tokenizer;

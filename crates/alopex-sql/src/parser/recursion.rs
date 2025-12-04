@@ -1,6 +1,7 @@
 use crate::error::ParserError;
 
 /// Prevents runaway recursion during parsing.
+#[derive(Debug, Clone)]
 pub struct RecursionCounter {
     max_depth: usize,
     remaining_depth: std::cell::Cell<usize>,

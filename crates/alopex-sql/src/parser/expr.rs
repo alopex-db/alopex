@@ -24,6 +24,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_prefix(&mut self) -> Result<Expr> {
+        if let Some(res) = self.dialect.parse_prefix(self) {
+            return res;
+        }
+
         let token = self.peek().clone();
         match &token.token {
             Token::Number(n) => {
@@ -61,7 +65,8 @@ impl<'a> Parser<'a> {
                 }
                 Keyword::NOT => {
                     self.advance();
-                    let operand = self.parse_subexpr(Precedence::UnaryNot.value())?;
+                    let operand =
+                        self.parse_subexpr(self.dialect.prec_value(Precedence::UnaryNot))?;
                     let span = token.span.union(&operand.span());
                     Ok(Expr::new(
                         ExprKind::UnaryOp {
@@ -146,7 +151,7 @@ impl<'a> Parser<'a> {
             }
             Token::Minus => {
                 self.advance();
-                let operand = self.parse_subexpr(Precedence::UnaryNot.value())?;
+                let operand = self.parse_subexpr(self.dialect.prec_value(Precedence::UnaryNot))?;
                 let span = token.span.union(&operand.span());
                 Ok(Expr::new(
                     ExprKind::UnaryOp {
@@ -156,7 +161,6 @@ impl<'a> Parser<'a> {
                     span,
                 ))
             }
-            Token::LBracket => self.parse_vector_literal(),
             _ => Err(ParserError::UnexpectedToken {
                 line: token.span.start.line,
                 column: token.span.start.column,
@@ -166,7 +170,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_vector_literal(&mut self) -> Result<Expr> {
+    pub(crate) fn parse_vector_literal(&mut self) -> Result<Expr> {
         let start = self.peek().span;
         self.advance(); // consume '['
 
@@ -283,9 +287,9 @@ impl<'a> Parser<'a> {
                 }
                 Keyword::BETWEEN => {
                     self.advance();
-                    let low = self.parse_subexpr(Precedence::Between.value())?;
+                    let low = self.parse_subexpr(self.dialect.prec_value(Precedence::Between))?;
                     self.expect_keyword("AND", Keyword::AND)?;
-                    let high = self.parse_subexpr(Precedence::Between.value())?;
+                    let high = self.parse_subexpr(self.dialect.prec_value(Precedence::Between))?;
                     let span = left.span().union(&high.span());
                     Ok(Expr::new(
                         ExprKind::Between {
@@ -299,9 +303,11 @@ impl<'a> Parser<'a> {
                 }
                 Keyword::LIKE => {
                     self.advance();
-                    let pattern = self.parse_subexpr(Precedence::Like.value())?;
+                    let pattern = self.parse_subexpr(self.dialect.prec_value(Precedence::Like))?;
                     let escape = if self.consume_keyword(Keyword::ESCAPE) {
-                        Some(Box::new(self.parse_subexpr(Precedence::Like.value())?))
+                        Some(Box::new(
+                            self.parse_subexpr(self.dialect.prec_value(Precedence::Like))?,
+                        ))
                     } else {
                         None
                     };
@@ -368,9 +374,11 @@ impl<'a> Parser<'a> {
                             Keyword::BETWEEN => {
                                 self.advance(); // NOT
                                 self.advance(); // BETWEEN
-                                let low = self.parse_subexpr(Precedence::Between.value())?;
+                                let low = self
+                                    .parse_subexpr(self.dialect.prec_value(Precedence::Between))?;
                                 self.expect_keyword("AND", Keyword::AND)?;
-                                let high = self.parse_subexpr(Precedence::Between.value())?;
+                                let high = self
+                                    .parse_subexpr(self.dialect.prec_value(Precedence::Between))?;
                                 let span = left.span().union(&high.span());
                                 return Ok(Expr::new(
                                     ExprKind::Between {
@@ -385,9 +393,12 @@ impl<'a> Parser<'a> {
                             Keyword::LIKE => {
                                 self.advance(); // NOT
                                 self.advance(); // LIKE
-                                let pattern = self.parse_subexpr(Precedence::Like.value())?;
+                                let pattern =
+                                    self.parse_subexpr(self.dialect.prec_value(Precedence::Like))?;
                                 let escape = if self.consume_keyword(Keyword::ESCAPE) {
-                                    Some(Box::new(self.parse_subexpr(Precedence::Like.value())?))
+                                    Some(Box::new(self.parse_subexpr(
+                                        self.dialect.prec_value(Precedence::Like),
+                                    )?))
                                 } else {
                                     None
                                 };

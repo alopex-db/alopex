@@ -2,5 +2,7 @@
 name = "alopex-sql"
 version = "0.1.0"
 edition = "2024"
+description = "SQL parser components for the Alopex DB dialect"
+license = "Apache-2.0"
 
 [dependencies]

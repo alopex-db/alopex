@@ -7,8 +7,10 @@ use crate::error::{ParserError, Result};
 use keyword::Keyword;
 use token::{Token, TokenWithSpan, Word};
 
+/// 字句解析器。入力文字列をトークン列へ変換する。
+#[derive(Debug, Clone)]
 pub struct Tokenizer<'a> {
-    _dialect: &'a dyn Dialect,
+    dialect: &'a dyn Dialect,
     input: &'a str,
     pos: usize,
     line: u64,
@@ -18,7 +20,7 @@ pub struct Tokenizer<'a> {
 impl<'a> Tokenizer<'a> {
     pub fn new(dialect: &'a dyn Dialect, input: &'a str) -> Self {
         Self {
-            _dialect: dialect,
+            dialect,
             input,
             pos: 0,
             line: 1,
@@ -42,7 +44,7 @@ impl<'a> Tokenizer<'a> {
             }
 
             let token = match self.peek_char().unwrap() {
-                c if Self::is_identifier_start(c) => self.lex_word()?,
+                c if self.is_identifier_start(c) => self.lex_word()?,
                 c if c.is_ascii_digit() => self.lex_number()?,
                 '\'' => self.lex_string()?,
                 ',' => self.single_char_token(Token::Comma),
@@ -116,7 +118,7 @@ impl<'a> Tokenizer<'a> {
         let mut last_loc = start_loc;
 
         while let Some(ch) = self.peek_char() {
-            if Self::is_identifier_part(ch) {
+            if self.is_identifier_part(ch) {
                 let (_, loc) = self.next_char().unwrap();
                 last_loc = loc;
             } else {
@@ -383,11 +385,11 @@ impl<'a> Tokenizer<'a> {
         Some((ch, loc))
     }
 
-    fn is_identifier_start(ch: char) -> bool {
-        ch == '_' || ch.is_ascii_alphabetic()
+    fn is_identifier_start(&self, ch: char) -> bool {
+        self.dialect.is_identifier_start(ch)
     }
 
-    fn is_identifier_part(ch: char) -> bool {
-        ch == '_' || ch.is_ascii_alphanumeric()
+    fn is_identifier_part(&self, ch: char) -> bool {
+        self.dialect.is_identifier_part(ch)
     }
 }
