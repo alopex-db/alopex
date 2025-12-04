@@ -61,7 +61,10 @@ fn detects_conflict_between_transactions() {
     // t1 now conflicts because shared key was updated by t2.
     t1.put(&key("shared"), &val("first")).unwrap();
     let result = t1.commit();
-    assert!(result.is_err(), "expected conflict when committing t1 after t2");
+    assert!(
+        result.is_err(),
+        "expected conflict when committing t1 after t2"
+    );
 }
 
 #[test]

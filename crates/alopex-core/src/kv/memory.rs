@@ -8,11 +8,11 @@ use crate::storage::flush::write_empty_vector_segment;
 use crate::storage::sstable::{SstableReader, SstableWriter};
 use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, TxnState, Value};
-use tracing::warn;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
+use tracing::warn;
 
 /// メモリ使用量の統計（バイト単位）。
 #[derive(Debug, Clone, Default)]
@@ -453,10 +453,7 @@ impl<'a> TxnManager<'a, MemoryTransaction<'a>> for &'a MemoryTxnManager {
         // Compute prospective memory usage and enforce limits before mutating state.
         let mut delta: isize = 0;
         for (key, value) in &txn.writes {
-            let current_size = data
-                .get(key)
-                .map(|(v, _)| key.len() + v.len())
-                .unwrap_or(0);
+            let current_size = data.get(key).map(|(v, _)| key.len() + v.len()).unwrap_or(0);
             let new_size = match value {
                 Some(v) => key.len() + v.len(),
                 None => 0,

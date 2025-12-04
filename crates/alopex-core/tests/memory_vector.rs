@@ -33,13 +33,16 @@ fn memorykv_vector_search_cosine() {
         })
         .collect();
 
-    let candidates = pairs.iter().map(|(k, v)| Candidate {
-        key: k,
-        vector: v,
-    });
+    let candidates = pairs.iter().map(|(k, v)| Candidate { key: k, vector: v });
 
-    let res = search_flat(&[1.0, 0.0], Metric::Cosine, 3, candidates, None::<fn(&_) -> bool>)
-        .unwrap();
+    let res = search_flat(
+        &[1.0, 0.0],
+        Metric::Cosine,
+        3,
+        candidates,
+        None::<fn(&_) -> bool>,
+    )
+    .unwrap();
     assert_eq!(res.len(), 3);
     assert_eq!(res[0].key, b"a");
     assert_eq!(res[1].key, b"c"); // mixed vector ranks second for cosine
@@ -67,12 +70,15 @@ fn memorykv_vector_search_respects_l2_metric() {
         })
         .collect();
 
-    let candidates = pairs.iter().map(|(k, v)| Candidate {
-        key: k,
-        vector: v,
-    });
+    let candidates = pairs.iter().map(|(k, v)| Candidate { key: k, vector: v });
 
-    let res =
-        search_flat(&[0.0, 0.0], Metric::L2, 2, candidates, None::<fn(&_) -> bool>).unwrap();
+    let res = search_flat(
+        &[0.0, 0.0],
+        Metric::L2,
+        2,
+        candidates,
+        None::<fn(&_) -> bool>,
+    )
+    .unwrap();
     assert_eq!(res[0].key, b"near");
 }

@@ -4,7 +4,6 @@
 
 pub mod options;
 
-pub use alopex_core::{MemoryStats, Metric, TxnMode};
 pub use crate::options::DatabaseOptions;
 use alopex_core::{
     kv::memory::MemoryTransaction, score, storage::flush::write_empty_vector_segment,
@@ -12,6 +11,7 @@ use alopex_core::{
     LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter, MemoryKV, StorageFactory,
     TxnManager, VectorType, DEFAULT_CHUNK_SIZE,
 };
+pub use alopex_core::{MemoryStats, Metric, TxnMode};
 use std::convert::TryInto;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -161,11 +161,7 @@ impl Database {
 
     /// Returns a read-only snapshot of all key-value pairs.
     pub fn snapshot(&self) -> Vec<(Key, Vec<u8>)> {
-        self.store
-            .txn_manager()
-            .snapshot()
-            .into_iter()
-            .collect()
+        self.store.txn_manager().snapshot().into_iter().collect()
     }
 
     /// Creates a chunked large value writer for opaque blobs (beta).
@@ -237,9 +233,7 @@ fn temp_path(path: &Path) -> PathBuf {
     let mut p = path.to_path_buf();
     p.set_extension(format!(
         "{}.tmp",
-        path.extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("tmp")
+        path.extension().and_then(|s| s.to_str()).unwrap_or("tmp")
     ));
     p
 }

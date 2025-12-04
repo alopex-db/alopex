@@ -25,11 +25,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rtxn = db.begin(TxnMode::ReadOnly)?;
     println!(
         "hello -> {:?}",
-        rtxn.get(b"hello")?.map(|v| String::from_utf8_lossy(&v).to_string())
+        rtxn.get(b"hello")?
+            .map(|v| String::from_utf8_lossy(&v).to_string())
     );
     println!(
         "answer -> {:?}",
-        rtxn.get(b"answer")?.map(|v| String::from_utf8_lossy(&v).to_string())
+        rtxn.get(b"answer")?
+            .map(|v| String::from_utf8_lossy(&v).to_string())
     );
     drop(rtxn);
     print_mem_usage(&db, "after put");
