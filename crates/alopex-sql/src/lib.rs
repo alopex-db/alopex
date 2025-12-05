@@ -1,6 +1,7 @@
 //! SQL parser components for the Alopex DB SQL dialect.
 
 pub mod ast;
+pub mod catalog;
 pub mod dialect;
 pub mod error;
 pub mod parser;
