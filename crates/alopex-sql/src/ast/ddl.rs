@@ -36,7 +36,7 @@ pub enum DataType {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorMetric {
     Cosine,
     L2,

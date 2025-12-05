@@ -6,3 +6,4 @@ description = "SQL parser components for the Alopex DB dialect"
 license = "Apache-2.0"
 
 [dependencies]
+thiserror = "2.0"

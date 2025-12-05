@@ -4,6 +4,7 @@ pub mod ast;
 pub mod dialect;
 pub mod error;
 pub mod parser;
+pub mod planner;
 pub mod tokenizer;
 
 pub use ast::{
