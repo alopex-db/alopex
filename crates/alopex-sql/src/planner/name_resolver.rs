@@ -268,14 +268,14 @@ impl<'a, C: Catalog> NameResolver<'a, C> {
                 column,
             } => {
                 // If a table qualifier is provided, verify it matches
-                if let Some(qualifier) = table_qualifier {
-                    if qualifier != &table.name {
-                        return Err(PlannerError::TableNotFound {
-                            name: qualifier.clone(),
-                            line: expr.span.start.line,
-                            column: expr.span.start.column,
-                        });
-                    }
+                if let Some(qualifier) = table_qualifier
+                    && qualifier != &table.name
+                {
+                    return Err(PlannerError::TableNotFound {
+                        name: qualifier.clone(),
+                        line: expr.span.start.line,
+                        column: expr.span.start.column,
+                    });
                 }
 
                 // Verify the column exists
