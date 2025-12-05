@@ -5,14 +5,17 @@
 //! - [`ResolvedType`]: Normalized type information for type checking
 //! - [`TypedExpr`]: Type-checked expressions with resolved types
 //! - [`LogicalPlan`]: Logical query plan representation
+//! - [`NameResolver`]: Table and column reference resolution
 
 mod error;
 pub mod logical_plan;
+pub mod name_resolver;
 pub mod typed_expr;
 pub mod types;
 
 pub use error::PlannerError;
 pub use logical_plan::LogicalPlan;
+pub use name_resolver::{NameResolver, ResolvedColumn};
 pub use typed_expr::{
     ProjectedColumn, Projection, SortExpr, TypedAssignment, TypedExpr, TypedExprKind,
 };
