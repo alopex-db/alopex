@@ -2,7 +2,7 @@
 //!
 //! This module defines [`TypedExpr`] and related types that represent
 //! expressions after type checking. These types carry resolved type
-//! information and are used in [`LogicalPlan`] construction.
+//! information and are used in [`crate::planner::LogicalPlan`] construction.
 //!
 //! # Overview
 //!

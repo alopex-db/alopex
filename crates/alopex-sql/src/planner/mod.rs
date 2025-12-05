@@ -184,14 +184,11 @@ impl<'a, C: Catalog> Planner<'a, C> {
     fn extract_primary_key(stmt: &CreateTable) -> Option<Vec<String>> {
         use crate::ast::ddl::TableConstraint;
 
-        // First check table-level constraints (scan all in case there are multiple)
-        for constraint in &stmt.constraints {
-            // Currently only PrimaryKey variant exists; use match for future extensibility
-            match constraint {
-                TableConstraint::PrimaryKey { columns, .. } => {
-                    return Some(columns.clone());
-                }
-            }
+        // First check table-level constraints
+        // Note: Currently only PrimaryKey variant exists; when more variants are added,
+        // this should iterate to find the first PrimaryKey constraint
+        if let Some(TableConstraint::PrimaryKey { columns, .. }) = stmt.constraints.first() {
+            return Some(columns.clone());
         }
 
         // Then check column-level PRIMARY KEY constraints
