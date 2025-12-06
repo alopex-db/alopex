@@ -38,7 +38,7 @@ fn truncated_file_detected_as_incomplete() {
     // truncate footer bytes to simulate crash before footer fully written
     let meta = std::fs::metadata(&path).unwrap();
     let new_len = meta.len().saturating_sub((FOOTER_SIZE / 2) as u64);
-    let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
     f.set_len(new_len).unwrap();
     f.sync_all().unwrap();
 
