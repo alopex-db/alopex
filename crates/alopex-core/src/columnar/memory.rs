@@ -141,6 +141,13 @@ impl InMemorySegmentStore {
         ColumnarSectionWriter::write_section(writer, &segment)
             .map_err(|e| Error::InvalidFormat(e.to_string()))
     }
+
+    /// カラム数を返す（メタデータから取得）。
+    pub fn column_count(&self, table_id: u32, segment_id: u64) -> Result<usize> {
+        let guard = self.segments.read().unwrap();
+        let segment = guard.get(&(table_id, segment_id)).ok_or(Error::NotFound)?;
+        Ok(segment.meta.schema.column_count())
+    }
 }
 
 #[cfg(test)]

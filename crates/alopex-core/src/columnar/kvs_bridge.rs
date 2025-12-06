@@ -6,7 +6,7 @@ use std::time::Duration;
 use bincode::Options;
 
 use crate::columnar::segment_v2::{
-    ColumnSegmentV2, InMemorySegmentSource, RecordBatch, SegmentReaderV2,
+    ColumnSegmentV2, InMemorySegmentSource, RecordBatch, SegmentMetaV2, SegmentReaderV2,
 };
 use crate::error::{Error, Result};
 use crate::kv::{memory::MemoryTransaction, KVStore, KVTransaction};
@@ -174,6 +174,15 @@ impl ColumnarKvsBridge {
         let mut txn = self.store.begin(TxnMode::ReadOnly)?;
         let index = Self::load_index(&mut txn, table_id)?;
         Ok(index)
+    }
+
+    /// カラム数を取得する（統計メタから取得）。
+    pub fn column_count(&self, table_id: u32, segment_id: u64) -> Result<usize> {
+        let stats = self.read_statistics(table_id, segment_id)?;
+        let meta: SegmentMetaV2 = bincode_config()
+            .deserialize(&stats)
+            .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+        Ok(meta.schema.column_count())
     }
 }
 

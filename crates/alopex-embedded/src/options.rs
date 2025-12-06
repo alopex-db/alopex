@@ -38,6 +38,11 @@ impl DatabaseOptions {
         self.memory_mode
     }
 
+    /// Returns the optional memory limit when configured.
+    pub fn memory_limit(&self) -> Option<usize> {
+        self.memory_limit
+    }
+
     /// Convert the options to a core StorageMode.
     pub(crate) fn to_storage_mode(&self, path: Option<&Path>) -> StorageMode {
         if self.memory_mode {

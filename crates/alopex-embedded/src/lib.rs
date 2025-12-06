@@ -2,20 +2,29 @@
 
 #![deny(missing_docs)]
 
+pub mod columnar_api;
 pub mod options;
 
+pub use crate::columnar_api::{EmbeddedConfig, StorageMode};
 pub use crate::options::DatabaseOptions;
 use alopex_core::{
-    kv::memory::MemoryTransaction, score, storage::flush::write_empty_vector_segment,
-    storage::sstable::SstableWriter, validate_dimensions, KVStore, KVTransaction, Key,
-    LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter, MemoryKV, StorageFactory,
-    TxnManager, VectorType, DEFAULT_CHUNK_SIZE,
+    columnar::{
+        kvs_bridge::ColumnarKvsBridge, memory::InMemorySegmentStore, segment_v2::SegmentConfigV2,
+    },
+    kv::memory::MemoryTransaction,
+    score,
+    storage::flush::write_empty_vector_segment,
+    storage::sstable::SstableWriter,
+    validate_dimensions, KVStore, KVTransaction, Key, LargeValueKind, LargeValueMeta,
+    LargeValueReader, LargeValueWriter, MemoryKV, StorageFactory, TxnManager, VectorType,
+    DEFAULT_CHUNK_SIZE,
 };
 pub use alopex_core::{MemoryStats, Metric, TxnMode};
 use std::convert::TryInto;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::result;
+use std::sync::Arc;
 
 /// A convenience `Result` type for database operations.
 pub type Result<T> = result::Result<T, Error>;
@@ -29,25 +38,45 @@ pub enum Error {
     /// The transaction has already been completed and cannot be used.
     #[error("transaction is completed")]
     TxnCompleted,
+    /// The requested table was not found or is invalid.
+    #[error("table not found: {0}")]
+    TableNotFound(String),
+    /// The operation requires in-memory columnar mode.
+    #[error("not in in-memory columnar mode")]
+    NotInMemoryMode,
 }
 
 /// The main database object.
 pub struct Database {
     /// The underlying key-value store.
-    store: MemoryKV,
+    pub(crate) store: Arc<MemoryKV>,
+    pub(crate) columnar_mode: StorageMode,
+    pub(crate) columnar_bridge: ColumnarKvsBridge,
+    pub(crate) columnar_memory: Option<InMemorySegmentStore>,
+    pub(crate) segment_config: SegmentConfigV2,
 }
 
 impl Database {
     /// Opens a database at the specified path.
     pub fn open(path: &Path) -> Result<Self> {
         let store = MemoryKV::open(path).map_err(Error::Core)?;
-        Ok(Self { store })
+        Ok(Self::init(
+            store,
+            StorageMode::Disk,
+            None,
+            SegmentConfigV2::default(),
+        ))
     }
 
     /// Creates a new, purely in-memory (transient) database.
     pub fn new() -> Self {
         let store = MemoryKV::new();
-        Self { store }
+        Self::init(
+            store,
+            StorageMode::InMemory,
+            None,
+            SegmentConfigV2::default(),
+        )
     }
 
     /// Opens a database in in-memory mode with default options.
@@ -63,7 +92,35 @@ impl Database {
             )));
         }
         let store = StorageFactory::create(opts.to_storage_mode(None)).map_err(Error::Core)?;
-        Ok(Self { store })
+        Ok(Self::init(
+            store,
+            StorageMode::InMemory,
+            opts.memory_limit(),
+            SegmentConfigV2::default(),
+        ))
+    }
+
+    pub(crate) fn init(
+        store: MemoryKV,
+        columnar_mode: StorageMode,
+        memory_limit: Option<usize>,
+        segment_config: SegmentConfigV2,
+    ) -> Self {
+        let store = Arc::new(store);
+        let columnar_bridge = ColumnarKvsBridge::new(store.clone());
+        let columnar_memory = if matches!(columnar_mode, StorageMode::InMemory) {
+            Some(InMemorySegmentStore::new(memory_limit.map(|v| v as u64)))
+        } else {
+            None
+        };
+
+        Self {
+            store,
+            columnar_mode,
+            columnar_bridge,
+            columnar_memory,
+            segment_config,
+        }
     }
 
     /// Flushes the current in-memory data to an SSTable on disk (beta).
