@@ -2,11 +2,12 @@
 use std::convert::TryInto;
 
 use crc32fast::Hasher;
+use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
 /// Logical data type of a column.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogicalType {
     /// Signed 64-bit integer.
     Int64,

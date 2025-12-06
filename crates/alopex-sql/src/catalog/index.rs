@@ -111,8 +111,8 @@ mod tests {
 
     #[test]
     fn test_index_metadata_with_method() {
-        let index = IndexMetadata::new("idx_users_name", "users", "name")
-            .with_method(IndexMethod::BTree);
+        let index =
+            IndexMetadata::new("idx_users_name", "users", "name").with_method(IndexMethod::BTree);
 
         assert_eq!(index.method, Some(IndexMethod::BTree));
     }

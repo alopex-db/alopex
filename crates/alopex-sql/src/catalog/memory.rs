@@ -112,13 +112,14 @@ impl Catalog for MemoryCatalog {
         }
 
         // Verify target table exists
-        let table = self.tables.get(&index.table).ok_or_else(|| {
-            PlannerError::TableNotFound {
+        let table = self
+            .tables
+            .get(&index.table)
+            .ok_or_else(|| PlannerError::TableNotFound {
                 name: index.table.clone(),
                 line: 0,
                 column: 0,
-            }
-        })?;
+            })?;
 
         // Verify target column exists in table
         if table.get_column(&index.column).is_none() {

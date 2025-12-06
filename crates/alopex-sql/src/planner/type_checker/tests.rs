@@ -630,15 +630,21 @@ fn test_normalize_metric_cosine() {
 
     // Test various cases
     assert_eq!(
-        type_checker.normalize_metric("cosine", test_span()).unwrap(),
+        type_checker
+            .normalize_metric("cosine", test_span())
+            .unwrap(),
         VectorMetric::Cosine
     );
     assert_eq!(
-        type_checker.normalize_metric("COSINE", test_span()).unwrap(),
+        type_checker
+            .normalize_metric("COSINE", test_span())
+            .unwrap(),
         VectorMetric::Cosine
     );
     assert_eq!(
-        type_checker.normalize_metric("Cosine", test_span()).unwrap(),
+        type_checker
+            .normalize_metric("Cosine", test_span())
+            .unwrap(),
         VectorMetric::Cosine
     );
 }
@@ -683,7 +689,11 @@ fn test_normalize_metric_invalid() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
-        PlannerError::InvalidMetric { value, line, column } => {
+        PlannerError::InvalidMetric {
+            value,
+            line,
+            column,
+        } => {
             assert_eq!(value, "euclidean");
             assert_eq!(line, 5);
             assert_eq!(column, 20);
@@ -878,7 +888,9 @@ fn test_check_insert_values_type_mismatch() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
-        PlannerError::TypeMismatch { expected, found, .. } => {
+        PlannerError::TypeMismatch {
+            expected, found, ..
+        } => {
             assert_eq!(expected, "Integer");
             assert_eq!(found, "Text");
         }
@@ -1005,7 +1017,9 @@ fn test_check_assignment_type_mismatch() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
-        PlannerError::TypeMismatch { expected, found, .. } => {
+        PlannerError::TypeMismatch {
+            expected, found, ..
+        } => {
             assert_eq!(expected, "Integer");
             assert_eq!(found, "Text");
         }

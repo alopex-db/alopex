@@ -56,7 +56,6 @@ pub use catalog::{Catalog, ColumnMetadata, IndexMetadata, MemoryCatalog, TableMe
 
 // Planner types (re-exported for convenience)
 pub use planner::{
-    LogicalPlan, NameResolver, Planner, PlannerError, ProjectedColumn, Projection,
-    ResolvedColumn, ResolvedType, SortExpr, TypeChecker, TypedAssignment, TypedExpr,
-    TypedExprKind,
+    LogicalPlan, NameResolver, Planner, PlannerError, ProjectedColumn, Projection, ResolvedColumn,
+    ResolvedType, SortExpr, TypeChecker, TypedAssignment, TypedExpr, TypedExprKind,
 };

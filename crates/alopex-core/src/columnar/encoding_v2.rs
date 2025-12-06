@@ -108,7 +108,12 @@ impl Bitmap {
 
     /// Get the number of null values.
     pub fn null_count(&self) -> usize {
-        self.len - self.bits.iter().map(|b| b.count_ones() as usize).sum::<usize>()
+        self.len
+            - self
+                .bits
+                .iter()
+                .map(|b| b.count_ones() as usize)
+                .sum::<usize>()
     }
 
     /// Encode bitmap to bytes.
@@ -304,7 +309,11 @@ impl Encoder for ForEncoder {
         let range = (max_val - min_val) as u64;
 
         // Calculate bits needed
-        let bits_needed = if range == 0 { 1 } else { 64 - range.leading_zeros() } as u8;
+        let bits_needed = if range == 0 {
+            1
+        } else {
+            64 - range.leading_zeros()
+        } as u8;
 
         let mut buf = Vec::new();
         buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
@@ -467,7 +476,8 @@ impl Encoder for PforEncoder {
         let mut sorted_offsets = offsets.clone();
         sorted_offsets.sort_unstable();
 
-        let percentile_idx = ((values.len() as f64 * self.percentile) as usize).min(values.len() - 1);
+        let percentile_idx =
+            ((values.len() as f64 * self.percentile) as usize).min(values.len() - 1);
         let percentile_max = sorted_offsets[percentile_idx];
 
         let bits_needed = if percentile_max == 0 {
@@ -707,7 +717,9 @@ impl Decoder for ByteStreamSplitDecoder {
         logical_type: LogicalType,
     ) -> Result<(Column, Option<Bitmap>)> {
         if data.len() < 6 {
-            return Err(Error::InvalidFormat("ByteStreamSplit header too short".into()));
+            return Err(Error::InvalidFormat(
+                "ByteStreamSplit header too short".into(),
+            ));
         }
 
         let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
@@ -727,13 +739,17 @@ impl Decoder for ByteStreamSplitDecoder {
             return match logical_type {
                 LogicalType::Float64 => Ok((Column::Float64(vec![]), bitmap)),
                 LogicalType::Int64 => Ok((Column::Int64(vec![]), bitmap)),
-                _ => Err(Error::InvalidFormat("ByteStreamSplit logical type mismatch".into())),
+                _ => Err(Error::InvalidFormat(
+                    "ByteStreamSplit logical type mismatch".into(),
+                )),
             };
         }
 
         let expected_size = count * bytes_per_value;
         if pos + expected_size > data.len() {
-            return Err(Error::InvalidFormat("ByteStreamSplit data truncated".into()));
+            return Err(Error::InvalidFormat(
+                "ByteStreamSplit data truncated".into(),
+            ));
         }
 
         // Reconstruct values from byte streams
@@ -850,7 +866,9 @@ impl Decoder for IncrementalStringDecoder {
         }
 
         if data.len() < 5 {
-            return Err(Error::InvalidFormat("IncrementalString header too short".into()));
+            return Err(Error::InvalidFormat(
+                "IncrementalString header too short".into(),
+            ));
         }
 
         let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
@@ -873,13 +891,17 @@ impl Decoder for IncrementalStringDecoder {
 
         // First value
         if pos + 4 > data.len() {
-            return Err(Error::InvalidFormat("IncrementalString first len truncated".into()));
+            return Err(Error::InvalidFormat(
+                "IncrementalString first len truncated".into(),
+            ));
         }
         let first_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
 
         if pos + first_len > data.len() {
-            return Err(Error::InvalidFormat("IncrementalString first value truncated".into()));
+            return Err(Error::InvalidFormat(
+                "IncrementalString first value truncated".into(),
+            ));
         }
         let mut current = data[pos..pos + first_len].to_vec();
         pos += first_len;
@@ -888,7 +910,9 @@ impl Decoder for IncrementalStringDecoder {
         // Subsequent values
         for _ in 1..count {
             if pos + 4 > data.len() {
-                return Err(Error::InvalidFormat("IncrementalString header truncated".into()));
+                return Err(Error::InvalidFormat(
+                    "IncrementalString header truncated".into(),
+                ));
             }
             let prefix_len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
             pos += 2;
@@ -896,7 +920,9 @@ impl Decoder for IncrementalStringDecoder {
             pos += 2;
 
             if pos + suffix_len > data.len() {
-                return Err(Error::InvalidFormat("IncrementalString suffix truncated".into()));
+                return Err(Error::InvalidFormat(
+                    "IncrementalString suffix truncated".into(),
+                ));
             }
 
             current.truncate(prefix_len);
@@ -927,7 +953,9 @@ impl Encoder for RleEncoder {
         match data {
             Column::Bool(values) => encode_rle_bool(values, null_bitmap),
             Column::Int64(values) => encode_rle_int64(values, null_bitmap),
-            _ => Err(Error::InvalidFormat("RLE encoding requires Bool or Int64".into())),
+            _ => Err(Error::InvalidFormat(
+                "RLE encoding requires Bool or Int64".into(),
+            )),
         }
     }
 
@@ -1039,7 +1067,9 @@ impl Decoder for RleDecoder {
         match logical_type {
             LogicalType::Bool => decode_rle_bool(data),
             LogicalType::Int64 => decode_rle_int64(data),
-            _ => Err(Error::InvalidFormat("RLE decoding requires Bool or Int64".into())),
+            _ => Err(Error::InvalidFormat(
+                "RLE decoding requires Bool or Int64".into(),
+            )),
         }
     }
 }
@@ -1322,7 +1352,9 @@ fn decode_dict_binary(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
     };
 
     if pos + 4 > data.len() {
-        return Err(Error::InvalidFormat("Dictionary dict_count truncated".into()));
+        return Err(Error::InvalidFormat(
+            "Dictionary dict_count truncated".into(),
+        ));
     }
 
     let dict_count = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
@@ -1336,12 +1368,16 @@ fn decode_dict_binary(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
     let mut dict: Vec<Vec<u8>> = Vec::with_capacity(dict_count);
     for _ in 0..dict_count {
         if pos + 4 > data.len() {
-            return Err(Error::InvalidFormat("Dictionary entry len truncated".into()));
+            return Err(Error::InvalidFormat(
+                "Dictionary entry len truncated".into(),
+            ));
         }
         let entry_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if pos + entry_len > data.len() {
-            return Err(Error::InvalidFormat("Dictionary entry data truncated".into()));
+            return Err(Error::InvalidFormat(
+                "Dictionary entry data truncated".into(),
+            ));
         }
         dict.push(data[pos..pos + entry_len].to_vec());
         pos += entry_len;
@@ -1382,17 +1418,23 @@ fn decode_dict_fixed(data: &[u8], expected_len: usize) -> Result<(Column, Option
     };
 
     if pos + 2 > data.len() {
-        return Err(Error::InvalidFormat("Dictionary fixed_len truncated".into()));
+        return Err(Error::InvalidFormat(
+            "Dictionary fixed_len truncated".into(),
+        ));
     }
     let fixed_len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
     pos += 2;
 
     if fixed_len != expected_len {
-        return Err(Error::InvalidFormat("Dictionary fixed length mismatch".into()));
+        return Err(Error::InvalidFormat(
+            "Dictionary fixed length mismatch".into(),
+        ));
     }
 
     if pos + 4 > data.len() {
-        return Err(Error::InvalidFormat("Dictionary dict_count truncated".into()));
+        return Err(Error::InvalidFormat(
+            "Dictionary dict_count truncated".into(),
+        ));
     }
 
     let dict_count = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
@@ -1412,7 +1454,9 @@ fn decode_dict_fixed(data: &[u8], expected_len: usize) -> Result<(Column, Option
     let mut dict: Vec<Vec<u8>> = Vec::with_capacity(dict_count);
     for _ in 0..dict_count {
         if pos + fixed_len > data.len() {
-            return Err(Error::InvalidFormat("Dictionary fixed entry truncated".into()));
+            return Err(Error::InvalidFormat(
+                "Dictionary fixed entry truncated".into(),
+            ));
         }
         dict.push(data[pos..pos + fixed_len].to_vec());
         pos += fixed_len;
@@ -1456,7 +1500,11 @@ impl Encoder for BitpackEncoder {
     fn encode(&self, data: &Column, null_bitmap: Option<&Bitmap>) -> Result<Vec<u8>> {
         let values = match data {
             Column::Bool(v) => v,
-            _ => return Err(Error::InvalidFormat("Bitpack encoding requires Bool".into())),
+            _ => {
+                return Err(Error::InvalidFormat(
+                    "Bitpack encoding requires Bool".into(),
+                ))
+            }
         };
 
         let mut buf = Vec::new();
@@ -1505,7 +1553,9 @@ impl Decoder for BitpackDecoder {
         logical_type: LogicalType,
     ) -> Result<(Column, Option<Bitmap>)> {
         if logical_type != LogicalType::Bool {
-            return Err(Error::InvalidFormat("Bitpack decoding requires Bool".into()));
+            return Err(Error::InvalidFormat(
+                "Bitpack decoding requires Bool".into(),
+            ));
         }
 
         if data.len() < 5 {
@@ -1602,7 +1652,11 @@ fn select_int_encoding(hints: &EncodingHints) -> EncodingV2 {
 
     // Small range: use FOR
     if let Some(range) = hints.value_range {
-        let bits_needed = if range == 0 { 1 } else { 64 - range.leading_zeros() };
+        let bits_needed = if range == 0 {
+            1
+        } else {
+            64 - range.leading_zeros()
+        };
         if bits_needed <= 16 {
             // Check if PFOR would be better (has outliers)
             if let Some(ratio) = hints.in_range_ratio {
@@ -1824,7 +1878,8 @@ impl Decoder for PlainDecoder {
                 if pos + 2 > data.len() {
                     return Err(Error::InvalidFormat("plain fixed len truncated".into()));
                 }
-                let stored_len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+                let stored_len =
+                    u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
                 pos += 2;
                 if stored_len != fixed_len as usize {
                     return Err(Error::InvalidFormat("plain fixed length mismatch".into()));
@@ -2110,7 +2165,10 @@ mod tests {
             value_range: Some(100),
             in_range_ratio: None,
         };
-        assert_eq!(select_encoding(LogicalType::Int64, &hints), EncodingV2::Delta);
+        assert_eq!(
+            select_encoding(LogicalType::Int64, &hints),
+            EncodingV2::Delta
+        );
     }
 
     #[test]
@@ -2156,7 +2214,9 @@ mod tests {
     #[test]
     fn test_rle_bool_roundtrip() {
         // Runs of consecutive values
-        let values = vec![true, true, true, false, false, true, true, true, true, false];
+        let values = vec![
+            true, true, true, false, false, true, true, true, true, false,
+        ];
         let col = Column::Bool(values.clone());
 
         let encoder = RleEncoder;
@@ -2255,9 +2315,7 @@ mod tests {
         let encoded = encoder.encode(&col, None).unwrap();
 
         let decoder = RleDecoder;
-        let (decoded, bitmap) = decoder
-            .decode(&encoded, 0, LogicalType::Bool)
-            .unwrap();
+        let (decoded, bitmap) = decoder.decode(&encoded, 0, LogicalType::Bool).unwrap();
 
         assert!(bitmap.is_none());
         if let Column::Bool(decoded_values) = decoded {
@@ -2375,9 +2433,7 @@ mod tests {
         let encoded = encoder.encode(&col, None).unwrap();
 
         let decoder = DictionaryDecoder;
-        let (decoded, bitmap) = decoder
-            .decode(&encoded, 0, LogicalType::Binary)
-            .unwrap();
+        let (decoded, bitmap) = decoder.decode(&encoded, 0, LogicalType::Binary).unwrap();
 
         assert!(bitmap.is_none());
         if let Column::Binary(decoded_values) = decoded {
@@ -2393,7 +2449,9 @@ mod tests {
 
     #[test]
     fn test_bitpack_bool_roundtrip() {
-        let values = vec![true, false, true, true, false, true, false, false, true, true];
+        let values = vec![
+            true, false, true, true, false, true, false, false, true, true,
+        ];
         let col = Column::Bool(values.clone());
 
         let encoder = BitpackEncoder;
@@ -2449,9 +2507,7 @@ mod tests {
         let encoded = encoder.encode(&col, None).unwrap();
 
         let decoder = BitpackDecoder;
-        let (decoded, bitmap) = decoder
-            .decode(&encoded, 0, LogicalType::Bool)
-            .unwrap();
+        let (decoded, bitmap) = decoder.decode(&encoded, 0, LogicalType::Bool).unwrap();
 
         assert!(bitmap.is_none());
         if let Column::Bool(decoded_values) = decoded {
@@ -2516,10 +2572,7 @@ mod tests {
             value_range: None,
             in_range_ratio: None,
         };
-        assert_eq!(
-            select_encoding(LogicalType::Bool, &hints),
-            EncodingV2::Rle
-        );
+        assert_eq!(select_encoding(LogicalType::Bool, &hints), EncodingV2::Rle);
     }
 
     #[test]
@@ -2528,14 +2581,11 @@ mod tests {
         let hints = EncodingHints {
             is_sorted: false,
             distinct_count: 5,
-            total_count: 100, // avg run length = 20
+            total_count: 100,            // avg run length = 20
             value_range: Some(u64::MAX), // large range so FOR won't be selected
             in_range_ratio: None,
         };
-        assert_eq!(
-            select_encoding(LogicalType::Int64, &hints),
-            EncodingV2::Rle
-        );
+        assert_eq!(select_encoding(LogicalType::Int64, &hints), EncodingV2::Rle);
     }
 
     #[test]

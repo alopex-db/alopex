@@ -315,7 +315,12 @@ impl TypedExpr {
     }
 
     /// Creates a typed unary operation.
-    pub fn unary_op(op: UnaryOp, operand: TypedExpr, resolved_type: ResolvedType, span: Span) -> Self {
+    pub fn unary_op(
+        op: UnaryOp,
+        operand: TypedExpr,
+        resolved_type: ResolvedType,
+        span: Span,
+    ) -> Self {
         Self::new(
             TypedExprKind::UnaryOp {
                 op,
@@ -485,7 +490,10 @@ mod tests {
             Span::default(),
         );
 
-        assert!(matches!(expr.kind, TypedExprKind::Literal(Literal::Number(_))));
+        assert!(matches!(
+            expr.kind,
+            TypedExprKind::Literal(Literal::Number(_))
+        ));
         assert_eq!(expr.resolved_type, ResolvedType::Integer);
     }
 
@@ -695,7 +703,10 @@ mod tests {
             negated: false,
         };
 
-        assert!(matches!(expr_kind, TypedExprKind::Between { negated: false, .. }));
+        assert!(matches!(
+            expr_kind,
+            TypedExprKind::Between { negated: false, .. }
+        ));
     }
 
     #[test]
@@ -711,6 +722,9 @@ mod tests {
             negated: true,
         };
 
-        assert!(matches!(expr_kind, TypedExprKind::IsNull { negated: true, .. }));
+        assert!(matches!(
+            expr_kind,
+            TypedExprKind::IsNull { negated: true, .. }
+        ));
     }
 }

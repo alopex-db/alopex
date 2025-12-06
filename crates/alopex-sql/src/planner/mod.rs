@@ -28,7 +28,9 @@ pub use typed_expr::{
 };
 pub use types::ResolvedType;
 
-use crate::ast::ddl::{ColumnConstraint, ColumnDef, CreateIndex, CreateTable, DropIndex, DropTable};
+use crate::ast::ddl::{
+    ColumnConstraint, ColumnDef, CreateIndex, CreateTable, DropIndex, DropTable,
+};
 use crate::ast::dml::{Delete, Insert, OrderByExpr, Select, SelectItem, Update};
 use crate::ast::expr::Literal;
 use crate::ast::{Statement, StatementKind};
@@ -254,7 +256,8 @@ impl<'a, C: Catalog> Planner<'a, C> {
             .resolve_column(table, &stmt.column, stmt.span)?;
 
         // Build index metadata
-        let mut index = IndexMetadata::new(stmt.name.clone(), stmt.table.clone(), stmt.column.clone());
+        let mut index =
+            IndexMetadata::new(stmt.name.clone(), stmt.table.clone(), stmt.column.clone());
 
         if let Some(method) = stmt.method {
             index = index.with_method(method);
@@ -300,7 +303,9 @@ impl<'a, C: Catalog> Planner<'a, C> {
     /// Each layer is optional and only added if the corresponding clause is present.
     fn plan_select(&self, stmt: &Select) -> Result<LogicalPlan, PlannerError> {
         // 1. Resolve the FROM table
-        let table = self.name_resolver.resolve_table(&stmt.from.name, stmt.from.span)?;
+        let table = self
+            .name_resolver
+            .resolve_table(&stmt.from.name, stmt.from.span)?;
 
         // 2. Build the projection
         let projection = self.build_projection(&stmt.projection, table)?;
@@ -591,9 +596,9 @@ impl<'a, C: Catalog> Planner<'a, C> {
 
         for assignment in &stmt.assignments {
             // Resolve the column
-            let column_meta = self
-                .name_resolver
-                .resolve_column(table, &assignment.column, assignment.span)?;
+            let column_meta =
+                self.name_resolver
+                    .resolve_column(table, &assignment.column, assignment.span)?;
             let column_index = table.get_column_index(&assignment.column).unwrap();
 
             // Type-check the value expression
@@ -610,7 +615,11 @@ impl<'a, C: Catalog> Planner<'a, C> {
             }
 
             // Validate type compatibility
-            self.validate_type_assignment(&typed_value, &column_meta.data_type, assignment.value.span)?;
+            self.validate_type_assignment(
+                &typed_value,
+                &column_meta.data_type,
+                assignment.value.span,
+            )?;
 
             typed_assignments.push(TypedAssignment::new(
                 assignment.column.clone(),

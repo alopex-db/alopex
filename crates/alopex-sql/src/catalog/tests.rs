@@ -193,8 +193,7 @@ mod memory_catalog_tests {
         catalog.create_table(create_test_table("users")).unwrap();
 
         // Try to create index on non-existent column
-        let result =
-            catalog.create_index(create_test_index("idx_users_email", "users", "email"));
+        let result = catalog.create_index(create_test_index("idx_users_email", "users", "email"));
         assert!(result.is_err());
         match result.unwrap_err() {
             PlannerError::ColumnNotFound { column, table, .. } => {

@@ -8,7 +8,7 @@ pub mod large_value;
 pub mod sstable;
 
 // Re-export V2 compression types for columnar storage
-pub use compression::{CompressionV2, Compressor, NoneCompressor, create_compressor};
+pub use compression::{create_compressor, CompressionV2, Compressor, NoneCompressor};
 
 #[cfg(feature = "compression-lz4")]
 pub use compression::Lz4Compressor;

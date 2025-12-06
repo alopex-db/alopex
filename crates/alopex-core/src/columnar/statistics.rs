@@ -81,7 +81,9 @@ pub fn compute_column_statistics(
 ) -> ColumnStatistics {
     match column {
         Column::Int64(values) => compute_int64_statistics(values, null_bitmap, compute_distinct),
-        Column::Float64(values) => compute_float64_statistics(values, null_bitmap, compute_distinct),
+        Column::Float64(values) => {
+            compute_float64_statistics(values, null_bitmap, compute_distinct)
+        }
         Column::Bool(values) => compute_bool_statistics(values, null_bitmap, compute_distinct),
         Column::Binary(values) => compute_binary_statistics(values, null_bitmap, compute_distinct),
         Column::Fixed { values, len: _ } => {
@@ -216,9 +218,15 @@ fn compute_bool_statistics(
 
     let (min, max) = match (has_false, has_true) {
         (false, false) => (None, None),
-        (true, false) => (Some(ScalarValue::Bool(false)), Some(ScalarValue::Bool(false))),
+        (true, false) => (
+            Some(ScalarValue::Bool(false)),
+            Some(ScalarValue::Bool(false)),
+        ),
         (false, true) => (Some(ScalarValue::Bool(true)), Some(ScalarValue::Bool(true))),
-        (true, true) => (Some(ScalarValue::Bool(false)), Some(ScalarValue::Bool(true))),
+        (true, true) => (
+            Some(ScalarValue::Bool(false)),
+            Some(ScalarValue::Bool(true)),
+        ),
     };
 
     let distinct_count = if compute_distinct {

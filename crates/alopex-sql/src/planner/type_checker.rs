@@ -4,9 +4,9 @@
 //! It checks that expressions are well-typed and that operations are valid
 //! for the types involved.
 
+use crate::ast::Span;
 use crate::ast::ddl::VectorMetric;
 use crate::ast::expr::{BinaryOp, Expr, ExprKind, Literal, UnaryOp};
-use crate::ast::Span;
 use crate::catalog::{Catalog, TableMetadata};
 use crate::planner::error::PlannerError;
 use crate::planner::typed_expr::{TypedExpr, TypedExprKind};
@@ -135,12 +135,8 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
                 };
                 (TypedExprKind::Literal(lit.clone()), resolved_type)
             }
-            Literal::String(_) => {
-                (TypedExprKind::Literal(lit.clone()), ResolvedType::Text)
-            }
-            Literal::Boolean(_) => {
-                (TypedExprKind::Literal(lit.clone()), ResolvedType::Boolean)
-            }
+            Literal::String(_) => (TypedExprKind::Literal(lit.clone()), ResolvedType::Text),
+            Literal::Boolean(_) => (TypedExprKind::Literal(lit.clone()), ResolvedType::Boolean),
             Literal::Null => (TypedExprKind::Literal(lit.clone()), ResolvedType::Null),
         };
 
@@ -194,8 +190,12 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
         let left_typed = self.infer_type(left, table)?;
         let right_typed = self.infer_type(right, table)?;
 
-        let result_type =
-            self.check_binary_op(op, &left_typed.resolved_type, &right_typed.resolved_type, span)?;
+        let result_type = self.check_binary_op(
+            op,
+            &left_typed.resolved_type,
+            &right_typed.resolved_type,
+            span,
+        )?;
 
         Ok(TypedExpr {
             kind: TypedExprKind::BinaryOp {
@@ -607,7 +607,11 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
             .map(|item| {
                 let typed = self.infer_type(item, table)?;
                 // Check each item is compatible with the expression
-                self.check_comparison_op(&expr_typed.resolved_type, &typed.resolved_type, item.span)?;
+                self.check_comparison_op(
+                    &expr_typed.resolved_type,
+                    &typed.resolved_type,
+                    item.span,
+                )?;
                 Ok(typed)
             })
             .collect::<Result<Vec<_>, PlannerError>>()?;
@@ -884,14 +888,15 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
 
             for (value, col_name) in row.iter().zip(target_columns.iter()) {
                 // Get column metadata
-                let col_meta = table.get_column(col_name).ok_or_else(|| {
-                    PlannerError::ColumnNotFound {
-                        column: col_name.to_string(),
-                        table: table.name.clone(),
-                        line: span.start.line,
-                        col: span.start.column,
-                    }
-                })?;
+                let col_meta =
+                    table
+                        .get_column(col_name)
+                        .ok_or_else(|| PlannerError::ColumnNotFound {
+                            column: col_name.to_string(),
+                            table: table.name.clone(),
+                            line: span.start.line,
+                            col: span.start.column,
+                        })?;
 
                 // Type-check the value expression
                 let typed_value = self.infer_type(value, table)?;
@@ -948,14 +953,14 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
         span: Span,
     ) -> Result<TypedExpr, PlannerError> {
         // Get column metadata
-        let col_meta = table.get_column(column).ok_or_else(|| {
-            PlannerError::ColumnNotFound {
+        let col_meta = table
+            .get_column(column)
+            .ok_or_else(|| PlannerError::ColumnNotFound {
                 column: column.to_string(),
                 table: table.name.clone(),
                 line: span.start.line,
                 col: span.start.column,
-            }
-        })?;
+            })?;
 
         // Type-check the value expression
         let typed_value = self.infer_type(value, table)?;

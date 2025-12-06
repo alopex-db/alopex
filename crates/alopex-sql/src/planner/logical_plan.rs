@@ -624,8 +624,7 @@ mod tests {
             "user_name".to_string(),
         );
 
-        let plan =
-            LogicalPlan::scan("users".to_string(), Projection::Columns(vec![col1, col2]));
+        let plan = LogicalPlan::scan("users".to_string(), Projection::Columns(vec![col1, col2]));
 
         if let LogicalPlan::Scan { projection, .. } = &plan {
             assert_eq!(projection.len(), 2);

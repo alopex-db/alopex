@@ -148,7 +148,11 @@ fn test_plan_create_table() {
     let result = planner.plan(&stmt(StatementKind::CreateTable(create)));
     assert!(result.is_ok());
 
-    if let LogicalPlan::CreateTable { table, if_not_exists } = result.unwrap() {
+    if let LogicalPlan::CreateTable {
+        table,
+        if_not_exists,
+    } = result.unwrap()
+    {
         assert_eq!(table.name, "new_table");
         assert_eq!(table.columns.len(), 2);
         assert!(!if_not_exists);
@@ -256,7 +260,11 @@ fn test_plan_create_index() {
     let result = planner.plan(&stmt(StatementKind::CreateIndex(create)));
     assert!(result.is_ok());
 
-    if let LogicalPlan::CreateIndex { index, if_not_exists } = result.unwrap() {
+    if let LogicalPlan::CreateIndex {
+        index,
+        if_not_exists,
+    } = result.unwrap()
+    {
         assert_eq!(index.name, "idx_users_name");
         assert_eq!(index.table, "users");
         assert_eq!(index.column, "name");
@@ -496,7 +504,12 @@ fn test_plan_select_with_limit() {
     let result = planner.plan(&stmt(StatementKind::Select(select)));
     assert!(result.is_ok());
 
-    if let LogicalPlan::Limit { input, limit, offset } = result.unwrap() {
+    if let LogicalPlan::Limit {
+        input,
+        limit,
+        offset,
+    } = result.unwrap()
+    {
         assert!(matches!(*input, LogicalPlan::Scan { .. }));
         assert_eq!(limit, Some(10));
         assert_eq!(offset, Some(5));
@@ -597,7 +610,12 @@ fn test_plan_insert_with_columns() {
     let result = planner.plan(&stmt(StatementKind::Insert(insert)));
     assert!(result.is_ok());
 
-    if let LogicalPlan::Insert { table, columns, values } = result.unwrap() {
+    if let LogicalPlan::Insert {
+        table,
+        columns,
+        values,
+    } = result.unwrap()
+    {
         assert_eq!(table, "users");
         assert_eq!(columns, vec!["id", "name"]);
         assert_eq!(values.len(), 1);
@@ -671,7 +689,11 @@ fn test_plan_insert_column_count_mismatch() {
     let result = planner.plan(&stmt(StatementKind::Insert(insert)));
     assert!(matches!(
         result,
-        Err(PlannerError::ColumnValueCountMismatch { columns: 2, values: 1, .. })
+        Err(PlannerError::ColumnValueCountMismatch {
+            columns: 2,
+            values: 1,
+            ..
+        })
     ));
 }
 
@@ -717,7 +739,12 @@ fn test_plan_update() {
     let result = planner.plan(&stmt(StatementKind::Update(update)));
     assert!(result.is_ok());
 
-    if let LogicalPlan::Update { table, assignments, filter } = result.unwrap() {
+    if let LogicalPlan::Update {
+        table,
+        assignments,
+        filter,
+    } = result.unwrap()
+    {
         assert_eq!(table, "users");
         assert_eq!(assignments.len(), 1);
         assert_eq!(assignments[0].column, "name");
@@ -853,7 +880,11 @@ fn test_plan_insert_type_compatible() {
     // Integer can be inserted into Double column (price)
     let insert = Insert {
         table: "products".to_string(),
-        columns: Some(vec!["id".to_string(), "name".to_string(), "price".to_string()]),
+        columns: Some(vec![
+            "id".to_string(),
+            "name".to_string(),
+            "price".to_string(),
+        ]),
         values: vec![vec![int_lit(1), str_lit("Widget"), int_lit(100)]],
         span: span(),
     };

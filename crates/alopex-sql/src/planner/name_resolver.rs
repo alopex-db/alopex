@@ -4,8 +4,8 @@
 //! in SQL statements, validating their existence against the catalog, and
 //! expanding wildcards in SELECT statements.
 
-use crate::ast::expr::{Expr, ExprKind};
 use crate::ast::Span;
+use crate::ast::expr::{Expr, ExprKind};
 use crate::catalog::{Catalog, TableMetadata};
 use crate::planner::error::PlannerError;
 use crate::planner::types::ResolvedType;
@@ -93,11 +93,13 @@ impl<'a, C: Catalog> NameResolver<'a, C> {
     /// assert_eq!(table.name, "users");
     /// ```
     pub fn resolve_table(&self, name: &str, span: Span) -> Result<&TableMetadata, PlannerError> {
-        self.catalog.get_table(name).ok_or_else(|| PlannerError::TableNotFound {
-            name: name.to_string(),
-            line: span.start.line,
-            column: span.start.column,
-        })
+        self.catalog
+            .get_table(name)
+            .ok_or_else(|| PlannerError::TableNotFound {
+                name: name.to_string(),
+                line: span.start.line,
+                column: span.start.column,
+            })
     }
 
     /// Resolve a column reference within a single table context.
@@ -121,12 +123,14 @@ impl<'a, C: Catalog> NameResolver<'a, C> {
         column: &str,
         span: Span,
     ) -> Result<&'t crate::catalog::ColumnMetadata, PlannerError> {
-        table.get_column(column).ok_or_else(|| PlannerError::ColumnNotFound {
-            column: column.to_string(),
-            table: table.name.clone(),
-            line: span.start.line,
-            col: span.start.column,
-        })
+        table
+            .get_column(column)
+            .ok_or_else(|| PlannerError::ColumnNotFound {
+                column: column.to_string(),
+                table: table.name.clone(),
+                line: span.start.line,
+                col: span.start.column,
+            })
     }
 
     /// Resolve a column reference with scope for multiple tables.
@@ -156,23 +160,23 @@ impl<'a, C: Catalog> NameResolver<'a, C> {
     ) -> Result<ResolvedColumn, PlannerError> {
         if let Some(qualifier) = table_qualifier {
             // Explicit table qualifier - find the matching table
-            let table = tables
-                .iter()
-                .find(|t| t.name == qualifier)
-                .ok_or_else(|| PlannerError::TableNotFound {
+            let table = tables.iter().find(|t| t.name == qualifier).ok_or_else(|| {
+                PlannerError::TableNotFound {
                     name: qualifier.to_string(),
                     line: span.start.line,
                     column: span.start.column,
-                })?;
-
-            let column_index = table.get_column_index(column).ok_or_else(|| {
-                PlannerError::ColumnNotFound {
-                    column: column.to_string(),
-                    table: table.name.clone(),
-                    line: span.start.line,
-                    col: span.start.column,
                 }
             })?;
+
+            let column_index =
+                table
+                    .get_column_index(column)
+                    .ok_or_else(|| PlannerError::ColumnNotFound {
+                        column: column.to_string(),
+                        table: table.name.clone(),
+                        line: span.start.line,
+                        col: span.start.column,
+                    })?;
 
             let column_meta = &table.columns[column_index];
             Ok(ResolvedColumn {
@@ -304,10 +308,7 @@ impl<'a, C: Catalog> NameResolver<'a, C> {
             }
 
             ExprKind::Between {
-                expr: e,
-                low,
-                high,
-                ..
+                expr: e, low, high, ..
             } => {
                 self.resolve_expr_recursive(e, table)?;
                 self.resolve_expr_recursive(low, table)?;
