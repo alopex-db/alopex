@@ -11,7 +11,7 @@ use std::convert::TryInto;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result};
+use crate::columnar::error::{ColumnarError, Result};
 
 use super::encoding::{Column, LogicalType};
 
@@ -127,12 +127,14 @@ impl Bitmap {
     /// Decode bitmap from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 4 {
-            return Err(Error::InvalidFormat("bitmap header too short".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "bitmap header too short".into(),
+            ));
         }
         let len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
         let num_bytes = len.div_ceil(8);
         if bytes.len() < 4 + num_bytes {
-            return Err(Error::InvalidFormat("bitmap data truncated".into()));
+            return Err(ColumnarError::InvalidFormat("bitmap data truncated".into()));
         }
         Ok(Self {
             bits: bytes[4..4 + num_bytes].to_vec(),
@@ -184,7 +186,11 @@ impl Encoder for DeltaEncoder {
     fn encode(&self, data: &Column, null_bitmap: Option<&Bitmap>) -> Result<Vec<u8>> {
         let values = match data {
             Column::Int64(v) => v,
-            _ => return Err(Error::InvalidFormat("delta encoding requires Int64".into())),
+            _ => {
+                return Err(ColumnarError::InvalidFormat(
+                    "delta encoding requires Int64".into(),
+                ))
+            }
         };
 
         if values.is_empty() {
@@ -234,11 +240,15 @@ impl Decoder for DeltaDecoder {
         logical_type: LogicalType,
     ) -> Result<(Column, Option<Bitmap>)> {
         if logical_type != LogicalType::Int64 {
-            return Err(Error::InvalidFormat("delta decoding requires Int64".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "delta decoding requires Int64".into(),
+            ));
         }
 
         if data.len() < 5 {
-            return Err(Error::InvalidFormat("delta header too short".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "delta header too short".into(),
+            ));
         }
 
         let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
@@ -258,7 +268,9 @@ impl Decoder for DeltaDecoder {
         }
 
         if pos + 8 > data.len() {
-            return Err(Error::InvalidFormat("delta first value truncated".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "delta first value truncated".into(),
+            ));
         }
 
         let first = i64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
@@ -294,7 +306,11 @@ impl Encoder for ForEncoder {
     fn encode(&self, data: &Column, null_bitmap: Option<&Bitmap>) -> Result<Vec<u8>> {
         let values = match data {
             Column::Int64(v) => v,
-            _ => return Err(Error::InvalidFormat("FOR encoding requires Int64".into())),
+            _ => {
+                return Err(ColumnarError::InvalidFormat(
+                    "FOR encoding requires Int64".into(),
+                ))
+            }
         };
 
         if values.is_empty() {
@@ -370,11 +386,13 @@ impl Decoder for ForDecoder {
         logical_type: LogicalType,
     ) -> Result<(Column, Option<Bitmap>)> {
         if logical_type != LogicalType::Int64 {
-            return Err(Error::InvalidFormat("FOR decoding requires Int64".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "FOR decoding requires Int64".into(),
+            ));
         }
 
         if data.len() < 5 {
-            return Err(Error::InvalidFormat("FOR header too short".into()));
+            return Err(ColumnarError::InvalidFormat("FOR header too short".into()));
         }
 
         let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
@@ -394,7 +412,9 @@ impl Decoder for ForDecoder {
         }
 
         if pos + 9 > data.len() {
-            return Err(Error::InvalidFormat("FOR reference truncated".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "FOR reference truncated".into(),
+            ));
         }
 
         let reference = i64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
@@ -422,7 +442,7 @@ impl Decoder for ForDecoder {
 
             // Check for truncated data before subtraction to prevent underflow
             if bits_in_buffer < bits_per_value {
-                return Err(Error::InvalidFormat("FOR data truncated".into()));
+                return Err(ColumnarError::InvalidFormat("FOR data truncated".into()));
             }
 
             let offset = bit_buffer & mask;
@@ -459,7 +479,11 @@ impl Encoder for PforEncoder {
     fn encode(&self, data: &Column, null_bitmap: Option<&Bitmap>) -> Result<Vec<u8>> {
         let values = match data {
             Column::Int64(v) => v,
-            _ => return Err(Error::InvalidFormat("PFOR encoding requires Int64".into())),
+            _ => {
+                return Err(ColumnarError::InvalidFormat(
+                    "PFOR encoding requires Int64".into(),
+                ))
+            }
         };
 
         if values.is_empty() {
@@ -561,11 +585,13 @@ impl Decoder for PforDecoder {
         logical_type: LogicalType,
     ) -> Result<(Column, Option<Bitmap>)> {
         if logical_type != LogicalType::Int64 {
-            return Err(Error::InvalidFormat("PFOR decoding requires Int64".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "PFOR decoding requires Int64".into(),
+            ));
         }
 
         if data.len() < 5 {
-            return Err(Error::InvalidFormat("PFOR header too short".into()));
+            return Err(ColumnarError::InvalidFormat("PFOR header too short".into()));
         }
 
         let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
@@ -585,7 +611,7 @@ impl Decoder for PforDecoder {
         }
 
         if pos + 13 > data.len() {
-            return Err(Error::InvalidFormat("PFOR header truncated".into()));
+            return Err(ColumnarError::InvalidFormat("PFOR header truncated".into()));
         }
 
         let reference = i64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
@@ -615,7 +641,7 @@ impl Decoder for PforDecoder {
 
             // Check for truncated data before subtraction to prevent underflow
             if bits_in_buffer < bits_per_value {
-                return Err(Error::InvalidFormat("PFOR data truncated".into()));
+                return Err(ColumnarError::InvalidFormat("PFOR data truncated".into()));
             }
 
             let offset = bit_buffer & mask;
@@ -633,7 +659,9 @@ impl Decoder for PforDecoder {
         // Apply exceptions
         for _ in 0..exception_count {
             if pos + 12 > data.len() {
-                return Err(Error::InvalidFormat("PFOR exception truncated".into()));
+                return Err(ColumnarError::InvalidFormat(
+                    "PFOR exception truncated".into(),
+                ));
             }
             let idx = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
             pos += 4;
@@ -671,7 +699,7 @@ impl Encoder for ByteStreamSplitEncoder {
                 (8, bytes)
             }
             _ => {
-                return Err(Error::InvalidFormat(
+                return Err(ColumnarError::InvalidFormat(
                     "ByteStreamSplit requires Float64 or Int64".into(),
                 ))
             }
@@ -717,7 +745,7 @@ impl Decoder for ByteStreamSplitDecoder {
         logical_type: LogicalType,
     ) -> Result<(Column, Option<Bitmap>)> {
         if data.len() < 6 {
-            return Err(Error::InvalidFormat(
+            return Err(ColumnarError::InvalidFormat(
                 "ByteStreamSplit header too short".into(),
             ));
         }
@@ -739,7 +767,7 @@ impl Decoder for ByteStreamSplitDecoder {
             return match logical_type {
                 LogicalType::Float64 => Ok((Column::Float64(vec![]), bitmap)),
                 LogicalType::Int64 => Ok((Column::Int64(vec![]), bitmap)),
-                _ => Err(Error::InvalidFormat(
+                _ => Err(ColumnarError::InvalidFormat(
                     "ByteStreamSplit logical type mismatch".into(),
                 )),
             };
@@ -747,7 +775,7 @@ impl Decoder for ByteStreamSplitDecoder {
 
         let expected_size = count * bytes_per_value;
         if pos + expected_size > data.len() {
-            return Err(Error::InvalidFormat(
+            return Err(ColumnarError::InvalidFormat(
                 "ByteStreamSplit data truncated".into(),
             ));
         }
@@ -776,7 +804,7 @@ impl Decoder for ByteStreamSplitDecoder {
                     .collect();
                 Ok((Column::Int64(values), bitmap))
             }
-            _ => Err(Error::InvalidFormat(
+            _ => Err(ColumnarError::InvalidFormat(
                 "ByteStreamSplit requires Float64 or Int64".into(),
             )),
         }
@@ -798,7 +826,7 @@ impl Encoder for IncrementalStringEncoder {
         let values = match data {
             Column::Binary(v) => v,
             _ => {
-                return Err(Error::InvalidFormat(
+                return Err(ColumnarError::InvalidFormat(
                     "IncrementalString encoding requires Binary".into(),
                 ))
             }
@@ -860,13 +888,13 @@ impl Decoder for IncrementalStringDecoder {
         logical_type: LogicalType,
     ) -> Result<(Column, Option<Bitmap>)> {
         if logical_type != LogicalType::Binary {
-            return Err(Error::InvalidFormat(
+            return Err(ColumnarError::InvalidFormat(
                 "IncrementalString decoding requires Binary".into(),
             ));
         }
 
         if data.len() < 5 {
-            return Err(Error::InvalidFormat(
+            return Err(ColumnarError::InvalidFormat(
                 "IncrementalString header too short".into(),
             ));
         }
@@ -891,7 +919,7 @@ impl Decoder for IncrementalStringDecoder {
 
         // First value
         if pos + 4 > data.len() {
-            return Err(Error::InvalidFormat(
+            return Err(ColumnarError::InvalidFormat(
                 "IncrementalString first len truncated".into(),
             ));
         }
@@ -899,7 +927,7 @@ impl Decoder for IncrementalStringDecoder {
         pos += 4;
 
         if pos + first_len > data.len() {
-            return Err(Error::InvalidFormat(
+            return Err(ColumnarError::InvalidFormat(
                 "IncrementalString first value truncated".into(),
             ));
         }
@@ -910,7 +938,7 @@ impl Decoder for IncrementalStringDecoder {
         // Subsequent values
         for _ in 1..count {
             if pos + 4 > data.len() {
-                return Err(Error::InvalidFormat(
+                return Err(ColumnarError::InvalidFormat(
                     "IncrementalString header truncated".into(),
                 ));
             }
@@ -920,7 +948,7 @@ impl Decoder for IncrementalStringDecoder {
             pos += 2;
 
             if pos + suffix_len > data.len() {
-                return Err(Error::InvalidFormat(
+                return Err(ColumnarError::InvalidFormat(
                     "IncrementalString suffix truncated".into(),
                 ));
             }
@@ -953,7 +981,7 @@ impl Encoder for RleEncoder {
         match data {
             Column::Bool(values) => encode_rle_bool(values, null_bitmap),
             Column::Int64(values) => encode_rle_int64(values, null_bitmap),
-            _ => Err(Error::InvalidFormat(
+            _ => Err(ColumnarError::InvalidFormat(
                 "RLE encoding requires Bool or Int64".into(),
             )),
         }
@@ -1067,7 +1095,7 @@ impl Decoder for RleDecoder {
         match logical_type {
             LogicalType::Bool => decode_rle_bool(data),
             LogicalType::Int64 => decode_rle_int64(data),
-            _ => Err(Error::InvalidFormat(
+            _ => Err(ColumnarError::InvalidFormat(
                 "RLE decoding requires Bool or Int64".into(),
             )),
         }
@@ -1076,7 +1104,7 @@ impl Decoder for RleDecoder {
 
 fn decode_rle_bool(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
     if data.len() < 5 {
-        return Err(Error::InvalidFormat("RLE header too short".into()));
+        return Err(ColumnarError::InvalidFormat("RLE header too short".into()));
     }
 
     let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
@@ -1092,7 +1120,9 @@ fn decode_rle_bool(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
     };
 
     if pos + 4 > data.len() {
-        return Err(Error::InvalidFormat("RLE run_count truncated".into()));
+        return Err(ColumnarError::InvalidFormat(
+            "RLE run_count truncated".into(),
+        ));
     }
 
     let run_count = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
@@ -1106,7 +1136,9 @@ fn decode_rle_bool(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
 
     for _ in 0..run_count {
         if pos + 5 > data.len() {
-            return Err(Error::InvalidFormat("RLE bool run truncated".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "RLE bool run truncated".into(),
+            ));
         }
         let value = data[pos] != 0;
         pos += 1;
@@ -1119,7 +1151,7 @@ fn decode_rle_bool(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
     }
 
     if values.len() != count {
-        return Err(Error::InvalidFormat("RLE count mismatch".into()));
+        return Err(ColumnarError::InvalidFormat("RLE count mismatch".into()));
     }
 
     Ok((Column::Bool(values), bitmap))
@@ -1127,7 +1159,7 @@ fn decode_rle_bool(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
 
 fn decode_rle_int64(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
     if data.len() < 5 {
-        return Err(Error::InvalidFormat("RLE header too short".into()));
+        return Err(ColumnarError::InvalidFormat("RLE header too short".into()));
     }
 
     let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
@@ -1143,7 +1175,9 @@ fn decode_rle_int64(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
     };
 
     if pos + 4 > data.len() {
-        return Err(Error::InvalidFormat("RLE run_count truncated".into()));
+        return Err(ColumnarError::InvalidFormat(
+            "RLE run_count truncated".into(),
+        ));
     }
 
     let run_count = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
@@ -1157,7 +1191,9 @@ fn decode_rle_int64(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
 
     for _ in 0..run_count {
         if pos + 12 > data.len() {
-            return Err(Error::InvalidFormat("RLE int64 run truncated".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "RLE int64 run truncated".into(),
+            ));
         }
         let value = i64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
         pos += 8;
@@ -1170,7 +1206,7 @@ fn decode_rle_int64(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
     }
 
     if values.len() != count {
-        return Err(Error::InvalidFormat("RLE count mismatch".into()));
+        return Err(ColumnarError::InvalidFormat("RLE count mismatch".into()));
     }
 
     Ok((Column::Int64(values), bitmap))
@@ -1193,7 +1229,7 @@ impl Encoder for DictionaryEncoder {
         match data {
             Column::Binary(values) => encode_dict_binary(values, null_bitmap),
             Column::Fixed { len, values } => encode_dict_fixed(*len, values, null_bitmap),
-            _ => Err(Error::InvalidFormat(
+            _ => Err(ColumnarError::InvalidFormat(
                 "Dictionary encoding requires Binary or Fixed".into(),
             )),
         }
@@ -1327,7 +1363,7 @@ impl Decoder for DictionaryDecoder {
         match logical_type {
             LogicalType::Binary => decode_dict_binary(data),
             LogicalType::Fixed(fixed_len) => decode_dict_fixed(data, fixed_len as usize),
-            _ => Err(Error::InvalidFormat(
+            _ => Err(ColumnarError::InvalidFormat(
                 "Dictionary decoding requires Binary or Fixed".into(),
             )),
         }
@@ -1336,7 +1372,9 @@ impl Decoder for DictionaryDecoder {
 
 fn decode_dict_binary(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
     if data.len() < 5 {
-        return Err(Error::InvalidFormat("Dictionary header too short".into()));
+        return Err(ColumnarError::InvalidFormat(
+            "Dictionary header too short".into(),
+        ));
     }
 
     let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
@@ -1352,7 +1390,7 @@ fn decode_dict_binary(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
     };
 
     if pos + 4 > data.len() {
-        return Err(Error::InvalidFormat(
+        return Err(ColumnarError::InvalidFormat(
             "Dictionary dict_count truncated".into(),
         ));
     }
@@ -1368,14 +1406,14 @@ fn decode_dict_binary(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
     let mut dict: Vec<Vec<u8>> = Vec::with_capacity(dict_count);
     for _ in 0..dict_count {
         if pos + 4 > data.len() {
-            return Err(Error::InvalidFormat(
+            return Err(ColumnarError::InvalidFormat(
                 "Dictionary entry len truncated".into(),
             ));
         }
         let entry_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if pos + entry_len > data.len() {
-            return Err(Error::InvalidFormat(
+            return Err(ColumnarError::InvalidFormat(
                 "Dictionary entry data truncated".into(),
             ));
         }
@@ -1387,12 +1425,16 @@ fn decode_dict_binary(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
     let mut values = Vec::with_capacity(count);
     for _ in 0..count {
         if pos + 4 > data.len() {
-            return Err(Error::InvalidFormat("Dictionary index truncated".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "Dictionary index truncated".into(),
+            ));
         }
         let idx = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if idx >= dict.len() {
-            return Err(Error::InvalidFormat("Dictionary index out of range".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "Dictionary index out of range".into(),
+            ));
         }
         values.push(dict[idx].clone());
     }
@@ -1402,7 +1444,9 @@ fn decode_dict_binary(data: &[u8]) -> Result<(Column, Option<Bitmap>)> {
 
 fn decode_dict_fixed(data: &[u8], expected_len: usize) -> Result<(Column, Option<Bitmap>)> {
     if data.len() < 5 {
-        return Err(Error::InvalidFormat("Dictionary header too short".into()));
+        return Err(ColumnarError::InvalidFormat(
+            "Dictionary header too short".into(),
+        ));
     }
 
     let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
@@ -1418,7 +1462,7 @@ fn decode_dict_fixed(data: &[u8], expected_len: usize) -> Result<(Column, Option
     };
 
     if pos + 2 > data.len() {
-        return Err(Error::InvalidFormat(
+        return Err(ColumnarError::InvalidFormat(
             "Dictionary fixed_len truncated".into(),
         ));
     }
@@ -1426,13 +1470,13 @@ fn decode_dict_fixed(data: &[u8], expected_len: usize) -> Result<(Column, Option
     pos += 2;
 
     if fixed_len != expected_len {
-        return Err(Error::InvalidFormat(
+        return Err(ColumnarError::InvalidFormat(
             "Dictionary fixed length mismatch".into(),
         ));
     }
 
     if pos + 4 > data.len() {
-        return Err(Error::InvalidFormat(
+        return Err(ColumnarError::InvalidFormat(
             "Dictionary dict_count truncated".into(),
         ));
     }
@@ -1454,7 +1498,7 @@ fn decode_dict_fixed(data: &[u8], expected_len: usize) -> Result<(Column, Option
     let mut dict: Vec<Vec<u8>> = Vec::with_capacity(dict_count);
     for _ in 0..dict_count {
         if pos + fixed_len > data.len() {
-            return Err(Error::InvalidFormat(
+            return Err(ColumnarError::InvalidFormat(
                 "Dictionary fixed entry truncated".into(),
             ));
         }
@@ -1466,12 +1510,16 @@ fn decode_dict_fixed(data: &[u8], expected_len: usize) -> Result<(Column, Option
     let mut values = Vec::with_capacity(count);
     for _ in 0..count {
         if pos + 4 > data.len() {
-            return Err(Error::InvalidFormat("Dictionary index truncated".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "Dictionary index truncated".into(),
+            ));
         }
         let idx = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if idx >= dict.len() {
-            return Err(Error::InvalidFormat("Dictionary index out of range".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "Dictionary index out of range".into(),
+            ));
         }
         values.push(dict[idx].clone());
     }
@@ -1501,7 +1549,7 @@ impl Encoder for BitpackEncoder {
         let values = match data {
             Column::Bool(v) => v,
             _ => {
-                return Err(Error::InvalidFormat(
+                return Err(ColumnarError::InvalidFormat(
                     "Bitpack encoding requires Bool".into(),
                 ))
             }
@@ -1553,13 +1601,15 @@ impl Decoder for BitpackDecoder {
         logical_type: LogicalType,
     ) -> Result<(Column, Option<Bitmap>)> {
         if logical_type != LogicalType::Bool {
-            return Err(Error::InvalidFormat(
+            return Err(ColumnarError::InvalidFormat(
                 "Bitpack decoding requires Bool".into(),
             ));
         }
 
         if data.len() < 5 {
-            return Err(Error::InvalidFormat("Bitpack header too short".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "Bitpack header too short".into(),
+            ));
         }
 
         let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
@@ -1580,7 +1630,9 @@ impl Decoder for BitpackDecoder {
 
         let num_bytes = count.div_ceil(8);
         if pos + num_bytes > data.len() {
-            return Err(Error::InvalidFormat("Bitpack data truncated".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "Bitpack data truncated".into(),
+            ));
         }
 
         let packed = &data[pos..pos + num_bytes];
@@ -1803,7 +1855,7 @@ impl Decoder for PlainDecoder {
         logical_type: LogicalType,
     ) -> Result<(Column, Option<Bitmap>)> {
         if data.is_empty() {
-            return Err(Error::InvalidFormat("plain data empty".into()));
+            return Err(ColumnarError::InvalidFormat("plain data empty".into()));
         }
 
         let has_bitmap = data[0] != 0;
@@ -1818,7 +1870,7 @@ impl Decoder for PlainDecoder {
         };
 
         if pos + 4 > data.len() {
-            return Err(Error::InvalidFormat("plain count truncated".into()));
+            return Err(ColumnarError::InvalidFormat("plain count truncated".into()));
         }
 
         let count = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
@@ -1829,7 +1881,7 @@ impl Decoder for PlainDecoder {
                 let mut values = Vec::with_capacity(count);
                 for _ in 0..count {
                     if pos + 8 > data.len() {
-                        return Err(Error::InvalidFormat("plain int64 truncated".into()));
+                        return Err(ColumnarError::InvalidFormat("plain int64 truncated".into()));
                     }
                     values.push(i64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()));
                     pos += 8;
@@ -1840,7 +1892,9 @@ impl Decoder for PlainDecoder {
                 let mut values = Vec::with_capacity(count);
                 for _ in 0..count {
                     if pos + 8 > data.len() {
-                        return Err(Error::InvalidFormat("plain float64 truncated".into()));
+                        return Err(ColumnarError::InvalidFormat(
+                            "plain float64 truncated".into(),
+                        ));
                     }
                     values.push(f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()));
                     pos += 8;
@@ -1851,7 +1905,7 @@ impl Decoder for PlainDecoder {
                 let mut values = Vec::with_capacity(count);
                 for _ in 0..count {
                     if pos >= data.len() {
-                        return Err(Error::InvalidFormat("plain bool truncated".into()));
+                        return Err(ColumnarError::InvalidFormat("plain bool truncated".into()));
                     }
                     values.push(data[pos] != 0);
                     pos += 1;
@@ -1862,12 +1916,16 @@ impl Decoder for PlainDecoder {
                 let mut values = Vec::with_capacity(count);
                 for _ in 0..count {
                     if pos + 4 > data.len() {
-                        return Err(Error::InvalidFormat("plain binary len truncated".into()));
+                        return Err(ColumnarError::InvalidFormat(
+                            "plain binary len truncated".into(),
+                        ));
                     }
                     let len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
                     pos += 4;
                     if pos + len > data.len() {
-                        return Err(Error::InvalidFormat("plain binary data truncated".into()));
+                        return Err(ColumnarError::InvalidFormat(
+                            "plain binary data truncated".into(),
+                        ));
                     }
                     values.push(data[pos..pos + len].to_vec());
                     pos += len;
@@ -1876,18 +1934,24 @@ impl Decoder for PlainDecoder {
             }
             LogicalType::Fixed(fixed_len) => {
                 if pos + 2 > data.len() {
-                    return Err(Error::InvalidFormat("plain fixed len truncated".into()));
+                    return Err(ColumnarError::InvalidFormat(
+                        "plain fixed len truncated".into(),
+                    ));
                 }
                 let stored_len =
                     u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
                 pos += 2;
                 if stored_len != fixed_len as usize {
-                    return Err(Error::InvalidFormat("plain fixed length mismatch".into()));
+                    return Err(ColumnarError::InvalidFormat(
+                        "plain fixed length mismatch".into(),
+                    ));
                 }
                 let mut values = Vec::with_capacity(count);
                 for _ in 0..count {
                     if pos + stored_len > data.len() {
-                        return Err(Error::InvalidFormat("plain fixed data truncated".into()));
+                        return Err(ColumnarError::InvalidFormat(
+                            "plain fixed data truncated".into(),
+                        ));
                     }
                     values.push(data[pos..pos + stored_len].to_vec());
                     pos += stored_len;
@@ -1939,10 +2003,10 @@ fn decode_varint(data: &[u8]) -> Result<(u64, usize)> {
         }
         shift += 7;
         if shift >= 64 {
-            return Err(Error::InvalidFormat("varint overflow".into()));
+            return Err(ColumnarError::InvalidFormat("varint overflow".into()));
         }
     }
-    Err(Error::InvalidFormat("varint truncated".into()))
+    Err(ColumnarError::InvalidFormat("varint truncated".into()))
 }
 
 // ============================================================================

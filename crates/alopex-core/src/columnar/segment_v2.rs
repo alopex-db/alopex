@@ -16,8 +16,8 @@ use crate::columnar::encoding_v2::{
     create_decoder, create_encoder, select_encoding, Bitmap, Decoder, Encoder, EncodingHints,
     EncodingV2,
 };
+use crate::columnar::error::{ColumnarError, Result};
 use crate::storage::compression::{create_compressor, CompressionV2};
-use crate::Error;
 
 /// Segment V2 のマジックバイト。
 pub const SEGMENT_MAGIC: &[u8; 4] = b"ALXC";
@@ -44,14 +44,14 @@ impl From<ChecksumScope> for u8 {
 }
 
 impl TryFrom<u8> for ChecksumScope {
-    type Error = Error;
+    type Error = ColumnarError;
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
         match value {
             0 => Ok(ChecksumScope::None),
             1 => Ok(ChecksumScope::Footer),
             2 => Ok(ChecksumScope::Chunk),
-            other => Err(Error::InvalidFormat(format!(
+            other => Err(ColumnarError::InvalidFormat(format!(
                 "unknown checksum scope: {other}"
             ))),
         }
@@ -129,7 +129,7 @@ fn column_len(column: &Column) -> usize {
 }
 
 /// Column をスライスするヘルパー。
-fn slice_column(column: &Column, start: usize, len: usize) -> Result<Column, Error> {
+fn slice_column(column: &Column, start: usize, len: usize) -> Result<Column> {
     match column {
         Column::Int64(v) => Ok(Column::Int64(v[start..start + len].to_vec())),
         Column::Float64(v) => Ok(Column::Float64(v[start..start + len].to_vec())),
@@ -223,51 +223,51 @@ fn build_encoding_hints(column: &Column, bitmap: Option<&Bitmap>) -> EncodingHin
 }
 
 /// バイト列からヘッダを復元する。
-fn read_header(bytes: &[u8]) -> Result<SegmentHeader, Error> {
+fn read_header(bytes: &[u8]) -> Result<SegmentHeader> {
     if bytes.len() < SEGMENT_HEADER_SIZE {
-        return Err(Error::InvalidFormat("header too short".into()));
+        return Err(ColumnarError::InvalidFormat("header too short".into()));
     }
     let mut cur = Cursor::new(bytes);
     let mut magic = [0u8; 4];
     cur.read_exact(&mut magic)
-        .map_err(|e| Error::InvalidFormat(format!("read magic failed: {e}")))?;
+        .map_err(|e| ColumnarError::InvalidFormat(format!("read magic failed: {e}")))?;
     if &magic != SEGMENT_MAGIC {
-        return Err(Error::InvalidFormat("invalid segment magic".into()));
+        return Err(ColumnarError::InvalidFormat("invalid segment magic".into()));
     }
     let mut u16buf = [0u8; 2];
     cur.read_exact(&mut u16buf)
-        .map_err(|e| Error::InvalidFormat(format!("read version failed: {e}")))?;
+        .map_err(|e| ColumnarError::InvalidFormat(format!("read version failed: {e}")))?;
     let format_version = u16::from_le_bytes(u16buf);
 
     let mut u16buf = [0u8; 2];
     cur.read_exact(&mut u16buf)
-        .map_err(|e| Error::InvalidFormat(format!("read column_count failed: {e}")))?;
+        .map_err(|e| ColumnarError::InvalidFormat(format!("read column_count failed: {e}")))?;
     let column_count = u16::from_le_bytes(u16buf);
 
     let mut u64buf = [0u8; 8];
     cur.read_exact(&mut u64buf)
-        .map_err(|e| Error::InvalidFormat(format!("read row_count failed: {e}")))?;
+        .map_err(|e| ColumnarError::InvalidFormat(format!("read row_count failed: {e}")))?;
     let row_count = u64::from_le_bytes(u64buf);
 
     let mut u32buf = [0u8; 4];
     cur.read_exact(&mut u32buf)
-        .map_err(|e| Error::InvalidFormat(format!("read row_group_size failed: {e}")))?;
+        .map_err(|e| ColumnarError::InvalidFormat(format!("read row_group_size failed: {e}")))?;
     let row_group_size = u32::from_le_bytes(u32buf);
 
     let mut scope_byte = [0u8; 1];
     cur.read_exact(&mut scope_byte)
-        .map_err(|e| Error::InvalidFormat(format!("read checksum_scope failed: {e}")))?;
+        .map_err(|e| ColumnarError::InvalidFormat(format!("read checksum_scope failed: {e}")))?;
     let checksum_scope = ChecksumScope::try_from(scope_byte[0])?;
 
     let mut comp_byte = [0u8; 1];
     cur.read_exact(&mut comp_byte)
-        .map_err(|e| Error::InvalidFormat(format!("read compression failed: {e}")))?;
+        .map_err(|e| ColumnarError::InvalidFormat(format!("read compression failed: {e}")))?;
     let compression = match comp_byte[0] {
         0 => CompressionV2::None,
         1 => CompressionV2::Lz4,
         2 => CompressionV2::Zstd { level: 3 },
         other => {
-            return Err(Error::InvalidFormat(format!(
+            return Err(ColumnarError::InvalidFormat(format!(
                 "unknown compression id: {other}"
             )))
         }
@@ -275,7 +275,7 @@ fn read_header(bytes: &[u8]) -> Result<SegmentHeader, Error> {
 
     let mut reserved = [0u8; 2];
     cur.read_exact(&mut reserved)
-        .map_err(|e| Error::InvalidFormat(format!("read reserved failed: {e}")))?;
+        .map_err(|e| ColumnarError::InvalidFormat(format!("read reserved failed: {e}")))?;
 
     Ok(SegmentHeader {
         magic,
@@ -527,17 +527,17 @@ impl InMemorySegmentSource {
 /// セグメント読み込み元を抽象化する。
 pub trait SegmentSource: Send + Sync + std::fmt::Debug {
     /// 指定範囲を読み取る。
-    fn read_range(&self, offset: u64, len: u64) -> Result<Vec<u8>, Error>;
+    fn read_range(&self, offset: u64, len: u64) -> Result<Vec<u8>>;
     /// 全体サイズを返す。
     fn total_size(&self) -> u64;
 }
 
 impl SegmentSource for InMemorySegmentSource {
-    fn read_range(&self, offset: u64, len: u64) -> Result<Vec<u8>, Error> {
+    fn read_range(&self, offset: u64, len: u64) -> Result<Vec<u8>> {
         let start = offset as usize;
         let end = start + len as usize;
         if end > self.data.len() {
-            return Err(Error::InvalidFormat("range out of bounds".into()));
+            return Err(ColumnarError::InvalidFormat("range out of bounds".into()));
         }
         Ok(self.data[start..end].to_vec())
     }
@@ -564,23 +564,23 @@ impl SegmentWriterV2 {
     }
 
     /// バッチを追加する。行数はスキーマと整合している前提。
-    pub fn write_batch(&mut self, batch: RecordBatch) -> Result<(), Error> {
+    pub fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
         self.buffer.push(batch);
         Ok(())
     }
 
     /// セグメントを書き出し、ColumnSegmentV2 を返す。
-    pub fn finish(mut self) -> Result<ColumnSegmentV2, Error> {
+    pub fn finish(mut self) -> Result<ColumnSegmentV2> {
         // すべて同じスキーマであることを前提に整合性チェック。
         let schema = self
             .buffer
             .first()
-            .ok_or_else(|| Error::InvalidFormat("no batches".into()))?
+            .ok_or_else(|| ColumnarError::InvalidFormat("no batches".into()))?
             .schema
             .clone();
         for b in &self.buffer {
             if b.schema.column_count() != schema.column_count() {
-                return Err(Error::InvalidFormat("schema mismatch".into()));
+                return Err(ColumnarError::InvalidFormat("schema mismatch".into()));
             }
         }
 
@@ -618,7 +618,7 @@ impl SegmentWriterV2 {
         );
 
         let schema_bytes =
-            bincode::serialize(&schema).map_err(|e| Error::InvalidFormat(e.to_string()))?;
+            bincode::serialize(&schema).map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
         let schema_len = schema_bytes.len() as u32;
 
         // データ部とメタ
@@ -662,7 +662,7 @@ impl SegmentWriterV2 {
                 let encoder: Box<dyn Encoder> = create_encoder(encoding);
                 let encoded = encoder
                     .encode(col, null_bitmap)
-                    .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+                    .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
                 let uncompressed_len = encoded.len() as u64;
                 rg_uncompressed_size += uncompressed_len;
 
@@ -670,10 +670,10 @@ impl SegmentWriterV2 {
                     encoded
                 } else {
                     let compressor = create_compressor(self.config.compression)
-                        .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+                        .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
                     compressor
                         .compress(&encoded)
-                        .map_err(|e| Error::InvalidFormat(e.to_string()))?
+                        .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?
                 };
 
                 let chunk_offset = rg_buffer.len() as u64;
@@ -707,9 +707,10 @@ impl SegmentWriterV2 {
             {
                 // 圧縮後サイズが上限を超えたら分割を試みる。1 行なら分割不可なのでエラー。
                 if rg.num_rows() <= 1 {
-                    return Err(Error::InvalidFormat(
-                        "row group exceeds max_row_group_bytes".into(),
-                    ));
+                    return Err(ColumnarError::RowGroupTooLarge {
+                        size: rg_compressed_size,
+                        max: self.config.max_row_group_bytes,
+                    });
                 }
                 let mid = rg.num_rows() / 2;
                 let mut left_cols = Vec::new();
@@ -834,7 +835,7 @@ impl SegmentWriterV2 {
         };
 
         let footer_payload =
-            bincode::serialize(&footer).map_err(|e| Error::InvalidFormat(e.to_string()))?;
+            bincode::serialize(&footer).map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
         let footer_size = footer_payload.len() as u32;
         let mut hasher = Hasher::new();
         hasher.update(&footer_payload);
@@ -869,10 +870,10 @@ pub struct SegmentReaderV2 {
 
 impl SegmentReaderV2 {
     /// セグメントをオープンしてヘッダ/フッター検証を行う。
-    pub fn open(source: Box<dyn SegmentSource>) -> Result<Self, Error> {
+    pub fn open(source: Box<dyn SegmentSource>) -> Result<Self> {
         let total_size = source.total_size();
         if total_size < (SEGMENT_HEADER_SIZE + 8) as u64 {
-            return Err(Error::InvalidFormat("segment too small".into()));
+            return Err(ColumnarError::InvalidFormat("segment too small".into()));
         }
 
         // フッターサイズとチェックサムを取得
@@ -881,7 +882,7 @@ impl SegmentReaderV2 {
         let footer_checksum = u32::from_le_bytes(trailer[4..8].try_into().unwrap());
 
         if footer_size + 8 > total_size {
-            return Err(Error::InvalidFormat("invalid footer size".into()));
+            return Err(ColumnarError::InvalidFormat("invalid footer size".into()));
         }
 
         let footer_start = total_size - 8 - footer_size;
@@ -890,24 +891,27 @@ impl SegmentReaderV2 {
         hasher.update(&footer_bytes);
         let computed = hasher.finalize();
         if computed != footer_checksum {
-            return Err(Error::ChecksumMismatch);
+            return Err(ColumnarError::ChecksumMismatch);
         }
 
-        let footer: SegmentFooter =
-            bincode::deserialize(&footer_bytes).map_err(|e| Error::InvalidFormat(e.to_string()))?;
+        let footer: SegmentFooter = bincode::deserialize(&footer_bytes)
+            .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
 
         // ヘッダとスキーマ読み込み
         let header_bytes = source.read_range(0, SEGMENT_HEADER_SIZE as u64)?;
         let header = read_header(&header_bytes)?;
         if header.format_version != SEGMENT_FORMAT_VERSION_V2 {
-            return Err(Error::InvalidFormat("unsupported format version".into()));
+            return Err(ColumnarError::UnsupportedFormatVersion {
+                found: header.format_version,
+                expected: SEGMENT_FORMAT_VERSION_V2,
+            });
         }
 
         let schema_len_bytes = source.read_range(SEGMENT_HEADER_SIZE as u64, 4)?;
         let schema_len = u32::from_le_bytes(schema_len_bytes.try_into().unwrap()) as u64;
         let schema_bytes = source.read_range(SEGMENT_HEADER_SIZE as u64 + 4, schema_len)?;
-        let schema: Schema =
-            bincode::deserialize(&schema_bytes).map_err(|e| Error::InvalidFormat(e.to_string()))?;
+        let schema: Schema = bincode::deserialize(&schema_bytes)
+            .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
 
         Ok(Self {
             header,
@@ -918,7 +922,7 @@ impl SegmentReaderV2 {
     }
 
     /// カラムの一部だけを読み取る（カラムプルーニング）。
-    pub fn read_columns(&self, columns: &[usize]) -> Result<Vec<RecordBatch>, Error> {
+    pub fn read_columns(&self, columns: &[usize]) -> Result<Vec<RecordBatch>> {
         let mut batches = Vec::new();
         for idx in 0..self.footer.row_group_table.entries.len() {
             batches.push(self.read_row_group_by_index(columns, idx)?);
@@ -931,13 +935,13 @@ impl SegmentReaderV2 {
         &self,
         columns: &[usize],
         rg_index: usize,
-    ) -> Result<RecordBatch, Error> {
+    ) -> Result<RecordBatch> {
         let entry = self
             .footer
             .row_group_table
             .entries
             .get(rg_index)
-            .ok_or_else(|| Error::InvalidFormat("row group index out of bounds".into()))?;
+            .ok_or_else(|| ColumnarError::InvalidFormat("row group index out of bounds".into()))?;
 
         let mut cols = Vec::new();
         let mut bitmaps = Vec::new();
@@ -947,12 +951,12 @@ impl SegmentReaderV2 {
                 .column_descriptors
                 .columns
                 .get(col_idx)
-                .ok_or_else(|| Error::InvalidFormat("column index out of bounds".into()))?;
+                .ok_or_else(|| ColumnarError::InvalidFormat("column index out of bounds".into()))?;
             let chunk_meta = entry
                 .column_chunk_offsets
                 .iter()
                 .find(|c| c.column_idx as usize == col_idx)
-                .ok_or_else(|| Error::InvalidFormat("missing chunk offset".into()))?;
+                .ok_or_else(|| ColumnarError::InvalidFormat("missing chunk offset".into()))?;
             let chunk_bytes = self
                 .source
                 .read_range(entry.data_offset + chunk_meta.offset, chunk_meta.length)?;
@@ -963,7 +967,7 @@ impl SegmentReaderV2 {
                     hasher.update(&chunk_bytes);
                     let computed = hasher.finalize();
                     if expected != computed {
-                        return Err(Error::ChecksumMismatch);
+                        return Err(ColumnarError::ChecksumMismatch);
                     }
                 }
                 if let Some(expected_rg) = entry.checksum {
@@ -973,7 +977,7 @@ impl SegmentReaderV2 {
                         .read_range(entry.data_offset, entry.compressed_size)?;
                     hasher.update(&rg_bytes);
                     if hasher.finalize() != expected_rg {
-                        return Err(Error::ChecksumMismatch);
+                        return Err(ColumnarError::ChecksumMismatch);
                     }
                 }
             }
@@ -983,10 +987,10 @@ impl SegmentReaderV2 {
                 chunk_bytes
             } else {
                 let compressor = create_compressor(desc.compression)
-                    .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+                    .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
                 compressor
                     .decompress(&chunk_bytes, chunk_meta.uncompressed_length as usize)
-                    .map_err(|e| Error::InvalidFormat(e.to_string()))?
+                    .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?
             };
             let (col, bitmap) =
                 decoder.decode(&decompressed, entry.row_count as usize, desc.logical_type)?;
@@ -1019,7 +1023,7 @@ pub struct RowGroupIter<'a> {
 }
 
 impl<'a> Iterator for RowGroupIter<'a> {
-    type Item = Result<RecordBatch, Error>;
+    type Item = Result<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.index >= self.reader.footer.row_group_table.entries.len() {
@@ -1068,7 +1072,7 @@ mod tests {
     fn write_and_read(
         config: SegmentConfigV2,
         batches: Vec<RecordBatch>,
-    ) -> Result<SegmentReaderV2, Error> {
+    ) -> Result<SegmentReaderV2> {
         let mut writer = SegmentWriterV2::new(config);
         for b in batches {
             writer.write_batch(b)?;
@@ -1107,7 +1111,7 @@ mod tests {
         let mut writer = SegmentWriterV2::new(cfg);
         writer.write_batch(oversized).unwrap();
         let err = writer.finish().unwrap_err();
-        assert!(matches!(err, Error::InvalidFormat(_)));
+        assert!(matches!(err, ColumnarError::RowGroupTooLarge { .. }));
     }
 
     #[test]
@@ -1128,7 +1132,7 @@ mod tests {
         let mut writer = SegmentWriterV2::new(cfg);
         writer.write_batch(batch).unwrap();
         let err = writer.finish().unwrap_err();
-        assert!(matches!(err, Error::InvalidFormat(_)));
+        assert!(matches!(err, ColumnarError::RowGroupTooLarge { .. }));
     }
 
     #[test]
@@ -1142,7 +1146,7 @@ mod tests {
         let len = data.len();
         data[len - 1] ^= 0xFF; // フッターのチェックサムを壊す
         let err = SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(data))).unwrap_err();
-        assert!(matches!(err, Error::ChecksumMismatch));
+        assert!(matches!(err, ColumnarError::ChecksumMismatch));
     }
 
     #[test]
@@ -1189,7 +1193,10 @@ mod tests {
         // バージョンを 1 にする
         bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
         let err = SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(bytes))).unwrap_err();
-        assert!(matches!(err, Error::InvalidFormat(_)));
+        assert!(matches!(
+            err,
+            ColumnarError::UnsupportedFormatVersion { .. }
+        ));
     }
 
     #[test]
@@ -1229,6 +1236,6 @@ mod tests {
         let reader =
             SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(corrupted))).unwrap();
         let err = reader.read_columns(&[0]).unwrap_err();
-        assert!(matches!(err, Error::ChecksumMismatch));
+        assert!(matches!(err, ColumnarError::ChecksumMismatch));
     }
 }

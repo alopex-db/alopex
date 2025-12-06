@@ -7,11 +7,11 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
+use crate::columnar::error::{ColumnarError, Result};
 use crate::columnar::kvs_bridge::ColumnarKvsBridge;
 use crate::columnar::segment_v2::{
     ColumnSegmentV2, InMemorySegmentSource, RecordBatch, SegmentReaderV2,
 };
-use crate::error::{Error, Result};
 use crate::storage::format::{AlopexFileWriter, ColumnarSectionWriter};
 
 /// インメモリにカラムナーセグメントを保持する。
@@ -38,9 +38,9 @@ impl InMemorySegmentStore {
         let requested = current.saturating_add(size);
         if let Some(limit) = self.memory_limit {
             if requested > limit {
-                return Err(Error::MemoryLimitExceeded {
-                    limit: limit as usize,
-                    requested: requested as usize,
+                return Err(ColumnarError::MemoryLimitExceeded {
+                    limit: std::cmp::min(limit, usize::MAX as u64) as usize,
+                    requested: std::cmp::min(requested, usize::MAX as u64) as usize,
                 });
             }
         }
@@ -69,7 +69,7 @@ impl InMemorySegmentStore {
         let guard = self.segments.read().unwrap();
         let segment = guard
             .get(&(table_id, segment_id))
-            .ok_or(Error::NotFound)?
+            .ok_or(ColumnarError::NotFound)?
             .clone();
         drop(guard);
         let reader =
@@ -92,7 +92,7 @@ impl InMemorySegmentStore {
         let guard = self.segments.read().unwrap();
         let segment = guard
             .get(&(table_id, segment_id))
-            .ok_or(Error::NotFound)?
+            .ok_or(ColumnarError::NotFound)?
             .clone();
         drop(guard);
 
@@ -118,7 +118,7 @@ impl InMemorySegmentStore {
         let guard = self.segments.read().unwrap();
         let segment = guard
             .get(&(table_id, segment_id))
-            .ok_or(Error::NotFound)?
+            .ok_or(ColumnarError::NotFound)?
             .clone();
         drop(guard);
         bridge.write_segment(table_id, &segment)
@@ -134,18 +134,20 @@ impl InMemorySegmentStore {
         let guard = self.segments.read().unwrap();
         let segment = guard
             .get(&(table_id, segment_id))
-            .ok_or(Error::NotFound)?
+            .ok_or(ColumnarError::NotFound)?
             .clone();
         drop(guard);
 
         ColumnarSectionWriter::write_section(writer, &segment)
-            .map_err(|e| Error::InvalidFormat(e.to_string()))
+            .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))
     }
 
     /// カラム数を返す（メタデータから取得）。
     pub fn column_count(&self, table_id: u32, segment_id: u64) -> Result<usize> {
         let guard = self.segments.read().unwrap();
-        let segment = guard.get(&(table_id, segment_id)).ok_or(Error::NotFound)?;
+        let segment = guard
+            .get(&(table_id, segment_id))
+            .ok_or(ColumnarError::NotFound)?;
         Ok(segment.meta.schema.column_count())
     }
 }
@@ -193,7 +195,7 @@ mod tests {
         let store = InMemorySegmentStore::new(Some(1));
         let segment = make_segment();
         let err = store.write_segment(1, segment).unwrap_err();
-        assert!(matches!(err, Error::MemoryLimitExceeded { .. }));
+        assert!(matches!(err, ColumnarError::MemoryLimitExceeded { .. }));
     }
 
     #[test]

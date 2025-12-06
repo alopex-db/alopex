@@ -80,12 +80,13 @@ impl Database {
                         "disk mode requires a path".into(),
                     ))
                 })?;
-                StorageFactory::create(CoreStorageMode::Disk { path }).map_err(Error::Core)?
+                StorageFactory::create(CoreStorageMode::Disk { path })
+                    .map_err(|e| Error::Core(e.into()))?
             }
             StorageMode::InMemory => StorageFactory::create(CoreStorageMode::Memory {
                 max_size: config.memory_limit,
             })
-            .map_err(Error::Core)?,
+            .map_err(|e| Error::Core(e.into()))?,
         };
 
         Ok(Self::init(
@@ -104,22 +105,26 @@ impl Database {
     /// カラムナーセグメントを書き込む。
     pub fn write_columnar_segment(&self, table: &str, batch: RecordBatch) -> Result<u64> {
         let mut writer = SegmentWriterV2::new(self.segment_config.clone());
-        writer.write_batch(batch).map_err(Error::Core)?;
-        let segment = writer.finish().map_err(Error::Core)?;
+        writer
+            .write_batch(batch)
+            .map_err(|e| Error::Core(e.into()))?;
+        let segment = writer.finish().map_err(|e| Error::Core(e.into()))?;
         let table_id = table_id(table)?;
 
         match self.columnar_mode {
             StorageMode::Disk => self
                 .columnar_bridge
                 .write_segment(table_id, &segment)
-                .map_err(Error::Core),
+                .map_err(|e| Error::Core(e.into())),
             StorageMode::InMemory => {
                 let store = self.columnar_memory.as_ref().ok_or_else(|| {
                     Error::Core(alopex_core::Error::InvalidFormat(
                         "in-memory columnar store is not initialized".into(),
                     ))
                 })?;
-                store.write_segment(table_id, segment).map_err(Error::Core)
+                store
+                    .write_segment(table_id, segment)
+                    .map_err(|e| Error::Core(e.into()))
             }
         }
     }
@@ -136,7 +141,7 @@ impl Database {
             StorageMode::Disk => self
                 .columnar_bridge
                 .column_count(table_id, segment_id)
-                .map_err(Error::Core)?,
+                .map_err(|e| Error::Core(e.into()))?,
             StorageMode::InMemory => self
                 .columnar_memory
                 .as_ref()
@@ -146,7 +151,7 @@ impl Database {
                     ))
                 })?
                 .column_count(table_id, segment_id)
-                .map_err(Error::Core)?,
+                .map_err(|e| Error::Core(e.into()))?,
         };
         let all_indices: Vec<usize> = (0..column_count).collect();
 
@@ -154,7 +159,7 @@ impl Database {
             StorageMode::Disk => self
                 .columnar_bridge
                 .read_segment(table_id, segment_id, &all_indices)
-                .map_err(Error::Core)?,
+                .map_err(|e| Error::Core(e.into()))?,
             StorageMode::InMemory => self
                 .columnar_memory
                 .as_ref()
@@ -164,7 +169,7 @@ impl Database {
                     ))
                 })?
                 .read_segment(table_id, segment_id, &all_indices)
-                .map_err(Error::Core)?,
+                .map_err(|e| Error::Core(e.into()))?,
         };
 
         if let Some(names) = columns {
@@ -208,7 +213,7 @@ impl Database {
         let table_id = table_id(table)?;
         store
             .flush_to_segment_file(table_id, segment_id, path)
-            .map_err(Error::Core)
+            .map_err(|e| Error::Core(e.into()))
     }
 
     /// InMemory モードのセグメントを KVS へフラッシュする。
@@ -220,7 +225,7 @@ impl Database {
         let table_id = table_id(table)?;
         store
             .flush_to_kvs(table_id, segment_id, &self.columnar_bridge)
-            .map_err(Error::Core)
+            .map_err(|e| Error::Core(e.into()))
     }
 
     /// InMemory モードのセグメントを `.alopex` ファイルへフラッシュする。
@@ -237,7 +242,7 @@ impl Database {
         let table_id = table_id(table)?;
         store
             .flush_to_alopex(table_id, segment_id, writer)
-            .map_err(Error::Core)
+            .map_err(|e| Error::Core(e.into()))
     }
 }
 

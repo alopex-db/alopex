@@ -2,6 +2,8 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+use crate::columnar::error::ColumnarError;
+
 /// A convenience `Result` type.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -67,4 +69,8 @@ pub enum Error {
     /// The provided path already exists and cannot be overwritten.
     #[error("path exists: {0}")]
     PathExists(PathBuf),
+
+    /// Errors originating from columnar components.
+    #[error("columnar error: {0}")]
+    Columnar(#[from] ColumnarError),
 }

@@ -6,7 +6,7 @@ use std::path::Path;
 use crate::columnar::encoding::{
     decode_column, encode_column, Column, Compression, Encoding, LogicalType,
 };
-use crate::error::{Error, Result};
+use crate::columnar::error::{ColumnarError, Result};
 use crc32fast::Hasher;
 
 const MAGIC: &[u8] = b"ALXC";
@@ -90,13 +90,15 @@ impl SegmentReader {
         let mut magic = [0u8; 4];
         file.read_exact(&mut magic)?;
         if magic != MAGIC {
-            return Err(Error::InvalidFormat("invalid segment magic".into()));
+            return Err(ColumnarError::InvalidFormat("invalid segment magic".into()));
         }
         let mut version_bytes = [0u8; 2];
         file.read_exact(&mut version_bytes)?;
         let version = u16::from_le_bytes(version_bytes);
         if version != VERSION {
-            return Err(Error::InvalidFormat("unsupported segment version".into()));
+            return Err(ColumnarError::InvalidFormat(
+                "unsupported segment version".into(),
+            ));
         }
 
         let mut kind = [0u8; 3];
@@ -153,33 +155,33 @@ impl<'a> Iterator for ChunkIter<'a> {
 
         let mut row_bytes = [0u8; 4];
         if let Err(e) = self.reader.file.read_exact(&mut row_bytes) {
-            return Some(Err(Error::InvalidFormat(format!(
+            return Some(Err(ColumnarError::InvalidFormat(format!(
                 "chunk rows read failed: {e}"
             ))));
         }
         let rows = u32::from_le_bytes(row_bytes) as usize;
         if rows == 0 || rows > self.reader.meta.chunk_rows {
-            return Some(Err(Error::CorruptedSegment {
+            return Some(Err(ColumnarError::CorruptedSegment {
                 reason: "chunk rows exceed declared limit".into(),
             }));
         }
 
         let mut len_bytes = [0u8; 4];
         if let Err(e) = self.reader.file.read_exact(&mut len_bytes) {
-            return Some(Err(Error::InvalidFormat(format!(
+            return Some(Err(ColumnarError::InvalidFormat(format!(
                 "chunk length read failed: {e}"
             ))));
         }
         let len = u32::from_le_bytes(len_bytes) as usize;
         if len > MAX_CHUNK_BYTES {
-            return Some(Err(Error::CorruptedSegment {
+            return Some(Err(ColumnarError::CorruptedSegment {
                 reason: "chunk encoded size exceeds limit".into(),
             }));
         }
 
         let mut buf = vec![0u8; len];
         if let Err(e) = self.reader.file.read_exact(&mut buf) {
-            return Some(Err(Error::InvalidFormat(format!(
+            return Some(Err(ColumnarError::InvalidFormat(format!(
                 "chunk payload read failed: {e}"
             ))));
         }
@@ -187,7 +189,7 @@ impl<'a> Iterator for ChunkIter<'a> {
         if self.reader.meta.chunk_checksum {
             let mut crc_bytes = [0u8; 4];
             if let Err(e) = self.reader.file.read_exact(&mut crc_bytes) {
-                return Some(Err(Error::InvalidFormat(format!(
+                return Some(Err(ColumnarError::InvalidFormat(format!(
                     "chunk checksum read failed: {e}"
                 ))));
             }
@@ -196,7 +198,7 @@ impl<'a> Iterator for ChunkIter<'a> {
             hasher.update(&buf);
             let computed = hasher.finalize();
             if expected != computed {
-                return Some(Err(Error::CorruptedSegment {
+                return Some(Err(ColumnarError::CorruptedSegment {
                     reason: "checksum mismatch".into(),
                 }));
             }
@@ -236,7 +238,7 @@ fn byte_to_logical(byte: u8) -> Result<LogicalType> {
         2 => Ok(LogicalType::Bool),
         3 => Ok(LogicalType::Binary),
         b if b >= 4 && b != 255 => Ok(LogicalType::Fixed((b - 4) as u16)),
-        _ => Err(Error::InvalidFormat("unknown logical type".into())),
+        _ => Err(ColumnarError::InvalidFormat("unknown logical type".into())),
     }
 }
 
@@ -255,7 +257,7 @@ fn byte_to_encoding(byte: u8) -> Result<Encoding> {
         1 => Ok(Encoding::Dictionary),
         2 => Ok(Encoding::Rle),
         3 => Ok(Encoding::Bitpack),
-        _ => Err(Error::InvalidFormat("unknown encoding".into())),
+        _ => Err(ColumnarError::InvalidFormat("unknown encoding".into())),
     }
 }
 
@@ -270,7 +272,7 @@ fn byte_to_compression(byte: u8) -> Result<Compression> {
     match byte {
         0 => Ok(Compression::None),
         1 => Ok(Compression::Lz4),
-        _ => Err(Error::InvalidFormat("unknown compression".into())),
+        _ => Err(ColumnarError::InvalidFormat("unknown compression".into())),
     }
 }
 
@@ -360,7 +362,7 @@ mod tests {
 
         let mut reader = SegmentReader::open(&path).unwrap();
         let err = reader.iter().next().unwrap().unwrap_err();
-        assert!(matches!(err, Error::CorruptedSegment { .. }));
+        assert!(matches!(err, ColumnarError::CorruptedSegment { .. }));
     }
 
     #[test]
@@ -386,7 +388,7 @@ mod tests {
 
         let mut reader = SegmentReader::open(&path).unwrap();
         let err = reader.iter().next().unwrap().unwrap_err();
-        assert!(matches!(err, Error::CorruptedSegment { .. }));
+        assert!(matches!(err, ColumnarError::CorruptedSegment { .. }));
     }
 
     #[cfg(feature = "compression-lz4")]

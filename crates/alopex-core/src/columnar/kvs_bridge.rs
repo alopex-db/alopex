@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use bincode::Options;
 
+use crate::columnar::error::{ColumnarError, Result};
 use crate::columnar::segment_v2::{
     ColumnSegmentV2, InMemorySegmentSource, RecordBatch, SegmentMetaV2, SegmentReaderV2,
 };
-use crate::error::{Error, Result};
 use crate::kv::{memory::MemoryTransaction, KVStore, KVTransaction};
 use crate::storage::format::bincode_config;
 use crate::txn::TxnManager;
@@ -77,7 +77,7 @@ impl ColumnarKvsBridge {
         if let Some(bytes) = txn.get(&key)? {
             bincode_config()
                 .deserialize(&bytes)
-                .map_err(|e| Error::InvalidFormat(e.to_string()))
+                .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))
         } else {
             Ok(Vec::new())
         }
@@ -91,8 +91,9 @@ impl ColumnarKvsBridge {
         let key = key_layout::segment_index_key(table_id);
         let bytes = bincode_config()
             .serialize(index)
-            .map_err(|e| Error::InvalidFormat(e.to_string()))?;
-        txn.put(key, bytes)
+            .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
+        txn.put(key, bytes)?;
+        Ok(())
     }
 
     /// セグメントを書き込み、割り当てたセグメントIDを返す。
@@ -116,24 +117,24 @@ impl ColumnarKvsBridge {
             let segment_key = key_layout::column_segment_key(table_id, next_id, 0);
             let bytes = bincode_config()
                 .serialize(segment)
-                .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+                .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
             txn.put(segment_key, bytes)?;
 
             // 統計は SegmentMetaV2 をそのまま保持。
             let stats_key = key_layout::statistics_key(table_id, next_id);
             let stats_bytes = bincode_config()
                 .serialize(&segment.meta)
-                .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+                .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
             txn.put(stats_key, stats_bytes)?;
 
             index.push(next_id);
             Self::persist_index(&mut txn, table_id, &index)?;
 
-            let commit_result = manager.commit(txn);
+            let commit_result = manager.commit(txn).map_err(ColumnarError::from);
 
             match commit_result {
                 Ok(()) => return Ok(next_id),
-                Err(Error::TxnConflict) if attempts < self.max_retries => {
+                Err(ColumnarError::TxnConflict) if attempts < self.max_retries => {
                     std::thread::sleep(Duration::from_millis(10));
                     continue;
                 }
@@ -151,11 +152,11 @@ impl ColumnarKvsBridge {
     ) -> Result<Vec<RecordBatch>> {
         let key = key_layout::column_segment_key(table_id, segment_id, 0);
         let mut txn = self.store.begin(TxnMode::ReadOnly)?;
-        let bytes = txn.get(&key)?.ok_or(Error::NotFound)?;
+        let bytes = txn.get(&key)?.ok_or(ColumnarError::NotFound)?;
 
         let segment: ColumnSegmentV2 = bincode_config()
             .deserialize(&bytes)
-            .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+            .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
         let reader =
             SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))?;
         reader.read_columns(columns)
@@ -165,7 +166,7 @@ impl ColumnarKvsBridge {
     pub fn read_statistics(&self, table_id: u32, segment_id: u64) -> Result<Vec<u8>> {
         let key = key_layout::statistics_key(table_id, segment_id);
         let mut txn = self.store.begin(TxnMode::ReadOnly)?;
-        let bytes = txn.get(&key)?.ok_or(Error::NotFound)?;
+        let bytes = txn.get(&key)?.ok_or(ColumnarError::NotFound)?;
         Ok(bytes)
     }
 
@@ -181,7 +182,7 @@ impl ColumnarKvsBridge {
         let stats = self.read_statistics(table_id, segment_id)?;
         let meta: SegmentMetaV2 = bincode_config()
             .deserialize(&stats)
-            .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+            .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
         Ok(meta.schema.column_count())
     }
 }
@@ -235,7 +236,7 @@ mod tests {
 
         // セグメントバイトが大きすぎてメモリリミットに抵触し、コミットが拒否される。
         let err = bridge.write_segment(1, &segment).unwrap_err();
-        assert!(matches!(err, Error::MemoryLimitExceeded { .. }));
+        assert!(matches!(err, ColumnarError::MemoryLimitExceeded { .. }));
 
         // インデックスとデータは存在しない。
         let store = bridge.store.clone();

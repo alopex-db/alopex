@@ -19,7 +19,7 @@ pub fn write_empty_vector_segment(path: &Path) -> Result<()> {
         chunk_checksum: true,
     };
     let col = Column::Binary(Vec::new());
-    write_segment(path, &col, &meta)
+    Ok(write_segment(path, &col, &meta)?)
 }
 
 #[cfg(test)]

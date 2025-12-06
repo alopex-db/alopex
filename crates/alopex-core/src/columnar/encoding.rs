@@ -4,7 +4,7 @@ use std::convert::TryInto;
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result};
+use crate::columnar::error::{ColumnarError, Result};
 
 /// Logical data type of a column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,12 +84,18 @@ pub fn encode_column(
     if let Compression::Lz4 = compression {
         #[cfg(feature = "compression-lz4")]
         {
-            let orig_len: u32 = payload
-                .len()
-                .try_into()
-                .map_err(|_| Error::InvalidFormat("payload too large for lz4".into()))?;
-            let compressed = lz4::block::compress(&payload, None, false)
-                .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+            let orig_len: u32 =
+                payload
+                    .len()
+                    .try_into()
+                    .map_err(|_| ColumnarError::CorruptedSegment {
+                        reason: "payload too large for lz4".into(),
+                    })?;
+            let compressed = lz4::block::compress(&payload, None, false).map_err(|e| {
+                ColumnarError::CorruptedSegment {
+                    reason: e.to_string(),
+                }
+            })?;
             let mut buf = Vec::with_capacity(4 + compressed.len());
             buf.extend_from_slice(&orig_len.to_le_bytes());
             buf.extend_from_slice(&compressed);
@@ -97,9 +103,9 @@ pub fn encode_column(
         }
         #[cfg(not(feature = "compression-lz4"))]
         {
-            return Err(Error::InvalidFormat(
-                "lz4 compression is disabled (feature compression-lz4)".into(),
-            ));
+            return Err(ColumnarError::CorruptedSegment {
+                reason: "lz4 compression is disabled (feature compression-lz4)".into(),
+            });
         }
     }
 
@@ -123,7 +129,9 @@ pub fn decode_column(
 ) -> Result<Column> {
     let data = if checksum {
         if bytes.len() < 4 {
-            return Err(Error::InvalidFormat("checksum missing".into()));
+            return Err(ColumnarError::CorruptedSegment {
+                reason: "checksum missing".into(),
+            });
         }
         let (content, crc_bytes) = bytes.split_at(bytes.len() - 4);
         let expected = u32::from_le_bytes(crc_bytes.try_into().unwrap());
@@ -131,7 +139,7 @@ pub fn decode_column(
         hasher.update(content);
         let computed = hasher.finalize();
         if expected != computed {
-            return Err(Error::ChecksumMismatch);
+            return Err(ColumnarError::ChecksumMismatch);
         }
         content
     } else {
@@ -144,17 +152,22 @@ pub fn decode_column(
             #[cfg(feature = "compression-lz4")]
             {
                 if data.len() < 4 {
-                    return Err(Error::InvalidFormat("lz4 header too short".into()));
+                    return Err(ColumnarError::CorruptedSegment {
+                        reason: "lz4 header too short".into(),
+                    });
                 }
                 let orig_len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as i32;
-                lz4::block::decompress(&data[4..], Some(orig_len as i32))
-                    .map_err(|e| Error::InvalidFormat(e.to_string()))?
+                lz4::block::decompress(&data[4..], Some(orig_len as i32)).map_err(|e| {
+                    ColumnarError::CorruptedSegment {
+                        reason: e.to_string(),
+                    }
+                })?
             }
             #[cfg(not(feature = "compression-lz4"))]
             {
-                return Err(Error::InvalidFormat(
-                    "lz4 compression is disabled (feature compression-lz4)".into(),
-                ));
+                return Err(ColumnarError::CorruptedSegment {
+                    reason: "lz4 compression is disabled (feature compression-lz4)".into(),
+                });
             }
         }
     };
@@ -174,8 +187,12 @@ fn validate_logical(column: &Column, logical: LogicalType) -> Result<()> {
         | (Column::Bool(_), LogicalType::Bool)
         | (Column::Binary(_), LogicalType::Binary) => Ok(()),
         (Column::Fixed { len, .. }, LogicalType::Fixed(flen)) if *len == flen as usize => Ok(()),
-        (_, LogicalType::Fixed(_)) => Err(Error::InvalidFormat("fixed length mismatch".into())),
-        _ => Err(Error::InvalidFormat("logical type mismatch".into())),
+        (_, LogicalType::Fixed(_)) => Err(ColumnarError::CorruptedSegment {
+            reason: "fixed length mismatch".into(),
+        }),
+        _ => Err(ColumnarError::CorruptedSegment {
+            reason: "logical type mismatch".into(),
+        }),
     }
 }
 
@@ -209,7 +226,9 @@ fn encode_plain(column: &Column) -> Result<Vec<u8>> {
         Column::Fixed { len, values } => {
             for v in values {
                 if v.len() != *len {
-                    return Err(Error::InvalidFormat("fixed value length mismatch".into()));
+                    return Err(ColumnarError::CorruptedSegment {
+                        reason: "fixed value length mismatch".into(),
+                    });
                 }
             }
             let mut buf = Vec::with_capacity(6 + values.len() * *len);
@@ -230,7 +249,9 @@ fn encode_varlen(values: &[Vec<u8>]) -> Result<Vec<u8>> {
         let len: u32 = v
             .len()
             .try_into()
-            .map_err(|_| Error::InvalidFormat("value too long".into()))?;
+            .map_err(|_| ColumnarError::CorruptedSegment {
+                reason: "value too long".into(),
+            })?;
         buf.extend_from_slice(&len.to_le_bytes());
         buf.extend_from_slice(v);
     }
@@ -239,14 +260,18 @@ fn encode_varlen(values: &[Vec<u8>]) -> Result<Vec<u8>> {
 
 fn decode_plain(bytes: &[u8], logical: LogicalType) -> Result<Column> {
     if bytes.len() < 4 {
-        return Err(Error::InvalidFormat("plain header too short".into()));
+        return Err(ColumnarError::CorruptedSegment {
+            reason: "plain header too short".into(),
+        });
     }
     let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let mut pos = 4;
     match logical {
         LogicalType::Int64 => {
             if bytes.len() < pos + count * 8 {
-                return Err(Error::InvalidFormat("plain int64 truncated".into()));
+                return Err(ColumnarError::CorruptedSegment {
+                    reason: "plain int64 truncated".into(),
+                });
             }
             let mut out = Vec::with_capacity(count);
             for _ in 0..count {
@@ -258,7 +283,9 @@ fn decode_plain(bytes: &[u8], logical: LogicalType) -> Result<Column> {
         }
         LogicalType::Float64 => {
             if bytes.len() < pos + count * 8 {
-                return Err(Error::InvalidFormat("plain float64 truncated".into()));
+                return Err(ColumnarError::CorruptedSegment {
+                    reason: "plain float64 truncated".into(),
+                });
             }
             let mut out = Vec::with_capacity(count);
             for _ in 0..count {
@@ -270,7 +297,9 @@ fn decode_plain(bytes: &[u8], logical: LogicalType) -> Result<Column> {
         }
         LogicalType::Bool => {
             if bytes.len() < pos + count {
-                return Err(Error::InvalidFormat("plain bool truncated".into()));
+                return Err(ColumnarError::CorruptedSegment {
+                    reason: "plain bool truncated".into(),
+                });
             }
             let mut out = Vec::with_capacity(count);
             for _ in 0..count {
@@ -282,16 +311,22 @@ fn decode_plain(bytes: &[u8], logical: LogicalType) -> Result<Column> {
         LogicalType::Binary => decode_varlen(&bytes[4..], count).map(Column::Binary),
         LogicalType::Fixed(len) => {
             if bytes.len() < pos + 2 {
-                return Err(Error::InvalidFormat("fixed header truncated".into()));
+                return Err(ColumnarError::CorruptedSegment {
+                    reason: "fixed header truncated".into(),
+                });
             }
             let stored_len = u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap()) as usize;
             pos += 2;
             if stored_len as u16 != len {
-                return Err(Error::InvalidFormat("fixed length mismatch".into()));
+                return Err(ColumnarError::CorruptedSegment {
+                    reason: "fixed length mismatch".into(),
+                });
             }
             let expected = pos + count * stored_len;
             if bytes.len() < expected {
-                return Err(Error::InvalidFormat("fixed values truncated".into()));
+                return Err(ColumnarError::CorruptedSegment {
+                    reason: "fixed values truncated".into(),
+                });
             }
             let mut values = Vec::with_capacity(count);
             for _ in 0..count {
@@ -312,12 +347,16 @@ fn decode_varlen(bytes: &[u8], count: usize) -> Result<Vec<Vec<u8>>> {
     let mut values = Vec::with_capacity(count);
     for _ in 0..count {
         if pos + 4 > bytes.len() {
-            return Err(Error::InvalidFormat("varlen length truncated".into()));
+            return Err(ColumnarError::CorruptedSegment {
+                reason: "varlen length truncated".into(),
+            });
         }
         let len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if pos + len > bytes.len() {
-            return Err(Error::InvalidFormat("varlen value truncated".into()));
+            return Err(ColumnarError::CorruptedSegment {
+                reason: "varlen value truncated".into(),
+            });
         }
         values.push(bytes[pos..pos + len].to_vec());
         pos += len;
@@ -330,9 +369,9 @@ fn encode_dictionary(column: &Column) -> Result<Vec<u8>> {
         Column::Binary(v) => v,
         Column::Fixed { values, .. } => values,
         _ => {
-            return Err(Error::InvalidFormat(
-                "dictionary encoding requires binary data".into(),
-            ))
+            return Err(ColumnarError::CorruptedSegment {
+                reason: "dictionary encoding requires binary data".into(),
+            })
         }
     };
 
@@ -355,7 +394,9 @@ fn encode_dictionary(column: &Column) -> Result<Vec<u8>> {
         let len: u32 = entry
             .len()
             .try_into()
-            .map_err(|_| Error::InvalidFormat("dict entry too long".into()))?;
+            .map_err(|_| ColumnarError::CorruptedSegment {
+                reason: "dict entry too long".into(),
+            })?;
         buf.extend_from_slice(&len.to_le_bytes());
         buf.extend_from_slice(entry);
     }
@@ -367,7 +408,9 @@ fn encode_dictionary(column: &Column) -> Result<Vec<u8>> {
 
 fn decode_dictionary(bytes: &[u8], logical: LogicalType) -> Result<Column> {
     if bytes.len() < 8 {
-        return Err(Error::InvalidFormat("dictionary header too short".into()));
+        return Err(ColumnarError::CorruptedSegment {
+            reason: "dictionary header too short".into(),
+        });
     }
     let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let dict_count = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
@@ -376,22 +419,31 @@ fn decode_dictionary(bytes: &[u8], logical: LogicalType) -> Result<Column> {
     let mut dict = Vec::with_capacity(dict_count);
     for _ in 0..dict_count {
         if pos + 4 > bytes.len() {
-            return Err(Error::InvalidFormat("dict length truncated".into()));
+            return Err(ColumnarError::CorruptedSegment {
+                reason: "dict length truncated".into(),
+            });
         }
         let len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if pos + len > bytes.len() {
-            return Err(Error::InvalidFormat("dict entry truncated".into()));
+            return Err(ColumnarError::CorruptedSegment {
+                reason: "dict entry truncated".into(),
+            });
         }
         dict.push(bytes[pos..pos + len].to_vec());
         pos += len;
     }
 
-    let expected_idx_bytes = count
-        .checked_mul(4)
-        .ok_or_else(|| Error::InvalidFormat("index overflow".into()))?;
+    let expected_idx_bytes =
+        count
+            .checked_mul(4)
+            .ok_or_else(|| ColumnarError::CorruptedSegment {
+                reason: "index overflow".into(),
+            })?;
     if pos + expected_idx_bytes > bytes.len() {
-        return Err(Error::InvalidFormat("dictionary indices truncated".into()));
+        return Err(ColumnarError::CorruptedSegment {
+            reason: "dictionary indices truncated".into(),
+        });
     }
 
     let mut values = Vec::with_capacity(count);
@@ -400,7 +452,9 @@ fn decode_dictionary(bytes: &[u8], logical: LogicalType) -> Result<Column> {
         pos += 4;
         let entry = dict
             .get(idx)
-            .ok_or_else(|| Error::InvalidFormat("dictionary index out of bounds".into()))?;
+            .ok_or_else(|| ColumnarError::CorruptedSegment {
+                reason: "dictionary index out of bounds".into(),
+            })?;
         values.push(entry.clone());
     }
 
@@ -409,7 +463,9 @@ fn decode_dictionary(bytes: &[u8], logical: LogicalType) -> Result<Column> {
         LogicalType::Fixed(len) => {
             for v in &values {
                 if v.len() != len as usize {
-                    return Err(Error::InvalidFormat("fixed length mismatch".into()));
+                    return Err(ColumnarError::CorruptedSegment {
+                        reason: "fixed length mismatch".into(),
+                    });
                 }
             }
             Ok(Column::Fixed {
@@ -417,7 +473,9 @@ fn decode_dictionary(bytes: &[u8], logical: LogicalType) -> Result<Column> {
                 values,
             })
         }
-        _ => Err(Error::InvalidFormat("dictionary logical mismatch".into())),
+        _ => Err(ColumnarError::CorruptedSegment {
+            reason: "dictionary logical mismatch".into(),
+        }),
     }
 }
 
@@ -454,9 +512,9 @@ fn encode_rle(column: &Column) -> Result<Vec<u8>> {
             }
             Ok(buf)
         }
-        _ => Err(Error::InvalidFormat(
-            "rle only supports numeric/bool".into(),
-        )),
+        _ => Err(ColumnarError::CorruptedSegment {
+            reason: "rle only supports numeric/bool".into(),
+        }),
     }
 }
 
@@ -487,7 +545,9 @@ where
     buf.extend_from_slice(&(runs.len() as u32).to_le_bytes());
     for (val, len) in runs {
         if val.len() != width {
-            return Err(Error::InvalidFormat("rle width mismatch".into()));
+            return Err(ColumnarError::CorruptedSegment {
+                reason: "rle width mismatch".into(),
+            });
         }
         buf.extend_from_slice(&val);
         buf.extend_from_slice(&len.to_le_bytes());
@@ -497,7 +557,9 @@ where
 
 fn decode_rle(bytes: &[u8], logical: LogicalType) -> Result<Column> {
     if bytes.len() < 8 {
-        return Err(Error::InvalidFormat("rle header too short".into()));
+        return Err(ColumnarError::CorruptedSegment {
+            reason: "rle header too short".into(),
+        });
     }
     let total = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let run_count = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
@@ -510,7 +572,9 @@ fn decode_rle(bytes: &[u8], logical: LogicalType) -> Result<Column> {
             let mut lengths = Vec::with_capacity(run_count);
             for _ in 0..run_count {
                 if pos + width + 4 > bytes.len() {
-                    return Err(Error::InvalidFormat("rle numeric truncated".into()));
+                    return Err(ColumnarError::CorruptedSegment {
+                        reason: "rle numeric truncated".into(),
+                    });
                 }
                 out.push(bytes[pos..pos + width].to_vec());
                 pos += width;
@@ -555,7 +619,9 @@ fn decode_rle(bytes: &[u8], logical: LogicalType) -> Result<Column> {
             let mut runs = Vec::with_capacity(run_count);
             for _ in 0..run_count {
                 if pos + 5 > bytes.len() {
-                    return Err(Error::InvalidFormat("rle bool truncated".into()));
+                    return Err(ColumnarError::CorruptedSegment {
+                        reason: "rle bool truncated".into(),
+                    });
                 }
                 let val = bytes[pos] != 0;
                 pos += 1;
@@ -569,7 +635,9 @@ fn decode_rle(bytes: &[u8], logical: LogicalType) -> Result<Column> {
             }
             Ok(Column::Bool(out))
         }
-        _ => Err(Error::InvalidFormat("rle logical mismatch".into())),
+        _ => Err(ColumnarError::CorruptedSegment {
+            reason: "rle logical mismatch".into(),
+        }),
     }
 }
 
@@ -581,7 +649,11 @@ enum ColumnValue {
 fn encode_bitpack(column: &Column) -> Result<Vec<u8>> {
     let values = match column {
         Column::Bool(v) => v,
-        _ => return Err(Error::InvalidFormat("bitpack supports bool only".into())),
+        _ => {
+            return Err(ColumnarError::CorruptedSegment {
+                reason: "bitpack supports bool only".into(),
+            })
+        }
     };
     let count = values.len();
     let mut buf = Vec::with_capacity(4 + (count + 7) / 8);
@@ -607,15 +679,21 @@ fn encode_bitpack(column: &Column) -> Result<Vec<u8>> {
 
 fn decode_bitpack(bytes: &[u8], logical: LogicalType) -> Result<Column> {
     if logical != LogicalType::Bool {
-        return Err(Error::InvalidFormat("bitpack logical mismatch".into()));
+        return Err(ColumnarError::CorruptedSegment {
+            reason: "bitpack logical mismatch".into(),
+        });
     }
     if bytes.len() < 4 {
-        return Err(Error::InvalidFormat("bitpack header too short".into()));
+        return Err(ColumnarError::CorruptedSegment {
+            reason: "bitpack header too short".into(),
+        });
     }
     let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let needed = 4 + (count + 7) / 8;
     if bytes.len() < needed {
-        return Err(Error::InvalidFormat("bitpack data truncated".into()));
+        return Err(ColumnarError::CorruptedSegment {
+            reason: "bitpack data truncated".into(),
+        });
     }
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
@@ -741,6 +819,6 @@ mod tests {
             true,
         )
         .unwrap_err();
-        assert!(matches!(err, Error::ChecksumMismatch));
+        assert!(matches!(err, ColumnarError::ChecksumMismatch));
     }
 }
