@@ -415,7 +415,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let wal = dir.path().join("wal.log");
         let db = Database::open_with_config(EmbeddedConfig::disk(wal)).unwrap();
-        let mut txn = db.begin(crate::TxnMode::ReadWrite).unwrap();
+        let txn = db.begin(crate::TxnMode::ReadWrite).unwrap();
         let seg_id = txn.write_columnar_segment("tbl_txn", make_batch()).unwrap();
         txn.commit().unwrap();
 
