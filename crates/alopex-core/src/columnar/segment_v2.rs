@@ -501,7 +501,7 @@ impl Default for SegmentConfigV2 {
 }
 
 /// セグメント出力（メモリバッファ）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ColumnSegmentV2 {
     /// ヘッダ。
     pub header: SegmentHeader,
