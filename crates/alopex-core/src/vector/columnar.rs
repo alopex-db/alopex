@@ -11,8 +11,7 @@ use crate::columnar::segment_v2::{
     ColumnSchema, ColumnSegmentV2, InMemorySegmentSource, RecordBatch, Schema, SegmentReaderV2,
     SegmentWriterV2,
 };
-use crate::columnar::statistics::VectorSegmentStatistics;
-use crate::columnar::statistics::ScalarValue;
+use crate::columnar::statistics::{ScalarValue, VectorSegmentStatistics};
 use crate::vector::simd::select_kernel;
 use crate::storage::compression::CompressionV2;
 use crate::vector::Metric;
@@ -797,7 +796,7 @@ pub struct VectorSearchParams {
     pub metric: Metric,
     /// 取得する Top-K 件数。
     pub top_k: usize,
-    /// プロジェクション（未実装のメタデータ用、現状は無視される）。
+    /// メタデータ列のプロジェクション（0-based、metadata 配列のインデックス）。
     pub projection: Option<Vec<usize>>,
     /// フィルタマスク（行単位、true=通過）。
     pub filter_mask: Option<Vec<bool>>,
@@ -945,10 +944,9 @@ impl VectorStoreManager {
                 continue;
             }
             stats.segments_scanned += 1;
-            let active_rows = segment.num_vectors - segment.deleted.null_count() as u64;
-            stats.rows_scanned += active_rows;
             let decoded = segment.decode_vectors()?;
             let decoded_keys = segment.decode_keys()?;
+            let metadata = decode_metadata(&segment.metadata, segment.num_vectors as usize)?;
             let kernel = select_kernel();
             let mask = params.filter_mask.as_ref();
             for (idx, chunk) in decoded.chunks(self.config.dimension).enumerate() {
@@ -969,11 +967,28 @@ impl VectorStoreManager {
                 let row_id = *decoded_keys
                     .get(idx)
                     .ok_or_else(|| Error::InvalidFormat("missing key".into()))?;
+                let columns = if let Some(proj) = &params.projection {
+                    let mut cols = Vec::with_capacity(proj.len());
+                    for &p in proj {
+                        let col = metadata
+                            .get(p)
+                            .ok_or_else(|| Error::InvalidFormat("projection out of bounds".into()))?;
+                        cols.push(
+                            col.get(idx)
+                                .cloned()
+                                .ok_or_else(|| Error::InvalidFormat("projection row out of bounds".into()))?,
+                        );
+                    }
+                    cols
+                } else {
+                    Vec::new()
+                };
                 candidates.push(VectorSearchResult {
                     row_id,
                     score,
-                    columns: Vec::new(),
+                    columns,
                 });
+                stats.rows_scanned += 1;
             }
             row_offset += segment.num_vectors;
         }
@@ -998,7 +1013,7 @@ impl VectorStoreManager {
             Column::Float32(flattened),
             None,
             LogicalType::Float32,
-            EncodingV2::ByteStreamSplit,
+            self.config.encoding,
         )?;
         let key_enc = encode_generic_column(
             Column::Int64(keys.to_vec()),
@@ -1055,6 +1070,42 @@ fn compute_stats(vectors: &[Vec<f32>]) -> VectorSegmentStatistics {
 
 fn contains_nan_or_inf(vec: &[f32]) -> bool {
     vec.iter().any(|v| !v.is_finite())
+}
+
+fn decode_metadata(
+    metadata: &Option<Vec<EncodedColumn>>,
+    rows: usize,
+) -> Result<Vec<Vec<ScalarValue>>> {
+    if let Some(cols) = metadata {
+        let mut decoded_cols = Vec::with_capacity(cols.len());
+        for col in cols {
+            let decoder = create_decoder(col.encoding);
+            let (column, _) = decoder
+                .decode(&col.data, col.num_values as usize, col.logical_type)
+                .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+            let values = column_to_scalar_values(column)?;
+            if values.len() != rows {
+                return Err(Error::InvalidFormat(
+                    "metadata column length mismatch num_vectors".into(),
+                ));
+            }
+            decoded_cols.push(values);
+        }
+        Ok(decoded_cols)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn column_to_scalar_values(column: Column) -> Result<Vec<ScalarValue>> {
+    Ok(match column {
+        Column::Int64(v) => v.into_iter().map(ScalarValue::Int64).collect(),
+        Column::Float32(v) => v.into_iter().map(ScalarValue::Float32).collect(),
+        Column::Float64(v) => v.into_iter().map(ScalarValue::Float64).collect(),
+        Column::Bool(v) => v.into_iter().map(ScalarValue::Bool).collect(),
+        Column::Binary(v) => v.into_iter().map(ScalarValue::Binary).collect(),
+        Column::Fixed { values, .. } => values.into_iter().map(ScalarValue::Binary).collect(),
+    })
 }
 
 #[cfg(test)]
