@@ -12,6 +12,8 @@ use crate::columnar::segment_v2::{
     SegmentWriterV2,
 };
 use crate::columnar::statistics::VectorSegmentStatistics;
+use crate::columnar::statistics::ScalarValue;
+use crate::vector::simd::select_kernel;
 use crate::storage::compression::CompressionV2;
 use crate::vector::Metric;
 use crate::{Error, Result};
@@ -234,6 +236,44 @@ impl VectorSegment {
         }
 
         Ok(())
+    }
+
+    /// ベクトルデータをデコード（FlattenされたFloat32配列）。
+    pub fn decode_vectors(&self) -> Result<Vec<f32>> {
+        let decoder = create_decoder(self.vectors.encoding);
+        let (col, _) = decoder
+            .decode(
+                &self.vectors.data,
+                self.vectors.num_values as usize,
+                self.vectors.logical_type,
+            )
+            .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+        match col {
+            Column::Float32(v) => Ok(v),
+            other => Err(Error::InvalidFormat(format!(
+                "vectors column decoded to unexpected type {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// キー列をデコード。
+    pub fn decode_keys(&self) -> Result<Vec<i64>> {
+        let decoder = create_decoder(self.keys.encoding);
+        let (col, _) = decoder
+            .decode(
+                &self.keys.data,
+                self.keys.num_values as usize,
+                self.keys.logical_type,
+            )
+            .map_err(|e| Error::InvalidFormat(e.to_string()))?;
+        match col {
+            Column::Int64(v) => Ok(v),
+            other => Err(Error::InvalidFormat(format!(
+                "keys column decoded to unexpected type {:?}",
+                other
+            ))),
+        }
     }
 
     /// EncodedColumn 群を ColumnSegmentV2 へ書き出す。
@@ -710,6 +750,311 @@ pub mod key_layout {
     pub fn vector_segment_key(segment_id: u64) -> Vec<u8> {
         format!("vector_segment:{segment_id}").into_bytes()
     }
+}
+
+/// VectorStore の設定。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VectorStoreConfig {
+    /// ベクトル次元。
+    pub dimension: usize,
+    /// デフォルトメトリック。
+    pub metric: Metric,
+    /// 1 セグメントあたりの最大ベクトル数。
+    pub segment_max_vectors: usize,
+    /// 将来のコンパクション閾値（現状は設定のみ）。
+    pub compaction_threshold: f32,
+    /// ベクトルエンコーディング方式。
+    pub encoding: EncodingV2,
+}
+
+impl Default for VectorStoreConfig {
+    fn default() -> Self {
+        Self {
+            dimension: 128,
+            metric: Metric::Cosine,
+            segment_max_vectors: 65_536,
+            compaction_threshold: 0.3,
+            encoding: EncodingV2::ByteStreamSplit,
+        }
+    }
+}
+
+/// ベクトル追加結果。
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppendResult {
+    /// 追加されたベクトル数。
+    pub vectors_added: usize,
+    /// 新規作成されたセグメント数。
+    pub segments_created: usize,
+}
+
+/// 検索パラメータ。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct VectorSearchParams {
+    /// クエリベクトル。
+    pub query: Vec<f32>,
+    /// 使用するメトリック。
+    pub metric: Metric,
+    /// 取得する Top-K 件数。
+    pub top_k: usize,
+    /// プロジェクション（未実装のメタデータ用、現状は無視される）。
+    pub projection: Option<Vec<usize>>,
+    /// フィルタマスク（行単位、true=通過）。
+    pub filter_mask: Option<Vec<bool>>,
+}
+
+/// 検索結果。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct VectorSearchResult {
+    /// ベクトル識別子。
+    pub row_id: i64,
+    /// スコア（DESCソート）。
+    pub score: f32,
+    /// 投影されたカラム（現状空配列）。
+    pub columns: Vec<ScalarValue>,
+}
+
+/// 検索統計。
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchStats {
+    /// 走査したセグメント数。
+    pub segments_scanned: u64,
+    /// プルーニングでスキップしたセグメント数。
+    pub segments_pruned: u64,
+    /// 走査した行数（削除済み含む）。
+    pub rows_scanned: u64,
+    /// スコア計算した行数。
+    pub rows_matched: u64,
+}
+
+/// VectorStore のシンプルなインメモリ実装。
+#[derive(Debug)]
+pub struct VectorStoreManager {
+    config: VectorStoreConfig,
+    segments: Vec<VectorSegment>,
+    next_segment_id: u64,
+}
+
+impl VectorStoreManager {
+    /// 新しい VectorStoreManager を生成。
+    pub fn new(config: VectorStoreConfig) -> Self {
+        Self {
+            config,
+            segments: Vec::new(),
+            next_segment_id: 0,
+        }
+    }
+
+    /// ベクトルバッチを追加する。
+    pub async fn append_batch(&mut self, keys: &[i64], vectors: &[Vec<f32>]) -> Result<AppendResult> {
+        if keys.len() != vectors.len() {
+            return Err(Error::InvalidFormat("keys/vectors length mismatch".into()));
+        }
+        if vectors.is_empty() {
+            return Ok(AppendResult::default());
+        }
+        let dim = self.config.dimension;
+        for (idx, v) in vectors.iter().enumerate() {
+            if v.len() != dim {
+                return Err(Error::DimensionMismatch {
+                    expected: dim,
+                    actual: v.len(),
+                });
+            }
+            if contains_nan_or_inf(v) {
+                return Err(Error::InvalidVector {
+                    index: idx,
+                    reason: "vector contains NaN or Inf".into(),
+                });
+            }
+        }
+
+        let mut vectors_added = 0usize;
+        let mut segments_created = 0usize;
+        let mut start = 0usize;
+        while start < vectors.len() {
+            let end = usize::min(start + self.config.segment_max_vectors, vectors.len());
+            let slice = &vectors[start..end];
+            let key_slice = &keys[start..end];
+
+            let segment = self.build_segment(key_slice, slice)?;
+            self.segments.push(segment);
+            self.next_segment_id += 1;
+            vectors_added += slice.len();
+            segments_created += 1;
+            start = end;
+        }
+
+        Ok(AppendResult {
+            vectors_added,
+            segments_created,
+        })
+    }
+
+    /// ベクトル検索。
+    pub fn search(&self, params: VectorSearchParams) -> Result<Vec<VectorSearchResult>> {
+        let mut stats = SearchStats::default();
+        let (results, _) = self.search_internal(params, &mut stats)?;
+        Ok(results)
+    }
+
+    /// 統計付き検索。
+    pub fn search_with_stats(
+        &self,
+        params: VectorSearchParams,
+    ) -> Result<(Vec<VectorSearchResult>, SearchStats)> {
+        let mut stats = SearchStats::default();
+        let (results, stats) = self.search_internal(params, &mut stats)?;
+        Ok((results, stats))
+    }
+
+    fn search_internal(
+        &self,
+        params: VectorSearchParams,
+        stats: &mut SearchStats,
+    ) -> Result<(Vec<VectorSearchResult>, SearchStats)> {
+        if params.top_k == 0 {
+            return Ok((Vec::new(), stats.clone()));
+        }
+        if params.query.len() != self.config.dimension {
+            return Err(Error::DimensionMismatch {
+                expected: self.config.dimension,
+                actual: params.query.len(),
+            });
+        }
+        if contains_nan_or_inf(&params.query) {
+            return Err(Error::InvalidVector {
+                index: 0,
+                reason: "query contains NaN or Inf".into(),
+            });
+        }
+
+        let mut candidates: Vec<VectorSearchResult> = Vec::new();
+        let query_norm = params
+            .query
+            .iter()
+            .map(|v| v * v)
+            .sum::<f32>()
+            .sqrt();
+        let mut row_offset = 0u64;
+        for segment in &self.segments {
+            // pruning by norm range
+            if query_norm < segment.statistics.norm_min || query_norm > segment.statistics.norm_max {
+                stats.segments_pruned += 1;
+                row_offset += segment.num_vectors;
+                continue;
+            }
+            stats.segments_scanned += 1;
+            let active_rows = segment.num_vectors - segment.deleted.null_count() as u64;
+            stats.rows_scanned += active_rows;
+            let decoded = segment.decode_vectors()?;
+            let decoded_keys = segment.decode_keys()?;
+            let kernel = select_kernel();
+            let mask = params.filter_mask.as_ref();
+            for (idx, chunk) in decoded.chunks(self.config.dimension).enumerate() {
+                if !segment.deleted.get(idx) {
+                    continue;
+                }
+                if let Some(mask_vec) = mask {
+                    let global_idx = row_offset as usize + idx;
+                    if global_idx >= mask_vec.len() || !mask_vec[global_idx] {
+                        continue;
+                    }
+                }
+                let score = match params.metric {
+                    Metric::Cosine => kernel.cosine(&params.query, chunk),
+                    Metric::L2 => kernel.l2(&params.query, chunk),
+                    Metric::InnerProduct => kernel.inner_product(&params.query, chunk),
+                };
+                let row_id = *decoded_keys
+                    .get(idx)
+                    .ok_or_else(|| Error::InvalidFormat("missing key".into()))?;
+                candidates.push(VectorSearchResult {
+                    row_id,
+                    score,
+                    columns: Vec::new(),
+                });
+            }
+            row_offset += segment.num_vectors;
+        }
+        stats.rows_matched = candidates.len() as u64;
+
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.row_id.cmp(&b.row_id))
+        });
+        candidates.truncate(params.top_k);
+        Ok((candidates, stats.clone()))
+    }
+
+    fn build_segment(&mut self, keys: &[i64], vectors: &[Vec<f32>]) -> Result<VectorSegment> {
+        let mut flattened = Vec::with_capacity(vectors.len() * self.config.dimension);
+        for v in vectors {
+            flattened.extend_from_slice(v);
+        }
+        let vec_enc = encode_generic_column(
+            Column::Float32(flattened),
+            None,
+            LogicalType::Float32,
+            EncodingV2::ByteStreamSplit,
+        )?;
+        let key_enc = encode_generic_column(
+            Column::Int64(keys.to_vec()),
+            None,
+            LogicalType::Int64,
+            EncodingV2::Plain,
+        )?;
+        let deleted = Bitmap::all_valid(keys.len());
+        let stats = compute_stats(vectors);
+        let segment = VectorSegment {
+            segment_id: self.next_segment_id,
+            dimension: self.config.dimension,
+            metric: self.config.metric,
+            num_vectors: keys.len() as u64,
+            vectors: vec_enc,
+            keys: key_enc,
+            deleted,
+            metadata: None,
+            statistics: stats,
+        };
+        Ok(segment)
+    }
+}
+
+fn compute_stats(vectors: &[Vec<f32>]) -> VectorSegmentStatistics {
+    let row_count = vectors.len() as u64;
+    let null_count = 0;
+    let deleted_count = 0;
+    let active_count = row_count - deleted_count;
+    let mut norm_min = f32::MAX;
+    let mut norm_max = f32::MIN;
+    for v in vectors {
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        norm_min = norm_min.min(norm);
+        norm_max = norm_max.max(norm);
+    }
+    if vectors.is_empty() {
+        norm_min = 0.0;
+        norm_max = 0.0;
+    }
+    VectorSegmentStatistics {
+        row_count,
+        null_count,
+        active_count,
+        deleted_count,
+        deletion_ratio: 0.0,
+        norm_min,
+        norm_max,
+        min_values: Vec::new(),
+        max_values: Vec::new(),
+        created_at: 0,
+    }
+}
+
+fn contains_nan_or_inf(vec: &[f32]) -> bool {
+    vec.iter().any(|v| !v.is_finite())
 }
 
 #[cfg(test)]
