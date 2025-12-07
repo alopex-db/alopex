@@ -1113,7 +1113,8 @@ mod tests {
     use super::*;
     use crate::columnar::encoding_v2::EncodingV2;
     use std::future::Future;
-    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
 
     fn encode_f32(values: &[f32]) -> EncodedColumn {
         let encoder = create_encoder(EncodingV2::ByteStreamSplit);
@@ -1273,14 +1274,13 @@ mod tests {
     }
 
     fn block_on<F: Future>(fut: F) -> F::Output {
-        fn no_op(_: *const ()) {}
-        fn clone(_: *const ()) -> RawWaker {
-            RawWaker::new(std::ptr::null(), &VTABLE)
+        struct Noop;
+        impl Wake for Noop {
+            fn wake(self: Arc<Self>) {}
+            fn wake_by_ref(self: &Arc<Self>) {}
         }
-        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, no_op, no_op, no_op);
-        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+        let waker = Waker::from(Arc::new(Noop));
         let mut cx = Context::from_waker(&waker);
-        // pin the future on stack
         let mut fut = std::pin::pin!(fut);
         loop {
             match fut.as_mut().poll(&mut cx) {
