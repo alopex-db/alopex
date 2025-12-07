@@ -35,8 +35,6 @@ pub struct EncodedColumn {
     pub logical_type: LogicalType,
     /// エンコーディング種別。
     pub encoding: crate::columnar::encoding_v2::EncodingV2,
-    /// 圧縮種別。
-    pub compression: CompressionV2,
     /// 値の個数。
     pub num_values: u64,
     /// エンコード済みペイロード。
@@ -114,7 +112,9 @@ impl VectorSegment {
             ));
         }
 
-        Self::from_column_segment(envelope)
+        let segment = Self::from_column_segment(envelope)?;
+        segment.validate()?;
+        Ok(segment)
     }
 
     /// 内部整合性チェック。
@@ -146,12 +146,6 @@ impl VectorSegment {
             }
         }
 
-        if self.vectors.compression != CompressionV2::None {
-            return Err(Error::InvalidFormat(
-                "vectors.compression must be None for segment V2 envelope".into(),
-            ));
-        }
-
         // keys: Int64 かつ行数一致
         if self.keys.logical_type != LogicalType::Int64 {
             return Err(Error::InvalidFormat(
@@ -170,18 +164,15 @@ impl VectorSegment {
                 ));
             }
         }
-        if self.keys.compression != CompressionV2::None {
-            return Err(Error::InvalidFormat(
-                "keys.compression must be None for segment V2 envelope".into(),
-            ));
-        }
-
         // deleted bitmap 長さ
         if self.deleted.len() != n {
             return Err(Error::InvalidFormat(
                 "deleted bitmap length mismatch num_vectors".into(),
             ));
         }
+        let valid_count = (0..n).filter(|&i| self.deleted.get(i)).count() as u64;
+        let deleted_count = self.num_vectors.saturating_sub(valid_count);
+        let active_count = valid_count;
 
         // metadata 各列の行数整合
         if let Some(meta_cols) = &self.metadata {
@@ -200,12 +191,46 @@ impl VectorSegment {
                         )));
                     }
                 }
-                if col.compression != CompressionV2::None {
-                    return Err(Error::InvalidFormat(
-                        "metadata.compression must be None for segment V2 envelope".into(),
-                    ));
-                }
             }
+        }
+
+        // statistics 整合性
+        if self.statistics.row_count != self.num_vectors {
+            return Err(Error::InvalidFormat(
+                "statistics.row_count mismatch num_vectors".into(),
+            ));
+        }
+        let active_deleted = self
+            .statistics
+            .active_count
+            .saturating_add(self.statistics.deleted_count);
+        if active_deleted != self.num_vectors {
+            return Err(Error::InvalidFormat(
+                "statistics.active_count + deleted_count mismatch num_vectors".into(),
+            ));
+        }
+        if self.statistics.deleted_count != deleted_count {
+            return Err(Error::InvalidFormat(
+                "statistics.deleted_count mismatch deleted bitmap".into(),
+            ));
+        }
+        if self.statistics.active_count != active_count {
+            return Err(Error::InvalidFormat(
+                "statistics.active_count mismatch deleted bitmap".into(),
+            ));
+        }
+        if self.statistics.row_count > 0 {
+            let expected_ratio =
+                (self.statistics.deleted_count as f32) / (self.statistics.row_count as f32);
+            if (self.statistics.deletion_ratio - expected_ratio).abs() > 1e-6 {
+                return Err(Error::InvalidFormat(
+                    "statistics.deletion_ratio mismatch deleted_count/row_count".into(),
+                ));
+            }
+        } else if self.statistics.deletion_ratio != 0.0 {
+            return Err(Error::InvalidFormat(
+                "statistics.deletion_ratio must be 0 when row_count is 0".into(),
+            ));
         }
 
         Ok(())
@@ -217,6 +242,7 @@ impl VectorSegment {
 
         let n = self.num_vectors as usize;
         let dim = self.dimension;
+        let compression = CompressionV2::None;
 
         // vectors -> Column::Fixed (byte packed per vector)
         let (vec_col_decoded, vec_bm) = self.decode_column(&self.vectors)?;
@@ -287,7 +313,12 @@ impl VectorSegment {
                         "metadata length mismatch num_vectors".into(),
                     ));
                 }
-                metadata_columns.push(decoded);
+                let normalized = if let LogicalType::Fixed(len) = col.logical_type {
+                    ensure_fixed_column(decoded, len as usize)?
+                } else {
+                    decoded
+                };
+                metadata_columns.push(normalized);
                 metadata_bitmaps.push(bm);
             }
         }
@@ -344,7 +375,7 @@ impl VectorSegment {
         let batch = RecordBatch::new(schema, columns, bitmaps);
 
         let mut writer = SegmentWriterV2::new(SegmentConfigV2 {
-            compression: CompressionV2::None,
+            compression,
             ..Default::default()
         });
         writer
@@ -375,10 +406,16 @@ impl VectorSegment {
             .map_err(|e| Error::InvalidFormat(e.to_string()))?
         {
             for (idx, col) in batch.columns.iter().enumerate() {
+                if idx >= combined_columns.len() {
+                    return Err(Error::InvalidFormat("column index out of bounds".into()));
+                }
                 combined_columns[idx] =
                     Some(append_column(combined_columns[idx].take(), col.clone())?);
             }
             for (idx, bm) in batch.null_bitmaps.iter().enumerate() {
+                if idx >= combined_bitmaps.len() {
+                    return Err(Error::InvalidFormat("bitmap index out of bounds".into()));
+                }
                 combined_bitmaps[idx] = append_bitmap(combined_bitmaps[idx].take(), bm.clone());
             }
         }
@@ -420,7 +457,7 @@ impl VectorSegment {
             metadata_cols.push(encoded);
         }
 
-        Ok(VectorSegment {
+        let segment = VectorSegment {
             segment_id: envelope.segment_id,
             dimension: envelope.dimension,
             metric: envelope.metric,
@@ -434,20 +471,24 @@ impl VectorSegment {
                 Some(metadata_cols)
             },
             statistics: envelope.statistics,
-        })
+        };
+        segment.validate()?;
+        Ok(segment)
     }
 
     fn decode_column(&self, col: &EncodedColumn) -> Result<(Column, Option<Bitmap>)> {
-        if col.compression != CompressionV2::None {
-            return Err(Error::InvalidFormat(
-                "compressed encoded columns are not supported yet".into(),
-            ));
-        }
         let decoder = create_decoder(col.encoding);
+        let encoded_bytes = col.data.clone();
+
         decoder
-            .decode(&col.data, col.num_values as usize, col.logical_type)
+            .decode(
+                &encoded_bytes,
+                col.num_values as usize,
+                col.logical_type,
+            )
             .map_err(|e| Error::InvalidFormat(e.to_string()))
     }
+
 }
 
 fn column_logical_type(col: &Column) -> Result<LogicalType> {
@@ -586,7 +627,6 @@ fn encode_vectors_from_fixed(
     Ok(EncodedColumn {
         logical_type: LogicalType::Float32,
         encoding: EncodingV2::ByteStreamSplit,
-        compression: CompressionV2::None,
         num_values: floats.len() as u64,
         data: encoded,
         null_bitmap: bitmap,
@@ -599,6 +639,10 @@ fn encode_generic_column(
     logical_type: LogicalType,
     encoding: EncodingV2,
 ) -> Result<EncodedColumn> {
+    let col = match logical_type {
+        LogicalType::Fixed(len) => ensure_fixed_column(col, len as usize)?,
+        _ => col,
+    };
     let encoder = create_encoder(encoding);
     let encoded = encoder
         .encode(&col, bitmap.as_ref())
@@ -607,7 +651,6 @@ fn encode_generic_column(
     Ok(EncodedColumn {
         logical_type,
         encoding,
-        compression: CompressionV2::None,
         num_values: column_length(&col) as u64,
         data: encoded,
         null_bitmap: bitmap,
@@ -635,6 +678,32 @@ fn column_to_bitmap(col: Column, expected_len: usize) -> Result<Bitmap> {
     }
 }
 
+fn ensure_fixed_column(col: Column, len: usize) -> Result<Column> {
+    match col {
+        Column::Fixed { len: l, values } => {
+            if l != len {
+                return Err(Error::InvalidFormat(
+                    "fixed column length mismatch expected length".into(),
+                ));
+            }
+            Ok(Column::Fixed { len, values })
+        }
+        Column::Binary(values) => {
+            if values.iter().any(|v| v.len() != len) {
+                return Err(Error::InvalidFormat(
+                    "binary column has variable-length values for Fixed type".into(),
+                ));
+            }
+            Ok(Column::Fixed { len, values })
+        }
+        other => Err(Error::InvalidFormat(format!(
+            "column must be Fixed/Binary for Fixed logical type, got {:?}",
+            other
+        ))),
+    }
+}
+
+
 /// KVS キーレイアウト。
 pub mod key_layout {
     /// `vector_segment:{segment_id}` 形式のキーを生成する。
@@ -656,7 +725,6 @@ mod tests {
         EncodedColumn {
             logical_type: LogicalType::Float32,
             encoding: EncodingV2::ByteStreamSplit,
-            compression: CompressionV2::None,
             num_values: values.len() as u64,
             data,
             null_bitmap: None,
@@ -671,7 +739,6 @@ mod tests {
         EncodedColumn {
             logical_type: LogicalType::Int64,
             encoding: EncodingV2::Plain,
-            compression: CompressionV2::None,
             num_values: values.len() as u64,
             data,
             null_bitmap: None,
