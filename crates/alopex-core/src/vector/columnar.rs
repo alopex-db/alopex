@@ -1116,6 +1116,8 @@ mod tests {
     use crate::MemoryKV;
     use crate::kv::{KVStore, KVTransaction};
     use crate::txn::TxnManager;
+    use crate::ScalarKernel;
+    use crate::vector::simd::DistanceKernel;
     use std::future::Future;
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
@@ -1313,8 +1315,30 @@ mod tests {
             ..Default::default()
         });
         let keys = vec![1, 2, 3];
-        let vecs = vec![vec![1.0, 0.0], vec![1.0, 0.0], vec![1.0, 0.0]];
+        let vecs = vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![0.6, 0.8]];
         block_on(mgr.append_batch(&keys, &vecs)).unwrap();
+
+        // 簡易メタデータを各セグメントに付与（整数1列）。
+        if let Some(seg) = mgr.segments.get_mut(0) {
+            let meta_col = encode_generic_column(
+                Column::Int64(vec![100, 200]),
+                None,
+                LogicalType::Int64,
+                EncodingV2::Plain,
+            )
+            .unwrap();
+            seg.metadata = Some(vec![meta_col]);
+        }
+        if let Some(seg) = mgr.segments.get_mut(1) {
+            let meta_col = encode_generic_column(
+                Column::Int64(vec![300]),
+                None,
+                LogicalType::Int64,
+                EncodingV2::Plain,
+            )
+            .unwrap();
+            seg.metadata = Some(vec![meta_col]);
+        }
 
         // 永続化: VectorSegment を KVS に保存。
         let store = MemoryKV::new();
@@ -1346,14 +1370,40 @@ mod tests {
             query: vec![1.0, 0.0],
             metric: Metric::InnerProduct,
             top_k: 3,
-            projection: None,
-            filter_mask: None,
+            projection: Some(vec![0]),
+            filter_mask: Some(vec![true, true, true]),
         };
-        let (results, _stats) = restored.search_with_stats(params).unwrap();
+        let (results, _stats) = restored.search_with_stats(params.clone()).unwrap();
         assert_eq!(results.len(), 3);
-        // スコア順（同スコアは row_id 昇順）
-        let row_ids: Vec<_> = results.iter().map(|r| r.row_id).collect();
-        assert_eq!(row_ids, vec![1, 2, 3]);
+        // 期待される並び（スコアDESC、同スコアはrow_id ASC）とプロジェクション値を計算。
+        let scalar = ScalarKernel::default();
+        let expected = vec![
+            (keys[0], scalar.inner_product(&params.query, &vecs[0]), ScalarValue::Int64(100)),
+            (keys[1], scalar.inner_product(&params.query, &vecs[1]), ScalarValue::Int64(200)),
+            (keys[2], scalar.inner_product(&params.query, &vecs[2]), ScalarValue::Int64(300)),
+        ];
+        let mut expected_sorted = expected.clone();
+        expected_sorted.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        for ((exp_id, _, exp_col), got) in expected_sorted.iter().zip(results.iter()) {
+            assert_eq!(got.row_id, *exp_id);
+            assert_same_scalar(exp_col, got.columns.first().unwrap());
+        }
+    }
+
+    fn assert_same_scalar(expected: &ScalarValue, actual: &ScalarValue) {
+        match (expected, actual) {
+            (ScalarValue::Int64(a), ScalarValue::Int64(b)) => assert_eq!(a, b),
+            (ScalarValue::Float32(a), ScalarValue::Float32(b)) => assert!((a - b).abs() < 1e-5),
+            (ScalarValue::Float64(a), ScalarValue::Float64(b)) => assert!((a - b).abs() < 1e-8),
+            (ScalarValue::Bool(a), ScalarValue::Bool(b)) => assert_eq!(a, b),
+            (ScalarValue::Binary(a), ScalarValue::Binary(b)) => assert_eq!(a, b),
+            other => panic!("scalar mismatch: {:?}", other),
+        }
     }
 
     fn block_on<F: Future>(fut: F) -> F::Output {
