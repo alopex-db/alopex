@@ -1112,6 +1112,10 @@ fn column_to_scalar_values(column: Column) -> Result<Vec<ScalarValue>> {
 mod tests {
     use super::*;
     use crate::columnar::encoding_v2::EncodingV2;
+    use crate::types::TxnMode;
+    use crate::MemoryKV;
+    use crate::kv::{KVStore, KVTransaction};
+    use crate::txn::TxnManager;
     use std::future::Future;
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
@@ -1298,6 +1302,58 @@ mod tests {
         assert_eq!(results.len(), 3);
         let row_ids: Vec<_> = results.iter().map(|r| r.row_id).collect();
         assert_eq!(row_ids, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn vector_store_end_to_end_with_kvs_roundtrip() {
+        let mut mgr = VectorStoreManager::new(VectorStoreConfig {
+            dimension: 2,
+            metric: Metric::InnerProduct,
+            segment_max_vectors: 2,
+            ..Default::default()
+        });
+        let keys = vec![1, 2, 3];
+        let vecs = vec![vec![1.0, 0.0], vec![1.0, 0.0], vec![1.0, 0.0]];
+        block_on(mgr.append_batch(&keys, &vecs)).unwrap();
+
+        // 永続化: VectorSegment を KVS に保存。
+        let store = MemoryKV::new();
+        {
+            let manager = store.txn_manager();
+            let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+            for seg in &mgr.segments {
+                let key = key_layout::vector_segment_key(seg.segment_id);
+                let bytes = seg.to_bytes().unwrap();
+                txn.put(key, bytes).unwrap();
+            }
+            manager.commit(txn).unwrap();
+        }
+
+        // 復元: KVS から VectorSegment を読み出して新しいマネージャに投入。
+        let mut restored = VectorStoreManager::new(mgr.config.clone());
+        restored.next_segment_id = mgr.next_segment_id;
+        {
+            let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+            for seg in &mgr.segments {
+                let key = key_layout::vector_segment_key(seg.segment_id);
+                let bytes = txn.get(&key).unwrap().unwrap();
+                let decoded = VectorSegment::from_bytes(&bytes).unwrap();
+                restored.segments.push(decoded);
+            }
+        }
+
+        let params = VectorSearchParams {
+            query: vec![1.0, 0.0],
+            metric: Metric::InnerProduct,
+            top_k: 3,
+            projection: None,
+            filter_mask: None,
+        };
+        let (results, _stats) = restored.search_with_stats(params).unwrap();
+        assert_eq!(results.len(), 3);
+        // スコア順（同スコアは row_id 昇順）
+        let row_ids: Vec<_> = results.iter().map(|r| r.row_id).collect();
+        assert_eq!(row_ids, vec![1, 2, 3]);
     }
 
     fn block_on<F: Future>(fut: F) -> F::Output {
