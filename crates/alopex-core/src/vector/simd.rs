@@ -130,6 +130,7 @@ mod avx2 {
             while i + 8 <= query.len() {
                 let q = _mm256_loadu_ps(query.as_ptr().add(i));
                 let v = _mm256_loadu_ps(vector.as_ptr().add(i));
+                // AVX2+FMA 前提: FMA 非搭載AVX2はサポート対象外（設計方針）。
                 acc = _mm256_fmadd_ps(q, v, acc);
                 i += 8;
             }
