@@ -1,13 +1,15 @@
 //! Vector schema, metrics, and validation helpers.
 
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 use crate::{Error, Result};
+pub mod columnar;
 pub mod flat;
 pub mod simd;
 
 /// Supported similarity/distance metrics.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Metric {
     /// Cosine similarity.
     Cosine,
