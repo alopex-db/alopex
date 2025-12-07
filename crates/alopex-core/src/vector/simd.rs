@@ -431,4 +431,40 @@ mod tests {
         let s = k.inner_product(&q, &v);
         assert!((s - 4.0).abs() < 1e-6);
     }
+
+    #[test]
+    fn select_kernel_matches_scalar_for_all_metrics() {
+        let kernel = select_kernel();
+        let scalar = ScalarKernel::default();
+        let q = vec![1.0f32, 2.0, 3.0, 4.0];
+        let v1 = vec![4.0f32, 3.0, 2.0, 1.0];
+        let v2 = vec![1.0f32, 1.0, 1.0, 1.0];
+
+        let metrics = [Metric::Cosine, Metric::L2, Metric::InnerProduct];
+        for &m in &metrics {
+            let s1 = match m {
+                Metric::Cosine => scalar.cosine(&q, &v1),
+                Metric::L2 => scalar.l2(&q, &v1),
+                Metric::InnerProduct => scalar.inner_product(&q, &v1),
+            };
+            let k1 = match m {
+                Metric::Cosine => kernel.cosine(&q, &v1),
+                Metric::L2 => kernel.l2(&q, &v1),
+                Metric::InnerProduct => kernel.inner_product(&q, &v1),
+            };
+            assert!((s1 - k1).abs() < 1e-6);
+
+            let s2 = match m {
+                Metric::Cosine => scalar.cosine(&q, &v2),
+                Metric::L2 => scalar.l2(&q, &v2),
+                Metric::InnerProduct => scalar.inner_product(&q, &v2),
+            };
+            let k2 = match m {
+                Metric::Cosine => kernel.cosine(&q, &v2),
+                Metric::L2 => kernel.l2(&q, &v2),
+                Metric::InnerProduct => kernel.inner_product(&q, &v2),
+            };
+            assert!((s2 - k2).abs() < 1e-6);
+        }
+    }
 }

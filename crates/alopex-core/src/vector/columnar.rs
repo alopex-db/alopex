@@ -1112,6 +1112,8 @@ fn column_to_scalar_values(column: Column) -> Result<Vec<ScalarValue>> {
 mod tests {
     use super::*;
     use crate::columnar::encoding_v2::EncodingV2;
+    use std::future::Future;
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
     fn encode_f32(values: &[f32]) -> EncodedColumn {
         let encoder = create_encoder(EncodingV2::ByteStreamSplit);
@@ -1204,5 +1206,87 @@ mod tests {
         seg.num_vectors = 2; // mismatch
         let err = seg.to_bytes().unwrap_err();
         assert!(matches!(err, Error::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn compute_stats_updates_norms_and_counts() {
+        let vectors = vec![vec![3.0f32, 4.0], vec![0.0f32, 0.0]];
+        let stats = compute_stats(&vectors);
+        assert_eq!(stats.row_count, 2);
+        assert_eq!(stats.active_count, 2);
+        assert_eq!(stats.deleted_count, 0);
+        // norms: 5.0 and 0.0
+        assert!((stats.norm_min - 0.0).abs() < 1e-6);
+        assert!((stats.norm_max - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vector_store_append_and_search_with_filter_and_projection() {
+        let mut mgr = VectorStoreManager::new(VectorStoreConfig {
+            dimension: 2,
+            metric: Metric::InnerProduct,
+            segment_max_vectors: 2,
+            ..Default::default()
+        });
+        let keys = vec![10, 11, 12];
+        let vecs = vec![vec![1.0, 0.0], vec![0.5, 0.5], vec![0.0, 1.0]];
+        block_on(mgr.append_batch(&keys, &vecs)).unwrap();
+
+        // set metadata for projection (one column of ints)
+        if let Some(seg) = mgr.segments.get_mut(0) {
+            let meta_col = encode_generic_column(
+                Column::Int64(vec![100, 200]),
+                None,
+                LogicalType::Int64,
+                EncodingV2::Plain,
+            )
+            .unwrap();
+            seg.metadata = Some(vec![meta_col]);
+        }
+        if let Some(seg) = mgr.segments.get_mut(1) {
+            let meta_col = encode_generic_column(
+                Column::Int64(vec![300]),
+                None,
+                LogicalType::Int64,
+                EncodingV2::Plain,
+            )
+            .unwrap();
+            seg.metadata = Some(vec![meta_col]);
+        }
+
+        // filter out the middle row, project metadata column 0
+        let params = VectorSearchParams {
+            query: vec![1.0, 0.0],
+            metric: Metric::InnerProduct,
+            top_k: 3,
+            projection: Some(vec![0]),
+            filter_mask: Some(vec![true, false, true]),
+        };
+        let (results, stats) = mgr.search_with_stats(params).unwrap();
+        assert_eq!(stats.rows_scanned, 2);
+        assert_eq!(stats.segments_scanned, 2);
+        assert_eq!(stats.rows_matched, 2);
+        assert_eq!(results.len(), 2);
+        // first result should be key 10 with metadata 100
+        assert_eq!(results[0].row_id, 10);
+        assert_eq!(results[0].columns, vec![ScalarValue::Int64(100)]);
+    }
+
+    fn block_on<F: Future>(fut: F) -> F::Output {
+        fn no_op(_: *const ()) {}
+        fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, no_op, no_op, no_op);
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        // pin the future on stack
+        let mut fut = std::pin::pin!(fut);
+        loop {
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(val) => return val,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
     }
 }
