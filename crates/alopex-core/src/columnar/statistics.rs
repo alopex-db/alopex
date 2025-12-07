@@ -8,6 +8,7 @@ use std::collections::HashSet;
 
 use crate::columnar::encoding::Column;
 use crate::columnar::encoding_v2::Bitmap;
+use crate::columnar::error::{ColumnarError, Result};
 
 /// A scalar value that can represent min/max statistics for any column type.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -16,6 +17,8 @@ pub enum ScalarValue {
     Null,
     /// Boolean value.
     Bool(bool),
+    /// 32-bit floating point.
+    Float32(f32),
     /// 64-bit signed integer.
     Int64(i64),
     /// 64-bit floating point.
@@ -68,6 +71,43 @@ impl SegmentStatistics {
     }
 }
 
+/// ベクトルセグメント向けの統計情報。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VectorSegmentStatistics {
+    /// 全行数。
+    pub row_count: u64,
+    /// NULL 行数。
+    pub null_count: u64,
+    /// アクティブ（有効）行数。
+    pub active_count: u64,
+    /// 論理削除行数。
+    pub deleted_count: u64,
+    /// 削除率（0-1）。
+    pub deletion_ratio: f32,
+    /// ベクトルノルムの最小値。
+    pub norm_min: f32,
+    /// ベクトルノルムの最大値。
+    pub norm_max: f32,
+    /// フィルタ列の最小値。
+    pub min_values: Vec<ScalarValue>,
+    /// フィルタ列の最大値。
+    pub max_values: Vec<ScalarValue>,
+    /// 作成時刻（epoch millis）。
+    pub created_at: u64,
+}
+
+impl VectorSegmentStatistics {
+    /// シリアライズ（KVS 永続化用）。
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| ColumnarError::InvalidFormat(e.to_string()))
+    }
+
+    /// バイト列から復元する。
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bincode::deserialize(bytes).map_err(|e| ColumnarError::InvalidFormat(e.to_string()))
+    }
+}
+
 /// Compute statistics for a column.
 ///
 /// # Arguments
@@ -81,6 +121,9 @@ pub fn compute_column_statistics(
 ) -> ColumnStatistics {
     match column {
         Column::Int64(values) => compute_int64_statistics(values, null_bitmap, compute_distinct),
+        Column::Float32(values) => {
+            compute_float32_statistics(values, null_bitmap, compute_distinct)
+        }
         Column::Float64(values) => {
             compute_float64_statistics(values, null_bitmap, compute_distinct)
         }
@@ -182,6 +225,56 @@ fn compute_float64_statistics(
     ColumnStatistics {
         min: min_val.map(ScalarValue::Float64),
         max: max_val.map(ScalarValue::Float64),
+        null_count,
+        distinct_count: distinct_set.map(|s| s.len() as u64),
+    }
+}
+
+/// Compute statistics for Float32 column.
+fn compute_float32_statistics(
+    values: &[f32],
+    null_bitmap: Option<&Bitmap>,
+    compute_distinct: bool,
+) -> ColumnStatistics {
+    if values.is_empty() {
+        return ColumnStatistics::default();
+    }
+
+    let mut min_val: Option<f32> = None;
+    let mut max_val: Option<f32> = None;
+    let mut null_count = 0u64;
+    let mut distinct_set: Option<HashSet<u32>> = if compute_distinct {
+        Some(HashSet::new())
+    } else {
+        None
+    };
+
+    for (i, &value) in values.iter().enumerate() {
+        if let Some(bitmap) = null_bitmap {
+            if !bitmap.get(i) {
+                null_count += 1;
+                continue;
+            }
+        }
+
+        if value.is_nan() {
+            if let Some(ref mut set) = distinct_set {
+                set.insert(f32::NAN.to_bits());
+            }
+            continue;
+        }
+
+        min_val = Some(min_val.map_or(value, |m| m.min(value)));
+        max_val = Some(max_val.map_or(value, |m| m.max(value)));
+
+        if let Some(ref mut set) = distinct_set {
+            set.insert(value.to_bits());
+        }
+    }
+
+    ColumnStatistics {
+        min: min_val.map(ScalarValue::Float32),
+        max: max_val.map(ScalarValue::Float32),
         null_count,
         distinct_count: distinct_set.map(|s| s.len() as u64),
     }
@@ -327,6 +420,7 @@ fn merge_max(a: &Option<ScalarValue>, b: &Option<ScalarValue>) -> Option<ScalarV
 fn scalar_min(a: &ScalarValue, b: &ScalarValue) -> ScalarValue {
     match (a, b) {
         (ScalarValue::Int64(a), ScalarValue::Int64(b)) => ScalarValue::Int64(*a.min(b)),
+        (ScalarValue::Float32(a), ScalarValue::Float32(b)) => ScalarValue::Float32(a.min(*b)),
         (ScalarValue::Float64(a), ScalarValue::Float64(b)) => ScalarValue::Float64(a.min(*b)),
         (ScalarValue::Bool(a), ScalarValue::Bool(b)) => ScalarValue::Bool(*a && *b),
         (ScalarValue::Binary(a), ScalarValue::Binary(b)) => {
@@ -339,6 +433,7 @@ fn scalar_min(a: &ScalarValue, b: &ScalarValue) -> ScalarValue {
 fn scalar_max(a: &ScalarValue, b: &ScalarValue) -> ScalarValue {
     match (a, b) {
         (ScalarValue::Int64(a), ScalarValue::Int64(b)) => ScalarValue::Int64(*a.max(b)),
+        (ScalarValue::Float32(a), ScalarValue::Float32(b)) => ScalarValue::Float32(a.max(*b)),
         (ScalarValue::Float64(a), ScalarValue::Float64(b)) => ScalarValue::Float64(a.max(*b)),
         (ScalarValue::Bool(a), ScalarValue::Bool(b)) => ScalarValue::Bool(*a || *b),
         (ScalarValue::Binary(a), ScalarValue::Binary(b)) => {
@@ -414,6 +509,18 @@ mod tests {
 
         assert_eq!(stats.min, Some(ScalarValue::Float64(-1.5)));
         assert_eq!(stats.max, Some(ScalarValue::Float64(3.5)));
+        assert_eq!(stats.null_count, 0);
+        assert_eq!(stats.distinct_count, Some(5));
+    }
+
+    #[test]
+    fn test_min_max_float32() {
+        let values = vec![1.5f32, 2.5, 0.5, 3.5, -1.5];
+        let column = Column::Float32(values);
+        let stats = compute_column_statistics(&column, None, true);
+
+        assert_eq!(stats.min, Some(ScalarValue::Float32(-1.5)));
+        assert_eq!(stats.max, Some(ScalarValue::Float32(3.5)));
         assert_eq!(stats.null_count, 0);
         assert_eq!(stats.distinct_count, Some(5));
     }
@@ -575,5 +682,26 @@ mod tests {
             Some(ScalarValue::Binary(vec![0xFF, 0xFF, 0xFF, 0xFF]))
         );
         assert_eq!(stats.distinct_count, Some(3));
+    }
+
+    #[test]
+    fn test_vector_segment_statistics_roundtrip() {
+        let stats = VectorSegmentStatistics {
+            row_count: 10_000,
+            null_count: 5,
+            active_count: 9_900,
+            deleted_count: 95,
+            deletion_ratio: 0.0095,
+            norm_min: 0.1,
+            norm_max: 3.2,
+            min_values: vec![ScalarValue::Int64(1)],
+            max_values: vec![ScalarValue::Int64(100)],
+            created_at: 1_735_000_000,
+        };
+
+        let bytes = stats.to_bytes().unwrap();
+        let decoded = VectorSegmentStatistics::from_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded, stats);
     }
 }

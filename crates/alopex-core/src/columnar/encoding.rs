@@ -11,6 +11,8 @@ use crate::columnar::error::{ColumnarError, Result};
 pub enum LogicalType {
     /// Signed 64-bit integer.
     Int64,
+    /// 32-bit floating point.
+    Float32,
     /// 64-bit floating point.
     Float64,
     /// Boolean value.
@@ -48,6 +50,8 @@ pub enum Compression {
 pub enum Column {
     /// Column of i64 values.
     Int64(Vec<i64>),
+    /// Column of f32 values.
+    Float32(Vec<f32>),
     /// Column of f64 values.
     Float64(Vec<f64>),
     /// Column of bool values.
@@ -183,6 +187,7 @@ pub fn decode_column(
 fn validate_logical(column: &Column, logical: LogicalType) -> Result<()> {
     match (column, logical) {
         (Column::Int64(_), LogicalType::Int64)
+        | (Column::Float32(_), LogicalType::Float32)
         | (Column::Float64(_), LogicalType::Float64)
         | (Column::Bool(_), LogicalType::Bool)
         | (Column::Binary(_), LogicalType::Binary) => Ok(()),
@@ -200,6 +205,14 @@ fn encode_plain(column: &Column) -> Result<Vec<u8>> {
     match column {
         Column::Int64(values) => {
             let mut buf = Vec::with_capacity(4 + values.len() * 8);
+            buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for v in values {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Ok(buf)
+        }
+        Column::Float32(values) => {
+            let mut buf = Vec::with_capacity(4 + values.len() * 4);
             buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
             for v in values {
                 buf.extend_from_slice(&v.to_le_bytes());
@@ -280,6 +293,20 @@ fn decode_plain(bytes: &[u8], logical: LogicalType) -> Result<Column> {
                 pos += 8;
             }
             Ok(Column::Int64(out))
+        }
+        LogicalType::Float32 => {
+            if bytes.len() < pos + count * 4 {
+                return Err(ColumnarError::CorruptedSegment {
+                    reason: "plain float32 truncated".into(),
+                });
+            }
+            let mut out = Vec::with_capacity(count);
+            for _ in 0..count {
+                let v = f32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
+                out.push(v);
+                pos += 4;
+            }
+            Ok(Column::Float32(out))
         }
         LogicalType::Float64 => {
             if bytes.len() < pos + count * 8 {
@@ -484,6 +511,9 @@ fn encode_rle(column: &Column) -> Result<Vec<u8>> {
         Column::Int64(values) => {
             encode_rle_nums(values.iter().map(|v| v.to_le_bytes().to_vec()), 8)
         }
+        Column::Float32(values) => {
+            encode_rle_nums(values.iter().map(|v| v.to_le_bytes().to_vec()), 4)
+        }
         Column::Float64(values) => {
             encode_rle_nums(values.iter().map(|v| v.to_le_bytes().to_vec()), 8)
         }
@@ -566,8 +596,12 @@ fn decode_rle(bytes: &[u8], logical: LogicalType) -> Result<Column> {
     let mut pos = 8;
 
     match logical {
-        LogicalType::Int64 | LogicalType::Float64 => {
-            let width = 8;
+        LogicalType::Int64 | LogicalType::Float64 | LogicalType::Float32 => {
+            let width = if matches!(logical, LogicalType::Float32) {
+                4
+            } else {
+                8
+            };
             let mut out: Vec<Vec<u8>> = Vec::with_capacity(run_count);
             let mut lengths = Vec::with_capacity(run_count);
             for _ in 0..run_count {
@@ -584,11 +618,20 @@ fn decode_rle(bytes: &[u8], logical: LogicalType) -> Result<Column> {
             let mut values = Vec::with_capacity(total);
             for (val_bytes, len) in out.into_iter().zip(lengths) {
                 for _ in 0..len {
-                    let val_arr: [u8; 8] = val_bytes.as_slice().try_into().unwrap();
-                    let v = if matches!(logical, LogicalType::Int64) {
-                        ColumnValue::I64(i64::from_le_bytes(val_arr))
-                    } else {
-                        ColumnValue::F64(f64::from_le_bytes(val_arr))
+                    let v = match logical {
+                        LogicalType::Int64 => {
+                            let val_arr: [u8; 8] = val_bytes.as_slice().try_into().unwrap();
+                            ColumnValue::I64(i64::from_le_bytes(val_arr))
+                        }
+                        LogicalType::Float64 => {
+                            let val_arr: [u8; 8] = val_bytes.as_slice().try_into().unwrap();
+                            ColumnValue::F64(f64::from_le_bytes(val_arr))
+                        }
+                        LogicalType::Float32 => {
+                            let val_arr: [u8; 4] = val_bytes.as_slice().try_into().unwrap();
+                            ColumnValue::F32(f32::from_le_bytes(val_arr))
+                        }
+                        _ => unreachable!(),
                     };
                     values.push(v);
                 }
@@ -599,6 +642,15 @@ fn decode_rle(bytes: &[u8], logical: LogicalType) -> Result<Column> {
                         .into_iter()
                         .map(|v| match v {
                             ColumnValue::I64(x) => x,
+                            _ => unreachable!(),
+                        })
+                        .collect(),
+                )),
+                LogicalType::Float32 => Ok(Column::Float32(
+                    values
+                        .into_iter()
+                        .map(|v| match v {
+                            ColumnValue::F32(x) => x,
                             _ => unreachable!(),
                         })
                         .collect(),
@@ -643,6 +695,7 @@ fn decode_rle(bytes: &[u8], logical: LogicalType) -> Result<Column> {
 
 enum ColumnValue {
     I64(i64),
+    F32(f32),
     F64(f64),
 }
 

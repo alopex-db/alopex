@@ -121,6 +121,7 @@ fn write_header(header: &SegmentHeader, buf: &mut Vec<u8>) {
 fn column_len(column: &Column) -> usize {
     match column {
         Column::Int64(v) => v.len(),
+        Column::Float32(v) => v.len(),
         Column::Float64(v) => v.len(),
         Column::Bool(v) => v.len(),
         Column::Binary(v) => v.len(),
@@ -132,6 +133,7 @@ fn column_len(column: &Column) -> usize {
 fn slice_column(column: &Column, start: usize, len: usize) -> Result<Column> {
     match column {
         Column::Int64(v) => Ok(Column::Int64(v[start..start + len].to_vec())),
+        Column::Float32(v) => Ok(Column::Float32(v[start..start + len].to_vec())),
         Column::Float64(v) => Ok(Column::Float64(v[start..start + len].to_vec())),
         Column::Bool(v) => Ok(Column::Bool(v[start..start + len].to_vec())),
         Column::Binary(v) => Ok(Column::Binary(v[start..start + len].to_vec())),
@@ -188,6 +190,15 @@ fn build_encoding_hints(column: &Column, bitmap: Option<&Bitmap>) -> EncodingHin
         Column::Float64(values) => {
             hints.total_count = values.len();
             hints.distinct_count = values.len(); // 粗い推定
+            hints.is_sorted = values.windows(2).all(|w| {
+                w[0].partial_cmp(&w[1])
+                    .map(|o| o != std::cmp::Ordering::Greater)
+                    .unwrap_or(true)
+            });
+        }
+        Column::Float32(values) => {
+            hints.total_count = values.len();
+            hints.distinct_count = values.len();
             hints.is_sorted = values.windows(2).all(|w| {
                 w[0].partial_cmp(&w[1])
                     .map(|o| o != std::cmp::Ordering::Greater)

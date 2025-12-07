@@ -30,13 +30,29 @@ pub struct SegmentMeta {
 
 /// Writes a single-column segment to `path`, chunked by `meta.chunk_rows`.
 pub fn write_segment(path: &Path, column: &Column, meta: &SegmentMeta) -> Result<()> {
+    // v1 セグメントは Float32 と Fixed 長 251 以上をサポートしない。
+    match meta.logical_type {
+        LogicalType::Float32 => {
+            return Err(ColumnarError::InvalidFormat(
+                "segment v1 does not support Float32".into(),
+            ))
+        }
+        LogicalType::Fixed(len) if len >= 251 => {
+            return Err(ColumnarError::InvalidFormat(
+                "segment v1 fixed length must be <= 250".into(),
+            ))
+        }
+        _ => {}
+    }
+
     let mut file = File::create(path)?;
 
     // Header
     file.write_all(MAGIC)?;
     file.write_all(&VERSION.to_le_bytes())?;
+    let logical_byte = logical_to_byte(meta.logical_type)?;
     file.write_all(&[
-        logical_to_byte(meta.logical_type),
+        logical_byte,
         encoding_to_byte(meta.encoding),
         compression_to_byte(meta.compression),
     ])?;
@@ -215,17 +231,22 @@ impl<'a> Iterator for ChunkIter<'a> {
     }
 }
 
-fn logical_to_byte(logical: LogicalType) -> u8 {
+fn logical_to_byte(logical: LogicalType) -> Result<u8> {
     match logical {
-        LogicalType::Int64 => 0,
-        LogicalType::Float64 => 1,
-        LogicalType::Bool => 2,
-        LogicalType::Binary => 3,
+        LogicalType::Int64 => Ok(0),
+        LogicalType::Float64 => Ok(1),
+        LogicalType::Bool => Ok(2),
+        LogicalType::Binary => Ok(3),
+        LogicalType::Float32 => Err(ColumnarError::InvalidFormat(
+            "segment v1 does not support Float32".into(),
+        )),
         LogicalType::Fixed(len) => {
-            if len > u8::MAX as u16 {
-                255
+            // 4..=254 are reserved for fixed lengths 0..=250. 255 is treated as
+            // a clamped legacy sentinel for >=251 to avoid panics.
+            if len >= 251 {
+                Ok(255)
             } else {
-                4 + (len as u8)
+                Ok(4 + (len as u8))
             }
         }
     }
@@ -237,7 +258,8 @@ fn byte_to_logical(byte: u8) -> Result<LogicalType> {
         1 => Ok(LogicalType::Float64),
         2 => Ok(LogicalType::Bool),
         3 => Ok(LogicalType::Binary),
-        b if b >= 4 && b != 255 => Ok(LogicalType::Fixed((b - 4) as u16)),
+        255 => Ok(LogicalType::Fixed(251)),
+        b if b >= 4 => Ok(LogicalType::Fixed((b - 4) as u16)),
         _ => Err(ColumnarError::InvalidFormat("unknown logical type".into())),
     }
 }
@@ -279,6 +301,7 @@ fn byte_to_compression(byte: u8) -> Result<Compression> {
 fn column_len(column: &Column) -> usize {
     match column {
         Column::Int64(v) => v.len(),
+        Column::Float32(v) => v.len(),
         Column::Float64(v) => v.len(),
         Column::Bool(v) => v.len(),
         Column::Binary(v) => v.len(),
@@ -289,6 +312,7 @@ fn column_len(column: &Column) -> usize {
 fn slice_column(column: &Column, start: usize, len: usize) -> Result<Column> {
     match column {
         Column::Int64(v) => Ok(Column::Int64(v[start..start + len].to_vec())),
+        Column::Float32(v) => Ok(Column::Float32(v[start..start + len].to_vec())),
         Column::Float64(v) => Ok(Column::Float64(v[start..start + len].to_vec())),
         Column::Bool(v) => Ok(Column::Bool(v[start..start + len].to_vec())),
         Column::Binary(v) => Ok(Column::Binary(v[start..start + len].to_vec())),
@@ -389,6 +413,52 @@ mod tests {
         let mut reader = SegmentReader::open(&path).unwrap();
         let err = reader.iter().next().unwrap().unwrap_err();
         assert!(matches!(err, ColumnarError::CorruptedSegment { .. }));
+    }
+
+    #[test]
+    fn logical_type_byte_mapping_legacy_safe() {
+        // Fixed length below the boundary maps into 4..=254.
+        assert_eq!(logical_to_byte(LogicalType::Fixed(250)).unwrap(), 254);
+        assert_eq!(byte_to_logical(254).unwrap(), LogicalType::Fixed(250));
+
+        // Legacy sentinel 255 is kept for fixed >=251, decoded as clamped 251.
+        assert_eq!(logical_to_byte(LogicalType::Fixed(251)).unwrap(), 255);
+        assert_eq!(byte_to_logical(255).unwrap(), LogicalType::Fixed(251));
+    }
+
+    #[test]
+    fn float32_is_rejected_in_v1_segment() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("seg_f32.alx");
+        let meta = SegmentMeta {
+            logical_type: LogicalType::Float32,
+            encoding: Encoding::Plain,
+            compression: Compression::None,
+            chunk_rows: 2,
+            chunk_checksum: false,
+        };
+        let col = Column::Float32(vec![1.0, 2.0]);
+        let err = write_segment(&path, &col, &meta).unwrap_err();
+        assert!(matches!(err, ColumnarError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn fixed_length_over_250_is_rejected_in_v1_segment() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("seg_fixed_over.alx");
+        let meta = SegmentMeta {
+            logical_type: LogicalType::Fixed(300),
+            encoding: Encoding::Plain,
+            compression: Compression::None,
+            chunk_rows: 2,
+            chunk_checksum: false,
+        };
+        let col = Column::Fixed {
+            len: 300,
+            values: vec![vec![0u8; 300]],
+        };
+        let err = write_segment(&path, &col, &meta).unwrap_err();
+        assert!(matches!(err, ColumnarError::InvalidFormat(_)));
     }
 
     #[cfg(feature = "compression-lz4")]

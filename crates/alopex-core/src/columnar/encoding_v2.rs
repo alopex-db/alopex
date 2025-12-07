@@ -690,6 +690,10 @@ pub struct ByteStreamSplitEncoder;
 impl Encoder for ByteStreamSplitEncoder {
     fn encode(&self, data: &Column, null_bitmap: Option<&Bitmap>) -> Result<Vec<u8>> {
         let (bytes_per_value, raw_bytes): (usize, Vec<u8>) = match data {
+            Column::Float32(values) => {
+                let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+                (4, bytes)
+            }
             Column::Float64(values) => {
                 let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
                 (8, bytes)
@@ -700,7 +704,7 @@ impl Encoder for ByteStreamSplitEncoder {
             }
             _ => {
                 return Err(ColumnarError::InvalidFormat(
-                    "ByteStreamSplit requires Float64 or Int64".into(),
+                    "ByteStreamSplit requires Float32, Float64, or Int64".into(),
                 ))
             }
         };
@@ -765,6 +769,7 @@ impl Decoder for ByteStreamSplitDecoder {
 
         if count == 0 {
             return match logical_type {
+                LogicalType::Float32 => Ok((Column::Float32(vec![]), bitmap)),
                 LogicalType::Float64 => Ok((Column::Float64(vec![]), bitmap)),
                 LogicalType::Int64 => Ok((Column::Int64(vec![]), bitmap)),
                 _ => Err(ColumnarError::InvalidFormat(
@@ -790,6 +795,13 @@ impl Decoder for ByteStreamSplitDecoder {
         }
 
         match logical_type {
+            LogicalType::Float32 => {
+                let values: Vec<f32> = raw_bytes
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+                    .collect();
+                Ok((Column::Float32(values), bitmap))
+            }
             LogicalType::Float64 => {
                 let values: Vec<f64> = raw_bytes
                     .chunks_exact(8)
@@ -805,7 +817,7 @@ impl Decoder for ByteStreamSplitDecoder {
                 Ok((Column::Int64(values), bitmap))
             }
             _ => Err(ColumnarError::InvalidFormat(
-                "ByteStreamSplit requires Float64 or Int64".into(),
+                "ByteStreamSplit requires Float32, Float64, or Int64".into(),
             )),
         }
     }
@@ -1674,6 +1686,7 @@ pub struct EncodingHints {
 pub fn select_encoding(logical_type: LogicalType, hints: &EncodingHints) -> EncodingV2 {
     match logical_type {
         LogicalType::Int64 => select_int_encoding(hints),
+        LogicalType::Float32 => EncodingV2::ByteStreamSplit,
         LogicalType::Float64 => EncodingV2::ByteStreamSplit,
         LogicalType::Bool => select_bool_encoding(hints),
         LogicalType::Binary => select_binary_encoding(hints),
@@ -1808,6 +1821,12 @@ impl Encoder for PlainEncoder {
                     buf.extend_from_slice(&v.to_le_bytes());
                 }
             }
+            Column::Float32(values) => {
+                buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
+                for v in values {
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
+            }
             Column::Float64(values) => {
                 buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
                 for v in values {
@@ -1887,6 +1906,19 @@ impl Decoder for PlainDecoder {
                     pos += 8;
                 }
                 Column::Int64(values)
+            }
+            LogicalType::Float32 => {
+                let mut values = Vec::with_capacity(count);
+                for _ in 0..count {
+                    if pos + 4 > data.len() {
+                        return Err(ColumnarError::InvalidFormat(
+                            "plain float32 truncated".into(),
+                        ));
+                    }
+                    values.push(f32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()));
+                    pos += 4;
+                }
+                Column::Float32(values)
             }
             LogicalType::Float64 => {
                 let mut values = Vec::with_capacity(count);
@@ -2106,6 +2138,63 @@ mod tests {
     }
 
     #[test]
+    fn test_byte_stream_split_f32_roundtrip() {
+        let values = vec![1.0f32, -0.5, 3.25, 0.0, std::f32::consts::PI];
+        let col = Column::Float32(values.clone());
+
+        let encoder = ByteStreamSplitEncoder;
+        let encoded = encoder.encode(&col, None).unwrap();
+
+        let decoder = ByteStreamSplitDecoder;
+        let (decoded, bitmap) = decoder
+            .decode(&encoded, values.len(), LogicalType::Float32)
+            .unwrap();
+
+        assert!(bitmap.is_none());
+        if let Column::Float32(decoded_values) = decoded {
+            assert_eq!(decoded_values, values);
+        } else {
+            panic!("Expected Float32 column");
+        }
+    }
+
+    #[cfg(feature = "compression-lz4")]
+    #[test]
+    fn test_byte_stream_split_f32_compression_ratio() {
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut values = Vec::with_capacity(100_000);
+        while values.len() < 100_000 {
+            // Box-Muller で正規分布（平均0, 分散1）を生成
+            let u1: f32 = rng.gen::<f32>().max(std::f32::MIN_POSITIVE);
+            let u2: f32 = rng.gen::<f32>();
+            let r = (-2.0 * u1.ln()).sqrt();
+            let theta = 2.0 * std::f32::consts::PI * u2;
+            values.push(r * theta.cos());
+            if values.len() < 100_000 {
+                values.push(r * theta.sin());
+            }
+        }
+
+        let col = Column::Float32(values.clone());
+        let encoder = ByteStreamSplitEncoder;
+        let encoded = encoder.encode(&col, None).unwrap();
+
+        let compressed =
+            lz4::block::compress(&encoded, None, false).expect("lz4 compression should succeed");
+
+        let raw_len = (values.len() * std::mem::size_of::<f32>()) as f32;
+        let ratio = compressed.len() as f32 / raw_len;
+
+        assert!(
+            ratio < 0.7,
+            "expected >=30% reduction, got ratio {:.3}",
+            ratio
+        );
+    }
+
+    #[test]
     fn test_incremental_string_sorted() {
         let values: Vec<Vec<u8>> = vec![
             b"apple".to_vec(),
@@ -2252,6 +2341,10 @@ mod tests {
         let hints = EncodingHints::default();
         assert_eq!(
             select_encoding(LogicalType::Float64, &hints),
+            EncodingV2::ByteStreamSplit
+        );
+        assert_eq!(
+            select_encoding(LogicalType::Float32, &hints),
             EncodingV2::ByteStreamSplit
         );
     }

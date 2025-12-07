@@ -57,6 +57,19 @@ pub enum Error {
         metric: String,
     },
 
+    /// A vector value is invalid for the requested operation.
+    #[error("invalid vector at index {index}: {reason}")]
+    InvalidVector {
+        /// Zero-based index of the offending vector.
+        index: usize,
+        /// Reason for invalidation.
+        reason: String,
+    },
+
+    /// A filter expression is malformed or unsupported.
+    #[error("invalid filter: {0}")]
+    InvalidFilter(String),
+
     /// Memory usage exceeded configured limit.
     #[error("memory limit exceeded: limit={limit}, requested={requested}")]
     MemoryLimitExceeded {
