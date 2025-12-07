@@ -467,4 +467,52 @@ mod tests {
             assert!((s2 - k2).abs() < 1e-6);
         }
     }
+
+    fn assert_same_f32(a: f32, b: f32) {
+        if a.is_nan() && b.is_nan() {
+            return;
+        }
+        if a.is_infinite() && b.is_infinite() {
+            assert_eq!(a.is_sign_positive(), b.is_sign_positive());
+            return;
+        }
+        assert!((a - b).abs() < 1e-5, "a={a}, b={b}");
+    }
+
+    #[test]
+    fn kernel_handles_nan_and_inf_like_scalar() {
+        let kernel = select_kernel();
+        let scalar = ScalarKernel::default();
+        let cases = vec![
+            (
+                Metric::Cosine,
+                vec![f32::NAN, 1.0, 2.0],
+                vec![1.0, 2.0, 3.0],
+            ),
+            (
+                Metric::InnerProduct,
+                vec![f32::INFINITY, 1.0],
+                vec![1.0, 2.0],
+            ),
+            (
+                Metric::L2,
+                vec![f32::INFINITY, 0.0],
+                vec![1.0, 0.0],
+            ),
+        ];
+
+        for (metric, q, v) in cases {
+            let s = match metric {
+                Metric::Cosine => scalar.cosine(&q, &v),
+                Metric::L2 => scalar.l2(&q, &v),
+                Metric::InnerProduct => scalar.inner_product(&q, &v),
+            };
+            let k = match metric {
+                Metric::Cosine => kernel.cosine(&q, &v),
+                Metric::L2 => kernel.l2(&q, &v),
+                Metric::InnerProduct => kernel.inner_product(&q, &v),
+            };
+            assert_same_f32(s, k);
+        }
+    }
 }

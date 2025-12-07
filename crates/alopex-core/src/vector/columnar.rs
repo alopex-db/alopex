@@ -1273,6 +1273,33 @@ mod tests {
         assert_eq!(results[0].columns, vec![ScalarValue::Int64(100)]);
     }
 
+    #[test]
+    fn vector_store_topk_is_deterministic_on_ties() {
+        let mut mgr = VectorStoreManager::new(VectorStoreConfig {
+            dimension: 2,
+            metric: Metric::InnerProduct,
+            segment_max_vectors: 3,
+            ..Default::default()
+        });
+        // All vectors have identical scores; ordering should fall back to row_id ascending.
+        let keys = vec![20, 10, 30];
+        let vecs = vec![vec![1.0, 0.0], vec![1.0, 0.0], vec![1.0, 0.0]];
+        block_on(mgr.append_batch(&keys, &vecs)).unwrap();
+
+        let params = VectorSearchParams {
+            query: vec![1.0, 0.0],
+            metric: Metric::InnerProduct,
+            top_k: 3,
+            projection: None,
+            filter_mask: None,
+        };
+        let (results, stats) = mgr.search_with_stats(params).unwrap();
+        assert_eq!(stats.rows_scanned, 3);
+        assert_eq!(results.len(), 3);
+        let row_ids: Vec<_> = results.iter().map(|r| r.row_id).collect();
+        assert_eq!(row_ids, vec![10, 20, 30]);
+    }
+
     fn block_on<F: Future>(fut: F) -> F::Output {
         struct Noop;
         impl Wake for Noop {
