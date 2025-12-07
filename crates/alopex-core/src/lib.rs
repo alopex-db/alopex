@@ -27,4 +27,5 @@ pub use storage::large_value::{
 pub use txn::TxnManager;
 pub use types::{Key, TxnId, TxnMode, Value};
 pub use vector::flat::{search_flat, ScoredItem};
+pub use vector::simd::{select_kernel, DistanceKernel, ScalarKernel};
 pub use vector::{score, validate_dimensions, Metric, VectorType};

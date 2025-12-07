@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use crate::{Error, Result};
 pub mod flat;
+pub mod simd;
 
 /// Supported similarity/distance metrics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
