@@ -515,4 +515,64 @@ mod tests {
             assert_same_f32(s, k);
         }
     }
+
+    #[test]
+    fn cosine_with_nan_matches_scalar() {
+        let kernel = select_kernel();
+        let scalar = ScalarKernel::default();
+        let q = [f32::NAN, 1.0, 2.0, 3.0];
+        let v = [1.0, 2.0, 3.0, 4.0];
+        let s = scalar.cosine(&q, &v);
+        let k = kernel.cosine(&q, &v);
+        assert_same_f32(s, k);
+    }
+
+    #[test]
+    fn l2_with_inf_matches_scalar() {
+        let kernel = select_kernel();
+        let scalar = ScalarKernel::default();
+        let q = [f32::INFINITY, 0.0, 1.0];
+        let v = [1.0, 0.0, 1.0];
+        let s = scalar.l2(&q, &v);
+        let k = kernel.l2(&q, &v);
+        assert_same_f32(s, k);
+    }
+
+    #[test]
+    fn inner_product_with_nan_matches_scalar() {
+        let kernel = select_kernel();
+        let scalar = ScalarKernel::default();
+        let q = [1.0, f32::NAN];
+        let v = [2.0, 3.0];
+        let s = scalar.inner_product(&q, &v);
+        let k = kernel.inner_product(&q, &v);
+        assert_same_f32(s, k);
+    }
+
+    #[test]
+    fn batch_score_propagates_nan_inf_like_scalar() {
+        let kernel = select_kernel();
+        let scalar = ScalarKernel::default();
+        let q = [1.0, f32::NAN];
+        let vectors = [2.0, 3.0, f32::INFINITY, 0.0];
+        let mut scores_kernel = [0.0f32; 2];
+        let mut scores_scalar = [0.0f32; 2];
+        kernel.batch_score(
+            Metric::InnerProduct,
+            &q,
+            &vectors,
+            2,
+            &mut scores_kernel,
+        );
+        scalar.batch_score(
+            Metric::InnerProduct,
+            &q,
+            &vectors,
+            2,
+            &mut scores_scalar,
+        );
+        for (a, b) in scores_scalar.iter().zip(scores_kernel.iter()) {
+            assert_same_f32(*a, *b);
+        }
+    }
 }
