@@ -8,6 +8,13 @@ pub mod columnar;
 pub mod flat;
 pub mod simd;
 
+// Re-export主要型。
+pub use columnar::{
+    key_layout as vector_key_layout, AppendResult, SearchStats, VectorSearchParams,
+    VectorSearchResult, VectorSegment, VectorStoreConfig, VectorStoreManager,
+};
+pub use simd::{select_kernel, DistanceKernel, ScalarKernel};
+
 /// Supported similarity/distance metrics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Metric {

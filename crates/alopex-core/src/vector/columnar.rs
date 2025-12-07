@@ -752,6 +752,13 @@ pub mod key_layout {
 }
 
 /// VectorStore の設定。
+///
+/// # Examples
+/// ```
+/// use alopex_core::vector::{VectorStoreConfig, Metric};
+/// let cfg = VectorStoreConfig { dimension: 128, metric: Metric::Cosine, ..Default::default() };
+/// assert_eq!(cfg.dimension, 128);
+/// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VectorStoreConfig {
     /// ベクトル次元。
@@ -845,6 +852,19 @@ impl VectorStoreManager {
     }
 
     /// ベクトルバッチを追加する。
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use alopex_core::vector::{VectorStoreManager, VectorStoreConfig};
+    /// # use alopex_core::Result;
+    /// # async fn demo() -> Result<()> {
+    /// let mut mgr = VectorStoreManager::new(VectorStoreConfig { dimension: 2, ..Default::default() });
+    /// let keys = vec![1, 2];
+    /// let vecs = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+    /// mgr.append_batch(&keys, &vecs).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn append_batch(&mut self, keys: &[i64], vectors: &[Vec<f32>]) -> Result<AppendResult> {
         if keys.len() != vectors.len() {
             return Err(Error::InvalidFormat("keys/vectors length mismatch".into()));
@@ -891,6 +911,10 @@ impl VectorStoreManager {
     }
 
     /// ベクトル検索。
+    ///
+    /// # Errors
+    /// - `DimensionMismatch`: クエリ次元が設定と異なる場合。
+    /// - `InvalidVector`: クエリに NaN/Inf が含まれる場合。
     pub fn search(&self, params: VectorSearchParams) -> Result<Vec<VectorSearchResult>> {
         let mut stats = SearchStats::default();
         let (results, _) = self.search_internal(params, &mut stats)?;
@@ -898,6 +922,8 @@ impl VectorStoreManager {
     }
 
     /// 統計付き検索。
+    ///
+    /// `search` と同じ結果に加え、走査/プルーニング件数を返す。
     pub fn search_with_stats(
         &self,
         params: VectorSearchParams,
