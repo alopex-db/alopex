@@ -7,3 +7,7 @@ license = "Apache-2.0"
 
 [dependencies]
 thiserror = "2.0"
+alopex-core = { path = "../alopex-core" }
+
+[dev-dependencies]
+proptest = "1.4"

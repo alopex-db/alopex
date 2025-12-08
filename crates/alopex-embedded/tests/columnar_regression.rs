@@ -28,9 +28,7 @@ fn columnar_projection_roundtrip_in_memory() {
     let db = Database::open_in_memory().unwrap();
     db.write_columnar_segment("t1", make_batch()).unwrap();
 
-    let batches = db
-        .read_columnar_segment("t1", 0, Some(&["val"]))
-        .unwrap();
+    let batches = db.read_columnar_segment("t1", 0, Some(&["val"])).unwrap();
     assert_eq!(batches.len(), 1);
     let batch = &batches[0];
     assert_eq!(batch.schema.columns.len(), 1);

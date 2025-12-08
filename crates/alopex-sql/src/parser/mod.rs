@@ -236,11 +236,11 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn consume_keyword(&mut self, keyword: crate::tokenizer::keyword::Keyword) -> bool {
-        if let Token::Word(Word { keyword: kw, .. }) = &self.peek().token {
-            if *kw == keyword {
-                self.advance();
-                return true;
-            }
+        if let Token::Word(Word { keyword: kw, .. }) = &self.peek().token
+            && *kw == keyword
+        {
+            self.advance();
+            return true;
         }
         false
     }
@@ -268,11 +268,11 @@ impl<'a> Parser<'a> {
         kw: crate::tokenizer::keyword::Keyword,
     ) -> Result<Span> {
         let tok = self.peek().clone();
-        if let Token::Word(Word { keyword, .. }) = tok.token {
-            if keyword == kw {
-                self.advance();
-                return Ok(tok.span);
-            }
+        if let Token::Word(Word { keyword, .. }) = tok.token
+            && keyword == kw
+        {
+            self.advance();
+            return Ok(tok.span);
         }
         Err(ParserError::ExpectedToken {
             line: tok.span.start.line,

@@ -9,8 +9,8 @@
 
 use std::convert::TryInto;
 
-use serde::{Deserialize, Serialize};
 use crate::columnar::error::{ColumnarError, Result};
+use serde::{Deserialize, Serialize};
 
 use super::encoding::{Column, LogicalType};
 
@@ -959,12 +959,11 @@ impl Decoder for ByteStreamSplitDecoder {
                                     "ByteStreamSplit stream length too large".into(),
                                 )
                             })?;
-                            lz4::block::decompress(payload, Some(orig_len_i32))
-                                .map_err(|_| {
-                                    ColumnarError::InvalidFormat(
-                                        "ByteStreamSplit stream decompress failed".into(),
-                                    )
-                                })?
+                            lz4::block::decompress(payload, Some(orig_len_i32)).map_err(|_| {
+                                ColumnarError::InvalidFormat(
+                                    "ByteStreamSplit stream decompress failed".into(),
+                                )
+                            })?
                         }
                         #[cfg(not(feature = "compression-lz4"))]
                         {
@@ -976,11 +975,13 @@ impl Decoder for ByteStreamSplitDecoder {
                     BYTE_STREAM_SPLIT_FLAG_ZSTD => {
                         #[cfg(feature = "compression-zstd")]
                         {
-                            zstd::stream::decode_all(std::io::Cursor::new(payload)).map_err(|_| {
-                                ColumnarError::InvalidFormat(
-                                    "ByteStreamSplit stream decompress failed".into(),
-                                )
-                            })?
+                            zstd::stream::decode_all(std::io::Cursor::new(payload)).map_err(
+                                |_| {
+                                    ColumnarError::InvalidFormat(
+                                        "ByteStreamSplit stream decompress failed".into(),
+                                    )
+                                },
+                            )?
                         }
                         #[cfg(not(feature = "compression-zstd"))]
                         {
@@ -2366,7 +2367,7 @@ mod tests {
 
     #[test]
     fn test_byte_stream_split_floats() {
-        let values = vec![1.5f64, 2.7, 3.14159, 4.0, 5.5];
+        let values = vec![1.5f64, 2.7, std::f64::consts::PI, 4.0, 5.5];
         let col = Column::Float64(values.clone());
 
         let encoder = ByteStreamSplitEncoder;
@@ -2422,13 +2423,15 @@ mod tests {
             let theta = 2.0 * std::f32::consts::PI * u2;
             values.push(r * theta.cos());
             if values.len() < 100_000 {
-            values.push(r * theta.sin());
+                values.push(r * theta.sin());
             }
         }
 
         let mut msb_counts = std::collections::HashMap::new();
         for v in &values {
-            *msb_counts.entry((v.to_bits() >> 24) as u8).or_insert(0usize) += 1;
+            *msb_counts
+                .entry((v.to_bits() >> 24) as u8)
+                .or_insert(0usize) += 1;
         }
         let mut top = msb_counts.into_iter().collect::<Vec<_>>();
         top.sort_by(|a, b| b.1.cmp(&a.1));
@@ -2447,8 +2450,8 @@ mod tests {
             encoded.len().saturating_sub(payload_offset)
         );
 
-        let compressed =
-            zstd::stream::encode_all(std::io::Cursor::new(&encoded), 3).expect("zstd compression should succeed");
+        let compressed = zstd::stream::encode_all(std::io::Cursor::new(&encoded), 3)
+            .expect("zstd compression should succeed");
         let t_dec_start = Instant::now();
         let decoder = ByteStreamSplitDecoder;
         let (decoded, _) = decoder
@@ -2536,7 +2539,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: false,
                 per_stream_lz4: false,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: false,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: false,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2551,7 +2556,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: false,
                 per_stream_lz4: false,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: false,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: false,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2566,7 +2573,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: false,
                 per_stream_lz4: false,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: false,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: false,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2581,7 +2590,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: false,
                 per_stream_lz4: false,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: false,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: false,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2596,7 +2607,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: false,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: false,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: false,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2611,7 +2624,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: false,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: false,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2626,7 +2641,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: false,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: false,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2641,7 +2658,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: false,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: false,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2656,7 +2675,9 @@ mod tests {
                 delta_xor: true,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: false,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: false,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2671,7 +2692,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2686,7 +2709,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: false,
-                per_stream_zstd: true,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: true,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2701,7 +2726,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: false,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2716,7 +2743,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: false,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: false,
                 exponent_split: true,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2731,7 +2760,9 @@ mod tests {
                 delta_xor: true,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: false,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: false,
                 exponent_split: true,
                 exponent_rle: false,
                 exponent_delta: true,
@@ -2746,7 +2777,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: true,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2761,7 +2794,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: false,
-                per_stream_zstd: true,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: true,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: true,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2776,7 +2811,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: false,
-                per_stream_zstd: false,                outer_zstd: true,                bitshuffle: true,
+                per_stream_zstd: false,
+                outer_zstd: true,
+                bitshuffle: true,
                 exponent_split: true,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2791,7 +2828,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: true,
                 exponent_rle: true,
                 exponent_delta: false,
@@ -2806,7 +2845,9 @@ mod tests {
                 delta_xor: true,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: false,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: false,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2821,7 +2862,9 @@ mod tests {
                 delta_xor: true,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2836,7 +2879,9 @@ mod tests {
                 delta_xor: true,
                 sign_split: true,
                 per_stream_lz4: false,
-                per_stream_zstd: true,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: true,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2851,7 +2896,9 @@ mod tests {
                 delta_xor: true,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: true,
                 exponent_rle: false,
                 exponent_delta: true,
@@ -2866,7 +2913,9 @@ mod tests {
                 delta_xor: true,
                 sign_split: true,
                 per_stream_lz4: false,
-                per_stream_zstd: true,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: true,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: true,
                 exponent_rle: false,
                 exponent_delta: true,
@@ -2881,7 +2930,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2896,7 +2947,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: false,
-                per_stream_zstd: true,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: true,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2911,7 +2964,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2926,7 +2981,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: true,
-                per_stream_zstd: false,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: false,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: true,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2941,7 +2998,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: false,
-                per_stream_zstd: true,                outer_zstd: false,                bitshuffle: true,
+                per_stream_zstd: true,
+                outer_zstd: false,
+                bitshuffle: true,
                 exponent_split: true,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2956,7 +3015,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: false,
-                per_stream_zstd: true,                outer_zstd: false,                bitshuffle: false,
+                per_stream_zstd: true,
+                outer_zstd: false,
+                bitshuffle: false,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2971,7 +3032,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: false,
-                per_stream_zstd: false,                outer_zstd: true,                bitshuffle: false,
+                per_stream_zstd: false,
+                outer_zstd: true,
+                bitshuffle: false,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -2986,7 +3049,9 @@ mod tests {
                 delta_xor: false,
                 sign_split: true,
                 per_stream_lz4: false,
-                per_stream_zstd: true,                outer_zstd: false,                bitshuffle: false,
+                per_stream_zstd: true,
+                outer_zstd: false,
+                bitshuffle: false,
                 exponent_split: false,
                 exponent_rle: false,
                 exponent_delta: false,
@@ -3142,7 +3207,11 @@ mod tests {
             }
         }
 
-        fn encode_variant(values: &[f32], cfg: LayoutConfig, timings: &mut Timings) -> VariantEncoded {
+        fn encode_variant(
+            values: &[f32],
+            cfg: LayoutConfig,
+            timings: &mut Timings,
+        ) -> VariantEncoded {
             let start = std::time::Instant::now();
             let mut sign_bytes = if cfg.sign_split {
                 vec![0u8; values.len().div_ceil(8)]
@@ -3172,7 +3241,11 @@ mod tests {
                     let diff = bits ^ pred;
                     let lz_bytes = (diff.leading_zeros() / 8) as u8;
                     let lz_clamped = lz_bytes.min(3); // 0..3 -> sig_len 1..4, diff==0 handled by lz=4 equivalent
-                    let sig_len = if diff == 0 { 0 } else { 4 - lz_clamped as usize };
+                    let sig_len = if diff == 0 {
+                        0
+                    } else {
+                        4 - lz_clamped as usize
+                    };
                     len_stream.push(sig_len as u8);
                     if sig_len > 0 {
                         let be = diff.to_be_bytes();
@@ -3285,10 +3358,7 @@ mod tests {
 
                 let mut offset = 0;
                 while offset < num_values {
-                    let block_len = cfg
-                        .block
-                        .unwrap_or(num_values)
-                        .min(num_values - offset);
+                    let block_len = cfg.block.unwrap_or(num_values).min(num_values - offset);
                     for (stream_idx, byte_idx) in order.iter().enumerate() {
                         let stream = &mut streams[stream_idx];
                         let start = offset * bytes_per_value + byte_idx;
@@ -3319,11 +3389,8 @@ mod tests {
                 if cfg.per_stream_zstd {
                     #[cfg(feature = "compression-zstd")]
                     {
-                        let compressed = zstd::stream::encode_all(
-                            std::io::Cursor::new(stream),
-                            9,
-                        )
-                        .unwrap_or_else(|_| stream.clone());
+                        let compressed = zstd::stream::encode_all(std::io::Cursor::new(stream), 9)
+                            .unwrap_or_else(|_| stream.clone());
                         if compressed.len() < stream.len() {
                             payload_concat.extend_from_slice(&compressed);
                             continue;
@@ -3353,7 +3420,12 @@ mod tests {
             }
         }
 
-        fn decode_variant(encoded: &VariantEncoded, cfg: LayoutConfig, value_count: usize, timings: &mut Timings) -> Vec<f32> {
+        fn decode_variant(
+            encoded: &VariantEncoded,
+            cfg: LayoutConfig,
+            value_count: usize,
+            timings: &mut Timings,
+        ) -> Vec<f32> {
             let start = std::time::Instant::now();
             let bytes_per_value = 4;
 
@@ -3379,14 +3451,14 @@ mod tests {
                     let mut bits = diff ^ pred;
                     prev2 = prev1;
                     prev1 = bits;
-                if cfg.sign_split && (encoded.sign_bytes[idx / 8] >> (idx % 8)) & 1 != 0 {
-                    bits |= 0x8000_0000;
+                    if cfg.sign_split && (encoded.sign_bytes[idx / 8] >> (idx % 8)) & 1 != 0 {
+                        bits |= 0x8000_0000;
+                    }
+                    values.push(f32::from_bits(bits));
                 }
-                values.push(f32::from_bits(bits));
-            }
-            timings.decode_ms += start.elapsed().as_secs_f64() * 1e3;
-            return values;
-        } else if cfg.exponent_split {
+                timings.decode_ms += start.elapsed().as_secs_f64() * 1e3;
+                return values;
+            } else if cfg.exponent_split {
                 fn bitunshuffle_u32(data: &[u8], count: usize) -> Vec<u32> {
                     let bytes_per_plane = count.div_ceil(8);
                     let expected = bytes_per_plane * 32;
@@ -3428,19 +3500,17 @@ mod tests {
                     let mut values = Vec::with_capacity(value_count);
                     for idx in 0..value_count {
                         let mut bits = mant_values[idx] | ((exp_stream[idx] as u32) << 23);
-                    if cfg.sign_split
-                        && (encoded.sign_bytes[idx / 8] >> (idx % 8)) & 1 != 0
-                    {
-                        bits |= 0x8000_0000;
+                        if cfg.sign_split && (encoded.sign_bytes[idx / 8] >> (idx % 8)) & 1 != 0 {
+                            bits |= 0x8000_0000;
+                        }
+                        values.push(f32::from_bits(bits));
                     }
-                    values.push(f32::from_bits(bits));
-                }
-                timings.decode_ms += start.elapsed().as_secs_f64() * 1e3;
-                return values;
-            } else {
-                let mant_stream = &encoded.streams[1];
-                assert_eq!(mant_stream.len(), value_count * 3);
-                let mut mant_values = Vec::with_capacity(value_count);
+                    timings.decode_ms += start.elapsed().as_secs_f64() * 1e3;
+                    return values;
+                } else {
+                    let mant_stream = &encoded.streams[1];
+                    assert_eq!(mant_stream.len(), value_count * 3);
+                    let mut mant_values = Vec::with_capacity(value_count);
                     for idx in 0..value_count {
                         let start = idx * 3;
                         let mut buf = [0u8; 4];
@@ -3454,17 +3524,15 @@ mod tests {
                     let mut values = Vec::with_capacity(value_count);
                     for idx in 0..value_count {
                         let mut bits = mant_values[idx] | ((exp_stream[idx] as u32) << 23);
-                    if cfg.sign_split
-                        && (encoded.sign_bytes[idx / 8] >> (idx % 8)) & 1 != 0
-                    {
-                        bits |= 0x8000_0000;
+                        if cfg.sign_split && (encoded.sign_bytes[idx / 8] >> (idx % 8)) & 1 != 0 {
+                            bits |= 0x8000_0000;
+                        }
+                        values.push(f32::from_bits(bits));
                     }
-                    values.push(f32::from_bits(bits));
+                    timings.decode_ms += start.elapsed().as_secs_f64() * 1e3;
+                    return values;
                 }
-                timings.decode_ms += start.elapsed().as_secs_f64() * 1e3;
-                return values;
-            }
-        } else if cfg.bitshuffle {
+            } else if cfg.bitshuffle {
                 let data = &encoded.streams[0];
                 let mut bits_vec = if let Some(block) = cfg.block_bitshuffle {
                     bitunshuffle_block_u32(data, value_count, block)
@@ -3522,10 +3590,7 @@ mod tests {
             let mut raw_bytes = vec![0u8; value_count * bytes_per_value];
             let mut offset = 0;
             while offset < value_count {
-                let block_len = cfg
-                    .block
-                    .unwrap_or(value_count)
-                    .min(value_count - offset);
+                let block_len = cfg.block.unwrap_or(value_count).min(value_count - offset);
                 for (stream_idx, byte_idx) in order.iter().enumerate() {
                     let stream = &streams[stream_idx];
                     let start = offset;
@@ -3568,20 +3633,16 @@ mod tests {
 
             let encoded_len = encoded.payload_concat.len() as f32;
             #[cfg(feature = "compression-lz4")]
-            let compressed_len_outer =
-                lz4::block::compress(&encoded.payload_concat, None, false)
-                    .expect("lz4 compress")
-                    .len()
-                    as f32;
+            let compressed_len_outer = lz4::block::compress(&encoded.payload_concat, None, false)
+                .expect("lz4 compress")
+                .len() as f32;
             #[cfg(not(feature = "compression-lz4"))]
             let compressed_len_outer = 0f32;
             #[cfg(feature = "compression-zstd")]
-            let compressed_len_outer_zstd = zstd::stream::encode_all(
-                std::io::Cursor::new(&encoded.payload_concat),
-                3,
-            )
-            .expect("zstd compress")
-            .len() as f32;
+            let compressed_len_outer_zstd =
+                zstd::stream::encode_all(std::io::Cursor::new(&encoded.payload_concat), 3)
+                    .expect("zstd compress")
+                    .len() as f32;
             #[cfg(not(feature = "compression-zstd"))]
             let compressed_len_outer_zstd = 0f32;
             let compressed_len_per_stream: usize = if cfg.per_stream_lz4 {
@@ -3729,7 +3790,8 @@ mod tests {
                         }
                     }
                     2 => {
-                        let zs = zstd::stream::encode_all(std::io::Cursor::new(&stream), 15).unwrap();
+                        let zs =
+                            zstd::stream::encode_all(std::io::Cursor::new(&stream), 15).unwrap();
                         if zs.len() < stream.len() {
                             (2u8, zs)
                         } else {
@@ -3797,9 +3859,7 @@ mod tests {
         }
 
         let decoder = ByteStreamSplitDecoder;
-        let (decoded, bitmap) = decoder
-            .decode(&buf, count, LogicalType::Float32)
-            .unwrap();
+        let (decoded, bitmap) = decoder.decode(&buf, count, LogicalType::Float32).unwrap();
 
         assert!(bitmap.is_none());
         if let Column::Float32(decoded_values) = decoded {

@@ -658,7 +658,7 @@ mod tests {
     fn test_scalar_value_is_null() {
         assert!(ScalarValue::Null.is_null());
         assert!(!ScalarValue::Int64(42).is_null());
-        assert!(!ScalarValue::Float64(3.14).is_null());
+        assert!(!ScalarValue::Float64(std::f64::consts::PI).is_null());
         assert!(!ScalarValue::Bool(true).is_null());
         assert!(!ScalarValue::Binary(vec![1, 2, 3]).is_null());
     }

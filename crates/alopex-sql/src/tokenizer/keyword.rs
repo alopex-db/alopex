@@ -87,6 +87,7 @@ pub enum Keyword {
 
 impl Keyword {
     /// Case-insensitive lookup.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(input: &str) -> Self {
         match input.to_ascii_uppercase().as_str() {
             "SELECT" => Self::SELECT,

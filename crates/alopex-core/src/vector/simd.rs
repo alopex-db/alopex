@@ -494,11 +494,7 @@ mod tests {
                 vec![f32::INFINITY, 1.0],
                 vec![1.0, 2.0],
             ),
-            (
-                Metric::L2,
-                vec![f32::INFINITY, 0.0],
-                vec![1.0, 0.0],
-            ),
+            (Metric::L2, vec![f32::INFINITY, 0.0], vec![1.0, 0.0]),
         ];
 
         for (metric, q, v) in cases {
@@ -557,20 +553,8 @@ mod tests {
         let vectors = [2.0, 3.0, f32::INFINITY, 0.0];
         let mut scores_kernel = [0.0f32; 2];
         let mut scores_scalar = [0.0f32; 2];
-        kernel.batch_score(
-            Metric::InnerProduct,
-            &q,
-            &vectors,
-            2,
-            &mut scores_kernel,
-        );
-        scalar.batch_score(
-            Metric::InnerProduct,
-            &q,
-            &vectors,
-            2,
-            &mut scores_scalar,
-        );
+        kernel.batch_score(Metric::InnerProduct, &q, &vectors, 2, &mut scores_kernel);
+        scalar.batch_score(Metric::InnerProduct, &q, &vectors, 2, &mut scores_scalar);
         for (a, b) in scores_scalar.iter().zip(scores_kernel.iter()) {
             assert_same_f32(*a, *b);
         }

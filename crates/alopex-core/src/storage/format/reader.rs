@@ -184,15 +184,15 @@ impl AlopexFileReader {
     }
 }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    impl FileReader for AlopexFileReader {
-        fn open(source: FileSource) -> Result<Self, FormatError> {
-            let FileSource::Path(path) = source;
-            let mmap = Self::map_file(&path)?;
-            let footer = Self::read_footer(&mmap)?;
-            let section_index = Self::read_section_index(&mmap, &footer)?;
-            let header = Self::read_header(&mmap)?;
-            Ok(Self {
+#[cfg(not(target_arch = "wasm32"))]
+impl FileReader for AlopexFileReader {
+    fn open(source: FileSource) -> Result<Self, FormatError> {
+        let FileSource::Path(path) = source;
+        let mmap = Self::map_file(&path)?;
+        let footer = Self::read_footer(&mmap)?;
+        let section_index = Self::read_section_index(&mmap, &footer)?;
+        let header = Self::read_header(&mmap)?;
+        Ok(Self {
             mmap,
             header,
             footer,

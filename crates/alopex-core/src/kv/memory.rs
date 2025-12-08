@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound::{Excluded, Included};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::warn;
 
 /// メモリ使用量の統計（バイト単位）。
@@ -551,108 +551,48 @@ impl<'a> MemoryTransaction<'a> {
         Ok(())
     }
 
-    fn scan_range_internal(&mut self, start: &[u8], end: &[u8]) -> Result<Vec<(Key, Value)>> {
-        self.ensure_active()?;
-
-        let mut merged: BTreeMap<Key, (Option<Value>, Option<u64>)> = BTreeMap::new();
+    fn scan_range_internal(&mut self, start: &[u8], end: &[u8]) -> MergedScanIter<'_> {
         let start_vec = start.to_vec();
         let end_vec = end.to_vec();
-
-        {
-            let data = self.manager.state.data.read().unwrap();
-            for (key, (value, version)) in data.range((Included(start_vec.clone()), Excluded(end_vec.clone()))) {
-                if *version > self.start_version {
-                    continue;
-                }
-                merged.insert(key.clone(), (Some(value.clone()), Some(*version)));
-            }
-        }
-
-        for (key, write) in self
+        let data_guard = self.manager.state.data.read().unwrap();
+        let data_ptr: *const BTreeMap<Key, VersionedValue> = &*data_guard;
+        let data_iter = unsafe {
+            // Safety: data_guard keeps the map alive for the lifetime of the iterator.
+            (&*data_ptr).range((Included(start_vec.clone()), Excluded(end_vec.clone())))
+        };
+        let write_iter = self
             .writes
-            .range((Included(start_vec), Excluded(end_vec)))
-        {
-            match write {
-                Some(v) => {
-                    if let Some((val, _)) = merged.get_mut(key) {
-                        *val = Some(v.clone());
-                    } else {
-                        merged.insert(key.clone(), (Some(v.clone()), None));
-                    }
-                }
-                None => {
-                    if let Some((val, _)) = merged.get_mut(key) {
-                        *val = None;
-                    } else {
-                        merged.insert(key.clone(), (None, None));
-                    }
-                }
-            }
-        }
+            .range((Included(start_vec.clone()), Excluded(end_vec.clone())));
 
-        for (key, (_, maybe_version)) in merged.iter() {
-            if let Some(version) = maybe_version {
-                self.read_set.insert(key.clone(), *version);
-            }
-        }
-
-        Ok(merged
-            .into_iter()
-            .filter_map(|(k, (value, _))| value.map(|v| (k, v)))
-            .collect())
+        MergedScanIter::new(
+            data_guard,
+            data_iter,
+            write_iter,
+            None,
+            Some(end_vec),
+            self.start_version,
+            &mut self.read_set,
+        )
     }
 
-    fn scan_prefix_internal(&mut self, prefix: &[u8]) -> Result<Vec<(Key, Value)>> {
-        self.ensure_active()?;
-
-        let mut merged: BTreeMap<Key, (Option<Value>, Option<u64>)> = BTreeMap::new();
+    fn scan_prefix_internal(&mut self, prefix: &[u8]) -> MergedScanIter<'_> {
         let prefix_vec = prefix.to_vec();
-
-        {
-            let data = self.manager.state.data.read().unwrap();
-            for (key, (value, version)) in data.range(prefix_vec.clone()..) {
-                if !key.starts_with(&prefix_vec) {
-                    break;
-                }
-                if *version > self.start_version {
-                    continue;
-                }
-                merged.insert(key.clone(), (Some(value.clone()), Some(*version)));
-            }
-        }
-
-        for (key, write) in self.writes.range(prefix_vec.clone()..) {
-            if !key.starts_with(&prefix_vec) {
-                break;
-            }
-            match write {
-                Some(v) => {
-                    if let Some((val, _)) = merged.get_mut(key) {
-                        *val = Some(v.clone());
-                    } else {
-                        merged.insert(key.clone(), (Some(v.clone()), None));
-                    }
-                }
-                None => {
-                    if let Some((val, _)) = merged.get_mut(key) {
-                        *val = None;
-                    } else {
-                        merged.insert(key.clone(), (None, None));
-                    }
-                }
-            }
-        }
-
-        for (key, (_, maybe_version)) in merged.iter() {
-            if let Some(version) = maybe_version {
-                self.read_set.insert(key.clone(), *version);
-            }
-        }
-
-        Ok(merged
-            .into_iter()
-            .filter_map(|(k, (value, _))| value.map(|v| (k, v)))
-            .collect())
+        let data_guard = self.manager.state.data.read().unwrap();
+        let data_ptr: *const BTreeMap<Key, VersionedValue> = &*data_guard;
+        let data_iter = unsafe {
+            // Safety: data_guard keeps the map alive for the lifetime of the iterator.
+            (&*data_ptr).range(prefix_vec.clone()..)
+        };
+        let write_iter = self.writes.range(prefix_vec.clone()..);
+        MergedScanIter::new(
+            data_guard,
+            data_iter,
+            write_iter,
+            Some(prefix_vec),
+            None,
+            self.start_version,
+            &mut self.read_set,
+        )
     }
 }
 
@@ -720,8 +660,11 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
         &mut self,
         prefix: &[u8],
     ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
-        let items = self.scan_prefix_internal(prefix)?;
-        Ok(Box::new(items.into_iter()))
+        self.ensure_active()?;
+        let iter = self
+            .scan_prefix_internal(prefix)
+            .filter_map(|(k, v)| v.map(|val| (k, val)));
+        Ok(Box::new(iter))
     }
 
     fn scan_range(
@@ -729,8 +672,135 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
         start: &[u8],
         end: &[u8],
     ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
-        let items = self.scan_range_internal(start, end)?;
-        Ok(Box::new(items.into_iter()))
+        self.ensure_active()?;
+        let iter = self
+            .scan_range_internal(start, end)
+            .filter_map(|(k, v)| v.map(|val| (k, val)));
+        Ok(Box::new(iter))
+    }
+}
+
+/// Lazy merge iterator that overlays in-flight writes onto a snapshot guard.
+struct MergedScanIter<'a> {
+    #[allow(dead_code)]
+    data_guard: RwLockReadGuard<'a, BTreeMap<Key, VersionedValue>>,
+    data_iter: std::collections::btree_map::Range<'a, Key, VersionedValue>,
+    write_iter: std::collections::btree_map::Range<'a, Key, Option<Value>>,
+    data_peek: Option<(Key, (Value, u64))>,
+    write_peek: Option<(Key, Option<Value>)>,
+    prefix: Option<Vec<u8>>,
+    end: Option<Key>,
+    start_version: u64,
+    read_set: &'a mut HashMap<Key, u64>,
+}
+
+impl<'a> MergedScanIter<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        data_guard: std::sync::RwLockReadGuard<'a, BTreeMap<Key, VersionedValue>>,
+        data_iter: std::collections::btree_map::Range<'a, Key, VersionedValue>,
+        write_iter: std::collections::btree_map::Range<'a, Key, Option<Value>>,
+        prefix: Option<Vec<u8>>,
+        end: Option<Key>,
+        start_version: u64,
+        read_set: &'a mut HashMap<Key, u64>,
+    ) -> Self {
+        let mut iter = Self {
+            data_guard,
+            data_iter,
+            write_iter,
+            data_peek: None,
+            write_peek: None,
+            prefix,
+            end,
+            start_version,
+            read_set,
+        };
+        iter.advance_data();
+        iter.advance_write();
+        iter
+    }
+
+    fn advance_data(&mut self) {
+        self.data_peek = None;
+        while let Some((k, (v, ver))) = self.data_iter.next().map(|(k, v)| (k.clone(), v.clone())) {
+            if let Some(end) = &self.end {
+                if k >= *end {
+                    return;
+                }
+            }
+            if let Some(prefix) = &self.prefix {
+                if !k.starts_with(prefix) {
+                    return;
+                }
+            }
+            if ver > self.start_version {
+                continue;
+            }
+            self.data_peek = Some((k, (v, ver)));
+            return;
+        }
+    }
+
+    fn advance_write(&mut self) {
+        self.write_peek = None;
+        while let Some((k, v)) = self.write_iter.next().map(|(k, v)| (k.clone(), v.clone())) {
+            if let Some(end) = &self.end {
+                if k >= *end {
+                    return;
+                }
+            }
+            if let Some(prefix) = &self.prefix {
+                if !k.starts_with(prefix) {
+                    return;
+                }
+            }
+            self.write_peek = Some((k, v));
+            return;
+        }
+    }
+}
+
+impl<'a> Iterator for MergedScanIter<'a> {
+    type Item = (Key, Option<Value>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let data_key = self.data_peek.as_ref().map(|(k, _)| k.clone());
+        let write_key = self.write_peek.as_ref().map(|(k, _)| k.clone());
+
+        match (data_key, write_key) {
+            (Some(dk), Some(wk)) => {
+                if dk == wk {
+                    let (_, (_, ver)) = self.data_peek.take().unwrap();
+                    let (_, write_val) = self.write_peek.take().unwrap();
+                    self.read_set.insert(dk.clone(), ver);
+                    self.advance_data();
+                    self.advance_write();
+                    Some((dk, write_val))
+                } else if dk < wk {
+                    let (k, (v, ver)) = self.data_peek.take().unwrap();
+                    self.read_set.insert(k.clone(), ver);
+                    self.advance_data();
+                    Some((k, Some(v)))
+                } else {
+                    let (k, write_val) = self.write_peek.take().unwrap();
+                    self.advance_write();
+                    Some((k, write_val))
+                }
+            }
+            (Some(_), None) => {
+                let (k, (v, ver)) = self.data_peek.take().unwrap();
+                self.read_set.insert(k.clone(), ver);
+                self.advance_data();
+                Some((k, Some(v)))
+            }
+            (None, Some(_)) => {
+                let (k, write_val) = self.write_peek.take().unwrap();
+                self.advance_write();
+                Some((k, write_val))
+            }
+            (None, None) => None,
+        }
     }
 }
 

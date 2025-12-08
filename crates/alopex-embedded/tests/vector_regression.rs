@@ -12,7 +12,8 @@ fn upsert_vector_rejects_empty_input() {
 fn search_similar_dimension_mismatch_surfaces() {
     let db = Database::new();
     let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
-    txn.upsert_vector(b"k", b"m", &[1.0], Metric::Cosine).unwrap();
+    txn.upsert_vector(b"k", b"m", &[1.0], Metric::Cosine)
+        .unwrap();
     txn.commit().unwrap();
 
     let mut ro = db.begin(TxnMode::ReadOnly).unwrap();

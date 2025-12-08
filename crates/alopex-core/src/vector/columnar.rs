@@ -12,8 +12,8 @@ use crate::columnar::segment_v2::{
     SegmentWriterV2,
 };
 use crate::columnar::statistics::{ScalarValue, VectorSegmentStatistics};
-use crate::vector::simd::select_kernel;
 use crate::storage::compression::CompressionV2;
+use crate::vector::simd::select_kernel;
 use crate::vector::{CompactionResult, DeleteResult, Metric};
 use crate::{Error, Result};
 use std::collections::HashSet;
@@ -540,14 +540,9 @@ impl VectorSegment {
         let encoded_bytes = col.data.clone();
 
         decoder
-            .decode(
-                &encoded_bytes,
-                col.num_values as usize,
-                col.logical_type,
-            )
+            .decode(&encoded_bytes, col.num_values as usize, col.logical_type)
             .map_err(|e| Error::InvalidFormat(e.to_string()))
     }
-
 }
 
 fn column_logical_type(col: &Column) -> Result<LogicalType> {
@@ -803,7 +798,6 @@ fn ensure_fixed_column(col: Column, len: usize) -> Result<Column> {
     }
 }
 
-
 /// KVS キーレイアウト。
 pub mod key_layout {
     /// `vector_segment:{segment_id}` 形式のキーを生成する。
@@ -930,7 +924,11 @@ impl VectorStoreManager {
     /// mgr.append_batch(&keys, &vecs).await?;
     /// # Ok(()) }
     /// ```
-    pub async fn append_batch(&mut self, keys: &[i64], vectors: &[Vec<f32>]) -> Result<AppendResult> {
+    pub async fn append_batch(
+        &mut self,
+        keys: &[i64],
+        vectors: &[Vec<f32>],
+    ) -> Result<AppendResult> {
         if keys.len() != vectors.len() {
             return Err(Error::InvalidFormat("keys/vectors length mismatch".into()));
         }
@@ -1073,11 +1071,7 @@ impl VectorStoreManager {
             .position(|s| s.segment_id == segment_id)
             .ok_or(Error::NotFound)?;
 
-        let old = self
-            .segments
-            .get(pos)
-            .cloned()
-            .ok_or(Error::NotFound)?;
+        let old = self.segments.get(pos).cloned().ok_or(Error::NotFound)?;
         let old_size = old.to_bytes().map(|b| b.len() as u64).unwrap_or(0);
 
         let active_indices: Vec<usize> = (0..old.num_vectors as usize)
@@ -1198,12 +1192,7 @@ impl VectorStoreManager {
         }
 
         let mut candidates: Vec<VectorSearchResult> = Vec::new();
-        let query_norm = params
-            .query
-            .iter()
-            .map(|v| v * v)
-            .sum::<f32>()
-            .sqrt();
+        let query_norm = params.query.iter().map(|v| v * v).sum::<f32>().sqrt();
         let mut row_offset = 0u64;
         for segment in &self.segments {
             if segment.statistics.deletion_ratio >= 1.0 {
@@ -1212,15 +1201,14 @@ impl VectorStoreManager {
                 continue;
             }
             // pruning by norm range
-            if query_norm < segment.statistics.norm_min || query_norm > segment.statistics.norm_max {
+            if query_norm < segment.statistics.norm_min || query_norm > segment.statistics.norm_max
+            {
                 stats.segments_pruned += 1;
                 row_offset += segment.num_vectors;
                 continue;
             }
             stats.segments_scanned += 1;
-            stats.rows_scanned = stats
-                .rows_scanned
-                .saturating_add(segment.num_vectors);
+            stats.rows_scanned = stats.rows_scanned.saturating_add(segment.num_vectors);
             let decoded = segment.decode_vectors()?;
             let decoded_keys = segment.decode_keys()?;
             let metadata = decode_metadata(&segment.metadata, segment.num_vectors as usize)?;
@@ -1248,14 +1236,12 @@ impl VectorStoreManager {
                 let columns = if let Some(proj) = &params.projection {
                     let mut cols = Vec::with_capacity(proj.len());
                     for &p in proj {
-                        let col = metadata
-                            .get(p)
-                            .ok_or_else(|| Error::InvalidFormat("projection out of bounds".into()))?;
-                        cols.push(
-                            col.get(idx)
-                                .cloned()
-                                .ok_or_else(|| Error::InvalidFormat("projection row out of bounds".into()))?,
-                        );
+                        let col = metadata.get(p).ok_or_else(|| {
+                            Error::InvalidFormat("projection out of bounds".into())
+                        })?;
+                        cols.push(col.get(idx).cloned().ok_or_else(|| {
+                            Error::InvalidFormat("projection row out of bounds".into())
+                        })?);
                     }
                     cols
                 } else {
@@ -1400,12 +1386,12 @@ fn column_to_scalar_values(column: Column) -> Result<Vec<ScalarValue>> {
 mod tests {
     use super::*;
     use crate::columnar::encoding_v2::EncodingV2;
-    use crate::types::TxnMode;
-    use crate::MemoryKV;
     use crate::kv::{KVStore, KVTransaction};
     use crate::txn::TxnManager;
-    use crate::ScalarKernel;
+    use crate::types::TxnMode;
     use crate::vector::simd::DistanceKernel;
+    use crate::MemoryKV;
+    use crate::ScalarKernel;
     use std::future::Future;
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
@@ -1975,9 +1961,21 @@ mod tests {
         // 期待される並び（スコアDESC、同スコアはrow_id ASC）とプロジェクション値を計算。
         let scalar = ScalarKernel::default();
         let expected = vec![
-            (keys[0], scalar.inner_product(&params.query, &vecs[0]), ScalarValue::Int64(100)),
-            (keys[1], scalar.inner_product(&params.query, &vecs[1]), ScalarValue::Int64(200)),
-            (keys[2], scalar.inner_product(&params.query, &vecs[2]), ScalarValue::Int64(300)),
+            (
+                keys[0],
+                scalar.inner_product(&params.query, &vecs[0]),
+                ScalarValue::Int64(100),
+            ),
+            (
+                keys[1],
+                scalar.inner_product(&params.query, &vecs[1]),
+                ScalarValue::Int64(200),
+            ),
+            (
+                keys[2],
+                scalar.inner_product(&params.query, &vecs[2]),
+                ScalarValue::Int64(300),
+            ),
         ];
         let mut expected_sorted = expected.clone();
         expected_sorted.sort_by(|a, b| {

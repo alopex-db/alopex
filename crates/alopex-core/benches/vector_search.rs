@@ -12,9 +12,7 @@ fn bench_flat_search(c: &mut Criterion) {
     let kernel = select_kernel();
 
     c.bench_function("flat_search_inner_product", |b| {
-        b.iter(|| {
-            kernel.batch_score(Metric::InnerProduct, &query, &vectors, dim, &mut scores)
-        })
+        b.iter(|| kernel.batch_score(Metric::InnerProduct, &query, &vectors, dim, &mut scores))
     });
 }
 

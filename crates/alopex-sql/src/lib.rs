@@ -32,6 +32,7 @@ pub mod dialect;
 pub mod error;
 pub mod parser;
 pub mod planner;
+pub mod storage;
 pub mod tokenizer;
 
 // AST types
@@ -59,3 +60,6 @@ pub use planner::{
     LogicalPlan, NameResolver, Planner, PlannerError, ProjectedColumn, Projection, ResolvedColumn,
     ResolvedType, SortExpr, TypeChecker, TypedAssignment, TypedExpr, TypedExprKind,
 };
+
+// Storage types (Work in progress; will be expanded in storage module)
+pub use storage::{SqlValue, StorageError};

@@ -41,10 +41,8 @@ pub trait KVTransaction<'a> {
     ///
     /// Implementations must respect snapshot isolation: results should reflect
     /// the transaction's start version plus its in-flight writes.
-    fn scan_prefix(
-        &mut self,
-        prefix: &[u8],
-    ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>>;
+    fn scan_prefix(&mut self, prefix: &[u8])
+        -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>>;
 
     /// Scans key-value pairs in the half-open range [start, end).
     ///
