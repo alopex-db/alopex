@@ -984,8 +984,12 @@ impl VectorStoreManager {
     /// ```
     /// # use alopex_core::vector::{VectorStoreManager, VectorStoreConfig, Metric};
     /// # let mut mgr = VectorStoreManager::new(VectorStoreConfig { compaction_threshold: 0.5, ..Default::default() });
-    /// # let _ = futures::executor::block_on(mgr.append_batch(&[1,2], &[vec![1.0,0.0], vec![0.0,1.0]]));
-    /// assert!(mgr.segments_needing_compaction().is_empty());
+    /// # futures::executor::block_on(mgr.append_batch(&[1,2], &[vec![1.0,0.0], vec![0.0,1.0]])).unwrap();
+    /// assert!(mgr.segments_needing_compaction().is_empty()); // no deletions yet
+    /// // Mark one row deleted -> deletion_ratio = 0.5, meets threshold
+    /// mgr.segments[0].deleted.set(0, true);
+    /// mgr.segments[0].recompute_deletion_stats();
+    /// assert_eq!(mgr.segments_needing_compaction(), vec![mgr.segments[0].segment_id]);
     /// ```
     pub fn segments_needing_compaction(&self) -> Vec<u64> {
         let threshold = self.config.compaction_threshold;
