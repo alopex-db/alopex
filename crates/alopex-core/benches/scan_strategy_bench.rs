@@ -5,8 +5,6 @@ use std::time::Instant;
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use crossbeam_skiplist::SkipMap;
-#[cfg(feature = "memory-profiling")]
-use jemalloc_ctl::stats;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 type Key = Vec<u8>;
@@ -37,18 +35,6 @@ struct Dataset {
     prefix: Key,
     range_start: Key,
     range_end: Key,
-}
-
-#[cfg(feature = "memory-profiling")]
-fn measure_alloc<F, R>(f: F) -> (R, usize)
-where
-    F: FnOnce() -> R,
-{
-    // NOTE: meaningful値を得るには jemalloc をグローバルアロケータに設定して実行すること。
-    let before = stats::allocated::read().unwrap_or(0);
-    let result = f();
-    let after = stats::allocated::read().unwrap_or(before);
-    (result, after.saturating_sub(before))
 }
 
 impl Clone for Dataset {
@@ -375,36 +361,6 @@ fn bench_write_while_read(c: &mut Criterion) {
     });
 }
 
-#[cfg(feature = "memory-profiling")]
-fn bench_memory_usage(c: &mut Criterion) {
-    let size = 100_000;
-    let dataset = build_dataset(size);
-    let mut group = c.benchmark_group("memory_usage");
-
-    group.bench_function("guard_range_mem", |b| {
-        b.iter(|| {
-            let (_, delta) = measure_alloc(|| guard_in_struct(&dataset, ScanMode::Range));
-            black_box(delta);
-        });
-    });
-
-    group.bench_function("precollect_range_mem", |b| {
-        b.iter(|| {
-            let (_, delta) = measure_alloc(|| pre_collect(&dataset, ScanMode::Range));
-            black_box(delta);
-        });
-    });
-
-    group.bench_function("snapshot_range_mem", |b| {
-        b.iter(|| {
-            let (_, delta) = measure_alloc(|| snapshot_clone(&dataset, ScanMode::Range));
-            black_box(delta);
-        });
-    });
-
-    group.finish();
-}
-
 fn scan_strategy_bench(c: &mut Criterion) {
     for &size in DATASET_SIZES {
         bench_modes(c, size);
@@ -413,8 +369,6 @@ fn scan_strategy_bench(c: &mut Criterion) {
     bench_concurrent_reads(c);
     bench_concurrent_skiplist_reads(c);
     bench_write_while_read(c);
-    #[cfg(feature = "memory-profiling")]
-    bench_memory_usage(c);
 }
 
 criterion_group!(benches, scan_strategy_bench);
