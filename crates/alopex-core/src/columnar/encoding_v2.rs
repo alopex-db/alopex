@@ -73,6 +73,11 @@ impl Bitmap {
 
     /// Create a new bitmap with all values set to invalid (null).
     pub fn new(len: usize) -> Self {
+        Self::new_zeroed(len)
+    }
+
+    /// Create a new bitmap with all bits cleared.
+    pub fn new_zeroed(len: usize) -> Self {
         let num_bytes = len.div_ceil(8);
         Self {
             bits: vec![0u8; num_bytes],

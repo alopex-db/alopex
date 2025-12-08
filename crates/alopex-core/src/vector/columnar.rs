@@ -171,10 +171,15 @@ impl VectorSegment {
                 "deleted bitmap length mismatch num_vectors".into(),
             ));
         }
-        let deleted_count = (0..n)
-            .filter(|&i| self.deleted.get(i))
-            .count() as u64;
-        let active_count = self.num_vectors.saturating_sub(deleted_count);
+        let mut deleted_count = 0u64;
+        let mut active_count = 0u64;
+        for idx in 0..n {
+            if self.deleted.get(idx) {
+                deleted_count += 1;
+            } else {
+                active_count += 1;
+            }
+        }
 
         // metadata 各列の行数整合
         if let Some(meta_cols) = &self.metadata {
@@ -983,6 +988,7 @@ impl VectorStoreManager {
             let kernel = select_kernel();
             let mask = params.filter_mask.as_ref();
             for (idx, chunk) in decoded.chunks(self.config.dimension).enumerate() {
+                // deleted bitmap uses `true` to mean logically deleted.
                 if segment.deleted.get(idx) {
                     continue;
                 }
@@ -1053,8 +1059,8 @@ impl VectorStoreManager {
             LogicalType::Int64,
             EncodingV2::Plain,
         )?;
-        let deleted = Bitmap::new(keys.len());
-        let stats = compute_stats(vectors);
+        let deleted = Bitmap::new_zeroed(keys.len());
+        let stats = compute_stats(vectors, Some(&deleted));
         let segment = VectorSegment {
             segment_id: self.next_segment_id,
             dimension: self.config.dimension,
@@ -1070,19 +1076,24 @@ impl VectorStoreManager {
     }
 }
 
-fn compute_stats(vectors: &[Vec<f32>]) -> VectorSegmentStatistics {
+fn compute_stats(vectors: &[Vec<f32>], deleted: Option<&Bitmap>) -> VectorSegmentStatistics {
     let row_count = vectors.len() as u64;
     let null_count = 0;
-    let deleted_count = 0;
+    let deleted_count = (0..vectors.len())
+        .filter(|&i| deleted.map_or(false, |bm| bm.get(i)))
+        .count() as u64;
     let active_count = row_count.saturating_sub(deleted_count);
     let mut norm_min = f32::MAX;
     let mut norm_max = f32::MIN;
-    for v in vectors {
+    for (idx, v) in vectors.iter().enumerate() {
+        if deleted.map_or(false, |bm| bm.get(idx)) {
+            continue;
+        }
         let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         norm_min = norm_min.min(norm);
         norm_max = norm_max.max(norm);
     }
-    if vectors.is_empty() {
+    if active_count == 0 {
         norm_min = 0.0;
         norm_max = 0.0;
     }
@@ -1197,7 +1208,7 @@ mod tests {
             num_vectors: 1,
             vectors: encode_f32(&vectors),
             keys: encode_i64(&[0]),
-            deleted: Bitmap::new(1),
+            deleted: Bitmap::new_zeroed(1),
             metadata: None,
             statistics: VectorSegmentStatistics {
                 row_count: 1,
@@ -1256,13 +1267,28 @@ mod tests {
     #[test]
     fn compute_stats_updates_norms_and_counts() {
         let vectors = vec![vec![3.0f32, 4.0], vec![0.0f32, 0.0]];
-        let stats = compute_stats(&vectors);
+        let stats = compute_stats(&vectors, None);
         assert_eq!(stats.row_count, 2);
         assert_eq!(stats.active_count, 2);
         assert_eq!(stats.deleted_count, 0);
         // norms: 5.0 and 0.0
         assert!((stats.norm_min - 0.0).abs() < 1e-6);
         assert!((stats.norm_max - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compute_stats_respects_deleted_bitmap() {
+        let vectors = vec![vec![1.0f32], vec![2.0f32]];
+        let mut deleted = Bitmap::new_zeroed(2);
+        deleted.set(1, true);
+
+        let stats = compute_stats(&vectors, Some(&deleted));
+        assert_eq!(stats.row_count, 2);
+        assert_eq!(stats.active_count, 1);
+        assert_eq!(stats.deleted_count, 1);
+        assert!((stats.deletion_ratio - 0.5).abs() < 1e-6);
+        assert!((stats.norm_min - 1.0).abs() < 1e-6);
+        assert!((stats.norm_max - 1.0).abs() < 1e-6);
     }
 
     #[test]
