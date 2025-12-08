@@ -24,6 +24,19 @@ pub struct DeleteResult {
     pub segments_modified: Vec<u64>,
 }
 
+/// 結果: セグメントコンパクション。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompactionResult {
+    /// コンパクション対象の旧セグメントID。
+    pub old_segment_id: u64,
+    /// 新しく生成されたセグメントID（全削除時は None）。
+    pub new_segment_id: Option<u64>,
+    /// 削除されたベクトル数（旧セグメントとの差分）。
+    pub vectors_removed: u64,
+    /// 概算回収バイト数（旧サイズ - 新サイズ、非負）。
+    pub space_reclaimed: u64,
+}
+
 /// Supported similarity/distance metrics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Metric {

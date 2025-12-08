@@ -14,7 +14,7 @@ use crate::columnar::segment_v2::{
 use crate::columnar::statistics::{ScalarValue, VectorSegmentStatistics};
 use crate::vector::simd::select_kernel;
 use crate::storage::compression::CompressionV2;
-use crate::vector::{DeleteResult, Metric};
+use crate::vector::{CompactionResult, DeleteResult, Metric};
 use crate::{Error, Result};
 use std::collections::HashSet;
 
@@ -716,6 +716,45 @@ fn encode_generic_column(
     })
 }
 
+fn slice_column(col: &Column, indices: &[usize]) -> Result<Column> {
+    Ok(match col {
+        Column::Int64(v) => Column::Int64(take_indices(v, indices)?),
+        Column::Float32(v) => Column::Float32(take_indices(v, indices)?),
+        Column::Float64(v) => Column::Float64(take_indices(v, indices)?),
+        Column::Bool(v) => Column::Bool(take_indices(v, indices)?),
+        Column::Binary(v) => Column::Binary(take_indices(v, indices)?),
+        Column::Fixed { len, values } => Column::Fixed {
+            len: *len,
+            values: take_indices(values, indices)?,
+        },
+    })
+}
+
+fn slice_bitmap(bm: Option<Bitmap>, indices: &[usize]) -> Option<Bitmap> {
+    bm.map(|source| {
+        let mut sliced = Bitmap::new_zeroed(indices.len());
+        for (dst_idx, src_idx) in indices.iter().enumerate() {
+            if source.get(*src_idx) {
+                sliced.set(dst_idx, true);
+            }
+        }
+        sliced
+    })
+}
+
+fn take_indices<T: Clone>(values: &[T], indices: &[usize]) -> Result<Vec<T>> {
+    let mut out = Vec::with_capacity(indices.len());
+    for &idx in indices {
+        out.push(
+            values
+                .get(idx)
+                .cloned()
+                .ok_or_else(|| Error::InvalidFormat("index out of bounds".into()))?,
+        );
+    }
+    Ok(out)
+}
+
 fn column_to_bitmap(col: Column, expected_len: usize) -> Result<Bitmap> {
     match col {
         Column::Bool(values) => {
@@ -932,6 +971,21 @@ impl VectorStoreManager {
         })
     }
 
+    /// コンパクション対象セグメントを取得する。
+    pub fn segments_needing_compaction(&self) -> Vec<u64> {
+        let threshold = self.config.compaction_threshold;
+        if threshold >= 1.0 {
+            return Vec::new();
+        }
+        let mut ids = Vec::new();
+        for seg in &self.segments {
+            if seg.statistics.deletion_ratio >= threshold && seg.statistics.deletion_ratio > 0.0 {
+                ids.push(seg.segment_id);
+            }
+        }
+        ids
+    }
+
     /// 指定キーのベクトルを論理削除する（in-memory）。
     pub async fn delete_batch(&mut self, keys: &[i64]) -> Result<DeleteResult> {
         if keys.is_empty() {
@@ -961,6 +1015,94 @@ impl VectorStoreManager {
         }
 
         Ok(result)
+    }
+
+    /// セグメントをコンパクションして新セグメントに置換する。
+    pub async fn compact_segment(&mut self, segment_id: u64) -> Result<CompactionResult> {
+        let pos = self
+            .segments
+            .iter()
+            .position(|s| s.segment_id == segment_id)
+            .ok_or(Error::NotFound)?;
+
+        let old = self
+            .segments
+            .get(pos)
+            .cloned()
+            .ok_or(Error::NotFound)?;
+        let old_size = old.to_bytes().map(|b| b.len() as u64).unwrap_or(0);
+
+        let active_indices: Vec<usize> = (0..old.num_vectors as usize)
+            .filter(|&i| !old.deleted.get(i))
+            .collect();
+
+        if active_indices.is_empty() {
+            self.segments.remove(pos);
+            return Ok(CompactionResult {
+                old_segment_id: segment_id,
+                new_segment_id: None,
+                vectors_removed: old.num_vectors,
+                space_reclaimed: old_size,
+            });
+        }
+
+        let decoded_vectors = old.decode_vectors()?;
+        let decoded_keys = old.decode_keys()?;
+
+        let mut new_vecs = Vec::with_capacity(active_indices.len());
+        for &idx in &active_indices {
+            let start = idx * self.config.dimension;
+            let end = start + self.config.dimension;
+            new_vecs.push(decoded_vectors[start..end].to_vec());
+        }
+        let new_keys: Vec<i64> = active_indices
+            .iter()
+            .map(|&i| {
+                decoded_keys
+                    .get(i)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidFormat("missing key".into()))
+            })
+            .collect::<Result<_>>()?;
+
+        let mut new_segment = self.build_segment(&new_keys, &new_vecs)?;
+
+        // metadata を再構成（存在する場合）。
+        if let Some(meta_cols) = &old.metadata {
+            let mut new_meta = Vec::with_capacity(meta_cols.len());
+            for col in meta_cols {
+                let (decoded_col, bitmap) = old.decode_column(col)?;
+                let sliced_col = slice_column(&decoded_col, &active_indices)?;
+                let sliced_bitmap = slice_bitmap(bitmap, &active_indices);
+                let encoded = encode_generic_column(
+                    sliced_col,
+                    sliced_bitmap,
+                    col.logical_type,
+                    col.encoding,
+                )?;
+                new_meta.push(encoded);
+            }
+            if !new_meta.is_empty() {
+                new_segment.metadata = Some(new_meta);
+            }
+        }
+
+        // 新セグメントIDを割当て、置換。
+        let new_segment_id = self.next_segment_id;
+        new_segment.segment_id = new_segment_id; // build_segment で設定した値と合わせるため明示
+        self.next_segment_id += 1;
+        let new_size = new_segment.to_bytes().map(|b| b.len() as u64).unwrap_or(0);
+        let space_reclaimed = old_size.saturating_sub(new_size);
+        let vectors_removed = old.num_vectors.saturating_sub(new_segment.num_vectors);
+
+        self.segments[pos] = new_segment;
+
+        Ok(CompactionResult {
+            old_segment_id: segment_id,
+            new_segment_id: Some(new_segment_id),
+            vectors_removed,
+            space_reclaimed,
+        })
     }
 
     /// ベクトル検索。
@@ -1372,6 +1514,96 @@ mod tests {
         assert_eq!(mgr.segments[1].statistics.deleted_count, 1);
         assert_eq!(mgr.segments[1].statistics.active_count, 0);
         assert!((mgr.segments[1].statistics.deletion_ratio - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn segments_needing_compaction_respects_thresholds() {
+        let mut mgr = VectorStoreManager::new(VectorStoreConfig {
+            dimension: 2,
+            metric: Metric::InnerProduct,
+            segment_max_vectors: 2,
+            compaction_threshold: 0.5,
+            ..Default::default()
+        });
+        let keys = vec![1, 2, 3, 4];
+        let vecs = vec![
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+            vec![0.5, 0.5],
+            vec![0.2, 0.8],
+        ];
+        block_on(mgr.append_batch(&keys, &vecs)).unwrap();
+        let seg0 = mgr.segments[0].segment_id;
+
+        // mark one row deleted in first segment -> deletion_ratio=0.5
+        if let Some(seg) = mgr.segments.get_mut(0) {
+            seg.deleted.set(0, true);
+            seg.recompute_deletion_stats();
+        }
+
+        let mut ids = mgr.segments_needing_compaction();
+        assert_eq!(ids, vec![seg0]);
+
+        mgr.config.compaction_threshold = 1.0;
+        assert!(mgr.segments_needing_compaction().is_empty());
+
+        mgr.config.compaction_threshold = 0.0;
+        ids = mgr.segments_needing_compaction();
+        assert_eq!(ids, vec![seg0]);
+    }
+
+    #[test]
+    fn compact_segment_removes_deleted_and_resets_stats() {
+        let mut mgr = VectorStoreManager::new(VectorStoreConfig {
+            dimension: 2,
+            metric: Metric::InnerProduct,
+            segment_max_vectors: 4,
+            ..Default::default()
+        });
+        let keys = vec![1, 2, 3];
+        let vecs = vec![vec![1.0, 0.0], vec![0.5, 0.5], vec![0.0, 1.0]];
+        block_on(mgr.append_batch(&keys, &vecs)).unwrap();
+        let old_id = mgr.segments[0].segment_id;
+        mgr.segments[0].deleted.set(1, true);
+        mgr.segments[0].recompute_deletion_stats();
+
+        let res = block_on(mgr.compact_segment(old_id)).unwrap();
+        let new_id = res.new_segment_id.expect("new segment");
+        assert_eq!(res.old_segment_id, old_id);
+        assert_eq!(res.vectors_removed, 1);
+
+        let new_seg = mgr
+            .segments
+            .iter()
+            .find(|s| s.segment_id == new_id)
+            .expect("segment exists");
+        assert_eq!(new_seg.num_vectors, 2);
+        assert_eq!(new_seg.statistics.deleted_count, 0);
+        assert_eq!(new_seg.statistics.active_count, 2);
+        assert_eq!(new_seg.statistics.deletion_ratio, 0.0);
+    }
+
+    #[test]
+    fn compact_segment_handles_all_deleted() {
+        let mut mgr = VectorStoreManager::new(VectorStoreConfig {
+            dimension: 2,
+            metric: Metric::InnerProduct,
+            segment_max_vectors: 4,
+            ..Default::default()
+        });
+        let keys = vec![1, 2];
+        let vecs = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        block_on(mgr.append_batch(&keys, &vecs)).unwrap();
+        let old_id = mgr.segments[0].segment_id;
+        mgr.segments[0].deleted.set(0, true);
+        mgr.segments[0].deleted.set(1, true);
+        mgr.segments[0].recompute_deletion_stats();
+
+        let res = block_on(mgr.compact_segment(old_id)).unwrap();
+        assert_eq!(res.old_segment_id, old_id);
+        assert_eq!(res.new_segment_id, None);
+        assert_eq!(res.vectors_removed, 2);
+        assert!(mgr.segments.iter().all(|s| s.segment_id != old_id));
     }
 
     #[test]
