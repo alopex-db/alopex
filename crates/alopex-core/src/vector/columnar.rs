@@ -1517,6 +1517,53 @@ mod tests {
     }
 
     #[test]
+    fn delete_batch_empty_input_noop() {
+        let mut mgr = VectorStoreManager::new(VectorStoreConfig {
+            dimension: 2,
+            metric: Metric::InnerProduct,
+            segment_max_vectors: 2,
+            ..Default::default()
+        });
+        let keys = vec![10, 11];
+        let vecs = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        block_on(mgr.append_batch(&keys, &vecs)).unwrap();
+
+        let res = block_on(mgr.delete_batch(&[])).unwrap();
+        assert_eq!(res.vectors_deleted, 0);
+        assert!(res.segments_modified.is_empty());
+        // stats unchanged
+        assert_eq!(mgr.segments[0].statistics.deleted_count, 0);
+        assert_eq!(mgr.segments[0].statistics.active_count, 2);
+    }
+
+    #[test]
+    fn delete_batch_ignores_nonexistent_and_already_deleted() {
+        let mut mgr = VectorStoreManager::new(VectorStoreConfig {
+            dimension: 2,
+            metric: Metric::InnerProduct,
+            segment_max_vectors: 2,
+            ..Default::default()
+        });
+        let keys = vec![1, 2, 3];
+        let vecs = vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![0.2, 0.8]];
+        block_on(mgr.append_batch(&keys, &vecs)).unwrap();
+
+        // mark key 2 as already deleted
+        mgr.segments[0].deleted.set(1, true);
+        mgr.segments[0].recompute_deletion_stats();
+
+        let res = block_on(mgr.delete_batch(&[2, 3, 999])).unwrap();
+        assert_eq!(res.vectors_deleted, 1); // only key 3 transitions false->true
+        assert_eq!(res.segments_modified, vec![mgr.segments[1].segment_id]);
+
+        // stats reflect only new deletion for key 3
+        assert_eq!(mgr.segments[0].statistics.deleted_count, 1);
+        assert_eq!(mgr.segments[0].statistics.active_count, 1);
+        assert_eq!(mgr.segments[1].statistics.deleted_count, 1);
+        assert_eq!(mgr.segments[1].statistics.active_count, 0);
+    }
+
+    #[test]
     fn segments_needing_compaction_respects_thresholds() {
         let mut mgr = VectorStoreManager::new(VectorStoreConfig {
             dimension: 2,
@@ -1550,6 +1597,11 @@ mod tests {
         mgr.config.compaction_threshold = 0.0;
         ids = mgr.segments_needing_compaction();
         assert_eq!(ids, vec![seg0]);
+
+        // compact and ensure it drops from the list
+        block_on(mgr.compact_segment(seg0)).unwrap();
+        mgr.config.compaction_threshold = 0.5;
+        assert!(mgr.segments_needing_compaction().is_empty());
     }
 
     #[test]
@@ -1604,6 +1656,124 @@ mod tests {
         assert_eq!(res.new_segment_id, None);
         assert_eq!(res.vectors_removed, 2);
         assert!(mgr.segments.iter().all(|s| s.segment_id != old_id));
+    }
+
+    #[test]
+    fn compact_segment_errors_on_missing() {
+        let mut mgr = VectorStoreManager::new(VectorStoreConfig {
+            dimension: 2,
+            metric: Metric::InnerProduct,
+            ..Default::default()
+        });
+        let err = block_on(mgr.compact_segment(999)).unwrap_err();
+        assert!(matches!(err, Error::NotFound));
+    }
+
+    #[test]
+    fn search_skips_deleted_rows_and_prunes_empty_segments() {
+        let mut mgr = VectorStoreManager::new(VectorStoreConfig {
+            dimension: 2,
+            metric: Metric::InnerProduct,
+            segment_max_vectors: 2,
+            ..Default::default()
+        });
+        let keys = vec![1, 2, 3, 4];
+        let vecs = vec![
+            vec![1.0, 0.0], // seg0
+            vec![0.0, 1.0], // seg0
+            vec![0.5, 0.5], // seg1
+            vec![0.2, 0.8], // seg1
+        ];
+        block_on(mgr.append_batch(&keys, &vecs)).unwrap();
+
+        // delete all in first segment and one in second segment
+        mgr.segments[0].deleted.set(0, true);
+        mgr.segments[0].deleted.set(1, true);
+        mgr.segments[0].recompute_deletion_stats();
+        mgr.segments[1].deleted.set(1, true);
+        mgr.segments[1].recompute_deletion_stats();
+
+        let params = VectorSearchParams {
+            query: vec![0.5, 0.5],
+            metric: Metric::InnerProduct,
+            top_k: 10,
+            projection: None,
+            filter_mask: None,
+        };
+        let (results, stats) = mgr.search_with_stats(params).unwrap();
+
+        // seg0 should be pruned (deletion_ratio==1.0), seg1 scanned with one active row.
+        assert_eq!(stats.segments_pruned, 1);
+        assert_eq!(stats.segments_scanned, 1);
+        assert_eq!(stats.rows_scanned, 2); // segment size before deletion
+        assert_eq!(stats.rows_matched, 1); // only non-deleted row remains
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].row_id, 3);
+    }
+
+    #[test]
+    fn delete_compact_search_flow() {
+        let mut mgr = VectorStoreManager::new(VectorStoreConfig {
+            dimension: 2,
+            metric: Metric::InnerProduct,
+            segment_max_vectors: 10,
+            ..Default::default()
+        });
+        let keys = vec![1, 2, 3];
+        let vecs = vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![0.5, 0.5]];
+        block_on(mgr.append_batch(&keys, &vecs)).unwrap();
+        let seg_id = mgr.segments[0].segment_id;
+
+        // Flow1: initial search then delete and confirm removal.
+        let params = VectorSearchParams {
+            query: vec![1.0, 0.0],
+            metric: Metric::InnerProduct,
+            top_k: 10,
+            projection: None,
+            filter_mask: None,
+        };
+        let (results, stats) = mgr.search_with_stats(params.clone()).unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(stats.segments_scanned, 1);
+        assert_eq!(stats.rows_matched, 3);
+
+        let del_res = block_on(mgr.delete_batch(&[2])).unwrap();
+        assert_eq!(del_res.vectors_deleted, 1);
+        assert_eq!(mgr.segments[0].statistics.deleted_count, 1);
+        assert_eq!(mgr.segments[0].statistics.active_count, 2);
+
+        let (results_after_del, stats_after_del) = mgr.search_with_stats(params.clone()).unwrap();
+        assert_eq!(results_after_del.len(), 2);
+        let ids: Vec<_> = results_after_del.iter().map(|r| r.row_id).collect();
+        assert_eq!(ids, vec![1, 3]);
+        assert_eq!(stats_after_del.rows_matched, 2);
+
+        // Flow2: compact removes deleted rows and resets stats.
+        let comp_res = block_on(mgr.compact_segment(seg_id)).unwrap();
+        let new_id = comp_res.new_segment_id.expect("new segment");
+        assert_eq!(comp_res.vectors_removed, 1);
+        let seg = mgr
+            .segments
+            .iter()
+            .find(|s| s.segment_id == new_id)
+            .unwrap();
+        assert_eq!(seg.statistics.deleted_count, 0);
+        assert_eq!(seg.statistics.active_count, 2);
+        assert_eq!(seg.statistics.deletion_ratio, 0.0);
+
+        let (results_after_compact, _) = mgr.search_with_stats(params.clone()).unwrap();
+        let ids: Vec<_> = results_after_compact.iter().map(|r| r.row_id).collect();
+        assert_eq!(ids, vec![1, 3]);
+
+        // Flow3: delete remaining rows -> compact -> search empty.
+        block_on(mgr.delete_batch(&[1, 3])).unwrap();
+        let comp_res2 = block_on(mgr.compact_segment(new_id)).unwrap();
+        assert_eq!(comp_res2.new_segment_id, None);
+        assert!(mgr.segments.is_empty());
+
+        let (results_final, stats_final) = mgr.search_with_stats(params).unwrap();
+        assert!(results_final.is_empty());
+        assert_eq!(stats_final.segments_scanned, 0);
     }
 
     #[test]
