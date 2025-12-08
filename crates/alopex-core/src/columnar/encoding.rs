@@ -683,7 +683,7 @@ fn decode_rle(bytes: &[u8], logical: LogicalType) -> Result<Column> {
             }
             let mut out = Vec::with_capacity(total);
             for (val, len) in runs {
-                out.extend(std::iter::repeat(val).take(len));
+                out.extend(std::iter::repeat_n(val, len));
             }
             Ok(Column::Bool(out))
         }
@@ -709,7 +709,7 @@ fn encode_bitpack(column: &Column) -> Result<Vec<u8>> {
         }
     };
     let count = values.len();
-    let mut buf = Vec::with_capacity(4 + (count + 7) / 8);
+    let mut buf = Vec::with_capacity(4 + count.div_ceil(8));
     buf.extend_from_slice(&(count as u32).to_le_bytes());
     let mut current = 0u8;
     let mut bit = 0;
@@ -742,7 +742,7 @@ fn decode_bitpack(bytes: &[u8], logical: LogicalType) -> Result<Column> {
         });
     }
     let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    let needed = 4 + (count + 7) / 8;
+    let needed = 4 + count.div_ceil(8);
     if bytes.len() < needed {
         return Err(ColumnarError::CorruptedSegment {
             reason: "bitpack data truncated".into(),

@@ -1036,8 +1036,8 @@ impl Decoder for ByteStreamSplitDecoder {
 
             for byte_idx in 0..bytes_per_value {
                 for value_idx in 0..count {
-                    raw_bytes[value_idx * bytes_per_value + byte_idx] =
-                        data[pos + value_idx * bytes_per_value + byte_idx];
+                    let offset = pos + byte_idx * count + value_idx;
+                    raw_bytes[value_idx * bytes_per_value + byte_idx] = data[offset];
                 }
             }
         }

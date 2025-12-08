@@ -9,6 +9,7 @@ use crate::storage::sstable::{SstableReader, SstableWriter};
 use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, TxnState, Value};
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Bound::{Excluded, Included};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
@@ -435,7 +436,7 @@ impl<'a> TxnManager<'a, MemoryTransaction<'a>> for &'a MemoryTxnManager {
 
         let mut data = self.state.data.write().unwrap();
 
-        for (key, _read_version) in &txn.read_set {
+        for key in txn.read_set.keys() {
             let current_version = data.get(key).map(|(_, v)| *v).unwrap_or(0);
             if current_version > txn.start_version {
                 return Err(Error::TxnConflict);
@@ -443,7 +444,7 @@ impl<'a> TxnManager<'a, MemoryTransaction<'a>> for &'a MemoryTxnManager {
         }
 
         // Detect write-write conflicts even when the key was never read.
-        for (key, _) in &txn.writes {
+        for key in txn.writes.keys() {
             let current_version = data.get(key).map(|(_, v)| *v).unwrap_or(0);
             if current_version > txn.start_version {
                 return Err(Error::TxnConflict);
@@ -542,6 +543,117 @@ impl<'a> MemoryTransaction<'a> {
             read_set: HashMap::new(),
         }
     }
+
+    fn ensure_active(&self) -> Result<()> {
+        if self.state != TxnState::Active {
+            return Err(Error::TxnClosed);
+        }
+        Ok(())
+    }
+
+    fn scan_range_internal(&mut self, start: &[u8], end: &[u8]) -> Result<Vec<(Key, Value)>> {
+        self.ensure_active()?;
+
+        let mut merged: BTreeMap<Key, (Option<Value>, Option<u64>)> = BTreeMap::new();
+        let start_vec = start.to_vec();
+        let end_vec = end.to_vec();
+
+        {
+            let data = self.manager.state.data.read().unwrap();
+            for (key, (value, version)) in data.range((Included(start_vec.clone()), Excluded(end_vec.clone()))) {
+                if *version > self.start_version {
+                    continue;
+                }
+                merged.insert(key.clone(), (Some(value.clone()), Some(*version)));
+            }
+        }
+
+        for (key, write) in self
+            .writes
+            .range((Included(start_vec), Excluded(end_vec)))
+        {
+            match write {
+                Some(v) => {
+                    if let Some((val, _)) = merged.get_mut(key) {
+                        *val = Some(v.clone());
+                    } else {
+                        merged.insert(key.clone(), (Some(v.clone()), None));
+                    }
+                }
+                None => {
+                    if let Some((val, _)) = merged.get_mut(key) {
+                        *val = None;
+                    } else {
+                        merged.insert(key.clone(), (None, None));
+                    }
+                }
+            }
+        }
+
+        for (key, (_, maybe_version)) in merged.iter() {
+            if let Some(version) = maybe_version {
+                self.read_set.insert(key.clone(), *version);
+            }
+        }
+
+        Ok(merged
+            .into_iter()
+            .filter_map(|(k, (value, _))| value.map(|v| (k, v)))
+            .collect())
+    }
+
+    fn scan_prefix_internal(&mut self, prefix: &[u8]) -> Result<Vec<(Key, Value)>> {
+        self.ensure_active()?;
+
+        let mut merged: BTreeMap<Key, (Option<Value>, Option<u64>)> = BTreeMap::new();
+        let prefix_vec = prefix.to_vec();
+
+        {
+            let data = self.manager.state.data.read().unwrap();
+            for (key, (value, version)) in data.range(prefix_vec.clone()..) {
+                if !key.starts_with(&prefix_vec) {
+                    break;
+                }
+                if *version > self.start_version {
+                    continue;
+                }
+                merged.insert(key.clone(), (Some(value.clone()), Some(*version)));
+            }
+        }
+
+        for (key, write) in self.writes.range(prefix_vec.clone()..) {
+            if !key.starts_with(&prefix_vec) {
+                break;
+            }
+            match write {
+                Some(v) => {
+                    if let Some((val, _)) = merged.get_mut(key) {
+                        *val = Some(v.clone());
+                    } else {
+                        merged.insert(key.clone(), (Some(v.clone()), None));
+                    }
+                }
+                None => {
+                    if let Some((val, _)) = merged.get_mut(key) {
+                        *val = None;
+                    } else {
+                        merged.insert(key.clone(), (None, None));
+                    }
+                }
+            }
+        }
+
+        for (key, (_, maybe_version)) in merged.iter() {
+            if let Some(version) = maybe_version {
+                self.read_set.insert(key.clone(), *version);
+            }
+        }
+
+        Ok(merged
+            .into_iter()
+            .filter_map(|(k, (value, _))| value.map(|v| (k, v)))
+            .collect())
+    }
 }
 
 impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
@@ -602,6 +714,23 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
         }
         self.writes.insert(key, None);
         Ok(())
+    }
+
+    fn scan_prefix(
+        &mut self,
+        prefix: &[u8],
+    ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
+        let items = self.scan_prefix_internal(prefix)?;
+        Ok(Box::new(items.into_iter()))
+    }
+
+    fn scan_range(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
+        let items = self.scan_range_internal(start, end)?;
+        Ok(Box::new(items.into_iter()))
     }
 }
 
@@ -756,6 +885,70 @@ mod tests {
         let manager = reopened.txn_manager();
         let mut txn = manager.begin(TxnMode::ReadOnly).unwrap();
         assert_eq!(txn.get(&key("k1")).unwrap(), Some(value("v2")));
+    }
+
+    #[test]
+    fn scan_prefix_merges_snapshot_and_writes() {
+        let store = MemoryKV::new();
+        let manager = store.txn_manager();
+
+        let mut seed = manager.begin(TxnMode::ReadWrite).unwrap();
+        seed.put(key("p:1"), value("old1")).unwrap();
+        seed.put(key("p:2"), value("old2")).unwrap();
+        seed.put(key("q:1"), value("other")).unwrap();
+        manager.commit(seed).unwrap();
+
+        let mut txn = manager.begin(TxnMode::ReadWrite).unwrap();
+        txn.put(key("p:1"), value("new1")).unwrap();
+        txn.delete(key("p:2")).unwrap();
+        txn.put(key("p:3"), value("new3")).unwrap();
+
+        let results: Vec<_> = txn.scan_prefix(b"p:").unwrap().collect();
+        assert_eq!(
+            results,
+            vec![(key("p:1"), value("new1")), (key("p:3"), value("new3"))]
+        );
+    }
+
+    #[test]
+    fn scan_range_skips_newer_versions() {
+        let store = MemoryKV::new();
+        let manager = store.txn_manager();
+
+        let mut seed = manager.begin(TxnMode::ReadWrite).unwrap();
+        seed.put(key("b"), value("v1")).unwrap();
+        manager.commit(seed).unwrap();
+
+        let mut txn1 = manager.begin(TxnMode::ReadWrite).unwrap();
+
+        let mut txn2 = manager.begin(TxnMode::ReadWrite).unwrap();
+        txn2.put(key("ba"), value("v2")).unwrap();
+        manager.commit(txn2).unwrap();
+
+        let results: Vec<_> = txn1.scan_range(b"b", b"c").unwrap().collect();
+        assert_eq!(results, vec![(key("b"), value("v1"))]);
+    }
+
+    #[test]
+    fn scan_range_records_reads_for_conflict_detection() {
+        let store = MemoryKV::new();
+        let manager = store.txn_manager();
+
+        let mut seed = manager.begin(TxnMode::ReadWrite).unwrap();
+        seed.put(key("k1"), value("v1")).unwrap();
+        manager.commit(seed).unwrap();
+
+        let mut t1 = manager.begin(TxnMode::ReadWrite).unwrap();
+        let results: Vec<_> = t1.scan_range(b"k0", b"kz").unwrap().collect();
+        assert_eq!(results, vec![(key("k1"), value("v1"))]);
+        t1.put(key("k_new"), value("v_new")).unwrap();
+
+        let mut t2 = manager.begin(TxnMode::ReadWrite).unwrap();
+        t2.put(key("k1"), value("v2")).unwrap();
+        manager.commit(t2).unwrap();
+
+        let result = manager.commit(t1);
+        assert!(matches!(result, Err(Error::TxnConflict)));
     }
 
     #[test]

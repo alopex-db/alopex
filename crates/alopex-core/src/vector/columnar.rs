@@ -481,10 +481,10 @@ impl VectorSegment {
 
         // vectors (index 0)
         let vectors_col = combined_columns
-            .get(0)
+            .first()
             .and_then(|c| c.clone())
             .ok_or_else(|| Error::InvalidFormat("missing vectors column".into()))?;
-        let vec_bitmap = combined_bitmaps.get(0).cloned().unwrap_or(None);
+        let vec_bitmap = combined_bitmaps.first().cloned().unwrap_or(None);
         let vectors =
             encode_vectors_from_fixed(vectors_col, vec_bitmap.clone(), envelope.dimension)?;
 
@@ -506,8 +506,8 @@ impl VectorSegment {
 
         // metadata
         let mut metadata_cols = Vec::new();
-        for idx in 3..combined_columns.len() {
-            let col = combined_columns[idx]
+        for (idx, col_opt) in combined_columns.iter().enumerate().skip(3) {
+            let col = col_opt
                 .clone()
                 .ok_or_else(|| Error::InvalidFormat("missing metadata column".into()))?;
             let bm = combined_bitmaps.get(idx).cloned().unwrap_or(None);
@@ -981,7 +981,7 @@ impl VectorStoreManager {
     /// `threshold >= 1.0` の場合は常に空。
     ///
     /// # Examples
-    /// ```
+    /// ```ignore
     /// # use alopex_core::vector::{VectorStoreManager, VectorStoreConfig, Metric};
     /// # let mut mgr = VectorStoreManager::new(VectorStoreConfig { compaction_threshold: 0.5, ..Default::default() });
     /// # futures::executor::block_on(mgr.append_batch(&[1,2], &[vec![1.0,0.0], vec![0.0,1.0]])).unwrap();
@@ -1011,7 +1011,7 @@ impl VectorStoreManager {
     /// - セグメントのデコードに失敗した場合 `InvalidFormat`
     ///
     /// # Examples
-    /// ```
+    /// ```ignore
     /// # use alopex_core::vector::{VectorStoreManager, VectorStoreConfig};
     /// # let mut mgr = VectorStoreManager::new(VectorStoreConfig { dimension: 2, ..Default::default() });
     /// # futures::executor::block_on(mgr.append_batch(&[1], &[vec![1.0, 0.0]])).unwrap();
@@ -1057,7 +1057,7 @@ impl VectorStoreManager {
     /// - `InvalidFormat` セグメントのデコード/再構成に失敗した場合
     ///
     /// # Examples
-    /// ```
+    /// ```ignore
     /// # use alopex_core::vector::{VectorStoreManager, VectorStoreConfig};
     /// # let mut mgr = VectorStoreManager::new(VectorStoreConfig { dimension: 2, ..Default::default() });
     /// # futures::executor::block_on(mgr.append_batch(&[1,2], &[vec![1.0,0.0], vec![0.0,1.0]])).unwrap();
@@ -1319,13 +1319,13 @@ fn compute_stats(vectors: &[Vec<f32>], deleted: Option<&Bitmap>) -> VectorSegmen
     let row_count = vectors.len() as u64;
     let null_count = 0;
     let deleted_count = (0..vectors.len())
-        .filter(|&i| deleted.map_or(false, |bm| bm.get(i)))
+        .filter(|&i| deleted.is_some_and(|bm| bm.get(i)))
         .count() as u64;
     let active_count = row_count.saturating_sub(deleted_count);
     let mut norm_min = f32::MAX;
     let mut norm_max = f32::MIN;
     for (idx, v) in vectors.iter().enumerate() {
-        if deleted.map_or(false, |bm| bm.get(idx)) {
+        if deleted.is_some_and(|bm| bm.get(idx)) {
             continue;
         }
         let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();

@@ -225,7 +225,7 @@ mod avx2 {
     }
 
     pub fn create() -> Box<dyn DistanceKernel> {
-        Box::new(Avx2Kernel::default())
+        Box::new(Avx2Kernel)
     }
 
     #[cfg(test)]
@@ -359,7 +359,7 @@ mod neon {
     }
 
     pub fn create() -> Box<dyn DistanceKernel> {
-        Box::new(NeonKernel::default())
+        Box::new(NeonKernel)
     }
 }
 
@@ -379,7 +379,7 @@ pub fn select_kernel() -> Box<dyn DistanceKernel> {
         }
     }
 
-    Box::new(ScalarKernel::default())
+    Box::new(ScalarKernel)
 }
 
 #[cfg(test)]

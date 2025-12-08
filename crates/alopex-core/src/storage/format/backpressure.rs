@@ -76,7 +76,7 @@ impl CompactionDebtTracker {
         }
         // 閾値超過分に比例させ、最大2秒にクリップ。
         let over = ratio - self.config.throttle_threshold;
-        let millis = (over * 1000.0).min(2000.0).max(10.0);
+        let millis = (over * 1000.0).clamp(10.0, 2000.0);
         Duration::from_millis(millis as u64)
     }
 }

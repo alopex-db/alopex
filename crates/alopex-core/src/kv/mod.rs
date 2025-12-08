@@ -36,6 +36,25 @@ pub trait KVTransaction<'a> {
     ///
     /// Returns an error if the transaction is read-only.
     fn delete(&mut self, key: Key) -> Result<()>;
+
+    /// Scans all key-value pairs whose keys start with the given prefix.
+    ///
+    /// Implementations must respect snapshot isolation: results should reflect
+    /// the transaction's start version plus its in-flight writes.
+    fn scan_prefix(
+        &mut self,
+        prefix: &[u8],
+    ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>>;
+
+    /// Scans key-value pairs in the half-open range [start, end).
+    ///
+    /// Implementations must respect snapshot isolation: results should reflect
+    /// the transaction's start version plus its in-flight writes.
+    fn scan_range(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>>;
 }
 
 /// The main trait for a key-value storage engine.

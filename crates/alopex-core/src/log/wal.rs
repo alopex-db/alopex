@@ -41,8 +41,7 @@ impl WalWriter {
     /// - Checksum (u32)
     /// - Data ([u8])
     pub fn append(&mut self, record: &WalRecord) -> Result<()> {
-        let data = bincode::serialize(record)
-            .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let data = bincode::serialize(record).map_err(|e| Error::Io(std::io::Error::other(e)))?;
         let checksum = crc32fast::hash(&data);
 
         self.writer.write_all(&(data.len() as u32).to_le_bytes())?;
@@ -118,10 +117,7 @@ impl Iterator for WalReader {
 
         match bincode::deserialize(&data) {
             Ok(record) => Some(Ok(record)),
-            Err(e) => Some(Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e,
-            )))),
+            Err(e) => Some(Err(Error::Io(std::io::Error::other(e)))),
         }
     }
 }

@@ -14,7 +14,7 @@ const VERSION: u16 = 1;
 const HEADER_SIZE: u64 = 4 + 2 + 1 + 1 + 2 + 8 + 4 + 4; // magic + version + kind + reserved + type_id + total_len + chunk_size + chunk_count
 const FOOTER_SIZE: u64 = 4 + 4 + 4; // magic + chunk_count + checksum
 /// Default chunk size (1 MiB) used when callers want a reasonable starting point.
-pub const DEFAULT_CHUNK_SIZE: u32 = 1 * 1024 * 1024; // 1 MiB
+pub const DEFAULT_CHUNK_SIZE: u32 = 1024 * 1024; // 1 MiB
 
 /// Identifies whether the large value is typed or opaque.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

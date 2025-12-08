@@ -483,7 +483,7 @@ impl RecordBatch {
 
     /// 行数を返す（先頭カラム長で代表）。
     pub fn num_rows(&self) -> usize {
-        self.columns.get(0).map(column_len).unwrap_or_default()
+        self.columns.first().map(column_len).unwrap_or_default()
     }
 }
 

@@ -88,7 +88,7 @@ impl Default for EphemeralDataGcConfig {
             intent_flush_interval: Duration::from_secs(1),
             lock_flush_interval: Duration::from_secs(1),
             gc_trigger_entries: 1000,
-            gc_trigger_bytes: 1 * 1024 * 1024,
+            gc_trigger_bytes: 1024 * 1024,
             intent_retention: Duration::from_secs(0),
             lock_retention: Duration::from_secs(0),
         }
