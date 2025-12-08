@@ -15,7 +15,9 @@ pub use columnar::{
 };
 pub use simd::{select_kernel, DistanceKernel, ScalarKernel};
 
-/// 結果: バッチ削除。
+/// Batch delete result.
+///
+/// Tracks how many vectors flipped from `deleted=false` to `true` and which segments were touched.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeleteResult {
     /// 実際に削除状態へ遷移したベクトル数（false→true）。
@@ -24,7 +26,9 @@ pub struct DeleteResult {
     pub segments_modified: Vec<u64>,
 }
 
-/// 結果: セグメントコンパクション。
+/// Result of compacting a segment (physical deletion of logically deleted rows).
+///
+/// Provides the old/new segment IDs and a summary of how much data was removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompactionResult {
     /// コンパクション対象の旧セグメントID。

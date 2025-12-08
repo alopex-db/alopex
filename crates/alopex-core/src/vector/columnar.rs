@@ -914,6 +914,10 @@ impl VectorStoreManager {
 
     /// ベクトルバッチを追加する。
     ///
+    /// # Errors
+    /// - `DimensionMismatch`: 入力ベクトルの次元が設定と異なる場合
+    /// - `InvalidVector`: NaN/Inf を含む場合
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -972,6 +976,17 @@ impl VectorStoreManager {
     }
 
     /// コンパクション対象セグメントを取得する。
+    ///
+    /// `deletion_ratio` が `compaction_threshold` 以上かつ > 0 のセグメントIDを返す。
+    /// `threshold >= 1.0` の場合は常に空。
+    ///
+    /// # Examples
+    /// ```
+    /// # use alopex_core::vector::{VectorStoreManager, VectorStoreConfig, Metric};
+    /// # let mut mgr = VectorStoreManager::new(VectorStoreConfig { compaction_threshold: 0.5, ..Default::default() });
+    /// # let _ = futures::executor::block_on(mgr.append_batch(&[1,2], &[vec![1.0,0.0], vec![0.0,1.0]]));
+    /// assert!(mgr.segments_needing_compaction().is_empty());
+    /// ```
     pub fn segments_needing_compaction(&self) -> Vec<u64> {
         let threshold = self.config.compaction_threshold;
         if threshold >= 1.0 {
@@ -987,6 +1002,18 @@ impl VectorStoreManager {
     }
 
     /// 指定キーのベクトルを論理削除する（in-memory）。
+    ///
+    /// # Errors
+    /// - セグメントのデコードに失敗した場合 `InvalidFormat`
+    ///
+    /// # Examples
+    /// ```
+    /// # use alopex_core::vector::{VectorStoreManager, VectorStoreConfig};
+    /// # let mut mgr = VectorStoreManager::new(VectorStoreConfig { dimension: 2, ..Default::default() });
+    /// # futures::executor::block_on(mgr.append_batch(&[1], &[vec![1.0, 0.0]])).unwrap();
+    /// let res = futures::executor::block_on(mgr.delete_batch(&[1])).unwrap();
+    /// assert_eq!(res.vectors_deleted, 1);
+    /// ```
     pub async fn delete_batch(&mut self, keys: &[i64]) -> Result<DeleteResult> {
         if keys.is_empty() {
             return Ok(DeleteResult::default());
@@ -1018,6 +1045,23 @@ impl VectorStoreManager {
     }
 
     /// セグメントをコンパクションして新セグメントに置換する。
+    ///
+    /// 削除済み行を物理的に取り除き、新セグメントを構築する（全削除時はセグメントを削除）。
+    ///
+    /// # Errors
+    /// - `Error::NotFound` 指定IDが存在しない場合
+    /// - `InvalidFormat` セグメントのデコード/再構成に失敗した場合
+    ///
+    /// # Examples
+    /// ```
+    /// # use alopex_core::vector::{VectorStoreManager, VectorStoreConfig};
+    /// # let mut mgr = VectorStoreManager::new(VectorStoreConfig { dimension: 2, ..Default::default() });
+    /// # futures::executor::block_on(mgr.append_batch(&[1,2], &[vec![1.0,0.0], vec![0.0,1.0]])).unwrap();
+    /// # futures::executor::block_on(mgr.delete_batch(&[1])).unwrap();
+    /// let seg_id = mgr.segments[0].segment_id;
+    /// let res = futures::executor::block_on(mgr.compact_segment(seg_id)).unwrap();
+    /// assert!(res.new_segment_id.is_some());
+    /// ```
     pub async fn compact_segment(&mut self, segment_id: u64) -> Result<CompactionResult> {
         let pos = self
             .segments
