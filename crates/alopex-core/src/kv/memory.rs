@@ -471,13 +471,6 @@ impl<'a> TxnManager<'a, MemoryTransaction<'a>> for &'a MemoryTxnManager {
 
         if delta > 0 {
             self.state.check_memory_limit(delta as usize)?;
-        } else if let Some(limit) = *self.state.memory_limit.read().unwrap() {
-            if prospective > limit {
-                return Err(Error::MemoryLimitExceeded {
-                    limit,
-                    requested: prospective,
-                });
-            }
         }
 
         let commit_version = self.state.commit_version.fetch_add(1, Ordering::AcqRel) + 1;
@@ -682,8 +675,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
 
 /// Lazy merge iterator that overlays in-flight writes onto a snapshot guard.
 struct MergedScanIter<'a> {
-    #[allow(dead_code)]
-    data_guard: RwLockReadGuard<'a, BTreeMap<Key, VersionedValue>>,
+    _data_guard: RwLockReadGuard<'a, BTreeMap<Key, VersionedValue>>,
     data_iter: std::collections::btree_map::Range<'a, Key, VersionedValue>,
     write_iter: std::collections::btree_map::Range<'a, Key, Option<Value>>,
     data_peek: Option<(Key, (Value, u64))>,
@@ -706,7 +698,7 @@ impl<'a> MergedScanIter<'a> {
         read_set: &'a mut HashMap<Key, u64>,
     ) -> Self {
         let mut iter = Self {
-            data_guard,
+            _data_guard: data_guard,
             data_iter,
             write_iter,
             data_peek: None,
@@ -744,7 +736,7 @@ impl<'a> MergedScanIter<'a> {
 
     fn advance_write(&mut self) {
         self.write_peek = None;
-        while let Some((k, v)) = self.write_iter.next().map(|(k, v)| (k.clone(), v.clone())) {
+        if let Some((k, v)) = self.write_iter.next().map(|(k, v)| (k.clone(), v.clone())) {
             if let Some(end) = &self.end {
                 if k >= *end {
                     return;
@@ -756,7 +748,6 @@ impl<'a> MergedScanIter<'a> {
                 }
             }
             self.write_peek = Some((k, v));
-            return;
         }
     }
 }

@@ -81,6 +81,7 @@ name = "alopex-sql"
 version = "0.1.0"
 dependencies = [
  "alopex-core",
+ "criterion",
  "proptest",
  "thiserror 2.0.17",
 ]

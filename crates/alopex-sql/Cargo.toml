@@ -11,3 +11,8 @@ alopex-core = { path = "../alopex-core" }
 
 [dev-dependencies]
 proptest = "1.4"
+criterion = "0.5"
+
+[[bench]]
+name = "key_encoding"
+harness = false
