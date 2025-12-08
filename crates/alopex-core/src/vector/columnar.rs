@@ -14,8 +14,9 @@ use crate::columnar::segment_v2::{
 use crate::columnar::statistics::{ScalarValue, VectorSegmentStatistics};
 use crate::vector::simd::select_kernel;
 use crate::storage::compression::CompressionV2;
-use crate::vector::Metric;
+use crate::vector::{DeleteResult, Metric};
 use crate::{Error, Result};
+use std::collections::HashSet;
 
 const VECTOR_SEGMENT_VERSION: u8 = 1;
 
@@ -279,6 +280,23 @@ impl VectorSegment {
                 other
             ))),
         }
+    }
+
+    /// 削除統計を deleted ビットマップから再計算する（norm は不変）。
+    fn recompute_deletion_stats(&mut self) {
+        let row_count = self.num_vectors;
+        let deleted_count = (0..row_count as usize)
+            .filter(|&i| self.deleted.get(i))
+            .count() as u64;
+        let active_count = row_count.saturating_sub(deleted_count);
+        self.statistics.row_count = row_count;
+        self.statistics.deleted_count = deleted_count;
+        self.statistics.active_count = active_count;
+        self.statistics.deletion_ratio = if row_count > 0 {
+            deleted_count as f32 / row_count as f32
+        } else {
+            0.0
+        };
     }
 
     /// EncodedColumn 群を ColumnSegmentV2 へ書き出す。
@@ -914,6 +932,37 @@ impl VectorStoreManager {
         })
     }
 
+    /// 指定キーのベクトルを論理削除する（in-memory）。
+    pub async fn delete_batch(&mut self, keys: &[i64]) -> Result<DeleteResult> {
+        if keys.is_empty() {
+            return Ok(DeleteResult::default());
+        }
+        let key_set: HashSet<i64> = keys.iter().copied().collect();
+        let mut result = DeleteResult::default();
+
+        for segment in &mut self.segments {
+            let decoded_keys = segment.decode_keys()?;
+            let mut modified = false;
+            for (idx, key) in decoded_keys.iter().enumerate() {
+                if !key_set.contains(key) {
+                    continue;
+                }
+                if !segment.deleted.get(idx) {
+                    segment.deleted.set(idx, true);
+                    result.vectors_deleted = result.vectors_deleted.saturating_add(1);
+                    modified = true;
+                }
+            }
+
+            if modified {
+                segment.recompute_deletion_stats();
+                result.segments_modified.push(segment.segment_id);
+            }
+        }
+
+        Ok(result)
+    }
+
     /// ベクトル検索。
     ///
     /// # Errors
@@ -1289,6 +1338,40 @@ mod tests {
         assert!((stats.deletion_ratio - 0.5).abs() < 1e-6);
         assert!((stats.norm_min - 1.0).abs() < 1e-6);
         assert!((stats.norm_max - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn delete_batch_marks_keys_and_updates_stats() {
+        let mut mgr = VectorStoreManager::new(VectorStoreConfig {
+            dimension: 2,
+            metric: Metric::InnerProduct,
+            segment_max_vectors: 2,
+            ..Default::default()
+        });
+        let keys = vec![10, 11, 12];
+        let vecs = vec![vec![1.0, 0.0], vec![0.5, 0.5], vec![0.0, 1.0]];
+        block_on(mgr.append_batch(&keys, &vecs)).unwrap();
+        let seg0_id = mgr.segments[0].segment_id;
+        let seg1_id = mgr.segments[1].segment_id;
+
+        // 事前に1行を削除済みにしておく（再カウント対象外）。
+        if let Some(seg) = mgr.segments.get_mut(0) {
+            seg.deleted.set(1, true);
+            seg.recompute_deletion_stats();
+        }
+
+        let res = block_on(mgr.delete_batch(&[11, 12, 999])).unwrap();
+        assert_eq!(res.vectors_deleted, 1);
+        assert_eq!(res.segments_modified, vec![seg1_id]);
+
+        // セグメント0は変化なし、セグメント1は全削除でdeletion_ratio=1.0。
+        assert_eq!(mgr.segments[0].segment_id, seg0_id);
+        assert_eq!(mgr.segments[0].statistics.deleted_count, 1);
+        assert_eq!(mgr.segments[0].statistics.active_count, 1);
+        assert_eq!(mgr.segments[1].segment_id, seg1_id);
+        assert_eq!(mgr.segments[1].statistics.deleted_count, 1);
+        assert_eq!(mgr.segments[1].statistics.active_count, 0);
+        assert!((mgr.segments[1].statistics.deletion_ratio - 1.0).abs() < 1e-6);
     }
 
     #[test]

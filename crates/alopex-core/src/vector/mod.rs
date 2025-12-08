@@ -15,6 +15,15 @@ pub use columnar::{
 };
 pub use simd::{select_kernel, DistanceKernel, ScalarKernel};
 
+/// 結果: バッチ削除。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeleteResult {
+    /// 実際に削除状態へ遷移したベクトル数（false→true）。
+    pub vectors_deleted: u64,
+    /// 変更があったセグメントID。
+    pub segments_modified: Vec<u64>,
+}
+
 /// Supported similarity/distance metrics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Metric {
