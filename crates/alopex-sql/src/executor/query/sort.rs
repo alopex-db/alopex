@@ -14,6 +14,7 @@ pub fn execute_sort(
         return Ok(rows);
     }
 
+    // TODO: Key evaluation/materialization holds all rows in memory; consider external/streaming sort for very large datasets if requirements expand.
     // Precompute sort keys to avoid repeated evaluation during comparisons.
     let mut keyed: Vec<(Row, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
     for row in rows.drain(..) {

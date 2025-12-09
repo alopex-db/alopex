@@ -31,6 +31,7 @@ fn execute_plan<S: KVStore, C: Catalog>(
     catalog: &C,
     plan: LogicalPlan,
 ) -> Result<(Vec<Row>, Vec<crate::catalog::ColumnMetadata>, Projection)> {
+    // TODO: This implementation materializes each stage into Vec<Row>; consider streaming/iterator-based execution for large datasets in future versions.
     match plan {
         LogicalPlan::Scan { table, projection } => {
             let table_meta = catalog
