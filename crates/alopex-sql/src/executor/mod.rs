@@ -7,6 +7,9 @@
 //! The Executor takes a [`LogicalPlan`] from the Planner and executes it
 //! against the storage layer. It supports DDL, DML, and Query operations.
 //!
+//! Query execution currently materializes intermediate results per stage;
+//! future versions may add streaming pipelines as requirements grow.
+
 //! # Components
 //!
 //! - [`Executor`]: Main executor struct
