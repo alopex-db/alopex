@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use alopex_sql::storage::{KeyEncoder, SqlValue};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 fn assert_monotonic<K: AsRef<[u8]>, T: std::fmt::Debug>(
     mut values: Vec<T>,
@@ -102,21 +102,14 @@ fn bench_doubles(c: &mut Criterion) {
 }
 
 fn bench_texts(c: &mut Criterion) {
-    let values = vec![
-        "",
-        "a",
-        "aa",
-        "b",
-        "é",
-        "あ",
-        "あい",
-        "🍣",
-    ];
+    let values = vec!["", "a", "aa", "b", "é", "あ", "あい", "🍣"];
     c.bench_function("key_encoding/text_order", |b| {
         b.iter(|| {
             assert_monotonic(
                 values.clone(),
-                |v, row_id| KeyEncoder::index_key(1, &SqlValue::Text(v.to_string()), row_id).unwrap(),
+                |v, row_id| {
+                    KeyEncoder::index_key(1, &SqlValue::Text(v.to_string()), row_id).unwrap()
+                },
                 |a, b| a.cmp(b),
                 "text",
             );
@@ -125,14 +118,7 @@ fn bench_texts(c: &mut Criterion) {
 }
 
 fn bench_blobs(c: &mut Criterion) {
-    let values = vec![
-        vec![],
-        vec![0],
-        vec![0, 1],
-        vec![1],
-        vec![1, 0],
-        vec![0xFF],
-    ];
+    let values = vec![vec![], vec![0], vec![0, 1], vec![1], vec![1, 0], vec![0xFF]];
     c.bench_function("key_encoding/blob_order", |b| {
         b.iter(|| {
             assert_monotonic(

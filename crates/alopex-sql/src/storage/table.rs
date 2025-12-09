@@ -83,7 +83,11 @@ impl<'a, T: KVTransaction<'a>> TableStorage<'a, T> {
     }
 
     /// Scan rows in the half-open RowID range [start_row_id, end_row_id].
-    pub fn range_scan(&mut self, start_row_id: u64, end_row_id: u64) -> Result<TableScanIterator<'_>> {
+    pub fn range_scan(
+        &mut self,
+        start_row_id: u64,
+        end_row_id: u64,
+    ) -> Result<TableScanIterator<'_>> {
         let start = KeyEncoder::row_key(self.table_id, start_row_id);
         let end = if end_row_id == u64::MAX {
             if self.table_id == u32::MAX {
@@ -139,7 +143,6 @@ impl<'a, T: KVTransaction<'a>> TableStorage<'a, T> {
     fn row_key(&self, row_id: u64) -> Key {
         KeyEncoder::row_key(self.table_id, row_id)
     }
-
 }
 
 /// Iterator over table rows that lazily decodes RowCodec.
@@ -172,10 +175,10 @@ impl<'a> Iterator for TableScanIterator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alopex_core::kv::memory::MemoryKV;
-    use alopex_core::kv::KVStore;
-    use alopex_core::types::TxnMode;
     use crate::planner::types::ResolvedType;
+    use alopex_core::kv::KVStore;
+    use alopex_core::kv::memory::MemoryKV;
+    use alopex_core::types::TxnMode;
 
     fn sample_table_meta() -> TableMetadata {
         TableMetadata::new(
@@ -192,7 +195,9 @@ mod tests {
 
     fn with_table<F>(store: &MemoryKV, meta: &TableMetadata, f: F)
     where
-        F: FnOnce(&mut TableStorage<'static, <MemoryKV as alopex_core::kv::KVStore>::Transaction<'static>>),
+        F: FnOnce(
+            &mut TableStorage<'static, <MemoryKV as alopex_core::kv::KVStore>::Transaction<'static>>,
+        ),
     {
         let store_static: &'static MemoryKV = Box::leak(Box::new(store.clone()));
         let txn = store_static.begin(TxnMode::ReadWrite).unwrap();
@@ -238,7 +243,11 @@ mod tests {
         let store = MemoryKV::new();
         let meta = sample_table_meta();
         with_table(&store, &meta, |table| {
-            let row = vec![SqlValue::Null, SqlValue::Text("bob".into()), SqlValue::Integer(30)];
+            let row = vec![
+                SqlValue::Null,
+                SqlValue::Text("bob".into()),
+                SqlValue::Integer(30),
+            ];
             let err = table.insert(2, &row).unwrap_err();
             matches!(err, StorageError::NullConstraintViolation { .. });
         });
@@ -312,11 +321,7 @@ mod tests {
                 table.insert(i, &row).unwrap();
             }
 
-            let rows: Vec<_> = table
-                .scan()
-                .unwrap()
-                .map(|res| res.unwrap().0)
-                .collect();
+            let rows: Vec<_> = table.scan().unwrap().map(|res| res.unwrap().0).collect();
             assert_eq!(rows, vec![1, 2, 3]);
         });
     }

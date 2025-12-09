@@ -78,6 +78,17 @@ impl KeyEncoder {
         Ok(buf)
     }
 
+    /// Prefix for equality lookups on a composite value within an index.
+    pub fn composite_index_prefix(index_id: u32, values: &[SqlValue]) -> Result<Vec<u8>> {
+        let mut buf = Vec::with_capacity(1 + 4 + values.len() * 16);
+        buf.push(0x02);
+        buf.extend_from_slice(&index_id.to_be_bytes());
+        for v in values {
+            encode_index_value(v, &mut buf)?;
+        }
+        Ok(buf)
+    }
+
     /// Sequence key for auto-increment RowID tracking.
     pub fn sequence_key(table_id: u32) -> Vec<u8> {
         let mut buf = Vec::with_capacity(1 + 4);
@@ -163,8 +174,8 @@ fn encode_ordered_f64(v: f64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cmp::Ordering;
     use proptest::prelude::*;
+    use std::cmp::Ordering;
 
     #[test]
     fn row_key_roundtrip() {
@@ -184,7 +195,7 @@ mod tests {
     #[test]
     fn index_prefix_matches_index_key_prefix() {
         let prefix = KeyEncoder::index_prefix(5);
-            let key = KeyEncoder::index_key(5, &SqlValue::Integer(1), 99).unwrap();
+        let key = KeyEncoder::index_key(5, &SqlValue::Integer(1), 99).unwrap();
         assert!(key.starts_with(&prefix));
     }
 
@@ -195,16 +206,7 @@ mod tests {
 
     #[test]
     fn bigint_ordering_matches_lexicographic() {
-        assert_monotonic_i64(vec![
-            i64::MIN,
-            -10,
-            -1,
-            0,
-            1,
-            2,
-            100,
-            i64::MAX,
-        ]);
+        assert_monotonic_i64(vec![i64::MIN, -10, -1, 0, 1, 2, 100, i64::MAX]);
     }
 
     #[test]
@@ -237,16 +239,7 @@ mod tests {
 
     #[test]
     fn text_ordering_handles_ascii_and_multibyte() {
-        let values = vec![
-            "",
-            "a",
-            "aa",
-            "b",
-            "é",
-            "あ",
-            "あい",
-            "🍣",
-        ];
+        let values = vec!["", "a", "aa", "b", "é", "あ", "あい", "🍣"];
         assert_monotonic_text(values);
     }
 
@@ -287,14 +280,7 @@ mod tests {
 
     #[test]
     fn composite_key_maintains_lexicographic_tuple_order() {
-        let mut tuples = vec![
-            (0, 0),
-            (0, 1),
-            (1, 0),
-            (1, 2),
-            (2, 0),
-            (2, 2),
-        ];
+        let mut tuples = vec![(0, 0), (0, 1), (1, 0), (1, 2), (2, 0), (2, 2)];
         tuples.sort();
 
         let mut prev: Option<Vec<u8>> = None;
@@ -325,7 +311,8 @@ mod tests {
                 let ordering = prev_v.cmp(v);
                 let key_ord = prev_key.cmp(&key);
                 assert!(
-                    ordering == key_ord || (ordering == Ordering::Equal && key_ord == Ordering::Less),
+                    ordering == key_ord
+                        || (ordering == Ordering::Equal && key_ord == Ordering::Less),
                     "integer ordering mismatch: prev={prev_v}, curr={v}"
                 );
             }
@@ -343,7 +330,8 @@ mod tests {
                 let ordering = prev_v.cmp(v);
                 let key_ord = prev_key.cmp(&key);
                 assert!(
-                    ordering == key_ord || (ordering == Ordering::Equal && key_ord == Ordering::Less),
+                    ordering == key_ord
+                        || (ordering == Ordering::Equal && key_ord == Ordering::Less),
                     "bigint ordering mismatch: prev={prev_v}, curr={v}"
                 );
             }
@@ -361,7 +349,8 @@ mod tests {
                 let ordering = prev_v.total_cmp(v);
                 let key_ord = prev_key.cmp(&key);
                 assert!(
-                    ordering == key_ord || (ordering == Ordering::Equal && key_ord == Ordering::Less),
+                    ordering == key_ord
+                        || (ordering == Ordering::Equal && key_ord == Ordering::Less),
                     "float ordering mismatch: prev={prev_v}, curr={v}"
                 );
             }
@@ -379,7 +368,8 @@ mod tests {
                 let ordering = prev_v.total_cmp(v);
                 let key_ord = prev_key.cmp(&key);
                 assert!(
-                    ordering == key_ord || (ordering == Ordering::Equal && key_ord == Ordering::Less),
+                    ordering == key_ord
+                        || (ordering == Ordering::Equal && key_ord == Ordering::Less),
                     "double ordering mismatch: prev={prev_v}, curr={v}"
                 );
             }
@@ -392,12 +382,14 @@ mod tests {
         sorted.sort();
         let mut prev: Option<(Vec<u8>, &str)> = None;
         for (i, v) in sorted.iter().enumerate() {
-            let key = KeyEncoder::index_key(1, &SqlValue::Text((*v).to_string()), i as u64).unwrap();
+            let key =
+                KeyEncoder::index_key(1, &SqlValue::Text((*v).to_string()), i as u64).unwrap();
             if let Some((prev_key, prev_v)) = prev {
                 let ordering = prev_v.cmp(v);
                 let key_ord = prev_key.cmp(&key);
                 assert!(
-                    ordering == key_ord || (ordering == Ordering::Equal && key_ord == Ordering::Less),
+                    ordering == key_ord
+                        || (ordering == Ordering::Equal && key_ord == Ordering::Less),
                     "text ordering mismatch: prev={prev_v}, curr={v}"
                 );
             }
@@ -421,7 +413,8 @@ mod tests {
                 };
                 let key_ord = prev_key.cmp(&key);
                 assert!(
-                    ordering == key_ord || (ordering == Ordering::Equal && key_ord == Ordering::Less),
+                    ordering == key_ord
+                        || (ordering == Ordering::Equal && key_ord == Ordering::Less),
                     "blob ordering mismatch: prev={prev_v:?}, curr={v:?}"
                 );
             }
@@ -453,7 +446,8 @@ mod tests {
                 let ordering = prev_v.cmp(v);
                 let key_ord = prev_key.cmp(&key);
                 assert!(
-                    ordering == key_ord || (ordering == Ordering::Equal && key_ord == Ordering::Less),
+                    ordering == key_ord
+                        || (ordering == Ordering::Equal && key_ord == Ordering::Less),
                     "timestamp ordering mismatch: prev={prev_v}, curr={v}"
                 );
             }

@@ -157,9 +157,11 @@ fn encode_value(value: &SqlValue, buf: &mut Vec<u8>) {
 
 fn decode_value(tag: u8, bytes: &[u8], cursor: &mut usize) -> Result<SqlValue> {
     let mut take = |len: usize, reason: &'static str| -> Result<&[u8]> {
-        let end = cursor.checked_add(len).ok_or_else(|| StorageError::CorruptedData {
-            reason: reason.to_string(),
-        })?;
+        let end = cursor
+            .checked_add(len)
+            .ok_or_else(|| StorageError::CorruptedData {
+                reason: reason.to_string(),
+            })?;
         if end > bytes.len() {
             return Err(StorageError::CorruptedData {
                 reason: reason.to_string(),
@@ -174,11 +176,15 @@ fn decode_value(tag: u8, bytes: &[u8], cursor: &mut usize) -> Result<SqlValue> {
         0x00 => Ok(SqlValue::Null),
         0x01 => {
             let raw = take(4, "truncated Integer value")?;
-            Ok(SqlValue::Integer(i32::from_le_bytes(raw.try_into().unwrap())))
+            Ok(SqlValue::Integer(i32::from_le_bytes(
+                raw.try_into().unwrap(),
+            )))
         }
         0x02 => {
             let raw = take(8, "truncated BigInt value")?;
-            Ok(SqlValue::BigInt(i64::from_le_bytes(raw.try_into().unwrap())))
+            Ok(SqlValue::BigInt(i64::from_le_bytes(
+                raw.try_into().unwrap(),
+            )))
         }
         0x03 => {
             let raw = take(4, "truncated Float value")?;
