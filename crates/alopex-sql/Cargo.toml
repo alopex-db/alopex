@@ -16,3 +16,11 @@ criterion = "0.5"
 [[bench]]
 name = "key_encoding"
 harness = false
+
+[[bench]]
+name = "storage_bench"
+harness = false
+
+[[bench]]
+name = "storage_macro_bench"
+harness = false
