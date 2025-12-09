@@ -61,5 +61,8 @@ pub use planner::{
     ResolvedType, SortExpr, TypeChecker, TypedAssignment, TypedExpr, TypedExprKind,
 };
 
-// Storage types (Work in progress; will be expanded in storage module)
-pub use storage::{SqlValue, StorageError};
+// Storage types
+pub use storage::{
+    IndexScanIterator, IndexStorage, KeyEncoder, RowCodec, SqlTransaction, SqlValue, StorageError,
+    TableScanIterator, TableStorage, TxnBridge, TxnContext,
+};

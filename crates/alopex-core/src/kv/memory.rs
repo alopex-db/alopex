@@ -671,6 +671,102 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
             .filter_map(|(k, v)| v.map(|val| (k, val)));
         Ok(Box::new(iter))
     }
+
+    fn commit_self(mut self) -> Result<()> {
+        if self.state != TxnState::Active {
+            return Err(Error::TxnClosed);
+        }
+        if self.mode == TxnMode::ReadOnly || self.writes.is_empty() {
+            self.state = TxnState::Committed;
+            return Ok(());
+        }
+
+        let mut data = self.manager.state.data.write().unwrap();
+
+        // Check read-set for conflicts
+        for key in self.read_set.keys() {
+            let current_version = data.get(key).map(|(_, v)| *v).unwrap_or(0);
+            if current_version > self.start_version {
+                return Err(Error::TxnConflict);
+            }
+        }
+
+        // Check write-write conflicts
+        for key in self.writes.keys() {
+            let current_version = data.get(key).map(|(_, v)| *v).unwrap_or(0);
+            if current_version > self.start_version {
+                return Err(Error::TxnConflict);
+            }
+        }
+
+        // Compute prospective memory usage
+        let mut delta: isize = 0;
+        for (key, value) in &self.writes {
+            let current_size = data.get(key).map(|(v, _)| key.len() + v.len()).unwrap_or(0);
+            let new_size = match value {
+                Some(v) => key.len() + v.len(),
+                None => 0,
+            };
+            delta += new_size as isize - current_size as isize;
+        }
+
+        let current_mem = self.manager.state.current_memory.load(Ordering::Relaxed);
+        let prospective = if delta >= 0 {
+            current_mem.saturating_add(delta as usize)
+        } else {
+            current_mem.saturating_sub(delta.unsigned_abs())
+        };
+
+        if delta > 0 {
+            self.manager.state.check_memory_limit(delta as usize)?;
+        }
+
+        let commit_version = self
+            .manager
+            .state
+            .commit_version
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
+
+        // WAL write
+        if let Some(wal_lock) = &self.manager.state.wal_writer {
+            let mut wal = wal_lock.write().unwrap();
+            wal.append(&WalRecord::Begin(self.id))?;
+            for (key, value) in &self.writes {
+                let record = match value {
+                    Some(v) => WalRecord::Put(self.id, key.clone(), v.clone()),
+                    None => WalRecord::Delete(self.id, key.clone()),
+                };
+                wal.append(&record)?;
+            }
+            wal.append(&WalRecord::Commit(self.id))?;
+        }
+
+        // Apply writes
+        for (key, value) in std::mem::take(&mut self.writes) {
+            if let Some(v) = value {
+                data.insert(key, (v, commit_version));
+            } else {
+                data.remove(&key);
+            }
+        }
+
+        self.manager
+            .state
+            .current_memory
+            .store(prospective, Ordering::Relaxed);
+
+        self.state = TxnState::Committed;
+        Ok(())
+    }
+
+    fn rollback_self(mut self) -> Result<()> {
+        if self.state != TxnState::Active {
+            return Err(Error::TxnClosed);
+        }
+        self.state = TxnState::RolledBack;
+        Ok(())
+    }
 }
 
 /// Lazy merge iterator that overlays in-flight writes onto a snapshot guard.

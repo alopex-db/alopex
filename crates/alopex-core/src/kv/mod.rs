@@ -53,6 +53,17 @@ pub trait KVTransaction<'a> {
         start: &[u8],
         end: &[u8],
     ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>>;
+
+    /// Commits the transaction, applying all buffered writes.
+    ///
+    /// This method consumes the transaction. On success, all writes become
+    /// visible to subsequent transactions. On failure, no changes are applied.
+    fn commit_self(self) -> Result<()>;
+
+    /// Rolls back the transaction, discarding all buffered writes.
+    ///
+    /// This method consumes the transaction. All pending writes are discarded.
+    fn rollback_self(self) -> Result<()>;
 }
 
 /// The main trait for a key-value storage engine.

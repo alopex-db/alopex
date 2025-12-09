@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use alopex_core::kv::KVTransaction;
 use alopex_core::types::{Key, Value};
 
@@ -7,19 +9,28 @@ use super::error::{Result, StorageError};
 use super::{KeyEncoder, RowCodec, SqlValue};
 
 /// TableStorage provides CRUD and scan operations over a table backed by a KV store.
-pub struct TableStorage<'a, T: KVTransaction<'a>> {
+///
+/// The two lifetime parameters serve distinct purposes:
+/// - `'a`: The borrow duration of the transaction reference
+/// - `'txn`: The lifetime parameter of the KVTransaction type itself
+///
+/// This separation is necessary to allow SqlTransaction to return TableStorage
+/// instances while maintaining proper lifetime relationships with GATs.
+pub struct TableStorage<'a, 'txn, T: KVTransaction<'txn>> {
     txn: &'a mut T,
     table_meta: TableMetadata,
     table_id: u32,
+    _txn_lifetime: PhantomData<&'txn ()>,
 }
 
-impl<'a, T: KVTransaction<'a>> TableStorage<'a, T> {
+impl<'a, 'txn, T: KVTransaction<'txn>> TableStorage<'a, 'txn, T> {
     /// Create a new TableStorage wrapper for a given table.
     pub fn new(txn: &'a mut T, table_meta: &TableMetadata, table_id: u32) -> Self {
         Self {
             txn,
             table_meta: table_meta.clone(),
             table_id,
+            _txn_lifetime: PhantomData,
         }
     }
 
@@ -196,7 +207,11 @@ mod tests {
     fn with_table<F>(store: &MemoryKV, meta: &TableMetadata, f: F)
     where
         F: FnOnce(
-            &mut TableStorage<'static, <MemoryKV as alopex_core::kv::KVStore>::Transaction<'static>>,
+            &mut TableStorage<
+                'static,
+                'static,
+                <MemoryKV as alopex_core::kv::KVStore>::Transaction<'static>,
+            >,
         ),
     {
         let store_static: &'static MemoryKV = Box::leak(Box::new(store.clone()));

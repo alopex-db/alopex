@@ -1,4 +1,5 @@
 use std::convert::TryInto;
+use std::marker::PhantomData;
 
 use alopex_core::kv::KVTransaction;
 use alopex_core::types::{Key, Value};
@@ -7,14 +8,22 @@ use super::error::{Result, StorageError};
 use super::{KeyEncoder, SqlValue};
 
 /// IndexStorage manages secondary index entries and lookups.
-pub struct IndexStorage<'a, T: KVTransaction<'a>> {
+///
+/// The two lifetime parameters serve distinct purposes:
+/// - `'a`: The borrow duration of the transaction reference
+/// - `'txn`: The lifetime parameter of the KVTransaction type itself
+///
+/// This separation is necessary to allow SqlTransaction to return IndexStorage
+/// instances while maintaining proper lifetime relationships with GATs.
+pub struct IndexStorage<'a, 'txn, T: KVTransaction<'txn>> {
     txn: &'a mut T,
     index_id: u32,
     unique: bool,
     column_indices: Vec<usize>,
+    _txn_lifetime: PhantomData<&'txn ()>,
 }
 
-impl<'a, T: KVTransaction<'a>> IndexStorage<'a, T> {
+impl<'a, 'txn, T: KVTransaction<'txn>> IndexStorage<'a, 'txn, T> {
     /// Create a new IndexStorage for the given index definition.
     pub fn new(txn: &'a mut T, index_id: u32, unique: bool, column_indices: Vec<usize>) -> Self {
         Self {
@@ -22,6 +31,7 @@ impl<'a, T: KVTransaction<'a>> IndexStorage<'a, T> {
             index_id,
             unique,
             column_indices,
+            _txn_lifetime: PhantomData,
         }
     }
 
@@ -215,7 +225,7 @@ mod tests {
 
     fn with_index<F>(unique: bool, column_indices: Vec<usize>, f: F)
     where
-        F: FnOnce(&mut IndexStorage<'static, <MemoryKV as KVStore>::Transaction<'static>>),
+        F: FnOnce(&mut IndexStorage<'static, 'static, <MemoryKV as KVStore>::Transaction<'static>>),
     {
         let store = MemoryKV::new();
         let store_static: &'static MemoryKV = Box::leak(Box::new(store));
