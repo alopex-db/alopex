@@ -37,6 +37,7 @@ mod ddl;
 mod dml;
 mod error;
 pub mod evaluator;
+mod query;
 mod result;
 
 pub use error::{ConstraintViolation, EvaluationError, ExecutorError, Result};
@@ -236,11 +237,9 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
     // Query Operations (to be implemented in Phase 5)
     // ========================================================================
 
-    fn execute_query(&mut self, _plan: LogicalPlan) -> Result<ExecutionResult> {
-        // TODO: Implement in Phase 5 (Tasks 5.2-5.7)
-        Err(ExecutorError::UnsupportedOperation(
-            "SELECT not yet implemented".into(),
-        ))
+    fn execute_query(&mut self, plan: LogicalPlan) -> Result<ExecutionResult> {
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| query::execute_query(txn, &*catalog, plan))
     }
 }
 
