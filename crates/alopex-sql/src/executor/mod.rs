@@ -34,6 +34,7 @@
 //! ```
 
 mod ddl;
+mod dml;
 mod error;
 pub mod evaluator;
 mod result;
@@ -199,42 +200,36 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
     }
 
     // ========================================================================
-    // DML Operations (to be implemented in Phase 4)
+    // DML Operations (implemented in Phase 4)
     // ========================================================================
 
     fn execute_insert(
         &mut self,
-        _table: &str,
-        _columns: Vec<String>,
-        _values: Vec<Vec<crate::planner::TypedExpr>>,
+        table: &str,
+        columns: Vec<String>,
+        values: Vec<Vec<crate::planner::TypedExpr>>,
     ) -> Result<ExecutionResult> {
-        // TODO: Implement in Phase 4 (Task 4.2)
-        Err(ExecutorError::UnsupportedOperation(
-            "INSERT not yet implemented".into(),
-        ))
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| dml::execute_insert(txn, &*catalog, table, columns, values))
     }
 
     fn execute_update(
         &mut self,
-        _table: &str,
-        _assignments: Vec<crate::planner::TypedAssignment>,
-        _filter: Option<crate::planner::TypedExpr>,
+        table: &str,
+        assignments: Vec<crate::planner::TypedAssignment>,
+        filter: Option<crate::planner::TypedExpr>,
     ) -> Result<ExecutionResult> {
-        // TODO: Implement in Phase 4 (Task 4.3)
-        Err(ExecutorError::UnsupportedOperation(
-            "UPDATE not yet implemented".into(),
-        ))
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| dml::execute_update(txn, &*catalog, table, assignments, filter))
     }
 
     fn execute_delete(
         &mut self,
-        _table: &str,
-        _filter: Option<crate::planner::TypedExpr>,
+        table: &str,
+        filter: Option<crate::planner::TypedExpr>,
     ) -> Result<ExecutionResult> {
-        // TODO: Implement in Phase 4 (Task 4.4)
-        Err(ExecutorError::UnsupportedOperation(
-            "DELETE not yet implemented".into(),
-        ))
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| dml::execute_delete(txn, &*catalog, table, filter))
     }
 
     // ========================================================================
@@ -290,16 +285,33 @@ mod tests {
     }
 
     #[test]
-    fn dml_operations_still_unsupported() {
+    fn insert_is_supported() {
+        use crate::Span;
+        use crate::catalog::{ColumnMetadata, TableMetadata};
+        use crate::planner::typed_expr::TypedExprKind;
+        use crate::planner::types::ResolvedType;
+
         let mut executor = create_executor();
+
+        let table = TableMetadata::new("t", vec![ColumnMetadata::new("id", ResolvedType::Integer)])
+            .with_primary_key(vec!["id".into()]);
+
+        executor
+            .execute(LogicalPlan::CreateTable {
+                table,
+                if_not_exists: false,
+            })
+            .unwrap();
+
         let result = executor.execute(LogicalPlan::Insert {
             table: "t".into(),
             columns: vec!["id".into()],
-            values: vec![vec![]],
+            values: vec![vec![crate::planner::typed_expr::TypedExpr {
+                kind: TypedExprKind::Literal(crate::ast::expr::Literal::Number("1".into())),
+                resolved_type: ResolvedType::Integer,
+                span: Span::default(),
+            }]],
         });
-        assert!(matches!(
-            result,
-            Err(ExecutorError::UnsupportedOperation(_))
-        ));
+        assert!(matches!(result, Ok(ExecutionResult::RowsAffected(1))));
     }
 }
