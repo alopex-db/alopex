@@ -88,15 +88,6 @@ fn predicate_matches(filter: &Option<TypedExpr>, row: &[SqlValue]) -> Result<boo
     }
 }
 
-fn remove_indexes<S: KVStore>(
-    _txn: &mut SqlTransaction<'_, S>,
-    _indexes: &[IndexMetadata],
-    _row_id: u64,
-    _row: &[SqlValue],
-) -> Result<()> {
-    unreachable!("remove_indexes is unused in the batched implementation")
-}
-
 fn map_storage_error(table: &crate::catalog::TableMetadata, err: StorageError) -> ExecutorError {
     match err {
         StorageError::NullConstraintViolation { column } => {

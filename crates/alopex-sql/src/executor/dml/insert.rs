@@ -103,16 +103,6 @@ fn build_row(
     Ok(row)
 }
 
-fn insert_row_with_indexes<S: KVStore>(
-    _txn: &mut SqlTransaction<'_, S>,
-    _table: &TableMetadata,
-    _indexes: &[IndexMetadata],
-    _row: &[SqlValue],
-) -> Result<()> {
-    // Deprecated helper retained for compatibility; logic moved to populate_indexes.
-    unreachable!("insert_row_with_indexes is unused in the batched implementation");
-}
-
 fn map_storage_error(table: &TableMetadata, err: StorageError) -> ExecutorError {
     match err {
         StorageError::NullConstraintViolation { column } => {

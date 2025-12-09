@@ -116,16 +116,6 @@ fn enforce_not_null(table: &TableMetadata, column_index: usize, value: &SqlValue
     Ok(())
 }
 
-fn update_indexes<S: KVStore>(
-    _txn: &mut SqlTransaction<'_, S>,
-    _indexes: &[IndexMetadata],
-    _row_id: u64,
-    _old_row: &[SqlValue],
-    _new_row: &[SqlValue],
-) -> Result<()> {
-    unreachable!("update_indexes is unused in the batched implementation")
-}
-
 fn map_storage_error(table: &TableMetadata, err: StorageError) -> ExecutorError {
     match err {
         StorageError::NullConstraintViolation { column } => {
