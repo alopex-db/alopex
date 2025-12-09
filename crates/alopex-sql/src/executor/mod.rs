@@ -35,6 +35,7 @@
 
 mod ddl;
 mod error;
+pub mod evaluator;
 mod result;
 
 pub use error::{ConstraintViolation, EvaluationError, ExecutorError, Result};
