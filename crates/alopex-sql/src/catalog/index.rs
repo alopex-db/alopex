@@ -161,16 +161,15 @@ mod tests {
 
     #[test]
     fn test_index_metadata_with_column_indices() {
-        let index = IndexMetadata::new(1, "idx", "table", vec!["col".into()])
-            .with_column_indices(vec![2]);
+        let index =
+            IndexMetadata::new(1, "idx", "table", vec!["col".into()]).with_column_indices(vec![2]);
 
         assert_eq!(index.column_indices, vec![2]);
     }
 
     #[test]
     fn test_index_metadata_with_unique() {
-        let index = IndexMetadata::new(1, "idx", "table", vec!["col".into()])
-            .with_unique(true);
+        let index = IndexMetadata::new(1, "idx", "table", vec!["col".into()]).with_unique(true);
 
         assert!(index.unique);
     }
@@ -221,8 +220,7 @@ mod tests {
             ("m".to_string(), "32".to_string()),
             ("ef_construction".to_string(), "400".to_string()),
         ];
-        let index = IndexMetadata::new(1, "idx", "table", vec!["col".into()])
-            .with_options(options);
+        let index = IndexMetadata::new(1, "idx", "table", vec!["col".into()]).with_options(options);
 
         assert_eq!(index.options.len(), 2);
         assert_eq!(index.get_option("m"), Some("32"));
@@ -230,12 +228,7 @@ mod tests {
 
     #[test]
     fn test_covers_column() {
-        let index = IndexMetadata::new(
-            1,
-            "idx",
-            "table",
-            vec!["a".into(), "b".into()],
-        );
+        let index = IndexMetadata::new(1, "idx", "table", vec!["a".into(), "b".into()]);
 
         assert!(index.covers_column("a"));
         assert!(index.covers_column("b"));

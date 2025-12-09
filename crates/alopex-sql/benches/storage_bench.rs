@@ -6,7 +6,7 @@ use alopex_core::types::TxnMode;
 use alopex_sql::catalog::{ColumnMetadata, TableMetadata};
 use alopex_sql::planner::types::ResolvedType;
 use alopex_sql::storage::{KeyEncoder, RowCodec, SqlValue, TableStorage};
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 
 fn bench_rowcodec(c: &mut Criterion) {
     let row = vec![

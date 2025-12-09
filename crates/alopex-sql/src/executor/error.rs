@@ -83,7 +83,9 @@ pub enum ConstraintViolation {
     },
 
     /// UNIQUE constraint violated.
-    #[error("UNIQUE constraint violated on index: {index_name}, columns: {columns:?}, value: {value:?}")]
+    #[error(
+        "UNIQUE constraint violated on index: {index_name}, columns: {columns:?}, value: {value:?}"
+    )]
     Unique {
         index_name: String,
         columns: Vec<String>,

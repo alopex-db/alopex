@@ -60,9 +60,7 @@ fn end_to_end_storage_flow() {
     // 3. Update row and index: rename bob -> robert, ensure index updated.
     bridge
         .with_write_txn(|ctx| {
-            ctx.with_table(&meta, |table| {
-                table.update(2, &user_row(2, "robert", 25))
-            })?;
+            ctx.with_table(&meta, |table| table.update(2, &user_row(2, "robert", 25)))?;
             ctx.with_index(1, true, vec![1], |index| {
                 index.delete(&user_row(2, "bob", 25), 2)?;
                 index.insert(&user_row(2, "robert", 25), 2)

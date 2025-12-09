@@ -259,8 +259,12 @@ impl<'a, C: Catalog> Planner<'a, C> {
         // Build index metadata
         // Note: index_id is set to 0 as placeholder; Executor assigns the actual ID
         // Note: column_indices will be resolved by Executor when table schema is available
-        let mut index =
-            IndexMetadata::new(0, stmt.name.clone(), stmt.table.clone(), vec![stmt.column.clone()]);
+        let mut index = IndexMetadata::new(
+            0,
+            stmt.name.clone(),
+            stmt.table.clone(),
+            vec![stmt.column.clone()],
+        );
 
         if let Some(method) = stmt.method {
             index = index.with_method(method);

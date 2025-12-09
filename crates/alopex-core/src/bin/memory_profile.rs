@@ -121,7 +121,9 @@ where
     F: FnOnce() -> R,
 {
     eprintln!("ERROR: memory-profiling feature not enabled");
-    eprintln!("Run with: cargo run -p alopex-core --bin memory_profile --features memory-profiling");
+    eprintln!(
+        "Run with: cargo run -p alopex-core --bin memory_profile --features memory-profiling"
+    );
     std::process::exit(1);
 }
 

@@ -125,6 +125,31 @@ impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
         IndexStorage::new(&mut self.inner, index_id, unique, column_indices)
     }
 
+    /// Delete all keys with the given prefix.
+    pub fn delete_prefix(&mut self, prefix: &[u8]) -> Result<()> {
+        // Process in small batches to avoid unbounded memory use.
+        const BATCH: usize = 512;
+        loop {
+            let mut keys = Vec::with_capacity(BATCH);
+            {
+                let iter = self.inner.scan_prefix(prefix)?;
+                for (key, _) in iter.take(BATCH) {
+                    keys.push(key);
+                }
+            }
+
+            if keys.is_empty() {
+                break;
+            }
+
+            for key in keys {
+                self.inner.delete(key)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Execute operations on a table within a closure.
     ///
     /// This is a convenience method that creates a TableStorage,

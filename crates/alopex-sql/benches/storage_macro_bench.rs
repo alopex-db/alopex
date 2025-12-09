@@ -5,7 +5,7 @@ use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::{ColumnMetadata, TableMetadata};
 use alopex_sql::planner::types::ResolvedType;
 use alopex_sql::storage::{SqlValue, TxnBridge};
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
 fn table_meta() -> TableMetadata {
     TableMetadata::new(
@@ -80,13 +80,17 @@ fn macro_flow(c: &mut Criterion) {
                 // Update + delete
                 bridge
                     .with_write_txn(|ctx| {
-                        ctx.with_table(&meta, |table| table.update(100, &user_row(100, "updated", 42)))?;
+                        ctx.with_table(&meta, |table| {
+                            table.update(100, &user_row(100, "updated", 42))
+                        })?;
                         ctx.with_index(1, true, vec![1], |index| {
                             index.delete(&user_row(100, "user100", 20), 100)?;
                             index.insert(&user_row(100, "updated", 42), 100)
                         })?;
                         ctx.with_table(&meta, |table| table.delete(150))?;
-                        ctx.with_index(1, true, vec![1], |index| index.delete(&user_row(150, "user150", 20), 150))?;
+                        ctx.with_index(1, true, vec![1], |index| {
+                            index.delete(&user_row(150, "user150", 20), 150)
+                        })?;
                         Ok(())
                     })
                     .unwrap();

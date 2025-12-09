@@ -33,6 +33,7 @@
 //! let result = executor.execute(plan)?;
 //! ```
 
+mod ddl;
 mod error;
 mod result;
 
@@ -45,7 +46,7 @@ use alopex_core::kv::KVStore;
 
 use crate::catalog::Catalog;
 use crate::planner::LogicalPlan;
-use crate::storage::TxnBridge;
+use crate::storage::{SqlTransaction, TxnBridge};
 
 /// SQL statement executor.
 ///
@@ -65,6 +66,23 @@ pub struct Executor<S: KVStore, C: Catalog> {
 }
 
 impl<S: KVStore, C: Catalog> Executor<S, C> {
+    fn run_in_write_txn<R, F>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut SqlTransaction<'_, S>) -> Result<R>,
+    {
+        let mut txn = self.bridge.begin_write().map_err(ExecutorError::from)?;
+        match f(&mut txn) {
+            Ok(result) => {
+                txn.commit().map_err(ExecutorError::from)?;
+                Ok(result)
+            }
+            Err(err) => {
+                txn.rollback().map_err(ExecutorError::from)?;
+                Err(err)
+            }
+        }
+    }
+
     /// Create a new Executor with the given store and catalog.
     ///
     /// # Arguments
@@ -107,37 +125,35 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
     pub fn execute(&mut self, plan: LogicalPlan) -> Result<ExecutionResult> {
         match plan {
             // DDL Operations
-            LogicalPlan::CreateTable { table, if_not_exists } => {
-                self.execute_create_table(table, if_not_exists)
-            }
-            LogicalPlan::DropTable { name, if_exists } => {
-                self.execute_drop_table(&name, if_exists)
-            }
-            LogicalPlan::CreateIndex { index, if_not_exists } => {
-                self.execute_create_index(index, if_not_exists)
-            }
-            LogicalPlan::DropIndex { name, if_exists } => {
-                self.execute_drop_index(&name, if_exists)
-            }
+            LogicalPlan::CreateTable {
+                table,
+                if_not_exists,
+            } => self.execute_create_table(table, if_not_exists),
+            LogicalPlan::DropTable { name, if_exists } => self.execute_drop_table(&name, if_exists),
+            LogicalPlan::CreateIndex {
+                index,
+                if_not_exists,
+            } => self.execute_create_index(index, if_not_exists),
+            LogicalPlan::DropIndex { name, if_exists } => self.execute_drop_index(&name, if_exists),
 
             // DML Operations
-            LogicalPlan::Insert { table, columns, values } => {
-                self.execute_insert(&table, columns, values)
-            }
-            LogicalPlan::Update { table, assignments, filter } => {
-                self.execute_update(&table, assignments, filter)
-            }
-            LogicalPlan::Delete { table, filter } => {
-                self.execute_delete(&table, filter)
-            }
+            LogicalPlan::Insert {
+                table,
+                columns,
+                values,
+            } => self.execute_insert(&table, columns, values),
+            LogicalPlan::Update {
+                table,
+                assignments,
+                filter,
+            } => self.execute_update(&table, assignments, filter),
+            LogicalPlan::Delete { table, filter } => self.execute_delete(&table, filter),
 
             // Query Operations
             LogicalPlan::Scan { .. }
             | LogicalPlan::Filter { .. }
             | LogicalPlan::Sort { .. }
-            | LogicalPlan::Limit { .. } => {
-                self.execute_query(plan)
-            }
+            | LogicalPlan::Limit { .. } => self.execute_query(plan),
         }
     }
 
@@ -147,38 +163,38 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
 
     fn execute_create_table(
         &mut self,
-        _table: crate::catalog::TableMetadata,
-        _if_not_exists: bool,
+        table: crate::catalog::TableMetadata,
+        if_not_exists: bool,
     ) -> Result<ExecutionResult> {
-        // TODO: Implement in Phase 2 (Task 2.2)
-        Err(ExecutorError::UnsupportedOperation(
-            "CREATE TABLE not yet implemented".into(),
-        ))
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            ddl::create_table::execute_create_table(txn, &mut *catalog, table, if_not_exists)
+        })
     }
 
-    fn execute_drop_table(&mut self, _name: &str, _if_exists: bool) -> Result<ExecutionResult> {
-        // TODO: Implement in Phase 2 (Task 2.3)
-        Err(ExecutorError::UnsupportedOperation(
-            "DROP TABLE not yet implemented".into(),
-        ))
+    fn execute_drop_table(&mut self, name: &str, if_exists: bool) -> Result<ExecutionResult> {
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            ddl::drop_table::execute_drop_table(txn, &mut *catalog, name, if_exists)
+        })
     }
 
     fn execute_create_index(
         &mut self,
-        _index: crate::catalog::IndexMetadata,
-        _if_not_exists: bool,
+        index: crate::catalog::IndexMetadata,
+        if_not_exists: bool,
     ) -> Result<ExecutionResult> {
-        // TODO: Implement in Phase 2 (Task 2.4)
-        Err(ExecutorError::UnsupportedOperation(
-            "CREATE INDEX not yet implemented".into(),
-        ))
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            ddl::create_index::execute_create_index(txn, &mut *catalog, index, if_not_exists)
+        })
     }
 
-    fn execute_drop_index(&mut self, _name: &str, _if_exists: bool) -> Result<ExecutionResult> {
-        // TODO: Implement in Phase 2 (Task 2.5)
-        Err(ExecutorError::UnsupportedOperation(
-            "DROP INDEX not yet implemented".into(),
-        ))
+    fn execute_drop_index(&mut self, name: &str, if_exists: bool) -> Result<ExecutionResult> {
+        let mut catalog = self.catalog.write().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            ddl::drop_index::execute_drop_index(txn, &mut *catalog, name, if_exists)
+        })
     }
 
     // ========================================================================
@@ -235,8 +251,8 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alopex_core::kv::memory::MemoryKV;
     use crate::catalog::MemoryCatalog;
+    use alopex_core::kv::memory::MemoryKV;
 
     fn create_executor() -> Executor<MemoryKV, MemoryCatalog> {
         let store = Arc::new(MemoryKV::new());
@@ -251,10 +267,9 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_operations() {
+    fn create_table_is_supported() {
         let mut executor = create_executor();
 
-        // Test that all operations currently return UnsupportedOperation
         use crate::catalog::{ColumnMetadata, TableMetadata};
         use crate::planner::ResolvedType;
 
@@ -266,6 +281,20 @@ mod tests {
         let result = executor.execute(LogicalPlan::CreateTable {
             table,
             if_not_exists: false,
+        });
+        assert!(matches!(result, Ok(ExecutionResult::Success)));
+
+        let catalog = executor.catalog.read().unwrap();
+        assert!(catalog.table_exists("test"));
+    }
+
+    #[test]
+    fn dml_operations_still_unsupported() {
+        let mut executor = create_executor();
+        let result = executor.execute(LogicalPlan::Insert {
+            table: "t".into(),
+            columns: vec!["id".into()],
+            values: vec![vec![]],
         });
         assert!(matches!(
             result,
