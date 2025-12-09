@@ -10,7 +10,7 @@ use crate::planner::PlannerError;
 
 /// In-memory catalog implementation using HashMaps.
 ///
-/// This is the default catalog implementation for v0.1.1.
+/// This is the default catalog implementation for v0.1.2.
 /// It stores all metadata in memory and does not persist across restarts.
 ///
 /// # Thread Safety
@@ -44,6 +44,10 @@ pub struct MemoryCatalog {
     tables: HashMap<String, TableMetadata>,
     /// Indexes stored by name.
     indexes: HashMap<String, IndexMetadata>,
+    /// Counter for generating unique table IDs (starts at 0, first ID is 1).
+    table_id_counter: u32,
+    /// Counter for generating unique index IDs (starts at 0, first ID is 1).
+    index_id_counter: u32,
 }
 
 impl MemoryCatalog {
@@ -121,14 +125,16 @@ impl Catalog for MemoryCatalog {
                 column: 0,
             })?;
 
-        // Verify target column exists in table
-        if table.get_column(&index.column).is_none() {
-            return Err(PlannerError::ColumnNotFound {
-                column: index.column.clone(),
-                table: index.table.clone(),
-                line: 0,
-                col: 0,
-            });
+        // Verify all target columns exist in table
+        for column in &index.columns {
+            if table.get_column(column).is_none() {
+                return Err(PlannerError::ColumnNotFound {
+                    column: column.clone(),
+                    table: index.table.clone(),
+                    line: 0,
+                    col: 0,
+                });
+            }
         }
 
         self.indexes.insert(index.name.clone(), index);
@@ -159,5 +165,15 @@ impl Catalog for MemoryCatalog {
 
     fn index_exists(&self, name: &str) -> bool {
         self.indexes.contains_key(name)
+    }
+
+    fn next_table_id(&mut self) -> u32 {
+        self.table_id_counter += 1;
+        self.table_id_counter
+    }
+
+    fn next_index_id(&mut self) -> u32 {
+        self.index_id_counter += 1;
+        self.index_id_counter
     }
 }

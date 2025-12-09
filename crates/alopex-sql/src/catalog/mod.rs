@@ -32,8 +32,8 @@
 //! assert!(catalog.table_exists("users"));
 //! assert!(catalog.get_table("users").is_some());
 //!
-//! // Create an index
-//! let index = IndexMetadata::new("idx_users_name", "users", "name")
+//! // Create an index (index_id is assigned by catalog in production)
+//! let index = IndexMetadata::new(1, "idx_users_name", "users", vec!["name".into()])
 //!     .with_method(IndexMethod::BTree);
 //! catalog.create_index(index).unwrap();
 //!
@@ -65,6 +65,7 @@ use crate::planner::PlannerError;
 /// - Read methods take `&self` and return references or copies
 /// - Write methods take `&mut self` and return `Result<(), PlannerError>`
 /// - The `Planner` only uses read methods; `Executor` performs writes
+/// - ID generation is done via `next_table_id()` / `next_index_id()` at execute time
 ///
 /// # Error Handling
 ///
@@ -121,4 +122,16 @@ pub trait Catalog {
 
     /// Check if an index exists.
     fn index_exists(&self, name: &str) -> bool;
+
+    /// Generate the next unique table ID.
+    ///
+    /// Called by the Executor when creating a new table.
+    /// IDs start from 1 and increment monotonically.
+    fn next_table_id(&mut self) -> u32;
+
+    /// Generate the next unique index ID.
+    ///
+    /// Called by the Executor when creating a new index.
+    /// IDs start from 1 and increment monotonically.
+    fn next_index_id(&mut self) -> u32;
 }

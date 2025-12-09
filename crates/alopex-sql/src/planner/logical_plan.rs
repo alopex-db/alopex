@@ -586,7 +586,7 @@ mod tests {
 
     #[test]
     fn test_create_index_plan() {
-        let index = IndexMetadata::new("idx_users_name", "users", "name");
+        let index = IndexMetadata::new(0, "idx_users_name", "users", vec!["name".into()]);
         let plan = LogicalPlan::create_index(index, false);
 
         assert_eq!(plan.name(), "CreateIndex");

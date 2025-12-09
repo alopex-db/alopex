@@ -17,6 +17,7 @@ fn sample_table_meta() -> TableMetadata {
             ColumnMetadata::new("age", ResolvedType::Integer),
         ],
     )
+    .with_table_id(1)
 }
 
 #[test]
@@ -28,7 +29,7 @@ fn end_to_end_storage_flow() {
     // 1. Insert rows and index entries, then commit.
     bridge
         .with_write_txn(|ctx| {
-            ctx.with_table(&meta, 1, |table| {
+            ctx.with_table(&meta, |table| {
                 insert_user(table, 1, "alice", 20)?;
                 insert_user(table, 2, "bob", 25)?;
                 insert_user(table, 3, "carol", 30)?;
@@ -50,7 +51,7 @@ fn end_to_end_storage_flow() {
                 index.lookup(&SqlValue::Text("alice".into()))
             })?;
             assert_eq!(ids, vec![1]);
-            ctx.with_table(&meta, 1, |table| table.get(1))
+            ctx.with_table(&meta, |table| table.get(1))
         })
         .expect("read txn should succeed")
         .expect("alice should exist");
@@ -59,7 +60,7 @@ fn end_to_end_storage_flow() {
     // 3. Update row and index: rename bob -> robert, ensure index updated.
     bridge
         .with_write_txn(|ctx| {
-            ctx.with_table(&meta, 1, |table| {
+            ctx.with_table(&meta, |table| {
                 table.update(2, &user_row(2, "robert", 25))
             })?;
             ctx.with_index(1, true, vec![1], |index| {
@@ -90,7 +91,7 @@ fn end_to_end_storage_flow() {
             ctx.with_index(1, true, vec![1], |index| {
                 index.delete(&user_row(3, "carol", 30), 3)
             })?;
-            ctx.with_table(&meta, 1, |table| table.delete(3))?;
+            ctx.with_table(&meta, |table| table.delete(3))?;
             Ok(())
         })
         .unwrap();
@@ -108,7 +109,7 @@ fn end_to_end_storage_flow() {
     // 5. Rollback scenario: insert then rollback, verify absence.
     bridge
         .with_write_txn_explicit(|ctx| {
-            ctx.with_table(&meta, 1, |table| insert_user(table, 4, "dave", 40))?;
+            ctx.with_table(&meta, |table| insert_user(table, 4, "dave", 40))?;
             ctx.with_index(1, true, vec![1], |index| {
                 index.insert(&user_row(4, "dave", 40), 4)
             })?;

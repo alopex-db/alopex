@@ -56,7 +56,8 @@ fn bench_table_storage_insert_scan(c: &mut Criterion) {
                 .with_not_null(true),
             ColumnMetadata::new("name", ResolvedType::Text).with_not_null(true),
         ],
-    );
+    )
+    .with_table_id(1);
 
     c.bench_function("table_storage_insert_scan", |b| {
         b.iter_batched(
@@ -68,7 +69,7 @@ fn bench_table_storage_insert_scan(c: &mut Criterion) {
             |(store, meta)| {
                 let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
                 {
-                    let mut table = TableStorage::new(&mut txn, &meta, 1);
+                    let mut table = TableStorage::new(&mut txn, &meta);
                     for i in 0..100 {
                         let row = vec![SqlValue::Integer(i), SqlValue::Text(format!("user{i}"))];
                         table.insert(i as u64, &row).unwrap();

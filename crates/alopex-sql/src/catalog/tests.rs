@@ -20,8 +20,9 @@ fn create_test_table(name: &str) -> TableMetadata {
 }
 
 /// Helper function to create a test index metadata.
+/// Note: index_id is set to 0 for test purposes; in production, Catalog assigns IDs.
 fn create_test_index(name: &str, table: &str, column: &str) -> IndexMetadata {
-    IndexMetadata::new(name, table, column).with_method(IndexMethod::BTree)
+    IndexMetadata::new(0, name, table, vec![column.into()]).with_method(IndexMethod::BTree)
 }
 
 mod memory_catalog_tests {
@@ -225,7 +226,7 @@ mod memory_catalog_tests {
         catalog.create_table(create_test_table("users")).unwrap();
         catalog
             .create_index(
-                IndexMetadata::new("idx_users_name", "users", "name")
+                IndexMetadata::new(0, "idx_users_name", "users", vec!["name".into()])
                     .with_method(IndexMethod::Hnsw)
                     .with_option("m", "16"),
             )
@@ -236,7 +237,7 @@ mod memory_catalog_tests {
         let index = index.unwrap();
         assert_eq!(index.name, "idx_users_name");
         assert_eq!(index.table, "users");
-        assert_eq!(index.column, "name");
+        assert_eq!(index.first_column(), Some("name"));
         assert_eq!(index.method, Some(IndexMethod::Hnsw));
         assert_eq!(index.get_option("m"), Some("16"));
     }
@@ -449,7 +450,7 @@ mod memory_catalog_tests {
         );
         catalog.create_table(table).unwrap();
 
-        let index = IndexMetadata::new("idx_items_embedding", "items", "embedding")
+        let index = IndexMetadata::new(0, "idx_items_embedding", "items", vec!["embedding".into()])
             .with_method(IndexMethod::Hnsw)
             .with_option("m", "16")
             .with_option("ef_construction", "200");
@@ -460,5 +461,57 @@ mod memory_catalog_tests {
         assert_eq!(index.method, Some(IndexMethod::Hnsw));
         assert_eq!(index.get_option("m"), Some("16"));
         assert_eq!(index.get_option("ef_construction"), Some("200"));
+    }
+
+    // ==================== ID Generation Tests ====================
+
+    #[test]
+    fn test_next_table_id_starts_at_one() {
+        let mut catalog = MemoryCatalog::new();
+        let id1 = catalog.next_table_id();
+        assert_eq!(id1, 1);
+    }
+
+    #[test]
+    fn test_next_table_id_increments() {
+        let mut catalog = MemoryCatalog::new();
+        let id1 = catalog.next_table_id();
+        let id2 = catalog.next_table_id();
+        let id3 = catalog.next_table_id();
+        assert_eq!((id1, id2, id3), (1, 2, 3));
+    }
+
+    #[test]
+    fn test_next_index_id_starts_at_one() {
+        let mut catalog = MemoryCatalog::new();
+        let id1 = catalog.next_index_id();
+        assert_eq!(id1, 1);
+    }
+
+    #[test]
+    fn test_next_index_id_increments() {
+        let mut catalog = MemoryCatalog::new();
+        let id1 = catalog.next_index_id();
+        let id2 = catalog.next_index_id();
+        let id3 = catalog.next_index_id();
+        assert_eq!((id1, id2, id3), (1, 2, 3));
+    }
+
+    #[test]
+    fn test_table_and_index_ids_are_independent() {
+        let mut catalog = MemoryCatalog::new();
+        // Generate some table IDs
+        let t1 = catalog.next_table_id();
+        let t2 = catalog.next_table_id();
+        // Generate some index IDs
+        let i1 = catalog.next_index_id();
+        let i2 = catalog.next_index_id();
+        // Generate more table IDs
+        let t3 = catalog.next_table_id();
+
+        // Table IDs should be sequential: 1, 2, 3
+        assert_eq!((t1, t2, t3), (1, 2, 3));
+        // Index IDs should be sequential: 1, 2
+        assert_eq!((i1, i2), (1, 2));
     }
 }

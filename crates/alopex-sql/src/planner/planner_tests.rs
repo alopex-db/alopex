@@ -267,7 +267,7 @@ fn test_plan_create_index() {
     {
         assert_eq!(index.name, "idx_users_name");
         assert_eq!(index.table, "users");
-        assert_eq!(index.column, "name");
+        assert_eq!(index.first_column(), Some("name"));
         assert_eq!(index.method, Some(IndexMethod::BTree));
         assert!(!if_not_exists);
     } else {
@@ -301,7 +301,7 @@ fn test_plan_create_index_column_not_found() {
 #[test]
 fn test_plan_drop_index() {
     let mut catalog = create_test_catalog();
-    let index = crate::catalog::IndexMetadata::new("idx_test", "users", "name");
+    let index = crate::catalog::IndexMetadata::new(0, "idx_test", "users", vec!["name".into()]);
     catalog.create_index(index).unwrap();
 
     let planner = Planner::new(&catalog);

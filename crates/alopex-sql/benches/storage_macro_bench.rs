@@ -18,6 +18,7 @@ fn table_meta() -> TableMetadata {
             ColumnMetadata::new("age", ResolvedType::Integer),
         ],
     )
+    .with_table_id(1)
 }
 
 fn user_row(id: i32, name: &str, age: i32) -> Vec<SqlValue> {
@@ -40,7 +41,7 @@ fn macro_flow(c: &mut Criterion) {
                 // Insert + index
                 bridge
                     .with_write_txn(|ctx| {
-                        ctx.with_table(&meta, 1, |table| {
+                        ctx.with_table(&meta, |table| {
                             for i in 0..200 {
                                 let row = user_row(i, &format!("user{i}"), 20 + (i % 5));
                                 table.insert(i as u64, &row)?;
@@ -66,7 +67,7 @@ fn macro_flow(c: &mut Criterion) {
                             assert_eq!(ids, vec![50]);
                             Ok(())
                         })?;
-                        ctx.with_table(&meta, 1, |table| {
+                        ctx.with_table(&meta, |table| {
                             let mut iter = table.scan()?;
                             while let Some(res) = iter.next() {
                                 let _ = res.unwrap();
@@ -79,12 +80,12 @@ fn macro_flow(c: &mut Criterion) {
                 // Update + delete
                 bridge
                     .with_write_txn(|ctx| {
-                        ctx.with_table(&meta, 1, |table| table.update(100, &user_row(100, "updated", 42)))?;
+                        ctx.with_table(&meta, |table| table.update(100, &user_row(100, "updated", 42)))?;
                         ctx.with_index(1, true, vec![1], |index| {
                             index.delete(&user_row(100, "user100", 20), 100)?;
                             index.insert(&user_row(100, "updated", 42), 100)
                         })?;
-                        ctx.with_table(&meta, 1, |table| table.delete(150))?;
+                        ctx.with_table(&meta, |table| table.delete(150))?;
                         ctx.with_index(1, true, vec![1], |index| index.delete(&user_row(150, "user150", 20), 150))?;
                         Ok(())
                     })

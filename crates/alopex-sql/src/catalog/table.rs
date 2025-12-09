@@ -8,7 +8,7 @@ use crate::planner::types::ResolvedType;
 
 /// Metadata for a table in the catalog.
 ///
-/// Contains the table name, column definitions, and optional primary key constraint.
+/// Contains the table ID, name, column definitions, and optional primary key constraint.
 ///
 /// # Examples
 ///
@@ -33,6 +33,8 @@ use crate::planner::types::ResolvedType;
 /// ```
 #[derive(Debug, Clone)]
 pub struct TableMetadata {
+    /// Unique table ID assigned by the catalog.
+    pub table_id: u32,
     /// Table name.
     pub name: String,
     /// Column definitions (order is preserved).
@@ -43,12 +45,22 @@ pub struct TableMetadata {
 
 impl TableMetadata {
     /// Create a new table metadata with the given name and columns.
+    ///
+    /// The table_id defaults to 0; use `with_table_id()` to set it,
+    /// or it will be assigned by the Catalog when the table is created.
     pub fn new(name: impl Into<String>, columns: Vec<ColumnMetadata>) -> Self {
         Self {
+            table_id: 0,
             name: name.into(),
             columns,
             primary_key: None,
         }
+    }
+
+    /// Set the table ID.
+    pub fn with_table_id(mut self, table_id: u32) -> Self {
+        self.table_id = table_id;
+        self
     }
 
     /// Set the primary key columns.
@@ -194,9 +206,17 @@ mod tests {
     #[test]
     fn test_table_metadata_new() {
         let table = TableMetadata::new("users", vec![]);
+        assert_eq!(table.table_id, 0);
         assert_eq!(table.name, "users");
         assert!(table.columns.is_empty());
         assert!(table.primary_key.is_none());
+    }
+
+    #[test]
+    fn test_table_metadata_with_table_id() {
+        let table = TableMetadata::new("users", vec![]).with_table_id(42);
+        assert_eq!(table.table_id, 42);
+        assert_eq!(table.name, "users");
     }
 
     #[test]

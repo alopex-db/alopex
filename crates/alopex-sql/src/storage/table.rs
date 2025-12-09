@@ -25,11 +25,13 @@ pub struct TableStorage<'a, 'txn, T: KVTransaction<'txn>> {
 
 impl<'a, 'txn, T: KVTransaction<'txn>> TableStorage<'a, 'txn, T> {
     /// Create a new TableStorage wrapper for a given table.
-    pub fn new(txn: &'a mut T, table_meta: &TableMetadata, table_id: u32) -> Self {
+    ///
+    /// The `table_id` is obtained from `table_meta.table_id`.
+    pub fn new(txn: &'a mut T, table_meta: &TableMetadata) -> Self {
         Self {
             txn,
+            table_id: table_meta.table_id,
             table_meta: table_meta.clone(),
-            table_id,
             _txn_lifetime: PhantomData,
         }
     }
@@ -191,7 +193,7 @@ mod tests {
     use alopex_core::kv::memory::MemoryKV;
     use alopex_core::types::TxnMode;
 
-    fn sample_table_meta() -> TableMetadata {
+    fn sample_table_meta(table_id: u32) -> TableMetadata {
         TableMetadata::new(
             "users",
             vec![
@@ -202,6 +204,7 @@ mod tests {
                 crate::catalog::ColumnMetadata::new("age", ResolvedType::Integer),
             ],
         )
+        .with_table_id(table_id)
     }
 
     fn with_table<F>(store: &MemoryKV, meta: &TableMetadata, f: F)
@@ -217,14 +220,14 @@ mod tests {
         let store_static: &'static MemoryKV = Box::leak(Box::new(store.clone()));
         let txn = store_static.begin(TxnMode::ReadWrite).unwrap();
         let txn_static: &'static mut _ = Box::leak(Box::new(txn));
-        let mut table = TableStorage::new(txn_static, meta, 1);
+        let mut table = TableStorage::new(txn_static, meta);
         f(&mut table);
     }
 
     #[test]
     fn insert_and_get_roundtrip() {
         let store = MemoryKV::new();
-        let meta = sample_table_meta();
+        let meta = sample_table_meta(1);
         with_table(&store, &meta, |table| {
             let row = vec![
                 SqlValue::Integer(1),
@@ -240,7 +243,7 @@ mod tests {
     #[test]
     fn duplicate_primary_key_is_rejected() {
         let store = MemoryKV::new();
-        let meta = sample_table_meta();
+        let meta = sample_table_meta(1);
         with_table(&store, &meta, |table| {
             let row = vec![
                 SqlValue::Integer(1),
@@ -256,7 +259,7 @@ mod tests {
     #[test]
     fn not_null_constraint_is_enforced() {
         let store = MemoryKV::new();
-        let meta = sample_table_meta();
+        let meta = sample_table_meta(1);
         with_table(&store, &meta, |table| {
             let row = vec![
                 SqlValue::Null,
@@ -271,7 +274,7 @@ mod tests {
     #[test]
     fn update_overwrites_existing_row() {
         let store = MemoryKV::new();
-        let meta = sample_table_meta();
+        let meta = sample_table_meta(1);
         with_table(&store, &meta, |table| {
             let row1 = vec![
                 SqlValue::Integer(1),
@@ -294,7 +297,7 @@ mod tests {
     #[test]
     fn update_nonexistent_returns_not_found() {
         let store = MemoryKV::new();
-        let meta = sample_table_meta();
+        let meta = sample_table_meta(1);
         with_table(&store, &meta, |table| {
             let row = vec![
                 SqlValue::Integer(99),
@@ -309,7 +312,7 @@ mod tests {
     #[test]
     fn delete_removes_row() {
         let store = MemoryKV::new();
-        let meta = sample_table_meta();
+        let meta = sample_table_meta(1);
         with_table(&store, &meta, |table| {
             let row = vec![
                 SqlValue::Integer(1),
@@ -325,7 +328,7 @@ mod tests {
     #[test]
     fn scan_returns_all_rows_in_order() {
         let store = MemoryKV::new();
-        let meta = sample_table_meta();
+        let meta = sample_table_meta(1);
         with_table(&store, &meta, |table| {
             for i in 1..=3 {
                 let row = vec![
@@ -344,7 +347,7 @@ mod tests {
     #[test]
     fn range_scan_respects_bounds() {
         let store = MemoryKV::new();
-        let meta = sample_table_meta();
+        let meta = sample_table_meta(1);
         with_table(&store, &meta, |table| {
             for i in 1..=5 {
                 let row = vec![
@@ -367,11 +370,11 @@ mod tests {
     #[test]
     fn range_scan_handles_max_table_id_end_bound() {
         let store = MemoryKV::new();
-        let meta = sample_table_meta();
+        let meta = sample_table_meta(u32::MAX);
         let store_static: &'static MemoryKV = Box::leak(Box::new(store.clone()));
         let txn = store_static.begin(TxnMode::ReadWrite).unwrap();
         let txn_static: &'static mut _ = Box::leak(Box::new(txn));
-        let mut table = TableStorage::new(txn_static, &meta, u32::MAX);
+        let mut table = TableStorage::new(txn_static, &meta);
 
         let row = vec![
             SqlValue::Integer(1),
@@ -390,7 +393,7 @@ mod tests {
     #[test]
     fn next_row_id_increments_sequence() {
         let store = MemoryKV::new();
-        let meta = sample_table_meta();
+        let meta = sample_table_meta(1);
         with_table(&store, &meta, |table| {
             let id1 = table.next_row_id().unwrap();
             let id2 = table.next_row_id().unwrap();

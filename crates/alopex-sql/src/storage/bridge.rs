@@ -103,12 +103,13 @@ impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
     ///
     /// Returns a TableStorage instance that borrows this transaction.
     /// The returned storage is valid for the duration of the borrow.
+    ///
+    /// The `table_id` is obtained from `table_meta.table_id`.
     pub fn table_storage<'b>(
         &'b mut self,
         table_meta: &TableMetadata,
-        table_id: u32,
     ) -> TableStorage<'b, 'a, S::Transaction<'a>> {
-        TableStorage::new(&mut self.inner, table_meta, table_id)
+        TableStorage::new(&mut self.inner, table_meta)
     }
 
     /// Get an index storage handle.
@@ -128,11 +129,13 @@ impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
     ///
     /// This is a convenience method that creates a TableStorage,
     /// executes the closure, and returns the result.
-    pub fn with_table<R, F>(&mut self, table_meta: &TableMetadata, table_id: u32, f: F) -> Result<R>
+    ///
+    /// The `table_id` is obtained from `table_meta.table_id`.
+    pub fn with_table<R, F>(&mut self, table_meta: &TableMetadata, f: F) -> Result<R>
     where
         F: FnOnce(&mut TableStorage<'_, 'a, S::Transaction<'a>>) -> Result<R>,
     {
-        let mut storage = self.table_storage(table_meta, table_id);
+        let mut storage = self.table_storage(table_meta);
         f(&mut storage)
     }
 
@@ -194,6 +197,7 @@ mod tests {
                 ColumnMetadata::new("name", ResolvedType::Text).with_not_null(true),
             ],
         )
+        .with_table_id(1)
     }
 
     #[test]
@@ -231,7 +235,7 @@ mod tests {
         // Write transaction
         bridge
             .with_write_txn(|ctx| {
-                ctx.with_table(&meta, 1, |table| {
+                ctx.with_table(&meta, |table| {
                     table.insert(1, &[SqlValue::Integer(1), SqlValue::Text("alice".into())])
                 })
             })
@@ -239,7 +243,7 @@ mod tests {
 
         // Read transaction
         let row = bridge
-            .with_read_txn(|ctx| ctx.with_table(&meta, 1, |table| table.get(1)))
+            .with_read_txn(|ctx| ctx.with_table(&meta, |table| table.get(1)))
             .unwrap()
             .unwrap();
 
@@ -255,7 +259,7 @@ mod tests {
         // Write transaction with explicit rollback
         bridge
             .with_write_txn_explicit(|ctx| {
-                ctx.with_table(&meta, 1, |table| {
+                ctx.with_table(&meta, |table| {
                     table.insert(1, &[SqlValue::Integer(1), SqlValue::Text("bob".into())])
                 })?;
                 Ok(((), false)) // false = rollback
@@ -264,7 +268,7 @@ mod tests {
 
         // Read transaction should not see the row
         let row = bridge
-            .with_read_txn(|ctx| ctx.with_table(&meta, 1, |table| table.get(1)))
+            .with_read_txn(|ctx| ctx.with_table(&meta, |table| table.get(1)))
             .unwrap();
 
         assert!(row.is_none());
@@ -279,7 +283,7 @@ mod tests {
         // Start first write transaction
         let mut txn1 = bridge.begin_write().unwrap();
         {
-            let mut table = txn1.table_storage(&meta, 1);
+            let mut table = txn1.table_storage(&meta);
             table
                 .insert(1, &[SqlValue::Integer(1), SqlValue::Text("alice".into())])
                 .unwrap();
@@ -288,7 +292,7 @@ mod tests {
         // Start second write transaction
         let mut txn2 = bridge.begin_write().unwrap();
         {
-            let mut table = txn2.table_storage(&meta, 1);
+            let mut table = txn2.table_storage(&meta);
             table
                 .insert(1, &[SqlValue::Integer(1), SqlValue::Text("bob".into())])
                 .unwrap();
@@ -312,7 +316,7 @@ mod tests {
         // Insert multiple rows
         bridge
             .with_write_txn(|ctx| {
-                ctx.with_table(&meta, 1, |table| {
+                ctx.with_table(&meta, |table| {
                     for i in 1..=3 {
                         table.insert(
                             i,
@@ -330,7 +334,7 @@ mod tests {
         // Scan all rows
         let rows: Vec<u64> = bridge
             .with_read_txn(|ctx| {
-                ctx.with_table(&meta, 1, |table| {
+                ctx.with_table(&meta, |table| {
                     let iter = table.scan()?;
                     let ids: Vec<u64> = iter.filter_map(|r| r.ok().map(|(id, _)| id)).collect();
                     Ok(ids)

@@ -129,6 +129,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
         let primary_key = Self::extract_primary_key(stmt);
 
         // Build table metadata
+        // Note: table_id defaults to 0 as placeholder; Executor assigns the actual ID
         let mut table = TableMetadata::new(stmt.name.clone(), columns);
         if let Some(pk) = primary_key {
             table = table.with_primary_key(pk);
@@ -256,8 +257,10 @@ impl<'a, C: Catalog> Planner<'a, C> {
             .resolve_column(table, &stmt.column, stmt.span)?;
 
         // Build index metadata
+        // Note: index_id is set to 0 as placeholder; Executor assigns the actual ID
+        // Note: column_indices will be resolved by Executor when table schema is available
         let mut index =
-            IndexMetadata::new(stmt.name.clone(), stmt.table.clone(), stmt.column.clone());
+            IndexMetadata::new(0, stmt.name.clone(), stmt.table.clone(), vec![stmt.column.clone()]);
 
         if let Some(method) = stmt.method {
             index = index.with_method(method);
