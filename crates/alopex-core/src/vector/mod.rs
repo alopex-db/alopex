@@ -6,6 +6,7 @@ use std::str::FromStr;
 use crate::{Error, Result};
 pub mod columnar;
 pub mod flat;
+pub mod hnsw;
 pub mod simd;
 
 // Re-export主要型。
@@ -13,6 +14,7 @@ pub use columnar::{
     key_layout as vector_key_layout, AppendResult, SearchStats, VectorSearchParams,
     VectorSearchResult, VectorSegment, VectorStoreConfig, VectorStoreManager,
 };
+pub use hnsw::{HnswConfig, HnswIndex, HnswSearchResult, HnswStats};
 pub use simd::{select_kernel, DistanceKernel, ScalarKernel};
 
 /// Batch delete result.

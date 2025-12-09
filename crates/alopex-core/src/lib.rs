@@ -31,5 +31,6 @@ pub use vector::columnar::{
     VectorSegment, VectorStoreConfig, VectorStoreManager,
 };
 pub use vector::flat::{search_flat, ScoredItem};
+pub use vector::hnsw::{HnswConfig, HnswIndex, HnswSearchResult, HnswStats};
 pub use vector::simd::{select_kernel, DistanceKernel, ScalarKernel};
 pub use vector::{score, validate_dimensions, Metric, VectorType};

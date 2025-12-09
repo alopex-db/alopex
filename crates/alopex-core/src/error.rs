@@ -83,6 +83,63 @@ pub enum Error {
     #[error("path exists: {0}")]
     PathExists(PathBuf),
 
+    /// An index configuration parameter is invalid.
+    #[error("invalid parameter {param}: {reason}")]
+    InvalidParameter {
+        /// Name of the invalid parameter.
+        param: String,
+        /// Description of the expected range or constraint.
+        reason: String,
+    },
+
+    /// An index with the requested name was not found.
+    #[error("index not found: {name}")]
+    IndexNotFound {
+        /// Name of the missing index.
+        name: String,
+    },
+
+    /// An index failed integrity checks.
+    #[error("corrupted index {name}: {reason}")]
+    CorruptedIndex {
+        /// Name of the corrupted index.
+        name: String,
+        /// Description of the corruption.
+        reason: String,
+    },
+
+    /// The stored index version is unsupported by this binary.
+    #[error("unsupported index version: found {found}, supported {supported}")]
+    UnsupportedIndexVersion {
+        /// Version detected in storage.
+        found: u32,
+        /// Highest supported version.
+        supported: u32,
+    },
+
+    /// An unknown configuration or runtime option was provided.
+    #[error("unknown option: {key}")]
+    UnknownOption {
+        /// Name of the option.
+        key: String,
+    },
+
+    /// A column type does not match the expected layout.
+    #[error("invalid column type for {column}, expected {expected}")]
+    InvalidColumnType {
+        /// Column name.
+        column: String,
+        /// Expected type description.
+        expected: String,
+    },
+
+    /// The index is busy and cannot serve the requested operation.
+    #[error("index busy during {operation}")]
+    IndexBusy {
+        /// Operation that was attempted.
+        operation: String,
+    },
+
     /// Errors originating from columnar components.
     #[error("columnar error: {0}")]
     Columnar(#[from] ColumnarError),
