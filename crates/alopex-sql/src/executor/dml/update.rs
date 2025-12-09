@@ -29,26 +29,16 @@ pub fn execute_update<S: KVStore, C: Catalog>(
     const BATCH: usize = 512;
 
     loop {
-        let mut batch = Vec::with_capacity(BATCH);
-        {
-            let mut table_storage = txn.table_storage(&table);
-            let mut iter = table_storage.range_scan(next_row_id, u64::MAX)?;
-            for _ in 0..BATCH {
-                if let Some(res) = iter.next() {
-                    let (row_id, row) = res?;
-                    next_row_id = row_id.saturating_add(1);
-                    batch.push((row_id, row));
-                } else {
-                    break;
-                }
-            }
-        }
+        let batch = fetch_batch(txn, &table, next_row_id, BATCH)?;
 
         if batch.is_empty() {
             break;
         }
 
+        let mut changes = Vec::new();
+
         for (row_id, row) in batch {
+            next_row_id = row_id.saturating_add(1);
             if !predicate_matches(&filter, &row)? {
                 continue;
             }
@@ -66,18 +56,40 @@ pub fn execute_update<S: KVStore, C: Catalog>(
                 continue;
             }
 
-            update_indexes(txn, &indexes, row_id, &row, &new_row)?;
-
-            let mut table_storage = txn.table_storage(&table);
-            table_storage
-                .update(row_id, &new_row)
-                .map_err(|e| map_storage_error(&table, e))?;
-
-            rows_affected += 1;
+            changes.push((row_id, row, new_row));
         }
+
+        if changes.is_empty() {
+            continue;
+        }
+
+        update_indexes_batch(txn, &indexes, &changes)?;
+        apply_table_updates(txn, &table, &changes)?;
+
+        rows_affected += changes.len() as u64;
     }
 
     Ok(ExecutionResult::RowsAffected(rows_affected))
+}
+
+fn fetch_batch<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    table: &TableMetadata,
+    start_row_id: u64,
+    batch_size: usize,
+) -> Result<Vec<(u64, Vec<SqlValue>)>> {
+    let mut batch = Vec::with_capacity(batch_size);
+    let mut table_storage = txn.table_storage(table);
+    let mut iter = table_storage.range_scan(start_row_id, u64::MAX)?;
+    for _ in 0..batch_size {
+        if let Some(res) = iter.next() {
+            let (row_id, row) = res?;
+            batch.push((row_id, row));
+        } else {
+            break;
+        }
+    }
+    Ok(batch)
 }
 
 fn predicate_matches(filter: &Option<TypedExpr>, row: &[SqlValue]) -> Result<bool> {
@@ -105,47 +117,13 @@ fn enforce_not_null(table: &TableMetadata, column_index: usize, value: &SqlValue
 }
 
 fn update_indexes<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
-    indexes: &[IndexMetadata],
-    row_id: u64,
-    old_row: &[SqlValue],
-    new_row: &[SqlValue],
+    _txn: &mut SqlTransaction<'_, S>,
+    _indexes: &[IndexMetadata],
+    _row_id: u64,
+    _old_row: &[SqlValue],
+    _new_row: &[SqlValue],
 ) -> Result<()> {
-    for index in indexes {
-        let old_skip = should_skip_unique_index_for_null(index, old_row);
-        let new_skip = should_skip_unique_index_for_null(index, new_row);
-
-        let changed = index
-            .column_indices
-            .iter()
-            .any(|&idx| old_row[idx] != new_row[idx]);
-
-        if !changed && old_skip == new_skip {
-            continue;
-        }
-
-        if !old_skip {
-            txn.with_index(
-                index.index_id,
-                index.unique,
-                index.column_indices.clone(),
-                |storage| storage.delete(old_row, row_id),
-            )
-            .map_err(|e| map_index_error(index, e))?;
-        }
-
-        if !new_skip {
-            txn.with_index(
-                index.index_id,
-                index.unique,
-                index.column_indices.clone(),
-                |storage| storage.insert(new_row, row_id),
-            )
-            .map_err(|e| map_index_error(index, e))?;
-        }
-    }
-
-    Ok(())
+    unreachable!("update_indexes is unused in the batched implementation")
 }
 
 fn map_storage_error(table: &TableMetadata, err: StorageError) -> ExecutorError {
@@ -195,6 +173,55 @@ fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) ->
             .column_indices
             .iter()
             .any(|&idx| row.get(idx).map_or(true, SqlValue::is_null))
+}
+
+fn update_indexes_batch<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    indexes: &[IndexMetadata],
+    changes: &[(u64, Vec<SqlValue>, Vec<SqlValue>)],
+) -> Result<()> {
+    for index in indexes {
+        let mut storage =
+            txn.index_storage(index.index_id, index.unique, index.column_indices.clone());
+        for (row_id, old_row, new_row) in changes {
+            let old_skip = should_skip_unique_index_for_null(index, old_row);
+            let new_skip = should_skip_unique_index_for_null(index, new_row);
+            let changed = index
+                .column_indices
+                .iter()
+                .any(|&idx| old_row[idx] != new_row[idx]);
+
+            if !changed && old_skip == new_skip {
+                continue;
+            }
+
+            if !old_skip {
+                storage
+                    .delete(old_row, *row_id)
+                    .map_err(|e| map_index_error(index, e))?;
+            }
+            if !new_skip {
+                storage
+                    .insert(new_row, *row_id)
+                    .map_err(|e| map_index_error(index, e))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_table_updates<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    table: &TableMetadata,
+    changes: &[(u64, Vec<SqlValue>, Vec<SqlValue>)],
+) -> Result<()> {
+    let mut table_storage = txn.table_storage(table);
+    for (row_id, _, new_row) in changes {
+        table_storage
+            .update(*row_id, new_row)
+            .map_err(|e| map_storage_error(table, e))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

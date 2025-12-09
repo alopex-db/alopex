@@ -27,14 +27,27 @@ pub fn execute_insert<S: KVStore, C: Catalog>(
         .cloned()
         .collect();
 
-    let mut rows_inserted = 0u64;
-    for row_exprs in values {
-        let row = build_row(&table, &columns, row_exprs)?;
-        insert_row_with_indexes(txn, &table, &indexes, &row)?;
-        rows_inserted += 1;
+    let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::with_capacity(values.len());
+
+    // Insert into table using a single handle; stage for index population.
+    {
+        let mut table_storage = txn.table_storage(&table);
+        for row_exprs in values {
+            let row = build_row(&table, &columns, row_exprs)?;
+            let row_id = table_storage
+                .next_row_id()
+                .map_err(|e| map_storage_error(&table, e))?;
+            table_storage
+                .insert(row_id, &row)
+                .map_err(|e| map_storage_error(&table, e))?;
+            staged.push((row_id, row));
+        }
     }
 
-    Ok(ExecutionResult::RowsAffected(rows_inserted))
+    // Populate indexes using one handle per index for the whole batch.
+    populate_indexes(txn, &indexes, &staged)?;
+
+    Ok(ExecutionResult::RowsAffected(staged.len() as u64))
 }
 
 fn validate_columns(table: &TableMetadata, columns: &[String]) -> Result<()> {
@@ -91,34 +104,13 @@ fn build_row(
 }
 
 fn insert_row_with_indexes<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
-    table: &TableMetadata,
-    indexes: &[IndexMetadata],
-    row: &[SqlValue],
+    _txn: &mut SqlTransaction<'_, S>,
+    _table: &TableMetadata,
+    _indexes: &[IndexMetadata],
+    _row: &[SqlValue],
 ) -> Result<()> {
-    let mut table_storage = txn.table_storage(table);
-    let row_id = table_storage
-        .next_row_id()
-        .map_err(|e| map_storage_error(table, e))?;
-    table_storage
-        .insert(row_id, row)
-        .map_err(|e| map_storage_error(table, e))?;
-
-    for index in indexes {
-        if should_skip_unique_index_for_null(index, row) {
-            continue;
-        }
-
-        txn.with_index(
-            index.index_id,
-            index.unique,
-            index.column_indices.clone(),
-            |storage| storage.insert(row, row_id),
-        )
-        .map_err(|e| map_index_error(index, e))?;
-    }
-
-    Ok(())
+    // Deprecated helper retained for compatibility; logic moved to populate_indexes.
+    unreachable!("insert_row_with_indexes is unused in the batched implementation");
 }
 
 fn map_storage_error(table: &TableMetadata, err: StorageError) -> ExecutorError {
@@ -168,6 +160,26 @@ fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) ->
             .column_indices
             .iter()
             .any(|&idx| row.get(idx).map_or(true, SqlValue::is_null))
+}
+
+fn populate_indexes<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    indexes: &[IndexMetadata],
+    rows: &[(u64, Vec<SqlValue>)],
+) -> Result<()> {
+    for index in indexes {
+        let mut storage =
+            txn.index_storage(index.index_id, index.unique, index.column_indices.clone());
+        for (row_id, row) in rows {
+            if should_skip_unique_index_for_null(index, row) {
+                continue;
+            }
+            storage
+                .insert(row, *row_id)
+                .map_err(|e| map_index_error(index, e))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

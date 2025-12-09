@@ -1,6 +1,6 @@
 use alopex_core::kv::KVStore;
 
-use crate::catalog::{Catalog, IndexMetadata};
+use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
 use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;
@@ -28,42 +28,54 @@ pub fn execute_delete<S: KVStore, C: Catalog>(
     const BATCH: usize = 512;
 
     loop {
-        let mut batch = Vec::with_capacity(BATCH);
-        {
-            let mut table_storage = txn.table_storage(&table);
-            let mut iter = table_storage.range_scan(next_row_id, u64::MAX)?;
-            for _ in 0..BATCH {
-                if let Some(res) = iter.next() {
-                    let (row_id, row) = res?;
-                    next_row_id = row_id.saturating_add(1);
-                    batch.push((row_id, row));
-                } else {
-                    break;
-                }
-            }
-        }
+        let batch = fetch_batch(txn, &table, next_row_id, BATCH)?;
 
         if batch.is_empty() {
             break;
         }
 
+        let mut deletes = Vec::new();
+
         for (row_id, row) in batch {
+            next_row_id = row_id.saturating_add(1);
             if !predicate_matches(&filter, &row)? {
                 continue;
             }
 
-            remove_indexes(txn, &indexes, row_id, &row)?;
-
-            let mut table_storage = txn.table_storage(&table);
-            table_storage
-                .delete(row_id)
-                .map_err(|e| map_storage_error(&table, e))?;
-
-            rows_affected += 1;
+            deletes.push((row_id, row));
         }
+
+        if deletes.is_empty() {
+            continue;
+        }
+
+        remove_indexes_batch(txn, &indexes, &deletes)?;
+        delete_rows(txn, &table, &deletes)?;
+
+        rows_affected += deletes.len() as u64;
     }
 
     Ok(ExecutionResult::RowsAffected(rows_affected))
+}
+
+fn fetch_batch<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    table: &TableMetadata,
+    start_row_id: u64,
+    batch_size: usize,
+) -> Result<Vec<(u64, Vec<SqlValue>)>> {
+    let mut batch = Vec::with_capacity(batch_size);
+    let mut table_storage = txn.table_storage(table);
+    let mut iter = table_storage.range_scan(start_row_id, u64::MAX)?;
+    for _ in 0..batch_size {
+        if let Some(res) = iter.next() {
+            let (row_id, row) = res?;
+            batch.push((row_id, row));
+        } else {
+            break;
+        }
+    }
+    Ok(batch)
 }
 
 fn predicate_matches(filter: &Option<TypedExpr>, row: &[SqlValue]) -> Result<bool> {
@@ -77,25 +89,12 @@ fn predicate_matches(filter: &Option<TypedExpr>, row: &[SqlValue]) -> Result<boo
 }
 
 fn remove_indexes<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
-    indexes: &[IndexMetadata],
-    row_id: u64,
-    row: &[SqlValue],
+    _txn: &mut SqlTransaction<'_, S>,
+    _indexes: &[IndexMetadata],
+    _row_id: u64,
+    _row: &[SqlValue],
 ) -> Result<()> {
-    for index in indexes {
-        if should_skip_unique_index_for_null(index, row) {
-            continue;
-        }
-        txn.with_index(
-            index.index_id,
-            index.unique,
-            index.column_indices.clone(),
-            |storage| storage.delete(row, row_id),
-        )
-        .map_err(|e| map_index_error(index, e))?;
-    }
-
-    Ok(())
+    unreachable!("remove_indexes is unused in the batched implementation")
 }
 
 fn map_storage_error(table: &crate::catalog::TableMetadata, err: StorageError) -> ExecutorError {
@@ -145,6 +144,40 @@ fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) ->
             .column_indices
             .iter()
             .any(|&idx| row.get(idx).map_or(true, SqlValue::is_null))
+}
+
+fn remove_indexes_batch<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    indexes: &[IndexMetadata],
+    deletes: &[(u64, Vec<SqlValue>)],
+) -> Result<()> {
+    for index in indexes {
+        let mut storage =
+            txn.index_storage(index.index_id, index.unique, index.column_indices.clone());
+        for (row_id, row) in deletes {
+            if should_skip_unique_index_for_null(index, row) {
+                continue;
+            }
+            storage
+                .delete(row, *row_id)
+                .map_err(|e| map_index_error(index, e))?;
+        }
+    }
+    Ok(())
+}
+
+fn delete_rows<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    table: &TableMetadata,
+    deletes: &[(u64, Vec<SqlValue>)],
+) -> Result<()> {
+    let mut table_storage = txn.table_storage(table);
+    for (row_id, _) in deletes {
+        table_storage
+            .delete(*row_id)
+            .map_err(|e| map_storage_error(table, e))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
