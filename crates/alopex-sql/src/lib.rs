@@ -30,6 +30,7 @@ pub mod ast;
 pub mod catalog;
 pub mod dialect;
 pub mod error;
+pub mod executor;
 pub mod parser;
 pub mod planner;
 pub mod storage;
@@ -65,4 +66,10 @@ pub use planner::{
 pub use storage::{
     IndexScanIterator, IndexStorage, KeyEncoder, RowCodec, SqlTransaction, SqlValue, StorageError,
     TableScanIterator, TableStorage, TxnBridge, TxnContext,
+};
+
+// Executor types
+pub use executor::{
+    ColumnInfo, ConstraintViolation, EvaluationError, ExecutionResult, Executor, ExecutorError,
+    QueryResult, Row,
 };
