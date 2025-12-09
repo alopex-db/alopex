@@ -9,57 +9,86 @@ use crate::storage::{SqlTransaction, SqlValue};
 
 use super::{ColumnInfo, Row};
 
-mod filter;
-mod limit;
+pub mod iterator;
 mod project;
 mod scan;
-mod sort;
+
+pub use iterator::{FilterIterator, LimitIterator, RowIterator, SortIterator};
 
 /// Execute a SELECT logical plan and return a query result.
+///
+/// This function uses an iterator-based execution model that processes rows
+/// through a pipeline of operators. This approach:
+/// - Enables early termination for LIMIT queries
+/// - Provides streaming execution after the initial scan
+/// - Allows composable query operators
+///
+/// Note: The Scan stage reads all matching rows into memory, but subsequent
+/// operators (Filter, Sort, Limit) process rows through an iterator pipeline.
+/// Sort operations additionally require materializing all input rows.
 pub fn execute_query<S: KVStore, C: Catalog>(
     txn: &mut SqlTransaction<'_, S>,
     catalog: &C,
     plan: LogicalPlan,
 ) -> Result<ExecutionResult> {
-    let (rows, schema, projection) = execute_plan(txn, catalog, plan)?;
+    let (mut iter, projection, schema) = build_iterator_pipeline(txn, catalog, plan)?;
+
+    // Collect rows from iterator and apply projection
+    let mut rows = Vec::new();
+    while let Some(result) = iter.next_row() {
+        rows.push(result?);
+    }
+
     let result = project::execute_project(rows, &projection, &schema)?;
     Ok(ExecutionResult::Query(result))
 }
 
-fn execute_plan<S: KVStore, C: Catalog>(
+/// Build an iterator pipeline from a logical plan.
+///
+/// This recursively constructs a tree of iterators that mirrors the logical plan
+/// structure. The scan phase reads rows into memory, then subsequent operators
+/// process them through an iterator pipeline enabling streaming execution and
+/// early termination.
+fn build_iterator_pipeline<S: KVStore, C: Catalog>(
     txn: &mut SqlTransaction<'_, S>,
     catalog: &C,
     plan: LogicalPlan,
-) -> Result<(Vec<Row>, Vec<crate::catalog::ColumnMetadata>, Projection)> {
-    // TODO: This implementation materializes each stage into Vec<Row>; consider streaming/iterator-based execution for large datasets in future versions.
+) -> Result<(Box<dyn RowIterator>, Projection, Vec<crate::catalog::ColumnMetadata>)> {
     match plan {
         LogicalPlan::Scan { table, projection } => {
             let table_meta = catalog
                 .get_table(&table)
                 .cloned()
-                .ok_or_else(|| ExecutorError::TableNotFound(table))?;
-            let schema = table_meta.columns.clone();
+                .ok_or_else(|| ExecutorError::TableNotFound(table.clone()))?;
+
+            // TODO: 現状は Scan で一度全件をメモリに載せてから iterator に渡しています。
+            // 将来ストリーミングを徹底する場合は、ScanIterator を活用できるよう
+            // トランザクションのライフタイム設計を見直すとよいです。
             let rows = scan::execute_scan(txn, &table_meta)?;
-            Ok((rows, schema, projection))
+            let schema = table_meta.columns.clone();
+
+            // Wrap in VecIterator for consistent iterator-based processing
+            let iter = iterator::VecIterator::new(rows, schema.clone());
+            Ok((Box::new(iter), projection, schema))
         }
         LogicalPlan::Filter { input, predicate } => {
-            let (rows, schema, projection) = execute_plan(txn, catalog, *input)?;
-            let filtered = filter::execute_filter(rows, &predicate)?;
-            Ok((filtered, schema, projection))
+            let (input_iter, projection, schema) = build_iterator_pipeline(txn, catalog, *input)?;
+            let filter_iter = FilterIterator::new(input_iter, predicate);
+            Ok((Box::new(filter_iter), projection, schema))
         }
         LogicalPlan::Sort { input, order_by } => {
-            let (rows, schema, projection) = execute_plan(txn, catalog, *input)?;
-            let sorted = sort::execute_sort(rows, &order_by)?;
-            Ok((sorted, schema, projection))
+            let (input_iter, projection, schema) = build_iterator_pipeline(txn, catalog, *input)?;
+            let sort_iter = SortIterator::new(input_iter, &order_by)?;
+            Ok((Box::new(sort_iter), projection, schema))
         }
         LogicalPlan::Limit {
             input,
             limit,
             offset,
         } => {
-            let (rows, schema, projection) = execute_plan(txn, catalog, *input)?;
-            let limited = limit::execute_limit(rows, limit, offset);
-            Ok((limited, schema, projection))
+            let (input_iter, projection, schema) = build_iterator_pipeline(txn, catalog, *input)?;
+            let limit_iter = LimitIterator::new(input_iter, limit, offset);
+            Ok((Box::new(limit_iter), projection, schema))
         }
         other => Err(ExecutorError::UnsupportedOperation(format!(
             "unsupported query plan: {other:?}"
