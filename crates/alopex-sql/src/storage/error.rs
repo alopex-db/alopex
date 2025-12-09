@@ -21,6 +21,9 @@ pub enum StorageError {
     #[error("type mismatch: expected {expected}, got {actual}")]
     TypeMismatch { expected: String, actual: String },
 
+    #[error("row not found: table_id={table_id}, row_id={row_id}")]
+    RowNotFound { table_id: u32, row_id: u64 },
+
     #[error("transaction conflict")]
     TransactionConflict,
 

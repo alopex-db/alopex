@@ -57,8 +57,9 @@ impl<'a, T: KVTransaction<'a>> TableStorage<'a, T> {
         self.validate_row(row)?;
         let key = self.row_key(row_id);
         if self.txn.get(&key)?.is_none() {
-            return Err(StorageError::CorruptedData {
-                reason: "row not found for update".into(),
+            return Err(StorageError::RowNotFound {
+                table_id: self.table_id,
+                row_id,
             });
         }
         let encoded = RowCodec::encode(row);
@@ -85,7 +86,12 @@ impl<'a, T: KVTransaction<'a>> TableStorage<'a, T> {
     pub fn range_scan(&mut self, start_row_id: u64, end_row_id: u64) -> Result<TableScanIterator<'_>> {
         let start = KeyEncoder::row_key(self.table_id, start_row_id);
         let end = if end_row_id == u64::MAX {
-            KeyEncoder::table_prefix(self.table_id.saturating_add(1))
+            if self.table_id == u32::MAX {
+                // Next prefix after row space is 0x02 (index keyspace).
+                vec![0x02]
+            } else {
+                KeyEncoder::table_prefix(self.table_id.saturating_add(1))
+            }
         } else {
             KeyEncoder::row_key(self.table_id, end_row_id.saturating_add(1))
         };
@@ -262,6 +268,21 @@ mod tests {
     }
 
     #[test]
+    fn update_nonexistent_returns_not_found() {
+        let store = MemoryKV::new();
+        let meta = sample_table_meta();
+        with_table(&store, &meta, |table| {
+            let row = vec![
+                SqlValue::Integer(99),
+                SqlValue::Text("ghost".into()),
+                SqlValue::Integer(0),
+            ];
+            let err = table.update(99, &row).unwrap_err();
+            matches!(err, StorageError::RowNotFound { .. });
+        });
+    }
+
+    #[test]
     fn delete_removes_row() {
         let store = MemoryKV::new();
         let meta = sample_table_meta();
@@ -321,6 +342,29 @@ mod tests {
                 .collect();
             assert_eq!(rows, vec![2, 3, 4]);
         });
+    }
+
+    #[test]
+    fn range_scan_handles_max_table_id_end_bound() {
+        let store = MemoryKV::new();
+        let meta = sample_table_meta();
+        let store_static: &'static MemoryKV = Box::leak(Box::new(store.clone()));
+        let txn = store_static.begin(TxnMode::ReadWrite).unwrap();
+        let txn_static: &'static mut _ = Box::leak(Box::new(txn));
+        let mut table = TableStorage::new(txn_static, &meta, u32::MAX);
+
+        let row = vec![
+            SqlValue::Integer(1),
+            SqlValue::Text("max".into()),
+            SqlValue::Integer(1),
+        ];
+        table.insert(1, &row).unwrap();
+        let rows: Vec<_> = table
+            .range_scan(1, u64::MAX)
+            .unwrap()
+            .map(|res| res.unwrap().0)
+            .collect();
+        assert_eq!(rows, vec![1]);
     }
 
     #[test]
