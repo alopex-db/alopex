@@ -1,20 +1,20 @@
-//! Shared HNSW data types and configuration.
+//! HNSW の公開データ型と設定。
 
 use serde::{Deserialize, Serialize};
 
 use crate::vector::Metric;
 use crate::{Error, Result};
 
-/// Configuration parameters for an HNSW index.
+/// HNSW インデックスの設定値。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HnswConfig {
-    /// Vector dimensionality (1-65535).
+    /// ベクトル次元（1-65535）。
     pub dimension: usize,
-    /// Distance metric to use.
+    /// 利用する距離メトリック。
     pub metric: Metric,
-    /// Maximum number of bi-directional connections per node (2-100, default 16).
+    /// 双方向接続の上限（2-100、既定16）。
     pub m: usize,
-    /// Search width during construction (>= m, default 200).
+    /// 構築時の探索幅（m 以上、既定200）。
     pub ef_construction: usize,
 }
 
@@ -30,7 +30,7 @@ impl Default for HnswConfig {
 }
 
 impl HnswConfig {
-    /// Validates parameter ranges according to the specification.
+    /// パラメータの範囲チェックを行う（dimension 1-65535、m 2-100、ef_construction>=m）。
     pub fn validate(&self) -> Result<()> {
         if !(1..=65535).contains(&self.dimension) {
             return Err(Error::InvalidParameter {
@@ -59,32 +59,32 @@ impl HnswConfig {
         Ok(())
     }
 
-    /// Returns a new configuration with the provided dimension.
+    /// 次元数を設定した新しい構成を返す。
     pub fn with_dimension(mut self, dim: usize) -> Self {
         self.dimension = dim;
         self
     }
 
-    /// Returns a new configuration with the provided metric.
+    /// メトリックを設定した新しい構成を返す。
     pub fn with_metric(mut self, metric: Metric) -> Self {
         self.metric = metric;
         self
     }
 
-    /// Returns a new configuration with the provided `m` value.
+    /// ノード接続数 `m` を設定した新しい構成を返す。
     pub fn with_m(mut self, m: usize) -> Self {
         self.m = m;
         self
     }
 
-    /// Returns a new configuration with the provided construction search width.
+    /// 構築時探索幅 `ef_construction` を設定した新しい構成を返す。
     pub fn with_ef_construction(mut self, ef_construction: usize) -> Self {
         self.ef_construction = ef_construction;
         self
     }
 }
 
-/// Aggregate statistics about an HNSW index.
+/// HNSW インデックスの集計統計。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HnswStats {
     /// Number of active nodes.
@@ -99,7 +99,7 @@ pub struct HnswStats {
     pub avg_edges_per_node: f64,
 }
 
-/// Per-search statistics for HNSW queries.
+/// 検索 1 回あたりの統計。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SearchStats {
     /// Total nodes visited during search.
@@ -110,7 +110,7 @@ pub struct SearchStats {
     pub search_time_us: u64,
 }
 
-/// A single search result from the HNSW index.
+/// HNSW 検索結果の 1 件。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HnswSearchResult {
     /// Key associated with the returned vector.
@@ -121,7 +121,7 @@ pub struct HnswSearchResult {
     pub metadata: Vec<u8>,
 }
 
-/// Statistics emitted on insert callbacks.
+/// 挿入コールバックで通知する統計。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InsertStats {
     /// Assigned node identifier.

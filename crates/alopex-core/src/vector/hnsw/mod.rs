@@ -23,6 +23,11 @@ type SearchCallback = Box<dyn Fn(&SearchStats) + Send + Sync>;
 type InsertCallback = Box<dyn Fn(&InsertStats) + Send + Sync>;
 
 /// HNSW インデックスの公開 API。
+///
+/// - `create`/`load` で生成・復元
+/// - `upsert`/`delete` で更新
+/// - `search` で top-k 近傍検索
+/// - `compact` で削除済みノードを物理除去
 pub struct HnswIndex {
     name: String,
     graph: Arc<RwLock<HnswGraph>>,
@@ -54,7 +59,7 @@ impl HnswIndex {
         &self.name
     }
 
-    /// ベクトルを挿入（既存キーはエラー）。
+    /// ベクトルを挿入または更新する（既存キーは上書き）。
     pub fn upsert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<()> {
         self.wait_for_compaction("upsert")?;
         let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
@@ -118,7 +123,7 @@ impl HnswIndex {
         self.stats_cache.clone()
     }
 
-    /// コンパクションを実行する。
+    /// コンパクションを実行する（論理削除されたノードを物理削除）。
     ///
     /// v0.3 方針: グラフをクローンしてロック外で compact を実行し、短時間のスワップのみ
     /// write ロックを取得することで search をほぼブロックしないようにする。
