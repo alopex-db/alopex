@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use crate::kv::KVTransaction;
 use crate::vector::CompactionResult;
 use crate::{Error, Result};
+use std::collections::HashSet;
 
 /// コンパクション待ちのタイムアウト（長時間ブロックを避けるため）。
 const COMPACTION_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -144,6 +145,70 @@ impl HnswIndex {
         self.compacting.store(false, Ordering::Release);
         self.compact_condvar.notify_all();
         Ok(result)
+    }
+
+    /// トランザクション内での upsert（変更をステージング）。
+    pub fn upsert_staged(
+        &mut self,
+        key: &[u8],
+        vector: &[f32],
+        metadata: &[u8],
+        state: &mut HnswTransactionState,
+    ) -> Result<()> {
+        self.wait_for_compaction("upsert")?;
+        let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
+        state.ensure_snapshot(&graph);
+
+        let existed = graph.find_node_id(key).is_some();
+        let node_id = graph.upsert(key, vector, metadata)?;
+        if existed {
+            state.record_upsert(node_id, false, None);
+        } else {
+            state.record_upsert(node_id, true, None);
+        }
+        self.stats_cache = Self::compute_stats(&graph);
+        Ok(())
+    }
+
+    /// トランザクション内での論理削除（変更をステージング）。
+    pub fn delete_staged(&mut self, key: &[u8], state: &mut HnswTransactionState) -> Result<bool> {
+        self.wait_for_compaction("delete")?;
+        let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
+        let Some(node_id) = graph.find_node_id(key) else {
+            return Ok(false);
+        };
+        state.ensure_snapshot(&graph);
+        let deleted = graph.delete(key)?;
+        if deleted {
+            state.record_delete(node_id);
+            self.stats_cache = Self::compute_stats(&graph);
+        }
+        Ok(deleted)
+    }
+
+    /// ステージした変更を保存する。
+    pub fn commit_staged<'a, T: KVTransaction<'a>>(
+        &self,
+        txn: &mut T,
+        state: &mut HnswTransactionState,
+    ) -> Result<()> {
+        let (modified, inserted, deleted_keys) = state.prepare_for_commit();
+        let graph = self.graph.read().unwrap_or_else(|e| e.into_inner());
+        self.storage
+            .save_incremental(txn, &graph, &modified, &inserted, &deleted_keys)?;
+        state.clear();
+        Ok(())
+    }
+
+    /// ステージした変更を破棄し、スナップショットへ完全に戻す。
+    pub fn rollback(&mut self, state: &mut HnswTransactionState) -> Result<()> {
+        if let Some(snapshot) = state.snapshot.take() {
+            let mut graph = self.graph.write().unwrap_or_else(|e| e.into_inner());
+            *graph = snapshot;
+            self.stats_cache = Self::compute_stats(&graph);
+        }
+        state.clear();
+        Ok(())
     }
 
     /// 検索コールバックを設定する。
@@ -277,5 +342,58 @@ impl HnswIndex {
             level,
             connected_neighbors,
         }
+    }
+}
+
+/// トランザクション内の HNSW 変更を追跡する。
+#[derive(Default)]
+pub struct HnswTransactionState {
+    snapshot: Option<HnswGraph>,
+    modified_nodes: HashSet<u32>,
+    inserted_nodes: HashSet<u32>,
+    deleted_nodes: HashSet<u32>,
+    deleted_key_indices: Vec<Vec<u8>>,
+}
+
+impl HnswTransactionState {
+    fn ensure_snapshot(&mut self, graph: &HnswGraph) {
+        if self.snapshot.is_none() {
+            self.snapshot = Some(graph.clone());
+        }
+    }
+
+    fn record_upsert(&mut self, node_id: u32, is_new: bool, old_key: Option<Vec<u8>>) {
+        if is_new {
+            self.inserted_nodes.insert(node_id);
+        } else {
+            self.modified_nodes.insert(node_id);
+        }
+        if let Some(key) = old_key {
+            self.deleted_key_indices.push(key);
+        }
+    }
+
+    fn record_delete(&mut self, node_id: u32) {
+        self.deleted_nodes.insert(node_id);
+        self.modified_nodes.insert(node_id);
+    }
+
+    fn prepare_for_commit(&self) -> (Vec<u32>, Vec<u32>, Vec<Vec<u8>>) {
+        let modified: Vec<u32> = self
+            .modified_nodes
+            .difference(&self.inserted_nodes)
+            .copied()
+            .collect();
+        let inserted: Vec<u32> = self.inserted_nodes.iter().copied().collect();
+        let deleted_keys = self.deleted_key_indices.clone();
+        (modified, inserted, deleted_keys)
+    }
+
+    fn clear(&mut self) {
+        self.snapshot = None;
+        self.modified_nodes.clear();
+        self.inserted_nodes.clear();
+        self.deleted_nodes.clear();
+        self.deleted_key_indices.clear();
     }
 }
