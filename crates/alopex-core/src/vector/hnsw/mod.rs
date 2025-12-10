@@ -397,3 +397,6 @@ impl HnswTransactionState {
         self.deleted_key_indices.clear();
     }
 }
+
+#[cfg(test)]
+mod tests;
