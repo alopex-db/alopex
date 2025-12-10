@@ -80,13 +80,12 @@ impl Database {
                         "disk mode requires a path".into(),
                     ))
                 })?;
-                StorageFactory::create(CoreStorageMode::Disk { path })
-                    .map_err(|e| Error::Core(e.into()))?
+                StorageFactory::create(CoreStorageMode::Disk { path }).map_err(Error::Core)?
             }
             StorageMode::InMemory => StorageFactory::create(CoreStorageMode::Memory {
                 max_size: config.memory_limit,
             })
-            .map_err(|e| Error::Core(e.into()))?,
+            .map_err(Error::Core)?,
         };
 
         Ok(Self::init(

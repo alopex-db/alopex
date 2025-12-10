@@ -7,6 +7,7 @@ pub mod options;
 
 pub use crate::columnar_api::{EmbeddedConfig, StorageMode};
 pub use crate::options::DatabaseOptions;
+use alopex_core::vector::hnsw::{HnswTransactionState, SearchStats as HnswSearchStats};
 use alopex_core::{
     columnar::{
         kvs_bridge::ColumnarKvsBridge, memory::InMemorySegmentStore, segment_v2::SegmentConfigV2,
@@ -15,11 +16,12 @@ use alopex_core::{
     score,
     storage::flush::write_empty_vector_segment,
     storage::sstable::SstableWriter,
-    validate_dimensions, KVStore, KVTransaction, Key, LargeValueKind, LargeValueMeta,
-    LargeValueReader, LargeValueWriter, MemoryKV, StorageFactory, TxnManager, VectorType,
-    DEFAULT_CHUNK_SIZE,
+    validate_dimensions, HnswConfig, HnswIndex, HnswSearchResult, HnswStats, KVStore,
+    KVTransaction, Key, LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter,
+    MemoryKV, StorageFactory, TxnManager, VectorType, DEFAULT_CHUNK_SIZE,
 };
 pub use alopex_core::{MemoryStats, Metric, TxnMode};
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -172,6 +174,7 @@ impl Database {
         let _ = fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(true)
             .open(wal_path);
         Ok(())
     }
@@ -221,6 +224,52 @@ impl Database {
         self.store.txn_manager().snapshot().into_iter().collect()
     }
 
+    /// HNSW インデックスを作成し、永続化する。
+    pub fn create_hnsw_index(&self, name: &str, config: HnswConfig) -> Result<()> {
+        let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
+        let index = HnswIndex::create(name, config).map_err(Error::Core)?;
+        index.save(&mut txn).map_err(Error::Core)?;
+        self.store.txn_manager().commit(txn).map_err(Error::Core)
+    }
+
+    /// HNSW インデックスを削除する。
+    pub fn drop_hnsw_index(&self, name: &str) -> Result<()> {
+        let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
+        let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
+        index.drop(&mut txn).map_err(Error::Core)?;
+        self.store.txn_manager().commit(txn).map_err(Error::Core)
+    }
+
+    /// HNSW 統計情報を取得する。
+    pub fn get_hnsw_stats(&self, name: &str) -> Result<HnswStats> {
+        let mut txn = self.store.begin(TxnMode::ReadOnly).map_err(Error::Core)?;
+        let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
+        Ok(index.stats())
+    }
+
+    /// HNSW インデックスをコンパクションし、結果を返す。
+    pub fn compact_hnsw_index(&self, name: &str) -> Result<alopex_core::vector::CompactionResult> {
+        let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
+        let mut index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
+        let result = index.compact().map_err(Error::Core)?;
+        index.save(&mut txn).map_err(Error::Core)?;
+        self.store.txn_manager().commit(txn).map_err(Error::Core)?;
+        Ok(result)
+    }
+
+    /// HNSW インデックスに検索を行う。
+    pub fn search_hnsw(
+        &self,
+        name: &str,
+        query: &[f32],
+        k: usize,
+        ef_search: Option<usize>,
+    ) -> Result<(Vec<HnswSearchResult>, HnswSearchStats)> {
+        let mut txn = self.store.begin(TxnMode::ReadOnly).map_err(Error::Core)?;
+        let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
+        index.search(query, k, ef_search).map_err(Error::Core)
+    }
+
     /// Creates a chunked large value writer for opaque blobs (beta).
     pub fn create_blob_writer(
         &self,
@@ -263,7 +312,14 @@ impl Database {
         Ok(Transaction {
             inner: Some(txn),
             db: self,
+            hnsw_indices: HashMap::new(),
         })
+    }
+}
+
+impl Default for Database {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -271,6 +327,7 @@ impl Database {
 pub struct Transaction<'a> {
     inner: Option<MemoryTransaction<'a>>,
     db: &'a Database,
+    hnsw_indices: HashMap<String, (HnswIndex, alopex_core::vector::hnsw::HnswTransactionState)>,
 }
 
 /// A search result row containing key, metadata, and similarity score.
@@ -311,6 +368,28 @@ impl<'a> Transaction<'a> {
     /// Deletes a key-value pair.
     pub fn delete(&mut self, key: &[u8]) -> Result<()> {
         self.inner_mut()?.delete(key.to_vec()).map_err(Error::Core)
+    }
+
+    /// HNSW にベクトルをステージング挿入/更新する。
+    pub fn upsert_to_hnsw(
+        &mut self,
+        index_name: &str,
+        key: &[u8],
+        vector: &[f32],
+        metadata: &[u8],
+    ) -> Result<()> {
+        self.ensure_write_txn()?;
+        let (index, state) = self.hnsw_entry_mut(index_name)?;
+        index
+            .upsert_staged(key, vector, metadata, state)
+            .map_err(Error::Core)
+    }
+
+    /// HNSW からキーをステージング削除する。
+    pub fn delete_from_hnsw(&mut self, index_name: &str, key: &[u8]) -> Result<bool> {
+        self.ensure_write_txn()?;
+        let (index, state) = self.hnsw_entry_mut(index_name)?;
+        index.delete_staged(key, state).map_err(Error::Core)
     }
 
     /// Upserts a vector and metadata under the provided key after validating dimensions and metric.
@@ -411,28 +490,66 @@ impl<'a> Transaction<'a> {
 
     /// Commits the transaction, applying all changes.
     pub fn commit(mut self) -> Result<()> {
+        {
+            let txn = self.inner.as_mut().ok_or(Error::TxnCompleted)?;
+            for (_, (index, state)) in self.hnsw_indices.iter_mut() {
+                index.commit_staged(txn, state).map_err(Error::Core)?;
+            }
+        }
         let txn = self.inner.take().ok_or(Error::TxnCompleted)?;
+        self.hnsw_indices.clear();
         self.db.store.txn_manager().commit(txn).map_err(Error::Core)
     }
 
     /// Rolls back the transaction, discarding all changes.
     pub fn rollback(mut self) -> Result<()> {
-        let txn = self.inner.take().ok_or(Error::TxnCompleted)?;
-        self.db
-            .store
-            .txn_manager()
-            .rollback(txn)
-            .map_err(Error::Core)
+        if let Some(txn) = self.inner.take() {
+            for (_, (index, state)) in self.hnsw_indices.iter_mut() {
+                let _ = index.rollback(state);
+            }
+            self.hnsw_indices.clear();
+            self.db
+                .store
+                .txn_manager()
+                .rollback(txn)
+                .map_err(Error::Core)
+        } else {
+            Err(Error::TxnCompleted)
+        }
     }
 
     fn inner_mut(&mut self) -> Result<&mut MemoryTransaction<'a>> {
         self.inner.as_mut().ok_or(Error::TxnCompleted)
+    }
+
+    fn hnsw_entry_mut(&mut self, name: &str) -> Result<&mut (HnswIndex, HnswTransactionState)> {
+        if !self.hnsw_indices.contains_key(name) {
+            let index = {
+                let txn = self.inner_mut()?;
+                HnswIndex::load(name, txn).map_err(Error::Core)?
+            };
+            self.hnsw_indices
+                .insert(name.to_string(), (index, HnswTransactionState::default()));
+        }
+        Ok(self.hnsw_indices.get_mut(name).unwrap())
+    }
+
+    fn ensure_write_txn(&self) -> Result<()> {
+        let txn = self.inner.as_ref().ok_or(Error::TxnCompleted)?;
+        if txn.mode() != TxnMode::ReadWrite {
+            return Err(Error::Core(alopex_core::Error::TxnConflict));
+        }
+        Ok(())
     }
 }
 
 impl<'a> Drop for Transaction<'a> {
     fn drop(&mut self) {
         if let Some(txn) = self.inner.take() {
+            for (_, (index, state)) in self.hnsw_indices.iter_mut() {
+                let _ = index.rollback(state);
+            }
+            self.hnsw_indices.clear();
             let _ = self.db.store.txn_manager().rollback(txn);
         }
     }
@@ -460,8 +577,7 @@ fn byte_to_metric(byte: u8) -> result::Result<Metric, alopex_core::Error> {
 fn encode_vector_entry(vector_type: VectorType, metadata: &[u8], vector: &[f32]) -> Vec<u8> {
     let dim = vector_type.dim() as u32;
     let meta_len = metadata.len() as u32;
-    let mut buf =
-        Vec::with_capacity(1 + 4 + 4 + metadata.len() + vector.len() * std::mem::size_of::<f32>());
+    let mut buf = Vec::with_capacity(1 + 4 + 4 + metadata.len() + std::mem::size_of_val(vector));
     buf.push(metric_to_byte(vector_type.metric()));
     buf.extend_from_slice(&dim.to_le_bytes());
     buf.extend_from_slice(&meta_len.to_le_bytes());
