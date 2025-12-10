@@ -24,6 +24,22 @@ pub struct HnswGraph {
     pub(crate) deleted_count: u64,
 }
 
+impl Clone for HnswGraph {
+    fn clone(&self) -> Self {
+        Self {
+            nodes: self.nodes.clone(),
+            key_to_node: self.key_to_node.clone(),
+            entry_point: self.entry_point,
+            max_level: self.max_level,
+            config: self.config.clone(),
+            kernel: select_kernel(),
+            free_list: self.free_list.clone(),
+            active_count: self.active_count,
+            deleted_count: self.deleted_count,
+        }
+    }
+}
+
 #[allow(dead_code)]
 impl HnswGraph {
     /// Creates a new, empty HNSW graph using the provided configuration.
@@ -154,6 +170,34 @@ impl HnswGraph {
         };
 
         Ok(node_id)
+    }
+
+    /// 既存キーならベクトルとメタデータを更新し、無ければ挿入する。
+    /// 既存ノードが deleted の場合は再有効化する。
+    pub fn upsert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<u32> {
+        validate_dimensions(self.config.dimension, vector.len())?;
+        if let Some(node_id) = self.find_node_id(key) {
+            let Some(node) = self
+                .nodes
+                .get_mut(node_id as usize)
+                .and_then(|n| n.as_mut())
+            else {
+                // マップに存在しても実体が無い場合は新規挿入扱い。
+                return self.insert(key, vector, metadata);
+            };
+            node.vector.clear();
+            node.vector.extend_from_slice(vector);
+            node.metadata.clear();
+            node.metadata.extend_from_slice(metadata);
+            if node.deleted {
+                node.deleted = false;
+                self.deleted_count = self.deleted_count.saturating_sub(1);
+                self.active_count = self.active_count.saturating_add(1);
+            }
+            Ok(node_id)
+        } else {
+            self.insert(key, vector, metadata)
+        }
     }
 
     /// Executes a top-k search. Returns results and search statistics.
