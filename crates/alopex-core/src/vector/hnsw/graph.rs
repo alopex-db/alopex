@@ -302,6 +302,11 @@ impl HnswGraph {
         }
     }
 
+    /// 次に割り当てるノードID（ノード配列長に相当）を返す。
+    pub(crate) fn next_node_id(&self) -> u32 {
+        self.nodes.len() as u32
+    }
+
     fn allocate_node_id(&mut self) -> u32 {
         self.free_list.pop().unwrap_or(self.nodes.len() as u32)
     }
