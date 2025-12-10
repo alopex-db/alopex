@@ -1,3 +1,5 @@
-//! HNSW storage layer for persistence (placeholder).
+//! HNSW storage layer for persistence (placeholder for future phases).
 
-// Implementation will be added in later tasks.
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+pub struct HnswStorage;
