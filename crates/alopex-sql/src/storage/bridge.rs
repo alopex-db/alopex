@@ -1,7 +1,10 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use alopex_core::kv::{KVStore, KVTransaction};
 use alopex_core::types::TxnMode;
+use alopex_core::vector::hnsw::{HnswIndex, HnswTransactionState};
+use alopex_core::{Error as CoreError, Result as CoreResult};
 
 use crate::catalog::TableMetadata;
 
@@ -25,6 +28,7 @@ impl<S: KVStore> TxnBridge<S> {
         Ok(SqlTransaction {
             inner: txn,
             mode: TxnMode::ReadOnly,
+            hnsw_indices: HashMap::new(),
         })
     }
 
@@ -34,6 +38,7 @@ impl<S: KVStore> TxnBridge<S> {
         Ok(SqlTransaction {
             inner: txn,
             mode: TxnMode::ReadWrite,
+            hnsw_indices: HashMap::new(),
         })
     }
 
@@ -91,6 +96,13 @@ impl<S: KVStore> TxnBridge<S> {
 pub struct SqlTransaction<'a, S: KVStore + 'a> {
     inner: S::Transaction<'a>,
     mode: TxnMode,
+    hnsw_indices: HashMap<String, HnswTxnEntry>,
+}
+
+pub(crate) struct HnswTxnEntry {
+    pub(crate) index: HnswIndex,
+    pub(crate) state: HnswTransactionState,
+    pub(crate) dirty: bool,
 }
 
 impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
@@ -123,6 +135,51 @@ impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
         column_indices: Vec<usize>,
     ) -> IndexStorage<'b, 'a, S::Transaction<'a>> {
         IndexStorage::new(&mut self.inner, index_id, unique, column_indices)
+    }
+
+    /// HNSW インデックスのキャッシュエントリを取得する（存在しなければロードする）。
+    #[allow(dead_code)]
+    pub(crate) fn hnsw_entry(&mut self, name: &str) -> CoreResult<&HnswIndex> {
+        if !self.hnsw_indices.contains_key(name) {
+            let index = HnswIndex::load(name, &mut self.inner)?;
+            self.hnsw_indices.insert(
+                name.to_string(),
+                HnswTxnEntry {
+                    index,
+                    state: HnswTransactionState::default(),
+                    dirty: false,
+                },
+            );
+        }
+        Ok(&self.hnsw_indices.get(name).expect("inserted above").index)
+    }
+
+    /// HNSW インデックスのキャッシュエントリを可変で取得する（存在しなければロードする）。
+    pub(crate) fn hnsw_entry_mut(&mut self, name: &str) -> CoreResult<&mut HnswTxnEntry> {
+        if !self.hnsw_indices.contains_key(name) {
+            let index = HnswIndex::load(name, &mut self.inner)?;
+            self.hnsw_indices.insert(
+                name.to_string(),
+                HnswTxnEntry {
+                    index,
+                    state: HnswTransactionState::default(),
+                    dirty: false,
+                },
+            );
+        }
+        Ok(self.hnsw_indices.get_mut(name).expect("inserted above"))
+    }
+
+    pub(crate) fn ensure_write_txn(&self) -> CoreResult<()> {
+        if self.mode != TxnMode::ReadWrite {
+            return Err(CoreError::TxnConflict);
+        }
+        Ok(())
+    }
+
+    /// 内部の KV トランザクションへの可変参照を返す（HNSW ブリッジ向け）。
+    pub(crate) fn inner_mut(&mut self) -> &mut S::Transaction<'a> {
+        &mut self.inner
     }
 
     /// Delete all keys with the given prefix.
@@ -185,7 +242,8 @@ impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
     /// Commit the transaction.
     ///
     /// Consumes the transaction. On success, all writes become visible.
-    pub fn commit(self) -> Result<()> {
+    pub fn commit(mut self) -> Result<()> {
+        self.commit_hnsw()?;
         self.inner.commit_self()?;
         Ok(())
     }
@@ -193,8 +251,31 @@ impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
     /// Rollback the transaction.
     ///
     /// Consumes the transaction. All pending writes are discarded.
-    pub fn rollback(self) -> Result<()> {
+    pub fn rollback(mut self) -> Result<()> {
+        self.rollback_hnsw()?;
         self.inner.rollback_self()?;
+        Ok(())
+    }
+
+    fn commit_hnsw(&mut self) -> Result<()> {
+        for entry in self.hnsw_indices.values_mut() {
+            if entry.dirty {
+                entry
+                    .index
+                    .commit_staged(&mut self.inner, &mut entry.state)?;
+            }
+        }
+        self.hnsw_indices.clear();
+        Ok(())
+    }
+
+    fn rollback_hnsw(&mut self) -> Result<()> {
+        for entry in self.hnsw_indices.values_mut() {
+            if entry.dirty {
+                entry.index.rollback(&mut entry.state)?;
+            }
+        }
+        self.hnsw_indices.clear();
         Ok(())
     }
 }

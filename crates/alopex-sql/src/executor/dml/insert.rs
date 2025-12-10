@@ -1,7 +1,9 @@
 use alopex_core::kv::KVStore;
 
+use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
 use crate::executor::evaluator::{EvalContext, evaluate};
+use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;
 use crate::storage::{SqlTransaction, SqlValue, StorageError};
@@ -26,6 +28,9 @@ pub fn execute_insert<S: KVStore, C: Catalog>(
         .into_iter()
         .cloned()
         .collect();
+    let (hnsw_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
+        .into_iter()
+        .partition(|idx| matches!(idx.method, Some(IndexMethod::Hnsw)));
 
     let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::with_capacity(values.len());
 
@@ -45,7 +50,8 @@ pub fn execute_insert<S: KVStore, C: Catalog>(
     }
 
     // Populate indexes using one handle per index for the whole batch.
-    populate_indexes(txn, &indexes, &staged)?;
+    populate_indexes(txn, &btree_indexes, &staged)?;
+    populate_hnsw_indexes(txn, &table, &hnsw_indexes, &staged)?;
 
     Ok(ExecutionResult::RowsAffected(staged.len() as u64))
 }
@@ -149,7 +155,7 @@ fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) ->
         && index
             .column_indices
             .iter()
-            .any(|&idx| row.get(idx).map_or(true, SqlValue::is_null))
+            .any(|&idx| row.get(idx).is_none_or(SqlValue::is_null))
 }
 
 fn populate_indexes<S: KVStore>(
@@ -167,6 +173,20 @@ fn populate_indexes<S: KVStore>(
             storage
                 .insert(row, *row_id)
                 .map_err(|e| map_index_error(index, e))?;
+        }
+    }
+    Ok(())
+}
+
+fn populate_hnsw_indexes<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    table: &TableMetadata,
+    indexes: &[IndexMetadata],
+    rows: &[(u64, Vec<SqlValue>)],
+) -> Result<()> {
+    for index in indexes {
+        for (row_id, row) in rows {
+            HnswBridge::on_insert(txn, table, index, *row_id, row)?;
         }
     }
     Ok(())

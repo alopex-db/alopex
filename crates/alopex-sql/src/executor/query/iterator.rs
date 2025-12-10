@@ -291,10 +291,10 @@ impl<I: RowIterator> LimitIterator<I> {
 impl<I: RowIterator> RowIterator for LimitIterator<I> {
     fn next_row(&mut self) -> Option<Result<Row>> {
         // Check if limit already reached
-        if let Some(limit) = self.limit {
-            if self.yielded >= limit {
-                return None;
-            }
+        if let Some(limit) = self.limit
+            && self.yielded >= limit
+        {
+            return None;
         }
 
         loop {
@@ -307,10 +307,10 @@ impl<I: RowIterator> RowIterator for LimitIterator<I> {
                     }
 
                     // Check limit again after skipping
-                    if let Some(limit) = self.limit {
-                        if self.yielded >= limit {
-                            return None;
-                        }
+                    if let Some(limit) = self.limit
+                        && self.yielded >= limit
+                    {
+                        return None;
                     }
 
                     self.yielded += 1;
@@ -366,8 +366,8 @@ impl RowIterator for VecIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::planner::types::ResolvedType;
     use crate::Span;
+    use crate::planner::types::ResolvedType;
 
     fn sample_schema() -> Vec<ColumnMetadata> {
         vec![
@@ -378,9 +378,15 @@ mod tests {
 
     fn sample_rows() -> Vec<Row> {
         vec![
-            Row::new(1, vec![SqlValue::Integer(1), SqlValue::Text("alice".into())]),
+            Row::new(
+                1,
+                vec![SqlValue::Integer(1), SqlValue::Text("alice".into())],
+            ),
             Row::new(2, vec![SqlValue::Integer(2), SqlValue::Text("bob".into())]),
-            Row::new(3, vec![SqlValue::Integer(3), SqlValue::Text("carol".into())]),
+            Row::new(
+                3,
+                vec![SqlValue::Integer(3), SqlValue::Text("carol".into())],
+            ),
             Row::new(4, vec![SqlValue::Integer(4), SqlValue::Text("dave".into())]),
             Row::new(5, vec![SqlValue::Integer(5), SqlValue::Text("eve".into())]),
         ]
@@ -503,8 +509,14 @@ mod tests {
         use crate::planner::typed_expr::{SortExpr, TypedExpr, TypedExprKind};
 
         let rows = vec![
-            Row::new(1, vec![SqlValue::Integer(3), SqlValue::Text("carol".into())]),
-            Row::new(2, vec![SqlValue::Integer(1), SqlValue::Text("alice".into())]),
+            Row::new(
+                1,
+                vec![SqlValue::Integer(3), SqlValue::Text("carol".into())],
+            ),
+            Row::new(
+                2,
+                vec![SqlValue::Integer(1), SqlValue::Text("alice".into())],
+            ),
             Row::new(3, vec![SqlValue::Integer(2), SqlValue::Text("bob".into())]),
         ];
         let schema = sample_schema();
@@ -543,8 +555,14 @@ mod tests {
         use crate::planner::typed_expr::{SortExpr, TypedExpr, TypedExprKind};
 
         let rows = vec![
-            Row::new(1, vec![SqlValue::Integer(1), SqlValue::Text("alice".into())]),
-            Row::new(2, vec![SqlValue::Integer(3), SqlValue::Text("carol".into())]),
+            Row::new(
+                1,
+                vec![SqlValue::Integer(1), SqlValue::Text("alice".into())],
+            ),
+            Row::new(
+                2,
+                vec![SqlValue::Integer(3), SqlValue::Text("carol".into())],
+            ),
             Row::new(3, vec![SqlValue::Integer(2), SqlValue::Text("bob".into())]),
         ];
         let schema = sample_schema();

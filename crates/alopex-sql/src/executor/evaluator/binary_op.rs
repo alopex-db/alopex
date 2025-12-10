@@ -37,11 +37,11 @@ fn add(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
         (SqlValue::Integer(a), SqlValue::Integer(b)) => a
             .checked_add(b)
             .map(SqlValue::Integer)
-            .ok_or_else(|| ExecutorError::Evaluation(EvaluationError::Overflow)),
+            .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
         (SqlValue::BigInt(a), SqlValue::BigInt(b)) => a
             .checked_add(b)
             .map(SqlValue::BigInt)
-            .ok_or_else(|| ExecutorError::Evaluation(EvaluationError::Overflow)),
+            .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
         (SqlValue::Float(a), SqlValue::Float(b)) => Ok(SqlValue::Float(a + b)),
         (SqlValue::Double(a), SqlValue::Double(b)) => Ok(SqlValue::Double(a + b)),
         (l, r) => type_mismatch("Numeric", &l, &r),
@@ -54,11 +54,11 @@ fn sub(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
         (SqlValue::Integer(a), SqlValue::Integer(b)) => a
             .checked_sub(b)
             .map(SqlValue::Integer)
-            .ok_or_else(|| ExecutorError::Evaluation(EvaluationError::Overflow)),
+            .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
         (SqlValue::BigInt(a), SqlValue::BigInt(b)) => a
             .checked_sub(b)
             .map(SqlValue::BigInt)
-            .ok_or_else(|| ExecutorError::Evaluation(EvaluationError::Overflow)),
+            .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
         (SqlValue::Float(a), SqlValue::Float(b)) => Ok(SqlValue::Float(a - b)),
         (SqlValue::Double(a), SqlValue::Double(b)) => Ok(SqlValue::Double(a - b)),
         (l, r) => type_mismatch("Numeric", &l, &r),
@@ -71,11 +71,11 @@ fn mul(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
         (SqlValue::Integer(a), SqlValue::Integer(b)) => a
             .checked_mul(b)
             .map(SqlValue::Integer)
-            .ok_or_else(|| ExecutorError::Evaluation(EvaluationError::Overflow)),
+            .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
         (SqlValue::BigInt(a), SqlValue::BigInt(b)) => a
             .checked_mul(b)
             .map(SqlValue::BigInt)
-            .ok_or_else(|| ExecutorError::Evaluation(EvaluationError::Overflow)),
+            .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
         (SqlValue::Float(a), SqlValue::Float(b)) => Ok(SqlValue::Float(a * b)),
         (SqlValue::Double(a), SqlValue::Double(b)) => Ok(SqlValue::Double(a * b)),
         (l, r) => type_mismatch("Numeric", &l, &r),
@@ -89,10 +89,10 @@ fn div(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
             Err(ExecutorError::Evaluation(EvaluationError::DivisionByZero))
         }
         (_, SqlValue::BigInt(0)) => Err(ExecutorError::Evaluation(EvaluationError::DivisionByZero)),
-        (_, SqlValue::Float(f)) if f == 0.0 => {
+        (_, SqlValue::Float(0.0)) => {
             Err(ExecutorError::Evaluation(EvaluationError::DivisionByZero))
         }
-        (_, SqlValue::Double(d)) if d == 0.0 => {
+        (_, SqlValue::Double(0.0)) => {
             Err(ExecutorError::Evaluation(EvaluationError::DivisionByZero))
         }
         (SqlValue::Integer(a), SqlValue::Integer(b)) => Ok(SqlValue::Integer(a / b)),
@@ -132,12 +132,12 @@ fn compare(left: SqlValue, right: SqlValue, kind: OrderingKind) -> Result<SqlVal
 
     use OrderingKind::*;
     use std::cmp::Ordering;
-    let cmp = left.partial_cmp(&right).ok_or_else(|| {
-        ExecutorError::Evaluation(EvaluationError::TypeMismatch {
+    let cmp = left.partial_cmp(&right).ok_or(ExecutorError::Evaluation(
+        EvaluationError::TypeMismatch {
             expected: "Comparable".into(),
             actual: format!("{:?} vs {:?}", left.type_name(), right.type_name()),
-        })
-    })?;
+        },
+    ))?;
 
     let result = match kind {
         Eq => cmp == Ordering::Equal,

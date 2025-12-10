@@ -1,7 +1,9 @@
 use alopex_core::kv::KVStore;
 
+use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
 use crate::executor::evaluator::{EvalContext, evaluate};
+use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::{TypedAssignment, TypedExpr};
 use crate::storage::{SqlTransaction, SqlValue, StorageError};
@@ -23,6 +25,9 @@ pub fn execute_update<S: KVStore, C: Catalog>(
         .into_iter()
         .cloned()
         .collect();
+    let (hnsw_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
+        .into_iter()
+        .partition(|idx| matches!(idx.method, Some(IndexMethod::Hnsw)));
 
     let mut rows_affected = 0u64;
     let mut next_row_id = 0u64;
@@ -63,7 +68,8 @@ pub fn execute_update<S: KVStore, C: Catalog>(
             continue;
         }
 
-        update_indexes_batch(txn, &indexes, &changes)?;
+        update_indexes_batch(txn, &btree_indexes, &changes)?;
+        update_hnsw_indexes(txn, &table, &hnsw_indexes, &changes)?;
         apply_table_updates(txn, &table, &changes)?;
 
         rows_affected += changes.len() as u64;
@@ -162,7 +168,7 @@ fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) ->
         && index
             .column_indices
             .iter()
-            .any(|&idx| row.get(idx).map_or(true, SqlValue::is_null))
+            .any(|&idx| row.get(idx).is_none_or(SqlValue::is_null))
 }
 
 fn update_indexes_batch<S: KVStore>(
@@ -210,6 +216,20 @@ fn apply_table_updates<S: KVStore>(
         table_storage
             .update(*row_id, new_row)
             .map_err(|e| map_storage_error(table, e))?;
+    }
+    Ok(())
+}
+
+fn update_hnsw_indexes<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    table: &TableMetadata,
+    indexes: &[IndexMetadata],
+    changes: &[(u64, Vec<SqlValue>, Vec<SqlValue>)],
+) -> Result<()> {
+    for index in indexes {
+        for (row_id, old_row, new_row) in changes {
+            HnswBridge::on_update(txn, table, index, *row_id, old_row, new_row)?;
+        }
     }
     Ok(())
 }

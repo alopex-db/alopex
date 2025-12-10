@@ -11,6 +11,10 @@ use thiserror::Error;
 /// Errors that can occur during SQL execution.
 #[derive(Debug, Error)]
 pub enum ExecutorError {
+    /// Underlying HNSW/kv error.
+    #[error("hnsw error: {0}")]
+    Core(#[from] alopex_core::Error),
+
     /// Table not found in catalog.
     #[error("table not found: {0}")]
     TableNotFound(String),

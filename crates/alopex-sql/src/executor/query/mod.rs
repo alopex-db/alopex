@@ -53,7 +53,11 @@ fn build_iterator_pipeline<S: KVStore, C: Catalog>(
     txn: &mut SqlTransaction<'_, S>,
     catalog: &C,
     plan: LogicalPlan,
-) -> Result<(Box<dyn RowIterator>, Projection, Vec<crate::catalog::ColumnMetadata>)> {
+) -> Result<(
+    Box<dyn RowIterator>,
+    Projection,
+    Vec<crate::catalog::ColumnMetadata>,
+)> {
     match plan {
         LogicalPlan::Scan { table, projection } => {
             let table_meta = catalog

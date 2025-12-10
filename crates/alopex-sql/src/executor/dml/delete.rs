@@ -1,7 +1,9 @@
 use alopex_core::kv::KVStore;
 
+use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
 use crate::executor::evaluator::{EvalContext, evaluate};
+use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;
 use crate::storage::{SqlTransaction, SqlValue, StorageError};
@@ -22,6 +24,9 @@ pub fn execute_delete<S: KVStore, C: Catalog>(
         .into_iter()
         .cloned()
         .collect();
+    let (hnsw_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
+        .into_iter()
+        .partition(|idx| matches!(idx.method, Some(IndexMethod::Hnsw)));
 
     let mut rows_affected = 0u64;
     let mut next_row_id = 0u64;
@@ -49,7 +54,8 @@ pub fn execute_delete<S: KVStore, C: Catalog>(
             continue;
         }
 
-        remove_indexes_batch(txn, &indexes, &deletes)?;
+        remove_indexes_batch(txn, &btree_indexes, &deletes)?;
+        remove_hnsw_indexes(txn, &hnsw_indexes, &deletes)?;
         delete_rows(txn, &table, &deletes)?;
 
         rows_affected += deletes.len() as u64;
@@ -134,7 +140,7 @@ fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) ->
         && index
             .column_indices
             .iter()
-            .any(|&idx| row.get(idx).map_or(true, SqlValue::is_null))
+            .any(|&idx| row.get(idx).is_none_or(SqlValue::is_null))
 }
 
 fn remove_indexes_batch<S: KVStore>(
@@ -152,6 +158,19 @@ fn remove_indexes_batch<S: KVStore>(
             storage
                 .delete(row, *row_id)
                 .map_err(|e| map_index_error(index, e))?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_hnsw_indexes<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    indexes: &[IndexMetadata],
+    deletes: &[(u64, Vec<SqlValue>)],
+) -> Result<()> {
+    for index in indexes {
+        for (row_id, _) in deletes {
+            HnswBridge::on_delete(txn, index, *row_id)?;
         }
     }
     Ok(())

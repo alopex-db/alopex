@@ -34,11 +34,11 @@ fn eval_minus(value: SqlValue) -> Result<SqlValue> {
         SqlValue::Integer(v) => v
             .checked_neg()
             .map(SqlValue::Integer)
-            .ok_or_else(|| ExecutorError::Evaluation(EvaluationError::Overflow)),
+            .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
         SqlValue::BigInt(v) => v
             .checked_neg()
             .map(SqlValue::BigInt)
-            .ok_or_else(|| ExecutorError::Evaluation(EvaluationError::Overflow)),
+            .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
         SqlValue::Float(v) => Ok(SqlValue::Float(-v)),
         SqlValue::Double(v) => Ok(SqlValue::Double(-v)),
         other => Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {

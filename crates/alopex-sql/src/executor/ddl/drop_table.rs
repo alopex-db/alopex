@@ -1,6 +1,8 @@
 use alopex_core::kv::KVStore;
 
+use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata};
+use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::storage::{KeyEncoder, SqlTransaction};
 
@@ -30,8 +32,12 @@ pub fn execute_drop_table<S: KVStore, C: Catalog>(
 
     // Remove index keyspaces via prefix deletion to avoid buffering rows.
     for index in &indexes {
-        let prefix = KeyEncoder::index_prefix(index.index_id);
-        txn.delete_prefix(&prefix)?;
+        if matches!(index.method, Some(IndexMethod::Hnsw)) {
+            HnswBridge::drop_index(txn, index, false)?;
+        } else {
+            let prefix = KeyEncoder::index_prefix(index.index_id);
+            txn.delete_prefix(&prefix)?;
+        }
     }
 
     // Remove table rows and sequence key by prefix.

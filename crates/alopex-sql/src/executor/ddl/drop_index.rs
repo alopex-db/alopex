@@ -1,6 +1,8 @@
 use alopex_core::kv::KVStore;
 
+use crate::ast::ddl::IndexMethod;
 use crate::catalog::Catalog;
+use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::storage::{KeyEncoder, SqlTransaction};
 
@@ -31,9 +33,13 @@ pub fn execute_drop_index<S: KVStore, C: Catalog>(
         }
     };
 
-    // Delete all index entries via prefix to avoid buffering rows.
-    let prefix = KeyEncoder::index_prefix(index.index_id);
-    txn.delete_prefix(&prefix)?;
+    if matches!(index.method, Some(IndexMethod::Hnsw)) {
+        HnswBridge::drop_index(txn, &index, if_exists)?;
+    } else {
+        // Delete all index entries via prefix to avoid buffering rows.
+        let prefix = KeyEncoder::index_prefix(index.index_id);
+        txn.delete_prefix(&prefix)?;
+    }
 
     catalog.drop_index(index_name)?;
 

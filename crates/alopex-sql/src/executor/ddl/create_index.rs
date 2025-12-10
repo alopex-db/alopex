@@ -1,6 +1,8 @@
 use alopex_core::kv::KVStore;
 
+use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
+use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::storage::{SqlTransaction, SqlValue, StorageError};
 
@@ -39,8 +41,12 @@ pub fn execute_create_index<S: KVStore, C: Catalog>(
     index.index_id = index_id;
     index.column_indices = column_indices.clone();
 
-    // Populate index entries for existing rows before publishing metadata.
-    build_index_for_existing_rows(txn, &table, &index, column_indices)?;
+    if matches!(index.method, Some(IndexMethod::Hnsw)) {
+        HnswBridge::create_index(txn, &table, &index)?;
+    } else {
+        // Populate index entries for existing rows before publishing metadata.
+        build_index_for_existing_rows(txn, &table, &index, column_indices)?;
+    }
 
     catalog.create_index(index)?;
 
@@ -67,7 +73,7 @@ fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) ->
         && index
             .column_indices
             .iter()
-            .any(|&idx| row.get(idx).map_or(true, SqlValue::is_null))
+            .any(|&idx| row.get(idx).is_none_or(SqlValue::is_null))
 }
 
 fn build_index_for_existing_rows<S: KVStore>(
@@ -128,9 +134,9 @@ fn fetch_rows_chunk<S: KVStore>(
 ) -> Result<Vec<(u64, Vec<SqlValue>)>> {
     Ok(txn.with_table(table, |table_storage| {
         let end_row_id = start_row_id.saturating_add(chunk_size - 1);
-        let mut scan = table_storage.range_scan(start_row_id, end_row_id)?;
+        let scan = table_storage.range_scan(start_row_id, end_row_id)?;
         let mut rows = Vec::new();
-        while let Some(entry) = scan.next() {
+        for entry in scan {
             let (row_id, row) = entry?;
             rows.push((row_id, row));
         }

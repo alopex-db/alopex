@@ -40,6 +40,7 @@ mod ddl;
 mod dml;
 mod error;
 pub mod evaluator;
+mod hnsw_bridge;
 mod query;
 mod result;
 

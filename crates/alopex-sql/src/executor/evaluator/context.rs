@@ -14,9 +14,9 @@ impl<'a> EvalContext<'a> {
 
     /// Get a column value by index.
     pub fn get(&self, index: usize) -> Result<&'a SqlValue, ExecutorError> {
-        self.row
-            .get(index)
-            .ok_or_else(|| ExecutorError::Evaluation(EvaluationError::InvalidColumnRef { index }))
+        self.row.get(index).ok_or(ExecutorError::Evaluation(
+            EvaluationError::InvalidColumnRef { index },
+        ))
     }
 }
 
