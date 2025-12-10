@@ -52,6 +52,10 @@ harness = false
 name = "scan_strategy_bench"
 harness = false
 
+[[bench]]
+name = "hnsw_bench"
+harness = false
+
 [[bin]]
 name = "memory_profile"
 path = "src/bin/memory_profile.rs"
