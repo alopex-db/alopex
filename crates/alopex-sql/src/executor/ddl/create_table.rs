@@ -47,12 +47,12 @@ pub fn execute_create_table<S: KVStore, C: Catalog>(
 
     catalog.create_table(table.clone())?;
 
-    if let Some(index) = pk_index {
-        if let Err(err) = catalog.create_index(index) {
-            // Best-effort rollback to keep catalog consistent.
-            let _ = catalog.drop_table(&table.name);
-            return Err(err.into());
-        }
+    if let Some(index) = pk_index
+        && let Err(err) = catalog.create_index(index)
+    {
+        // Best-effort rollback to keep catalog consistent.
+        let _ = catalog.drop_table(&table.name);
+        return Err(err.into());
     }
 
     Ok(ExecutionResult::Success)
