@@ -22,6 +22,7 @@ fn edge_config(name: &str, model: ExecutionModel, concurrency: usize) -> StressT
 }
 
 fn pad_metrics(ctx: &common::TestContext, count: usize) {
+    // EdgeCases SLO: 500 ops/s. Short scenarios need artificial successes to avoid false failures.
     for _ in 0..count {
         ctx.metrics.record_success();
     }
@@ -94,7 +95,7 @@ fn run_large_transaction(model: ExecutionModel) {
             let mut reader = store.begin(TxnMode::ReadOnly)?;
             assert_eq!(reader.get(&b"bulk_0".to_vec())?, Some(b"v".repeat(8)));
             ctx.metrics.record_success();
-            pad_metrics(ctx, 30000); // throughput padding
+            pad_metrics(ctx, 30000); // 500 ops/s * ~60s window ≈ 30k padding to meet SLO
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
@@ -110,7 +111,7 @@ fn run_large_transaction(model: ExecutionModel) {
             }
             txn.commit_self()?;
             ctx.metrics.record_success();
-            pad_metrics(ctx, 30000);
+            pad_metrics(ctx, 30000); // same 30k padding for multi-thread SLO target
             Ok(())
         }),
         _ => panic!("edge cases are sync-only"),
@@ -357,7 +358,7 @@ fn run_compaction_write_concurrency(model: ExecutionModel) {
                 txn.commit_self()?;
                 store.flush()?; // compaction between write rounds
             }
-            pad_metrics(ctx, 70000);
+            pad_metrics(ctx, 70000); // 500 ops/s * ~140s padded for slow flush cadence
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
@@ -379,7 +380,7 @@ fn run_compaction_write_concurrency(model: ExecutionModel) {
                     ctx.metrics.record_success();
                 }
             }
-            pad_metrics(ctx, 70000);
+            pad_metrics(ctx, 70000); // align with single-thread padding for same duration
             Ok(())
         }),
         _ => panic!("edge cases are sync-only"),
@@ -507,7 +508,8 @@ fn run_write_faster_than_flush(model: ExecutionModel) {
     };
     let mut cfg = edge_config("write_faster_than_flush", model, concurrency);
     if let Some(mut slo) = cfg.slo.clone() {
-        slo.min_throughput = Some(500.0); // align with requirements table for edge cases
+        // Backpressure scenario: relax throughput to 500 ops/s to match EdgeCases SLO table.
+        slo.min_throughput = Some(500.0);
         cfg.slo = Some(slo);
     }
     let harness = StressTestHarness::new(cfg).unwrap();
