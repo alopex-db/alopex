@@ -45,6 +45,7 @@ impl ParquetReader {
             .with_batch_size(1024)
             .build()
             .map_err(|e| ExecutorError::BulkLoad(format!("failed to build parquet reader: {e}")))?;
+        // TODO: バッチサイズを open 引数で受け取れるようにし、呼び出し側で柔軟に制御できるようにする。
 
         let target_types: Vec<ResolvedType> = table_meta
             .columns
