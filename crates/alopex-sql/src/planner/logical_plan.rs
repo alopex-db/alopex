@@ -147,6 +147,8 @@ pub enum LogicalPlan {
         table: TableMetadata,
         /// If true, don't error if table already exists.
         if_not_exists: bool,
+        /// Raw WITH options to be validated during execution.
+        with_options: Vec<(String, String)>,
     },
 
     /// DROP TABLE operation.
@@ -239,10 +241,15 @@ impl LogicalPlan {
     }
 
     /// Creates a new CreateTable plan.
-    pub fn create_table(table: TableMetadata, if_not_exists: bool) -> Self {
+    pub fn create_table(
+        table: TableMetadata,
+        if_not_exists: bool,
+        with_options: Vec<(String, String)>,
+    ) -> Self {
         LogicalPlan::CreateTable {
             table,
             if_not_exists,
+            with_options,
         }
     }
 
@@ -559,7 +566,7 @@ mod tests {
     #[test]
     fn test_create_table_plan() {
         let table = create_test_table_metadata();
-        let plan = LogicalPlan::create_table(table, false);
+        let plan = LogicalPlan::create_table(table, false, vec![]);
 
         assert_eq!(plan.name(), "CreateTable");
         assert!(plan.is_ddl());

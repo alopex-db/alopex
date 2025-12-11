@@ -76,7 +76,7 @@ mod tests {
         .with_primary_key(vec!["id".into()]);
 
         let mut txn = bridge.begin_write().unwrap();
-        execute_create_table(&mut txn, &mut catalog, table.clone(), false).unwrap();
+        execute_create_table(&mut txn, &mut catalog, table.clone(), vec![], false).unwrap();
         txn.commit().unwrap();
 
         let stored = catalog.get_table("users").unwrap().clone();

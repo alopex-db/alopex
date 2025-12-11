@@ -23,6 +23,7 @@ fn parse_create_table_with_constraints_and_vector() {
     assert!(table.if_not_exists);
     assert_eq!(table.name, "documents");
     assert_eq!(table.columns.len(), 3);
+    assert!(table.with_options.is_empty());
     assert!(matches!(
         table.columns[0].constraints.first().unwrap(),
         alopex_sql::ColumnConstraint::WithSpan { .. }
@@ -67,4 +68,32 @@ fn parse_drop_index_if_exists() {
     });
     assert!(drop.if_exists);
     assert_eq!(drop.name, "idx_docs");
+}
+
+#[test]
+fn parse_create_table_with_options() {
+    let table: CreateTable = parse_with(
+        "CREATE TABLE tbl (id INTEGER) WITH (storage = ' columnar ', compression = 'zstd', row_group_size = 50000)",
+        |p| p.parse_create_table().unwrap(),
+    );
+
+    assert_eq!(table.with_options.len(), 3);
+    assert!(
+        table
+            .with_options
+            .iter()
+            .any(|(k, v)| k == "storage" && v == " columnar ")
+    );
+    assert!(
+        table
+            .with_options
+            .iter()
+            .any(|(k, v)| k == "compression" && v == "zstd")
+    );
+    assert!(
+        table
+            .with_options
+            .iter()
+            .any(|(k, v)| k == "row_group_size" && v == "50000")
+    );
 }

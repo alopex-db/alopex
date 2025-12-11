@@ -135,7 +135,8 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
             LogicalPlan::CreateTable {
                 table,
                 if_not_exists,
-            } => self.execute_create_table(table, if_not_exists),
+                with_options,
+            } => self.execute_create_table(table, with_options, if_not_exists),
             LogicalPlan::DropTable { name, if_exists } => self.execute_drop_table(&name, if_exists),
             LogicalPlan::CreateIndex {
                 index,
@@ -171,11 +172,18 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
     fn execute_create_table(
         &mut self,
         table: crate::catalog::TableMetadata,
+        with_options: Vec<(String, String)>,
         if_not_exists: bool,
     ) -> Result<ExecutionResult> {
         let mut catalog = self.catalog.write().expect("catalog lock poisoned");
         self.run_in_write_txn(|txn| {
-            ddl::create_table::execute_create_table(txn, &mut *catalog, table, if_not_exists)
+            ddl::create_table::execute_create_table(
+                txn,
+                &mut *catalog,
+                table,
+                with_options,
+                if_not_exists,
+            )
         })
     }
 
@@ -280,6 +288,7 @@ mod tests {
         let result = executor.execute(LogicalPlan::CreateTable {
             table,
             if_not_exists: false,
+            with_options: vec![],
         });
         assert!(matches!(result, Ok(ExecutionResult::Success)));
 
@@ -303,6 +312,7 @@ mod tests {
             .execute(LogicalPlan::CreateTable {
                 table,
                 if_not_exists: false,
+                with_options: vec![],
             })
             .unwrap();
 

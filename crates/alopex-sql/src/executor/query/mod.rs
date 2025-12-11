@@ -174,7 +174,7 @@ mod tests {
             ],
         );
         let mut ddl_txn = bridge.begin_write().unwrap();
-        execute_create_table(&mut ddl_txn, &mut catalog, table.clone(), false).unwrap();
+        execute_create_table(&mut ddl_txn, &mut catalog, table.clone(), vec![], false).unwrap();
         ddl_txn.commit().unwrap();
 
         let mut txn = bridge.begin_write().unwrap();

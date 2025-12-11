@@ -7,6 +7,8 @@ pub struct CreateTable {
     pub name: String,
     pub columns: Vec<ColumnDef>,
     pub constraints: Vec<TableConstraint>,
+    /// Raw WITH オプション (key, value) の組。
+    pub with_options: Vec<(String, String)>,
     pub span: Span,
 }
 

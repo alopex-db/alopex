@@ -1,16 +1,21 @@
 use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::Span;
 use alopex_sql::catalog::{ColumnMetadata, MemoryCatalog, TableMetadata};
-use alopex_sql::executor::{ExecutionResult, Executor};
+use alopex_sql::executor::{ExecutionResult, Executor, ExecutorError};
 use alopex_sql::planner::logical_plan::LogicalPlan;
 use alopex_sql::planner::typed_expr::{Projection, TypedAssignment, TypedExpr, TypedExprKind};
 use alopex_sql::planner::types::ResolvedType;
+use alopex_sql::{Catalog, Compression, StorageType};
 use std::sync::{Arc, RwLock};
 
-fn create_executor() -> Executor<MemoryKV, MemoryCatalog> {
+fn create_executor() -> (
+    Executor<MemoryKV, MemoryCatalog>,
+    Arc<RwLock<MemoryCatalog>>,
+) {
     let store = Arc::new(MemoryKV::new());
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
-    Executor::new(store, catalog)
+    let executor = Executor::new(store, Arc::clone(&catalog));
+    (executor, catalog)
 }
 
 fn literal(kind: TypedExprKind, ty: ResolvedType) -> TypedExpr {
@@ -23,7 +28,7 @@ fn literal(kind: TypedExprKind, ty: ResolvedType) -> TypedExpr {
 
 #[test]
 fn executor_end_to_end_manual_plans() {
-    let mut executor = create_executor();
+    let (mut executor, _catalog) = create_executor();
 
     // CREATE TABLE
     let table = TableMetadata::new(
@@ -41,6 +46,7 @@ fn executor_end_to_end_manual_plans() {
         .execute(LogicalPlan::CreateTable {
             table,
             if_not_exists: false,
+            with_options: vec![],
         })
         .unwrap();
 
@@ -186,4 +192,59 @@ fn executor_end_to_end_manual_plans() {
         }
         other => panic!("unexpected result {other:?}"),
     }
+}
+
+#[test]
+fn create_table_with_options_applies_storage() {
+    let (mut executor, catalog) = create_executor();
+
+    let table = TableMetadata::new(
+        "col_tbl",
+        vec![ColumnMetadata::new("id", ResolvedType::Integer)],
+    );
+
+    executor
+        .execute(LogicalPlan::CreateTable {
+            table,
+            if_not_exists: false,
+            with_options: vec![
+                ("storage".into(), " columnar ".into()),
+                ("compression".into(), " none ".into()),
+                ("row_group_size".into(), "2000".into()),
+            ],
+        })
+        .unwrap();
+
+    let stored = catalog
+        .read()
+        .unwrap()
+        .get_table("col_tbl")
+        .unwrap()
+        .clone();
+    assert_eq!(stored.storage_options.storage_type, StorageType::Columnar);
+    assert_eq!(stored.storage_options.compression, Compression::None);
+    assert_eq!(stored.storage_options.row_group_size, 2_000);
+}
+
+#[test]
+fn create_table_with_duplicate_option_errors() {
+    let (mut executor, _catalog) = create_executor();
+
+    let table = TableMetadata::new(
+        "dup_tbl",
+        vec![ColumnMetadata::new("id", ResolvedType::Integer)],
+    );
+
+    let err = executor
+        .execute(LogicalPlan::CreateTable {
+            table,
+            if_not_exists: false,
+            with_options: vec![
+                ("storage".into(), "row".into()),
+                ("storage".into(), "columnar".into()),
+            ],
+        })
+        .unwrap_err();
+
+    assert!(matches!(err, ExecutorError::DuplicateOption(_)));
 }

@@ -138,6 +138,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
         Ok(LogicalPlan::CreateTable {
             table,
             if_not_exists: stmt.if_not_exists,
+            with_options: stmt.with_options.clone(),
         })
     }
 

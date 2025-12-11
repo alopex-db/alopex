@@ -1,6 +1,9 @@
 use alopex_core::kv::KVStore;
+use std::collections::HashSet;
 
-use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
+use crate::catalog::{
+    Catalog, Compression, IndexMetadata, StorageOptions, StorageType, TableMetadata,
+};
 use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::storage::{KeyEncoder, SqlTransaction};
 
@@ -11,6 +14,7 @@ pub fn execute_create_table<S: KVStore, C: Catalog>(
     txn: &mut SqlTransaction<'_, S>,
     catalog: &mut C,
     mut table: TableMetadata,
+    with_options: Vec<(String, String)>,
     if_not_exists: bool,
 ) -> Result<ExecutionResult> {
     if catalog.table_exists(&table.name) {
@@ -20,6 +24,9 @@ pub fn execute_create_table<S: KVStore, C: Catalog>(
             Err(ExecutorError::TableAlreadyExists(table.name))
         };
     }
+
+    // WITH オプションを解析してストレージ設定へ反映
+    table.storage_options = parse_storage_options(&with_options)?;
 
     // Resolve PK column indices before mutating the catalog to avoid partial writes.
     let pk_index = if let Some(pk_columns) = table.primary_key.clone() {
@@ -69,6 +76,58 @@ fn resolve_column_indices(table: &TableMetadata, columns: &[String]) -> Result<V
         .collect()
 }
 
+/// WITH 句オプションを StorageOptions に変換する。
+///
+/// - storage: row/columnar (case-insensitive)
+/// - compression: none/lz4/zstd (case-insensitive)
+/// - row_group_size: 1000〜1_000_000
+/// - 未知キーは UnknownTableOption
+/// - 重複キーは DuplicateOption
+pub fn parse_storage_options(with_options: &[(String, String)]) -> Result<StorageOptions> {
+    let mut options = StorageOptions::default();
+    let mut seen = HashSet::new();
+
+    for (key, value) in with_options {
+        let key_lower = key.to_lowercase();
+        if !seen.insert(key_lower.clone()) {
+            return Err(ExecutorError::DuplicateOption(key.clone()));
+        }
+
+        match key_lower.as_str() {
+            "storage" => {
+                let normalized = value.trim().to_lowercase();
+                options.storage_type = match normalized.as_str() {
+                    "row" => StorageType::Row,
+                    "columnar" => StorageType::Columnar,
+                    _ => return Err(ExecutorError::InvalidStorageType(value.clone())),
+                };
+            }
+            "compression" => {
+                let normalized = value.trim().to_lowercase();
+                options.compression = match normalized.as_str() {
+                    "none" => Compression::None,
+                    "lz4" => Compression::Lz4,
+                    "zstd" => Compression::Zstd,
+                    _ => return Err(ExecutorError::InvalidCompression(value.clone())),
+                };
+            }
+            "row_group_size" => {
+                let trimmed = value.trim();
+                let size: u32 = trimmed
+                    .parse()
+                    .map_err(|_| ExecutorError::InvalidRowGroupSize(value.clone()))?;
+                if size < 1_000 || size > 1_000_000 {
+                    return Err(ExecutorError::InvalidRowGroupSize(value.clone()));
+                }
+                options.row_group_size = size;
+            }
+            _ => return Err(ExecutorError::UnknownTableOption(key.clone())),
+        }
+    }
+
+    Ok(options)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,7 +158,7 @@ mod tests {
         .with_primary_key(vec!["id".into()]);
 
         let mut txn = bridge.begin_write().unwrap();
-        let result = execute_create_table(&mut txn, &mut catalog, table.clone(), false);
+        let result = execute_create_table(&mut txn, &mut catalog, table.clone(), vec![], false);
         assert!(matches!(result, Ok(ExecutionResult::Success)));
         txn.commit().unwrap();
         let stored = catalog.get_table("users").expect("table stored");
@@ -121,12 +180,12 @@ mod tests {
         .with_primary_key(vec!["id".into()]);
 
         let mut txn = bridge.begin_write().unwrap();
-        let first = execute_create_table(&mut txn, &mut catalog, table.clone(), false);
+        let first = execute_create_table(&mut txn, &mut catalog, table.clone(), vec![], false);
         assert!(first.is_ok());
         txn.commit().unwrap();
 
         let mut txn = bridge.begin_write().unwrap();
-        let second = execute_create_table(&mut txn, &mut catalog, table.clone(), true);
+        let second = execute_create_table(&mut txn, &mut catalog, table.clone(), vec![], true);
         assert!(matches!(second, Ok(ExecutionResult::Success)));
         txn.commit().unwrap();
 
@@ -144,7 +203,7 @@ mod tests {
         .with_primary_key(vec!["missing".into()]);
 
         let mut txn = bridge.begin_write().unwrap();
-        let err = execute_create_table(&mut txn, &mut catalog, table, false).unwrap_err();
+        let err = execute_create_table(&mut txn, &mut catalog, table, vec![], false).unwrap_err();
         txn.rollback().unwrap();
 
         assert!(matches!(
@@ -152,5 +211,85 @@ mod tests {
             ExecutorError::ColumnNotFound(name) if name == "missing"
         ));
         assert!(!catalog.table_exists("bad"));
+    }
+
+    #[test]
+    fn parse_storage_options_defaults_and_overrides() {
+        // empty -> defaults
+        let opts = parse_storage_options(&[]).unwrap();
+        assert_eq!(opts.storage_type, StorageType::Row);
+        assert_eq!(opts.compression, Compression::Lz4);
+        assert_eq!(opts.row_group_size, 100_000);
+
+        // overrides
+        let opts = parse_storage_options(&[
+            ("storage".into(), " columnar ".into()),
+            ("compression".into(), " zstd ".into()),
+            ("row_group_size".into(), " 5000 ".into()),
+        ])
+        .unwrap();
+        assert_eq!(opts.storage_type, StorageType::Columnar);
+        assert_eq!(opts.compression, Compression::Zstd);
+        assert_eq!(opts.row_group_size, 5_000);
+    }
+
+    #[test]
+    fn parse_storage_options_validates() {
+        // duplicate
+        let err = parse_storage_options(&[
+            ("storage".into(), "row".into()),
+            ("storage".into(), "columnar".into()),
+        ])
+        .unwrap_err();
+        assert!(matches!(err, ExecutorError::DuplicateOption(_)));
+
+        // unknown key
+        let err = parse_storage_options(&[("foo".into(), "bar".into())]).unwrap_err();
+        assert!(matches!(err, ExecutorError::UnknownTableOption(_)));
+
+        // invalid storage
+        let err = parse_storage_options(&[("storage".into(), "heap".into())]).unwrap_err();
+        assert!(matches!(err, ExecutorError::InvalidStorageType(_)));
+
+        // invalid compression
+        let err = parse_storage_options(&[("compression".into(), "gzip".into())]).unwrap_err();
+        assert!(matches!(err, ExecutorError::InvalidCompression(_)));
+
+        // invalid row_group_size (parse)
+        let err = parse_storage_options(&[("row_group_size".into(), "abc".into())]).unwrap_err();
+        assert!(matches!(err, ExecutorError::InvalidRowGroupSize(_)));
+
+        // invalid row_group_size (range)
+        let err = parse_storage_options(&[("row_group_size".into(), "10".into())]).unwrap_err();
+        assert!(matches!(err, ExecutorError::InvalidRowGroupSize(_)));
+    }
+
+    #[test]
+    fn execute_create_table_applies_storage_options() {
+        let (bridge, mut catalog) = bridge();
+        let table = TableMetadata::new(
+            "col_tbl",
+            vec![ColumnMetadata::new("id", ResolvedType::Integer)],
+        );
+
+        let mut txn = bridge.begin_write().unwrap();
+        execute_create_table(
+            &mut txn,
+            &mut catalog,
+            table,
+            vec![
+                ("storage".into(), "columnar".into()),
+                ("compression".into(), "none".into()),
+                ("row_group_size".into(), "2000".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        txn.commit().unwrap();
+
+        let stored = catalog.get_table("col_tbl").unwrap();
+        assert_eq!(stored.storage_options.storage_type, StorageType::Columnar);
+        assert_eq!(stored.storage_options.compression, Compression::None);
+        assert_eq!(stored.storage_options.row_group_size, 2_000);
     }
 }

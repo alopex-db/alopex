@@ -142,6 +142,7 @@ fn test_plan_create_table() {
             },
         ],
         constraints: vec![],
+        with_options: vec![],
         span: span(),
     };
 
@@ -151,11 +152,13 @@ fn test_plan_create_table() {
     if let LogicalPlan::CreateTable {
         table,
         if_not_exists,
+        with_options,
     } = result.unwrap()
     {
         assert_eq!(table.name, "new_table");
         assert_eq!(table.columns.len(), 2);
         assert!(!if_not_exists);
+        assert!(with_options.is_empty());
         assert!(table.columns[0].primary_key);
         assert!(table.columns[0].not_null);
         assert!(table.columns[1].not_null);
@@ -174,6 +177,7 @@ fn test_plan_create_table_already_exists() {
         name: "users".to_string(),
         columns: vec![],
         constraints: vec![],
+        with_options: vec![],
         span: span(),
     };
 
@@ -194,6 +198,7 @@ fn test_plan_create_table_if_not_exists() {
         name: "users".to_string(),
         columns: vec![],
         constraints: vec![],
+        with_options: vec![],
         span: span(),
     };
 

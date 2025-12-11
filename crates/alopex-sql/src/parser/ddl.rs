@@ -123,12 +123,50 @@ impl<'a> Parser<'a> {
         let end_span = self
             .expect_token("')'", |t| matches!(t, Token::RParen))?
             .span;
-        let span = start_span.union(&end_span);
+
+        // Optional WITH clause for table options
+        let mut with_options = Vec::new();
+        let mut span = start_span.union(&end_span);
+        if self.consume_keyword(Keyword::WITH) {
+            let with_start = self
+                .expect_token("'('", |t| matches!(t, Token::LParen))?
+                .span;
+            loop {
+                let (key, key_span) = self.parse_identifier()?;
+                self.expect_token("'='", |t| matches!(t, Token::Eq))?;
+                let val_tok = self.expect_token("option value", |t| {
+                    matches!(
+                        t,
+                        Token::Number(_) | Token::Word(_) | Token::SingleQuotedString(_)
+                    )
+                })?;
+                let value = match val_tok.token {
+                    Token::Number(n) => n,
+                    Token::Word(Word { value, .. }) => value,
+                    Token::SingleQuotedString(s) => s,
+                    _ => unreachable!(),
+                };
+                let _span = key_span.union(&val_tok.span);
+                with_options.push((key, value));
+
+                if matches!(self.peek().token, Token::Comma) {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+            let with_end = self
+                .expect_token("')'", |t| matches!(t, Token::RParen))?
+                .span;
+            span = span.union(&with_start).union(&with_end);
+        }
+
         Ok(CreateTable {
             if_not_exists,
             name,
             columns,
             constraints,
+            with_options,
             span,
         })
     }

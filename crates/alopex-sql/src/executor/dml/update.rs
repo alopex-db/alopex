@@ -276,7 +276,7 @@ mod tests {
 
         // DDL setup: table + pk index
         let mut ddl_txn = bridge.begin_write().unwrap();
-        execute_create_table(&mut ddl_txn, &mut catalog, table.clone(), false).unwrap();
+        execute_create_table(&mut ddl_txn, &mut catalog, table.clone(), vec![], false).unwrap();
         ddl_txn.commit().unwrap();
 
         let stored_table = catalog.get_table("users").unwrap().clone();
@@ -365,7 +365,7 @@ mod tests {
         .with_primary_key(vec!["id".into()]);
 
         let mut ddl_txn = bridge.begin_write().unwrap();
-        execute_create_table(&mut ddl_txn, &mut catalog, table.clone(), false).unwrap();
+        execute_create_table(&mut ddl_txn, &mut catalog, table.clone(), vec![], false).unwrap();
         ddl_txn.commit().unwrap();
 
         let mut txn = bridge.begin_write().unwrap();
