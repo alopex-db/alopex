@@ -66,7 +66,17 @@ impl BulkReader for ParquetReader {
         &self.schema
     }
 
-    fn next_batch(&mut self, _max_rows: usize) -> Result<Option<Vec<Vec<SqlValue>>>> {
+    fn next_batch(&mut self, max_rows: usize) -> Result<Option<Vec<Vec<SqlValue>>>> {
+        let max_rows = max_rows.max(1);
+
+        if let Some(mut buffered) = self.buffer.take() {
+            if buffered.len() > max_rows {
+                let rest = buffered.split_off(max_rows);
+                self.buffer = Some(rest);
+            }
+            return Ok(Some(buffered));
+        }
+
         let maybe_batch = self.reader.next();
         let batch = match maybe_batch {
             Some(b) => b.map_err(|e| {
@@ -92,8 +102,12 @@ impl BulkReader for ParquetReader {
             rows.push(row);
         }
 
-        self.buffer = Some(rows);
-        Ok(self.buffer.take())
+        if rows.len() > max_rows {
+            let rest = rows.split_off(max_rows);
+            self.buffer = Some(rest);
+        }
+
+        Ok(Some(rows))
     }
 }
 
