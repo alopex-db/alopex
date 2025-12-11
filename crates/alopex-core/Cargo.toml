@@ -10,6 +10,8 @@ compression-lz4 = ["lz4"]
 checksum-xxh64 = ["xxhash-rust/xxh64"]
 wasm-indexeddb = ["js-sys", "web-sys"]
 memory-profiling = ["dhat", "crossbeam-skiplist"]
+# Enable test-only I/O and crash hooks
+test-hooks = []
 
 [dependencies]
 bincode = "1.3"
@@ -27,7 +29,9 @@ crossbeam-skiplist = { version = "0.1", optional = true }
 rand = { workspace = true }
 
 [dev-dependencies]
+parking_lot = "0.12"
 tempfile = "3.8"
+tokio = { version = "1.35", default-features = false, features = ["rt", "rt-multi-thread", "macros", "time"] }
 criterion = { workspace = true }
 rand = { workspace = true }
 proptest = "1.4"

@@ -2,6 +2,8 @@
 //! and Optimistic Concurrency Control for Snapshot Isolation.
 
 use crate::error::{Error, Result};
+#[cfg(feature = "test-hooks")]
+use crate::kv::hooks::{CrashOperation, CrashSimulator, CrashTiming, IoHooks};
 use crate::kv::{KVStore, KVTransaction};
 use crate::log::wal::{WalReader, WalRecord, WalWriter};
 use crate::storage::flush::write_empty_vector_segment;
@@ -60,6 +62,36 @@ impl MemoryKV {
         Ok(Self { manager })
     }
 
+    /// Opens a persistent KV store with I/O hooks (test only).
+    #[cfg(feature = "test-hooks")]
+    pub fn open_with_io_hooks(path: &Path, hooks: Arc<dyn IoHooks>) -> Result<Self> {
+        let wal_writer = WalWriter::new(path)?;
+        let sstable_path = path.with_extension("sst");
+        let manager = Arc::new(MemoryTxnManager::new(
+            Some(wal_writer),
+            Some(path.to_path_buf()),
+            Some(sstable_path),
+        ));
+        manager.set_io_hooks(Some(hooks));
+        manager.recover()?;
+        Ok(Self { manager })
+    }
+
+    /// Opens a persistent KV store with crash hooks (test only).
+    #[cfg(feature = "test-hooks")]
+    pub fn open_with_crash_hooks(path: &Path, crash_sim: Arc<CrashSimulator>) -> Result<Self> {
+        let wal_writer = WalWriter::new(path)?;
+        let sstable_path = path.with_extension("sst");
+        let manager = Arc::new(MemoryTxnManager::new(
+            Some(wal_writer),
+            Some(path.to_path_buf()),
+            Some(sstable_path),
+        ));
+        manager.set_crash_sim(Some(crash_sim));
+        manager.recover()?;
+        Ok(Self { manager })
+    }
+
     /// Flushes the in-memory data to an SSTable.
     pub fn flush(&self) -> Result<()> {
         self.manager.flush()
@@ -108,6 +140,12 @@ struct MemorySharedState {
     memory_limit: RwLock<Option<usize>>,
     /// Current memory consumption (bytes) tracked across operations。
     current_memory: AtomicUsize,
+    #[cfg(feature = "test-hooks")]
+    /// Optional I/O hooks for fault injection (test only).
+    io_hooks: RwLock<Option<Arc<dyn IoHooks>>>,
+    #[cfg(feature = "test-hooks")]
+    /// Optional crash simulator for test-only crash points.
+    crash_sim: RwLock<Option<Arc<CrashSimulator>>>,
 }
 
 impl MemorySharedState {
@@ -167,6 +205,10 @@ impl MemoryTxnManager {
                 sstable_path,
                 memory_limit: RwLock::new(memory_limit),
                 current_memory: AtomicUsize::new(0),
+                #[cfg(feature = "test-hooks")]
+                io_hooks: RwLock::new(None),
+                #[cfg(feature = "test-hooks")]
+                crash_sim: RwLock::new(None),
             }),
         }
     }
@@ -182,6 +224,28 @@ impl MemoryTxnManager {
     /// Creates an in-memory manager with an optional memory limit.
     pub fn new_with_limit(limit: Option<usize>) -> Self {
         Self::new_with_params(None, None, None, limit)
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn set_io_hooks(&self, hooks: Option<Arc<dyn IoHooks>>) {
+        let mut guard = self.state.io_hooks.write().unwrap();
+        *guard = hooks;
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn set_crash_sim(&self, crash_sim: Option<Arc<CrashSimulator>>) {
+        let mut guard = self.state.crash_sim.write().unwrap();
+        *guard = crash_sim;
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn io_hooks(&self) -> Option<Arc<dyn IoHooks>> {
+        self.state.io_hooks.read().unwrap().clone()
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn crash_sim(&self) -> Option<Arc<CrashSimulator>> {
+        self.state.crash_sim.read().unwrap().clone()
     }
 
     /// Returns current memory usage statistics.
@@ -252,8 +316,91 @@ impl MemoryTxnManager {
         Ok(true)
     }
 
+    #[cfg(feature = "test-hooks")]
+    fn trigger_crash(&self, operation: CrashOperation, timing: CrashTiming) {
+        if let Some(sim) = self.crash_sim() {
+            sim.check_crash(operation, timing);
+        }
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn notify_wal_hooks(&self, data: &[u8], timing: CrashTiming) -> Result<()> {
+        match timing {
+            CrashTiming::Before => {
+                self.trigger_crash(CrashOperation::WalWrite, CrashTiming::Before);
+                if let Some(hooks) = self.io_hooks() {
+                    hooks.before_wal_write(data).map_err(Error::Io)?;
+                    hooks.before_fsync().map_err(Error::Io)?;
+                }
+                self.trigger_crash(CrashOperation::WalFsync, CrashTiming::Before);
+            }
+            CrashTiming::During => {
+                self.trigger_crash(CrashOperation::WalWrite, CrashTiming::During);
+                self.trigger_crash(CrashOperation::WalFsync, CrashTiming::During);
+            }
+            CrashTiming::After => {
+                self.trigger_crash(CrashOperation::WalWrite, CrashTiming::After);
+                self.trigger_crash(CrashOperation::WalFsync, CrashTiming::After);
+                if let Some(hooks) = self.io_hooks() {
+                    hooks.after_wal_write(data).map_err(Error::Io)?;
+                    hooks.after_fsync().map_err(Error::Io)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn notify_compaction(&self, timing: CrashTiming) {
+        self.trigger_crash(CrashOperation::Compaction, timing);
+        if let Some(hooks) = self.io_hooks() {
+            match timing {
+                CrashTiming::Before => hooks.on_compaction_start(),
+                CrashTiming::After => hooks.on_compaction_end(),
+                CrashTiming::During => {}
+            }
+        }
+    }
+
+    fn append_wal_record(&self, wal: &mut WalWriter, record: &WalRecord) -> Result<()> {
+        #[cfg(feature = "test-hooks")]
+        {
+            let data =
+                bincode::serialize(record).map_err(|e| Error::Io(std::io::Error::other(e)))?;
+            self.notify_wal_hooks(&data, CrashTiming::Before)?;
+            self.notify_wal_hooks(&data, CrashTiming::During)?;
+            wal.append(record)?;
+            self.notify_wal_hooks(&data, CrashTiming::After)?;
+            return Ok(());
+        }
+
+        #[cfg(not(feature = "test-hooks"))]
+        {
+            wal.append(record)
+        }
+    }
+
+    fn write_wal(&self, txn_id: TxnId, writes: &BTreeMap<Key, Option<Value>>) -> Result<()> {
+        if let Some(wal_lock) = &self.state.wal_writer {
+            let mut wal = wal_lock.write().unwrap();
+            self.append_wal_record(&mut wal, &WalRecord::Begin(txn_id))?;
+            for (key, value) in writes {
+                let record = match value {
+                    Some(v) => WalRecord::Put(txn_id, key.clone(), v.clone()),
+                    None => WalRecord::Delete(txn_id, key.clone()),
+                };
+                self.append_wal_record(&mut wal, &record)?;
+            }
+            self.append_wal_record(&mut wal, &WalRecord::Commit(txn_id))?;
+        }
+        Ok(())
+    }
+
     /// In-memory compaction entrypoint that rebuilds the map while honoring memory limits.
     pub fn compact_in_memory(&self) -> Result<bool> {
+        #[cfg(feature = "test-hooks")]
+        self.notify_compaction(CrashTiming::Before);
+
         let snapshot_bytes = {
             let data = self.state.data.read().unwrap();
             let mut bytes = 0usize;
@@ -263,7 +410,7 @@ impl MemoryTxnManager {
             bytes
         };
 
-        self.compact_with_limit(snapshot_bytes, snapshot_bytes, || {
+        let executed = self.compact_with_limit(snapshot_bytes, snapshot_bytes, || {
             let data = self.state.data.read().unwrap();
             let mut rebuilt = BTreeMap::new();
             for (k, (v, version)) in data.iter() {
@@ -271,10 +418,18 @@ impl MemoryTxnManager {
             }
             drop(data);
 
+            #[cfg(feature = "test-hooks")]
+            self.notify_compaction(CrashTiming::During);
+
             let mut write_guard = self.state.data.write().unwrap();
             *write_guard = rebuilt;
             Ok(())
-        })
+        })?;
+
+        #[cfg(feature = "test-hooks")]
+        self.notify_compaction(CrashTiming::After);
+
+        Ok(executed)
     }
 
     /// Flushes the current in-memory data to an SSTable file.
@@ -285,14 +440,36 @@ impl MemoryTxnManager {
             .as_ref()
             .ok_or_else(|| Error::InvalidFormat("sstable path is not configured".into()))?;
 
+        #[cfg(feature = "test-hooks")]
+        self.notify_compaction(CrashTiming::Before);
+
         let data = self.state.data.read().unwrap();
         let mut writer = SstableWriter::create(path)?;
         for (key, (value, _version)) in data.iter() {
+            #[cfg(feature = "test-hooks")]
+            {
+                let mut record = Vec::with_capacity(key.len() + value.len());
+                record.extend_from_slice(key);
+                record.extend_from_slice(value);
+                self.trigger_crash(CrashOperation::SstWrite, CrashTiming::Before);
+                if let Some(hooks) = self.io_hooks() {
+                    hooks.before_sst_write(&record).map_err(Error::Io)?;
+                }
+                self.trigger_crash(CrashOperation::SstWrite, CrashTiming::During);
+            }
+
             writer.append(key, value)?;
+
+            #[cfg(feature = "test-hooks")]
+            self.trigger_crash(CrashOperation::SstWrite, CrashTiming::After);
         }
         drop(data);
 
+        #[cfg(feature = "test-hooks")]
+        self.trigger_crash(CrashOperation::SstFinalize, CrashTiming::Before);
         let _footer = writer.finish()?;
+        #[cfg(feature = "test-hooks")]
+        self.trigger_crash(CrashOperation::SstFinalize, CrashTiming::After);
         let reader = SstableReader::open(path)?;
         // Also emit a placeholder vector segment alongside SSTable for future vector recovery.
         let vec_path = path.with_extension("vec");
@@ -300,6 +477,9 @@ impl MemoryTxnManager {
 
         let mut slot = self.state.sstable.write().unwrap();
         *slot = Some(reader);
+
+        #[cfg(feature = "test-hooks")]
+        self.notify_compaction(CrashTiming::After);
         Ok(())
     }
 
@@ -475,18 +655,7 @@ impl<'a> TxnManager<'a, MemoryTransaction<'a>> for &'a MemoryTxnManager {
 
         let commit_version = self.state.commit_version.fetch_add(1, Ordering::AcqRel) + 1;
 
-        if let Some(wal_lock) = &self.state.wal_writer {
-            let mut wal = wal_lock.write().unwrap();
-            wal.append(&WalRecord::Begin(txn.id))?;
-            for (key, value) in &txn.writes {
-                let record = match value {
-                    Some(v) => WalRecord::Put(txn.id, key.clone(), v.clone()),
-                    None => WalRecord::Delete(txn.id, key.clone()),
-                };
-                wal.append(&record)?;
-            }
-            wal.append(&WalRecord::Commit(txn.id))?;
-        }
+        self.write_wal(txn.id, &txn.writes)?;
 
         for (key, value) in std::mem::take(&mut txn.writes) {
             if let Some(v) = value {
@@ -729,18 +898,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
             + 1;
 
         // WAL write
-        if let Some(wal_lock) = &self.manager.state.wal_writer {
-            let mut wal = wal_lock.write().unwrap();
-            wal.append(&WalRecord::Begin(self.id))?;
-            for (key, value) in &self.writes {
-                let record = match value {
-                    Some(v) => WalRecord::Put(self.id, key.clone(), v.clone()),
-                    None => WalRecord::Delete(self.id, key.clone()),
-                };
-                wal.append(&record)?;
-            }
-            wal.append(&WalRecord::Commit(self.id))?;
-        }
+        self.manager.write_wal(self.id, &self.writes)?;
 
         // Apply writes
         for (key, value) in std::mem::take(&mut self.writes) {

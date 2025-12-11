@@ -17,6 +17,8 @@ pub use columnar::encoding::{
 };
 pub use columnar::segment::{write_segment, ChunkIter, SegmentMeta, SegmentReader};
 pub use error::{Error, Result};
+#[cfg(feature = "test-hooks")]
+pub use kv::hooks::{CrashOperation, CrashPoint, CrashSimulator, CrashTiming, IoHooks};
 pub use kv::memory::{MemoryKV, MemoryStats, MemoryTransaction, MemoryTxnManager};
 pub use kv::storage::{StorageFactory, StorageMode};
 pub use kv::{KVStore, KVTransaction};

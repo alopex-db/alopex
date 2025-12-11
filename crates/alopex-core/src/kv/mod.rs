@@ -4,6 +4,8 @@ use crate::error::Result;
 use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, Value};
 
+#[cfg(feature = "test-hooks")]
+pub mod hooks;
 pub mod memory;
 /// Storage mode selection helpers (disk vs memory).
 pub mod storage;
