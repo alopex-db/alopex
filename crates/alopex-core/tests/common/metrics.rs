@@ -51,6 +51,33 @@ impl MetricsCollector {
                 });
             }
         }
+        if let Some(p95) = cfg.p95_max_latency {
+            if summary.p95.map(|v| v > p95).unwrap_or(false) {
+                violations.push(SloViolation {
+                    metric: "p95_latency_ns".into(),
+                    expected: p95.as_nanos().to_string(),
+                    actual: summary.p95.unwrap().as_nanos().to_string(),
+                });
+            }
+        }
+        if let Some(p999) = cfg.p999_max_latency {
+            if summary.p999.map(|v| v > p999).unwrap_or(false) {
+                violations.push(SloViolation {
+                    metric: "p999_latency_ns".into(),
+                    expected: p999.as_nanos().to_string(),
+                    actual: summary.p999.unwrap().as_nanos().to_string(),
+                });
+            }
+        }
+        if let Some(p9999) = cfg.p9999_max_latency {
+            if summary.p9999.map(|v| v > p9999).unwrap_or(false) {
+                violations.push(SloViolation {
+                    metric: "p9999_latency_ns".into(),
+                    expected: p9999.as_nanos().to_string(),
+                    actual: summary.p9999.unwrap().as_nanos().to_string(),
+                });
+            }
+        }
         if let Some(min_tp) = cfg.min_throughput {
             if summary.throughput_per_sec < min_tp {
                 violations.push(SloViolation {
@@ -58,6 +85,19 @@ impl MetricsCollector {
                     expected: format!("{min_tp}"),
                     actual: format!("{:.2}", summary.throughput_per_sec),
                 });
+            }
+        }
+        if let Some(max_err_ratio) = cfg.max_error_ratio {
+            let total = summary.successes + summary.errors;
+            if total > 0 {
+                let ratio = summary.errors as f64 / total as f64;
+                if ratio > max_err_ratio {
+                    violations.push(SloViolation {
+                        metric: "error_ratio".into(),
+                        expected: format!("{:.4}", max_err_ratio),
+                        actual: format!("{:.4}", ratio),
+                    });
+                }
             }
         }
         SloResult {
@@ -114,6 +154,10 @@ impl MetricsSummary {
 pub struct SloConfig {
     pub p99_max_latency: Option<Duration>,
     pub min_throughput: Option<f64>,
+    pub p95_max_latency: Option<Duration>,
+    pub p999_max_latency: Option<Duration>,
+    pub p9999_max_latency: Option<Duration>,
+    pub max_error_ratio: Option<f64>,
 }
 
 /// SLO判定結果。
@@ -151,28 +195,44 @@ pub mod slo_presets {
             "concurrency",
             SloConfig {
                 p99_max_latency: Some(Duration::from_millis(200)),
+                p95_max_latency: Some(Duration::from_millis(150)),
+                p999_max_latency: Some(Duration::from_millis(400)),
+                p9999_max_latency: Some(Duration::from_millis(800)),
                 min_throughput: Some(1000.0),
+                max_error_ratio: Some(0.01),
             },
         );
         map.insert(
             "recovery",
             SloConfig {
                 p99_max_latency: Some(Duration::from_millis(500)),
+                p95_max_latency: Some(Duration::from_millis(400)),
+                p999_max_latency: Some(Duration::from_millis(800)),
+                p9999_max_latency: Some(Duration::from_millis(1500)),
                 min_throughput: Some(500.0),
+                max_error_ratio: Some(0.02),
             },
         );
         map.insert(
             "edge_cases",
             SloConfig {
                 p99_max_latency: Some(Duration::from_millis(400)),
+                p95_max_latency: Some(Duration::from_millis(300)),
+                p999_max_latency: Some(Duration::from_millis(700)),
+                p9999_max_latency: Some(Duration::from_millis(1200)),
                 min_throughput: Some(800.0),
+                max_error_ratio: Some(0.02),
             },
         );
         map.insert(
             "error_injection",
             SloConfig {
                 p99_max_latency: Some(Duration::from_millis(800)),
+                p95_max_latency: Some(Duration::from_millis(600)),
+                p999_max_latency: Some(Duration::from_millis(1500)),
+                p9999_max_latency: Some(Duration::from_millis(2000)),
                 min_throughput: Some(100.0),
+                max_error_ratio: Some(0.05),
             },
         );
         map.get(category).cloned()

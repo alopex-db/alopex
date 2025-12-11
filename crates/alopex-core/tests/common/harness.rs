@@ -215,16 +215,22 @@ impl StressTestHarness {
                 let tf = test_fn.clone();
                 handles.push(scope.spawn(move || tf(tid, &ctx_cloned)));
             }
-            let mut err: Option<String> = None;
+            let mut errs: Vec<String> = Vec::new();
             for h in handles {
-                if let Err(e) = h.join() {
-                    err = Some(format!("panic: {:?}", e));
+                match h.join() {
+                    Ok(res) => {
+                        if let Err(e) = res {
+                            errs.push(format!("{e:?}"));
+                        }
+                    }
+                    Err(panic) => errs.push(format!("panic: {:?}", panic)),
                 }
             }
-            if let Some(e) = err {
-                return Some(e);
+            if errs.is_empty() {
+                None
+            } else {
+                Some(errs.join("; "))
             }
-            None
         });
 
         let watchdog_result = watchdog.finish();
@@ -262,6 +268,6 @@ pub fn do_put_get_roundtrip(ctx: &TestContext) -> CoreResult<()> {
 }
 
 /// 操作ごとのウォッチドッグガード。
-pub fn begin_op(ctx: &TestContext) -> OperationGuard {
+pub fn begin_op(ctx: &TestContext) -> OperationGuard<'_> {
     ctx.watchdog.begin_operation()
 }
