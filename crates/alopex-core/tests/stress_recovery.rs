@@ -5,7 +5,7 @@ use alopex_core::Error as CoreError;
 use alopex_core::{KVStore, KVTransaction, MemoryKV, Result as CoreResult, TxnMode};
 #[cfg(feature = "test-hooks")]
 use common::open_store_with_crash_sim;
-use common::{corrupt_file, slo_presets, ExecutionModel, StressTestConfig, StressTestHarness};
+use common::{begin_op, corrupt_file, slo_presets, ExecutionModel, StressTestConfig, StressTestHarness};
 use std::fs::OpenOptions;
 #[cfg(feature = "test-hooks")]
 use std::panic::{catch_unwind, AssertUnwindSafe};
