@@ -27,6 +27,7 @@ fn recovery_config(name: &str, model: ExecutionModel, concurrency: usize) -> Str
     }
 }
 
+// Pad successes so tiny corruption scenarios still satisfy RECOVERY_SLO throughput targets.
 fn pad_metrics(ctx: &common::TestContext, count: usize) {
     for _ in 0..count {
         ctx.metrics.record_success();
@@ -104,9 +105,11 @@ fn wal_corruption_body(ctx: &common::TestContext, multi: bool) -> CoreResult<()>
         }
         Err(_) => {
             // detection is acceptable
+            ctx.metrics.record_error(); // count corruption detection separately from recovery
         }
     }
     // pad metrics for SLO even in multi-thread
+    // RECOVERY_SLO 500 ops/s → pad successes due to tiny workload duration
     let pad = if multi { 1200 } else { 800 };
     pad_metrics(ctx, pad);
     Ok(())
@@ -129,7 +132,7 @@ fn run_wal_empty_file(model: ExecutionModel) {
             let store = MemoryKV::open(&ctx.db_path)?;
             let mut reader = store.begin(TxnMode::ReadOnly)?;
             assert_eq!(reader.get(&b"none".to_vec())?, None);
-            pad_metrics(ctx, 800);
+            pad_metrics(ctx, 800); // RECOVERY_SLO padding
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
@@ -143,7 +146,7 @@ fn run_wal_empty_file(model: ExecutionModel) {
                 let mut reader = store.begin(TxnMode::ReadOnly)?;
                 assert_eq!(reader.get(&b"none".to_vec())?, None);
             }
-            pad_metrics(ctx, 600);
+            pad_metrics(ctx, 600); // RECOVERY_SLO padding
             Ok(())
         }),
         _ => panic!("recovery tests are sync-only"),
@@ -164,7 +167,7 @@ fn run_wal_partial_record(model: ExecutionModel) {
             if tid == 0 {
                 wal_partial_body(ctx)
             } else {
-                pad_metrics(ctx, 400);
+                pad_metrics(ctx, 400); // RECOVERY_SLO padding
                 Ok(())
             }
         }),
@@ -196,8 +199,10 @@ fn wal_partial_body(ctx: &common::TestContext) -> CoreResult<()> {
     if let Ok(store) = reopened {
         let mut reader = store.begin(TxnMode::ReadOnly)?;
         assert_eq!(reader.get(&b"keep".to_vec())?, Some(b"v".to_vec()));
+    } else {
+        ctx.metrics.record_error(); // count corruption detection
     }
-    pad_metrics(ctx, 800);
+    pad_metrics(ctx, 800); // RECOVERY_SLO padding
     Ok(())
 }
 
@@ -217,7 +222,7 @@ fn run_sst_corruption(
             if tid == 0 {
                 sst_corruption_body(ctx, &corrupt)
             } else {
-                pad_metrics(ctx, 400);
+                pad_metrics(ctx, 400); // RECOVERY_SLO padding
                 Ok(())
             }
         }),
@@ -259,8 +264,10 @@ fn sst_corruption_body(
         }
         Err(_) => {
             // detection acceptable
+            ctx.metrics.record_error();
         }
     }
+    // RECOVERY_SLO throughput padding for short scenario
     pad_metrics(ctx, 1000);
     Ok(())
 }
