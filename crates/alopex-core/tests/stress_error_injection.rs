@@ -96,7 +96,8 @@ fn test_enospc_on_open() {
         let injector = Arc::new(
             IoErrorInjector::new()
                 .with_write_error_rate(1.0)
-                .with_error_kind(ErrorKind::Other), // treat as ENOSPC-equivalent error
+                // ENOSPCはOS依存のため、ErrorKind::Otherで枯渇エラー相当を注入
+                .with_error_kind(ErrorKind::Other),
         );
         let store = open_store_with_fault_injector(&ctx.db_path, injector)?;
         let _op = begin_op(ctx);
@@ -110,7 +111,7 @@ fn test_enospc_on_open() {
         let clean_store = MemoryKV::open(&ctx.db_path)?;
         let mut reader = clean_store.begin(TxnMode::ReadOnly)?;
         assert_eq!(reader.get(&b"enospc".to_vec())?, None);
-        pad_metrics(ctx, 800);
+        pad_metrics(ctx, 800); // 100 ops/s * ~8s window equivalent
         Ok(())
     });
     assert!(
@@ -149,7 +150,7 @@ fn test_transient_io_recovery() {
 
         let mut reader = store.begin(TxnMode::ReadOnly)?;
         assert_eq!(reader.get(&b"transient".to_vec())?, Some(b"ok".to_vec()));
-        pad_metrics(ctx, 1200);
+        pad_metrics(ctx, 1200); // 100 ops/s * ~12s window equivalent
         Ok(())
     });
     assert!(
