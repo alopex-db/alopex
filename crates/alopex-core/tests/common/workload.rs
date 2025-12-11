@@ -1,6 +1,8 @@
 use alopex_core::types::Value;
 use rand::prelude::*;
 use rand::rngs::StdRng;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 /// ワークロード操作。
 #[derive(Clone, Debug)]
@@ -320,5 +322,107 @@ impl MultiModelWorkloadGenerator {
 
     fn random_vector(&mut self, dim: usize) -> Vec<f32> {
         (0..dim).map(|_| self.rng.gen_range(0.0..1.0)).collect()
+    }
+}
+
+/// カラム定義。
+#[derive(Clone, Debug)]
+pub struct ColumnDef {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+}
+
+/// ALTER TABLEの操作内容。
+#[derive(Clone, Debug)]
+pub enum AlterAction {
+    AddColumn(ColumnDef),
+    DropColumn(String),
+    RenameColumn { from: String, to: String },
+}
+
+/// DDL操作。
+#[derive(Clone, Debug)]
+pub enum DdlOperation {
+    CreateTable { name: String, columns: Vec<ColumnDef> },
+    DropTable { name: String },
+    TruncateTable { name: String },
+    AlterTable { name: String, action: AlterAction },
+}
+
+/// DDLワークロードジェネレーター。
+pub struct DdlWorkloadGenerator {
+    rng: Mutex<StdRng>,
+    table_counter: AtomicUsize,
+}
+
+impl DdlWorkloadGenerator {
+    pub fn new(seed: u64) -> Self {
+        Self {
+            rng: Mutex::new(StdRng::seed_from_u64(seed)),
+            table_counter: AtomicUsize::new(1),
+        }
+    }
+
+    /// 次のDDL操作を生成。
+    pub fn next_ddl(&self) -> DdlOperation {
+        let mut rng = self.rng.lock().unwrap();
+        let choice = rng.gen_range(0..4);
+        match choice {
+            0 => {
+                let id = self.table_counter.fetch_add(1, Ordering::Relaxed);
+                let name = format!("tbl_{id}");
+                DdlOperation::CreateTable {
+                    name,
+                    columns: self.random_columns(&mut rng),
+                }
+            }
+            1 => {
+                let name = self.pick_table_name(&mut rng);
+                DdlOperation::DropTable { name }
+            }
+            2 => {
+                let name = self.pick_table_name(&mut rng);
+                DdlOperation::TruncateTable { name }
+            }
+            _ => {
+                let name = self.pick_table_name(&mut rng);
+                let action = self.random_alter(&mut rng, &name);
+                DdlOperation::AlterTable { name, action }
+            }
+        }
+    }
+
+    fn pick_table_name(&self, rng: &mut StdRng) -> String {
+        let max_id = self.table_counter.load(Ordering::Relaxed).max(1);
+        let id = rng.gen_range(0..max_id);
+        format!("tbl_{id}")
+    }
+
+    fn random_columns(&self, rng: &mut StdRng) -> Vec<ColumnDef> {
+        let col_count = rng.gen_range(2..=4);
+        let data_types = ["INT", "TEXT", "VECTOR", "BOOL"];
+        (0..col_count)
+            .map(|idx| ColumnDef {
+                name: format!("c{idx}"),
+                data_type: data_types[rng.gen_range(0..data_types.len())].to_string(),
+                nullable: rng.gen_bool(0.3),
+            })
+            .collect()
+    }
+
+    fn random_alter(&self, rng: &mut StdRng, table: &str) -> AlterAction {
+        match rng.gen_range(0..3) {
+            0 => AlterAction::AddColumn(ColumnDef {
+                name: format!("add_{:04x}", rng.gen::<u16>()),
+                data_type: "INT".to_string(),
+                nullable: rng.gen_bool(0.5),
+            }),
+            1 => AlterAction::DropColumn(format!("c{}", rng.gen_range(0..4))),
+            _ => AlterAction::RenameColumn {
+                from: "c0".to_string(),
+                to: format!("c0_renamed_{table}"),
+            },
+        }
     }
 }

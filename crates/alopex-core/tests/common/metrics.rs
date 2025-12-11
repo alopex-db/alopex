@@ -235,6 +235,50 @@ pub mod slo_presets {
                 max_error_ratio: Some(0.05),
             },
         );
+        map.insert(
+            "multi_model",
+            SloConfig {
+                p99_max_latency: Some(Duration::from_millis(500)),
+                p95_max_latency: Some(Duration::from_millis(400)),
+                p999_max_latency: Some(Duration::from_millis(900)),
+                p9999_max_latency: Some(Duration::from_millis(1500)),
+                min_throughput: Some(500.0),
+                max_error_ratio: Some(0.02),
+            },
+        );
+        map.insert(
+            "ddl_dml",
+            SloConfig {
+                p99_max_latency: Some(Duration::from_millis(800)),
+                p95_max_latency: Some(Duration::from_millis(600)),
+                p999_max_latency: Some(Duration::from_millis(1500)),
+                p9999_max_latency: Some(Duration::from_millis(2000)),
+                min_throughput: Some(100.0),
+                max_error_ratio: Some(0.05),
+            },
+        );
+        map.insert(
+            "invalid_ops",
+            SloConfig {
+                p99_max_latency: Some(Duration::from_millis(500)),
+                p95_max_latency: Some(Duration::from_millis(400)),
+                p999_max_latency: Some(Duration::from_millis(900)),
+                p9999_max_latency: Some(Duration::from_millis(1500)),
+                min_throughput: Some(1000.0),
+                max_error_ratio: Some(1.0),
+            },
+        );
+        map.insert(
+            "chaos",
+            SloConfig {
+                p99_max_latency: Some(Duration::from_millis(800)),
+                p95_max_latency: Some(Duration::from_millis(600)),
+                p999_max_latency: Some(Duration::from_millis(1500)),
+                p9999_max_latency: Some(Duration::from_millis(2000)),
+                min_throughput: Some(100.0),
+                max_error_ratio: Some(0.1),
+            },
+        );
         map.get(category).cloned()
     }
 }
