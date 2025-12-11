@@ -11,6 +11,7 @@ use super::{ColumnInfo, Row};
 
 mod columnar_scan;
 pub mod iterator;
+mod knn;
 mod project;
 mod scan;
 
@@ -32,6 +33,10 @@ pub fn execute_query<S: KVStore, C: Catalog>(
     catalog: &C,
     plan: LogicalPlan,
 ) -> Result<ExecutionResult> {
+    if let Some((pattern, projection, filter)) = knn::extract_knn_context(&plan) {
+        return knn::execute_knn_query(txn, catalog, &pattern, &projection, filter.as_ref());
+    }
+
     let (mut iter, projection, schema) = build_iterator_pipeline(txn, catalog, plan)?;
 
     // Collect rows from iterator and apply projection

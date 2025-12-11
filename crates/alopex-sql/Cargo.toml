@@ -11,10 +11,13 @@ alopex-core = { path = "../alopex-core" }
 parquet = { version = "52", features = ["arrow"] }
 arrow-array = "52"
 arrow-schema = "52"
+serde = { workspace = true, features = ["derive"] }
+bincode = "1.3"
 
 [dev-dependencies]
 proptest = "1.4"
 criterion = "0.5"
+tempfile = "3.10"
 
 [[bench]]
 name = "key_encoding"

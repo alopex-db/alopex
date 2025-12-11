@@ -1,16 +1,17 @@
 use std::cmp::Ordering;
 
 use crate::storage::SqlValue;
+use serde::{Deserialize, Serialize};
 
 /// RowGroup 統計情報。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RowGroupStatistics {
     pub row_count: u64,
     pub columns: Vec<ColumnStatistics>,
 }
 
 /// カラム統計情報。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColumnStatistics {
     pub min: SqlValue,
     pub max: SqlValue,

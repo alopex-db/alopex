@@ -10,6 +10,7 @@
 //! - [`Planner`]: Main entry point for converting AST to LogicalPlan
 
 mod error;
+pub mod knn_optimizer;
 pub mod logical_plan;
 pub mod name_resolver;
 pub mod type_checker;
@@ -20,6 +21,7 @@ pub mod types;
 mod planner_tests;
 
 pub use error::PlannerError;
+pub use knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
 pub use logical_plan::LogicalPlan;
 pub use name_resolver::{NameResolver, ResolvedColumn};
 pub use type_checker::TypeChecker;

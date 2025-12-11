@@ -54,6 +54,15 @@ pub mod key_layout {
         key.extend_from_slice(&segment_id.to_le_bytes());
         key
     }
+
+    /// RowGroup 統計情報キーを生成する。
+    pub fn row_group_stats_key(table_id: u32, segment_id: u64) -> Vec<u8> {
+        let mut key = Vec::with_capacity(1 + 4 + 8);
+        key.push(PREFIX_ROW_GROUP);
+        key.extend_from_slice(&table_id.to_le_bytes());
+        key.extend_from_slice(&segment_id.to_le_bytes());
+        key
+    }
 }
 
 /// カラムナーセグメントを KVS に永続化するブリッジ。

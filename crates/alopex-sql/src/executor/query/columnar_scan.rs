@@ -1,11 +1,18 @@
-use alopex_core::kv::KVStore;
+use alopex_core::columnar::encoding::Column;
+use alopex_core::columnar::encoding_v2::Bitmap;
+use alopex_core::columnar::kvs_bridge::key_layout;
+use alopex_core::columnar::segment_v2::{ColumnSegmentV2, InMemorySegmentSource, SegmentReaderV2};
+use alopex_core::kv::{KVStore, KVTransaction};
+use alopex_core::storage::format::bincode_config;
+use bincode::config::Options;
 
 use crate::ast::expr::BinaryOp;
 use crate::catalog::TableMetadata;
-use crate::columnar::statistics::{RowGroupStatistics, compute_row_group_statistics};
+use crate::columnar::statistics::RowGroupStatistics;
 use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::{ExecutorError, Result, Row};
 use crate::planner::typed_expr::{Projection, TypedExpr, TypedExprKind};
+use crate::planner::types::ResolvedType;
 use crate::storage::{SqlTransaction, SqlValue};
 use std::collections::BTreeSet;
 
@@ -151,25 +158,50 @@ pub fn execute_columnar_scan<S: KVStore>(
     scan: &ColumnarScan,
 ) -> Result<Vec<Row>> {
     debug_assert_eq!(scan.table_id, table_meta.table_id);
-    let _ = &scan.projected_columns; // 射影プッシュダウン拡張用のプレースホルダー
-    let row_group_size = table_meta.storage_options.row_group_size.max(1) as usize;
+    let projected: Vec<usize> = if scan.projected_columns.is_empty() {
+        (0..table_meta.columns.len()).collect()
+    } else {
+        scan.projected_columns.clone()
+    };
 
-    // Columnar ストレージ未実装のため RowStorage を段階的に読み、RowGroup 単位で統計評価する。
-    let mut results = Vec::new();
-    let mut storage = txn.table_storage(table_meta);
-    let mut iter = storage
-        .range_scan(0, u64::MAX)
-        .map_err(ExecutorError::from)?;
-    let mut chunk: Vec<Row> = Vec::with_capacity(row_group_size);
-    while let Some(entry) = iter.next() {
-        let (row_id, values) = entry.map_err(ExecutorError::from)?;
-        chunk.push(Row::new(row_id, values));
-        if chunk.len() >= row_group_size {
-            process_chunk(&mut results, &mut chunk, scan)?;
-        }
+    let segment_ids = load_segment_index(txn, table_meta.table_id)?;
+    if segment_ids.is_empty() {
+        return Ok(Vec::new());
     }
-    if !chunk.is_empty() {
-        process_chunk(&mut results, &mut chunk, scan)?;
+
+    let mut results = Vec::new();
+    let mut next_row_id = 0u64;
+    for segment_id in segment_ids {
+        let segment = load_segment(txn, table_meta.table_id, segment_id)?;
+        let reader =
+            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))
+                .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+
+        let row_group_stats = load_row_group_stats(txn, table_meta.table_id, segment_id);
+        let row_group_count = segment.meta.row_groups.len();
+        for rg_index in 0..row_group_count {
+            let should_skip = match row_group_stats.as_ref() {
+                Some(stats) if stats.len() == row_group_count => {
+                    scan.should_skip_row_group(&stats[rg_index])
+                }
+                _ => false,
+            };
+            if should_skip {
+                continue;
+            }
+
+            let batch = reader
+                .read_row_group_by_index(&projected, rg_index)
+                .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+            append_rows_from_batch(
+                &mut results,
+                &batch,
+                table_meta,
+                &projected,
+                scan.residual_filter.as_ref(),
+                &mut next_row_id,
+            )?;
+        }
     }
 
     Ok(results)
@@ -331,7 +363,15 @@ pub fn build_columnar_scan_for_filter(
     projection: Projection,
     predicate: &TypedExpr,
 ) -> ColumnarScan {
-    let projected_columns = projection_to_columns(&projection, table_meta);
+    let mut projected_columns = projection_to_columns(&projection, table_meta);
+    let mut predicate_indices = BTreeSet::new();
+    collect_column_indices(predicate, &mut predicate_indices);
+    for idx in predicate_indices {
+        if !projected_columns.contains(&idx) {
+            projected_columns.push(idx);
+        }
+    }
+    projected_columns.sort_unstable();
     let pushed_filter = expr_to_pushdown(predicate);
     ColumnarScan::new(
         table_meta.table_id,
@@ -381,41 +421,202 @@ fn collect_column_indices(expr: &TypedExpr, acc: &mut BTreeSet<usize>) {
     }
 }
 
-fn process_chunk(out: &mut Vec<Row>, chunk: &mut Vec<Row>, scan: &ColumnarScan) -> Result<()> {
-    if scan.pushed_filter.is_some() {
-        let values: Vec<Vec<SqlValue>> = chunk.iter().map(|r| r.values.clone()).collect();
-        let stats = compute_row_group_statistics(&values);
-        if scan.should_skip_row_group(&stats) {
-            chunk.clear();
-            return Ok(());
-        }
+fn load_segment_index<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    table_id: u32,
+) -> Result<Vec<u64>> {
+    let key = key_layout::segment_index_key(table_id);
+    let bytes = txn.inner_mut().get(&key)?;
+    if let Some(raw) = bytes {
+        bincode_config()
+            .deserialize(&raw)
+            .map_err(|e| ExecutorError::Columnar(e.to_string()))
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn load_segment<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    table_id: u32,
+    segment_id: u64,
+) -> Result<ColumnSegmentV2> {
+    let key = key_layout::column_segment_key(table_id, segment_id, 0);
+    let bytes = txn
+        .inner_mut()
+        .get(&key)?
+        .ok_or_else(|| ExecutorError::Columnar(format!("segment {segment_id} missing")))?;
+    bincode_config()
+        .deserialize(&bytes)
+        .map_err(|e| ExecutorError::Columnar(e.to_string()))
+}
+
+fn load_row_group_stats<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    table_id: u32,
+    segment_id: u64,
+) -> Option<Vec<RowGroupStatistics>> {
+    let key = key_layout::row_group_stats_key(table_id, segment_id);
+    match txn.inner_mut().get(&key) {
+        Ok(Some(bytes)) => bincode_config().deserialize(&bytes).ok(),
+        Ok(None) => None,
+        Err(_) => None,
+    }
+}
+
+fn append_rows_from_batch(
+    out: &mut Vec<Row>,
+    batch: &alopex_core::columnar::segment_v2::RecordBatch,
+    table_meta: &TableMetadata,
+    projected: &[usize],
+    residual_filter: Option<&TypedExpr>,
+    next_row_id: &mut u64,
+) -> Result<()> {
+    if batch.columns.len() != projected.len() {
+        return Err(ExecutorError::Columnar(format!(
+            "projected column count mismatch: requested {}, got {}",
+            projected.len(),
+            batch.columns.len()
+        )));
     }
 
-    for row in chunk.drain(..) {
-        if let Some(predicate) = &scan.residual_filter {
-            let ctx = EvalContext::new(&row.values);
+    let row_count = batch.num_rows();
+    for row_idx in 0..row_count {
+        let mut values = vec![SqlValue::Null; table_meta.column_count()];
+        for (pos, &table_col_idx) in projected.iter().enumerate() {
+            let column = batch
+                .columns
+                .get(pos)
+                .ok_or_else(|| ExecutorError::Columnar("missing projected column".into()))?;
+            let bitmap = batch.null_bitmaps.get(pos).and_then(|b| b.as_ref());
+            let value = value_from_column(
+                column,
+                bitmap,
+                row_idx,
+                &table_meta
+                    .columns
+                    .get(table_col_idx)
+                    .ok_or_else(|| ExecutorError::Columnar("column index out of bounds".into()))?
+                    .data_type,
+            )?;
+            values[table_col_idx] = value;
+        }
+
+        if let Some(predicate) = residual_filter {
+            let ctx = EvalContext::new(&values);
             let keep = matches!(evaluate(predicate, &ctx)?, SqlValue::Boolean(true));
             if !keep {
                 continue;
             }
         }
-        out.push(row);
+
+        let row_id = *next_row_id;
+        *next_row_id = next_row_id.saturating_add(1);
+        out.push(Row::new(row_id, values));
     }
 
     Ok(())
+}
+
+fn value_from_column(
+    column: &Column,
+    bitmap: Option<&Bitmap>,
+    row_idx: usize,
+    ty: &ResolvedType,
+) -> Result<SqlValue> {
+    if let Some(bm) = bitmap {
+        if !bm.get(row_idx) {
+            return Ok(SqlValue::Null);
+        }
+    }
+
+    match (ty, column) {
+        (ResolvedType::Integer, Column::Int64(values)) => {
+            let v = *values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            Ok(SqlValue::Integer(v as i32))
+        }
+        (ResolvedType::BigInt | ResolvedType::Timestamp, Column::Int64(values)) => {
+            let v = *values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            if matches!(ty, ResolvedType::Timestamp) {
+                Ok(SqlValue::Timestamp(v))
+            } else {
+                Ok(SqlValue::BigInt(v))
+            }
+        }
+        (ResolvedType::Float, Column::Float32(values)) => {
+            let v = *values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            Ok(SqlValue::Float(v))
+        }
+        (ResolvedType::Double, Column::Float64(values)) => {
+            let v = *values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            Ok(SqlValue::Double(v))
+        }
+        (ResolvedType::Boolean, Column::Bool(values)) => {
+            let v = *values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            Ok(SqlValue::Boolean(v))
+        }
+        (ResolvedType::Text, Column::Binary(values)) => {
+            let raw = values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            String::from_utf8(raw.clone())
+                .map(SqlValue::Text)
+                .map_err(|e| ExecutorError::Columnar(e.to_string()))
+        }
+        (ResolvedType::Blob, Column::Binary(values)) => {
+            let raw = values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            Ok(SqlValue::Blob(raw.clone()))
+        }
+        (ResolvedType::Vector { .. }, Column::Fixed { values, .. }) => {
+            let raw = values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            if raw.len() % 4 != 0 {
+                return Err(ExecutorError::Columnar(
+                    "invalid vector byte length in columnar segment".into(),
+                ));
+            }
+            let floats: Vec<f32> = raw
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+                .collect();
+            Ok(SqlValue::Vector(floats))
+        }
+        (_, Column::Binary(values)) => {
+            let raw = values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            Ok(SqlValue::Blob(raw.clone()))
+        }
+        _ => Err(ExecutorError::Columnar(
+            "unsupported column type for columnar read".into(),
+        )),
+    }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ast::expr::Literal;
-    use crate::catalog::{ColumnMetadata, MemoryCatalog, TableMetadata};
+    use crate::catalog::{ColumnMetadata, TableMetadata};
     use crate::columnar::statistics::ColumnStatistics;
-    use crate::executor::ddl::create_table::execute_create_table;
     use crate::planner::typed_expr::TypedExpr;
     use crate::planner::typed_expr::TypedExprKind;
     use crate::planner::types::ResolvedType;
     use crate::storage::TxnBridge;
     use alopex_core::kv::memory::MemoryKV;
+    use bincode::config::Options;
     use std::sync::Arc;
 
     #[test]
@@ -579,8 +780,7 @@ mod tests {
     #[test]
     fn execute_columnar_scan_applies_residual_filter() {
         let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
-        let mut catalog = MemoryCatalog::new();
-        let table = TableMetadata::new(
+        let mut table = TableMetadata::new(
             "users",
             vec![
                 ColumnMetadata::new("id", ResolvedType::Integer),
@@ -588,30 +788,79 @@ mod tests {
             ],
         )
         .with_table_id(1);
-        let mut ddl_txn = bridge.begin_write().unwrap();
-        execute_create_table(&mut ddl_txn, &mut catalog, table.clone(), vec![], false).unwrap();
-        ddl_txn.commit().unwrap();
+        table.storage_options.storage_type = crate::catalog::StorageType::Columnar;
+
+        // Columnar セグメントを直接書き込む。
+        let schema = alopex_core::columnar::segment_v2::Schema {
+            columns: vec![
+                alopex_core::columnar::segment_v2::ColumnSchema {
+                    name: "id".into(),
+                    logical_type: alopex_core::columnar::encoding::LogicalType::Int64,
+                    nullable: false,
+                    fixed_len: None,
+                },
+                alopex_core::columnar::segment_v2::ColumnSchema {
+                    name: "name".into(),
+                    logical_type: alopex_core::columnar::encoding::LogicalType::Binary,
+                    nullable: false,
+                    fixed_len: None,
+                },
+            ],
+        };
+        let batch = alopex_core::columnar::segment_v2::RecordBatch::new(
+            schema.clone(),
+            vec![
+                alopex_core::columnar::encoding::Column::Int64(vec![1]),
+                alopex_core::columnar::encoding::Column::Binary(vec![b"alice".to_vec()]),
+            ],
+            vec![None, None],
+        );
+        let mut writer =
+            alopex_core::columnar::segment_v2::SegmentWriterV2::new(Default::default());
+        writer.write_batch(batch).unwrap();
+        let segment = writer.finish().unwrap();
+
+        let stats = vec![crate::columnar::statistics::compute_row_group_statistics(
+            &vec![vec![SqlValue::Integer(1), SqlValue::Text("alice".into())]],
+        )];
 
         let mut txn = bridge.begin_write().unwrap();
-        crate::executor::dml::execute_insert(
-            &mut txn,
-            &catalog,
-            "users",
-            vec!["id".into(), "name".into()],
-            vec![vec![
-                TypedExpr::literal(
-                    Literal::Number("1".into()),
-                    ResolvedType::Integer,
-                    crate::Span::default(),
-                ),
-                TypedExpr::literal(
-                    Literal::String("alice".into()),
-                    ResolvedType::Text,
-                    crate::Span::default(),
-                ),
-            ]],
-        )
-        .unwrap();
+        let segment_bytes = alopex_core::storage::format::bincode_config()
+            .serialize(&segment)
+            .unwrap();
+        let meta_bytes = alopex_core::storage::format::bincode_config()
+            .serialize(&segment.meta)
+            .unwrap();
+        let stats_bytes = alopex_core::storage::format::bincode_config()
+            .serialize(&stats)
+            .unwrap();
+        txn.inner_mut()
+            .put(
+                alopex_core::columnar::kvs_bridge::key_layout::column_segment_key(1, 0, 0),
+                segment_bytes,
+            )
+            .unwrap();
+        txn.inner_mut()
+            .put(
+                alopex_core::columnar::kvs_bridge::key_layout::statistics_key(1, 0),
+                meta_bytes,
+            )
+            .unwrap();
+        txn.inner_mut()
+            .put(
+                alopex_core::columnar::kvs_bridge::key_layout::row_group_stats_key(1, 0),
+                stats_bytes,
+            )
+            .unwrap();
+        let index_bytes = alopex_core::storage::format::bincode_config()
+            .serialize(&vec![0u64])
+            .unwrap();
+        txn.inner_mut()
+            .put(
+                alopex_core::columnar::kvs_bridge::key_layout::segment_index_key(1),
+                index_bytes,
+            )
+            .unwrap();
         txn.commit().unwrap();
 
         let scan = ColumnarScan::new(
