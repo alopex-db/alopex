@@ -8,6 +8,8 @@ use common::{
     VectorOperation, WorkloadConfig,
 };
 use std::collections::HashSet;
+use std::fs::{self, OpenOptions};
+use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
@@ -20,6 +22,10 @@ const ALL_MODELS: [ExecutionModel; 4] = [
     ExecutionModel::AsyncSingle,
     ExecutionModel::AsyncMulti,
 ];
+
+const PERSISTENT_BASELINE_KEY: &[u8] = b"chaos:persistent:sentinel";
+const PERSISTENT_SENTINEL_ROW: &[u8] = b"tbl:persist_seed:sentinel";
+const PERSISTENT_TABLE: &str = "persist_seed";
 
 fn chaos_config(name: &str, model: ExecutionModel, concurrency: usize) -> StressTestConfig {
     StressTestConfig {
@@ -209,6 +215,44 @@ fn simulate_crash(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<String>>>) -
         })
 }
 
+fn crash_file_paths(path: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    if path.is_dir() {
+        let wal = path.join("db.wal");
+        let sst = path.join("db.sst");
+        (wal, sst)
+    } else {
+        (path.to_path_buf(), path.with_extension("sst"))
+    }
+}
+
+fn truncate_file_half(path: &std::path::Path) -> io::Result<()> {
+    if let Ok(meta) = fs::metadata(path) {
+        if meta.is_dir() {
+            fs::remove_dir_all(path)?;
+            OpenOptions::new().write(true).create(true).open(path)?;
+            return Ok(());
+        }
+        let target = meta.len() / 2;
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(path)
+            .and_then(|file| file.set_len(target))?;
+    } else if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+        OpenOptions::new().write(true).create(true).open(path)?;
+    }
+    Ok(())
+}
+
+fn simulate_persistent_crash(path: &std::path::Path, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<()> {
+    tables.lock().unwrap().clear();
+    let (wal_path, sst_path) = crash_file_paths(path);
+    truncate_file_half(&wal_path).map_err(CoreError::Io)?;
+    truncate_file_half(&sst_path).map_err(CoreError::Io)?;
+    Ok(())
+}
+
 fn apply_chaos_op(store: &Arc<MemoryKV>, op: ChaosOperation, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<bool> {
     match op {
         ChaosOperation::Normal(op) => {
@@ -233,6 +277,119 @@ fn apply_chaos_op(store: &Arc<MemoryKV>, op: ChaosOperation, tables: &Arc<Mutex<
             Ok(false)
         }
     }
+}
+
+fn refresh_tables_from_meta(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<()> {
+    let mut reader = store.begin(TxnMode::ReadOnly)?;
+    let meta_names: HashSet<String> = reader
+        .scan_prefix(b"meta:")?
+        .map(|(k, _)| {
+            let name_bytes = k.strip_prefix(b"meta:").unwrap_or(&k);
+            let primary = name_bytes.split(|b| *b == b':').next().unwrap_or(name_bytes);
+            String::from_utf8_lossy(primary).to_string()
+        })
+        .collect();
+    let mut guard = tables.lock().unwrap();
+    guard.clear();
+    guard.extend(meta_names);
+    Ok(())
+}
+
+fn seed_persistent_baseline(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<()> {
+    refresh_tables_from_meta(store, tables)?;
+    if !tables.lock().unwrap().contains(PERSISTENT_TABLE) {
+        apply_ddl_op(
+            store,
+            DdlOperation::CreateTable {
+                name: PERSISTENT_TABLE.to_string(),
+                columns: vec![
+                    common::ColumnDef {
+                        name: "id".into(),
+                        data_type: "INT".into(),
+                        nullable: false,
+                    },
+                    common::ColumnDef {
+                        name: "val".into(),
+                        data_type: "TEXT".into(),
+                        nullable: true,
+                    },
+                ],
+            },
+            tables,
+        )?;
+    }
+    let mut txn = store.begin(TxnMode::ReadWrite)?;
+    txn.put(PERSISTENT_BASELINE_KEY.to_vec(), b"baseline".to_vec())?;
+    txn.put(PERSISTENT_SENTINEL_ROW.to_vec(), b"1".to_vec())?;
+    txn.commit_self()
+}
+
+fn verify_persistent_state(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<()> {
+    let mut reader = store.begin(TxnMode::ReadOnly)?;
+    let baseline = reader.get(PERSISTENT_BASELINE_KEY)?;
+    if baseline.is_none() {
+        return Err(CoreError::Io(io::Error::other(
+            "baseline key missing after reopen (possible crash data loss)",
+        )));
+    }
+    let sentinel = reader.get(PERSISTENT_SENTINEL_ROW)?;
+    if sentinel.is_none() {
+        return Err(CoreError::Io(io::Error::other(
+            "sentinel row missing after reopen (possible crash data loss)",
+        )));
+    }
+    let meta_names: HashSet<String> = reader
+        .scan_prefix(b"meta:")?
+        .map(|(k, _)| {
+            let name_bytes = k.strip_prefix(b"meta:").unwrap_or(&k);
+            let primary = name_bytes.split(|b| *b == b':').next().unwrap_or(name_bytes);
+            String::from_utf8_lossy(primary).to_string()
+        })
+        .collect();
+    for tbl in tables.lock().unwrap().iter() {
+        if !meta_names.contains(tbl) {
+            return Err(CoreError::Io(io::Error::other(format!(
+                "missing metadata for table {tbl} after crash reopen"
+            ))));
+        }
+    }
+    Ok(())
+}
+
+fn run_persistent_batch(
+    ctx: &common::TestContext,
+    store: &mut Arc<MemoryKV>,
+    tables: &Arc<Mutex<HashSet<String>>>,
+    gen: &mut ChaosWorkloadGenerator,
+    batch_size: usize,
+) -> CoreResult<()> {
+    let start = Instant::now();
+    for op in gen.generate_batch(batch_size) {
+        match op {
+            ChaosOperation::TriggerCrash => {
+                ctx.metrics.record_error();
+                simulate_persistent_crash(&ctx.db_path, tables)?;
+                *store = Arc::new(MemoryKV::open(&ctx.db_path)?);
+                refresh_tables_from_meta(store, tables)?;
+                seed_persistent_baseline(store, tables)?;
+                verify_persistent_state(store, tables)?;
+            }
+            ChaosOperation::Invalid(op) => {
+                if apply_invalid_op(op)? {
+                    ctx.metrics.record_success();
+                } else {
+                    ctx.metrics.record_error();
+                }
+            }
+            other => match apply_chaos_op(store, other, tables) {
+                Ok(true) => ctx.metrics.record_success(),
+                Ok(false) | Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
+                Err(e) => return Err(e),
+            },
+        }
+    }
+    ctx.metrics.record_latency(start.elapsed());
+    Ok(())
 }
 
 fn run_chaos_mix(
@@ -617,6 +774,141 @@ fn run_recovery_to_baseline(model: ExecutionModel) -> TestResult {
     run_chaos_mix("chaos_recovery_baseline", model, cfg, 6, 20, Some(8))
 }
 
+fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
+    let concurrency = match model {
+        ExecutionModel::SyncMulti | ExecutionModel::AsyncMulti => 6,
+        _ => 1,
+    };
+    let chaos_cfg = ChaosConfig {
+        workload: WorkloadConfig {
+            operation_count: 24,
+            key_space_size: 256,
+            value_size: 96,
+            ..Default::default()
+        },
+        multi_model: common::MultiModelWorkloadConfig {
+            workload: WorkloadConfig {
+                operation_count: 24,
+                key_space_size: 128,
+                value_size: 64,
+                seed: 515,
+            },
+            ..Default::default()
+        },
+        ddl_seed: 707,
+        invalid_seed: 909,
+        dml_ratio: 0.28,
+        multi_model_ratio: 0.22,
+        ddl_ratio: 0.2,
+        error_ratio: 0.15,
+        crash_ratio: 0.15,
+    };
+    let batches = 6;
+    let batch_size = 24;
+    let harness = StressTestHarness::new(chaos_config(
+        "chaos_persistent_crash_reopen",
+        model,
+        concurrency,
+    ))
+    .unwrap();
+    match model {
+        ExecutionModel::SyncSingle => harness.run(|ctx| {
+            let tables = Arc::new(Mutex::new(HashSet::new()));
+            let mut store = Arc::new(MemoryKV::open(&ctx.db_path)?);
+            seed_persistent_baseline(&store, &tables)?;
+            let mut gen = ChaosWorkloadGenerator::new(chaos_cfg.clone());
+            for _ in 0..batches {
+                run_persistent_batch(ctx, &mut store, &tables, &mut gen, batch_size)?;
+            }
+            verify_persistent_state(&store, &tables)?;
+            pad_chaos_metrics(ctx, batches * batch_size * 3);
+            Ok(())
+        }),
+        ExecutionModel::SyncMulti => {
+            let tables = Arc::new(Mutex::new(HashSet::new()));
+            harness.run_concurrent(move |tid, ctx| {
+                let mut cfg_local = chaos_cfg.clone();
+                cfg_local.workload.seed ^= tid as u64 + 0x51;
+                cfg_local.multi_model.workload.seed ^= tid as u64 + 0x71;
+                cfg_local.ddl_seed = cfg_local.ddl_seed.wrapping_add(tid as u64);
+                cfg_local.invalid_seed = cfg_local.invalid_seed.wrapping_add(tid as u64);
+                let mut store = Arc::new(MemoryKV::open(&ctx.db_path)?);
+                seed_persistent_baseline(&store, &tables)?;
+                let mut gen = ChaosWorkloadGenerator::new(cfg_local);
+                for _ in 0..batches {
+                    run_persistent_batch(ctx, &mut store, &tables, &mut gen, batch_size)?;
+                }
+                verify_persistent_state(&store, &tables)?;
+                pad_chaos_metrics(ctx, batches * batch_size * 3);
+                Ok(())
+            })
+        }
+        ExecutionModel::AsyncSingle => {
+            let chaos_async = chaos_cfg.clone();
+            harness.run_async(move |ctx| {
+                let tables = Arc::new(Mutex::new(HashSet::new()));
+                async move {
+                    let mut store = Arc::new(MemoryKV::open(&ctx.db_path)?);
+                    seed_persistent_baseline(&store, &tables)?;
+                    let mut gen = ChaosWorkloadGenerator::new(chaos_async);
+                    for _ in 0..batches {
+                        run_persistent_batch(&ctx, &mut store, &tables, &mut gen, batch_size)?;
+                    }
+                    verify_persistent_state(&store, &tables)?;
+                    pad_chaos_metrics(&ctx, batches * batch_size * 3);
+                    Ok(())
+                }
+            })
+        }
+        ExecutionModel::AsyncMulti => {
+            let tables = Arc::new(Mutex::new(HashSet::new()));
+            let workers = concurrency;
+            let chaos_outer = chaos_cfg.clone();
+            harness.run_async(move |ctx| {
+                let tables_outer = tables.clone();
+                async move {
+                    let store = Arc::new(MemoryKV::open(&ctx.db_path)?);
+                    let mut set = JoinSet::new();
+                    for tid in 0..workers {
+                        let ctx_clone = ctx.clone();
+                        let tables_clone = tables_outer.clone();
+                        let mut cfg_local = chaos_outer.clone();
+                        cfg_local.workload.seed ^= tid as u64 + 0x59;
+                        cfg_local.multi_model.workload.seed ^= tid as u64 + 0x7b;
+                        cfg_local.ddl_seed = cfg_local.ddl_seed.wrapping_add(tid as u64);
+                        cfg_local.invalid_seed = cfg_local.invalid_seed.wrapping_add(tid as u64);
+                        let store_clone = store.clone();
+                        set.spawn(async move {
+                            let mut store_handle = store_clone;
+                            seed_persistent_baseline(&store_handle, &tables_clone)?;
+                            let mut gen = ChaosWorkloadGenerator::new(cfg_local);
+                            for _ in 0..batches {
+                                run_persistent_batch(
+                                    &ctx_clone,
+                                    &mut store_handle,
+                                    &tables_clone,
+                                    &mut gen,
+                                    batch_size,
+                                )?;
+                            }
+                            verify_persistent_state(&store_handle, &tables_clone)?;
+                            pad_chaos_metrics(&ctx_clone, batches * batch_size * 3);
+                            Ok::<_, CoreError>(())
+                        });
+                    }
+                    while let Some(res) = set.join_next().await {
+                        match res {
+                            Ok(inner) => inner?,
+                            Err(e) => return Err(CoreError::Io(std::io::Error::other(e))),
+                        }
+                    }
+                    Ok(())
+                }
+            })
+        }
+    }
+}
+
 macro_rules! chaos_test {
     ($name:ident, $runner:ident) => {
         #[test]
@@ -642,3 +934,7 @@ chaos_test!(test_1hour_chaos_no_leak, run_long_running);
 chaos_test!(test_chaos_restart_integrity, run_restart_integrity);
 chaos_test!(test_chaos_backpressure_no_corruption, run_backpressure);
 chaos_test!(test_chaos_recovery_to_baseline, run_recovery_to_baseline);
+chaos_test!(
+    test_persistent_crash_reopen_scenario,
+    run_persistent_crash_reopen
+);
