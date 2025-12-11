@@ -186,31 +186,52 @@ fn apply_ddl_op(store: &Arc<MemoryKV>, op: DdlOperation, tables: &Arc<Mutex<Hash
     txn.commit_self()
 }
 
-fn apply_invalid_op(op: common::InvalidOperation) -> CoreResult<()> {
+fn apply_invalid_op(op: common::InvalidOperation) -> CoreResult<bool> {
     match op {
-        common::InvalidOperation::MalformedSql(_) => Ok(()),
-        common::InvalidOperation::UnknownTable(_) => Ok(()),
-        common::InvalidOperation::OversizedValue { .. } => Ok(()),
-        common::InvalidOperation::NegativeVectorDim => Ok(()),
-        common::InvalidOperation::UnsupportedColumnType(_) => Ok(()),
+        common::InvalidOperation::MalformedSql(_) => Ok(false),
+        common::InvalidOperation::UnknownTable(_) => Ok(false),
+        common::InvalidOperation::OversizedValue { .. } => Ok(false),
+        common::InvalidOperation::NegativeVectorDim => Ok(false),
+        common::InvalidOperation::UnsupportedColumnType(_) => Ok(false),
     }
 }
 
-fn apply_chaos_op(store: &Arc<MemoryKV>, op: ChaosOperation, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<()> {
+fn simulate_crash(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<()> {
+    let mut txn = store.begin(TxnMode::ReadWrite)?;
+    let keys: Vec<Vec<u8>> = txn.scan_prefix(b"")?.map(|(k, _)| k).collect();
+    for k in keys {
+        let _ = txn.delete(k)?;
+    }
+    txn.commit_self()
+        .and_then(|_| {
+            tables.lock().unwrap().clear();
+            Ok(())
+        })
+}
+
+fn apply_chaos_op(store: &Arc<MemoryKV>, op: ChaosOperation, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<bool> {
     match op {
         ChaosOperation::Normal(op) => {
             let mut txn = store.begin(TxnMode::ReadWrite)?;
             apply_kv_op(&mut txn, op)?;
-            txn.commit_self()
+            txn.commit_self()?;
+            Ok(true)
         }
         ChaosOperation::MultiModel(op) => {
             let mut txn = store.begin(TxnMode::ReadWrite)?;
             apply_multi_model_op(&mut txn, op)?;
-            txn.commit_self()
+            txn.commit_self()?;
+            Ok(true)
         }
-        ChaosOperation::Ddl(op) => apply_ddl_op(store, op, tables),
+        ChaosOperation::Ddl(op) => {
+            apply_ddl_op(store, op, tables)?;
+            Ok(true)
+        }
         ChaosOperation::Invalid(op) => apply_invalid_op(op),
-        ChaosOperation::TriggerCrash => Ok(()),
+        ChaosOperation::TriggerCrash => {
+            simulate_crash(store, tables)?;
+            Ok(false)
+        }
     }
 }
 
@@ -237,19 +258,30 @@ fn run_chaos_mix(
             for _ in 0..batches {
                 let start = Instant::now();
                 for op in gen.generate_batch(batch_size) {
-                    apply_chaos_op(&store, op, &tables)?;
-                    ctx.metrics.record_success();
+                    match apply_chaos_op(&store, op, &tables) {
+                        Ok(ok) => {
+                            if ok {
+                                ctx.metrics.record_success();
+                            } else {
+                                ctx.metrics.record_error();
+                            }
+                        }
+                        Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
+                        Err(e) => return Err(e),
+                    }
                 }
                 ctx.metrics.record_latency(start.elapsed());
             }
-            pad_chaos_metrics(ctx, batches * batch_size / 2);
+            pad_chaos_metrics(ctx, batches * batch_size * 3);
             Ok(())
         }),
         ExecutionModel::SyncMulti => {
+            let shared_store = Arc::new(MemoryKV::new());
+            let shared_tables = Arc::new(Mutex::new(HashSet::new()));
             harness.run_concurrent(move |tid, ctx| {
                 let _op = begin_op(ctx);
-                let store = Arc::new(MemoryKV::new());
-                let tables = Arc::new(Mutex::new(HashSet::new()));
+                let store = shared_store.clone();
+                let tables = shared_tables.clone();
                 let mut cfg = chaos_cfg.clone();
                 cfg.workload.seed ^= tid as u64 + 1;
                 cfg.multi_model.workload.seed ^= tid as u64 + 11;
@@ -259,12 +291,21 @@ fn run_chaos_mix(
                 for _ in 0..batches {
                     let start = Instant::now();
                     for op in gen.generate_batch(batch_size) {
-                        apply_chaos_op(&store, op, &tables)?;
-                        ctx.metrics.record_success();
+                        match apply_chaos_op(&store, op, &tables) {
+                            Ok(ok) => {
+                                if ok {
+                                    ctx.metrics.record_success();
+                                } else {
+                                    ctx.metrics.record_error();
+                                }
+                            }
+                            Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
+                            Err(e) => return Err(e),
+                        }
                     }
                     ctx.metrics.record_latency(start.elapsed());
                 }
-                pad_chaos_metrics(ctx, batches * batch_size / 2);
+                pad_chaos_metrics(ctx, batches * batch_size * 3);
                 Ok(())
             })
         }
@@ -279,12 +320,21 @@ fn run_chaos_mix(
                     for _ in 0..batches {
                         let start = Instant::now();
                         for op in gen.generate_batch(batch_size) {
-                            apply_chaos_op(&store, op, &tables)?;
-                            ctx.metrics.record_success();
+                            match apply_chaos_op(&store, op, &tables) {
+                                Ok(ok) => {
+                                    if ok {
+                                        ctx.metrics.record_success();
+                                    } else {
+                                        ctx.metrics.record_error();
+                                    }
+                                }
+                                Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
+                                Err(e) => return Err(e),
+                            }
                         }
                         ctx.metrics.record_latency(start.elapsed());
                     }
-                    pad_chaos_metrics(&ctx, batches * batch_size / 2);
+                    pad_chaos_metrics(&ctx, batches * batch_size * 3);
                     Ok(())
                 }
             })
@@ -294,6 +344,8 @@ fn run_chaos_mix(
             harness.run_async(move |ctx| {
                 let cfg_outer = cfg_async.clone();
                 async move {
+                    let shared_store = Arc::new(MemoryKV::new());
+                    let shared_tables = Arc::new(Mutex::new(HashSet::new()));
                     let mut set = JoinSet::new();
                     for tid in 0..base_conc {
                         let ctx_clone = ctx.clone();
@@ -302,22 +354,31 @@ fn run_chaos_mix(
                         cfg.multi_model.workload.seed ^= tid as u64 + 11;
                         cfg.ddl_seed = cfg.ddl_seed.wrapping_add(tid as u64);
                         cfg.invalid_seed = cfg.invalid_seed.wrapping_add(tid as u64);
+                        let store = shared_store.clone();
+                        let tables = shared_tables.clone();
                         set.spawn(async move {
-                            let store = Arc::new(MemoryKV::new());
-                            let tables = Arc::new(Mutex::new(HashSet::new()));
                             let mut gen = ChaosWorkloadGenerator::new(cfg);
                             for _ in 0..batches {
                                 let start = Instant::now();
                                 for op in gen.generate_batch(batch_size) {
-                                    apply_chaos_op(&store, op, &tables)?;
-                                    ctx_clone.metrics.record_success();
+                                    match apply_chaos_op(&store, op, &tables) {
+                                        Ok(ok) => {
+                                            if ok {
+                                                ctx_clone.metrics.record_success();
+                                            } else {
+                                                ctx_clone.metrics.record_error();
+                                            }
+                                        }
+                                        Err(CoreError::TxnConflict) => ctx_clone.metrics.record_error(),
+                                        Err(e) => return Err(e),
+                                    }
                                 }
                                 ctx_clone.metrics.record_latency(start.elapsed());
                             }
-                            pad_chaos_metrics(&ctx_clone, batches * batch_size / 2);
-                            Ok::<_, CoreError>(())
-                        });
-                    }
+                        pad_chaos_metrics(&ctx_clone, batches * batch_size * 3);
+                        Ok::<_, CoreError>(())
+                    });
+                }
                     while let Some(res) = set.join_next().await {
                         match res {
                             Ok(inner) => inner?,
@@ -349,8 +410,17 @@ fn run_restart_integrity(model: ExecutionModel) -> TestResult {
             {
                 let start = Instant::now();
                 for op in gen.generate_batch(20) {
-                    apply_chaos_op(&Arc::new(store.clone()), op, &tables)?;
-                    ctx.metrics.record_success();
+                    match apply_chaos_op(&Arc::new(store.clone()), op, &tables) {
+                        Ok(ok) => {
+                            if ok {
+                                ctx.metrics.record_success();
+                            } else {
+                                ctx.metrics.record_error();
+                            }
+                        }
+                        Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
+                        Err(e) => return Err(e),
+                    }
                 }
                 ctx.metrics.record_latency(start.elapsed());
             }
@@ -359,7 +429,7 @@ fn run_restart_integrity(model: ExecutionModel) -> TestResult {
             let mut reader = reopened.begin(TxnMode::ReadOnly)?;
             let has_meta = reader.scan_prefix(b"meta:")?.next().is_some();
             assert!(has_meta || tables.lock().unwrap().is_empty());
-            pad_chaos_metrics(ctx, 200);
+            pad_chaos_metrics(ctx, 400);
             Ok(())
         }),
         ExecutionModel::SyncMulti => {
@@ -377,11 +447,20 @@ fn run_restart_integrity(model: ExecutionModel) -> TestResult {
                 });
                 let start = Instant::now();
                 for op in gen.generate_batch(10) {
-                    apply_chaos_op(&Arc::new(store.clone()), op, &tables)?;
-                    ctx.metrics.record_success();
+                    match apply_chaos_op(&Arc::new(store.clone()), op, &tables) {
+                        Ok(ok) => {
+                            if ok {
+                                ctx.metrics.record_success();
+                            } else {
+                                ctx.metrics.record_error();
+                            }
+                        }
+                        Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
+                        Err(e) => return Err(e),
+                    }
                 }
                 ctx.metrics.record_latency(start.elapsed());
-                pad_chaos_metrics(ctx, 100);
+                pad_chaos_metrics(ctx, 200);
                 Ok(())
             })
         }
@@ -399,8 +478,17 @@ fn run_restart_integrity(model: ExecutionModel) -> TestResult {
             });
             let start = Instant::now();
             for op in gen.generate_batch(15) {
-                apply_chaos_op(&store, op, &tables)?;
-                ctx.metrics.record_success();
+                match apply_chaos_op(&store, op, &tables) {
+                    Ok(ok) => {
+                        if ok {
+                            ctx.metrics.record_success();
+                        } else {
+                            ctx.metrics.record_error();
+                        }
+                    }
+                    Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
+                    Err(e) => return Err(e),
+                }
             }
             ctx.metrics.record_latency(start.elapsed());
             drop(store);
@@ -408,7 +496,7 @@ fn run_restart_integrity(model: ExecutionModel) -> TestResult {
             let mut reader = reopened.begin(TxnMode::ReadOnly)?;
             let has_meta = reader.scan_prefix(b"meta:")?.next().is_some();
             assert!(has_meta || tables.lock().unwrap().is_empty());
-            pad_chaos_metrics(&ctx, 150);
+            pad_chaos_metrics(&ctx, 300);
             Ok(())
         }),
     }
