@@ -4,9 +4,10 @@ use crate::ast::expr::BinaryOp;
 use crate::catalog::TableMetadata;
 use crate::columnar::statistics::{RowGroupStatistics, compute_row_group_statistics};
 use crate::executor::evaluator::{EvalContext, evaluate};
-use crate::executor::{Result, Row};
+use crate::executor::{ExecutorError, Result, Row};
 use crate::planner::typed_expr::{Projection, TypedExpr, TypedExprKind};
 use crate::storage::{SqlTransaction, SqlValue};
+use std::collections::BTreeSet;
 
 /// ColumnarScan オペレータ。
 #[derive(Debug, Clone)]
@@ -150,40 +151,28 @@ pub fn execute_columnar_scan<S: KVStore>(
     scan: &ColumnarScan,
 ) -> Result<Vec<Row>> {
     debug_assert_eq!(scan.table_id, table_meta.table_id);
-    let _ = &scan.projected_columns;
+    let _ = &scan.projected_columns; // 射影プッシュダウン拡張用のプレースホルダー
+    let row_group_size = table_meta.storage_options.row_group_size.max(1) as usize;
 
-    // Columnar ストレージが未実装のため、現状は RowStorage から行を取得して統計を計算する。
-    let rows = txn.with_table(table_meta, |storage| {
-        let iter = storage.range_scan(0, u64::MAX)?;
-        let mut rows = Vec::new();
-        for entry in iter {
-            let (row_id, values) = entry?;
-            rows.push(Row::new(row_id, values));
-        }
-        Ok(rows)
-    })?;
-
-    if scan.pushed_filter.is_some() {
-        let values: Vec<Vec<SqlValue>> = rows.iter().map(|r| r.values.clone()).collect();
-        let stats = compute_row_group_statistics(&values);
-        if scan.should_skip_row_group(&stats) {
-            return Ok(Vec::new());
+    // Columnar ストレージ未実装のため RowStorage を段階的に読み、RowGroup 単位で統計評価する。
+    let mut results = Vec::new();
+    let mut storage = txn.table_storage(table_meta);
+    let mut iter = storage
+        .range_scan(0, u64::MAX)
+        .map_err(ExecutorError::from)?;
+    let mut chunk: Vec<Row> = Vec::with_capacity(row_group_size);
+    while let Some(entry) = iter.next() {
+        let (row_id, values) = entry.map_err(ExecutorError::from)?;
+        chunk.push(Row::new(row_id, values));
+        if chunk.len() >= row_group_size {
+            process_chunk(&mut results, &mut chunk, scan)?;
         }
     }
-
-    let mut filtered_rows = Vec::new();
-    for row in rows {
-        if let Some(predicate) = &scan.residual_filter {
-            let ctx = EvalContext::new(&row.values);
-            let keep = matches!(evaluate(predicate, &ctx)?, SqlValue::Boolean(true));
-            if !keep {
-                continue;
-            }
-        }
-        filtered_rows.push(row);
+    if !chunk.is_empty() {
+        process_chunk(&mut results, &mut chunk, scan)?;
     }
 
-    Ok(filtered_rows)
+    Ok(results)
 }
 
 /// TypedExpr から PushdownFilter へ変換する（変換不可なら None）。
@@ -320,7 +309,19 @@ pub fn projection_to_columns(projection: &Projection, table_meta: &TableMetadata
             .iter()
             .filter_map(|name| table_meta.columns.iter().position(|c| &c.name == name))
             .collect(),
-        Projection::Columns(_) => (0..table_meta.columns.len()).collect(),
+        Projection::Columns(cols) => {
+            let mut indices = BTreeSet::new();
+            for col in cols {
+                collect_column_indices(&col.expr, &mut indices);
+            }
+            if indices.is_empty() {
+                return (0..table_meta.columns.len()).collect();
+            }
+            indices
+                .into_iter()
+                .filter(|idx| *idx < table_meta.columns.len())
+                .collect()
+        }
     }
 }
 
@@ -346,6 +347,63 @@ pub fn build_columnar_scan(table_meta: &TableMetadata, projection: &Projection) 
     ColumnarScan::new(table_meta.table_id, projected_columns, None, None)
 }
 
+/// 式中に現れるカラムインデックスを収集する。
+fn collect_column_indices(expr: &TypedExpr, acc: &mut BTreeSet<usize>) {
+    match &expr.kind {
+        TypedExprKind::ColumnRef { column_index, .. } => {
+            acc.insert(*column_index);
+        }
+        TypedExprKind::BinaryOp { left, right, .. } => {
+            collect_column_indices(left, acc);
+            collect_column_indices(right, acc);
+        }
+        TypedExprKind::UnaryOp { operand, .. } => collect_column_indices(operand, acc),
+        TypedExprKind::Between {
+            expr, low, high, ..
+        } => {
+            collect_column_indices(expr, acc);
+            collect_column_indices(low, acc);
+            collect_column_indices(high, acc);
+        }
+        TypedExprKind::InList { expr, list, .. } => {
+            collect_column_indices(expr, acc);
+            for item in list {
+                collect_column_indices(item, acc);
+            }
+        }
+        TypedExprKind::IsNull { expr, .. } => collect_column_indices(expr, acc),
+        TypedExprKind::FunctionCall { args, .. } => {
+            for arg in args {
+                collect_column_indices(arg, acc);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn process_chunk(out: &mut Vec<Row>, chunk: &mut Vec<Row>, scan: &ColumnarScan) -> Result<()> {
+    if scan.pushed_filter.is_some() {
+        let values: Vec<Vec<SqlValue>> = chunk.iter().map(|r| r.values.clone()).collect();
+        let stats = compute_row_group_statistics(&values);
+        if scan.should_skip_row_group(&stats) {
+            chunk.clear();
+            return Ok(());
+        }
+    }
+
+    for row in chunk.drain(..) {
+        if let Some(predicate) = &scan.residual_filter {
+            let ctx = EvalContext::new(&row.values);
+            let keep = matches!(evaluate(predicate, &ctx)?, SqlValue::Boolean(true));
+            if !keep {
+                continue;
+            }
+        }
+        out.push(row);
+    }
+
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
