@@ -426,3 +426,145 @@ impl DdlWorkloadGenerator {
         }
     }
 }
+
+/// 不正操作の定義。
+#[derive(Clone, Debug)]
+pub enum InvalidOperation {
+    MalformedSql(String),
+    UnknownTable(String),
+    OversizedValue { key: Vec<u8>, value: Vec<u8> },
+    NegativeVectorDim,
+    UnsupportedColumnType(String),
+}
+
+/// 不正操作ジェネレーター。
+pub struct InvalidOperationGenerator {
+    rng: StdRng,
+}
+
+impl InvalidOperationGenerator {
+    pub fn new(seed: u64) -> Self {
+        Self {
+            rng: StdRng::seed_from_u64(seed),
+        }
+    }
+
+    pub fn next_invalid(&mut self) -> InvalidOperation {
+        match self.rng.gen_range(0..5) {
+            0 => InvalidOperation::MalformedSql("SELECT * FROM".into()),
+            1 => InvalidOperation::UnknownTable(format!("missing_{}", self.rng.gen::<u16>())),
+            2 => {
+                let key = format!("oversized_{:04x}", self.rng.gen::<u16>()).into_bytes();
+                let value: Vec<u8> = (0..2048).map(|_| self.rng.gen()).collect();
+                InvalidOperation::OversizedValue { key, value }
+            }
+            3 => InvalidOperation::NegativeVectorDim,
+            _ => InvalidOperation::UnsupportedColumnType("GEOMETRY".into()),
+        }
+    }
+}
+
+/// カオス生成の構成。
+#[derive(Clone, Debug)]
+pub struct ChaosConfig {
+    pub workload: WorkloadConfig,
+    pub multi_model: MultiModelWorkloadConfig,
+    pub ddl_seed: u64,
+    pub invalid_seed: u64,
+    pub dml_ratio: f64,
+    pub multi_model_ratio: f64,
+    pub ddl_ratio: f64,
+    pub error_ratio: f64,
+    pub crash_ratio: f64,
+}
+
+impl Default for ChaosConfig {
+    fn default() -> Self {
+        Self {
+            workload: WorkloadConfig::default(),
+            multi_model: MultiModelWorkloadConfig::default(),
+            ddl_seed: 99,
+            invalid_seed: 199,
+            dml_ratio: 0.4,
+            multi_model_ratio: 0.2,
+            ddl_ratio: 0.2,
+            error_ratio: 0.1,
+            crash_ratio: 0.1,
+        }
+    }
+}
+
+/// カオス操作。
+#[derive(Clone, Debug)]
+pub enum ChaosOperation {
+    Normal(Operation),
+    MultiModel(MultiModelOperation),
+    Ddl(DdlOperation),
+    Invalid(InvalidOperation),
+    TriggerCrash,
+}
+
+/// カオスワークロードジェネレーター。
+pub struct ChaosWorkloadGenerator {
+    rng: StdRng,
+    cfg: ChaosConfig,
+    workload_gen: WorkloadGenerator,
+    multi_model_gen: MultiModelWorkloadGenerator,
+    ddl_gen: DdlWorkloadGenerator,
+    invalid_gen: InvalidOperationGenerator,
+}
+
+impl ChaosWorkloadGenerator {
+    pub fn new(cfg: ChaosConfig) -> Self {
+        let rng = StdRng::seed_from_u64(cfg.workload.seed ^ 0xc4a0_5u64);
+        let invalid_seed = cfg.invalid_seed;
+        let ddl_seed = cfg.ddl_seed;
+        Self {
+            rng,
+            multi_model_gen: MultiModelWorkloadGenerator::new(cfg.multi_model.clone()),
+            workload_gen: WorkloadGenerator::new(cfg.workload.clone()),
+            ddl_gen: DdlWorkloadGenerator::new(ddl_seed),
+            invalid_gen: InvalidOperationGenerator::new(invalid_seed),
+            cfg,
+        }
+    }
+
+    /// カオス操作を1件生成（DML/マルチモデル/DDL/Invalid/Crash を比率で混合）。
+    pub fn next_chaos_operation(&mut self) -> ChaosOperation {
+        let buckets = [
+            self.cfg.dml_ratio,
+            self.cfg.multi_model_ratio,
+            self.cfg.ddl_ratio,
+            self.cfg.error_ratio,
+            self.cfg.crash_ratio,
+        ];
+        let total: f64 = buckets.iter().sum();
+        let choice = if total <= f64::EPSILON {
+            0
+        } else {
+            let r = self.rng.gen::<f64>() * total;
+            let mut acc = 0.0;
+            let mut idx = 0;
+            for (i, w) in buckets.iter().enumerate() {
+                acc += *w;
+                if r <= acc {
+                    idx = i;
+                    break;
+                }
+            }
+            idx
+        };
+        match choice {
+            0 => ChaosOperation::Normal(self.workload_gen.next_operation()),
+            1 => ChaosOperation::MultiModel(self.multi_model_gen.next_operation()),
+            2 => ChaosOperation::Ddl(self.ddl_gen.next_ddl()),
+            3 => ChaosOperation::Invalid(self.invalid_gen.next_invalid()),
+            _ => ChaosOperation::TriggerCrash,
+        }
+    }
+
+    /// 複数件生成。
+    pub fn generate_batch(&mut self, count: usize) -> Vec<ChaosOperation> {
+        (0..count).map(|_| self.next_chaos_operation()).collect()
+    }
+}
