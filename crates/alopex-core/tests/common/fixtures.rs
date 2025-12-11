@@ -1,9 +1,15 @@
+#[cfg(feature = "test-hooks")]
+use super::fault_injection::FaultInjector;
+#[cfg(feature = "test-hooks")]
+use alopex_core::{CrashSimulator, IoHooks};
 use alopex_core::{KVStore, KVTransaction, MemoryKV, Result as CoreResult, TxnMode};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "test-hooks")]
+use std::sync::Arc;
 use tempfile::TempDir;
 
 /// テスト環境（TempDir + DBパス）。
@@ -23,6 +29,57 @@ impl TestEnvironment {
 /// ストアを開く。
 pub fn open_store(path: &Path) -> CoreResult<MemoryKV> {
     MemoryKV::open(path)
+}
+
+/// ストアを障害注入フック付きで開く（test-hooks有効時のみ）。
+#[cfg(feature = "test-hooks")]
+pub fn open_store_with_fault_injector(
+    path: &Path,
+    injector: Arc<dyn FaultInjector>,
+) -> CoreResult<MemoryKV> {
+    struct InjectorAdapter {
+        inner: Arc<dyn FaultInjector>,
+    }
+
+    impl IoHooks for InjectorAdapter {
+        fn before_wal_write(&self, data: &[u8]) -> std::io::Result<()> {
+            self.inner.before_write(data)
+        }
+
+        fn after_wal_write(&self, _data: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn before_fsync(&self) -> std::io::Result<()> {
+            self.inner.before_fsync()
+        }
+
+        fn after_fsync(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn before_sst_write(&self, data: &[u8]) -> std::io::Result<()> {
+            self.inner.before_write(data)
+        }
+
+        fn on_compaction_start(&self) {
+            let _ = self.inner.before_fsync();
+        }
+
+        fn on_compaction_end(&self) {}
+    }
+
+    let hooks = Arc::new(InjectorAdapter { inner: injector });
+    MemoryKV::open_with_io_hooks(path, hooks)
+}
+
+/// ストアをクラッシュシミュレーター付きで開く（test-hooks有効時のみ）。
+#[cfg(feature = "test-hooks")]
+pub fn open_store_with_crash_sim(
+    path: &Path,
+    crash_sim: Arc<CrashSimulator>,
+) -> CoreResult<MemoryKV> {
+    MemoryKV::open_with_crash_hooks(path, crash_sim)
 }
 
 /// テストデータ生成。

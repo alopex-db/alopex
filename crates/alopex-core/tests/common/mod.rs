@@ -1,4 +1,6 @@
 pub mod assertions;
+#[cfg(feature = "test-hooks")]
+pub mod fault_injection;
 pub mod fixtures;
 pub mod harness;
 pub mod metrics;
@@ -7,6 +9,8 @@ pub mod watchdog;
 pub mod workload;
 
 pub use assertions::*;
+#[cfg(feature = "test-hooks")]
+pub use fault_injection::*;
 pub use fixtures::*;
 pub use harness::*;
 pub use metrics::*;
