@@ -36,6 +36,7 @@
 //! let result = executor.execute(plan)?;
 //! ```
 
+pub mod bulk;
 mod ddl;
 mod dml;
 mod error;
