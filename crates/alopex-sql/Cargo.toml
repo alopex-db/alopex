@@ -8,6 +8,9 @@ license = "Apache-2.0"
 [dependencies]
 thiserror = "2.0"
 alopex-core = { path = "../alopex-core" }
+parquet = { version = "52", features = ["arrow"] }
+arrow-array = "52"
+arrow-schema = "52"
 
 [dev-dependencies]
 proptest = "1.4"

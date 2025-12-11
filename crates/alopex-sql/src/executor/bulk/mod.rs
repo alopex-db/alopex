@@ -138,6 +138,12 @@ pub fn execute_copy<S: KVStore, C: Catalog>(
 /// パスセキュリティ検証。
 pub fn validate_file_path(file_path: &str, config: &CopySecurityConfig) -> Result<()> {
     let path = Path::new(file_path);
+
+    // 先に存在確認を行い、設計どおり FileNotFound を優先する。
+    if !path.exists() {
+        return Err(ExecutorError::FileNotFound(file_path.into()));
+    }
+
     let canonical = path
         .canonicalize()
         .map_err(|e| ExecutorError::PathValidationFailed {
@@ -481,9 +487,13 @@ mod tests {
     use crate::executor::ddl::create_table::execute_create_table;
     use crate::planner::types::ResolvedType;
     use crate::storage::TxnBridge;
+    use ::parquet::arrow::ArrowWriter;
     use alopex_core::kv::memory::MemoryKV;
+    use arrow_array::{Int32Array, RecordBatch, StringArray};
+    use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
     use std::fs::File;
     use std::io::Write;
+    use std::path::Path;
     use std::sync::Arc;
 
     fn bridge() -> (TxnBridge<MemoryKV>, MemoryCatalog) {
@@ -598,5 +608,57 @@ mod tests {
         let rows: Vec<_> = storage.scan().unwrap().map(|r| r.unwrap().1).collect();
         assert_eq!(rows.len(), 2);
         assert!(rows.contains(&vec![SqlValue::Integer(1), SqlValue::Text("alice".into())]));
+    }
+
+    #[test]
+    fn execute_copy_parquet_reads_schema_and_rows() {
+        let dir = std::env::temp_dir();
+        let file_path = dir.join("alopex_copy_test.parquet");
+        write_parquet_sample(&file_path);
+
+        let (bridge, mut catalog) = bridge();
+        create_table(&bridge, &mut catalog, StorageType::Row);
+
+        let mut txn = bridge.begin_write().unwrap();
+        let result = execute_copy(
+            &mut txn,
+            &catalog,
+            "users",
+            file_path.to_str().unwrap(),
+            FileFormat::Parquet,
+            CopyOptions::default(),
+            &CopySecurityConfig::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+        assert_eq!(result, ExecutionResult::RowsAffected(2));
+
+        // スキーマは Parquet から取得するため、テーブル側と不一致なら validate_schema が弾く。
+        let table = catalog.get_table("users").unwrap().clone();
+        let mut read_txn = bridge.begin_read().unwrap();
+        let mut storage = read_txn.table_storage(&table);
+        let rows: Vec<_> = storage.scan().unwrap().map(|r| r.unwrap().1).collect();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.contains(&vec![SqlValue::Integer(1), SqlValue::Text("alice".into())]));
+    }
+
+    fn write_parquet_sample(path: &Path) {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Int32, false),
+            ArrowField::new("name", ArrowDataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2])) as Arc<_>,
+                Arc::new(StringArray::from(vec!["alice", "bob"])) as Arc<_>,
+            ],
+        )
+        .unwrap();
+
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
     }
 }
