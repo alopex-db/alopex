@@ -1,0 +1,35 @@
+name: Stress Tests
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  stress-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          profile: minimal
+
+      - name: Run stress tests (short)
+        env:
+          RUST_BACKTRACE: 1
+          STRESS_TEST_TIMEOUT: 120
+          STRESS_REPORT_DIR: target/stress-reports # set empty string to skip artifact upload
+        run: |
+          cargo test --features test-hooks --test stress_* -- --test-threads=1
+
+      - name: Upload stress reports
+        if: ${{ env.STRESS_REPORT_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-reports
+          path: ${{ env.STRESS_REPORT_DIR }}
