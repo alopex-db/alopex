@@ -37,6 +37,8 @@ rand = { workspace = true }
 proptest = "1.4"
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 crossbeam-skiplist = "0.1"
+chrono = { version = "0.4", default-features = true, features = ["clock", "serde"] }
+serde_json = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 memmap2 = "0.9"

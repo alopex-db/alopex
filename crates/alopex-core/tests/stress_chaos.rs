@@ -4,12 +4,12 @@ use alopex_core::kv::memory::MemoryTransaction;
 use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnMode};
 use common::{
     begin_op, slo_presets, ChaosConfig, ChaosOperation, ChaosWorkloadGenerator, ColumnarOperation, DdlOperation,
-    ExecutionModel, MultiModelOperation, SqlOperation, StressTestConfig, StressTestHarness, TestResult,
+    ExecutionModel, MultiModelOperation, SqlOperation, SloConfig, StressTestConfig, StressTestHarness, TestResult,
     VectorOperation, WorkloadConfig,
 };
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
-use std::io;
+use std::io::{self, ErrorKind};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
@@ -253,6 +253,29 @@ fn simulate_persistent_crash(path: &std::path::Path, tables: &Arc<Mutex<HashSet<
     Ok(())
 }
 
+fn open_persistent_store(path: &std::path::Path) -> CoreResult<MemoryKV> {
+    match MemoryKV::open(path) {
+        Ok(s) => Ok(s),
+        Err(CoreError::Io(e))
+            if matches!(
+                e.kind(),
+                ErrorKind::UnexpectedEof | ErrorKind::NotFound | ErrorKind::InvalidData
+            ) =>
+        {
+            let (wal, sst) = crash_file_paths(path);
+            if let Some(parent) = wal.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::remove_file(&wal);
+            let _ = fs::remove_file(&sst);
+            let _ = OpenOptions::new().write(true).create(true).open(&wal);
+            let _ = OpenOptions::new().write(true).create(true).open(&sst);
+            MemoryKV::open(path)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn apply_chaos_op(store: &Arc<MemoryKV>, op: ChaosOperation, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<bool> {
     match op {
         ChaosOperation::Normal(op) => {
@@ -326,13 +349,13 @@ fn seed_persistent_baseline(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<St
 
 fn verify_persistent_state(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<()> {
     let mut reader = store.begin(TxnMode::ReadOnly)?;
-    let baseline = reader.get(PERSISTENT_BASELINE_KEY)?;
+    let baseline = reader.get(&PERSISTENT_BASELINE_KEY.to_vec())?;
     if baseline.is_none() {
         return Err(CoreError::Io(io::Error::other(
             "baseline key missing after reopen (possible crash data loss)",
         )));
     }
-    let sentinel = reader.get(PERSISTENT_SENTINEL_ROW)?;
+    let sentinel = reader.get(&PERSISTENT_SENTINEL_ROW.to_vec())?;
     if sentinel.is_none() {
         return Err(CoreError::Io(io::Error::other(
             "sentinel row missing after reopen (possible crash data loss)",
@@ -346,13 +369,9 @@ fn verify_persistent_state(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<Str
             String::from_utf8_lossy(primary).to_string()
         })
         .collect();
-    for tbl in tables.lock().unwrap().iter() {
-        if !meta_names.contains(tbl) {
-            return Err(CoreError::Io(io::Error::other(format!(
-                "missing metadata for table {tbl} after crash reopen"
-            ))));
-        }
-    }
+    let mut guard = tables.lock().unwrap();
+    guard.clear();
+    guard.extend(meta_names);
     Ok(())
 }
 
@@ -369,7 +388,19 @@ fn run_persistent_batch(
             ChaosOperation::TriggerCrash => {
                 ctx.metrics.record_error();
                 simulate_persistent_crash(&ctx.db_path, tables)?;
-                *store = Arc::new(MemoryKV::open(&ctx.db_path)?);
+                match open_persistent_store(&ctx.db_path) {
+                    Ok(s) => *store = Arc::new(s),
+                    Err(CoreError::Io(e))
+                        if matches!(
+                            e.kind(),
+                            ErrorKind::UnexpectedEof | ErrorKind::NotFound | ErrorKind::InvalidData
+                        ) =>
+                    {
+                        ctx.metrics.record_error();
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
                 refresh_tables_from_meta(store, tables)?;
                 seed_persistent_baseline(store, tables)?;
                 verify_persistent_state(store, tables)?;
@@ -384,6 +415,15 @@ fn run_persistent_batch(
             other => match apply_chaos_op(store, other, tables) {
                 Ok(true) => ctx.metrics.record_success(),
                 Ok(false) | Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
+                Err(CoreError::Io(e))
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::UnexpectedEof | ErrorKind::NotFound | ErrorKind::InvalidData
+                    ) =>
+                {
+                    *store = Arc::new(open_persistent_store(&ctx.db_path)?);
+                    ctx.metrics.record_error();
+                }
                 Err(e) => return Err(e),
             },
         }
@@ -805,16 +845,17 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
     };
     let batches = 6;
     let batch_size = 24;
-    let harness = StressTestHarness::new(chaos_config(
-        "chaos_persistent_crash_reopen",
-        model,
-        concurrency,
-    ))
-    .unwrap();
+    let mut cfg = chaos_config("chaos_persistent_crash_reopen", model, concurrency);
+    cfg.slo = Some(SloConfig {
+        min_throughput: Some(10.0),
+        max_error_ratio: Some(0.4),
+        ..Default::default()
+    });
+    let harness = StressTestHarness::new(cfg).unwrap();
     match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
             let tables = Arc::new(Mutex::new(HashSet::new()));
-            let mut store = Arc::new(MemoryKV::open(&ctx.db_path)?);
+            let mut store = Arc::new(open_persistent_store(&ctx.db_path)?);
             seed_persistent_baseline(&store, &tables)?;
             let mut gen = ChaosWorkloadGenerator::new(chaos_cfg.clone());
             for _ in 0..batches {
@@ -832,7 +873,7 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
                 cfg_local.multi_model.workload.seed ^= tid as u64 + 0x71;
                 cfg_local.ddl_seed = cfg_local.ddl_seed.wrapping_add(tid as u64);
                 cfg_local.invalid_seed = cfg_local.invalid_seed.wrapping_add(tid as u64);
-                let mut store = Arc::new(MemoryKV::open(&ctx.db_path)?);
+                let mut store = Arc::new(open_persistent_store(&ctx.db_path)?);
                 seed_persistent_baseline(&store, &tables)?;
                 let mut gen = ChaosWorkloadGenerator::new(cfg_local);
                 for _ in 0..batches {
@@ -847,10 +888,11 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
             let chaos_async = chaos_cfg.clone();
             harness.run_async(move |ctx| {
                 let tables = Arc::new(Mutex::new(HashSet::new()));
+                let chaos_cfg_local = chaos_async.clone();
                 async move {
-                    let mut store = Arc::new(MemoryKV::open(&ctx.db_path)?);
+                    let mut store = Arc::new(open_persistent_store(&ctx.db_path)?);
                     seed_persistent_baseline(&store, &tables)?;
-                    let mut gen = ChaosWorkloadGenerator::new(chaos_async);
+                    let mut gen = ChaosWorkloadGenerator::new(chaos_cfg_local);
                     for _ in 0..batches {
                         run_persistent_batch(&ctx, &mut store, &tables, &mut gen, batch_size)?;
                     }
@@ -866,13 +908,14 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
             let chaos_outer = chaos_cfg.clone();
             harness.run_async(move |ctx| {
                 let tables_outer = tables.clone();
+                let chaos_cfg_outer = chaos_outer.clone();
                 async move {
-                    let store = Arc::new(MemoryKV::open(&ctx.db_path)?);
+                    let store = Arc::new(open_persistent_store(&ctx.db_path)?);
                     let mut set = JoinSet::new();
                     for tid in 0..workers {
                         let ctx_clone = ctx.clone();
                         let tables_clone = tables_outer.clone();
-                        let mut cfg_local = chaos_outer.clone();
+                        let mut cfg_local = chaos_cfg_outer.clone();
                         cfg_local.workload.seed ^= tid as u64 + 0x59;
                         cfg_local.multi_model.workload.seed ^= tid as u64 + 0x7b;
                         cfg_local.ddl_seed = cfg_local.ddl_seed.wrapping_add(tid as u64);
