@@ -7,12 +7,13 @@
 mod binary_op;
 mod column_ref;
 mod context;
+mod function_call;
 mod is_null;
 mod literal;
 mod unary_op;
 pub mod vector_ops;
 
-pub use vector_ops::{VectorError, VectorMetric};
+pub use vector_ops::{VectorError, VectorMetric, vector_distance, vector_similarity};
 
 pub use context::EvalContext;
 
@@ -35,6 +36,9 @@ pub fn evaluate(expr: &TypedExpr, ctx: &EvalContext<'_>) -> Result<SqlValue> {
         TypedExprKind::IsNull { expr, negated } => is_null::eval_is_null(expr, *negated, ctx),
         TypedExprKind::VectorLiteral(values) => {
             Ok(SqlValue::Vector(values.iter().map(|v| *v as f32).collect()))
+        }
+        TypedExprKind::FunctionCall { name, args } => {
+            function_call::evaluate_function_call(name, args, ctx)
         }
         // Unsupported expressions return a clear error message.
         other => Err(ExecutorError::Evaluation(
