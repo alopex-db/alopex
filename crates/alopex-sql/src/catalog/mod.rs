@@ -51,7 +51,7 @@ mod tests;
 
 pub use index::IndexMetadata;
 pub use memory::MemoryCatalog;
-pub use table::{ColumnMetadata, TableMetadata};
+pub use table::{ColumnMetadata, Compression, StorageOptions, StorageType, TableMetadata};
 
 use crate::planner::PlannerError;
 

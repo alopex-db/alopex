@@ -6,6 +6,41 @@
 use crate::ast::expr::Expr;
 use crate::planner::types::ResolvedType;
 
+/// Storage layout for a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageType {
+    /// Row-oriented storage (existing engine).
+    Row,
+    /// Columnar storage (v0.1.3+).
+    Columnar,
+}
+
+/// Compression codec used for stored data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compression {
+    None,
+    Lz4,
+    Zstd,
+}
+
+/// Configurable storage options for a table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageOptions {
+    pub storage_type: StorageType,
+    pub compression: Compression,
+    pub row_group_size: u32,
+}
+
+impl Default for StorageOptions {
+    fn default() -> Self {
+        Self {
+            storage_type: StorageType::Row,
+            compression: Compression::Lz4,
+            row_group_size: 100_000,
+        }
+    }
+}
+
 /// Metadata for a table in the catalog.
 ///
 /// Contains the table ID, name, column definitions, and optional primary key constraint.
@@ -41,6 +76,8 @@ pub struct TableMetadata {
     pub columns: Vec<ColumnMetadata>,
     /// Primary key columns (supports composite keys).
     pub primary_key: Option<Vec<String>>,
+    /// Storage configuration (row/columnar, compression, row group sizing).
+    pub storage_options: StorageOptions,
 }
 
 impl TableMetadata {
@@ -54,6 +91,7 @@ impl TableMetadata {
             name: name.into(),
             columns,
             primary_key: None,
+            storage_options: StorageOptions::default(),
         }
     }
 
@@ -324,5 +362,19 @@ mod tests {
         assert!(column.not_null);
         assert!(column.primary_key);
         assert!(column.unique);
+    }
+
+    #[test]
+    fn test_storage_options_default() {
+        let options = StorageOptions::default();
+        assert_eq!(options.storage_type, StorageType::Row);
+        assert_eq!(options.compression, Compression::Lz4);
+        assert_eq!(options.row_group_size, 100_000);
+    }
+
+    #[test]
+    fn test_table_metadata_sets_default_storage_options() {
+        let table = TableMetadata::new("users", vec![]);
+        assert_eq!(table.storage_options, StorageOptions::default());
     }
 }

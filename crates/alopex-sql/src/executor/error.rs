@@ -5,6 +5,7 @@
 //! - [`ConstraintViolation`]: Constraint violation details
 //! - [`EvaluationError`]: Expression evaluation errors
 
+use crate::executor::evaluator::VectorError;
 use crate::storage::StorageError;
 use thiserror::Error;
 
@@ -67,6 +68,58 @@ pub enum ExecutorError {
     #[error("invalid operation: {operation} - {reason}")]
     InvalidOperation { operation: String, reason: String },
 
+    /// Input file not found.
+    #[error("file not found: {0}")]
+    FileNotFound(String),
+
+    /// File path failed validation.
+    #[error("path validation failed for '{path}': {reason}")]
+    PathValidationFailed { path: String, reason: String },
+
+    /// Unsupported file format.
+    #[error("unsupported format: {0}")]
+    UnsupportedFormat(String),
+
+    /// Schema mismatch between input and table.
+    #[error("schema mismatch: expected {expected} columns, got {actual} - {reason}")]
+    SchemaMismatch {
+        expected: usize,
+        actual: usize,
+        reason: String,
+    },
+
+    /// Invalid storage type option.
+    #[error("invalid storage type: {0}")]
+    InvalidStorageType(String),
+
+    /// Invalid compression option.
+    #[error("invalid compression: {0}")]
+    InvalidCompression(String),
+
+    /// Invalid row group size option.
+    #[error("invalid row_group_size: {0}")]
+    InvalidRowGroupSize(String),
+
+    /// Unknown table option key.
+    #[error("unknown table option: {0}")]
+    UnknownTableOption(String),
+
+    /// Duplicate option key.
+    #[error("duplicate option: {0}")]
+    DuplicateOption(String),
+
+    /// Vector processing error.
+    #[error("vector error: {0}")]
+    Vector(#[from] VectorError),
+
+    /// Bulk load generic error.
+    #[error("bulk load error: {0}")]
+    BulkLoad(String),
+
+    /// Columnar engine error.
+    #[error("columnar engine error: {0}")]
+    Columnar(String),
+
     /// Planner error (wrapped for convenience).
     #[error("planner error: {0}")]
     Planner(#[from] crate::planner::PlannerError),
@@ -119,6 +172,14 @@ pub enum EvaluationError {
     /// Unsupported expression type.
     #[error("unsupported expression: {0}")]
     UnsupportedExpression(String),
+
+    /// Unsupported function call.
+    #[error("unsupported function: {0}")]
+    UnsupportedFunction(String),
+
+    /// Vector evaluation error.
+    #[error("vector error: {0}")]
+    Vector(#[from] VectorError),
 }
 
 /// Type alias for executor results.
@@ -165,5 +226,27 @@ mod tests {
         let eval_err = EvaluationError::Overflow;
         let err: ExecutorError = eval_err.into();
         assert!(matches!(err, ExecutorError::Evaluation(_)));
+    }
+
+    #[test]
+    fn test_vector_error_conversion() {
+        let vector_err = VectorError::ZeroNormVector;
+        let eval_err: EvaluationError = vector_err.clone().into();
+        assert!(matches!(eval_err, EvaluationError::Vector(_)));
+
+        let exec_err: ExecutorError = vector_err.into();
+        assert!(matches!(exec_err, ExecutorError::Vector(_)));
+    }
+
+    #[test]
+    fn test_path_validation_failed_display() {
+        let err = ExecutorError::PathValidationFailed {
+            path: "/tmp/data.parquet".into(),
+            reason: "symbolic links not allowed".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "path validation failed for '/tmp/data.parquet': symbolic links not allowed"
+        );
     }
 }

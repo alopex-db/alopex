@@ -10,6 +10,9 @@ mod context;
 mod is_null;
 mod literal;
 mod unary_op;
+pub mod vector_ops;
+
+pub use vector_ops::{VectorError, VectorMetric};
 
 pub use context::EvalContext;
 

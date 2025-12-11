@@ -54,7 +54,10 @@ pub use tokenizer::keyword::Keyword;
 pub use tokenizer::token::{Token, TokenWithSpan, Word};
 
 // Catalog types (re-exported for convenience)
-pub use catalog::{Catalog, ColumnMetadata, IndexMetadata, MemoryCatalog, TableMetadata};
+pub use catalog::{
+    Catalog, ColumnMetadata, Compression, IndexMetadata, MemoryCatalog, StorageOptions,
+    StorageType, TableMetadata,
+};
 
 // Planner types (re-exported for convenience)
 pub use planner::{
