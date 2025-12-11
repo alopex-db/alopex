@@ -5,7 +5,7 @@ use arrow_array::{
     LargeBinaryArray, StringArray, TimestampMicrosecondArray,
 };
 use arrow_schema::DataType as ArrowDataType;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
 use crate::catalog::TableMetadata;
 use crate::executor::{ExecutorError, Result};
@@ -18,8 +18,8 @@ use super::{BulkReader, CopyField, CopySchema};
 pub struct ParquetReader {
     schema: CopySchema,
     target_types: Vec<ResolvedType>,
-    rows: Vec<Vec<SqlValue>>,
-    position: usize,
+    reader: ParquetRecordBatchReader,
+    buffer: Option<Vec<Vec<SqlValue>>>,
 }
 
 impl ParquetReader {
@@ -41,43 +41,22 @@ impl ParquetReader {
             });
         }
 
-        let mut reader = builder
+        let reader = builder
             .with_batch_size(1024)
             .build()
             .map_err(|e| ExecutorError::BulkLoad(format!("failed to build parquet reader: {e}")))?;
 
-        let mut rows: Vec<Vec<SqlValue>> = Vec::new();
         let target_types: Vec<ResolvedType> = table_meta
             .columns
             .iter()
             .map(|c| c.data_type.clone())
             .collect();
-        while let Some(batch) = reader.next() {
-            let batch = batch.map_err(|e| {
-                ExecutorError::BulkLoad(format!("failed to read parquet batch: {e}"))
-            })?;
-            for row_idx in 0..batch.num_rows() {
-                let mut row = Vec::with_capacity(fields.len());
-                for (col_idx, field) in fields.iter().enumerate() {
-                    let value = arrow_value_to_sql(
-                        batch.column(col_idx).as_ref(),
-                        batch.schema().field(col_idx).data_type(),
-                        target_types
-                            .get(col_idx)
-                            .ok_or_else(|| ExecutorError::BulkLoad("missing target type".into()))?,
-                        row_idx,
-                    )?;
-                    row.push(value);
-                }
-                rows.push(row);
-            }
-        }
 
         Ok(Self {
             schema: CopySchema { fields },
             target_types,
-            rows,
-            position: 0,
+            reader,
+            buffer: None,
         })
     }
 }
@@ -87,14 +66,34 @@ impl BulkReader for ParquetReader {
         &self.schema
     }
 
-    fn next_batch(&mut self, max_rows: usize) -> Result<Option<Vec<Vec<SqlValue>>>> {
-        if self.position >= self.rows.len() {
-            return Ok(None);
+    fn next_batch(&mut self, _max_rows: usize) -> Result<Option<Vec<Vec<SqlValue>>>> {
+        let maybe_batch = self.reader.next();
+        let batch = match maybe_batch {
+            Some(b) => b.map_err(|e| {
+                ExecutorError::BulkLoad(format!("failed to read parquet batch: {e}"))
+            })?,
+            None => return Ok(None),
+        };
+
+        let mut rows: Vec<Vec<SqlValue>> = Vec::with_capacity(batch.num_rows());
+        for row_idx in 0..batch.num_rows() {
+            let mut row = Vec::with_capacity(self.schema.fields.len());
+            for col_idx in 0..self.schema.fields.len() {
+                let value = arrow_value_to_sql(
+                    batch.column(col_idx).as_ref(),
+                    batch.schema().field(col_idx).data_type(),
+                    self.target_types
+                        .get(col_idx)
+                        .ok_or_else(|| ExecutorError::BulkLoad("missing target type".into()))?,
+                    row_idx,
+                )?;
+                row.push(value);
+            }
+            rows.push(row);
         }
-        let end = (self.position + max_rows).min(self.rows.len());
-        let batch = self.rows[self.position..end].to_vec();
-        self.position = end;
-        Ok(Some(batch))
+
+        self.buffer = Some(rows);
+        Ok(self.buffer.take())
     }
 }
 

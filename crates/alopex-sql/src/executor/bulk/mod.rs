@@ -614,7 +614,7 @@ mod tests {
     fn execute_copy_parquet_reads_schema_and_rows() {
         let dir = std::env::temp_dir();
         let file_path = dir.join("alopex_copy_test.parquet");
-        write_parquet_sample(&file_path);
+        write_parquet_sample(&file_path, 2);
 
         let (bridge, mut catalog) = bridge();
         create_table(&bridge, &mut catalog, StorageType::Row);
@@ -639,26 +639,61 @@ mod tests {
         let mut storage = read_txn.table_storage(&table);
         let rows: Vec<_> = storage.scan().unwrap().map(|r| r.unwrap().1).collect();
         assert_eq!(rows.len(), 2);
-        assert!(rows.contains(&vec![SqlValue::Integer(1), SqlValue::Text("alice".into())]));
+        assert!(rows.contains(&vec![SqlValue::Integer(1), SqlValue::Text("user0".into())]));
     }
 
-    fn write_parquet_sample(path: &Path) {
+    #[test]
+    fn parquet_reader_streams_batches() {
+        let dir = std::env::temp_dir();
+        let file_path = dir.join("alopex_copy_stream.parquet");
+        write_parquet_sample(&file_path, 1500);
+
+        let (bridge, mut catalog) = bridge();
+        create_table(&bridge, &mut catalog, StorageType::Row);
+        let table = catalog.get_table("users").unwrap().clone();
+
+        let mut reader = ParquetReader::open(file_path.to_str().unwrap(), &table, false).unwrap();
+        let mut batches = 0;
+        let mut total = 0;
+        while let Some(batch) = reader.next_batch(512).unwrap() {
+            total += batch.len();
+            batches += 1;
+        }
+        assert!(
+            batches >= 2,
+            "複数バッチを期待しましたが {batches} バッチでした"
+        );
+        assert_eq!(total, 1500);
+    }
+
+    fn write_parquet_sample(path: &Path, count: usize) {
         let schema = Arc::new(ArrowSchema::new(vec![
             ArrowField::new("id", ArrowDataType::Int32, false),
             ArrowField::new("name", ArrowDataType::Utf8, false),
         ]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int32Array::from(vec![1, 2])) as Arc<_>,
-                Arc::new(StringArray::from(vec!["alice", "bob"])) as Arc<_>,
-            ],
-        )
-        .unwrap();
 
         let file = File::create(path).unwrap();
-        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
-        writer.write(&batch).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema.clone(), None).unwrap();
+
+        let chunk_size = 700;
+        let mut start = 0;
+        while start < count {
+            let end = (start + chunk_size).min(count);
+            let ids: Vec<i32> = ((start + 1) as i32..=end as i32).collect();
+            let names: Vec<String> = (start..end).map(|i| format!("user{i}")).collect();
+
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int32Array::from(ids)) as Arc<_>,
+                    Arc::new(StringArray::from(names)) as Arc<_>,
+                ],
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+            start = end;
+        }
+
         writer.close().unwrap();
     }
 }
