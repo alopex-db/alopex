@@ -17,12 +17,13 @@ use super::{BulkReader, CopyField, CopySchema};
 /// Parquet リーダー（Arrow 経由でスキーマ抽出とデータ読み込み）。
 pub struct ParquetReader {
     schema: CopySchema,
+    target_types: Vec<ResolvedType>,
     rows: Vec<Vec<SqlValue>>,
     position: usize,
 }
 
 impl ParquetReader {
-    pub fn open(path: &str, _table_meta: &TableMetadata, _header: bool) -> Result<Self> {
+    pub fn open(path: &str, table_meta: &TableMetadata, _header: bool) -> Result<Self> {
         let file = File::open(path)
             .map_err(|e| ExecutorError::BulkLoad(format!("failed to open parquet: {e}")))?;
 
@@ -46,6 +47,11 @@ impl ParquetReader {
             .map_err(|e| ExecutorError::BulkLoad(format!("failed to build parquet reader: {e}")))?;
 
         let mut rows: Vec<Vec<SqlValue>> = Vec::new();
+        let target_types: Vec<ResolvedType> = table_meta
+            .columns
+            .iter()
+            .map(|c| c.data_type.clone())
+            .collect();
         while let Some(batch) = reader.next() {
             let batch = batch.map_err(|e| {
                 ExecutorError::BulkLoad(format!("failed to read parquet batch: {e}"))
@@ -56,10 +62,9 @@ impl ParquetReader {
                     let value = arrow_value_to_sql(
                         batch.column(col_idx).as_ref(),
                         batch.schema().field(col_idx).data_type(),
-                        field
-                            .data_type
-                            .as_ref()
-                            .ok_or_else(|| ExecutorError::BulkLoad("missing schema type".into()))?,
+                        target_types
+                            .get(col_idx)
+                            .ok_or_else(|| ExecutorError::BulkLoad("missing target type".into()))?,
                         row_idx,
                     )?;
                     row.push(value);
@@ -70,6 +75,7 @@ impl ParquetReader {
 
         Ok(Self {
             schema: CopySchema { fields },
+            target_types,
             rows,
             position: 0,
         })
@@ -125,13 +131,33 @@ fn arrow_value_to_sql(
             let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
             Ok(SqlValue::Integer(arr.value(row_idx)))
         }
+        (ArrowDataType::Int32, ResolvedType::BigInt) => {
+            let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
+            Ok(SqlValue::BigInt(arr.value(row_idx) as i64))
+        }
+        (ArrowDataType::Int32, ResolvedType::Float) => {
+            let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
+            Ok(SqlValue::Float(arr.value(row_idx) as f32))
+        }
+        (ArrowDataType::Int32, ResolvedType::Double) => {
+            let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
+            Ok(SqlValue::Double(arr.value(row_idx) as f64))
+        }
         (ArrowDataType::Int64, ResolvedType::BigInt) => {
             let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
             Ok(SqlValue::BigInt(arr.value(row_idx)))
         }
+        (ArrowDataType::Int64, ResolvedType::Double) => {
+            let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
+            Ok(SqlValue::Double(arr.value(row_idx) as f64))
+        }
         (ArrowDataType::Float32, ResolvedType::Float) => {
             let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
             Ok(SqlValue::Float(arr.value(row_idx)))
+        }
+        (ArrowDataType::Float32, ResolvedType::Double) => {
+            let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
+            Ok(SqlValue::Double(arr.value(row_idx) as f64))
         }
         (ArrowDataType::Float64, ResolvedType::Double) => {
             let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
