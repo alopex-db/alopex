@@ -1,6 +1,6 @@
 use alopex_core::kv::KVStore;
 
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, StorageType};
 use crate::executor::evaluator::EvalContext;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::planner::logical_plan::LogicalPlan;
@@ -9,6 +9,7 @@ use crate::storage::{SqlTransaction, SqlValue};
 
 use super::{ColumnInfo, Row};
 
+mod columnar_scan;
 pub mod iterator;
 mod project;
 mod scan;
@@ -65,6 +66,14 @@ fn build_iterator_pipeline<S: KVStore, C: Catalog>(
                 .cloned()
                 .ok_or_else(|| ExecutorError::TableNotFound(table.clone()))?;
 
+            if table_meta.storage_options.storage_type == StorageType::Columnar {
+                let columnar_scan = columnar_scan::build_columnar_scan(&table_meta, &projection);
+                let rows = columnar_scan::execute_columnar_scan(txn, &table_meta, &columnar_scan)?;
+                let schema = table_meta.columns.clone();
+                let iter = iterator::VecIterator::new(rows, schema.clone());
+                return Ok((Box::new(iter), projection, schema));
+            }
+
             // TODO: 現状は Scan で一度全件をメモリに載せてから iterator に渡しています。
             // 将来ストリーミングを徹底する場合は、ScanIterator を活用できるよう
             // トランザクションのライフタイム設計を見直すとよいです。
@@ -76,6 +85,22 @@ fn build_iterator_pipeline<S: KVStore, C: Catalog>(
             Ok((Box::new(iter), projection, schema))
         }
         LogicalPlan::Filter { input, predicate } => {
+            if let LogicalPlan::Scan { table, projection } = input.as_ref() {
+                if let Some(table_meta) = catalog.get_table(table) {
+                    if table_meta.storage_options.storage_type == StorageType::Columnar {
+                        let columnar_scan = columnar_scan::build_columnar_scan_for_filter(
+                            table_meta,
+                            projection.clone(),
+                            &predicate,
+                        );
+                        let rows =
+                            columnar_scan::execute_columnar_scan(txn, table_meta, &columnar_scan)?;
+                        let schema = table_meta.columns.clone();
+                        let iter = iterator::VecIterator::new(rows, schema.clone());
+                        return Ok((Box::new(iter), projection.clone(), schema));
+                    }
+                }
+            }
             let (input_iter, projection, schema) = build_iterator_pipeline(txn, catalog, *input)?;
             let filter_iter = FilterIterator::new(input_iter, predicate);
             Ok((Box::new(filter_iter), projection, schema))

@@ -28,6 +28,7 @@
 
 pub mod ast;
 pub mod catalog;
+pub mod columnar;
 pub mod dialect;
 pub mod error;
 pub mod executor;
