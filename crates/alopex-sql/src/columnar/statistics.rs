@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 pub struct RowGroupStatistics {
     pub row_count: u64,
     pub columns: Vec<ColumnStatistics>,
+    #[serde(default)]
+    pub row_id_min: Option<u64>,
+    #[serde(default)]
+    pub row_id_max: Option<u64>,
 }
 
 /// カラム統計情報。
@@ -79,7 +83,12 @@ pub fn compute_row_group_statistics(rows: &[Vec<SqlValue>]) -> RowGroupStatistic
         columns.push(ColumnStatistics::compute(&col_values));
     }
 
-    RowGroupStatistics { row_count, columns }
+    RowGroupStatistics {
+        row_count,
+        columns,
+        row_id_min: None,
+        row_id_max: None,
+    }
 }
 
 #[cfg(test)]

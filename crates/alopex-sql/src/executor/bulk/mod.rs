@@ -19,7 +19,9 @@ use alopex_core::storage::format::bincode_config;
 use bincode::config::Options;
 
 use crate::ast::ddl::IndexMethod;
-use crate::catalog::{Catalog, ColumnMetadata, Compression, IndexMetadata, TableMetadata};
+use crate::catalog::{
+    Catalog, ColumnMetadata, Compression, IndexMetadata, RowIdMode, TableMetadata,
+};
 use crate::columnar::statistics::compute_row_group_statistics;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
@@ -686,7 +688,7 @@ fn build_column(
 fn persist_segment<S: KVStore>(
     txn: &mut SqlTransaction<'_, S>,
     table: &TableMetadata,
-    segment: ColumnSegmentV2,
+    mut segment: ColumnSegmentV2,
     row_group_stats: &[crate::columnar::statistics::RowGroupStatistics],
 ) -> Result<u64> {
     if row_group_stats.len() != segment.meta.row_groups.len() {
@@ -711,6 +713,40 @@ fn persist_segment<S: KVStore>(
         .map(|id| id.saturating_add(1))
         .unwrap_or(0);
 
+    let mut row_group_stats = row_group_stats.to_vec();
+    if table.storage_options.row_id_mode == RowIdMode::Direct {
+        let total_rows = usize::try_from(segment.meta.num_rows)
+            .map_err(|_| ExecutorError::Columnar("segment row count exceeds usize::MAX".into()))?;
+        segment.row_ids = (0..total_rows)
+            .map(|idx| {
+                alopex_core::columnar::segment_v2::encode_row_id(segment_id, idx as u64)
+                    .map_err(|e| ExecutorError::Columnar(e.to_string()))
+            })
+            .collect::<Result<Vec<u64>>>()?;
+
+        for (idx, meta) in segment.meta.row_groups.iter().enumerate() {
+            let start = usize::try_from(meta.row_start)
+                .map_err(|_| ExecutorError::Columnar("row_start exceeds usize::MAX".into()))?;
+            let count = usize::try_from(meta.row_count)
+                .map_err(|_| ExecutorError::Columnar("row_count exceeds usize::MAX".into()))?;
+            if count == 0 {
+                continue;
+            }
+            let end = start
+                .checked_add(count)
+                .ok_or_else(|| ExecutorError::Columnar("row_id range overflow".into()))?;
+            if end > segment.row_ids.len() {
+                return Err(ExecutorError::Columnar(
+                    "row_ids length is smaller than row_group range".into(),
+                ));
+            }
+            row_group_stats[idx].row_id_min = segment.row_ids.get(start).copied();
+            row_group_stats[idx].row_id_max = segment.row_ids.get(end - 1).copied();
+        }
+    } else {
+        segment.row_ids.clear();
+    }
+
     let segment_bytes = bincode_config()
         .serialize(&segment)
         .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
@@ -726,7 +762,7 @@ fn persist_segment<S: KVStore>(
         .put(key_layout::statistics_key(table_id, segment_id), meta_bytes)?;
 
     let rg_bytes = bincode_config()
-        .serialize(row_group_stats)
+        .serialize(&row_group_stats)
         .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
     txn.inner_mut().put(
         key_layout::row_group_stats_key(table_id, segment_id),

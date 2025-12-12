@@ -202,6 +202,21 @@ pub fn execute_columnar_scan<S: KVStore>(
             let batch = reader
                 .read_row_group_by_index(&projected, rg_index)
                 .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+            let batch = if !segment.row_ids.is_empty() {
+                if let Some(meta) = segment.meta.row_groups.get(rg_index) {
+                    let start = meta.row_start as usize;
+                    let end = start + meta.row_count as usize;
+                    if end <= segment.row_ids.len() {
+                        batch.with_row_ids(Some(segment.row_ids[start..end].to_vec()))
+                    } else {
+                        batch
+                    }
+                } else {
+                    batch
+                }
+            } else {
+                batch
+            };
             append_rows_from_batch(
                 &mut results,
                 &batch,
@@ -525,7 +540,13 @@ fn append_rows_from_batch(
 
         let row_id = match row_id_mode {
             RowIdMode::Direct => {
-                if let Some(idx) = row_id_col_idx {
+                if let Some(row_ids) = batch.row_ids.as_ref() {
+                    *row_ids.get(row_idx).ok_or_else(|| {
+                        ExecutorError::Columnar(
+                            "row_id missing for row in row_id_mode=direct".into(),
+                        )
+                    })?
+                } else if let Some(idx) = row_id_col_idx {
                     let val = values.get(idx).ok_or_else(|| {
                         ExecutorError::Columnar("row_id column missing in projected values".into())
                     })?;
