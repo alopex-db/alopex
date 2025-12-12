@@ -5,6 +5,9 @@ edition = "2024"
 description = "SQL parser components for the Alopex DB dialect"
 license = "Apache-2.0"
 
+[features]
+default = []
+
 [dependencies]
 thiserror = "2.0"
 alopex-core = { path = "../alopex-core" }
@@ -29,4 +32,8 @@ harness = false
 
 [[bench]]
 name = "storage_macro_bench"
+harness = false
+
+[[bench]]
+name = "knn_rowid"
 harness = false

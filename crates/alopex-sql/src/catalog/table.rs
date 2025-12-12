@@ -15,6 +15,15 @@ pub enum StorageType {
     Columnar,
 }
 
+/// RowID materialization mode for columnar tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowIdMode {
+    /// RowID is not materialized or tracked (current default).
+    None,
+    /// RowID is stored directly as a column.
+    Direct,
+}
+
 /// Compression codec used for stored data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
@@ -29,6 +38,7 @@ pub struct StorageOptions {
     pub storage_type: StorageType,
     pub compression: Compression,
     pub row_group_size: u32,
+    pub row_id_mode: RowIdMode,
 }
 
 impl Default for StorageOptions {
@@ -37,6 +47,7 @@ impl Default for StorageOptions {
             storage_type: StorageType::Row,
             compression: Compression::Lz4,
             row_group_size: 100_000,
+            row_id_mode: RowIdMode::None,
         }
     }
 }
@@ -370,6 +381,7 @@ mod tests {
         assert_eq!(options.storage_type, StorageType::Row);
         assert_eq!(options.compression, Compression::Lz4);
         assert_eq!(options.row_group_size, 100_000);
+        assert_eq!(options.row_id_mode, RowIdMode::None);
     }
 
     #[test]

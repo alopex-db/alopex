@@ -40,6 +40,11 @@ impl MemoryKV {
         }
     }
 
+    /// Returns current in-memory usage statistics.
+    pub fn memory_stats(&self) -> MemoryStats {
+        self.manager.memory_stats()
+    }
+
     /// Creates a new in-memory KV store with an optional memory limit.
     pub fn new_with_limit(limit: Option<usize>) -> Self {
         Self {

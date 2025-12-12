@@ -45,7 +45,19 @@ impl CsvReader {
             if line.trim().is_empty() {
                 continue;
             }
-            let parts: Vec<&str> = line.split(',').collect();
+            let mut parts: Vec<String> = line.split(',').map(|s| s.to_string()).collect();
+            if parts.len() != table_meta.column_count() {
+                // 特例: 最終列が VECTOR の場合は余りを結合して帳尻を合わせる（埋め込みにカンマが含まれるため）。
+                if let Some(last_ty) = table_meta.columns.last().map(|c| &c.data_type)
+                    && matches!(last_ty, crate::planner::types::ResolvedType::Vector { .. })
+                    && parts.len() > table_meta.column_count()
+                {
+                    let head_count = table_meta.column_count().saturating_sub(1);
+                    let tail = parts.split_off(head_count);
+                    let merged = tail.join(",");
+                    parts.push(merged);
+                }
+            }
             if parts.len() != table_meta.column_count() {
                 return Err(ExecutorError::BulkLoad(format!(
                     "column count mismatch in row: expected {}, got {}",

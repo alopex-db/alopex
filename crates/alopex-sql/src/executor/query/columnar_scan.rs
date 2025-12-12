@@ -7,7 +7,7 @@ use alopex_core::storage::format::bincode_config;
 use bincode::config::Options;
 
 use crate::ast::expr::BinaryOp;
-use crate::catalog::TableMetadata;
+use crate::catalog::{RowIdMode, TableMetadata};
 use crate::columnar::statistics::RowGroupStatistics;
 use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::{ExecutorError, Result, Row};
@@ -169,6 +169,15 @@ pub fn execute_columnar_scan<S: KVStore>(
         return Ok(Vec::new());
     }
 
+    let row_id_col_idx = if table_meta.storage_options.row_id_mode == RowIdMode::Direct {
+        table_meta
+            .columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case("row_id"))
+    } else {
+        None
+    };
+
     let mut results = Vec::new();
     let mut next_row_id = 0u64;
     for segment_id in segment_ids {
@@ -199,6 +208,8 @@ pub fn execute_columnar_scan<S: KVStore>(
                 table_meta,
                 &projected,
                 scan.residual_filter.as_ref(),
+                table_meta.storage_options.row_id_mode,
+                row_id_col_idx,
                 &mut next_row_id,
             )?;
         }
@@ -470,6 +481,8 @@ fn append_rows_from_batch(
     table_meta: &TableMetadata,
     projected: &[usize],
     residual_filter: Option<&TypedExpr>,
+    row_id_mode: RowIdMode,
+    row_id_col_idx: Option<usize>,
     next_row_id: &mut u64,
 ) -> Result<()> {
     if batch.columns.len() != projected.len() {
@@ -510,8 +523,34 @@ fn append_rows_from_batch(
             }
         }
 
-        let row_id = *next_row_id;
-        *next_row_id = next_row_id.saturating_add(1);
+        let row_id = match row_id_mode {
+            RowIdMode::Direct => {
+                if let Some(idx) = row_id_col_idx {
+                    let val = values.get(idx).ok_or_else(|| {
+                        ExecutorError::Columnar("row_id column missing in projected values".into())
+                    })?;
+                    match val {
+                        SqlValue::Integer(v) if *v >= 0 => *v as u64,
+                        SqlValue::BigInt(v) if *v >= 0 => *v as u64,
+                        other => {
+                            return Err(ExecutorError::Columnar(format!(
+                                "row_id column must be non-negative integer, got {}",
+                                other.type_name()
+                            )));
+                        }
+                    }
+                } else {
+                    let rid = *next_row_id;
+                    *next_row_id = next_row_id.saturating_add(1);
+                    rid
+                }
+            }
+            RowIdMode::None => {
+                let rid = *next_row_id;
+                *next_row_id = next_row_id.saturating_add(1);
+                rid
+            }
+        };
         out.push(Row::new(row_id, values));
     }
 
@@ -609,7 +648,7 @@ fn value_from_column(
 mod tests {
     use super::*;
     use crate::ast::expr::Literal;
-    use crate::catalog::{ColumnMetadata, TableMetadata};
+    use crate::catalog::{ColumnMetadata, RowIdMode, TableMetadata};
     use crate::columnar::statistics::ColumnStatistics;
     use crate::planner::typed_expr::TypedExpr;
     use crate::planner::typed_expr::TypedExprKind;
@@ -895,5 +934,149 @@ mod tests {
         let rows = execute_columnar_scan(&mut read_txn, &table, &scan).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].values[1], SqlValue::Text("alice".into()));
+    }
+
+    #[test]
+    fn rowid_mode_direct_prefers_rowid_column() {
+        let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+        let mut table = TableMetadata::new(
+            "items",
+            vec![
+                ColumnMetadata::new("row_id", ResolvedType::BigInt),
+                ColumnMetadata::new("val", ResolvedType::Integer),
+            ],
+        )
+        .with_table_id(20);
+        table.storage_options.storage_type = crate::catalog::StorageType::Columnar;
+        table.storage_options.row_id_mode = RowIdMode::Direct;
+
+        let schema = alopex_core::columnar::segment_v2::Schema {
+            columns: vec![
+                alopex_core::columnar::segment_v2::ColumnSchema {
+                    name: "row_id".into(),
+                    logical_type: alopex_core::columnar::encoding::LogicalType::Int64,
+                    nullable: false,
+                    fixed_len: None,
+                },
+                alopex_core::columnar::segment_v2::ColumnSchema {
+                    name: "val".into(),
+                    logical_type: alopex_core::columnar::encoding::LogicalType::Int64,
+                    nullable: false,
+                    fixed_len: None,
+                },
+            ],
+        };
+        let batch = alopex_core::columnar::segment_v2::RecordBatch::new(
+            schema.clone(),
+            vec![
+                alopex_core::columnar::encoding::Column::Int64(vec![999]),
+                alopex_core::columnar::encoding::Column::Int64(vec![7]),
+            ],
+            vec![None, None],
+        );
+        let mut writer =
+            alopex_core::columnar::segment_v2::SegmentWriterV2::new(Default::default());
+        writer.write_batch(batch).unwrap();
+        let segment = writer.finish().unwrap();
+        let stats = vec![crate::columnar::statistics::compute_row_group_statistics(
+            &vec![vec![SqlValue::BigInt(999), SqlValue::Integer(7)]],
+        )];
+
+        persist_segment_for_test(&bridge, table.table_id, &segment, &stats);
+
+        let scan = ColumnarScan::new(table.table_id, vec![0, 1], None, None);
+        let mut read_txn = bridge.begin_read().unwrap();
+        let rows = execute_columnar_scan(&mut read_txn, &table, &scan).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].row_id, 999);
+        assert_eq!(rows[0].values[1], SqlValue::Integer(7));
+    }
+
+    #[test]
+    fn rowid_mode_none_uses_position() {
+        let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+        let mut table = TableMetadata::new(
+            "items",
+            vec![ColumnMetadata::new("val", ResolvedType::Integer)],
+        )
+        .with_table_id(21);
+        table.storage_options.storage_type = crate::catalog::StorageType::Columnar;
+        table.storage_options.row_id_mode = RowIdMode::None;
+
+        let schema = alopex_core::columnar::segment_v2::Schema {
+            columns: vec![alopex_core::columnar::segment_v2::ColumnSchema {
+                name: "val".into(),
+                logical_type: alopex_core::columnar::encoding::LogicalType::Int64,
+                nullable: false,
+                fixed_len: None,
+            }],
+        };
+        let batch = alopex_core::columnar::segment_v2::RecordBatch::new(
+            schema.clone(),
+            vec![alopex_core::columnar::encoding::Column::Int64(vec![3, 4])],
+            vec![None],
+        );
+        let mut writer =
+            alopex_core::columnar::segment_v2::SegmentWriterV2::new(Default::default());
+        writer.write_batch(batch).unwrap();
+        let segment = writer.finish().unwrap();
+        let stats = vec![crate::columnar::statistics::compute_row_group_statistics(
+            &vec![vec![SqlValue::Integer(3)], vec![SqlValue::Integer(4)]],
+        )];
+
+        persist_segment_for_test(&bridge, table.table_id, &segment, &stats);
+
+        let scan = ColumnarScan::new(table.table_id, vec![0], None, None);
+        let mut read_txn = bridge.begin_read().unwrap();
+        let rows = execute_columnar_scan(&mut read_txn, &table, &scan).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].row_id, 0);
+        assert_eq!(rows[1].row_id, 1);
+    }
+
+    fn persist_segment_for_test(
+        bridge: &TxnBridge<MemoryKV>,
+        table_id: u32,
+        segment: &alopex_core::columnar::segment_v2::ColumnSegmentV2,
+        row_group_stats: &[crate::columnar::statistics::RowGroupStatistics],
+    ) {
+        let mut txn = bridge.begin_write().unwrap();
+        let segment_bytes = alopex_core::storage::format::bincode_config()
+            .serialize(segment)
+            .unwrap();
+        let meta_bytes = alopex_core::storage::format::bincode_config()
+            .serialize(&segment.meta)
+            .unwrap();
+        let stats_bytes = alopex_core::storage::format::bincode_config()
+            .serialize(row_group_stats)
+            .unwrap();
+        txn.inner_mut()
+            .put(
+                alopex_core::columnar::kvs_bridge::key_layout::column_segment_key(table_id, 0, 0),
+                segment_bytes,
+            )
+            .unwrap();
+        txn.inner_mut()
+            .put(
+                alopex_core::columnar::kvs_bridge::key_layout::statistics_key(table_id, 0),
+                meta_bytes,
+            )
+            .unwrap();
+        txn.inner_mut()
+            .put(
+                alopex_core::columnar::kvs_bridge::key_layout::row_group_stats_key(table_id, 0),
+                stats_bytes,
+            )
+            .unwrap();
+        let index_bytes = alopex_core::storage::format::bincode_config()
+            .serialize(&vec![0u64])
+            .unwrap();
+        txn.inner_mut()
+            .put(
+                alopex_core::columnar::kvs_bridge::key_layout::segment_index_key(table_id),
+                index_bytes,
+            )
+            .unwrap();
+        txn.commit().unwrap();
     }
 }

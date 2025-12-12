@@ -2,7 +2,7 @@ use alopex_core::kv::KVStore;
 use std::collections::HashSet;
 
 use crate::catalog::{
-    Catalog, Compression, IndexMetadata, StorageOptions, StorageType, TableMetadata,
+    Catalog, Compression, IndexMetadata, RowIdMode, StorageOptions, StorageType, TableMetadata,
 };
 use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::storage::{KeyEncoder, SqlTransaction};
@@ -81,6 +81,7 @@ fn resolve_column_indices(table: &TableMetadata, columns: &[String]) -> Result<V
 /// - storage: row/columnar (case-insensitive)
 /// - compression: none/lz4/zstd (case-insensitive)
 /// - row_group_size: 1000〜1_000_000
+/// - rowid_mode: none/direct (case-insensitive)
 /// - 未知キーは UnknownTableOption
 /// - 重複キーは DuplicateOption
 pub fn parse_storage_options(with_options: &[(String, String)]) -> Result<StorageOptions> {
@@ -121,6 +122,14 @@ pub fn parse_storage_options(with_options: &[(String, String)]) -> Result<Storag
                 }
                 options.row_group_size = size;
             }
+            "rowid_mode" => {
+                let normalized = value.trim().to_lowercase();
+                options.row_id_mode = match normalized.as_str() {
+                    "none" => RowIdMode::None,
+                    "direct" => RowIdMode::Direct,
+                    _ => return Err(ExecutorError::InvalidRowIdMode(value.clone())),
+                };
+            }
             _ => return Err(ExecutorError::UnknownTableOption(key.clone())),
         }
     }
@@ -131,6 +140,7 @@ pub fn parse_storage_options(with_options: &[(String, String)]) -> Result<Storag
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RowIdMode;
     use crate::catalog::{ColumnMetadata, MemoryCatalog};
     use crate::executor::ExecutorError;
     use crate::planner::types::ResolvedType;
@@ -220,17 +230,20 @@ mod tests {
         assert_eq!(opts.storage_type, StorageType::Row);
         assert_eq!(opts.compression, Compression::Lz4);
         assert_eq!(opts.row_group_size, 100_000);
+        assert_eq!(opts.row_id_mode, RowIdMode::None);
 
         // overrides
         let opts = parse_storage_options(&[
             ("storage".into(), " columnar ".into()),
             ("compression".into(), " zstd ".into()),
             ("row_group_size".into(), " 5000 ".into()),
+            ("rowid_mode".into(), " direct ".into()),
         ])
         .unwrap();
         assert_eq!(opts.storage_type, StorageType::Columnar);
         assert_eq!(opts.compression, Compression::Zstd);
         assert_eq!(opts.row_group_size, 5_000);
+        assert_eq!(opts.row_id_mode, RowIdMode::Direct);
     }
 
     #[test]
@@ -262,6 +275,10 @@ mod tests {
         // invalid row_group_size (range)
         let err = parse_storage_options(&[("row_group_size".into(), "10".into())]).unwrap_err();
         assert!(matches!(err, ExecutorError::InvalidRowGroupSize(_)));
+
+        // invalid rowid_mode
+        let err = parse_storage_options(&[("rowid_mode".into(), "invalid".into())]).unwrap_err();
+        assert!(matches!(err, ExecutorError::InvalidRowIdMode(_)));
     }
 
     #[test]

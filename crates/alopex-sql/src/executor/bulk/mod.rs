@@ -302,6 +302,7 @@ fn bulk_load_columnar<S: KVStore, C: Catalog>(
     mut reader: Box<dyn BulkReader>,
 ) -> Result<u64> {
     let _ = catalog; // reserved for future index integration
+
     let row_group_size = table.storage_options.row_group_size.max(1) as usize;
     let compression = map_compression(table.storage_options.compression);
     let mut writer = SegmentWriterV2::new(SegmentConfigV2 {
@@ -333,7 +334,7 @@ fn bulk_load_columnar<S: KVStore, C: Catalog>(
     let segment = writer
         .finish()
         .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
-    persist_segment(txn, table, segment, &row_group_stats)?;
+    let _segment_id = persist_segment(txn, table, segment, &row_group_stats)?;
 
     Ok(total_rows)
 }
@@ -368,10 +369,14 @@ fn build_segment_schema(table: &TableMetadata) -> Result<Schema> {
 
 fn logical_type_for(ty: &ResolvedType) -> Result<LogicalType> {
     match ty {
-        ResolvedType::Integer
-        | ResolvedType::BigInt
-        | ResolvedType::Timestamp
-        | ResolvedType::Vector { .. } => Ok(LogicalType::Int64),
+        ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Timestamp => {
+            Ok(LogicalType::Int64)
+        }
+        ResolvedType::Vector { dimension, .. } => {
+            Ok(LogicalType::Fixed(dimension.checked_mul(4).ok_or_else(|| {
+                ExecutorError::Columnar("vector dimension overflow when computing fixed len".into())
+            })? as u16))
+        }
         ResolvedType::Float => Ok(LogicalType::Float32),
         ResolvedType::Double => Ok(LogicalType::Float64),
         ResolvedType::Boolean => Ok(LogicalType::Bool),
@@ -683,7 +688,7 @@ fn persist_segment<S: KVStore>(
     table: &TableMetadata,
     segment: ColumnSegmentV2,
     row_group_stats: &[crate::columnar::statistics::RowGroupStatistics],
-) -> Result<()> {
+) -> Result<u64> {
     if row_group_stats.len() != segment.meta.row_groups.len() {
         return Err(ExecutorError::Columnar(
             "row group statistics length mismatch".into(),
@@ -733,7 +738,7 @@ fn persist_segment<S: KVStore>(
         .serialize(&index)
         .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
     txn.inner_mut().put(index_key, index_bytes)?;
-    Ok(())
+    Ok(segment_id)
 }
 
 /// テキストをテーブル型に合わせて `SqlValue` へ変換する。
