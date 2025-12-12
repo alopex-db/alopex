@@ -177,15 +177,23 @@ fn run_insert_during_drop_table(model: ExecutionModel) -> TestResult {
         }),
         ExecutionModel::SyncMulti => {
             let fixture = Arc::new(DdlFixture::new_in_memory());
+            let barrier_setup = Arc::new(std::sync::Barrier::new(conc));
+            let barrier_drop = Arc::new(std::sync::Barrier::new(conc));
             harness.run_concurrent(move |tid, ctx| {
                 let _op = begin_op(ctx);
-                let fixture = fixture.clone();
                 let start = Instant::now();
                 if tid == 0 {
                     fixture.create("t1")?;
                     fixture.insert_row("t1", 1)?;
-                } else {
+                }
+                barrier_setup.wait();
+                if tid == 0 {
                     fixture.drop_table("t1")?;
+                }
+                barrier_drop.wait();
+                if tid != 0 {
+                    let res = fixture.insert_row("t1", tid + 2);
+                    assert!(res.is_err());
                 }
                 ctx.metrics.record_success();
                 ctx.metrics.record_latency(start.elapsed());

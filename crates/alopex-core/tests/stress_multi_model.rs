@@ -687,6 +687,7 @@ fn run_kv_sql_concurrent_access(model: ExecutionModel) -> TestResult {
 
 fn run_sql_select_kv_update_isolation(model: ExecutionModel) -> TestResult {
     let cfg = multi_model_config("sql_select_kv_update_isolation", model, 3);
+    let concurrency = cfg.concurrency.max(1);
     let harness = StressTestHarness::new(cfg).unwrap();
     let store = Arc::new(MemoryKV::new());
     match model {
@@ -708,6 +709,7 @@ fn run_sql_select_kv_update_isolation(model: ExecutionModel) -> TestResult {
         }),
         ExecutionModel::SyncMulti => {
             let store_sync = store.clone();
+            let barrier = Arc::new(std::sync::Barrier::new(concurrency));
             harness.run_concurrent(move |tid, ctx| {
                 let _op = begin_op(ctx);
                 let start = Instant::now();
@@ -715,7 +717,9 @@ fn run_sql_select_kv_update_isolation(model: ExecutionModel) -> TestResult {
                     let mut txn = store_sync.begin(TxnMode::ReadWrite)?;
                     txn.put(b"kv:isolation".to_vec(), b"v1".to_vec())?;
                     txn.commit_self()?;
-                } else {
+                }
+                barrier.wait();
+                if tid != 0 {
                     let mut reader = store_sync.begin(TxnMode::ReadOnly)?;
                     assert_eq!(
                         reader.get(&b"kv:isolation".to_vec())?,
