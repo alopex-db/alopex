@@ -233,6 +233,157 @@ pub fn execute_columnar_scan<S: KVStore>(
     Ok(results)
 }
 
+/// ColumnarScan を実行し、フィルタ後の RowID のみを返す。
+///
+/// RowIdMode::Direct で columnar ストレージの場合、行本体の読み込みを避けて
+/// RowID 再フェッチ用の候補セットを得る目的で使用する。
+pub fn execute_columnar_row_ids<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    table_meta: &TableMetadata,
+    scan: &ColumnarScan,
+) -> Result<Vec<u64>> {
+    if table_meta.storage_options.storage_type != crate::catalog::StorageType::Columnar {
+        return Err(ExecutorError::Columnar(
+            "execute_columnar_row_ids requires columnar storage".into(),
+        ));
+    }
+
+    let mut needed: BTreeSet<usize> = scan.projected_columns.iter().copied().collect();
+    if let Some(pred) = &scan.residual_filter {
+        collect_column_indices(pred, &mut needed);
+    }
+    let projected: Vec<usize> = needed.into_iter().collect();
+
+    let segment_ids = load_segment_index(txn, table_meta.table_id)?;
+    if segment_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let row_id_col_idx = if table_meta.storage_options.row_id_mode == RowIdMode::Direct {
+        table_meta
+            .columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case("row_id"))
+    } else {
+        None
+    };
+
+    let mut results = Vec::new();
+    let mut next_row_id = 0u64;
+    for segment_id in segment_ids {
+        let segment = load_segment(txn, table_meta.table_id, segment_id)?;
+        let reader =
+            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))
+                .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+
+        let row_group_stats = load_row_group_stats(txn, table_meta.table_id, segment_id);
+        let row_group_count = segment.meta.row_groups.len();
+        for rg_index in 0..row_group_count {
+            let should_skip = match row_group_stats.as_ref() {
+                Some(stats) if stats.len() == row_group_count => {
+                    scan.should_skip_row_group(&stats[rg_index])
+                }
+                _ => false,
+            };
+            if should_skip {
+                continue;
+            }
+
+            let batch = reader
+                .read_row_group_by_index(&projected, rg_index)
+                .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+            let batch = if !segment.row_ids.is_empty() {
+                if let Some(meta) = segment.meta.row_groups.get(rg_index) {
+                    let start = meta.row_start as usize;
+                    let end = start + meta.row_count as usize;
+                    if end <= segment.row_ids.len() {
+                        batch.with_row_ids(Some(segment.row_ids[start..end].to_vec()))
+                    } else {
+                        batch
+                    }
+                } else {
+                    batch
+                }
+            } else {
+                batch
+            };
+
+            let row_count = batch.num_rows();
+            for row_idx in 0..row_count {
+                // 残余フィルタの評価に必要なカラムだけ値を復元する。
+                let mut values = vec![SqlValue::Null; table_meta.column_count()];
+                for (pos, &table_col_idx) in projected.iter().enumerate() {
+                    let column = batch.columns.get(pos).ok_or_else(|| {
+                        ExecutorError::Columnar("missing projected column".into())
+                    })?;
+                    let bitmap = batch.null_bitmaps.get(pos).and_then(|b| b.as_ref());
+                    let value = value_from_column(
+                        column,
+                        bitmap,
+                        row_idx,
+                        &table_meta
+                            .columns
+                            .get(table_col_idx)
+                            .ok_or_else(|| {
+                                ExecutorError::Columnar("column index out of bounds".into())
+                            })?
+                            .data_type,
+                    )?;
+                    values[table_col_idx] = value;
+                }
+
+                if let Some(predicate) = scan.residual_filter.as_ref() {
+                    let ctx = EvalContext::new(&values);
+                    let keep = matches!(evaluate(predicate, &ctx)?, SqlValue::Boolean(true));
+                    if !keep {
+                        continue;
+                    }
+                }
+
+                let row_id = match table_meta.storage_options.row_id_mode {
+                    RowIdMode::Direct => {
+                        if let Some(row_ids) = batch.row_ids.as_ref() {
+                            *row_ids.get(row_idx).ok_or_else(|| {
+                                ExecutorError::Columnar(
+                                    "row_id missing for row in row_id_mode=direct".into(),
+                                )
+                            })?
+                        } else if let Some(idx) = row_id_col_idx {
+                            let val = values.get(idx).ok_or_else(|| {
+                                ExecutorError::Columnar(
+                                    "row_id column missing in projected values".into(),
+                                )
+                            })?;
+                            match val {
+                                SqlValue::Integer(v) if *v >= 0 => *v as u64,
+                                SqlValue::BigInt(v) if *v >= 0 => *v as u64,
+                                other => {
+                                    return Err(ExecutorError::Columnar(format!(
+                                        "row_id column must be non-negative integer, got {}",
+                                        other.type_name()
+                                    )));
+                                }
+                            }
+                        } else {
+                            let rid = next_row_id;
+                            next_row_id = next_row_id.saturating_add(1);
+                            rid
+                        }
+                    }
+                    RowIdMode::None => {
+                        let rid = next_row_id;
+                        next_row_id = next_row_id.saturating_add(1);
+                        rid
+                    }
+                };
+                results.push(row_id);
+            }
+        }
+    }
+
+    Ok(results)
+}
+
 /// TypedExpr から PushdownFilter へ変換する（変換不可なら None）。
 pub fn expr_to_pushdown(expr: &TypedExpr) -> Option<PushdownFilter> {
     match &expr.kind {
@@ -690,6 +841,8 @@ mod tests {
                 total_count: 3,
                 distinct_count: None,
             }],
+            row_id_min: None,
+            row_id_max: None,
         };
         let filter = PushdownFilter::Eq {
             column_idx: 0,
@@ -709,6 +862,8 @@ mod tests {
                 total_count: 3,
                 distinct_count: None,
             }],
+            row_id_min: None,
+            row_id_max: None,
         };
         let filter = PushdownFilter::Range {
             column_idx: 0,
@@ -729,6 +884,8 @@ mod tests {
                 total_count: 2,
                 distinct_count: None,
             }],
+            row_id_min: None,
+            row_id_max: None,
         };
         let filter = PushdownFilter::IsNull {
             column_idx: 0,
@@ -748,6 +905,8 @@ mod tests {
                 total_count: 2,
                 distinct_count: None,
             }],
+            row_id_min: None,
+            row_id_max: None,
         };
         let filter = PushdownFilter::IsNull {
             column_idx: 0,
@@ -767,6 +926,8 @@ mod tests {
                 total_count: 3,
                 distinct_count: None,
             }],
+            row_id_min: None,
+            row_id_max: None,
         };
         let filter = PushdownFilter::And(vec![
             PushdownFilter::Eq {
@@ -792,6 +953,8 @@ mod tests {
                 total_count: 3,
                 distinct_count: None,
             }],
+            row_id_min: None,
+            row_id_max: None,
         };
         let filter = PushdownFilter::Or(vec![
             PushdownFilter::Eq {
@@ -1022,7 +1185,7 @@ mod tests {
         )
         .with_table_id(21);
         table.storage_options.storage_type = crate::catalog::StorageType::Columnar;
-        table.storage_options.row_id_mode = RowIdMode::None;
+        table.storage_options.row_id_mode = RowIdMode::Direct;
 
         let schema = alopex_core::columnar::segment_v2::Schema {
             columns: vec![alopex_core::columnar::segment_v2::ColumnSchema {

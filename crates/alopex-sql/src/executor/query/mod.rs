@@ -9,7 +9,7 @@ use crate::storage::{SqlTransaction, SqlValue};
 
 use super::{ColumnInfo, Row};
 
-mod columnar_scan;
+pub mod columnar_scan;
 pub mod iterator;
 mod knn;
 mod project;

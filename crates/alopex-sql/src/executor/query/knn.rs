@@ -1,10 +1,16 @@
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BinaryHeap};
 
-use alopex_core::kv::KVStore;
+use alopex_core::columnar::encoding::Column;
+use alopex_core::columnar::encoding_v2::Bitmap;
+use alopex_core::columnar::kvs_bridge::key_layout;
+use alopex_core::columnar::segment_v2::{ColumnSegmentV2, InMemorySegmentSource, SegmentReaderV2};
+use alopex_core::kv::{KVStore, KVTransaction};
+use alopex_core::storage::format::bincode_config;
+use bincode::Options;
 
 use crate::ast::ddl::IndexMethod;
-use crate::catalog::{Catalog, IndexMetadata, StorageType, TableMetadata};
+use crate::catalog::{Catalog, IndexMetadata, RowIdMode, StorageType, TableMetadata};
 use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result, Row};
@@ -75,7 +81,7 @@ pub fn execute_knn_query<S: KVStore, C: Catalog>(
                 higher_is_better,
             )?;
             order_entries(&mut entries, higher_is_better);
-            let rows: Vec<Row> = entries.into_iter().map(|e| e.row).collect();
+            let rows = materialize_rows_by_id(txn, &table_meta, projection, entries)?;
             let projected = project::execute_project(rows, projection, &table_meta.columns)?;
             return Ok(ExecutionResult::Query(projected));
         }
@@ -91,7 +97,7 @@ pub fn execute_knn_query<S: KVStore, C: Catalog>(
         higher_is_better,
     )?;
     order_entries(&mut entries, higher_is_better);
-    let rows: Vec<Row> = entries.into_iter().map(|e| e.row).collect();
+    let rows = materialize_rows_by_id(txn, &table_meta, projection, entries)?;
     let projected = project::execute_project(rows, projection, &table_meta.columns)?;
     Ok(ExecutionResult::Query(projected))
 }
@@ -221,6 +227,225 @@ fn order_entries(entries: &mut [HeapEntry], higher_is_better: bool) {
             a.score.total_cmp(&b.score)
         }
     });
+}
+
+fn materialize_rows_by_id<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    table_meta: &TableMetadata,
+    projection: &Projection,
+    entries: Vec<HeapEntry>,
+) -> Result<Vec<Row>> {
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    if table_meta.storage_options.storage_type == StorageType::Columnar
+        && matches!(table_meta.storage_options.row_id_mode, RowIdMode::Direct)
+    {
+        let row_ids: Vec<u64> = entries.iter().map(|e| e.row.row_id).collect();
+        return fetch_columnar_rows_by_id(txn, table_meta, projection, &row_ids);
+    }
+    Ok(entries.into_iter().map(|e| e.row).collect())
+}
+
+fn fetch_columnar_rows_by_id<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    table_meta: &TableMetadata,
+    projection: &Projection,
+    row_ids: &[u64],
+) -> Result<Vec<Row>> {
+    if row_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let projected_columns = columnar_scan::projection_to_columns(projection, table_meta);
+    let mut by_segment: BTreeMap<u64, Vec<(usize, u64, u64)>> = BTreeMap::new();
+    for (pos, &row_id) in row_ids.iter().enumerate() {
+        let (segment_id, offset) = alopex_core::columnar::segment_v2::decode_row_id(row_id);
+        by_segment
+            .entry(segment_id)
+            .or_default()
+            .push((pos, row_id, offset));
+    }
+
+    let mut results: Vec<Option<Row>> = vec![None; row_ids.len()];
+
+    for (segment_id, entries) in by_segment {
+        let key = key_layout::column_segment_key(table_meta.table_id, segment_id, 0);
+        let bytes = txn
+            .inner_mut()
+            .get(&key)?
+            .ok_or_else(|| ExecutorError::Columnar(format!("segment {segment_id} missing")))?;
+        let segment: ColumnSegmentV2 = bincode_config()
+            .deserialize(&bytes)
+            .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+        let reader =
+            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))
+                .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+
+        let mut by_row_group: BTreeMap<usize, Vec<(usize, u64, usize)>> = BTreeMap::new();
+        for (pos, row_id, offset) in entries {
+            let (rg_idx, row_idx) = locate_row_group(&segment, offset)
+                .ok_or_else(|| ExecutorError::Columnar(format!("row_id {row_id} out of range")))?;
+            by_row_group
+                .entry(rg_idx)
+                .or_default()
+                .push((pos, row_id, row_idx));
+        }
+
+        for (rg_idx, rows) in by_row_group {
+            let batch = reader
+                .read_row_group_by_index(&projected_columns, rg_idx)
+                .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+            for (pos, row_id, row_idx) in rows {
+                let values = build_row_from_batch(&batch, &projected_columns, row_idx, table_meta)?;
+                results[pos] = Some(Row::new(row_id, values));
+            }
+        }
+    }
+
+    if results.iter().any(|r| r.is_none()) {
+        return Err(ExecutorError::Columnar(
+            "failed to materialize some row_ids".into(),
+        ));
+    }
+    Ok(results.into_iter().map(|r| r.unwrap()).collect())
+}
+
+fn locate_row_group(segment: &ColumnSegmentV2, local_offset: u64) -> Option<(usize, usize)> {
+    for (idx, meta) in segment.meta.row_groups.iter().enumerate() {
+        let start = meta.row_start;
+        let end = meta.row_start.saturating_add(meta.row_count);
+        if local_offset >= start && local_offset < end {
+            let row_idx = (local_offset - start) as usize;
+            return Some((idx, row_idx));
+        }
+    }
+    None
+}
+
+fn build_row_from_batch(
+    batch: &alopex_core::columnar::segment_v2::RecordBatch,
+    projected_columns: &[usize],
+    row_idx: usize,
+    table_meta: &TableMetadata,
+) -> Result<Vec<SqlValue>> {
+    if batch.columns.len() != projected_columns.len() {
+        return Err(ExecutorError::Columnar(format!(
+            "projected column count mismatch: expected {}, got {}",
+            projected_columns.len(),
+            batch.columns.len()
+        )));
+    }
+
+    let mut values = vec![SqlValue::Null; table_meta.column_count()];
+    for (pos, &table_col_idx) in projected_columns.iter().enumerate() {
+        let column = batch
+            .columns
+            .get(pos)
+            .ok_or_else(|| ExecutorError::Columnar("missing projected column".into()))?;
+        let bitmap = batch.null_bitmaps.get(pos).and_then(|b| b.as_ref());
+        let value = value_from_column(
+            column,
+            bitmap,
+            row_idx,
+            &table_meta
+                .columns
+                .get(table_col_idx)
+                .ok_or_else(|| ExecutorError::Columnar("column index out of bounds".into()))?
+                .data_type,
+        )?;
+        values[table_col_idx] = value;
+    }
+    Ok(values)
+}
+
+fn value_from_column(
+    column: &Column,
+    bitmap: Option<&Bitmap>,
+    row_idx: usize,
+    ty: &crate::planner::types::ResolvedType,
+) -> Result<SqlValue> {
+    if let Some(bm) = bitmap {
+        if !bm.get(row_idx) {
+            return Ok(SqlValue::Null);
+        }
+    }
+
+    use crate::planner::types::ResolvedType;
+    match (ty, column) {
+        (ResolvedType::Integer, Column::Int64(values)) => {
+            let v = *values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            Ok(SqlValue::Integer(v as i32))
+        }
+        (ResolvedType::BigInt | ResolvedType::Timestamp, Column::Int64(values)) => {
+            let v = *values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            if matches!(ty, ResolvedType::Timestamp) {
+                Ok(SqlValue::Timestamp(v))
+            } else {
+                Ok(SqlValue::BigInt(v))
+            }
+        }
+        (ResolvedType::Float, Column::Float32(values)) => {
+            let v = *values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            Ok(SqlValue::Float(v))
+        }
+        (ResolvedType::Double, Column::Float64(values)) => {
+            let v = *values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            Ok(SqlValue::Double(v))
+        }
+        (ResolvedType::Boolean, Column::Bool(values)) => {
+            let v = *values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            Ok(SqlValue::Boolean(v))
+        }
+        (ResolvedType::Text, Column::Binary(values)) => {
+            let raw = values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            String::from_utf8(raw.clone())
+                .map(SqlValue::Text)
+                .map_err(|e| ExecutorError::Columnar(e.to_string()))
+        }
+        (ResolvedType::Blob, Column::Binary(values)) => {
+            let raw = values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            Ok(SqlValue::Blob(raw.clone()))
+        }
+        (ResolvedType::Vector { .. }, Column::Fixed { values, .. }) => {
+            let raw = values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            if raw.len() % 4 != 0 {
+                return Err(ExecutorError::Columnar(
+                    "invalid vector byte length in columnar segment".into(),
+                ));
+            }
+            let floats: Vec<f32> = raw
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+                .collect();
+            Ok(SqlValue::Vector(floats))
+        }
+        (_, Column::Binary(values)) => {
+            let raw = values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            Ok(SqlValue::Blob(raw.clone()))
+        }
+        _ => Err(ExecutorError::Columnar(
+            "unsupported column type for columnar read".into(),
+        )),
+    }
 }
 
 fn find_hnsw_index<C: Catalog>(

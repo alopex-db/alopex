@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(opts.storage_type, StorageType::Row);
         assert_eq!(opts.compression, Compression::Lz4);
         assert_eq!(opts.row_group_size, 100_000);
-        assert_eq!(opts.row_id_mode, RowIdMode::None);
+        assert_eq!(opts.row_id_mode, RowIdMode::Direct);
 
         // overrides
         let opts = parse_storage_options(&[
