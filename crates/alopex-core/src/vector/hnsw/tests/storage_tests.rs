@@ -148,5 +148,5 @@ fn free_list_and_key_map_reconstructed_after_compaction() {
     assert!(loaded.free_list.contains(&removed));
     assert!(loaded.key_to_node.contains_key(b"a".as_slice()));
     assert!(loaded.key_to_node.contains_key(b"c".as_slice()));
-    assert!(loaded.key_to_node.get(b"b".as_slice()).is_none());
+    assert!(!loaded.key_to_node.contains_key(b"b".as_slice()));
 }

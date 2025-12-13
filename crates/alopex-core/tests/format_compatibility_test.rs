@@ -67,6 +67,7 @@ fn compression_from_env() -> CompressionAlgorithm {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::match_like_matches_macro)]
 fn compression_available(alg: CompressionAlgorithm) -> bool {
     match alg {
         CompressionAlgorithm::Zstd => cfg!(feature = "compression-zstd"),

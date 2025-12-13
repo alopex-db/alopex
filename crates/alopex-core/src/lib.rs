@@ -6,6 +6,7 @@ pub mod columnar;
 pub mod error;
 pub mod kv;
 pub mod log;
+pub mod lsm;
 pub mod obs;
 pub mod storage;
 pub mod txn;

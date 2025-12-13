@@ -1959,7 +1959,7 @@ mod tests {
         let (results, _stats) = restored.search_with_stats(params.clone()).unwrap();
         assert_eq!(results.len(), 3);
         // 期待される並び（スコアDESC、同スコアはrow_id ASC）とプロジェクション値を計算。
-        let scalar = ScalarKernel::default();
+        let scalar = ScalarKernel;
         let expected = vec![
             (
                 keys[0],
