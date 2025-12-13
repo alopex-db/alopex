@@ -612,6 +612,29 @@ fn ring_logical_to_physical(
         + offset_in_segment)
 }
 
+fn read_ring_bytes(
+    file: &mut File,
+    mut logical_offset: u64,
+    len: usize,
+    segment_size: u64,
+    segment_data_len: u64,
+    ring_len: u64,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(len);
+    while out.len() < len {
+        let offset_in_segment = logical_offset % segment_data_len;
+        let remaining_in_segment = (segment_data_len - offset_in_segment) as usize;
+        let chunk_len = remaining_in_segment.min(len - out.len());
+        let phys = ring_logical_to_physical(logical_offset, segment_size, segment_data_len)?;
+        file.seek(SeekFrom::Start(phys))?;
+        let mut buf = vec![0u8; chunk_len];
+        file.read_exact(&mut buf)?;
+        out.extend_from_slice(&buf);
+        logical_offset = (logical_offset + (chunk_len as u64)) % ring_len;
+    }
+    Ok(out)
+}
+
 impl WalWriter {
     fn write_ring(
         &mut self,
@@ -645,6 +668,13 @@ fn persist_section_header(file: &mut File, offset: u64, header: &WalSectionHeade
     file.seek(SeekFrom::Start(offset))?;
     file.write_all(&header.to_bytes())?;
     Ok(())
+}
+
+fn load_section_header(file: &mut File, offset: u64) -> Result<WalSectionHeader> {
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = [0u8; WAL_SECTION_HEADER_SIZE];
+    file.read_exact(&mut bytes)?;
+    Ok(WalSectionHeader::from_bytes(&bytes))
 }
 
 #[cfg(test)]
@@ -1287,5 +1317,329 @@ impl WalWriter {
     /// Total logical ring length in bytes.
     pub fn ring_len(&self) -> u64 {
         self.ring_len
+    }
+}
+
+/// Result of WAL replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalReplay {
+    /// Successfully decoded entries, in order.
+    pub entries: Vec<WalEntry>,
+    /// If replay stopped early, the logical ring offset where it stopped.
+    pub stopped_at: Option<u64>,
+    /// If replay stopped early, the reason (e.g. checksum mismatch / truncated entry).
+    pub stop_reason: Option<String>,
+}
+
+/// WAL reader for crash recovery.
+#[derive(Debug)]
+pub struct WalReader {
+    file: File,
+    config: WalConfig,
+    section_header: WalSectionHeader,
+    segment_id_base: u64,
+    segment_size: u64,
+    segment_data_len: u64,
+    ring_len: u64,
+    used_bytes: u64,
+}
+
+impl WalReader {
+    /// Open an existing WAL section for replay.
+    ///
+    /// The reader replays entries from `start_offset` (inclusive) up to `end_offset` (exclusive)
+    /// within the logical ring.
+    pub fn open(path: &Path, config: WalConfig) -> Result<Self> {
+        let mut file = OpenOptions::new().read(true).open(path)?;
+
+        let (segment_size, segment_data_len, max_segments, ring_len) =
+            compute_ring_layout(&config)?;
+        let wal_section_size = (WAL_SECTION_HEADER_SIZE as u64)
+            .checked_add(
+                segment_size
+                    .checked_mul(max_segments)
+                    .ok_or_else(|| Error::InvalidFormat("WAL section size overflow".into()))?,
+            )
+            .ok_or_else(|| Error::InvalidFormat("WAL section size overflow".into()))?;
+
+        let file_len = file.metadata()?.len();
+        if file_len < wal_section_size {
+            return Err(Error::InvalidFormat(
+                "WAL file is smaller than configured section size".into(),
+            ));
+        }
+
+        let section_header = load_section_header(&mut file, 0)?;
+        if section_header.start_offset >= ring_len {
+            return Err(Error::InvalidFormat(
+                "WAL start offset exceeds ring length".into(),
+            ));
+        }
+        if section_header.end_offset >= ring_len {
+            return Err(Error::InvalidFormat(
+                "WAL end offset exceeds ring length".into(),
+            ));
+        }
+
+        let used_bytes = if section_header.is_full {
+            ring_len
+        } else {
+            ring_distance(
+                section_header.start_offset,
+                section_header.end_offset,
+                ring_len,
+            )
+        };
+
+        let mut segment_id_base: Option<u64> = None;
+        for segment_index in 0..max_segments {
+            let header = read_segment_header(&mut file, segment_size, segment_index)?;
+            if segment_index == 0 {
+                segment_id_base = Some(header.segment_id);
+            } else if let Some(base) = segment_id_base {
+                if header.segment_id != base + segment_index {
+                    return Err(Error::InvalidFormat(
+                        "WAL segment_id sequence mismatch".into(),
+                    ));
+                }
+            }
+        }
+
+        Ok(Self {
+            file,
+            config,
+            section_header,
+            segment_id_base: segment_id_base.unwrap_or(0),
+            segment_size,
+            segment_data_len,
+            ring_len,
+            used_bytes,
+        })
+    }
+
+    /// Replay entries in the WAL section.
+    ///
+    /// If a corrupted or incomplete entry is detected, replay stops and returns the entries
+    /// decoded so far with `stop_reason` populated. This supports crash recovery where the tail
+    /// of the WAL may be partially written.
+    pub fn replay(&mut self) -> Result<WalReplay> {
+        let mut entries = Vec::new();
+        let mut cursor = self.section_header.start_offset;
+        let mut remaining = self.used_bytes;
+        let mut last_lsn: Option<u64> = None;
+
+        while remaining > 0 {
+            if remaining < WAL_ENTRY_FIXED_HEADER as u64 {
+                return Ok(WalReplay {
+                    entries,
+                    stopped_at: Some(cursor),
+                    stop_reason: Some("WAL entry header truncated".into()),
+                });
+            }
+
+            let header_bytes = read_ring_bytes(
+                &mut self.file,
+                cursor,
+                WAL_ENTRY_FIXED_HEADER,
+                self.segment_size,
+                self.segment_data_len,
+                self.ring_len,
+            )?;
+            let payload_and_crc_len =
+                u32::from_le_bytes(header_bytes[8..12].try_into().expect("fixed slice length"))
+                    as u64;
+            let total_len = (WAL_ENTRY_FIXED_HEADER as u64)
+                .checked_add(payload_and_crc_len)
+                .ok_or_else(|| Error::InvalidFormat("WAL entry length overflow".into()))?;
+
+            if total_len == 0 || total_len > self.ring_len {
+                return Ok(WalReplay {
+                    entries,
+                    stopped_at: Some(cursor),
+                    stop_reason: Some("WAL entry length is invalid".into()),
+                });
+            }
+
+            if total_len > remaining {
+                return Ok(WalReplay {
+                    entries,
+                    stopped_at: Some(cursor),
+                    stop_reason: Some("WAL entry truncated at tail".into()),
+                });
+            }
+
+            let entry_bytes = read_ring_bytes(
+                &mut self.file,
+                cursor,
+                total_len as usize,
+                self.segment_size,
+                self.segment_data_len,
+                self.ring_len,
+            )?;
+
+            let decoded = match WalEntry::decode(&entry_bytes) {
+                Ok((entry, consumed)) => {
+                    if consumed as u64 != total_len {
+                        return Ok(WalReplay {
+                            entries,
+                            stopped_at: Some(cursor),
+                            stop_reason: Some("WAL entry decode consumed unexpected length".into()),
+                        });
+                    }
+                    entry
+                }
+                Err(err) => {
+                    return Ok(WalReplay {
+                        entries,
+                        stopped_at: Some(cursor),
+                        stop_reason: Some(format!("WAL entry decode failed: {err}")),
+                    });
+                }
+            };
+
+            if let Some(prev) = last_lsn {
+                if decoded.lsn <= prev {
+                    return Ok(WalReplay {
+                        entries,
+                        stopped_at: Some(cursor),
+                        stop_reason: Some("WAL LSN is not strictly increasing".into()),
+                    });
+                }
+            }
+            last_lsn = Some(decoded.lsn);
+
+            entries.push(decoded);
+            cursor = (cursor + total_len) % self.ring_len;
+            remaining -= total_len;
+        }
+
+        Ok(WalReplay {
+            entries,
+            stopped_at: None,
+            stop_reason: None,
+        })
+    }
+
+    /// Current section header (start/end/is_full).
+    pub fn section_header(&self) -> &WalSectionHeader {
+        &self.section_header
+    }
+
+    /// Total logical ring length in bytes.
+    pub fn ring_len(&self) -> u64 {
+        self.ring_len
+    }
+
+    /// Segment ID base (segment_id = base + index).
+    pub fn segment_id_base(&self) -> u64 {
+        self.segment_id_base
+    }
+
+    /// Configuration used by this reader.
+    pub fn config(&self) -> &WalConfig {
+        &self.config
+    }
+}
+
+#[cfg(test)]
+mod reader {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn wal_reader_replays_entries_in_order() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_reader_basic");
+        let config = WalConfig {
+            segment_size: 4096,
+            max_segments: 1,
+            ..Default::default()
+        };
+
+        let mut writer = WalWriter::create(&path, config.clone(), 10, 1).unwrap();
+        let e1 = WalEntry::put(1, b"a".to_vec(), b"1".to_vec());
+        let e2 = WalEntry::delete(2, b"b".to_vec());
+        writer.append(&e1).unwrap();
+        writer.append(&e2).unwrap();
+
+        let mut reader = WalReader::open(&path, config).unwrap();
+        let replay = reader.replay().unwrap();
+        assert_eq!(replay.stop_reason, None);
+        assert_eq!(replay.entries, vec![e1, e2]);
+    }
+
+    #[test]
+    fn wal_reader_skips_entries_before_start_offset() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_reader_start");
+        let config = WalConfig {
+            segment_size: 4096,
+            max_segments: 1,
+            ..Default::default()
+        };
+
+        let mut writer = WalWriter::create(&path, config.clone(), 10, 1).unwrap();
+        let e1 = WalEntry::put(1, b"a".to_vec(), b"1".to_vec());
+        let e2 = WalEntry::put(2, b"b".to_vec(), b"2".to_vec());
+        let e1_len = e1.encode().unwrap().len() as u64;
+        writer.append(&e1).unwrap();
+        writer.append(&e2).unwrap();
+
+        writer.advance_start(e1_len).unwrap();
+
+        let mut reader = WalReader::open(&path, config).unwrap();
+        let replay = reader.replay().unwrap();
+        assert_eq!(replay.stop_reason, None);
+        assert_eq!(replay.entries, vec![e2]);
+    }
+
+    #[test]
+    fn wal_reader_stops_on_corrupt_tail_and_returns_prefix() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_reader_corrupt_tail");
+        let config = WalConfig {
+            segment_size: 4096,
+            max_segments: 1,
+            ..Default::default()
+        };
+
+        let mut writer = WalWriter::create(&path, config.clone(), 10, 1).unwrap();
+        let e1 = WalEntry::put(1, b"a".to_vec(), b"1".to_vec());
+        let e2 = WalEntry::put(2, b"b".to_vec(), b"2".to_vec());
+        let e2_len = e2.encode().unwrap().len() as u64;
+        writer.append(&e1).unwrap();
+
+        // Simulate a crash where the section header advanced for e2, but its bytes are not valid.
+        let start_of_e2 = writer.section_header.end_offset;
+        let mut corrupted_header = writer.section_header.clone();
+        corrupted_header.end_offset = (start_of_e2 + e2_len) % writer.ring_len;
+        persist_section_header(&mut writer.file, 0, &corrupted_header).unwrap();
+
+        let mut reader = WalReader::open(&path, config).unwrap();
+        let replay = reader.replay().unwrap();
+        assert_eq!(replay.entries, vec![e1]);
+        assert!(replay.stop_reason.is_some());
+    }
+
+    #[test]
+    fn wal_reader_replays_entry_crossing_segment_boundary() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_reader_multi");
+        let entry = WalEntry::put(10, b"k".to_vec(), vec![0xCD; 64]);
+        let encoded = entry.encode().unwrap();
+        let segment_data_len = (encoded.len() - 1) as u64; // force boundary crossing
+        let config = WalConfig {
+            segment_size: (WAL_SEGMENT_HEADER_SIZE as u64 + segment_data_len) as usize,
+            max_segments: 2,
+            ..Default::default()
+        };
+
+        let mut writer = WalWriter::create(&path, config.clone(), 2000, entry.lsn).unwrap();
+        writer.append(&entry).unwrap();
+
+        let mut reader = WalReader::open(&path, config).unwrap();
+        let replay = reader.replay().unwrap();
+        assert_eq!(replay.stop_reason, None);
+        assert_eq!(replay.entries, vec![entry]);
     }
 }
