@@ -5,6 +5,10 @@
 //! implementations build on top of these primitives.
 
 use std::convert::TryFrom;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 
@@ -525,9 +529,122 @@ fn compute_crc(version: u16, segment_id: u64, first_lsn: u64) -> u32 {
     crc32fast::hash(&buf)
 }
 
+fn ring_distance(start: u64, end: u64, len: u64) -> u64 {
+    if start <= end {
+        end - start
+    } else {
+        len - (start - end)
+    }
+}
+
+fn compute_ring_layout(config: &WalConfig) -> Result<(u64, u64, u64, u64)> {
+    if config.max_segments == 0 {
+        return Err(Error::InvalidFormat("max_segments must be >= 1".into()));
+    }
+    let segment_size = config.segment_size as u64;
+    let segment_header_bytes = WAL_SEGMENT_HEADER_SIZE as u64;
+    if segment_size <= segment_header_bytes {
+        return Err(Error::InvalidFormat(
+            "WAL segment size too small for segment header".into(),
+        ));
+    }
+    let segment_data_len = segment_size - segment_header_bytes;
+    let max_segments = config.max_segments as u64;
+    let ring_len = segment_data_len
+        .checked_mul(max_segments)
+        .ok_or_else(|| Error::InvalidFormat("WAL ring length overflow".into()))?;
+    if ring_len > WalSectionHeader::OFFSET_MASK {
+        return Err(Error::InvalidFormat(
+            "WAL ring length exceeds offset encoding capacity".into(),
+        ));
+    }
+    Ok((segment_size, segment_data_len, max_segments, ring_len))
+}
+
+fn segment_header_offset(segment_size: u64, segment_index: u64) -> u64 {
+    (WAL_SECTION_HEADER_SIZE as u64) + (segment_index * segment_size)
+}
+
+fn read_segment_header(
+    file: &mut File,
+    segment_size: u64,
+    segment_index: u64,
+) -> Result<WalSegmentHeader> {
+    let off = segment_header_offset(segment_size, segment_index);
+    file.seek(SeekFrom::Start(off))?;
+    let mut bytes = [0u8; WAL_SEGMENT_HEADER_SIZE];
+    file.read_exact(&mut bytes)?;
+    WalSegmentHeader::from_bytes(&bytes)
+}
+
+fn write_segment_header(
+    file: &mut File,
+    segment_size: u64,
+    segment_index: u64,
+    header: &WalSegmentHeader,
+) -> Result<()> {
+    let off = segment_header_offset(segment_size, segment_index);
+    file.seek(SeekFrom::Start(off))?;
+    file.write_all(&header.to_bytes())?;
+    Ok(())
+}
+
+fn ring_logical_to_physical(
+    logical_offset: u64,
+    segment_size: u64,
+    segment_data_len: u64,
+) -> Result<u64> {
+    if segment_data_len == 0 {
+        return Err(Error::InvalidFormat("segment data length is zero".into()));
+    }
+    let segment_index = logical_offset / segment_data_len;
+    let offset_in_segment = logical_offset % segment_data_len;
+    Ok(segment_header_offset(segment_size, segment_index)
+        + (WAL_SEGMENT_HEADER_SIZE as u64)
+        + offset_in_segment)
+}
+
+impl WalWriter {
+    fn write_ring(
+        &mut self,
+        mut logical_offset: u64,
+        mut data: &[u8],
+        entry_lsn: u64,
+    ) -> Result<()> {
+        while !data.is_empty() {
+            let offset_in_segment = logical_offset % self.segment_data_len;
+            if offset_in_segment == 0 {
+                let segment_index = logical_offset / self.segment_data_len;
+                let header = WalSegmentHeader::new(self.segment_id_base + segment_index, entry_lsn);
+                write_segment_header(&mut self.file, self.segment_size, segment_index, &header)?;
+            }
+            let remaining_in_segment = (self.segment_data_len - offset_in_segment) as usize;
+            let chunk_len = remaining_in_segment.min(data.len());
+
+            let phys =
+                ring_logical_to_physical(logical_offset, self.segment_size, self.segment_data_len)?;
+            self.file.seek(SeekFrom::Start(phys))?;
+            self.file.write_all(&data[..chunk_len])?;
+
+            logical_offset = (logical_offset + (chunk_len as u64)) % self.ring_len;
+            data = &data[chunk_len..];
+        }
+        Ok(())
+    }
+}
+
+fn persist_section_header(file: &mut File, offset: u64, header: &WalSectionHeader) -> Result<()> {
+    file.seek(SeekFrom::Start(offset))?;
+    file.write_all(&header.to_bytes())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom};
+    use tempfile::tempdir;
 
     #[test]
     fn segment_header_roundtrip() {
@@ -644,10 +761,241 @@ mod tests {
         let header = WalSectionHeader {
             start_offset: 128,
             end_offset: 4096,
+            is_full: false,
         };
         let bytes = header.to_bytes();
         let decoded = WalSectionHeader::from_bytes(&bytes);
         assert_eq!(decoded, header);
+    }
+
+    #[test]
+    fn wal_writer_appends_and_updates_header() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal");
+        let config = WalConfig {
+            segment_size: 4096,
+            max_segments: 1,
+            ..Default::default()
+        };
+        let mut writer = WalWriter::create(&path, config, 1, 100).unwrap();
+        let entry = WalEntry::put(100, b"key".to_vec(), b"value".to_vec());
+        let encoded_len = entry.encode().unwrap().len() as u64;
+
+        let offset = writer.append(&entry).unwrap();
+        assert_eq!(
+            offset,
+            (WAL_SECTION_HEADER_SIZE + WAL_SEGMENT_HEADER_SIZE) as u64
+        );
+
+        let mut file = File::open(&path).unwrap();
+        let mut hdr = [0u8; WAL_SECTION_HEADER_SIZE];
+        file.read_exact(&mut hdr).unwrap();
+        let section = WalSectionHeader::from_bytes(&hdr);
+        assert_eq!(section.start_offset, 0);
+        assert_eq!(section.end_offset, encoded_len);
+        assert!(!section.is_full);
+
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        let mut buf = vec![0u8; encoded_len as usize];
+        file.read_exact(&mut buf).unwrap();
+        let (decoded, consumed) = WalEntry::decode(&buf).unwrap();
+        assert_eq!(consumed, encoded_len as usize);
+        assert_eq!(decoded, entry);
+    }
+
+    #[test]
+    fn wal_writer_wraps_when_full() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_wrap");
+        let entry = WalEntry::put(1, b"a".to_vec(), b"1".to_vec());
+        let entry_len = entry.encode().unwrap().len() as u64;
+        let header_bytes = (WAL_SECTION_HEADER_SIZE + WAL_SEGMENT_HEADER_SIZE) as u64;
+        let ring_len = (entry_len + (entry_len / 2)).max(entry_len + 1);
+        let segment_size = (WAL_SEGMENT_HEADER_SIZE as u64) + ring_len;
+        let config = WalConfig {
+            segment_size: segment_size as usize,
+            max_segments: 1,
+            ..Default::default()
+        };
+
+        let mut writer = WalWriter::create(&path, config, 2, 10).unwrap();
+        let first_offset = writer.append(&entry).unwrap();
+        assert_eq!(first_offset, header_bytes);
+
+        // Simulate checkpoint freeing the first entry.
+        writer.advance_start(entry_len).unwrap();
+
+        let second_offset = writer.append(&entry).unwrap();
+        assert_eq!(second_offset, header_bytes);
+
+        let mut file = File::open(&path).unwrap();
+        let mut hdr = [0u8; WAL_SECTION_HEADER_SIZE];
+        file.read_exact(&mut hdr).unwrap();
+        let section = WalSectionHeader::from_bytes(&hdr);
+        assert_eq!(section.end_offset, entry_len);
+        assert!(!section.is_full);
+
+        file.seek(SeekFrom::Start(second_offset)).unwrap();
+        let mut buf = vec![0u8; entry_len as usize];
+        file.read_exact(&mut buf).unwrap();
+        let (decoded, consumed) = WalEntry::decode(&buf).unwrap();
+        assert_eq!(consumed as u64, entry_len);
+        assert_eq!(decoded, entry);
+    }
+
+    #[test]
+    fn wal_writer_refuses_overwrite_without_checkpoint() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_no_overwrite");
+        let entry = WalEntry::put(1, b"a".to_vec(), b"1".to_vec());
+        let entry_len = entry.encode().unwrap().len() as u64;
+        let ring_len = entry_len + (entry_len / 2);
+        let segment_size = (WAL_SEGMENT_HEADER_SIZE as u64) + ring_len;
+        let config = WalConfig {
+            segment_size: segment_size as usize,
+            max_segments: 1,
+            ..Default::default()
+        };
+        let mut writer = WalWriter::create(&path, config, 2, 10).unwrap();
+        writer.append(&entry).unwrap();
+        assert!(writer.append(&entry).is_err());
+    }
+
+    #[test]
+    fn wal_writer_advances_start_and_reclaims_space() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_reclaim");
+        let entry = WalEntry::put(1, b"k".to_vec(), b"v".to_vec());
+        let entry_len = entry.encode().unwrap().len() as u64;
+        let header_bytes = (WAL_SECTION_HEADER_SIZE + WAL_SEGMENT_HEADER_SIZE) as u64;
+        let ring_len = entry_len * 2;
+        let segment_size = (WAL_SEGMENT_HEADER_SIZE as u64) + ring_len;
+        let config = WalConfig {
+            segment_size: segment_size as usize,
+            max_segments: 1,
+            ..Default::default()
+        };
+        let mut writer = WalWriter::create(&path, config, 5, 50).unwrap();
+
+        writer.append(&entry).unwrap();
+        writer.advance_start(entry_len).unwrap();
+
+        let second = writer.append(&entry).unwrap();
+        assert_eq!(second, header_bytes);
+    }
+
+    #[test]
+    fn wal_section_header_can_represent_full_buffer() {
+        let header = WalSectionHeader {
+            start_offset: 0,
+            end_offset: 0,
+            is_full: true,
+        };
+        let bytes = header.to_bytes();
+        let decoded = WalSectionHeader::from_bytes(&bytes);
+        assert_eq!(decoded, header);
+    }
+
+    #[test]
+    fn wal_writer_persists_full_state_and_open_respects_it() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_full");
+        let entry = WalEntry::put(1, b"k".to_vec(), vec![0; 32]);
+        let entry_len = entry.encode().unwrap().len() as u64;
+        let segment_size = (WAL_SEGMENT_HEADER_SIZE as u64) + entry_len;
+        let config = WalConfig {
+            segment_size: segment_size as usize,
+            max_segments: 1,
+            ..Default::default()
+        };
+
+        let mut writer = WalWriter::create(&path, config.clone(), 7, 1).unwrap();
+        writer.append(&entry).unwrap();
+
+        let mut file = File::open(&path).unwrap();
+        let mut hdr = [0u8; WAL_SECTION_HEADER_SIZE];
+        file.read_exact(&mut hdr).unwrap();
+        let section = WalSectionHeader::from_bytes(&hdr);
+        assert!(section.is_full);
+        assert_eq!(section.start_offset, 0);
+        assert_eq!(section.end_offset, 0);
+
+        let mut reopened = WalWriter::open(&path, config).unwrap();
+        assert!(reopened
+            .append(&WalEntry::put(2, b"x".to_vec(), b"y".to_vec()))
+            .is_err());
+    }
+
+    #[test]
+    fn wal_writer_multi_segment_entry_crosses_boundary_and_is_readable() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_multi");
+        let entry = WalEntry::put(10, b"k".to_vec(), vec![0xAB; 64]);
+        let encoded = entry.encode().unwrap();
+        let segment_data_len = (encoded.len() - 1) as u64; // force boundary crossing
+        let config = WalConfig {
+            segment_size: (WAL_SEGMENT_HEADER_SIZE as u64 + segment_data_len) as usize,
+            max_segments: 2,
+            ..Default::default()
+        };
+
+        let mut writer = WalWriter::create(&path, config.clone(), 1000, entry.lsn).unwrap();
+        let start_physical = writer.append(&entry).unwrap();
+        assert_eq!(
+            start_physical,
+            (WAL_SECTION_HEADER_SIZE + WAL_SEGMENT_HEADER_SIZE) as u64
+        );
+
+        // Re-open and validate segment headers + ring contents.
+        let _reopened = WalWriter::open(&path, config.clone()).unwrap();
+
+        fn read_ring_bytes(
+            file: &mut File,
+            mut logical_offset: u64,
+            len: usize,
+            segment_size: u64,
+            segment_data_len: u64,
+            ring_len: u64,
+        ) -> Vec<u8> {
+            let mut out = Vec::with_capacity(len);
+            while out.len() < len {
+                let offset_in_segment = logical_offset % segment_data_len;
+                let remaining_in_segment = (segment_data_len - offset_in_segment) as usize;
+                let chunk_len = remaining_in_segment.min(len - out.len());
+                let phys = ring_logical_to_physical(logical_offset, segment_size, segment_data_len)
+                    .unwrap();
+                file.seek(SeekFrom::Start(phys)).unwrap();
+                let mut buf = vec![0u8; chunk_len];
+                file.read_exact(&mut buf).unwrap();
+                out.extend_from_slice(&buf);
+                logical_offset = (logical_offset + chunk_len as u64) % ring_len;
+            }
+            out
+        }
+
+        let mut file = File::open(&path).unwrap();
+        let (segment_size, segment_data_len, _max_segments, ring_len) =
+            compute_ring_layout(&config).unwrap();
+
+        // First two segment headers should have been initialized/updated with the base id.
+        let h0 = read_segment_header(&mut file, segment_size, 0).unwrap();
+        let h1 = read_segment_header(&mut file, segment_size, 1).unwrap();
+        assert_eq!(h0.segment_id, 1000);
+        assert_eq!(h1.segment_id, 1001);
+        assert_eq!(h0.first_lsn, entry.lsn);
+        assert_eq!(h1.first_lsn, entry.lsn);
+
+        let bytes = read_ring_bytes(
+            &mut file,
+            0,
+            encoded.len(),
+            segment_size,
+            segment_data_len,
+            ring_len,
+        );
+        let (decoded, consumed) = WalEntry::decode(&bytes).unwrap();
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded, entry);
     }
 }
 /// WAL section header for circular buffer bookkeeping.
@@ -657,24 +1005,272 @@ pub struct WalSectionHeader {
     pub start_offset: u64,
     /// Write pointer offset (exclusive).
     pub end_offset: u64,
+    /// Whether the buffer is full (disambiguates `start_offset == end_offset`).
+    pub is_full: bool,
 }
 
 impl WalSectionHeader {
+    const FULL_FLAG: u64 = 1u64 << 63;
+    const OFFSET_MASK: u64 = !Self::FULL_FLAG;
+
     /// Serialize to 16 bytes (start/end offsets).
     pub fn to_bytes(&self) -> [u8; WAL_SECTION_HEADER_SIZE] {
         let mut buf = [0u8; WAL_SECTION_HEADER_SIZE];
         buf[0..8].copy_from_slice(&self.start_offset.to_le_bytes());
-        buf[8..16].copy_from_slice(&self.end_offset.to_le_bytes());
+        let mut end = self.end_offset & Self::OFFSET_MASK;
+        if self.is_full {
+            end |= Self::FULL_FLAG;
+        }
+        buf[8..16].copy_from_slice(&end.to_le_bytes());
         buf
     }
 
     /// Deserialize from 16 bytes.
     pub fn from_bytes(bytes: &[u8; WAL_SECTION_HEADER_SIZE]) -> Self {
         let start_offset = u64::from_le_bytes(bytes[0..8].try_into().expect("fixed slice length"));
-        let end_offset = u64::from_le_bytes(bytes[8..16].try_into().expect("fixed slice length"));
+        let raw_end = u64::from_le_bytes(bytes[8..16].try_into().expect("fixed slice length"));
+        let is_full = (raw_end & Self::FULL_FLAG) != 0;
+        let end_offset = raw_end & Self::OFFSET_MASK;
         Self {
             start_offset,
             end_offset,
+            is_full,
         }
+    }
+}
+
+/// WAL writer for circular buffer sections.
+#[derive(Debug)]
+pub struct WalWriter {
+    file: File,
+    config: WalConfig,
+    section_header: WalSectionHeader,
+    segment_id_base: u64,
+    segment_size: u64,
+    segment_data_len: u64,
+    ring_len: u64,
+    /// Bytes currently used in the buffer.
+    used_bytes: u64,
+    /// Bytes written since last fsync (BatchSync mode).
+    pending_sync: usize,
+    /// Timestamp of last fsync (BatchSync mode).
+    last_sync: Instant,
+}
+
+impl WalWriter {
+    /// Create a new WAL writer and initialize section + segment headers.
+    ///
+    /// The WAL section size is `segment_size * max_segments` and each segment starts with a
+    /// [`WalSegmentHeader`], followed by the segment's data region.
+    pub fn create(
+        path: &Path,
+        config: WalConfig,
+        segment_id_base: u64,
+        first_lsn: u64,
+    ) -> Result<Self> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+
+        let (segment_size, segment_data_len, max_segments, ring_len) =
+            compute_ring_layout(&config)?;
+        let wal_section_size = (WAL_SECTION_HEADER_SIZE as u64)
+            .checked_add(
+                segment_size
+                    .checked_mul(max_segments)
+                    .ok_or_else(|| Error::InvalidFormat("WAL section size overflow".into()))?,
+            )
+            .ok_or_else(|| Error::InvalidFormat("WAL section size overflow".into()))?;
+        file.set_len(wal_section_size)?;
+
+        let section_header = WalSectionHeader {
+            start_offset: 0,
+            end_offset: 0,
+            is_full: false,
+        };
+        persist_section_header(&mut file, 0, &section_header)?;
+
+        for segment_index in 0..max_segments {
+            let header_first_lsn = if segment_index == 0 { first_lsn } else { 0 };
+            let header = WalSegmentHeader::new(segment_id_base + segment_index, header_first_lsn);
+            write_segment_header(&mut file, segment_size, segment_index, &header)?;
+        }
+        file.sync_data()?;
+
+        Ok(Self {
+            file,
+            config,
+            section_header,
+            segment_id_base,
+            segment_size,
+            segment_data_len,
+            ring_len,
+            used_bytes: 0,
+            pending_sync: 0,
+            last_sync: Instant::now(),
+        })
+    }
+
+    /// Open an existing WAL writer, resuming from the stored end offset.
+    pub fn open(path: &Path, config: WalConfig) -> Result<Self> {
+        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+        let (segment_size, segment_data_len, max_segments, ring_len) =
+            compute_ring_layout(&config)?;
+
+        let mut header_bytes = [0u8; WAL_SECTION_HEADER_SIZE];
+        file.read_exact(&mut header_bytes)?;
+        let section_header = WalSectionHeader::from_bytes(&header_bytes);
+
+        if section_header.start_offset >= ring_len {
+            return Err(Error::InvalidFormat(
+                "WAL start offset exceeds ring length".into(),
+            ));
+        }
+        if section_header.end_offset >= ring_len {
+            return Err(Error::InvalidFormat(
+                "WAL end offset exceeds ring length".into(),
+            ));
+        }
+
+        let used_bytes = if section_header.is_full {
+            ring_len
+        } else {
+            ring_distance(
+                section_header.start_offset,
+                section_header.end_offset,
+                ring_len,
+            )
+        };
+
+        // Validate all segment headers (magic/version/crc).
+        let mut segment_id_base: Option<u64> = None;
+        for segment_index in 0..max_segments {
+            let header = read_segment_header(&mut file, segment_size, segment_index)?;
+            if segment_index == 0 {
+                segment_id_base = Some(header.segment_id);
+            } else if let Some(base) = segment_id_base {
+                if header.segment_id != base + segment_index {
+                    return Err(Error::InvalidFormat(
+                        "WAL segment_id sequence mismatch".into(),
+                    ));
+                }
+            }
+        }
+
+        Ok(Self {
+            file,
+            config,
+            section_header,
+            segment_id_base: segment_id_base.unwrap_or(0),
+            segment_size,
+            segment_data_len,
+            ring_len,
+            used_bytes,
+            pending_sync: 0,
+            last_sync: Instant::now(),
+        })
+    }
+
+    /// Advance the read pointer (start_offset) after a checkpoint.
+    pub fn advance_start(&mut self, new_start: u64) -> Result<()> {
+        if new_start >= self.ring_len {
+            return Err(Error::InvalidFormat(
+                "WAL start offset exceeds ring length".into(),
+            ));
+        }
+        let current = self.section_header.start_offset;
+        let distance = ring_distance(current, new_start, self.ring_len);
+        if distance > self.used_bytes {
+            return Err(Error::InvalidFormat(
+                "WAL start offset advances beyond written data".into(),
+            ));
+        }
+        self.used_bytes -= distance;
+        self.section_header.start_offset = new_start;
+        self.section_header.is_full = false;
+
+        if self.used_bytes == 0 {
+            // Prefer reusing the reclaimed region immediately by resetting pointers.
+            self.section_header.start_offset = 0;
+            self.section_header.end_offset = 0;
+            self.section_header.is_full = false;
+        }
+
+        persist_section_header(&mut self.file, 0, &self.section_header)?;
+        Ok(())
+    }
+
+    /// Append a WAL entry into the circular buffer, returning the file offset written.
+    pub fn append(&mut self, entry: &WalEntry) -> Result<u64> {
+        let encoded = entry.encode()?;
+        let entry_len = encoded.len() as u64;
+        if entry_len > self.ring_len {
+            return Err(Error::InvalidFormat(
+                "WAL entry exceeds ring capacity".into(),
+            ));
+        }
+
+        let free_space = self.ring_len - self.used_bytes;
+        if entry_len > free_space {
+            return Err(Error::InvalidFormat(
+                "WAL buffer is full; cannot append entry".into(),
+            ));
+        }
+
+        // If the buffer is empty, always start from the beginning of the data region.
+        if self.used_bytes == 0 && !self.section_header.is_full {
+            self.section_header.start_offset = 0;
+            self.section_header.end_offset = 0;
+        }
+
+        let write_offset = self.section_header.end_offset;
+        let file_offset =
+            ring_logical_to_physical(write_offset, self.segment_size, self.segment_data_len)?;
+        self.write_ring(write_offset, &encoded, entry.lsn)?;
+
+        let new_end = write_offset + entry_len;
+        self.section_header.end_offset = new_end % self.ring_len;
+        self.used_bytes += entry_len;
+        self.section_header.is_full = self.used_bytes == self.ring_len;
+        persist_section_header(&mut self.file, 0, &self.section_header)?;
+
+        self.maybe_sync(encoded.len())?;
+        Ok(file_offset)
+    }
+
+    fn maybe_sync(&mut self, bytes_written: usize) -> Result<()> {
+        match self.config.sync_mode {
+            SyncMode::EveryWrite => {
+                self.file.sync_data()?;
+                self.pending_sync = 0;
+                self.last_sync = Instant::now();
+            }
+            SyncMode::BatchSync {
+                max_batch_size,
+                max_wait_ms,
+            } => {
+                self.pending_sync += bytes_written;
+                let elapsed = self.last_sync.elapsed();
+                let should_sync = self.pending_sync >= max_batch_size
+                    || elapsed >= Duration::from_millis(max_wait_ms);
+                if should_sync {
+                    self.file.sync_data()?;
+                    self.pending_sync = 0;
+                    self.last_sync = Instant::now();
+                }
+            }
+            SyncMode::NoSync => {
+                // no-op
+            }
+        }
+        Ok(())
+    }
+
+    /// Total logical ring length in bytes.
+    pub fn ring_len(&self) -> u64 {
+        self.ring_len
     }
 }
