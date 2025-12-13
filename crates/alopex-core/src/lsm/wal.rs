@@ -101,6 +101,9 @@ pub enum SyncMode {
     /// fsync on every append (safest).
     EveryWrite,
     /// fsync periodically based on batch size or timeout.
+    ///
+    /// Note: this mode can leave the WAL's section/segment headers temporarily stale after a crash.
+    /// Recovery must validate headers and fall back safely on inconsistencies.
     BatchSync {
         /// Max bytes to buffer before fsync.
         max_batch_size: usize,
@@ -108,6 +111,8 @@ pub enum SyncMode {
         max_wait_ms: u64,
     },
     /// Rely on OS buffering (fastest, least safe).
+    ///
+    /// Note: after a crash, recent appends and/or header updates may be missing.
     NoSync,
 }
 
@@ -118,7 +123,10 @@ pub struct WalSegmentHeader {
     pub version: u16,
     /// Segment identifier.
     pub segment_id: u64,
-    /// First LSN stored in this segment.
+    /// First LSN stored in this segment (including fragments).
+    ///
+    /// Entries may cross segment boundaries, so the data region may begin with a fragment of an
+    /// entry with this LSN. Do not assume decoding can start at the segment's first byte.
     pub first_lsn: u64,
     /// CRC32 for bytes [0..22).
     pub crc32: u32,
@@ -998,14 +1006,18 @@ mod tests {
         assert_eq!(decoded, entry);
     }
 }
+
 /// WAL section header for circular buffer bookkeeping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalSectionHeader {
-    /// Read pointer offset (inclusive).
+    /// Read pointer offset (inclusive), as a logical ring offset.
     pub start_offset: u64,
-    /// Write pointer offset (exclusive).
+    /// Write pointer offset (exclusive), as a logical ring offset.
     pub end_offset: u64,
     /// Whether the buffer is full (disambiguates `start_offset == end_offset`).
+    ///
+    /// This is persisted by storing a flag in the MSB of the serialized `end_offset`. Therefore,
+    /// the ring length must stay within [`WalSectionHeader::OFFSET_MASK`].
     pub is_full: bool,
 }
 
@@ -1062,6 +1074,9 @@ impl WalWriter {
     ///
     /// The WAL section size is `segment_size * max_segments` and each segment starts with a
     /// [`WalSegmentHeader`], followed by the segment's data region.
+    ///
+    /// `segment_id_base` is used to assign stable per-segment IDs as
+    /// `segment_id_base + segment_index`.
     pub fn create(
         path: &Path,
         config: WalConfig,
