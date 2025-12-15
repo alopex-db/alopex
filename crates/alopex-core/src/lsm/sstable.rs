@@ -845,6 +845,14 @@ impl SSTableReader {
         file.read_exact(&mut footer_bytes)?;
         let footer = SSTableFooter::from_bytes(&footer_bytes)?;
 
+        let header_bloom_present = (header.flags & FLAG_BLOOM_PRESENT) != 0;
+        let footer_bloom_present = footer.bloom_size > 0;
+        if header_bloom_present != footer_bloom_present {
+            return Err(Error::InvalidFormat(
+                "SSTable bloom presence mismatch between header flag and footer size".into(),
+            ));
+        }
+
         // Validate footer ranges early to avoid OOM / invalid seeks on corrupted files.
         let index_end = footer
             .index_offset
@@ -856,7 +864,7 @@ impl SSTableReader {
             ));
         }
 
-        let has_bloom = footer.bloom_size > 0;
+        let has_bloom = footer_bloom_present;
         let bloom_end = footer
             .bloom_offset
             .checked_add(footer.bloom_size as u64)
@@ -907,7 +915,7 @@ impl SSTableReader {
         let index = decode_index(&index_bytes)?;
 
         // Load bloom filter if present.
-        let bloom = if (header.flags & FLAG_BLOOM_PRESENT) != 0 && footer.bloom_size > 0 {
+        let bloom = if footer_bloom_present {
             file.seek(SeekFrom::Start(footer.bloom_offset))?;
             let mut bloom_bytes = vec![0u8; footer.bloom_size as usize];
             file.read_exact(&mut bloom_bytes)?;
@@ -1021,7 +1029,6 @@ impl SSTableReader {
         decode_entries(&decompressed, entry_count)
     }
 
-    /// Scan keys with the given prefix, returning the latest visible version per key.
     /// Scan keys with the given prefix, returning the latest visible version per key.
     ///
     /// Note: tombstones are returned as entries with `value == None`.
