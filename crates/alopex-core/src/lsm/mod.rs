@@ -13,6 +13,8 @@ pub mod wal;
 
 use std::collections::VecDeque;
 use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -22,7 +24,7 @@ use crate::kv::{KVStore, KVTransaction};
 use crate::lsm::buffer_pool::{BufferPool, BufferPoolConfig};
 use crate::lsm::memtable::{ImmutableMemTable, MemTable, MemTableConfig};
 use crate::lsm::sstable::SSTableConfig;
-use crate::lsm::wal::{SyncMode, WalConfig, WalWriter};
+use crate::lsm::wal::{SyncMode, WalConfig, WalEntryPayload, WalReader, WalWriter};
 use crate::storage::format::WriteThrottleConfig;
 use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, TxnState, Value};
@@ -144,6 +146,10 @@ impl<'a> LsmTxnManagerRef<'a> {
 pub struct LsmKV {
     /// 設定。
     pub config: LsmKVConfig,
+    /// データディレクトリ。
+    pub data_dir: PathBuf,
+    /// WAL ファイルパス。
+    pub wal_path: PathBuf,
     /// WAL Writer。
     pub wal: RwLock<WalWriter>,
     /// アクティブ MemTable。
@@ -161,6 +167,114 @@ pub struct LsmKV {
 }
 
 impl LsmKV {
+    /// LsmKV をデフォルト設定で開く。
+    ///
+    /// `path` はデータディレクトリとして扱い、内部で WAL ファイルを作成/再利用する。
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_config(path, LsmKVConfig::default())
+    }
+
+    /// 設定付きで LsmKV を開く。
+    ///
+    /// 既存 WAL がある場合は WAL をリプレイして MemTable を復元する（クラッシュリカバリ）。
+    pub fn open_with_config(path: impl AsRef<Path>, config: LsmKVConfig) -> Result<Self> {
+        let data_dir = path.as_ref().to_path_buf();
+        fs::create_dir_all(&data_dir)?;
+        let wal_path = data_dir.join("lsm.wal");
+
+        let (wal_writer, recovered, next_ts) = if wal_path.exists() {
+            let mut reader = WalReader::open(&wal_path, config.wal.clone())?;
+            let replay = reader.replay()?;
+            let mut mem = MemTable::new();
+            let last_lsn = apply_wal_replay(&mut mem, &replay.entries);
+            let next = last_lsn.saturating_add(1).max(1);
+            (WalWriter::open(&wal_path, config.wal.clone())?, mem, next)
+        } else {
+            (
+                WalWriter::create(&wal_path, config.wal.clone(), 1, 1)?,
+                MemTable::new(),
+                1,
+            )
+        };
+
+        let levels = vec![Vec::new(); config.compaction.max_levels];
+
+        Ok(Self {
+            wal: RwLock::new(wal_writer),
+            active_memtable: RwLock::new(recovered),
+            immutable_memtables: RwLock::new(VecDeque::new()),
+            levels: RwLock::new(levels),
+            buffer_pool: BufferPool::new(config.buffer_pool),
+            ts_oracle: TimestampOracle::new(next_ts),
+            txn_manager: LsmTxnManager::default(),
+            data_dir,
+            wal_path,
+            config,
+        })
+    }
+
+    /// MemTable をフラッシュする（手動）。
+    ///
+    /// 現段階では「Active MemTable を freeze して Immutable キューへ移す」までを行う。
+    pub fn flush(&self) -> Result<()> {
+        let old = {
+            let mut guard = self
+                .active_memtable
+                .write()
+                .expect("lsm active_memtable lock poisoned");
+            std::mem::take(&mut *guard)
+        };
+        let imm = Arc::new(old.freeze());
+
+        let mut queue = self
+            .immutable_memtables
+            .write()
+            .expect("lsm immutable_memtables lock poisoned");
+        queue.push_back(imm);
+
+        while queue.len() > self.config.memtable.max_immutable_count {
+            queue.pop_front();
+        }
+        Ok(())
+    }
+
+    /// コンパクションを実行する（手動）。
+    ///
+    /// 現段階ではメタデータ更新までの配線は未実装のため、no-op とする。
+    pub fn compact(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// メトリクスを取得する。
+    pub fn metrics(&self) -> LsmMetrics {
+        let wal_bytes = fs::metadata(&self.wal_path).map(|m| m.len()).unwrap_or(0);
+        let active_memtable_bytes = self
+            .active_memtable
+            .read()
+            .expect("lsm active_memtable lock poisoned")
+            .memory_usage_bytes();
+
+        let imm = self
+            .immutable_memtables
+            .read()
+            .expect("lsm immutable_memtables lock poisoned");
+        let immutable_memtables = imm.len();
+        let immutable_memtable_bytes = imm.iter().map(|t| t.memory_usage_bytes()).sum();
+
+        LsmMetrics {
+            wal_bytes,
+            active_memtable_bytes,
+            immutable_memtables,
+            immutable_memtable_bytes,
+            buffer_pool: self.buffer_pool.stats(),
+        }
+    }
+
+    /// 推定ディスク使用量（バイト）を返す。
+    pub fn disk_usage(&self) -> u64 {
+        fs::metadata(&self.wal_path).map(|m| m.len()).unwrap_or(0)
+    }
+
     fn get_visible_at(
         &self,
         key: &[u8],
@@ -275,6 +389,52 @@ impl LsmKV {
 
         out
     }
+}
+
+/// LsmKV のメトリクス（スナップショット）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LsmMetrics {
+    /// WAL ファイルサイズ（バイト）。
+    pub wal_bytes: u64,
+    /// Active MemTable の推定メモリ使用量（バイト）。
+    pub active_memtable_bytes: usize,
+    /// Immutable MemTable の個数。
+    pub immutable_memtables: usize,
+    /// Immutable MemTable の推定メモリ使用量合計（バイト）。
+    pub immutable_memtable_bytes: usize,
+    /// バッファプール統計。
+    pub buffer_pool: crate::lsm::buffer_pool::BufferPoolStatsSnapshot,
+}
+
+fn apply_wal_replay(mem: &mut MemTable, entries: &[crate::lsm::wal::WalEntry]) -> u64 {
+    let mut last = 0u64;
+    for e in entries {
+        last = last.max(e.lsn);
+        match &e.payload {
+            WalEntryPayload::Put { key, value } => {
+                mem.put(key.clone(), value.clone(), e.lsn, 0);
+            }
+            WalEntryPayload::Delete { key } => {
+                mem.delete(key.clone(), e.lsn, 0);
+            }
+            WalEntryPayload::Batch(ops) => {
+                let mut seq = 0u64;
+                for op in ops {
+                    match op.op_type {
+                        crate::lsm::wal::WalOpType::Put => {
+                            let val = op.value.clone().unwrap_or_default();
+                            mem.put(op.key.clone(), val, e.lsn, seq);
+                        }
+                        crate::lsm::wal::WalOpType::Delete => {
+                            mem.delete(op.key.clone(), e.lsn, seq);
+                        }
+                    }
+                    seq = seq.wrapping_add(1);
+                }
+            }
+        }
+    }
+    last
 }
 
 /// LSM 用トランザクション（スナップショット分離 + 書き込みバッファ）。
@@ -541,12 +701,15 @@ mod kv_store {
 
     fn new_test_store() -> LsmKV {
         let cfg = test_config();
-        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-        let wal = WalWriter::create(tmp.path(), cfg.wal.clone(), 1, 1).expect("wal create");
+        let data_dir = tempfile::tempdir().expect("tempdir").keep();
+        let wal_path = data_dir.join("lsm.wal");
+        let wal = WalWriter::create(&wal_path, cfg.wal.clone(), 1, 1).expect("wal create");
 
         let levels = vec![Vec::new(); cfg.compaction.max_levels];
         LsmKV {
             config: cfg,
+            data_dir,
+            wal_path,
             wal: RwLock::new(wal),
             active_memtable: RwLock::new(MemTable::new()),
             immutable_memtables: RwLock::new(VecDeque::new()),
@@ -620,5 +783,68 @@ mod kv_store {
 
         scan_tx.put(b"q:z".to_vec(), b"ok".to_vec()).unwrap();
         assert!(scan_tx.commit_self().is_err());
+    }
+}
+
+#[cfg(test)]
+mod methods {
+    use super::*;
+
+    fn test_config() -> LsmKVConfig {
+        let mut cfg = LsmKVConfig::default();
+        cfg.wal = WalConfig {
+            segment_size: 4096,
+            max_segments: 2,
+            sync_mode: SyncMode::NoSync,
+        };
+        cfg
+    }
+
+    #[test]
+    fn open_creates_wal_and_returns_metrics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+        let m = store.metrics();
+        assert!(m.wal_bytes > 0);
+        assert_eq!(m.immutable_memtables, 0);
+        assert_eq!(store.disk_usage(), m.wal_bytes);
+    }
+
+    #[test]
+    fn open_replays_wal_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let store = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+            let mut wal = store.wal.write().unwrap();
+            wal.append(&crate::lsm::wal::WalEntry::put(
+                10,
+                b"k".to_vec(),
+                b"v".to_vec(),
+            ))
+            .unwrap();
+        }
+
+        let store = LsmKV::open_with_config(dir.path(), test_config()).expect("reopen");
+        let mut tx = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(tx.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
+    }
+
+    #[test]
+    fn flush_moves_active_to_immutable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+
+        let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+        tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
+        tx.commit_self().unwrap();
+
+        store.flush().unwrap();
+
+        let m = store.metrics();
+        assert_eq!(m.immutable_memtables, 1);
+
+        let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(ro.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
     }
 }
