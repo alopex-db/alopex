@@ -25,8 +25,9 @@
 //!
 //! Each data block is:
 //! - `entry_count: u32`
-//! - `payload: [u8]` (optionally compressed)
-//! - `crc32: u32` over `entry_count || payload`
+//! - `uncompressed_len: u32`
+//! - `payload: [u8]` (entries bytes, possibly compressed)
+//! - `crc32: u32` over `entry_count || uncompressed_len || payload`
 //!
 //! The index block maps key ranges to block offsets/sizes.
 
@@ -496,7 +497,12 @@ pub struct SSTableWriter {
     min_timestamp: u64,
     max_timestamp: u64,
     bloom: Option<BloomFilter>,
+    /// Distinct user keys encountered (used to build Bloom filter at finish()).
+    ///
+    /// Note: this is an in-memory buffer. For very large tables it can still be substantial; a
+    /// future improvement is to support incremental Bloom insertion with an upfront size estimate.
     bloom_keys: Vec<Key>,
+    last_bloom_key: Option<Key>,
     closed: bool,
 }
 
@@ -538,6 +544,7 @@ impl SSTableWriter {
             max_timestamp: 0,
             bloom: None,
             bloom_keys: Vec::new(),
+            last_bloom_key: None,
             closed: false,
         };
 
@@ -604,7 +611,7 @@ impl SSTableWriter {
 
     fn flush_block_if_needed(&mut self, upcoming_len: usize) -> Result<()> {
         let projected = self.data_block_buf.len().saturating_add(upcoming_len);
-        let overhead = 4 /*entry_count*/ + 4 /*crc*/;
+        let overhead = 4 /*entry_count*/ + 4 /*uncompressed_len*/ + 4 /*crc*/;
         if self.data_block_entry_count > 0 && projected + overhead > self.config.block_size {
             self.finish_block()?;
         }
@@ -679,8 +686,14 @@ impl SSTableWriter {
         }
         self.last_key = Some((entry.key.clone(), entry.timestamp, entry.sequence));
 
-        if self.config.enable_bloom_filter {
+        if self.config.enable_bloom_filter
+            && self
+                .last_bloom_key
+                .as_ref()
+                .is_none_or(|k| k.as_slice() != entry.key.as_slice())
+        {
             self.bloom_keys.push(entry.key.clone());
+            self.last_bloom_key = Some(entry.key.clone());
         }
 
         // Estimate entry size in block (uncompressed).
@@ -820,6 +833,7 @@ impl SSTableReader {
         if file_len < (HEADER_SIZE + FOOTER_SIZE) as u64 {
             return Err(Error::InvalidFormat("SSTable file too small".into()));
         }
+        let data_end = file_len - (FOOTER_SIZE as u64);
 
         let mut header_bytes = [0u8; HEADER_SIZE];
         file.seek(SeekFrom::Start(0))?;
@@ -831,10 +845,42 @@ impl SSTableReader {
         file.read_exact(&mut footer_bytes)?;
         let footer = SSTableFooter::from_bytes(&footer_bytes)?;
 
+        // Validate footer ranges early to avoid OOM / invalid seeks on corrupted files.
+        let index_end = footer
+            .index_offset
+            .checked_add(footer.index_size as u64)
+            .ok_or_else(|| Error::InvalidFormat("SSTable index range overflow".into()))?;
+        if footer.index_offset < HEADER_SIZE as u64 || index_end > data_end {
+            return Err(Error::InvalidFormat(
+                "SSTable index range is out of bounds".into(),
+            ));
+        }
+
+        let has_bloom = footer.bloom_size > 0;
+        let bloom_end = footer
+            .bloom_offset
+            .checked_add(footer.bloom_size as u64)
+            .ok_or_else(|| Error::InvalidFormat("SSTable bloom range overflow".into()))?;
+        if has_bloom {
+            if footer.bloom_offset < HEADER_SIZE as u64 || bloom_end > data_end {
+                return Err(Error::InvalidFormat(
+                    "SSTable bloom range is out of bounds".into(),
+                ));
+            }
+            let index_range = (footer.index_offset, index_end);
+            let bloom_range = (footer.bloom_offset, bloom_end);
+            let overlaps = index_range.0 < bloom_range.1 && bloom_range.0 < index_range.1;
+            if overlaps {
+                return Err(Error::InvalidFormat(
+                    "SSTable index and bloom ranges overlap".into(),
+                ));
+            }
+        }
+
         // Validate file CRC.
         file.seek(SeekFrom::Start(0))?;
         let mut hasher = crc32fast::Hasher::new();
-        let mut remaining = file_len - (FOOTER_SIZE as u64);
+        let mut remaining = data_end;
         let mut buf = vec![0u8; 64 * 1024];
         while remaining > 0 {
             let chunk = (remaining as usize).min(buf.len());
@@ -976,12 +1022,17 @@ impl SSTableReader {
     }
 
     /// Scan keys with the given prefix, returning the latest visible version per key.
+    /// Scan keys with the given prefix, returning the latest visible version per key.
+    ///
+    /// Note: tombstones are returned as entries with `value == None`.
     pub fn scan_prefix(&mut self, prefix: &[u8], read_timestamp: u64) -> Result<Vec<SSTableEntry>> {
         let end = next_prefix(prefix);
         self.scan_range(prefix, end.as_deref().unwrap_or(&[]), read_timestamp)
     }
 
     /// Scan keys in `[start, end)`, returning the latest visible version per key.
+    ///
+    /// Note: tombstones are returned as entries with `value == None`.
     pub fn scan_range(
         &mut self,
         start: &[u8],
