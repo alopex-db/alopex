@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn composite_key_maintains_lexicographic_tuple_order() {
-        let mut tuples = vec![(0, 0), (0, 1), (1, 0), (1, 2), (2, 0), (2, 2)];
+        let mut tuples = [(0, 0), (0, 1), (1, 0), (1, 2), (2, 0), (2, 2)].to_vec();
         tuples.sort();
 
         let mut prev: Option<Vec<u8>> = None;
@@ -423,7 +423,7 @@ mod tests {
     }
 
     fn assert_monotonic_bool() {
-        let values = vec![false, true];
+        let values = [false, true];
         let mut prev: Option<(Vec<u8>, bool)> = None;
         for (i, v) in values.iter().enumerate() {
             let key = KeyEncoder::index_key(1, &SqlValue::Boolean(*v), i as u64).unwrap();

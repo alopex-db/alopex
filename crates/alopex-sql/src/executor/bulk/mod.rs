@@ -42,34 +42,19 @@ pub enum FileFormat {
 }
 
 /// COPY オプション。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CopyOptions {
     /// CSV ヘッダ行の有無。
     pub header: bool,
 }
 
-impl Default for CopyOptions {
-    fn default() -> Self {
-        Self { header: false }
-    }
-}
-
 /// COPY セキュリティ設定。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CopySecurityConfig {
     /// 許可するベースディレクトリ一覧（None なら無制限）。
     pub allowed_base_dirs: Option<Vec<PathBuf>>,
     /// シンボリックリンクを許可するか。
     pub allow_symlinks: bool,
-}
-
-impl Default for CopySecurityConfig {
-    fn default() -> Self {
-        Self {
-            allowed_base_dirs: None,
-            allow_symlinks: false,
-        }
-    }
 }
 
 /// 入力スキーマのフィールド。
@@ -222,29 +207,29 @@ pub fn validate_schema(schema: &CopySchema, table_meta: &TableMetadata) -> Resul
         .zip(table_meta.columns.iter())
         .enumerate()
     {
-        if let Some(dt) = &field.data_type {
-            if !is_type_compatible(dt, &col.data_type) {
-                return Err(ExecutorError::SchemaMismatch {
-                    expected: table_meta.columns.len(),
-                    actual: schema.fields.len(),
-                    reason: format!(
-                        "type mismatch for column '{}': expected {:?}, got {:?}",
-                        col.name, col.data_type, dt
-                    ),
-                });
-            }
+        if let Some(dt) = &field.data_type
+            && !is_type_compatible(dt, &col.data_type)
+        {
+            return Err(ExecutorError::SchemaMismatch {
+                expected: table_meta.columns.len(),
+                actual: schema.fields.len(),
+                reason: format!(
+                    "type mismatch for column '{}': expected {:?}, got {:?}",
+                    col.name, col.data_type, dt
+                ),
+            });
         }
-        if let Some(name) = &field.name {
-            if name != &col.name {
-                return Err(ExecutorError::SchemaMismatch {
-                    expected: table_meta.columns.len(),
-                    actual: schema.fields.len(),
-                    reason: format!(
-                        "column name mismatch at position {}: expected '{}', got '{}'",
-                        idx, col.name, name
-                    ),
-                });
-            }
+        if let Some(name) = &field.name
+            && name != &col.name
+        {
+            return Err(ExecutorError::SchemaMismatch {
+                expected: table_meta.columns.len(),
+                actual: schema.fields.len(),
+                reason: format!(
+                    "column name mismatch at position {}: expected '{}', got '{}'",
+                    idx, col.name, name
+                ),
+            });
         }
     }
 
@@ -804,7 +789,7 @@ pub(crate) fn parse_value(raw: &str, ty: &ResolvedType) -> Result<SqlValue> {
         ResolvedType::Boolean => {
             let parsed = trimmed
                 .parse::<bool>()
-                .or_else(|_| match trimmed {
+                .or(match trimmed {
                     "1" => Ok(true),
                     "0" => Ok(false),
                     _ => Err(()),

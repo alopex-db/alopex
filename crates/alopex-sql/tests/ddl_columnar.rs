@@ -11,7 +11,7 @@ fn plan_and_exec(sql: &str) -> Result<Vec<ExecutionResult>, ExecutorError> {
     let store = Arc::new(MemoryKV::new());
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
     let mut executor = Executor::new(store, catalog.clone());
-    let dialect = AlopexDialect::default();
+    let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(&dialect, sql).expect("parse sql");
     let mut results = Vec::new();
     for stmt in stmts {

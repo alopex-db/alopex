@@ -17,6 +17,12 @@ pub use columnar::{
 pub use hnsw::{HnswConfig, HnswIndex, HnswSearchResult, HnswStats};
 pub use simd::{select_kernel, DistanceKernel, ScalarKernel};
 
+#[cfg(test)]
+mod disk;
+
+#[cfg(test)]
+mod integration;
+
 /// Batch delete result.
 ///
 /// Tracks how many vectors flipped from `deleted=false` to `true` and which segments were touched.

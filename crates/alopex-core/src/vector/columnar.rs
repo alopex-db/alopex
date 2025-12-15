@@ -906,6 +906,50 @@ impl VectorStoreManager {
         }
     }
 
+    /// 現在保持しているセグメント一覧（読み取り専用）を返す。
+    ///
+    /// # 注意（Disk モード復元時の前提）
+    /// - `VectorStoreManager` は「セグメントの順序」を `row_id` の割当てに利用します（検索時に `row_offset` を積み上げる）。
+    /// - `from_segments` で復元する場合は、永続化時と同じ順序（通常は古い→新しい）で `segments` を渡してください。
+    pub fn segments(&self) -> &[VectorSegment] {
+        &self.segments
+    }
+
+    /// 設定を返す（Disk モードの復元用）。
+    ///
+    /// # 注意（Disk モード復元時の前提）
+    /// - `segments` 内の各セグメントは、この `config` と整合している必要があります（例: `dimension`/`metric`）。
+    pub fn config(&self) -> &VectorStoreConfig {
+        &self.config
+    }
+
+    /// 次に割り当てられるセグメントIDを返す（永続化用）。
+    ///
+    /// # 注意（Disk モード復元時の前提）
+    /// - `from_segments` に渡す `next_segment_id` は、通常 `max(segment_id) + 1` 以上である必要があります。
+    pub fn next_segment_id(&self) -> u64 {
+        self.next_segment_id
+    }
+
+    /// 永続化済みセグメントから `VectorStoreManager` を復元する（Disk モード向け）。
+    ///
+    /// # 注意（呼び出し側が満たすべき前提）
+    /// - `segments` は永続化時と同じ順序（通常は古い→新しい）で渡すこと。
+    /// - `segments` は重複しない `segment_id` を持つこと。
+    /// - `config` と `segments` の整合（dimension/metric など）を保つこと。
+    /// - `next_segment_id` は `max(segment_id) + 1` 以上であること（将来の追加/コンパクションで重複IDを避けるため）。
+    pub fn from_segments(
+        config: VectorStoreConfig,
+        segments: Vec<VectorSegment>,
+        next_segment_id: u64,
+    ) -> Self {
+        Self {
+            config,
+            segments,
+            next_segment_id,
+        }
+    }
+
     /// ベクトルバッチを追加する。
     ///
     /// # Errors

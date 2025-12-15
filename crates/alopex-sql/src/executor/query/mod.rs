@@ -90,21 +90,19 @@ fn build_iterator_pipeline<S: KVStore, C: Catalog>(
             Ok((Box::new(iter), projection, schema))
         }
         LogicalPlan::Filter { input, predicate } => {
-            if let LogicalPlan::Scan { table, projection } = input.as_ref() {
-                if let Some(table_meta) = catalog.get_table(table) {
-                    if table_meta.storage_options.storage_type == StorageType::Columnar {
-                        let columnar_scan = columnar_scan::build_columnar_scan_for_filter(
-                            table_meta,
-                            projection.clone(),
-                            &predicate,
-                        );
-                        let rows =
-                            columnar_scan::execute_columnar_scan(txn, table_meta, &columnar_scan)?;
-                        let schema = table_meta.columns.clone();
-                        let iter = iterator::VecIterator::new(rows, schema.clone());
-                        return Ok((Box::new(iter), projection.clone(), schema));
-                    }
-                }
+            if let LogicalPlan::Scan { table, projection } = input.as_ref()
+                && let Some(table_meta) = catalog.get_table(table)
+                && table_meta.storage_options.storage_type == StorageType::Columnar
+            {
+                let columnar_scan = columnar_scan::build_columnar_scan_for_filter(
+                    table_meta,
+                    projection.clone(),
+                    &predicate,
+                );
+                let rows = columnar_scan::execute_columnar_scan(txn, table_meta, &columnar_scan)?;
+                let schema = table_meta.columns.clone();
+                let iter = iterator::VecIterator::new(rows, schema.clone());
+                return Ok((Box::new(iter), projection.clone(), schema));
             }
             let (input_iter, projection, schema) = build_iterator_pipeline(txn, catalog, *input)?;
             let filter_iter = FilterIterator::new(input_iter, predicate);

@@ -16,7 +16,7 @@ fn run_sql(
     let store = Arc::new(MemoryKV::new());
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
     let mut executor = Executor::new(store, catalog.clone());
-    let dialect = AlopexDialect::default();
+    let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(&dialect, sql).expect("parse sql");
     for stmt in stmts {
         let plan = {
@@ -41,7 +41,7 @@ fn knn_optimization_without_index() {
 
     let query =
         "SELECT id FROM items ORDER BY vector_similarity(embedding, [0.5, 0.0], 'l2') ASC LIMIT 2";
-    let stmt = Parser::parse_sql(&AlopexDialect::default(), query)
+    let stmt = Parser::parse_sql(&AlopexDialect, query)
         .unwrap()
         .pop()
         .unwrap();
