@@ -1994,6 +1994,11 @@ fn select_int_encoding(hints: &EncodingHints) -> EncodingV2 {
 }
 
 fn select_binary_encoding(hints: &EncodingHints) -> EncodingV2 {
+    // ソート済みデータ: 先頭との差分（prefix）を活用できるため IncrementalString を優先する。
+    if hints.is_sorted && hints.total_count > 0 {
+        return EncodingV2::IncrementalString;
+    }
+
     // Low cardinality: use Dictionary
     if hints.total_count > 0 && hints.distinct_count > 0 {
         let cardinality_ratio = hints.distinct_count as f64 / hints.total_count as f64;
