@@ -3,6 +3,7 @@
 #![deny(missing_docs)]
 
 pub mod columnar;
+pub mod compaction;
 pub mod error;
 pub mod kv;
 pub mod log;
