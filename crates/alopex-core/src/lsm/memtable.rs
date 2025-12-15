@@ -145,6 +145,8 @@ impl MemTable {
     }
 
     /// Current approximate memory usage in bytes.
+    ///
+    /// This is best-effort accounting intended for coarse thresholds (e.g. flush triggers).
     pub fn memory_usage_bytes(&self) -> usize {
         self.memory_usage.load(Ordering::Relaxed)
     }
@@ -263,7 +265,9 @@ impl MemTable {
 
     /// Scan keys with the given prefix, returning at most one visible version per user key.
     pub fn scan_prefix(&self, prefix: &[u8], read_timestamp: u64) -> Vec<(Key, MemTableEntry)> {
-        let start = Included(prefix.to_vec());
+        // Use internal key space boundary to avoid accidentally starting in the middle of the
+        // version trailer region for a user key.
+        let start = Included(internal_key_prefix(prefix));
         let end = next_prefix(prefix).map(Excluded).unwrap_or(Unbounded);
         self.collect_scan(start, end, read_timestamp)
     }
@@ -308,6 +312,8 @@ pub struct ImmutableMemTable {
 
 impl ImmutableMemTable {
     /// Current approximate memory usage in bytes.
+    ///
+    /// This is best-effort accounting intended for coarse thresholds (e.g. flush triggers).
     pub fn memory_usage_bytes(&self) -> usize {
         self.memory_usage
     }
@@ -367,7 +373,7 @@ impl ImmutableMemTable {
 
     /// Scan keys with the given prefix, returning at most one visible version per user key.
     pub fn scan_prefix(&self, prefix: &[u8], read_timestamp: u64) -> Vec<(Key, MemTableEntry)> {
-        let start = Included(prefix.to_vec());
+        let start = Included(internal_key_prefix(prefix));
         let end = next_prefix(prefix).map(Excluded).unwrap_or(Unbounded);
         self.collect_scan(start, end, read_timestamp)
     }
