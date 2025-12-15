@@ -80,7 +80,9 @@ impl Database {
                         "disk mode requires a path".into(),
                     ))
                 })?;
-                StorageFactory::create(CoreStorageMode::Disk { path }).map_err(Error::Core)?
+                let path = crate::disk_data_dir_path(&path);
+                StorageFactory::create(CoreStorageMode::Disk { path, config: None })
+                    .map_err(Error::Core)?
             }
             StorageMode::InMemory => StorageFactory::create(CoreStorageMode::Memory {
                 max_size: config.memory_limit,

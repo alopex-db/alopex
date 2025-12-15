@@ -39,6 +39,7 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::lsm::buffer_pool::{BlockId, BufferPool, DataBlock};
+use crate::lsm::metrics::LsmMetrics;
 use crate::storage::{create_compressor, CompressionV2, Compressor};
 use crate::types::{Key, Value};
 
@@ -954,23 +955,31 @@ impl SSTableReader {
 
     /// Get the latest visible entry for the key at `read_timestamp`.
     pub fn get(&mut self, key: &[u8], read_timestamp: u64) -> Result<Option<SSTableEntry>> {
-        self.get_cached(None, 0, key, read_timestamp)
+        self.get_cached(None, None, 0, key, read_timestamp)
     }
 
     /// バッファプールを利用して `get` を行う。
     pub fn get_with_buffer_pool(
         &mut self,
         buffer_pool: &BufferPool,
+        metrics: &LsmMetrics,
         file_id: u64,
         key: &[u8],
         read_timestamp: u64,
     ) -> Result<Option<SSTableEntry>> {
-        self.get_cached(Some(buffer_pool), file_id, key, read_timestamp)
+        self.get_cached(
+            Some(buffer_pool),
+            Some(metrics),
+            file_id,
+            key,
+            read_timestamp,
+        )
     }
 
     fn get_cached(
         &mut self,
         buffer_pool: Option<&BufferPool>,
+        metrics: Option<&LsmMetrics>,
         file_id: u64,
         key: &[u8],
         read_timestamp: u64,
@@ -1001,7 +1010,7 @@ impl SSTableReader {
                 break;
             }
             if key <= block_meta.last_key.as_slice() {
-                let block = self.read_block_cached(buffer_pool, file_id, idx)?;
+                let block = self.read_block_cached(buffer_pool, metrics, file_id, idx)?;
                 let entries = self.decode_block_entries(&block)?;
                 if let Some(found) = find_in_entries(&entries, key, read_timestamp) {
                     return Ok(Some(found));
@@ -1015,6 +1024,7 @@ impl SSTableReader {
     fn read_block_cached(
         &mut self,
         buffer_pool: Option<&BufferPool>,
+        metrics: Option<&LsmMetrics>,
         file_id: u64,
         idx: usize,
     ) -> Result<Vec<u8>> {
@@ -1036,6 +1046,9 @@ impl SSTableReader {
         self.file.seek(SeekFrom::Start(entry.offset))?;
         let mut bytes = vec![0u8; entry.size as usize];
         self.file.read_exact(&mut bytes)?;
+        if let Some(m) = metrics {
+            m.add_sstable_read_bytes(bytes.len() as u64);
+        }
 
         if bytes.len() < 4 + 4 {
             return Err(Error::InvalidFormat("SSTable block too small".into()));
@@ -1080,23 +1093,31 @@ impl SSTableReader {
     ///
     /// Note: tombstones are returned as entries with `value == None`.
     pub fn scan_prefix(&mut self, prefix: &[u8], read_timestamp: u64) -> Result<Vec<SSTableEntry>> {
-        self.scan_prefix_cached(None, 0, prefix, read_timestamp)
+        self.scan_prefix_cached(None, None, 0, prefix, read_timestamp)
     }
 
     /// バッファプールを利用して `scan_prefix` を行う。
     pub fn scan_prefix_with_buffer_pool(
         &mut self,
         buffer_pool: &BufferPool,
+        metrics: &LsmMetrics,
         file_id: u64,
         prefix: &[u8],
         read_timestamp: u64,
     ) -> Result<Vec<SSTableEntry>> {
-        self.scan_prefix_cached(Some(buffer_pool), file_id, prefix, read_timestamp)
+        self.scan_prefix_cached(
+            Some(buffer_pool),
+            Some(metrics),
+            file_id,
+            prefix,
+            read_timestamp,
+        )
     }
 
     fn scan_prefix_cached(
         &mut self,
         buffer_pool: Option<&BufferPool>,
+        metrics: Option<&LsmMetrics>,
         file_id: u64,
         prefix: &[u8],
         read_timestamp: u64,
@@ -1104,6 +1125,7 @@ impl SSTableReader {
         let end = next_prefix(prefix);
         self.scan_range_cached(
             buffer_pool,
+            metrics,
             file_id,
             prefix,
             end.as_deref().unwrap_or(&[]),
@@ -1120,24 +1142,33 @@ impl SSTableReader {
         end: &[u8],
         read_timestamp: u64,
     ) -> Result<Vec<SSTableEntry>> {
-        self.scan_range_cached(None, 0, start, end, read_timestamp)
+        self.scan_range_cached(None, None, 0, start, end, read_timestamp)
     }
 
     /// バッファプールを利用して `scan_range` を行う。
     pub fn scan_range_with_buffer_pool(
         &mut self,
         buffer_pool: &BufferPool,
+        metrics: &LsmMetrics,
         file_id: u64,
         start: &[u8],
         end: &[u8],
         read_timestamp: u64,
     ) -> Result<Vec<SSTableEntry>> {
-        self.scan_range_cached(Some(buffer_pool), file_id, start, end, read_timestamp)
+        self.scan_range_cached(
+            Some(buffer_pool),
+            Some(metrics),
+            file_id,
+            start,
+            end,
+            read_timestamp,
+        )
     }
 
     fn scan_range_cached(
         &mut self,
         buffer_pool: Option<&BufferPool>,
+        metrics: Option<&LsmMetrics>,
         file_id: u64,
         start: &[u8],
         end: &[u8],
@@ -1154,7 +1185,7 @@ impl SSTableReader {
             if meta.last_key.as_slice() < start {
                 continue;
             }
-            let block = self.read_block_cached(buffer_pool, file_id, block_idx)?;
+            let block = self.read_block_cached(buffer_pool, metrics, file_id, block_idx)?;
             let entries = self.decode_block_entries(&block)?;
             for e in entries {
                 if e.key.as_slice() < start {

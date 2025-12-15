@@ -8,6 +8,7 @@
 pub mod buffer_pool;
 pub mod free_space;
 pub mod memtable;
+pub mod metrics;
 pub mod sstable;
 pub mod wal;
 
@@ -16,13 +17,14 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::compaction::leveled::{LeveledCompactionConfig, SSTableMeta};
 use crate::error::{Error, Result};
 use crate::kv::{KVStore, KVTransaction};
 use crate::lsm::buffer_pool::{BufferPool, BufferPoolConfig};
 use crate::lsm::memtable::{ImmutableMemTable, MemTable, MemTableConfig};
+use crate::lsm::metrics::{LsmMetrics, LsmMetricsSnapshot};
 use crate::lsm::sstable::{SSTableConfig, SSTableReader};
 use crate::lsm::wal::{
     SyncMode, WalBatchOp, WalConfig, WalEntry, WalEntryPayload, WalOpType, WalReader, WalWriter,
@@ -164,10 +166,14 @@ pub struct LsmKV {
     pub levels: RwLock<Vec<Vec<SSTableMeta>>>,
     /// SSTable データブロックのバッファプール。
     pub buffer_pool: BufferPool,
+    /// メトリクス（Atomic カウンタ）。
+    pub metrics: Arc<LsmMetrics>,
     /// タイムスタンプオラクル。
     pub ts_oracle: TimestampOracle,
     /// トランザクションマネージャ。
     pub txn_manager: LsmTxnManager,
+    /// コミットの直列化ロック（OCC の検証ウィンドウを閉じる）。
+    pub commit_lock: Mutex<()>,
 }
 
 impl LsmKV {
@@ -187,6 +193,7 @@ impl LsmKV {
         let wal_path = data_dir.join("lsm.wal");
         let sst_dir = data_dir.join("sst");
         fs::create_dir_all(&sst_dir)?;
+        let metrics = Arc::new(LsmMetrics::default());
 
         let (wal_writer, recovered, next_ts) = if wal_path.exists() {
             let mut reader = WalReader::open(&wal_path, config.wal.clone())?;
@@ -205,19 +212,23 @@ impl LsmKV {
 
         let levels = vec![Vec::new(); config.compaction.max_levels];
 
-        Ok(Self {
+        let store = Self {
             wal: RwLock::new(wal_writer),
             active_memtable: RwLock::new(recovered),
             immutable_memtables: RwLock::new(VecDeque::new()),
             levels: RwLock::new(levels),
             buffer_pool: BufferPool::new(config.buffer_pool),
+            metrics: Arc::clone(&metrics),
             ts_oracle: TimestampOracle::new(next_ts),
             txn_manager: LsmTxnManager::default(),
+            commit_lock: Mutex::new(()),
             data_dir,
             sst_dir,
             wal_path,
             config,
-        })
+        };
+        store.refresh_memtable_size_metrics();
+        Ok(store)
     }
 
     /// MemTable をフラッシュする（手動）。
@@ -233,15 +244,19 @@ impl LsmKV {
         };
         let imm = Arc::new(old.freeze());
 
-        let mut queue = self
-            .immutable_memtables
-            .write()
-            .expect("lsm immutable_memtables lock poisoned");
-        queue.push_back(imm);
+        {
+            let mut queue = self
+                .immutable_memtables
+                .write()
+                .expect("lsm immutable_memtables lock poisoned");
+            queue.push_back(imm);
 
-        while queue.len() > self.config.memtable.max_immutable_count {
-            queue.pop_front();
+            while queue.len() > self.config.memtable.max_immutable_count {
+                queue.pop_front();
+            }
         }
+        self.metrics.inc_memtable_flush_count();
+        self.refresh_memtable_size_metrics();
         Ok(())
     }
 
@@ -253,27 +268,35 @@ impl LsmKV {
     }
 
     /// メトリクスを取得する。
-    pub fn metrics(&self) -> LsmMetrics {
-        let wal_bytes = fs::metadata(&self.wal_path).map(|m| m.len()).unwrap_or(0);
-        let active_memtable_bytes = self
-            .active_memtable
+    pub fn metrics(&self) -> LsmMetricsSnapshot {
+        // Atomic カウンタの値を取得し、スナップショットに補完情報を足す。
+        let counters = self.metrics.counters_snapshot();
+        let sstable_count_per_level = self
+            .levels
             .read()
-            .expect("lsm active_memtable lock poisoned")
-            .memory_usage_bytes();
+            .expect("lsm levels lock poisoned")
+            .iter()
+            .map(|l| l.len())
+            .collect::<Vec<_>>();
 
-        let imm = self
-            .immutable_memtables
-            .read()
-            .expect("lsm immutable_memtables lock poisoned");
-        let immutable_memtables = imm.len();
-        let immutable_memtable_bytes = imm.iter().map(|t| t.memory_usage_bytes()).sum();
-
-        LsmMetrics {
-            wal_bytes,
-            active_memtable_bytes,
-            immutable_memtables,
-            immutable_memtable_bytes,
-            buffer_pool: self.buffer_pool.stats(),
+        let bp_stats = self.buffer_pool.stats();
+        let bp_total = bp_stats.hits + bp_stats.misses;
+        let hit_rate = if bp_total == 0 {
+            1.0
+        } else {
+            (bp_stats.hits as f64) / (bp_total as f64)
+        };
+        LsmMetricsSnapshot {
+            wal_write_bytes: counters.wal_write_bytes,
+            wal_sync_duration_ms: counters.wal_sync_duration_ms,
+            memtable_size_bytes: counters.memtable_size_bytes,
+            memtable_flush_count: counters.memtable_flush_count,
+            sstable_read_bytes: counters.sstable_read_bytes,
+            sstable_count_per_level,
+            buffer_pool_hit_rate: hit_rate,
+            buffer_pool_size_bytes: self.buffer_pool.current_size_bytes() as u64,
+            compaction_bytes_written: counters.compaction_bytes_written,
+            compaction_duration_ms: counters.compaction_duration_ms,
         }
     }
 
@@ -284,6 +307,23 @@ impl LsmKV {
 
     fn sstable_path_for(&self, file_id: u64) -> PathBuf {
         self.sst_dir.join(format!("{file_id}.sst"))
+    }
+
+    fn refresh_memtable_size_metrics(&self) {
+        let active_bytes = self
+            .active_memtable
+            .read()
+            .expect("lsm active_memtable lock poisoned")
+            .memory_usage_bytes() as u64;
+        let imm_bytes = self
+            .immutable_memtables
+            .read()
+            .expect("lsm immutable_memtables lock poisoned")
+            .iter()
+            .map(|t| t.memory_usage_bytes() as u64)
+            .sum::<u64>();
+        self.metrics
+            .set_memtable_size_bytes(active_bytes.saturating_add(imm_bytes));
     }
 
     fn get_visible_at(
@@ -318,9 +358,13 @@ impl LsmKV {
                 let Ok(mut reader) = SSTableReader::open(&path) else {
                     continue;
                 };
-                let Ok(found) =
-                    reader.get_with_buffer_pool(&self.buffer_pool, meta.id, key, read_timestamp)
-                else {
+                let Ok(found) = reader.get_with_buffer_pool(
+                    &self.buffer_pool,
+                    &self.metrics,
+                    meta.id,
+                    key,
+                    read_timestamp,
+                ) else {
                     continue;
                 };
                 let Some(found) = found else {
@@ -404,6 +448,7 @@ impl LsmKV {
                 };
                 let Ok(entries) = reader.scan_prefix_with_buffer_pool(
                     &self.buffer_pool,
+                    &self.metrics,
                     meta.id,
                     prefix,
                     read_timestamp,
@@ -483,6 +528,7 @@ impl LsmKV {
                 };
                 let Ok(entries) = reader.scan_range_with_buffer_pool(
                     &self.buffer_pool,
+                    &self.metrics,
                     meta.id,
                     start,
                     end,
@@ -516,21 +562,6 @@ impl LsmKV {
 
         out
     }
-}
-
-/// LsmKV のメトリクス（スナップショット）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LsmMetrics {
-    /// WAL ファイルサイズ（バイト）。
-    pub wal_bytes: u64,
-    /// Active MemTable の推定メモリ使用量（バイト）。
-    pub active_memtable_bytes: usize,
-    /// Immutable MemTable の個数。
-    pub immutable_memtables: usize,
-    /// Immutable MemTable の推定メモリ使用量合計（バイト）。
-    pub immutable_memtable_bytes: usize,
-    /// バッファプール統計。
-    pub buffer_pool: crate::lsm::buffer_pool::BufferPoolStatsSnapshot,
 }
 
 fn apply_wal_replay(mem: &mut MemTable, entries: &[crate::lsm::wal::WalEntry]) -> u64 {
@@ -718,6 +749,12 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
             return Ok(());
         }
 
+        let _commit_guard = self
+            .store
+            .commit_lock
+            .lock()
+            .expect("lsm commit_lock poisoned");
+
         for key in self.read_set.iter() {
             if self.store.latest_timestamp(key) > self.start_ts {
                 return Err(Error::TxnConflict);
@@ -749,8 +786,13 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
             ops.push(op);
         }
         {
+            let entry = WalEntry::batch(commit_ts, ops);
             let mut wal = self.store.wal.write().expect("lsm wal lock poisoned");
-            wal.append(&WalEntry::batch(commit_ts, ops))?;
+            let stats = wal.append_with_stats(&entry)?;
+            self.store.metrics.add_wal_write_bytes(stats.bytes_written);
+            self.store
+                .metrics
+                .add_wal_sync_duration_ms(stats.sync_duration_ms);
         }
 
         {
@@ -768,6 +810,7 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
                 seq = seq.wrapping_add(1);
             }
         }
+        self.store.refresh_memtable_size_metrics();
 
         // flush trigger: MemTable が閾値を超えたら freeze して immutable へ移動。
         if self
@@ -840,13 +883,14 @@ mod kv_store {
     use super::*;
 
     fn test_config() -> LsmKVConfig {
-        let mut cfg = LsmKVConfig::default();
-        cfg.wal = WalConfig {
-            segment_size: 4096,
-            max_segments: 2,
-            sync_mode: SyncMode::NoSync,
-        };
-        cfg
+        LsmKVConfig {
+            wal: WalConfig {
+                segment_size: 4096,
+                max_segments: 2,
+                sync_mode: SyncMode::NoSync,
+            },
+            ..Default::default()
+        }
     }
 
     fn new_test_store() -> LsmKV {
@@ -868,8 +912,10 @@ mod kv_store {
             immutable_memtables: RwLock::new(VecDeque::new()),
             levels: RwLock::new(levels),
             buffer_pool: BufferPool::new(BufferPoolConfig::default()),
+            metrics: Arc::new(LsmMetrics::default()),
             ts_oracle: TimestampOracle::new(1),
             txn_manager: LsmTxnManager::default(),
+            commit_lock: Mutex::new(()),
         }
     }
 
@@ -944,13 +990,14 @@ mod txn {
     use super::*;
 
     fn test_config() -> LsmKVConfig {
-        let mut cfg = LsmKVConfig::default();
-        cfg.wal = WalConfig {
-            segment_size: 4096,
-            max_segments: 2,
-            sync_mode: SyncMode::NoSync,
-        };
-        cfg
+        LsmKVConfig {
+            wal: WalConfig {
+                segment_size: 4096,
+                max_segments: 2,
+                sync_mode: SyncMode::NoSync,
+            },
+            ..Default::default()
+        }
     }
 
     fn new_test_store() -> LsmKV {
@@ -972,8 +1019,10 @@ mod txn {
             immutable_memtables: RwLock::new(VecDeque::new()),
             levels: RwLock::new(levels),
             buffer_pool: BufferPool::new(BufferPoolConfig::default()),
+            metrics: Arc::new(LsmMetrics::default()),
             ts_oracle: TimestampOracle::new(1),
             txn_manager: LsmTxnManager::default(),
+            commit_lock: Mutex::new(()),
         }
     }
 
@@ -1013,13 +1062,14 @@ mod methods {
     use super::*;
 
     fn test_config() -> LsmKVConfig {
-        let mut cfg = LsmKVConfig::default();
-        cfg.wal = WalConfig {
-            segment_size: 4096,
-            max_segments: 2,
-            sync_mode: SyncMode::NoSync,
-        };
-        cfg
+        LsmKVConfig {
+            wal: WalConfig {
+                segment_size: 4096,
+                max_segments: 2,
+                sync_mode: SyncMode::NoSync,
+            },
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -1027,9 +1077,9 @@ mod methods {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
         let m = store.metrics();
-        assert!(m.wal_bytes > 0);
-        assert_eq!(m.immutable_memtables, 0);
-        assert_eq!(store.disk_usage(), m.wal_bytes);
+        assert_eq!(m.wal_write_bytes, 0);
+        assert_eq!(m.memtable_flush_count, 0);
+        assert!(store.disk_usage() > 0);
     }
 
     #[test]
@@ -1064,7 +1114,7 @@ mod methods {
         store.flush().unwrap();
 
         let m = store.metrics();
-        assert_eq!(m.immutable_memtables, 1);
+        assert_eq!(m.memtable_flush_count, 1);
 
         let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
         assert_eq!(ro.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
@@ -1076,14 +1126,18 @@ mod write_path {
     use super::*;
 
     fn test_config() -> LsmKVConfig {
-        let mut cfg = LsmKVConfig::default();
-        cfg.wal = WalConfig {
-            segment_size: 4096,
-            max_segments: 2,
-            sync_mode: SyncMode::NoSync,
-        };
-        cfg.memtable.flush_threshold = 1;
-        cfg
+        LsmKVConfig {
+            wal: WalConfig {
+                segment_size: 4096,
+                max_segments: 2,
+                sync_mode: SyncMode::NoSync,
+            },
+            memtable: MemTableConfig {
+                flush_threshold: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -1112,7 +1166,7 @@ mod write_path {
 
         // flush_threshold=1 のため commit 後に自動で flush される。
         let metrics = store.metrics();
-        assert_eq!(metrics.immutable_memtables, 1);
+        assert_eq!(metrics.memtable_flush_count, 1);
 
         let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
         assert_eq!(ro.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
@@ -1127,13 +1181,14 @@ mod read_path {
     use crate::lsm::sstable::{SSTableEntry, SSTableWriter};
 
     fn test_config() -> LsmKVConfig {
-        let mut cfg = LsmKVConfig::default();
-        cfg.wal = WalConfig {
-            segment_size: 4096,
-            max_segments: 2,
-            sync_mode: SyncMode::NoSync,
-        };
-        cfg
+        LsmKVConfig {
+            wal: WalConfig {
+                segment_size: 4096,
+                max_segments: 2,
+                sync_mode: SyncMode::NoSync,
+            },
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -1173,7 +1228,7 @@ mod read_path {
         assert_eq!(ro.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
         let after = store.buffer_pool.stats();
 
-        assert!(after.misses >= before.misses + 1);
-        assert!(after.hits >= before.hits + 1);
+        assert!(after.misses > before.misses);
+        assert!(after.hits > before.hits);
     }
 }

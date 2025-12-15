@@ -1099,6 +1099,17 @@ pub struct WalWriter {
     last_sync: Instant,
 }
 
+/// WAL 追記の統計（メトリクス用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalAppendStats {
+    /// 実際に書き込んだファイルオフセット（物理）。
+    pub file_offset: u64,
+    /// 書き込んだバイト数（エントリ全体、CRC 含む）。
+    pub bytes_written: u64,
+    /// append 内で fsync が発生した場合の所要時間（ms）。発生しなければ 0。
+    pub sync_duration_ms: u64,
+}
+
 impl WalWriter {
     /// Create a new WAL writer and initialize section + segment headers.
     ///
@@ -1250,6 +1261,11 @@ impl WalWriter {
 
     /// Append a WAL entry into the circular buffer, returning the file offset written.
     pub fn append(&mut self, entry: &WalEntry) -> Result<u64> {
+        Ok(self.append_with_stats(entry)?.file_offset)
+    }
+
+    /// WAL へ追記しつつ、メトリクス用の統計も返す。
+    pub fn append_with_stats(&mut self, entry: &WalEntry) -> Result<WalAppendStats> {
         let encoded = entry.encode()?;
         let entry_len = encoded.len() as u64;
         if entry_len > self.ring_len {
@@ -1282,16 +1298,23 @@ impl WalWriter {
         self.section_header.is_full = self.used_bytes == self.ring_len;
         persist_section_header(&mut self.file, 0, &self.section_header)?;
 
-        self.maybe_sync(encoded.len())?;
-        Ok(file_offset)
+        let sync_duration_ms = self.maybe_sync_with_stats(encoded.len())?;
+        Ok(WalAppendStats {
+            file_offset,
+            bytes_written: entry_len,
+            sync_duration_ms,
+        })
     }
 
-    fn maybe_sync(&mut self, bytes_written: usize) -> Result<()> {
+    fn maybe_sync_with_stats(&mut self, bytes_written: usize) -> Result<u64> {
         match self.config.sync_mode {
             SyncMode::EveryWrite => {
+                let start = Instant::now();
                 self.file.sync_data()?;
+                let ms = start.elapsed().as_millis() as u64;
                 self.pending_sync = 0;
                 self.last_sync = Instant::now();
+                Ok(ms)
             }
             SyncMode::BatchSync {
                 max_batch_size,
@@ -1302,16 +1325,20 @@ impl WalWriter {
                 let should_sync = self.pending_sync >= max_batch_size
                     || elapsed >= Duration::from_millis(max_wait_ms);
                 if should_sync {
+                    let start = Instant::now();
                     self.file.sync_data()?;
+                    let ms = start.elapsed().as_millis() as u64;
                     self.pending_sync = 0;
                     self.last_sync = Instant::now();
+                    return Ok(ms);
                 }
+                Ok(0)
             }
             SyncMode::NoSync => {
                 // no-op
+                Ok(0)
             }
         }
-        Ok(())
     }
 
     /// Total logical ring length in bytes.

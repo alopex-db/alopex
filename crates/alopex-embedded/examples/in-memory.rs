@@ -2,7 +2,9 @@ use alopex_embedded::{Database, TxnMode};
 use std::path::PathBuf;
 
 fn print_mem_usage(db: &Database, label: &str) {
-    let usage = db.memory_usage();
+    let usage = db
+        .memory_usage()
+        .expect("memory_usage is available in in-memory mode");
     println!(
         "[{}] memory_usage -> total={}B kv={}B index={}B",
         label, usage.total_bytes, usage.kv_bytes, usage.index_bytes
@@ -56,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Persist to disk atomically.
-    let wal_path = PathBuf::from("in-memory-demo.wal");
+    let wal_path = PathBuf::from("in-memory-demo.alopex");
     db.persist_to_disk(&wal_path)?;
     println!("Persisted to disk at {:?}", wal_path);
 
