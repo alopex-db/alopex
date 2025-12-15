@@ -35,8 +35,10 @@ use std::cmp::Ordering as CmpOrdering;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::error::{Error, Result};
+use crate::lsm::buffer_pool::{BlockId, BufferPool, DataBlock};
 use crate::storage::{create_compressor, CompressionV2, Compressor};
 use crate::types::{Key, Value};
 
@@ -952,6 +954,27 @@ impl SSTableReader {
 
     /// Get the latest visible entry for the key at `read_timestamp`.
     pub fn get(&mut self, key: &[u8], read_timestamp: u64) -> Result<Option<SSTableEntry>> {
+        self.get_cached(None, 0, key, read_timestamp)
+    }
+
+    /// バッファプールを利用して `get` を行う。
+    pub fn get_with_buffer_pool(
+        &mut self,
+        buffer_pool: &BufferPool,
+        file_id: u64,
+        key: &[u8],
+        read_timestamp: u64,
+    ) -> Result<Option<SSTableEntry>> {
+        self.get_cached(Some(buffer_pool), file_id, key, read_timestamp)
+    }
+
+    fn get_cached(
+        &mut self,
+        buffer_pool: Option<&BufferPool>,
+        file_id: u64,
+        key: &[u8],
+        read_timestamp: u64,
+    ) -> Result<Option<SSTableEntry>> {
         if let Some(bloom) = &self.bloom {
             if !bloom.may_contain(key) {
                 return Ok(None);
@@ -978,7 +1001,7 @@ impl SSTableReader {
                 break;
             }
             if key <= block_meta.last_key.as_slice() {
-                let block = self.read_block(idx)?;
+                let block = self.read_block_cached(buffer_pool, file_id, idx)?;
                 let entries = self.decode_block_entries(&block)?;
                 if let Some(found) = find_in_entries(&entries, key, read_timestamp) {
                     return Ok(Some(found));
@@ -989,11 +1012,27 @@ impl SSTableReader {
         Ok(None)
     }
 
-    fn read_block(&mut self, idx: usize) -> Result<Vec<u8>> {
+    fn read_block_cached(
+        &mut self,
+        buffer_pool: Option<&BufferPool>,
+        file_id: u64,
+        idx: usize,
+    ) -> Result<Vec<u8>> {
         let entry = self
             .index
             .get(idx)
             .ok_or_else(|| Error::InvalidFormat("SSTable index out of bounds".into()))?;
+
+        if let Some(pool) = buffer_pool {
+            let id = BlockId {
+                file_id,
+                block_offset: entry.offset,
+            };
+            if let Some(hit) = pool.get(&id) {
+                return Ok(hit.as_slice().to_vec());
+            }
+        }
+
         self.file.seek(SeekFrom::Start(entry.offset))?;
         let mut bytes = vec![0u8; entry.size as usize];
         self.file.read_exact(&mut bytes)?;
@@ -1009,6 +1048,14 @@ impl SSTableReader {
         let computed_crc = crc32(&bytes[..bytes.len() - 4]);
         if stored_crc != computed_crc {
             return Err(Error::ChecksumMismatch);
+        }
+
+        if let Some(pool) = buffer_pool {
+            let id = BlockId {
+                file_id,
+                block_offset: entry.offset,
+            };
+            let _ = pool.put(id, Arc::new(DataBlock::new(bytes.clone())));
         }
         Ok(bytes)
     }
@@ -1033,8 +1080,35 @@ impl SSTableReader {
     ///
     /// Note: tombstones are returned as entries with `value == None`.
     pub fn scan_prefix(&mut self, prefix: &[u8], read_timestamp: u64) -> Result<Vec<SSTableEntry>> {
+        self.scan_prefix_cached(None, 0, prefix, read_timestamp)
+    }
+
+    /// バッファプールを利用して `scan_prefix` を行う。
+    pub fn scan_prefix_with_buffer_pool(
+        &mut self,
+        buffer_pool: &BufferPool,
+        file_id: u64,
+        prefix: &[u8],
+        read_timestamp: u64,
+    ) -> Result<Vec<SSTableEntry>> {
+        self.scan_prefix_cached(Some(buffer_pool), file_id, prefix, read_timestamp)
+    }
+
+    fn scan_prefix_cached(
+        &mut self,
+        buffer_pool: Option<&BufferPool>,
+        file_id: u64,
+        prefix: &[u8],
+        read_timestamp: u64,
+    ) -> Result<Vec<SSTableEntry>> {
         let end = next_prefix(prefix);
-        self.scan_range(prefix, end.as_deref().unwrap_or(&[]), read_timestamp)
+        self.scan_range_cached(
+            buffer_pool,
+            file_id,
+            prefix,
+            end.as_deref().unwrap_or(&[]),
+            read_timestamp,
+        )
     }
 
     /// Scan keys in `[start, end)`, returning the latest visible version per key.
@@ -1042,6 +1116,29 @@ impl SSTableReader {
     /// Note: tombstones are returned as entries with `value == None`.
     pub fn scan_range(
         &mut self,
+        start: &[u8],
+        end: &[u8],
+        read_timestamp: u64,
+    ) -> Result<Vec<SSTableEntry>> {
+        self.scan_range_cached(None, 0, start, end, read_timestamp)
+    }
+
+    /// バッファプールを利用して `scan_range` を行う。
+    pub fn scan_range_with_buffer_pool(
+        &mut self,
+        buffer_pool: &BufferPool,
+        file_id: u64,
+        start: &[u8],
+        end: &[u8],
+        read_timestamp: u64,
+    ) -> Result<Vec<SSTableEntry>> {
+        self.scan_range_cached(Some(buffer_pool), file_id, start, end, read_timestamp)
+    }
+
+    fn scan_range_cached(
+        &mut self,
+        buffer_pool: Option<&BufferPool>,
+        file_id: u64,
         start: &[u8],
         end: &[u8],
         read_timestamp: u64,
@@ -1057,7 +1154,7 @@ impl SSTableReader {
             if meta.last_key.as_slice() < start {
                 continue;
             }
-            let block = self.read_block(block_idx)?;
+            let block = self.read_block_cached(buffer_pool, file_id, block_idx)?;
             let entries = self.decode_block_entries(&block)?;
             for e in entries {
                 if e.key.as_slice() < start {

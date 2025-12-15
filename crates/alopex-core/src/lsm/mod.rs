@@ -23,11 +23,13 @@ use crate::error::{Error, Result};
 use crate::kv::{KVStore, KVTransaction};
 use crate::lsm::buffer_pool::{BufferPool, BufferPoolConfig};
 use crate::lsm::memtable::{ImmutableMemTable, MemTable, MemTableConfig};
-use crate::lsm::sstable::SSTableConfig;
-use crate::lsm::wal::{SyncMode, WalConfig, WalEntryPayload, WalReader, WalWriter};
+use crate::lsm::sstable::{SSTableConfig, SSTableReader};
+use crate::lsm::wal::{
+    SyncMode, WalBatchOp, WalConfig, WalEntry, WalEntryPayload, WalOpType, WalReader, WalWriter,
+};
 use crate::storage::format::WriteThrottleConfig;
 use crate::txn::TxnManager;
-use crate::types::{Key, TxnId, TxnMode, TxnState, Value};
+use crate::types::{Key, TxnId, TxnMode, Value};
 
 /// スレッドアクセスモード。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +150,8 @@ pub struct LsmKV {
     pub config: LsmKVConfig,
     /// データディレクトリ。
     pub data_dir: PathBuf,
+    /// SSTable ディレクトリ。
+    pub sst_dir: PathBuf,
     /// WAL ファイルパス。
     pub wal_path: PathBuf,
     /// WAL Writer。
@@ -181,6 +185,8 @@ impl LsmKV {
         let data_dir = path.as_ref().to_path_buf();
         fs::create_dir_all(&data_dir)?;
         let wal_path = data_dir.join("lsm.wal");
+        let sst_dir = data_dir.join("sst");
+        fs::create_dir_all(&sst_dir)?;
 
         let (wal_writer, recovered, next_ts) = if wal_path.exists() {
             let mut reader = WalReader::open(&wal_path, config.wal.clone())?;
@@ -208,6 +214,7 @@ impl LsmKV {
             ts_oracle: TimestampOracle::new(next_ts),
             txn_manager: LsmTxnManager::default(),
             data_dir,
+            sst_dir,
             wal_path,
             config,
         })
@@ -275,6 +282,10 @@ impl LsmKV {
         fs::metadata(&self.wal_path).map(|m| m.len()).unwrap_or(0)
     }
 
+    fn sstable_path_for(&self, file_id: u64) -> PathBuf {
+        self.sst_dir.join(format!("{file_id}.sst"))
+    }
+
     fn get_visible_at(
         &self,
         key: &[u8],
@@ -297,7 +308,43 @@ impl LsmKV {
                 return Some(e);
             }
         }
-        None
+
+        // SSTable を探索（L0 → L1..Ln）。
+        let levels = self.levels.read().expect("lsm levels lock poisoned");
+        let mut best: Option<crate::lsm::memtable::MemTableEntry> = None;
+        for level in levels.iter() {
+            for meta in level.iter() {
+                let path = self.sstable_path_for(meta.id);
+                let Ok(mut reader) = SSTableReader::open(&path) else {
+                    continue;
+                };
+                let Ok(found) =
+                    reader.get_with_buffer_pool(&self.buffer_pool, meta.id, key, read_timestamp)
+                else {
+                    continue;
+                };
+                let Some(found) = found else {
+                    continue;
+                };
+                let candidate = crate::lsm::memtable::MemTableEntry {
+                    value: found.value,
+                    timestamp: found.timestamp,
+                    sequence: found.sequence,
+                };
+                let better = match &best {
+                    None => true,
+                    Some(cur) => {
+                        (candidate.timestamp > cur.timestamp)
+                            || (candidate.timestamp == cur.timestamp
+                                && candidate.sequence > cur.sequence)
+                    }
+                };
+                if better {
+                    best = Some(candidate);
+                }
+            }
+        }
+        best
     }
 
     fn latest_timestamp(&self, key: &[u8]) -> u64 {
@@ -347,6 +394,46 @@ impl LsmKV {
             }
         }
 
+        // SSTable もマージ（L0→Ln、同一キーは新しい timestamp/sequence を採用）。
+        let levels = self.levels.read().expect("lsm levels lock poisoned");
+        for level in levels.iter() {
+            for meta in level.iter() {
+                let path = self.sstable_path_for(meta.id);
+                let Ok(mut reader) = SSTableReader::open(&path) else {
+                    continue;
+                };
+                let Ok(entries) = reader.scan_prefix_with_buffer_pool(
+                    &self.buffer_pool,
+                    meta.id,
+                    prefix,
+                    read_timestamp,
+                ) else {
+                    continue;
+                };
+                for e in entries {
+                    let k = e.key.clone();
+                    let candidate = crate::lsm::memtable::MemTableEntry {
+                        value: e.value,
+                        timestamp: e.timestamp,
+                        sequence: e.sequence,
+                    };
+                    match out.get(&k) {
+                        None => {
+                            out.insert(k, candidate);
+                        }
+                        Some(cur) => {
+                            let better = (candidate.timestamp > cur.timestamp)
+                                || (candidate.timestamp == cur.timestamp
+                                    && candidate.sequence > cur.sequence);
+                            if better {
+                                out.insert(k, candidate);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         out
     }
 
@@ -381,6 +468,46 @@ impl LsmKV {
                             || (e.timestamp == cur.timestamp && e.sequence > cur.sequence);
                         if better {
                             out.insert(k, e);
+                        }
+                    }
+                }
+            }
+        }
+
+        let levels = self.levels.read().expect("lsm levels lock poisoned");
+        for level in levels.iter() {
+            for meta in level.iter() {
+                let path = self.sstable_path_for(meta.id);
+                let Ok(mut reader) = SSTableReader::open(&path) else {
+                    continue;
+                };
+                let Ok(entries) = reader.scan_range_with_buffer_pool(
+                    &self.buffer_pool,
+                    meta.id,
+                    start,
+                    end,
+                    read_timestamp,
+                ) else {
+                    continue;
+                };
+                for e in entries {
+                    let k = e.key.clone();
+                    let candidate = crate::lsm::memtable::MemTableEntry {
+                        value: e.value,
+                        timestamp: e.timestamp,
+                        sequence: e.sequence,
+                    };
+                    match out.get(&k) {
+                        None => {
+                            out.insert(k, candidate);
+                        }
+                        Some(cur) => {
+                            let better = (candidate.timestamp > cur.timestamp)
+                                || (candidate.timestamp == cur.timestamp
+                                    && candidate.sequence > cur.sequence);
+                            if better {
+                                out.insert(k, candidate);
+                            }
                         }
                     }
                 }
@@ -437,36 +564,37 @@ fn apply_wal_replay(mem: &mut MemTable, entries: &[crate::lsm::wal::WalEntry]) -
     last
 }
 
-/// LSM 用トランザクション（スナップショット分離 + 書き込みバッファ）。
+/// LSM 用トランザクション（Snapshot Isolation + OCC）。
+///
+/// - 開始時点の `start_ts` をスナップショットとして読み取る。
+/// - `read_set` を記録し、コミット時に read-write conflict を検出する（ファントム検出は未対応）。
+/// - 書き込みは `write_set` にバッファし、コミット時に WAL → MemTable の順で反映する。
 #[derive(Debug)]
 pub struct LsmTransaction<'a> {
-    manager: LsmTxnManagerRef<'a>,
-    id: TxnId,
+    /// 開始タイムスタンプ。
+    start_ts: u64,
+    /// トランザクション ID。
+    txn_id: TxnId,
+    /// モード。
     mode: TxnMode,
-    state: TxnState,
-    read_timestamp: u64,
-    writes: BTreeMap<Key, Option<Value>>,
-    read_set: HashSet<Key>,
+    /// 読み取りセット。
+    read_set: HashSet<Vec<u8>>,
+    /// 書き込みセット（`None` は tombstone）。
+    write_set: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    /// KV ストア参照。
+    store: &'a LsmKV,
 }
 
 impl<'a> LsmTransaction<'a> {
-    fn new(manager: LsmTxnManagerRef<'a>, id: TxnId, mode: TxnMode, read_timestamp: u64) -> Self {
+    fn new(store: &'a LsmKV, txn_id: TxnId, mode: TxnMode, start_ts: u64) -> Self {
         Self {
-            manager,
-            id,
+            start_ts,
+            txn_id,
             mode,
-            state: TxnState::Active,
-            read_timestamp,
-            writes: BTreeMap::new(),
             read_set: HashSet::new(),
+            write_set: BTreeMap::new(),
+            store,
         }
-    }
-
-    fn ensure_active(&self) -> Result<()> {
-        if self.state != TxnState::Active {
-            return Err(Error::TxnClosed);
-        }
-        Ok(())
     }
 
     fn write_iter_prefix<'b>(
@@ -474,7 +602,7 @@ impl<'a> LsmTransaction<'a> {
         prefix: &'b [u8],
     ) -> impl Iterator<Item = (&'b Key, &'b Option<Value>)> + 'b {
         let prefix_vec = prefix.to_vec();
-        self.writes
+        self.write_set
             .range(prefix_vec..)
             .take_while(move |(k, _)| k.starts_with(prefix))
     }
@@ -482,7 +610,7 @@ impl<'a> LsmTransaction<'a> {
 
 impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
     fn id(&self) -> TxnId {
-        self.id
+        self.txn_id
     }
 
     fn mode(&self) -> TxnMode {
@@ -490,32 +618,28 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
     }
 
     fn get(&mut self, key: &Key) -> Result<Option<Value>> {
-        self.ensure_active()?;
-
-        if let Some(v) = self.writes.get(key) {
+        if let Some(v) = self.write_set.get(key) {
             return Ok(v.clone());
         }
 
         self.read_set.insert(key.clone());
-        let entry = self.manager.store.get_visible_at(key, self.read_timestamp);
+        let entry = self.store.get_visible_at(key, self.start_ts);
         Ok(entry.and_then(|e| e.value))
     }
 
     fn put(&mut self, key: Key, value: Value) -> Result<()> {
-        self.ensure_active()?;
         if self.mode == TxnMode::ReadOnly {
             return Err(Error::TxnConflict);
         }
-        self.writes.insert(key, Some(value));
+        self.write_set.insert(key, Some(value));
         Ok(())
     }
 
     fn delete(&mut self, key: Key) -> Result<()> {
-        self.ensure_active()?;
         if self.mode == TxnMode::ReadOnly {
             return Err(Error::TxnConflict);
         }
-        self.writes.insert(key, None);
+        self.write_set.insert(key, None);
         Ok(())
     }
 
@@ -523,11 +647,9 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
         &mut self,
         prefix: &[u8],
     ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
-        self.ensure_active()?;
         let mut map: BTreeMap<Key, Option<Value>> = self
-            .manager
             .store
-            .scan_prefix_visible(prefix, self.read_timestamp)
+            .scan_prefix_visible(prefix, self.start_ts)
             .into_iter()
             .map(|(k, e)| (k, e.value))
             .collect();
@@ -560,12 +682,9 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
         start: &[u8],
         end: &[u8],
     ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
-        self.ensure_active()?;
-
         let mut map: BTreeMap<Key, Option<Value>> = self
-            .manager
             .store
-            .scan_range_visible(start, end, self.read_timestamp)
+            .scan_range_visible(start, end, self.start_ts)
             .into_iter()
             .map(|(k, e)| (k, e.value))
             .collect();
@@ -574,7 +693,7 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
         self.read_set.extend(map.keys().cloned());
 
         let overlays: Vec<(Key, Option<Value>)> = self
-            .writes
+            .write_set
             .range(start.to_vec()..end.to_vec())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
@@ -595,58 +714,89 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
     }
 
     fn commit_self(mut self) -> Result<()> {
-        self.ensure_active()?;
-        if self.mode == TxnMode::ReadOnly || self.writes.is_empty() {
-            self.state = TxnState::Committed;
+        if self.mode == TxnMode::ReadOnly || self.write_set.is_empty() {
             return Ok(());
         }
 
         for key in self.read_set.iter() {
-            if self.manager.store.latest_timestamp(key) > self.read_timestamp {
+            if self.store.latest_timestamp(key) > self.start_ts {
                 return Err(Error::TxnConflict);
             }
         }
-        for key in self.writes.keys() {
-            if self.manager.store.latest_timestamp(key) > self.read_timestamp {
+        for key in self.write_set.keys() {
+            if self.store.latest_timestamp(key) > self.start_ts {
                 return Err(Error::TxnConflict);
             }
         }
 
-        let commit_ts = self.manager.store.ts_oracle.next_timestamp();
-        let active = self
-            .manager
+        let commit_ts = self.store.ts_oracle.next_timestamp();
+
+        // WAL に先行して追記してから MemTable に反映する（WAL → MemTable）。
+        let mut ops = Vec::with_capacity(self.write_set.len());
+        for (k, v) in self.write_set.iter() {
+            let op = match v {
+                Some(val) => WalBatchOp {
+                    op_type: WalOpType::Put,
+                    key: k.clone(),
+                    value: Some(val.clone()),
+                },
+                None => WalBatchOp {
+                    op_type: WalOpType::Delete,
+                    key: k.clone(),
+                    value: None,
+                },
+            };
+            ops.push(op);
+        }
+        {
+            let mut wal = self.store.wal.write().expect("lsm wal lock poisoned");
+            wal.append(&WalEntry::batch(commit_ts, ops))?;
+        }
+
+        {
+            let active = self
+                .store
+                .active_memtable
+                .read()
+                .expect("lsm active_memtable lock poisoned");
+            let mut seq = 1u64;
+            for (k, v) in std::mem::take(&mut self.write_set) {
+                match v {
+                    Some(val) => active.put(k, val, commit_ts, seq),
+                    None => active.delete(k, commit_ts, seq),
+                }
+                seq = seq.wrapping_add(1);
+            }
+        }
+
+        // flush trigger: MemTable が閾値を超えたら freeze して immutable へ移動。
+        if self
             .store
             .active_memtable
             .read()
-            .expect("lsm active_memtable lock poisoned");
-        let mut seq = 1u64;
-        for (k, v) in std::mem::take(&mut self.writes) {
-            match v {
-                Some(val) => active.put(k, val, commit_ts, seq),
-                None => active.delete(k, commit_ts, seq),
-            }
-            seq = seq.wrapping_add(1);
+            .expect("lsm active_memtable lock poisoned")
+            .memory_usage_bytes()
+            >= self.store.config.memtable.flush_threshold
+        {
+            self.store.flush()?;
         }
-
-        self.state = TxnState::Committed;
         Ok(())
     }
 
     fn rollback_self(mut self) -> Result<()> {
-        self.ensure_active()?;
-        self.state = TxnState::RolledBack;
+        self.write_set.clear();
         Ok(())
     }
 }
 
 impl<'a> TxnManager<'a, LsmTransaction<'a>> for LsmTxnManagerRef<'a> {
     fn begin(&'a self, mode: TxnMode) -> Result<LsmTransaction<'a>> {
-        let read_timestamp = self.store.ts_oracle.next_timestamp();
+        let start_ts = self.store.ts_oracle.next_timestamp();
         Ok(LsmTransaction::new(
-            *self,
+            self.store,
             self.allocate_txn_id(),
             mode,
-            read_timestamp,
+            start_ts,
         ))
     }
 
@@ -675,12 +825,12 @@ impl KVStore for LsmKV {
 
     fn begin(&self, mode: TxnMode) -> Result<Self::Transaction<'_>> {
         let manager = LsmTxnManagerRef { store: self };
-        let read_timestamp = self.ts_oracle.next_timestamp();
+        let start_ts = self.ts_oracle.next_timestamp();
         Ok(LsmTransaction::new(
-            manager,
+            self,
             manager.allocate_txn_id(),
             mode,
-            read_timestamp,
+            start_ts,
         ))
     }
 }
@@ -702,6 +852,8 @@ mod kv_store {
     fn new_test_store() -> LsmKV {
         let cfg = test_config();
         let data_dir = tempfile::tempdir().expect("tempdir").keep();
+        let sst_dir = data_dir.join("sst");
+        fs::create_dir_all(&sst_dir).expect("create sst dir");
         let wal_path = data_dir.join("lsm.wal");
         let wal = WalWriter::create(&wal_path, cfg.wal.clone(), 1, 1).expect("wal create");
 
@@ -709,6 +861,7 @@ mod kv_store {
         LsmKV {
             config: cfg,
             data_dir,
+            sst_dir,
             wal_path,
             wal: RwLock::new(wal),
             active_memtable: RwLock::new(MemTable::new()),
@@ -787,6 +940,75 @@ mod kv_store {
 }
 
 #[cfg(test)]
+mod txn {
+    use super::*;
+
+    fn test_config() -> LsmKVConfig {
+        let mut cfg = LsmKVConfig::default();
+        cfg.wal = WalConfig {
+            segment_size: 4096,
+            max_segments: 2,
+            sync_mode: SyncMode::NoSync,
+        };
+        cfg
+    }
+
+    fn new_test_store() -> LsmKV {
+        let cfg = test_config();
+        let data_dir = tempfile::tempdir().expect("tempdir").keep();
+        let sst_dir = data_dir.join("sst");
+        fs::create_dir_all(&sst_dir).expect("create sst dir");
+        let wal_path = data_dir.join("lsm.wal");
+        let wal = WalWriter::create(&wal_path, cfg.wal.clone(), 1, 1).expect("wal create");
+
+        let levels = vec![Vec::new(); cfg.compaction.max_levels];
+        LsmKV {
+            config: cfg,
+            data_dir,
+            sst_dir,
+            wal_path,
+            wal: RwLock::new(wal),
+            active_memtable: RwLock::new(MemTable::new()),
+            immutable_memtables: RwLock::new(VecDeque::new()),
+            levels: RwLock::new(levels),
+            buffer_pool: BufferPool::new(BufferPoolConfig::default()),
+            ts_oracle: TimestampOracle::new(1),
+            txn_manager: LsmTxnManager::default(),
+        }
+    }
+
+    #[test]
+    fn detects_read_write_conflict_after_get() {
+        let store = new_test_store();
+
+        let mut init = store.begin(TxnMode::ReadWrite).unwrap();
+        init.put(b"k".to_vec(), b"v1".to_vec()).unwrap();
+        init.commit_self().unwrap();
+
+        let mut a = store.begin(TxnMode::ReadWrite).unwrap();
+        assert_eq!(a.get(&b"k".to_vec()).unwrap(), Some(b"v1".to_vec()));
+
+        let mut b = store.begin(TxnMode::ReadWrite).unwrap();
+        b.put(b"k".to_vec(), b"v2".to_vec()).unwrap();
+        b.commit_self().unwrap();
+
+        a.put(b"other".to_vec(), b"x".to_vec()).unwrap();
+        assert!(a.commit_self().is_err());
+    }
+
+    #[test]
+    fn rollback_discards_write_set() {
+        let store = new_test_store();
+        let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+        tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
+        tx.rollback_self().unwrap();
+
+        let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(ro.get(&b"k".to_vec()).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
 mod methods {
     use super::*;
 
@@ -846,5 +1068,112 @@ mod methods {
 
         let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
         assert_eq!(ro.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
+    }
+}
+
+#[cfg(test)]
+mod write_path {
+    use super::*;
+
+    fn test_config() -> LsmKVConfig {
+        let mut cfg = LsmKVConfig::default();
+        cfg.wal = WalConfig {
+            segment_size: 4096,
+            max_segments: 2,
+            sync_mode: SyncMode::NoSync,
+        };
+        cfg.memtable.flush_threshold = 1;
+        cfg
+    }
+
+    #[test]
+    fn commit_appends_wal_and_reopen_replays() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let store = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+            let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+            tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
+            tx.commit_self().unwrap();
+        }
+
+        let store = LsmKV::open_with_config(dir.path(), test_config()).expect("reopen");
+        let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(ro.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
+    }
+
+    #[test]
+    fn flush_trigger_moves_to_immutable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+
+        let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+        tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
+        tx.commit_self().unwrap();
+
+        // flush_threshold=1 のため commit 後に自動で flush される。
+        let metrics = store.metrics();
+        assert_eq!(metrics.immutable_memtables, 1);
+
+        let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(ro.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
+    }
+}
+
+#[cfg(test)]
+mod read_path {
+    use super::*;
+
+    use crate::compaction::leveled::KeyRange;
+    use crate::lsm::sstable::{SSTableEntry, SSTableWriter};
+
+    fn test_config() -> LsmKVConfig {
+        let mut cfg = LsmKVConfig::default();
+        cfg.wal = WalConfig {
+            segment_size: 4096,
+            max_segments: 2,
+            sync_mode: SyncMode::NoSync,
+        };
+        cfg
+    }
+
+    #[test]
+    fn reads_from_sstable_via_buffer_pool() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+
+        // SSTable を1つ作成して L0 に登録する。
+        let file_id = 1u64;
+        let path = store.sstable_path_for(file_id);
+        let mut writer = SSTableWriter::create(&path, store.config.sstable).expect("sst create");
+        writer
+            .append(SSTableEntry {
+                key: b"k".to_vec(),
+                value: Some(b"v".to_vec()),
+                timestamp: 0,
+                sequence: 1,
+            })
+            .unwrap();
+        writer.finish().unwrap();
+
+        let size_bytes = fs::metadata(&path).unwrap().len();
+        let meta = SSTableMeta {
+            id: file_id,
+            level: 0,
+            size_bytes,
+            key_range: KeyRange {
+                first_key: b"k".to_vec(),
+                last_key: b"k".to_vec(),
+            },
+        };
+        store.levels.write().unwrap()[0].push(meta);
+
+        let before = store.buffer_pool.stats();
+        let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(ro.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
+        assert_eq!(ro.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
+        let after = store.buffer_pool.stats();
+
+        assert!(after.misses >= before.misses + 1);
+        assert!(after.hits >= before.hits + 1);
     }
 }
