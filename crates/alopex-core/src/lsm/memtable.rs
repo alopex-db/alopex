@@ -9,6 +9,7 @@
 //! This keeps versions for the same user key contiguous while ordering newer versions first.
 
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::ops::Bound;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -310,6 +311,166 @@ pub struct ImmutableMemTable {
     max_timestamp: Option<u64>,
 }
 
+/// ImmutableMemTable のキャッシュ管理。
+///
+/// - `max_immutable_count` を超えないように、追加時にエビクションを行う。
+/// - フラッシュ中（`flushing == true`）の MemTable はエビクトしない。
+///
+/// 注: この構造体はスレッドセーフではないため、呼び出し側で外側のロック（例: `RwLock`）を行うこと。
+#[derive(Debug)]
+pub struct ImmutableMemTableCache {
+    max_immutable_count: usize,
+    next_id: u64,
+    entries: VecDeque<ImmutableMemTableCacheEntry>,
+}
+
+/// `ImmutableMemTableCache` 内で ImmutableMemTable を識別するための ID。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ImmutableMemTableId(u64);
+
+#[derive(Debug)]
+struct ImmutableMemTableCacheEntry {
+    id: ImmutableMemTableId,
+    table: Arc<ImmutableMemTable>,
+    flushing: bool,
+}
+
+/// `try_push` の結果。
+#[derive(Debug)]
+pub struct ImmutableMemTablePushOutcome {
+    /// 追加されたテーブルの ID。
+    pub id: ImmutableMemTableId,
+    /// エビクトされたテーブル（0 件以上）。
+    pub evicted: Vec<ImmutableMemTableEvicted>,
+}
+
+/// エビクトされた ImmutableMemTable。
+#[derive(Debug)]
+pub struct ImmutableMemTableEvicted {
+    /// エビクトされたテーブルの ID。
+    pub id: ImmutableMemTableId,
+    /// エビクトされたテーブル。
+    pub table: Arc<ImmutableMemTable>,
+}
+
+impl ImmutableMemTableCache {
+    /// 新しいキャッシュを作成する。
+    pub fn new(max_immutable_count: usize) -> Self {
+        Self {
+            max_immutable_count,
+            next_id: 1,
+            entries: VecDeque::new(),
+        }
+    }
+
+    /// 保持している immutable MemTable 数。
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// 空かどうか。
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// `max_immutable_count` を返す。
+    pub fn max_immutable_count(&self) -> usize {
+        self.max_immutable_count
+    }
+
+    /// immutable MemTable を追加する。
+    ///
+    /// `max_immutable_count` に達している場合は、エビクションできる候補を選び、空きが作れた場合のみ追加する。
+    /// フラッシュ中の候補しかない場合は `None` を返して追加しない。
+    pub fn try_push(
+        &mut self,
+        table: Arc<ImmutableMemTable>,
+    ) -> Option<ImmutableMemTablePushOutcome> {
+        if self.max_immutable_count == 0 {
+            return None;
+        }
+
+        let mut evicted = Vec::new();
+        while self.entries.len() >= self.max_immutable_count {
+            let victim_index = self.select_eviction_candidate_index()?;
+            let victim = self
+                .entries
+                .remove(victim_index)
+                .expect("candidate index is in range");
+            evicted.push(ImmutableMemTableEvicted {
+                id: victim.id,
+                table: victim.table,
+            });
+        }
+
+        let id = ImmutableMemTableId(self.next_id);
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        self.entries.push_back(ImmutableMemTableCacheEntry {
+            id,
+            table,
+            flushing: false,
+        });
+        Some(ImmutableMemTablePushOutcome { id, evicted })
+    }
+
+    /// ID で immutable MemTable を取得する（保持していれば）。
+    pub fn get(&self, id: ImmutableMemTableId) -> Option<Arc<ImmutableMemTable>> {
+        self.entries
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| Arc::clone(&e.table))
+    }
+
+    /// フラッシュ中フラグを設定する（見つからなければ `false`）。
+    pub fn set_flushing(&mut self, id: ImmutableMemTableId, flushing: bool) -> bool {
+        let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) else {
+            return false;
+        };
+        entry.flushing = flushing;
+        true
+    }
+
+    /// ID 指定でキャッシュから取り除く（見つからなければ `None`）。
+    pub fn remove(&mut self, id: ImmutableMemTableId) -> Option<Arc<ImmutableMemTable>> {
+        let index = self.entries.iter().position(|e| e.id == id)?;
+        let entry = self.entries.remove(index)?;
+        Some(entry.table)
+    }
+
+    fn select_eviction_candidate_index(&self) -> Option<usize> {
+        // 優先度:
+        // 1) flushing ではないこと（必須）
+        // 2) max_timestamp が小さい（古い）ものを優先
+        // 3) 同一なら memory_usage が大きいものを優先（よりメモリを回収）
+        // 4) 最後に ID が小さい（古い生成順）もの
+        let mut best: Option<(usize, u64, usize, u64)> = None;
+        for (idx, entry) in self.entries.iter().enumerate() {
+            if entry.flushing {
+                continue;
+            }
+            let ts = entry.table.max_timestamp().unwrap_or(0);
+            let mem = entry.table.memory_usage_bytes();
+            let id = entry.id.0;
+
+            let key = (idx, ts, mem, id);
+            best = match best {
+                None => Some(key),
+                Some((best_idx, best_ts, best_mem, best_id)) => {
+                    let better = (ts < best_ts)
+                        || (ts == best_ts && mem > best_mem)
+                        || (ts == best_ts && mem == best_mem && id < best_id);
+                    if better {
+                        Some((idx, ts, mem, id))
+                    } else {
+                        Some((best_idx, best_ts, best_mem, best_id))
+                    }
+                }
+            };
+        }
+        best.map(|(idx, _, _, _)| idx)
+    }
+}
+
 impl ImmutableMemTable {
     /// Current approximate memory usage in bytes.
     ///
@@ -444,5 +605,61 @@ mod tests {
         mem.put(b"k".to_vec(), b"v".to_vec(), 10, 1);
         let imm = mem.freeze();
         assert_eq!(imm.get(b"k", 10).unwrap().value.unwrap(), b"v".to_vec());
+    }
+}
+
+#[cfg(test)]
+mod cache {
+    use super::*;
+
+    fn frozen_with_ts(ts: u64, mem: usize) -> Arc<ImmutableMemTable> {
+        let memtable = MemTable::new();
+        memtable.put(b"k".to_vec(), vec![0u8; mem], ts, 1);
+        Arc::new(memtable.freeze())
+    }
+
+    #[test]
+    fn evicts_oldest_non_flushing_when_full() {
+        let mut cache = ImmutableMemTableCache::new(2);
+
+        let a = cache.try_push(frozen_with_ts(10, 10)).unwrap().id;
+        let _b = cache.try_push(frozen_with_ts(20, 10)).unwrap().id;
+        let outcome = cache.try_push(frozen_with_ts(30, 10)).unwrap();
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(outcome.evicted.len(), 1);
+        assert_eq!(outcome.evicted[0].id, a);
+        assert!(cache.get(a).is_none());
+    }
+
+    #[test]
+    fn does_not_evict_flushing_entries() {
+        let mut cache = ImmutableMemTableCache::new(2);
+
+        let a = cache.try_push(frozen_with_ts(10, 10)).unwrap().id;
+        let b = cache.try_push(frozen_with_ts(20, 10)).unwrap().id;
+        assert!(cache.set_flushing(a, true));
+        assert!(cache.set_flushing(b, true));
+
+        // どちらも flushing のため、追加できない（max を超えることはしない）
+        assert!(cache.try_push(frozen_with_ts(30, 10)).is_none());
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get(a).is_some());
+        assert!(cache.get(b).is_some());
+    }
+
+    #[test]
+    fn eviction_prefers_older_then_larger_memory() {
+        let mut cache = ImmutableMemTableCache::new(2);
+
+        // 同一 timestamp の場合はメモリが大きい方が先にエビクトされる。
+        let a = cache.try_push(frozen_with_ts(10, 5)).unwrap().id;
+        let b = cache.try_push(frozen_with_ts(10, 50)).unwrap().id;
+        let outcome = cache.try_push(frozen_with_ts(11, 5)).unwrap();
+
+        assert_eq!(outcome.evicted.len(), 1);
+        assert_eq!(outcome.evicted[0].id, b);
+        assert!(cache.get(a).is_some());
+        assert!(cache.get(b).is_none());
     }
 }
