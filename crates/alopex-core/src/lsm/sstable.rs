@@ -1432,4 +1432,129 @@ mod tests {
         assert_eq!(r.get(b"k", 15).unwrap().unwrap().timestamp, 10);
         assert_eq!(r.get(b"k", 25).unwrap().unwrap().timestamp, 20);
     }
+
+    #[test]
+    fn sstable_scan_prefix_returns_latest_visible_per_key_in_reopen() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("scan_prefix.sst");
+        let config = SSTableConfig {
+            enable_bloom_filter: true,
+            compression: CompressionType::None,
+            block_size: 256,
+            ..Default::default()
+        };
+
+        {
+            let mut w = SSTableWriter::create(&path, config).unwrap();
+            w.append(SSTableEntry {
+                key: b"p:a".to_vec(),
+                value: Some(b"v2".to_vec()),
+                timestamp: 20,
+                sequence: 1,
+            })
+            .unwrap();
+            w.append(SSTableEntry {
+                key: b"p:a".to_vec(),
+                value: Some(b"v1".to_vec()),
+                timestamp: 10,
+                sequence: 1,
+            })
+            .unwrap();
+            w.append(SSTableEntry {
+                key: b"p:b".to_vec(),
+                value: Some(b"x".to_vec()),
+                timestamp: 15,
+                sequence: 1,
+            })
+            .unwrap();
+            w.append(SSTableEntry {
+                key: b"p:c".to_vec(),
+                value: None,
+                timestamp: 12,
+                sequence: 1,
+            })
+            .unwrap();
+            w.append(SSTableEntry {
+                key: b"q:z".to_vec(),
+                value: Some(b"no".to_vec()),
+                timestamp: 99,
+                sequence: 1,
+            })
+            .unwrap();
+            w.finish().unwrap();
+        }
+
+        // reopen して scan できること
+        let mut r = SSTableReader::open(&path).unwrap();
+        let got = r.scan_prefix(b"p:", 20).unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].key, b"p:a".to_vec());
+        assert_eq!(got[0].value.as_deref(), Some(b"v2".as_slice()));
+        assert_eq!(got[1].key, b"p:b".to_vec());
+        assert_eq!(got[2].key, b"p:c".to_vec());
+        assert!(got[2].value.is_none());
+
+        // read_timestamp により、見える版が変わる
+        let got = r.scan_prefix(b"p:", 15).unwrap();
+        assert_eq!(got[0].key, b"p:a".to_vec());
+        assert_eq!(got[0].value.as_deref(), Some(b"v1".as_slice()));
+    }
+
+    #[test]
+    fn sstable_scan_range_is_end_exclusive() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("scan_range.sst");
+        let config = SSTableConfig {
+            enable_bloom_filter: false,
+            compression: CompressionType::None,
+            block_size: 256,
+            ..Default::default()
+        };
+
+        let mut w = SSTableWriter::create(&path, config).unwrap();
+        w.append(SSTableEntry {
+            key: b"a".to_vec(),
+            value: Some(b"1".to_vec()),
+            timestamp: 10,
+            sequence: 1,
+        })
+        .unwrap();
+        w.append(SSTableEntry {
+            key: b"b".to_vec(),
+            value: Some(b"2".to_vec()),
+            timestamp: 10,
+            sequence: 1,
+        })
+        .unwrap();
+        w.append(SSTableEntry {
+            key: b"c".to_vec(),
+            value: Some(b"3".to_vec()),
+            timestamp: 10,
+            sequence: 1,
+        })
+        .unwrap();
+        w.append(SSTableEntry {
+            key: b"d".to_vec(),
+            value: Some(b"4".to_vec()),
+            timestamp: 10,
+            sequence: 1,
+        })
+        .unwrap();
+        w.finish().unwrap();
+
+        let mut r = SSTableReader::open(&path).unwrap();
+        let got = r.scan_range(b"b", b"d", 100).unwrap();
+        let keys: Vec<_> = got.into_iter().map(|e| e.key).collect();
+        assert_eq!(keys, vec![b"b".to_vec(), b"c".to_vec()]);
+    }
+
+    #[test]
+    fn next_prefix_handles_all_ff() {
+        assert_eq!(next_prefix(b""), None);
+        assert_eq!(next_prefix(&[0x00]), Some(vec![0x01]));
+        assert_eq!(next_prefix(&[0x01, 0x02]), Some(vec![0x01, 0x03]));
+        assert_eq!(next_prefix(&[0x01, 0xFF]), Some(vec![0x02]));
+        assert_eq!(next_prefix(&[0xFF]), None);
+        assert_eq!(next_prefix(&[0xFF, 0xFF]), None);
+    }
 }

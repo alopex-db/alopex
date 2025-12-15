@@ -600,6 +600,26 @@ mod tests {
     }
 
     #[test]
+    fn scan_range_is_end_exclusive_and_obeys_read_timestamp() {
+        let mem = MemTable::new();
+        mem.put(b"a".to_vec(), b"1".to_vec(), 10, 1);
+        mem.put(b"b".to_vec(), b"2_old".to_vec(), 10, 1);
+        mem.put(b"b".to_vec(), b"2_new".to_vec(), 20, 1);
+        mem.delete(b"c".to_vec(), 12, 1);
+        mem.put(b"d".to_vec(), b"4".to_vec(), 40, 1);
+
+        // [b, d) => b と c のみ（d は end で除外）
+        let got = mem.scan_range(b"b", b"d", 15);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].0, b"b".to_vec());
+        // ts=20 は見えないため古い版が返る
+        assert_eq!(got[0].1.value.as_deref(), Some(b"2_old".as_slice()));
+        assert_eq!(got[1].0, b"c".to_vec());
+        // tombstone は返る（value == None）
+        assert!(got[1].1.value.is_none());
+    }
+
+    #[test]
     fn freeze_produces_read_only_snapshot() {
         let mem = MemTable::new();
         mem.put(b"k".to_vec(), b"v".to_vec(), 10, 1);
