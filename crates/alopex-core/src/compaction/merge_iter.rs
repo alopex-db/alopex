@@ -13,6 +13,10 @@
 //!
 //! When multiple sources contain identical versions (same key, timestamp, sequence), only one copy
 //! is yielded.
+//!
+//! Note: the dedupe key is `(key, timestamp, sequence)` only. If corrupted inputs contain
+//! conflicting values for the same version, the iterator will keep the first one it encounters and
+//! drop the rest. Higher layers should validate SSTable integrity if stricter handling is needed.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;

@@ -74,7 +74,8 @@ impl FreeSpaceManager {
     /// Returns the offset of the allocated region, or `None` if no free region is large enough.
     pub fn allocate(&mut self, size: u64) -> Option<u64> {
         if size == 0 {
-            return Some(0);
+            // Reject zero-sized allocations to avoid callers treating `0` as a valid offset.
+            return None;
         }
         for i in 0..self.free_list.len() {
             let (off, sz) = self.free_list[i];
@@ -129,5 +130,13 @@ mod tests {
         let mut f = FreeSpaceManager::new();
         f.deallocate(0, 10).unwrap();
         assert_eq!(f.allocate(11), None);
+    }
+
+    #[test]
+    fn allocate_rejects_zero_size() {
+        let mut f = FreeSpaceManager::new();
+        f.deallocate(100, 10).unwrap();
+        assert_eq!(f.allocate(0), None);
+        assert_eq!(f.free_list(), &[(100, 10)]);
     }
 }

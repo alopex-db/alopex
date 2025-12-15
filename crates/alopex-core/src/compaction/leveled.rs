@@ -137,6 +137,9 @@ impl LeveledCompaction {
             let total: u64 = levels[level].iter().map(|m| m.size_bytes).sum();
             let limit = self.level_size_limit(level);
             if total > limit {
+                // TODO: choose a better candidate selection strategy (oldest run, smallest overlap,
+                // largest size, etc.). For now we select the first table as a deterministic
+                // placeholder.
                 let input_meta = levels[level].first()?;
                 let input_ids = vec![input_meta.id];
                 let overlaps = levels[level + 1]
