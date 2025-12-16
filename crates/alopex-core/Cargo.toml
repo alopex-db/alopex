@@ -21,7 +21,6 @@ tracing = { workspace = true }
 zstd = { version = "0.13", optional = true }
 lz4 = { version = "1.24", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh64"], optional = true }
-jemalloc-ctl = { version = "0.5", optional = true }
 dhat = { version = "0.3", optional = true }
 crossbeam-skiplist = { version = "0.1", optional = true }
 rand = { workspace = true }
@@ -36,6 +35,10 @@ crossbeam-skiplist = "0.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 memmap2 = "0.9"
+
+# jemalloc doesn't support Windows
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+jemalloc-ctl = { version = "0.5", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = { version = "0.3", optional = true }
