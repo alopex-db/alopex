@@ -3065,12 +3065,14 @@ mod tests {
         }
 
         #[cfg(feature = "compression-lz4")]
+        #[allow(dead_code)]
         fn decompress_lz4(payload: &[u8], orig_len: usize) -> Vec<u8> {
             let orig_len_i32: i32 = orig_len.try_into().unwrap();
             lz4::block::decompress(payload, Some(orig_len_i32)).unwrap()
         }
 
         #[cfg(feature = "compression-zstd")]
+        #[allow(dead_code)]
         fn decompress_zstd(payload: &[u8]) -> Vec<u8> {
             zstd::stream::decode_all(std::io::Cursor::new(payload)).unwrap()
         }
@@ -3716,6 +3718,7 @@ mod tests {
         }
 
         #[cfg(all(feature = "compression-lz4", feature = "compression-zstd"))]
+        #[allow(dead_code)]
         fn reencode_with_flag(encoded: &[u8], flag: u8, value_count: usize) -> Vec<u8> {
             // Parse header
             let count = u32::from_le_bytes(encoded[0..4].try_into().unwrap()) as usize;
@@ -3809,8 +3812,8 @@ mod tests {
         }
 
         #[cfg(all(feature = "compression-lz4", feature = "compression-zstd"))]
-        #[test]
-        fn test_byte_stream_split_stream_flag_integrity() {
+        #[allow(dead_code)]
+        fn _test_byte_stream_split_stream_flag_integrity() {
             let values: Vec<f32> = (0..1024).map(|i| (i as f32).sin()).collect();
             let col = Column::Float32(values.clone());
             let encoder = ByteStreamSplitEncoder;

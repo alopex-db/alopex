@@ -21,6 +21,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 type Key = Vec<u8>;
 type Value = u64;
 
+#[allow(dead_code)]
 struct Dataset {
     map: Arc<RwLock<BTreeMap<Key, Value>>>,
     skiplist: Arc<SkipMap<Key, Value>>,

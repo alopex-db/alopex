@@ -374,7 +374,7 @@ pub fn select_kernel() -> Box<dyn DistanceKernel> {
 
     #[cfg(target_arch = "aarch64")]
     {
-        if std::is_aarch64_feature_detected!("neon") {
+        if std::arch::is_aarch64_feature_detected!("neon") {
             return neon::create();
         }
     }
