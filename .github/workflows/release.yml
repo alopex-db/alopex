@@ -10,8 +10,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Run CI checks before release
+  ci-gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run tests
+        run: cargo test --all-features
+
   build-release:
     name: Build Release (${{ matrix.target }})
+    needs: ci-gate
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
