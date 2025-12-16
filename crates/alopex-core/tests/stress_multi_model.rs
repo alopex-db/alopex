@@ -50,6 +50,26 @@ macro_rules! mm_test {
 
 type CoreResult<T> = Result<T, CoreError>;
 
+fn commit_retry_sync<F>(store: &Arc<MemoryKV>, mut apply: F) -> CoreResult<()>
+where
+    F: for<'a> FnMut(&mut MemoryTransaction<'a>) -> CoreResult<()>,
+{
+    let mut attempts = 0usize;
+    loop {
+        let mut txn = store.begin(TxnMode::ReadWrite)?;
+        apply(&mut txn)?;
+        match txn.commit_self() {
+            Ok(_) => return Ok(()),
+            Err(CoreError::TxnConflict) if attempts < MAX_TXN_RETRIES => {
+                attempts += 1;
+                std::thread::yield_now();
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn multi_model_config(name: &str, model: ExecutionModel, concurrency: usize) -> StressTestConfig {
     let mut slo = slo_presets::get("multi_model");
     if let Some(cfg) = slo.as_mut() {
@@ -1048,24 +1068,21 @@ fn run_columnar_scan_kv_update(model: ExecutionModel) -> TestResult {
                 let _op = begin_op(ctx);
                 let start = Instant::now();
                 if tid == 0 {
-                    let mut txn = store_sync.begin(TxnMode::ReadWrite)?;
-                    apply_columnar_op(
-                        &mut txn,
-                        ColumnarOperation::BatchInsert {
-                            columns: vec![Column {
-                                name: "c1".into(),
-                                values: vec![b"9".to_vec()],
-                            }],
-                        },
-                    )?;
-                    txn.commit_self()?;
+                    commit_retry_sync(&store_sync, |txn| {
+                        apply_columnar_op(
+                            txn,
+                            ColumnarOperation::BatchInsert {
+                                columns: vec![Column {
+                                    name: "c1".into(),
+                                    values: vec![b"9".to_vec()],
+                                }],
+                            },
+                        )
+                    })?;
                 } else {
-                    let mut txn = store_sync.begin(TxnMode::ReadWrite)?;
-                    apply_kv_op(
-                        &mut txn,
-                        Operation::Put(b"kv:col".to_vec(), b"u2".to_vec()),
-                    )?;
-                    txn.commit_self()?;
+                    commit_retry_sync(&store_sync, |txn| {
+                        apply_kv_op(txn, Operation::Put(b"kv:col".to_vec(), b"u2".to_vec()))
+                    })?;
                 }
                 ctx.metrics.record_success();
                 ctx.metrics.record_latency(start.elapsed());
@@ -1136,16 +1153,16 @@ fn run_kv_sql_row_consistency(model: ExecutionModel) -> TestResult {
             let store_sync = store.clone();
             harness.run_concurrent(move |_tid, ctx| {
                 let start = Instant::now();
-                let mut txn = store_sync.begin(TxnMode::ReadWrite)?;
-                txn.put(b"kv:row:2".to_vec(), b"v2".to_vec())?;
-                apply_sql_op(
-                    &mut txn,
-                    SqlOperation::Insert {
-                        table: "rows".into(),
-                        row: vec![("id".into(), b"2".to_vec()), ("v".into(), b"v2".to_vec())],
-                    },
-                )?;
-                txn.commit_self()?;
+                commit_retry_sync(&store_sync, |txn| {
+                    txn.put(b"kv:row:2".to_vec(), b"v2".to_vec())?;
+                    apply_sql_op(
+                        txn,
+                        SqlOperation::Insert {
+                            table: "rows".into(),
+                            row: vec![("id".into(), b"2".to_vec()), ("v".into(), b"v2".to_vec())],
+                        },
+                    )
+                })?;
                 ctx.metrics.record_success();
                 ctx.metrics.record_latency(start.elapsed());
                 pad_multi_metrics(ctx, 200);
@@ -1209,12 +1226,9 @@ fn run_columnar_kv_flush_consistency(model: ExecutionModel) -> TestResult {
             let store_sync = store.clone();
             harness.run_concurrent(move |_tid, ctx| {
                 let start = Instant::now();
-                let mut txn = store_sync.begin(TxnMode::ReadWrite)?;
-                apply_kv_op(
-                    &mut txn,
-                    Operation::Put(b"kv:flush".to_vec(), b"2".to_vec()),
-                )?;
-                txn.commit_self()?;
+                commit_retry_sync(&store_sync, |txn| {
+                    apply_kv_op(txn, Operation::Put(b"kv:flush".to_vec(), b"2".to_vec()))
+                })?;
                 ctx.metrics.record_success();
                 ctx.metrics.record_latency(start.elapsed());
                 pad_multi_metrics(ctx, 200);

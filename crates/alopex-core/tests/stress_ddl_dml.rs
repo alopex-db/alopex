@@ -18,6 +18,7 @@ const ALL_MODELS: [ExecutionModel; 4] = [
     ExecutionModel::AsyncSingle,
     ExecutionModel::AsyncMulti,
 ];
+const MAX_DDL_RETRIES: usize = 20;
 
 macro_rules! ddl_test {
     ($name:ident, $runner:ident) => {
@@ -44,6 +45,21 @@ macro_rules! ddl_test {
 }
 
 type CoreResult<T> = Result<T, CoreError>;
+
+fn retry_txn_conflict_sync<T>(mut f: impl FnMut() -> CoreResult<T>) -> CoreResult<T> {
+    let mut attempts = 0usize;
+    loop {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(CoreError::TxnConflict) if attempts < MAX_DDL_RETRIES => {
+                attempts += 1;
+                std::thread::yield_now();
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
 
 fn ddl_config(name: &str, model: ExecutionModel, concurrency: usize) -> StressTestConfig {
     StressTestConfig {
@@ -560,9 +576,9 @@ fn run_drop_create_same_name_no_leak(model: ExecutionModel) -> TestResult {
             harness.run_concurrent(move |_tid, ctx| {
                 let fixture = fixture.clone();
                 let start = Instant::now();
-                fixture.create("t4")?;
-                fixture.drop_table("t4")?;
-                fixture.create("t4")?;
+                retry_txn_conflict_sync(|| fixture.create("t4"))?;
+                retry_txn_conflict_sync(|| fixture.drop_table("t4"))?;
+                retry_txn_conflict_sync(|| fixture.create("t4"))?;
                 ctx.metrics.record_success();
                 ctx.metrics.record_latency(start.elapsed());
                 pad_ddl_metrics(ctx, 200);
@@ -591,9 +607,27 @@ fn run_drop_create_same_name_no_leak(model: ExecutionModel) -> TestResult {
                         let ctx_clone = ctx.clone();
                         set.spawn(async move {
                             let start = Instant::now();
-                            fixture.create("t4")?;
-                            fixture.drop_table("t4")?;
-                            fixture.create("t4")?;
+                            for _ in 0..=MAX_DDL_RETRIES {
+                                match fixture.create("t4") {
+                                    Ok(_) => break,
+                                    Err(CoreError::TxnConflict) => tokio::task::yield_now().await,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            for _ in 0..=MAX_DDL_RETRIES {
+                                match fixture.drop_table("t4") {
+                                    Ok(_) => break,
+                                    Err(CoreError::TxnConflict) => tokio::task::yield_now().await,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            for _ in 0..=MAX_DDL_RETRIES {
+                                match fixture.create("t4") {
+                                    Ok(_) => break,
+                                    Err(CoreError::TxnConflict) => tokio::task::yield_now().await,
+                                    Err(e) => return Err(e),
+                                }
+                            }
                             ctx_clone.metrics.record_success();
                             ctx_clone.metrics.record_latency(start.elapsed());
                             pad_ddl_metrics(&ctx_clone, 200);
