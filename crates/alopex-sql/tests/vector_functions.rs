@@ -11,7 +11,7 @@ fn run_sql(sql: &str) -> Vec<ExecutionResult> {
     let store = Arc::new(MemoryKV::new());
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
     let mut executor = Executor::new(store, catalog.clone());
-    let dialect = AlopexDialect::default();
+    let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(&dialect, sql).expect("parse sql");
     let mut results = Vec::new();
     for stmt in stmts {
@@ -59,7 +59,7 @@ fn vector_function_invalid_args_return_error() {
     let store = Arc::new(MemoryKV::new());
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
     let mut executor = Executor::new(store, catalog.clone());
-    let dialect = AlopexDialect::default();
+    let dialect = AlopexDialect;
 
     // prepare table
     let create = Parser::parse_sql(&dialect, "CREATE TABLE dummy (id INT);")

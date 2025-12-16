@@ -19,12 +19,14 @@ use alopex_sql::planner::types::ResolvedType;
 use alopex_sql::storage::{SqlValue, TxnBridge};
 use alopex_sql::{RowIdMode, Span};
 
-fn create_executor() -> (
+type ExecutorContext = (
     Arc<MemoryKV>,
     TxnBridge<MemoryKV>,
     Arc<RwLock<MemoryCatalog>>,
     Executor<MemoryKV, MemoryCatalog>,
-) {
+);
+
+fn create_executor() -> ExecutorContext {
     let store = Arc::new(MemoryKV::new());
     let bridge = TxnBridge::new(store.clone());
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
@@ -125,7 +127,7 @@ fn copy_and_select_columnar_with_pruning_and_projection() {
 
     // Query with filter should return rows from pruned row groups.
     let sql = "SELECT name FROM users WHERE id >= 3";
-    let stmt = Parser::parse_sql(&AlopexDialect::default(), sql)
+    let stmt = Parser::parse_sql(&AlopexDialect, sql)
         .unwrap()
         .pop()
         .unwrap();
@@ -362,7 +364,7 @@ fn columnar_scan_falls_back_when_statistics_missing() {
         .unwrap();
 
     let sql = "SELECT name FROM users WHERE id = 2";
-    let stmt = Parser::parse_sql(&AlopexDialect::default(), sql)
+    let stmt = Parser::parse_sql(&AlopexDialect, sql)
         .unwrap()
         .pop()
         .unwrap();

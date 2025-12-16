@@ -68,7 +68,7 @@ fn macro_flow(c: &mut Criterion) {
                             Ok(())
                         })?;
                         ctx.with_table(&meta, |table| {
-                            let mut iter = table.scan()?;
+                            let iter = table.scan()?;
                             for res in iter {
                                 let _ = res.unwrap();
                             }

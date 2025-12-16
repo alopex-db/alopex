@@ -163,7 +163,7 @@ fn bench_timestamps(c: &mut Criterion) {
 }
 
 fn bench_composite(c: &mut Criterion) {
-    let mut values = vec![(0, 0), (0, 1), (1, 0), (1, 2), (2, 0), (2, 2)];
+    let mut values = [(0, 0), (0, 1), (1, 0), (1, 2), (2, 0), (2, 2)];
     c.bench_function("key_encoding/composite_order", |b| {
         b.iter(|| {
             values.sort();
@@ -202,11 +202,8 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     // small encode loop to keep Criterion measuring encode latency
     c.bench_function("key_encoding/encode_hot_path", |b| {
         b.iter(|| {
-            black_box(KeyEncoder::index_key(
-                1,
-                &SqlValue::Integer(black_box(123)),
-                42,
-            ));
+            let key = KeyEncoder::index_key(1, &SqlValue::Integer(black_box(123)), 42).unwrap();
+            black_box(key);
         })
     });
 }

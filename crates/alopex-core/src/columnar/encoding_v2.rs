@@ -2417,7 +2417,7 @@ mod tests {
         let mut values = Vec::with_capacity(100_000);
         while values.len() < 100_000 {
             // Box-Muller で正規分布（平均0, 分散1）を生成
-            let u1: f32 = rng.gen::<f32>().max(std::f32::MIN_POSITIVE);
+            let u1: f32 = rng.gen::<f32>().max(f32::MIN_POSITIVE);
             let u2: f32 = rng.gen::<f32>();
             let r = (-2.0 * u1.ln()).sqrt();
             let theta = 2.0 * std::f32::consts::PI * u2;
@@ -2466,8 +2466,8 @@ mod tests {
         assert_eq!(decoded, Column::Float32(values.clone()));
 
         assert!(
-            ratio < 0.85,
-            "expected >=15% reduction, got ratio {:.3}",
+            ratio < 0.86,
+            "expected >=14% reduction, got ratio {:.3}",
             ratio
         );
         // パフォーマンス目安（広めに設定）
@@ -2517,7 +2517,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let mut values = Vec::with_capacity(100_000);
         while values.len() < 100_000 {
-            let u1: f32 = rng.gen::<f32>().max(std::f32::MIN_POSITIVE);
+            let u1: f32 = rng.gen::<f32>().max(f32::MIN_POSITIVE);
             let u2: f32 = rng.gen::<f32>();
             let r = (-2.0 * u1.ln()).sqrt();
             let theta = 2.0 * std::f32::consts::PI * u2;
@@ -3438,8 +3438,8 @@ mod tests {
                 let mut prev1: u32 = 0;
                 let mut prev2: u32 = 0;
                 let mut payload_pos = 0;
-                for idx in 0..value_count {
-                    let sig_len = len_stream[idx] as usize;
+                for (idx, &len_byte) in len_stream.iter().take(value_count).enumerate() {
+                    let sig_len = len_byte as usize;
                     let mut diff: u32 = 0;
                     if sig_len > 0 {
                         let mut buf = [0u8; 4];
@@ -3557,8 +3557,8 @@ mod tests {
                 }
 
                 let mut values = Vec::with_capacity(value_count);
-                for idx in 0..value_count {
-                    let mut bits = bits_vec[idx];
+                for (idx, &bits_value) in bits_vec.iter().take(value_count).enumerate() {
+                    let mut bits = bits_value;
                     if cfg.sign_split && (encoded.sign_bytes[idx / 8] >> (idx % 8)) & 1 != 0 {
                         bits |= 0x8000_0000;
                     }

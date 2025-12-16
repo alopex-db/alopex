@@ -54,7 +54,7 @@ fn parse_create_index_with_using_and_with_options() {
         "CREATE INDEX idx_doc_embedding ON documents (embedding) USING HNSW WITH (m = 16, ef_construction = 200)",
         |p| p.parse_create_index().unwrap(),
     );
-    assert!(idx.if_not_exists == false);
+    assert!(!idx.if_not_exists);
     assert_eq!(idx.table, "documents");
     assert_eq!(idx.column, "embedding");
     assert!(matches!(idx.method, Some(IndexMethod::Hnsw)));

@@ -85,16 +85,14 @@ pub mod crud {
         // scan_prefix（件数と順序の最低限の検証）
         {
             let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
-            let mut iter = ro.scan_prefix(b"k:").unwrap();
-            let mut expected = 0u64;
+            let iter = ro.scan_prefix(b"k:").unwrap();
             let mut count = 0usize;
-            while let Some((k, v)) = iter.next() {
+            for (expected, (k, v)) in iter.enumerate() {
                 assert!(k.starts_with(b"k:"));
                 let suffix: [u8; 8] = k[2..10].try_into().expect("fixed key layout");
                 let i = u64::from_be_bytes(suffix);
-                assert_eq!(i, expected);
+                assert_eq!(i, expected as u64);
                 assert_eq!(v, value_for(i));
-                expected += 1;
                 count += 1;
             }
             assert_eq!(count, n);
@@ -132,7 +130,7 @@ pub mod crud {
             // updated: 0..100（ただし delete される 0,10,... は消える）
             for i in 0..100u64 {
                 let got = ro.get(&key_for(i)).unwrap();
-                if (i as usize) % 10 == 0 {
+                if i.is_multiple_of(10) {
                     assert_eq!(got, None);
                 } else {
                     assert_eq!(got, Some(b"updated".to_vec()));

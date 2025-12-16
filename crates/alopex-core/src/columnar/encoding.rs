@@ -161,7 +161,7 @@ pub fn decode_column(
                     });
                 }
                 let orig_len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as i32;
-                lz4::block::decompress(&data[4..], Some(orig_len as i32)).map_err(|e| {
+                lz4::block::decompress(&data[4..], Some(orig_len)).map_err(|e| {
                     ColumnarError::CorruptedSegment {
                         reason: e.to_string(),
                     }
