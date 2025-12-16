@@ -1232,3 +1232,6 @@ mod read_path {
         assert!(after.hits > before.hits);
     }
 }
+
+#[cfg(test)]
+mod integration;
