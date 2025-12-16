@@ -193,7 +193,8 @@ fn bench_modes(c: &mut Criterion, size: usize) {
     let dataset = Arc::new(build_dataset(size));
     let mut group = c.benchmark_group(format!("scan_strategies_{size}"));
 
-    let strategies: &[(&str, fn(&Dataset, ScanMode) -> u64)] = &[
+    type Strategy = (&'static str, fn(&Dataset, ScanMode) -> u64);
+    let strategies: &[Strategy] = &[
         ("guard", guard_in_struct),
         ("precollect", pre_collect),
         ("snapshot", snapshot_clone),

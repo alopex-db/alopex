@@ -91,7 +91,7 @@ fn delete_marks_node_and_compact_removes_it() {
     let compaction = graph.compact().unwrap();
     assert_eq!(compaction.vectors_removed, 1);
     assert_eq!(graph.deleted_count, 0);
-    assert!(graph.key_to_node.get(b"b".as_slice()).is_none());
+    assert!(!graph.key_to_node.contains_key(b"b".as_slice()));
     assert!(graph.nodes.get(removed_id as usize).is_some());
     assert!(graph.nodes[removed_id as usize].is_none());
 

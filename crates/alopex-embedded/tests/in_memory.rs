@@ -70,7 +70,8 @@ fn detects_conflict_between_transactions() {
 #[test]
 fn persist_to_disk_is_atomic_and_reloadable() {
     let dir = tempdir().unwrap();
-    let wal_path = dir.path().join("wal.log");
+    let wal_path = dir.path().join("db.alopex");
+    let data_dir = wal_path.with_extension("alopex.d");
 
     // Seed data in memory.
     let db = Database::open_in_memory().expect("in-memory db");
@@ -80,14 +81,11 @@ fn persist_to_disk_is_atomic_and_reloadable() {
 
     db.persist_to_disk(&wal_path).expect("persist success");
 
-    // All files exist, no temp leftovers.
-    let sst = wal_path.with_extension("sst");
-    let vec = wal_path.with_extension("vec");
+    // Marker + data directory exists, no temp leftovers.
     assert!(wal_path.exists());
-    assert!(sst.exists());
-    assert!(vec.exists());
-    assert!(!sst.with_extension("sst.tmp").exists());
-    assert!(!vec.with_extension("vec.tmp").exists());
+    assert!(data_dir.exists());
+    assert!(data_dir.join("lsm.wal").exists());
+    assert!(!data_dir.with_extension("tmp").exists());
 
     // Reload from disk path and verify data.
     let disk_db = Database::open(&wal_path).expect("open persisted db");
@@ -98,24 +96,23 @@ fn persist_to_disk_is_atomic_and_reloadable() {
 #[test]
 fn persist_to_disk_path_exists_error_reports_actual_path() {
     let dir = tempdir().unwrap();
-    let wal_path = dir.path().join("wal.log");
+    let wal_path = dir.path().join("db.alopex");
+    let data_dir = wal_path.with_extension("alopex.d");
 
-    // Pre-create WAL file to trigger PathExists.
+    // Pre-create marker file to trigger PathExists.
     fs::write(&wal_path, b"already").unwrap();
 
     let db = Database::open_in_memory().expect("in-memory db");
     let err = db.persist_to_disk(&wal_path).unwrap_err();
     let msg = format!("{err}");
     assert!(
-        msg.contains("path exists:") && msg.contains("wal.log"),
+        msg.contains("path exists:") && msg.contains("db.alopex"),
         "expected PathExists with wal path, got {msg}"
     );
 
     // No temp artifacts should exist.
-    assert!(!wal_path.with_extension("sst").exists());
-    assert!(!wal_path.with_extension("vec").exists());
-    assert!(!wal_path.with_extension("sst.tmp").exists());
-    assert!(!wal_path.with_extension("vec.tmp").exists());
+    assert!(!data_dir.exists());
+    assert!(!data_dir.with_extension("tmp").exists());
 }
 
 #[test]

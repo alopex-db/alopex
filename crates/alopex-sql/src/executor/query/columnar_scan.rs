@@ -99,21 +99,21 @@ impl ColumnarScan {
                     if col_stats.total_count == 0 {
                         return true;
                     }
-                    if let Some(filter_min) = min {
-                        if matches!(
+                    if let Some(filter_min) = min
+                        && matches!(
                             col_stats.max.partial_cmp(filter_min),
                             Some(std::cmp::Ordering::Less)
-                        ) {
-                            return true;
-                        }
+                        )
+                    {
+                        return true;
                     }
-                    if let Some(filter_max) = max {
-                        if matches!(
+                    if let Some(filter_max) = max
+                        && matches!(
                             col_stats.min.partial_cmp(filter_max),
                             Some(std::cmp::Ordering::Greater)
-                        ) {
-                            return true;
-                        }
+                        )
+                    {
+                        return true;
                     }
                     false
                 }
@@ -641,6 +641,7 @@ fn load_row_group_stats<S: KVStore>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_rows_from_batch(
     out: &mut Vec<Row>,
     batch: &alopex_core::columnar::segment_v2::RecordBatch,
@@ -735,10 +736,10 @@ fn value_from_column(
     row_idx: usize,
     ty: &ResolvedType,
 ) -> Result<SqlValue> {
-    if let Some(bm) = bitmap {
-        if !bm.get(row_idx) {
-            return Ok(SqlValue::Null);
-        }
+    if let Some(bm) = bitmap
+        && !bm.get(row_idx)
+    {
+        return Ok(SqlValue::Null);
     }
 
     match (ty, column) {
@@ -1044,7 +1045,7 @@ mod tests {
         let segment = writer.finish().unwrap();
 
         let stats = vec![crate::columnar::statistics::compute_row_group_statistics(
-            &vec![vec![SqlValue::Integer(1), SqlValue::Text("alice".into())]],
+            &[vec![SqlValue::Integer(1), SqlValue::Text("alice".into())]],
         )];
 
         let mut txn = bridge.begin_write().unwrap();
@@ -1163,7 +1164,7 @@ mod tests {
         writer.write_batch(batch).unwrap();
         let segment = writer.finish().unwrap();
         let stats = vec![crate::columnar::statistics::compute_row_group_statistics(
-            &vec![vec![SqlValue::BigInt(999), SqlValue::Integer(7)]],
+            &[vec![SqlValue::BigInt(999), SqlValue::Integer(7)]],
         )];
 
         persist_segment_for_test(&bridge, table.table_id, &segment, &stats);
@@ -1205,7 +1206,7 @@ mod tests {
         writer.write_batch(batch).unwrap();
         let segment = writer.finish().unwrap();
         let stats = vec![crate::columnar::statistics::compute_row_group_statistics(
-            &vec![vec![SqlValue::Integer(3)], vec![SqlValue::Integer(4)]],
+            &[vec![SqlValue::Integer(3)], vec![SqlValue::Integer(4)]],
         )];
 
         persist_segment_for_test(&bridge, table.table_id, &segment, &stats);

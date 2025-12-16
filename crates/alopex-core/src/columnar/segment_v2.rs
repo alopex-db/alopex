@@ -1134,9 +1134,7 @@ mod tests {
             writer.write_batch(b)?;
         }
         let segment = writer.finish()?;
-        Ok(SegmentReaderV2::open(Box::new(
-            InMemorySegmentSource::new(segment.data),
-        ))?)
+        SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data)))
     }
 
     #[test]

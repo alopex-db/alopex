@@ -77,3 +77,6 @@ pub use executor::{
     ColumnInfo, ConstraintViolation, EvaluationError, ExecutionResult, Executor, ExecutorError,
     QueryResult, Row,
 };
+
+#[cfg(test)]
+mod integration;

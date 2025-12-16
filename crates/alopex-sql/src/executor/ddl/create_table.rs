@@ -117,7 +117,7 @@ pub fn parse_storage_options(with_options: &[(String, String)]) -> Result<Storag
                 let size: u32 = trimmed
                     .parse()
                     .map_err(|_| ExecutorError::InvalidRowGroupSize(value.clone()))?;
-                if size < 1_000 || size > 1_000_000 {
+                if !(1_000..=1_000_000).contains(&size) {
                     return Err(ExecutorError::InvalidRowGroupSize(value.clone()));
                 }
                 options.row_group_size = size;

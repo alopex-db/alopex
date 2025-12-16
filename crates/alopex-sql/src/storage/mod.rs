@@ -13,3 +13,6 @@ pub use index::{IndexScanIterator, IndexStorage};
 pub use key::KeyEncoder;
 pub use table::{TableScanIterator, TableStorage};
 pub use value::SqlValue;
+
+#[cfg(test)]
+mod disk;

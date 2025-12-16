@@ -17,3 +17,9 @@ pub use memory::InMemorySegmentStore;
 pub use segment::SegmentReader;
 pub use segment_v2::{SegmentReaderV2, SegmentWriterV2};
 pub use statistics::{ColumnStatistics, SegmentStatistics};
+
+#[cfg(test)]
+mod disk;
+
+#[cfg(test)]
+mod integration;

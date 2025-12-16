@@ -52,7 +52,8 @@ impl DatabaseOptions {
         } else {
             let disk_path = path.expect("disk mode requires a path");
             StorageMode::Disk {
-                path: disk_path.to_path_buf(),
+                path: crate::disk_data_dir_path(disk_path),
+                config: None,
             }
         }
     }

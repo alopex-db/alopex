@@ -56,7 +56,7 @@ pub fn execute_knn_query<S: KVStore, C: Catalog>(
     let table_meta = catalog
         .get_table(&pattern.table)
         .cloned()
-        .ok_or_else(|| ExecutorError::TableNotFound(pattern.table.clone()))?;
+        .ok_or(ExecutorError::TableNotFound(pattern.table.clone()))?;
 
     if pattern.k == 0 {
         let empty = project::execute_project(Vec::new(), projection, &table_meta.columns)?;
@@ -65,26 +65,27 @@ pub fn execute_knn_query<S: KVStore, C: Catalog>(
 
     let vector_idx = table_meta
         .get_column_index(&pattern.column)
-        .ok_or_else(|| ExecutorError::ColumnNotFound(pattern.column.clone()))?;
+        .ok_or(ExecutorError::ColumnNotFound(pattern.column.clone()))?;
 
     let higher_is_better = pattern.sort_direction == SortDirection::Desc;
 
     // HNSW インデックスがあり、フィルタ無し、Row ストレージの場合のみインデックス経路を使う。
-    if filter.is_none() && table_meta.storage_options.storage_type == StorageType::Row {
-        if let Some(index) = find_hnsw_index(catalog, &table_meta, &pattern.column) {
-            let mut entries = execute_hnsw_search(
-                txn,
-                &table_meta,
-                &index,
-                vector_idx,
-                pattern,
-                higher_is_better,
-            )?;
-            order_entries(&mut entries, higher_is_better);
-            let rows = materialize_rows_by_id(txn, &table_meta, projection, entries)?;
-            let projected = project::execute_project(rows, projection, &table_meta.columns)?;
-            return Ok(ExecutionResult::Query(projected));
-        }
+    if filter.is_none()
+        && table_meta.storage_options.storage_type == StorageType::Row
+        && let Some(index) = find_hnsw_index(catalog, &table_meta, &pattern.column)
+    {
+        let mut entries = execute_hnsw_search(
+            txn,
+            &table_meta,
+            &index,
+            vector_idx,
+            pattern,
+            higher_is_better,
+        )?;
+        order_entries(&mut entries, higher_is_better);
+        let rows = materialize_rows_by_id(txn, &table_meta, projection, entries)?;
+        let projected = project::execute_project(rows, projection, &table_meta.columns)?;
+        return Ok(ExecutionResult::Query(projected));
     }
 
     let mut entries = execute_heap_scan(
@@ -148,10 +149,10 @@ fn execute_heap_scan<S: KVStore>(
     };
 
     for row in rows {
-        if let Some(predicate) = filter {
-            if !evaluate_filter(predicate, &row)? {
-                continue;
-            }
+        if let Some(predicate) = filter
+            && !evaluate_filter(predicate, &row)?
+        {
+            continue;
         }
 
         let score = score_row(&row, vector_idx, pattern)?;
@@ -193,11 +194,9 @@ fn columnar_rows<S: KVStore>(
 }
 
 fn score_row(row: &Row, vector_idx: usize, pattern: &KnnPattern) -> Result<f64> {
-    let value = row.values.get(vector_idx).ok_or_else(|| {
-        ExecutorError::Evaluation(crate::executor::EvaluationError::InvalidColumnRef {
-            index: vector_idx,
-        })
-    })?;
+    let value = row.values.get(vector_idx).ok_or(ExecutorError::Evaluation(
+        crate::executor::EvaluationError::InvalidColumnRef { index: vector_idx },
+    ))?;
 
     let vector = match value {
         SqlValue::Vector(v) => v,
@@ -365,10 +364,10 @@ fn value_from_column(
     row_idx: usize,
     ty: &crate::planner::types::ResolvedType,
 ) -> Result<SqlValue> {
-    if let Some(bm) = bitmap {
-        if !bm.get(row_idx) {
-            return Ok(SqlValue::Null);
-        }
+    if let Some(bm) = bitmap
+        && !bm.get(row_idx)
+    {
+        return Ok(SqlValue::Null);
     }
 
     use crate::planner::types::ResolvedType;

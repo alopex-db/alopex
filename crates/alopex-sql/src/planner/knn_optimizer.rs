@@ -80,10 +80,10 @@ fn extract_limit(plan: &LogicalPlan) -> Option<(&LogicalPlan, u64)> {
 }
 
 fn extract_sort(plan: &LogicalPlan) -> Option<(&SortExpr, &LogicalPlan)> {
-    if let LogicalPlan::Sort { input, order_by } = plan {
-        if order_by.len() == 1 {
-            return Some((&order_by[0], input.as_ref()));
-        }
+    if let LogicalPlan::Sort { input, order_by } = plan
+        && order_by.len() == 1
+    {
+        return Some((&order_by[0], input.as_ref()));
     }
     None
 }

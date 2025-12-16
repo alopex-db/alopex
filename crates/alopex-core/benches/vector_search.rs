@@ -1,5 +1,4 @@
 use alopex_core::vector::simd::select_kernel;
-use alopex_core::vector::simd::DistanceKernel;
 use alopex_core::vector::Metric;
 use criterion::{criterion_group, criterion_main, Criterion};
 
