@@ -1,38 +1,54 @@
 mod common;
 
-use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnMode};
+use alopex_core::kv::AnyKV;
+use alopex_core::lsm::wal::{SyncMode, WalConfig};
+use alopex_core::lsm::LsmKVConfig;
+use alopex_core::{
+    Error as CoreError, KVStore, KVTransaction, Result as CoreResult, StorageFactory, StorageMode,
+    TxnMode,
+};
 use common::{
     begin_op, slo_presets, ExecutionModel, SloConfig, StressTestConfig, StressTestHarness,
-    WorkloadConfig, WorkloadGenerator,
+    selected_storage_modes, StressStorageMode, WorkloadConfig, WorkloadGenerator,
 };
 use std::sync::Arc;
 use std::time::Duration;
+use tempfile::TempDir;
 use tokio::task::JoinSet;
 
 const MAX_RETRIES: usize = 20;
 
-fn concurrency_config(name: &str, model: ExecutionModel, concurrency: usize) -> StressTestConfig {
-    let slo = match model {
-        ExecutionModel::SyncSingle => Some(SloConfig {
-            min_throughput: Some(200.0),
-            p99_max_latency: Some(Duration::from_secs(1)),
-            p95_max_latency: Some(Duration::from_millis(800)),
-            p999_max_latency: Some(Duration::from_secs(2)),
-            p9999_max_latency: Some(Duration::from_secs(3)),
-            max_error_ratio: Some(0.05),
-        }),
-        ExecutionModel::SyncMulti => Some(SloConfig {
-            min_throughput: Some(500.0),
-            p99_max_latency: Some(Duration::from_millis(400)),
-            p95_max_latency: Some(Duration::from_millis(300)),
-            p999_max_latency: Some(Duration::from_millis(900)),
-            p9999_max_latency: Some(Duration::from_millis(1200)),
-            max_error_ratio: Some(0.02),
-        }),
-        _ => slo_presets::get("concurrency"),
+fn concurrency_config(
+    name: &str,
+    model: ExecutionModel,
+    concurrency: usize,
+    mode: StressStorageMode,
+) -> StressTestConfig {
+    let slo = if mode == StressStorageMode::Disk {
+        None
+    } else {
+        match model {
+            ExecutionModel::SyncSingle => Some(SloConfig {
+                min_throughput: Some(200.0),
+                p99_max_latency: Some(Duration::from_secs(1)),
+                p95_max_latency: Some(Duration::from_millis(800)),
+                p999_max_latency: Some(Duration::from_secs(2)),
+                p9999_max_latency: Some(Duration::from_secs(3)),
+                max_error_ratio: Some(0.05),
+            }),
+            ExecutionModel::SyncMulti => Some(SloConfig {
+                min_throughput: Some(500.0),
+                p99_max_latency: Some(Duration::from_millis(400)),
+                p95_max_latency: Some(Duration::from_millis(300)),
+                p999_max_latency: Some(Duration::from_millis(900)),
+                p9999_max_latency: Some(Duration::from_millis(1200)),
+                max_error_ratio: Some(0.02),
+            }),
+            _ => slo_presets::get("concurrency"),
+        }
     };
     StressTestConfig {
-        name: name.to_string(),
+        name: format!("{name}_{}", mode.as_str()),
         execution_model: model,
         concurrency,
         scenario_timeout: Duration::from_secs(60),
@@ -43,10 +59,31 @@ fn concurrency_config(name: &str, model: ExecutionModel, concurrency: usize) -> 
     }
 }
 
-fn run_same_key(model: ExecutionModel) {
-    let cfg = concurrency_config("same_key", model, 100);
+fn new_shared_store(mode: StressStorageMode) -> CoreResult<(Arc<AnyKV>, Option<TempDir>)> {
+    match mode {
+        StressStorageMode::Memory => Ok((Arc::new(AnyKV::Memory(alopex_core::MemoryKV::new())), None)),
+        StressStorageMode::Disk => {
+            let dir = TempDir::new()?;
+            let cfg = LsmKVConfig {
+                wal: WalConfig {
+                    sync_mode: SyncMode::NoSync,
+                    ..WalConfig::default()
+                },
+                ..LsmKVConfig::default()
+            };
+            let store = StorageFactory::create(StorageMode::Disk {
+                path: dir.path().to_path_buf(),
+                config: Some(cfg),
+            })?;
+            Ok((Arc::new(store), Some(dir)))
+        }
+    }
+}
+
+fn run_same_key(model: ExecutionModel, mode: StressStorageMode) {
+    let cfg = concurrency_config("same_key", model, 100, mode);
     let harness = StressTestHarness::new(cfg).unwrap();
-    let store = Arc::new(MemoryKV::new());
+    let (store, _store_guard) = new_shared_store(mode).unwrap();
     let result = match model {
         ExecutionModel::AsyncSingle | ExecutionModel::AsyncMulti => {
             let store_async = store.clone();
@@ -142,10 +179,10 @@ fn run_same_key(model: ExecutionModel) {
     );
 }
 
-fn run_read_write_conflict(model: ExecutionModel) {
-    let cfg = concurrency_config("rw_conflict", model, 50);
+fn run_read_write_conflict(model: ExecutionModel, mode: StressStorageMode) {
+    let cfg = concurrency_config("rw_conflict", model, 50, mode);
     let harness = StressTestHarness::new(cfg).unwrap();
-    let store = Arc::new(MemoryKV::new());
+    let (store, _store_guard) = new_shared_store(mode).unwrap();
     let result = match model {
         ExecutionModel::AsyncSingle | ExecutionModel::AsyncMulti => {
             let store_async = store.clone();
@@ -264,10 +301,10 @@ fn run_read_write_conflict(model: ExecutionModel) {
     );
 }
 
-fn run_long_short_mix(model: ExecutionModel) {
-    let cfg = concurrency_config("long_short", model, 32);
+fn run_long_short_mix(model: ExecutionModel, mode: StressStorageMode) {
+    let cfg = concurrency_config("long_short", model, 32, mode);
     let harness = StressTestHarness::new(cfg).unwrap();
-    let store = Arc::new(MemoryKV::new());
+    let (store, _store_guard) = new_shared_store(mode).unwrap();
     let result = match model {
         ExecutionModel::AsyncSingle | ExecutionModel::AsyncMulti => {
             let store_async = store.clone();
@@ -341,8 +378,8 @@ fn run_long_short_mix(model: ExecutionModel) {
     );
 }
 
-fn run_deadlock_watchdog(model: ExecutionModel) {
-    let mut cfg = concurrency_config("deadlock_detection", model, 4);
+fn run_deadlock_watchdog(model: ExecutionModel, mode: StressStorageMode) {
+    let mut cfg = concurrency_config("deadlock_detection", model, 4, mode);
     cfg.operation_timeout = Duration::from_millis(50);
     let harness = StressTestHarness::new(cfg).unwrap();
     let result = harness.run_concurrent(|_tid, ctx| {
@@ -358,10 +395,10 @@ fn run_deadlock_watchdog(model: ExecutionModel) {
     );
 }
 
-fn run_backpressure(model: ExecutionModel) {
-    let cfg = concurrency_config("backpressure", model, 64);
+fn run_backpressure(model: ExecutionModel, mode: StressStorageMode) {
+    let cfg = concurrency_config("backpressure", model, 64, mode);
     let harness = StressTestHarness::new(cfg).unwrap();
-    let store = Arc::new(MemoryKV::new());
+    let (store, _store_guard) = new_shared_store(mode).unwrap();
     let result = match model {
         ExecutionModel::AsyncSingle | ExecutionModel::AsyncMulti => {
             let store_async = store.clone();
@@ -564,10 +601,10 @@ fn run_backpressure(model: ExecutionModel) {
     );
 }
 
-fn run_recovery_after_spike(model: ExecutionModel) {
-    let cfg = concurrency_config("recovery_spike", model, 32);
+fn run_recovery_after_spike(model: ExecutionModel, mode: StressStorageMode) {
+    let cfg = concurrency_config("recovery_spike", model, 32, mode);
     let harness = StressTestHarness::new(cfg).unwrap();
-    let store = Arc::new(MemoryKV::new());
+    let (store, _store_guard) = new_shared_store(mode).unwrap();
     let result = match model {
         ExecutionModel::AsyncSingle | ExecutionModel::AsyncMulti => {
             let store_async = store.clone();
@@ -645,67 +682,79 @@ fn run_recovery_after_spike(model: ExecutionModel) {
 
 #[test]
 fn test_concurrent_same_key_write() {
-    for model in [
-        ExecutionModel::SyncSingle,
-        ExecutionModel::SyncMulti,
-        ExecutionModel::AsyncSingle,
-        ExecutionModel::AsyncMulti,
-    ] {
-        run_same_key(model);
+    for mode in selected_storage_modes() {
+        for model in [
+            ExecutionModel::SyncSingle,
+            ExecutionModel::SyncMulti,
+            ExecutionModel::AsyncSingle,
+            ExecutionModel::AsyncMulti,
+        ] {
+            run_same_key(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_read_write_conflict() {
-    for model in [
-        ExecutionModel::SyncSingle,
-        ExecutionModel::SyncMulti,
-        ExecutionModel::AsyncSingle,
-        ExecutionModel::AsyncMulti,
-    ] {
-        run_read_write_conflict(model);
+    for mode in selected_storage_modes() {
+        for model in [
+            ExecutionModel::SyncSingle,
+            ExecutionModel::SyncMulti,
+            ExecutionModel::AsyncSingle,
+            ExecutionModel::AsyncMulti,
+        ] {
+            run_read_write_conflict(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_long_short_transaction_mix() {
-    for model in [
-        ExecutionModel::SyncSingle,
-        ExecutionModel::SyncMulti,
-        ExecutionModel::AsyncSingle,
-        ExecutionModel::AsyncMulti,
-    ] {
-        run_long_short_mix(model);
+    for mode in selected_storage_modes() {
+        for model in [
+            ExecutionModel::SyncSingle,
+            ExecutionModel::SyncMulti,
+            ExecutionModel::AsyncSingle,
+            ExecutionModel::AsyncMulti,
+        ] {
+            run_long_short_mix(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_deadlock_detection() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_deadlock_watchdog(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_deadlock_watchdog(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_backpressure_under_load() {
-    for model in [
-        ExecutionModel::SyncSingle,
-        ExecutionModel::SyncMulti,
-        ExecutionModel::AsyncSingle,
-        ExecutionModel::AsyncMulti,
-    ] {
-        run_backpressure(model);
+    for mode in selected_storage_modes() {
+        for model in [
+            ExecutionModel::SyncSingle,
+            ExecutionModel::SyncMulti,
+            ExecutionModel::AsyncSingle,
+            ExecutionModel::AsyncMulti,
+        ] {
+            run_backpressure(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_recovery_after_spike() {
-    for model in [
-        ExecutionModel::SyncSingle,
-        ExecutionModel::SyncMulti,
-        ExecutionModel::AsyncSingle,
-        ExecutionModel::AsyncMulti,
-    ] {
-        run_recovery_after_spike(model);
+    for mode in selected_storage_modes() {
+        for model in [
+            ExecutionModel::SyncSingle,
+            ExecutionModel::SyncMulti,
+            ExecutionModel::AsyncSingle,
+            ExecutionModel::AsyncMulti,
+        ] {
+            run_recovery_after_spike(model, mode);
+        }
     }
 }

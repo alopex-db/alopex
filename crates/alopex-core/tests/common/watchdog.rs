@@ -118,7 +118,13 @@ impl Watchdog {
         if let Some(handle) = self.monitor.lock().unwrap().take() {
             let _ = handle.join();
         }
-        let result = self.evaluate();
+        let monitored = self.current_status();
+        let evaluated = self.evaluate();
+        let result = if !matches!(monitored, WatchdogResult::Success) {
+            monitored
+        } else {
+            evaluated
+        };
         self.status.store(result.as_u64(), Ordering::Release);
         result
     }

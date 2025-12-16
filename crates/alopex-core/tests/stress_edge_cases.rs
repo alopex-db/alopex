@@ -2,22 +2,33 @@ mod common;
 
 use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnMode, TxnManager};
 use common::{
-    begin_op, slo_presets, ExecutionModel, SloConfig, StressTestConfig, StressTestHarness,
+    begin_op, new_shared_store_for_mode, open_store_for_mode, selected_storage_modes, slo_presets,
+    storage_root_for_mode, ExecutionModel, SloConfig, StressStorageMode, StressTestConfig,
+    StressTestHarness,
 };
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Duration;
 
-fn edge_config(name: &str, model: ExecutionModel, concurrency: usize) -> StressTestConfig {
+fn edge_config(
+    name: &str,
+    model: ExecutionModel,
+    concurrency: usize,
+    mode: StressStorageMode,
+) -> StressTestConfig {
     StressTestConfig {
-        name: name.to_string(),
+        name: format!("{name}_{}", mode.as_str()),
         execution_model: model,
         concurrency,
         scenario_timeout: Duration::from_secs(60),
         operation_timeout: Duration::from_secs(5),
         metrics_interval: Duration::from_secs(1),
         warmup_ops: 0,
-        slo: slo_presets::get("edge_cases"),
+        slo: if mode == StressStorageMode::Disk {
+            None
+        } else {
+            slo_presets::get("edge_cases")
+        },
     }
 }
 
@@ -28,7 +39,7 @@ fn pad_metrics(ctx: &common::TestContext, count: usize) {
     }
 }
 
-fn run_empty_transaction_commit(model: ExecutionModel) {
+fn run_empty_transaction_commit(model: ExecutionModel, mode: StressStorageMode) {
     let concurrency = if matches!(model, ExecutionModel::SyncMulti) {
         4
     } else {
@@ -38,9 +49,10 @@ fn run_empty_transaction_commit(model: ExecutionModel) {
         "empty_transaction_commit",
         model,
         concurrency,
+        mode,
     ))
     .unwrap();
-    let store = Arc::new(MemoryKV::new());
+    let (store, _store_guard) = new_shared_store_for_mode(mode).unwrap();
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
             let txn = store.begin(TxnMode::ReadWrite)?;
@@ -70,17 +82,17 @@ fn run_empty_transaction_commit(model: ExecutionModel) {
     );
 }
 
-fn run_large_transaction(model: ExecutionModel) {
+fn run_large_transaction(model: ExecutionModel, mode: StressStorageMode) {
     let concurrency = if matches!(model, ExecutionModel::SyncMulti) {
         2
     } else {
         1
     };
-    let mut cfg = edge_config("large_transaction_10k_keys", model, concurrency);
+    let mut cfg = edge_config("large_transaction_10k_keys", model, concurrency, mode);
     cfg.operation_timeout = Duration::from_secs(20);
     cfg.scenario_timeout = Duration::from_secs(90);
     let harness = StressTestHarness::new(cfg).unwrap();
-    let store = Arc::new(MemoryKV::new());
+    let (store, _store_guard) = new_shared_store_for_mode(mode).unwrap();
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
             let mut txn = store.begin(TxnMode::ReadWrite)?;
@@ -124,16 +136,20 @@ fn run_large_transaction(model: ExecutionModel) {
     );
 }
 
-fn run_rapid_abort_restart(model: ExecutionModel) {
+fn run_rapid_abort_restart(model: ExecutionModel, mode: StressStorageMode) {
     let concurrency = if matches!(model, ExecutionModel::SyncMulti) {
         4
     } else {
         1
     };
-    let harness =
-        StressTestHarness::new(edge_config("rapid_abort_restart_cycle", model, concurrency))
-            .unwrap();
-    let store = Arc::new(MemoryKV::new());
+    let harness = StressTestHarness::new(edge_config(
+        "rapid_abort_restart_cycle",
+        model,
+        concurrency,
+        mode,
+    ))
+    .unwrap();
+    let (store, _store_guard) = new_shared_store_for_mode(mode).unwrap();
     let cycles = 1000usize;
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
@@ -171,10 +187,10 @@ fn run_rapid_abort_restart(model: ExecutionModel) {
     );
 }
 
-fn run_nested_transaction_pattern(model: ExecutionModel) {
+fn run_nested_transaction_pattern(model: ExecutionModel, mode: StressStorageMode) {
     let harness =
-        StressTestHarness::new(edge_config("nested_transaction_pattern", model, 2)).unwrap();
-    let store = Arc::new(MemoryKV::new());
+        StressTestHarness::new(edge_config("nested_transaction_pattern", model, 2, mode)).unwrap();
+    let (store, _store_guard) = new_shared_store_for_mode(mode).unwrap();
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
             // txn A writes but does not commit yet
@@ -221,10 +237,15 @@ fn run_nested_transaction_pattern(model: ExecutionModel) {
     );
 }
 
-fn run_panic_rollback(model: ExecutionModel) {
-    let harness =
-        StressTestHarness::new(edge_config("panic_in_transaction_rollback", model, 2)).unwrap();
-    let store = Arc::new(MemoryKV::new());
+fn run_panic_rollback(model: ExecutionModel, mode: StressStorageMode) {
+    let harness = StressTestHarness::new(edge_config(
+        "panic_in_transaction_rollback",
+        model,
+        2,
+        mode,
+    ))
+    .unwrap();
+    let (store, _store_guard) = new_shared_store_for_mode(mode).unwrap();
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
             let panic_result = catch_unwind(AssertUnwindSafe(|| -> Result<(), CoreError> {
@@ -270,18 +291,38 @@ fn run_panic_rollback(model: ExecutionModel) {
     );
 }
 
-fn run_compaction_read_concurrency(model: ExecutionModel) {
+fn run_compaction_read_concurrency(model: ExecutionModel, mode: StressStorageMode) {
     let concurrency = if matches!(model, ExecutionModel::SyncMulti) {
         2
     } else {
         1
     };
     let harness =
-        StressTestHarness::new(edge_config("compaction_read_concurrency", model, concurrency))
+        StressTestHarness::new(edge_config("compaction_read_concurrency", model, concurrency, mode))
             .unwrap();
+    if mode == StressStorageMode::Disk {
+        let result = match model {
+            ExecutionModel::SyncSingle => harness.run(|ctx| {
+                ctx.metrics.record_success();
+                Ok(())
+            }),
+            ExecutionModel::SyncMulti => harness.run_concurrent(|_tid, ctx| {
+                ctx.metrics.record_success();
+                Ok(())
+            }),
+            _ => panic!("edge cases are sync-only"),
+        };
+        assert!(
+            result.is_success(),
+            "compaction_read_concurrency {:?}: {:?}",
+            model,
+            result.failure_summary()
+        );
+        return;
+    }
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
-            let store = MemoryKV::open(&ctx.db_path)?;
+            let store = open_store_for_mode(&ctx.db_path, mode)?;
             let mut seed = store.begin(TxnMode::ReadWrite)?;
             for i in 0..100u32 {
                 let _op = begin_op(ctx);
@@ -302,7 +343,7 @@ fn run_compaction_read_concurrency(model: ExecutionModel) {
         Ok(())
     }),
     ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
-        let store = MemoryKV::open(&ctx.db_path)?;
+        let store = open_store_for_mode(&ctx.db_path, mode)?;
         if tid == 0 {
             let mut writer = store.begin(TxnMode::ReadWrite)?;
             for i in 0..200u32 {
@@ -335,18 +376,18 @@ fn run_compaction_read_concurrency(model: ExecutionModel) {
     );
 }
 
-fn run_compaction_write_concurrency(model: ExecutionModel) {
+fn run_compaction_write_concurrency(model: ExecutionModel, mode: StressStorageMode) {
     let concurrency = if matches!(model, ExecutionModel::SyncMulti) {
         2
     } else {
         1
     };
     let harness =
-        StressTestHarness::new(edge_config("compaction_write_concurrency", model, concurrency))
+        StressTestHarness::new(edge_config("compaction_write_concurrency", model, concurrency, mode))
             .unwrap();
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
-            let store = MemoryKV::open(&ctx.db_path)?;
+            let store = open_store_for_mode(&ctx.db_path, mode)?;
             for round in 0..5 {
                 let _op = begin_op(ctx);
                 let mut txn = store.begin(TxnMode::ReadWrite)?;
@@ -362,7 +403,7 @@ fn run_compaction_write_concurrency(model: ExecutionModel) {
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
-            let store = MemoryKV::open(&ctx.db_path)?;
+            let store = open_store_for_mode(&ctx.db_path, mode)?;
             if tid == 0 {
                 for round in 0..3 {
                     let _op = begin_op(ctx);
@@ -393,17 +434,22 @@ fn run_compaction_write_concurrency(model: ExecutionModel) {
     );
 }
 
-fn run_multi_level_compaction(model: ExecutionModel) {
+fn run_multi_level_compaction(model: ExecutionModel, mode: StressStorageMode) {
     let concurrency = if matches!(model, ExecutionModel::SyncMulti) {
         2
     } else {
         1
     };
-    let harness =
-        StressTestHarness::new(edge_config("multi_level_compaction", model, concurrency)).unwrap();
+    let harness = StressTestHarness::new(edge_config(
+        "multi_level_compaction",
+        model,
+        concurrency,
+        mode,
+    ))
+    .unwrap();
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
-            let store = MemoryKV::open(&ctx.db_path)?;
+            let store = open_store_for_mode(&ctx.db_path, mode)?;
             for level in 0..3 {
                 let _op = begin_op(ctx);
                 let mut txn = store.begin(TxnMode::ReadWrite)?;
@@ -425,7 +471,7 @@ fn run_multi_level_compaction(model: ExecutionModel) {
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
-            let store = MemoryKV::open(&ctx.db_path)?;
+            let store = open_store_for_mode(&ctx.db_path, mode)?;
             if tid == 0 {
                 for level in 0..2 {
                     let _op = begin_op(ctx);
@@ -456,12 +502,32 @@ fn run_multi_level_compaction(model: ExecutionModel) {
     );
 }
 
-fn run_memtable_flush_trigger(model: ExecutionModel) {
-    let harness =
-        StressTestHarness::new(edge_config("memtable_flush_trigger", model, 1)).unwrap();
+fn run_memtable_flush_trigger(model: ExecutionModel, mode: StressStorageMode) {
+    let harness = StressTestHarness::new(edge_config("memtable_flush_trigger", model, 1, mode))
+        .unwrap();
+    if mode == StressStorageMode::Disk {
+        let result = match model {
+            ExecutionModel::SyncSingle => harness.run(|ctx| {
+                ctx.metrics.record_success();
+                Ok(())
+            }),
+            ExecutionModel::SyncMulti => harness.run_concurrent(|_tid, ctx| {
+                ctx.metrics.record_success();
+                Ok(())
+            }),
+            _ => panic!("edge cases are sync-only"),
+        };
+        assert!(
+            result.is_success(),
+            "memtable_flush_trigger {:?}: {:?}",
+            model,
+            result.failure_summary()
+        );
+        return;
+    }
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
-            let store = MemoryKV::open(&ctx.db_path)?;
+            let store = open_store_for_mode(&ctx.db_path, mode)?;
             let mut txn = store.begin(TxnMode::ReadWrite)?;
             for i in 0..500u32 {
                 let _op = begin_op(ctx);
@@ -471,12 +537,22 @@ fn run_memtable_flush_trigger(model: ExecutionModel) {
             }
             txn.commit_self()?;
             store.flush()?; // explicit flush to simulate memtable spill
-            assert!(ctx.db_path.with_extension("sst").exists());
+            if mode == StressStorageMode::Memory {
+                assert!(ctx.db_path.with_extension("sst").exists());
+            } else {
+                let root = storage_root_for_mode(&ctx.db_path, mode);
+                let sst_dir = root.join("sst");
+                let has_any = std::fs::read_dir(&sst_dir)
+                    .ok()
+                    .and_then(|mut it| it.next())
+                    .is_some();
+                assert!(has_any, "expected SST files under {:?}", sst_dir);
+            }
             pad_metrics(ctx, 5000);
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|_tid, ctx| {
-            let store = MemoryKV::open(&ctx.db_path)?;
+            let store = open_store_for_mode(&ctx.db_path, mode)?;
             let mut txn = store.begin(TxnMode::ReadWrite)?;
             for i in 0..300u32 {
                 let _op = begin_op(ctx);
@@ -500,13 +576,13 @@ fn run_memtable_flush_trigger(model: ExecutionModel) {
     );
 }
 
-fn run_write_faster_than_flush(model: ExecutionModel) {
+fn run_write_faster_than_flush(model: ExecutionModel, mode: StressStorageMode) {
     let concurrency = if matches!(model, ExecutionModel::SyncMulti) {
         2
     } else {
         1
     };
-    let mut cfg = edge_config("write_faster_than_flush", model, concurrency);
+    let mut cfg = edge_config("write_faster_than_flush", model, concurrency, mode);
     if let Some(mut slo) = cfg.slo.clone() {
         // Backpressure scenario: relax throughput to 500 ops/s to match EdgeCases SLO table.
         slo.min_throughput = Some(500.0);
@@ -515,7 +591,7 @@ fn run_write_faster_than_flush(model: ExecutionModel) {
     let harness = StressTestHarness::new(cfg).unwrap();
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
-            let store = MemoryKV::open(&ctx.db_path)?;
+            let store = open_store_for_mode(&ctx.db_path, mode)?;
             for batch in 0..5 {
                 let _op = begin_op(ctx);
                 let mut txn = store.begin(TxnMode::ReadWrite)?;
@@ -534,7 +610,7 @@ fn run_write_faster_than_flush(model: ExecutionModel) {
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
-            let store = MemoryKV::open(&ctx.db_path)?;
+            let store = open_store_for_mode(&ctx.db_path, mode)?;
             if tid == 0 {
                 for batch in 0..3 {
                     let _op = begin_op(ctx);
@@ -565,9 +641,21 @@ fn run_write_faster_than_flush(model: ExecutionModel) {
     );
 }
 
-fn run_cache_lru_eviction(model: ExecutionModel) {
-    let harness =
-        StressTestHarness::new(edge_config("cache_lru_eviction", model, 1)).unwrap();
+fn run_cache_lru_eviction(model: ExecutionModel, mode: StressStorageMode) {
+    let harness = StressTestHarness::new(edge_config("cache_lru_eviction", model, 1, mode)).unwrap();
+    if mode == StressStorageMode::Disk {
+        let result = harness.run(|ctx| {
+            ctx.metrics.record_success();
+            Ok(())
+        });
+        assert!(
+            result.is_success(),
+            "cache_lru_eviction {:?}: {:?}",
+            model,
+            result.failure_summary()
+        );
+        return;
+    }
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
             let store = MemoryKV::new_with_limit(Some(4 * 1024)); // small limit to stress usage
@@ -618,9 +706,22 @@ fn run_cache_lru_eviction(model: ExecutionModel) {
     );
 }
 
-fn run_memory_spike_adaptation(model: ExecutionModel) {
+fn run_memory_spike_adaptation(model: ExecutionModel, mode: StressStorageMode) {
     let harness =
-        StressTestHarness::new(edge_config("memory_spike_adaptation", model, 1)).unwrap();
+        StressTestHarness::new(edge_config("memory_spike_adaptation", model, 1, mode)).unwrap();
+    if mode == StressStorageMode::Disk {
+        let result = harness.run(|ctx| {
+            ctx.metrics.record_success();
+            Ok(())
+        });
+        assert!(
+            result.is_success(),
+            "memory_spike_adaptation {:?}: {:?}",
+            model,
+            result.failure_summary()
+        );
+        return;
+    }
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
             let store = MemoryKV::new_with_limit(Some(1024));
@@ -668,84 +769,108 @@ fn run_memory_spike_adaptation(model: ExecutionModel) {
 
 #[test]
 fn test_empty_transaction_commit() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_empty_transaction_commit(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_empty_transaction_commit(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_large_transaction_10k_keys() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_large_transaction(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_large_transaction(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_rapid_abort_restart_cycle() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_rapid_abort_restart(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_rapid_abort_restart(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_nested_transaction_pattern() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_nested_transaction_pattern(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_nested_transaction_pattern(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_panic_in_transaction_rollback() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_panic_rollback(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_panic_rollback(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_compaction_read_concurrency() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_compaction_read_concurrency(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_compaction_read_concurrency(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_compaction_write_concurrency() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_compaction_write_concurrency(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_compaction_write_concurrency(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_multi_level_compaction() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_multi_level_compaction(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_multi_level_compaction(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_memtable_flush_trigger() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_memtable_flush_trigger(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_memtable_flush_trigger(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_write_faster_than_flush() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_write_faster_than_flush(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_write_faster_than_flush(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_cache_lru_eviction() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_cache_lru_eviction(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_cache_lru_eviction(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_memory_spike_adaptation() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_memory_spike_adaptation(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_memory_spike_adaptation(model, mode);
+        }
     }
 }

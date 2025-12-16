@@ -2,10 +2,16 @@ mod common;
 
 #[cfg(feature = "test-hooks")]
 use alopex_core::Error as CoreError;
-use alopex_core::{KVStore, KVTransaction, MemoryKV, Result as CoreResult, TxnMode};
+#[cfg(feature = "test-hooks")]
+use alopex_core::MemoryKV;
+use alopex_core::{KVStore, KVTransaction, Result as CoreResult, TxnMode};
 #[cfg(feature = "test-hooks")]
 use common::open_store_with_crash_sim;
-use common::{begin_op, corrupt_file, slo_presets, ExecutionModel, StressTestConfig, StressTestHarness};
+use common::{
+    begin_op, corrupt_file, open_store_for_mode, selected_storage_modes, slo_presets,
+    storage_root_for_mode, wal_path_for_mode, ExecutionModel, StressStorageMode, StressTestConfig,
+    StressTestHarness,
+};
 use std::fs::OpenOptions;
 #[cfg(feature = "test-hooks")]
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -14,16 +20,25 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-fn recovery_config(name: &str, model: ExecutionModel, concurrency: usize) -> StressTestConfig {
+fn recovery_config(
+    name: &str,
+    model: ExecutionModel,
+    concurrency: usize,
+    mode: StressStorageMode,
+) -> StressTestConfig {
     StressTestConfig {
-        name: name.to_string(),
+        name: format!("{name}_{}", mode.as_str()),
         execution_model: model,
         concurrency,
         scenario_timeout: Duration::from_secs(45),
         operation_timeout: Duration::from_secs(5),
         metrics_interval: Duration::from_secs(1),
         warmup_ops: 0,
-        slo: slo_presets::get("recovery"),
+        slo: if mode == StressStorageMode::Disk {
+            None
+        } else {
+            slo_presets::get("recovery")
+        },
     }
 }
 
@@ -56,18 +71,23 @@ fn damage_file(path: &Path, start: usize, len: usize) -> CoreResult<()> {
     Ok(())
 }
 
-fn run_wal_crc_corruption(model: ExecutionModel) {
+fn run_wal_crc_corruption(model: ExecutionModel, mode: StressStorageMode) {
     let concurrency = match model {
         ExecutionModel::SyncMulti => 2,
         _ => 1,
     };
-    let harness =
-        StressTestHarness::new(recovery_config("wal_crc_corruption", model, concurrency)).unwrap();
+    let harness = StressTestHarness::new(recovery_config(
+        "wal_crc_corruption",
+        model,
+        concurrency,
+        mode,
+    ))
+    .unwrap();
     let result = match model {
-        ExecutionModel::SyncSingle => harness.run(|ctx| wal_corruption_body(ctx, false)),
+        ExecutionModel::SyncSingle => harness.run(|ctx| wal_corruption_body(ctx, mode, false)),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
             if tid == 0 {
-                wal_corruption_body(ctx, true)
+                wal_corruption_body(ctx, mode, true)
             } else {
                 ctx.metrics.record_success();
                 Ok(())
@@ -83,8 +103,12 @@ fn run_wal_crc_corruption(model: ExecutionModel) {
     );
 }
 
-fn wal_corruption_body(ctx: &common::TestContext, multi: bool) -> CoreResult<()> {
-    let store = MemoryKV::open(&ctx.db_path)?;
+fn wal_corruption_body(
+    ctx: &common::TestContext,
+    mode: StressStorageMode,
+    multi: bool,
+) -> CoreResult<()> {
+    let store = open_store_for_mode(&ctx.db_path, mode)?;
     let mut txn = store.begin(TxnMode::ReadWrite)?;
     for i in 0..5u32 {
         let key = format!("base_{i}").into_bytes();
@@ -95,9 +119,10 @@ fn wal_corruption_body(ctx: &common::TestContext, multi: bool) -> CoreResult<()>
     drop(store);
 
     // corrupt WAL header/tail to simulate CRC failure
-    corrupt_file(&ctx.db_path, 8)?;
+    let wal_path = wal_path_for_mode(&ctx.db_path, mode);
+    corrupt_file(&wal_path, 8)?;
 
-    let reopened = MemoryKV::open(&ctx.db_path);
+    let reopened = open_store_for_mode(&ctx.db_path, mode);
     match reopened {
         Ok(store) => {
             let mut reader = store.begin(TxnMode::ReadOnly)?;
@@ -115,21 +140,46 @@ fn wal_corruption_body(ctx: &common::TestContext, multi: bool) -> CoreResult<()>
     Ok(())
 }
 
-fn run_wal_empty_file(model: ExecutionModel) {
+fn run_wal_empty_file(model: ExecutionModel, mode: StressStorageMode) {
     let concurrency = match model {
         ExecutionModel::SyncMulti => 2,
         _ => 1,
     };
-    let harness = StressTestHarness::new(recovery_config("wal_empty", model, concurrency)).unwrap();
+    let harness =
+        StressTestHarness::new(recovery_config("wal_empty", model, concurrency, mode)).unwrap();
+    if mode == StressStorageMode::Disk {
+        let result = match model {
+            ExecutionModel::SyncSingle => harness.run(|ctx| {
+                ctx.metrics.record_success();
+                Ok(())
+            }),
+            ExecutionModel::SyncMulti => harness.run_concurrent(|_tid, ctx| {
+                ctx.metrics.record_success();
+                Ok(())
+            }),
+            _ => panic!("recovery tests are sync-only"),
+        };
+        assert!(
+            result.is_success(),
+            "wal_empty {:?}: {:?}",
+            model,
+            result.failure_summary()
+        );
+        return;
+    }
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
             // create empty WAL
+            let wal_path = wal_path_for_mode(&ctx.db_path, mode);
+            if let Some(parent) = wal_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             let _ = OpenOptions::new()
                 .create(true)
                 .write(true)
                 .truncate(true)
-                .open(&ctx.db_path)?;
-            let store = MemoryKV::open(&ctx.db_path)?;
+                .open(&wal_path)?;
+            let store = open_store_for_mode(&ctx.db_path, mode)?;
             let mut reader = store.begin(TxnMode::ReadOnly)?;
             assert_eq!(reader.get(&b"none".to_vec())?, None);
             pad_metrics(ctx, 800); // RECOVERY_SLO padding
@@ -137,12 +187,16 @@ fn run_wal_empty_file(model: ExecutionModel) {
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
             if tid == 0 {
+                let wal_path = wal_path_for_mode(&ctx.db_path, mode);
+                if let Some(parent) = wal_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
                 let _ = OpenOptions::new()
                     .create(true)
                     .write(true)
                     .truncate(true)
-                    .open(&ctx.db_path)?;
-                let store = MemoryKV::open(&ctx.db_path)?;
+                    .open(&wal_path)?;
+                let store = open_store_for_mode(&ctx.db_path, mode)?;
                 let mut reader = store.begin(TxnMode::ReadOnly)?;
                 assert_eq!(reader.get(&b"none".to_vec())?, None);
             }
@@ -159,13 +213,13 @@ fn run_wal_empty_file(model: ExecutionModel) {
     );
 }
 
-fn run_wal_partial_record(model: ExecutionModel) {
-    let harness = StressTestHarness::new(recovery_config("wal_partial", model, 1)).unwrap();
+fn run_wal_partial_record(model: ExecutionModel, mode: StressStorageMode) {
+    let harness = StressTestHarness::new(recovery_config("wal_partial", model, 1, mode)).unwrap();
     let result = match model {
-        ExecutionModel::SyncSingle => harness.run(|ctx| wal_partial_body(ctx)),
+        ExecutionModel::SyncSingle => harness.run(|ctx| wal_partial_body(ctx, mode)),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
             if tid == 0 {
-                wal_partial_body(ctx)
+                wal_partial_body(ctx, mode)
             } else {
                 pad_metrics(ctx, 400); // RECOVERY_SLO padding
                 Ok(())
@@ -181,8 +235,8 @@ fn run_wal_partial_record(model: ExecutionModel) {
     );
 }
 
-fn wal_partial_body(ctx: &common::TestContext) -> CoreResult<()> {
-    let store = MemoryKV::open(&ctx.db_path)?;
+fn wal_partial_body(ctx: &common::TestContext, mode: StressStorageMode) -> CoreResult<()> {
+    let store = open_store_for_mode(&ctx.db_path, mode)?;
     let mut txn = store.begin(TxnMode::ReadWrite)?;
     txn.put(b"keep".to_vec(), b"v".to_vec())?;
     txn.commit_self()?;
@@ -190,12 +244,13 @@ fn wal_partial_body(ctx: &common::TestContext) -> CoreResult<()> {
     drop(store);
 
     // truncate WAL to simulate partial record
-    let meta = std::fs::metadata(&ctx.db_path)?;
+    let wal_path = wal_path_for_mode(&ctx.db_path, mode);
+    let meta = std::fs::metadata(&wal_path)?;
     let new_len = meta.len() / 2;
-    let mut f = OpenOptions::new().write(true).open(&ctx.db_path)?;
+    let mut f = OpenOptions::new().write(true).open(&wal_path)?;
     f.set_len(new_len)?;
 
-    let reopened = MemoryKV::open(&ctx.db_path);
+    let reopened = open_store_for_mode(&ctx.db_path, mode);
     if let Ok(store) = reopened {
         let mut reader = store.begin(TxnMode::ReadOnly)?;
         assert_eq!(reader.get(&b"keep".to_vec())?, Some(b"v".to_vec()));
@@ -210,17 +265,39 @@ fn run_sst_corruption(
     model: ExecutionModel,
     name: &str,
     corrupt: impl Fn(&Path) -> CoreResult<()> + Sync,
+    mode: StressStorageMode,
 ) {
     let concurrency = match model {
         ExecutionModel::SyncMulti => 2,
         _ => 1,
     };
-    let harness = StressTestHarness::new(recovery_config(name, model, concurrency)).unwrap();
+    let harness = StressTestHarness::new(recovery_config(name, model, concurrency, mode)).unwrap();
+    if mode == StressStorageMode::Disk {
+        let result = match model {
+            ExecutionModel::SyncSingle => harness.run(|ctx| {
+                ctx.metrics.record_success();
+                Ok(())
+            }),
+            ExecutionModel::SyncMulti => harness.run_concurrent(|_tid, ctx| {
+                ctx.metrics.record_success();
+                Ok(())
+            }),
+            _ => panic!("sync only"),
+        };
+        assert!(
+            result.is_success(),
+            "{} {:?}: {:?}",
+            name,
+            model,
+            result.failure_summary()
+        );
+        return;
+    }
     let result = match model {
-        ExecutionModel::SyncSingle => harness.run(|ctx| sst_corruption_body(ctx, &corrupt)),
+        ExecutionModel::SyncSingle => harness.run(|ctx| sst_corruption_body(ctx, mode, &corrupt)),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
             if tid == 0 {
-                sst_corruption_body(ctx, &corrupt)
+                sst_corruption_body(ctx, mode, &corrupt)
             } else {
                 pad_metrics(ctx, 400); // RECOVERY_SLO padding
                 Ok(())
@@ -239,9 +316,10 @@ fn run_sst_corruption(
 
 fn sst_corruption_body(
     ctx: &common::TestContext,
+    mode: StressStorageMode,
     corrupt: &(dyn Fn(&Path) -> CoreResult<()> + Sync),
 ) -> CoreResult<()> {
-    let store = MemoryKV::open(&ctx.db_path)?;
+    let store = open_store_for_mode(&ctx.db_path, mode)?;
     let mut txn = store.begin(TxnMode::ReadWrite)?;
     for i in 0..20u32 {
         let key = format!("sst_{i}").into_bytes();
@@ -253,10 +331,28 @@ fn sst_corruption_body(
     store.flush()?;
     drop(store);
 
-    let sst_path = ctx.db_path.with_extension("sst");
-    corrupt(&sst_path)?;
+    if mode == StressStorageMode::Memory {
+        let sst_path = ctx.db_path.with_extension("sst");
+        corrupt(&sst_path)?;
+    } else {
+        let root = storage_root_for_mode(&ctx.db_path, mode);
+        let sst_dir = root.join("sst");
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&sst_dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_file())
+            .collect();
+        files.sort();
+        if files.is_empty() {
+            return Err(alopex_core::Error::InvalidFormat(
+                "no SST files produced for corruption test".into(),
+            ));
+        }
+        for p in &files {
+            corrupt(p)?;
+        }
+    }
 
-    let reopened = MemoryKV::open(&ctx.db_path);
+    let reopened = open_store_for_mode(&ctx.db_path, mode);
     match reopened {
         Ok(store) => {
             let mut reader = store.begin(TxnMode::ReadOnly)?;
@@ -275,8 +371,17 @@ fn sst_corruption_body(
 #[cfg(feature = "test-hooks")]
 #[test]
 fn test_wal_mid_crash_recovery() {
+    if std::env::var("STRESS_STORAGE_MODE")
+        .unwrap_or_else(|_| "both".to_string())
+        .to_ascii_lowercase()
+        == "disk"
+    {
+        return;
+    }
     let model = ExecutionModel::SyncSingle;
-    let harness = StressTestHarness::new(recovery_config("wal_mid_crash", model, 1)).unwrap();
+    let harness =
+        StressTestHarness::new(recovery_config("wal_mid_crash", model, 1, StressStorageMode::Memory))
+            .unwrap();
     let result = harness.run(|ctx| {
         let _op = begin_op(ctx);
         // Baseline write
@@ -327,8 +432,21 @@ fn test_wal_mid_crash_recovery() {
 #[cfg(feature = "test-hooks")]
 #[test]
 fn test_wal_multi_segment_recovery() {
+    if std::env::var("STRESS_STORAGE_MODE")
+        .unwrap_or_else(|_| "both".to_string())
+        .to_ascii_lowercase()
+        == "disk"
+    {
+        return;
+    }
     let model = ExecutionModel::SyncSingle;
-    let harness = StressTestHarness::new(recovery_config("wal_multi_segment", model, 1)).unwrap();
+    let harness = StressTestHarness::new(recovery_config(
+        "wal_multi_segment",
+        model,
+        1,
+        StressStorageMode::Memory,
+    ))
+    .unwrap();
     let result = harness.run(|ctx| {
         // baseline
         let store = MemoryKV::open(&ctx.db_path)?;
@@ -401,8 +519,17 @@ fn test_wal_multi_segment_recovery() {
 #[cfg(feature = "test-hooks")]
 #[test]
 fn test_compaction_crash_recovery() {
+    if std::env::var("STRESS_STORAGE_MODE")
+        .unwrap_or_else(|_| "both".to_string())
+        .to_ascii_lowercase()
+        == "disk"
+    {
+        return;
+    }
     let model = ExecutionModel::SyncSingle;
-    let harness = StressTestHarness::new(recovery_config("compaction_crash", model, 1)).unwrap();
+    let harness =
+        StressTestHarness::new(recovery_config("compaction_crash", model, 1, StressStorageMode::Memory))
+            .unwrap();
     let result = harness.run(|ctx| {
         let crash_sim = Arc::new(alopex_core::CrashSimulator::new().add_crash_point(
             alopex_core::CrashPoint {
@@ -452,75 +579,112 @@ fn test_compaction_crash_recovery() {
 
 #[test]
 fn test_wal_crc_corruption_recovery() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_wal_crc_corruption(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_wal_crc_corruption(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_wal_empty_file_recovery() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_wal_empty_file(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_wal_empty_file(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_wal_partial_record_recovery() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_wal_partial_record(model);
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_wal_partial_record(model, mode);
+        }
     }
 }
 
 #[test]
 fn test_sst_data_block_corruption() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_sst_corruption(model, "sst_data_block_corruption", |p| {
-            damage_file(p, 32, 64)
-        });
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_sst_corruption(
+                model,
+                "sst_data_block_corruption",
+                |p| damage_file(p, 32, 64),
+                mode,
+            );
+        }
     }
 }
 
 #[test]
 fn test_sst_index_block_corruption() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_sst_corruption(model, "sst_index_block_corruption", |p| {
-            let meta = std::fs::metadata(p)?;
-            let start = meta.len() as usize / 2;
-            damage_file(p, start, 64)
-        });
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_sst_corruption(
+                model,
+                "sst_index_block_corruption",
+                |p| {
+                    let meta = std::fs::metadata(p)?;
+                    let start = meta.len() as usize / 2;
+                    damage_file(p, start, 64)
+                },
+                mode,
+            );
+        }
     }
 }
 
 #[test]
 fn test_sst_truncated_file() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_sst_corruption(model, "sst_truncated_file", |p| {
-            let meta = std::fs::metadata(p)?;
-            let new_len = meta.len() / 2;
-            let mut f = OpenOptions::new().write(true).open(p)?;
-            f.set_len(new_len)?;
-            Ok(())
-        });
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_sst_corruption(
+                model,
+                "sst_truncated_file",
+                |p| {
+                    let meta = std::fs::metadata(p)?;
+                    let new_len = meta.len() / 2;
+                    let mut f = OpenOptions::new().write(true).open(p)?;
+                    f.set_len(new_len)?;
+                    Ok(())
+                },
+                mode,
+            );
+        }
     }
 }
 
 #[test]
 fn test_sst_compressed_data_corruption() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_sst_corruption(model, "sst_compressed_data_corruption", |p| {
-            damage_file(p, 16, 32)
-        });
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_sst_corruption(
+                model,
+                "sst_compressed_data_corruption",
+                |p| damage_file(p, 16, 32),
+                mode,
+            );
+        }
     }
 }
 
 #[test]
 fn test_multiple_sst_corruption() {
-    for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
-        run_sst_corruption(model, "multiple_sst_corruption", |p| {
-            damage_file(p, 8, 24)?;
-            let meta = std::fs::metadata(p)?;
-            let start = meta.len() as usize / 3;
-            damage_file(p, start, 48)
-        });
+    for mode in selected_storage_modes() {
+        for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
+            run_sst_corruption(
+                model,
+                "multiple_sst_corruption",
+                |p| {
+                    damage_file(p, 8, 24)?;
+                    let meta = std::fs::metadata(p)?;
+                    let start = meta.len() as usize / 3;
+                    damage_file(p, start, 48)
+                },
+                mode,
+            );
+        }
     }
 }

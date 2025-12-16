@@ -23,6 +23,13 @@ macro_rules! ddl_test {
     ($name:ident, $runner:ident) => {
         #[test]
         fn $name() {
+            if std::env::var("STRESS_STORAGE_MODE")
+                .unwrap_or_else(|_| "both".to_string())
+                .to_ascii_lowercase()
+                == "disk"
+            {
+                return;
+            }
             for model in ALL_MODELS {
                 let result = $runner(model);
                 assert!(

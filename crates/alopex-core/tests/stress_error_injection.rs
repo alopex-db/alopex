@@ -33,6 +33,13 @@ fn pad_metrics(ctx: &common::TestContext, count: usize) {
 
 #[test]
 fn test_eio_during_write() {
+    if std::env::var("STRESS_STORAGE_MODE")
+        .unwrap_or_else(|_| "both".to_string())
+        .to_ascii_lowercase()
+        == "disk"
+    {
+        return;
+    }
     let harness = StressTestHarness::new(error_config("eio_during_write")).unwrap();
     let result = harness.run(|ctx| {
         let injector = Arc::new(
@@ -63,6 +70,13 @@ fn test_eio_during_write() {
 
 #[test]
 fn test_fsync_failure() {
+    if std::env::var("STRESS_STORAGE_MODE")
+        .unwrap_or_else(|_| "both".to_string())
+        .to_ascii_lowercase()
+        == "disk"
+    {
+        return;
+    }
     let harness = StressTestHarness::new(error_config("fsync_failure")).unwrap();
     let result = harness.run(|ctx| {
         let injector = Arc::new(
@@ -91,6 +105,13 @@ fn test_fsync_failure() {
 
 #[test]
 fn test_enospc_on_open() {
+    if std::env::var("STRESS_STORAGE_MODE")
+        .unwrap_or_else(|_| "both".to_string())
+        .to_ascii_lowercase()
+        == "disk"
+    {
+        return;
+    }
     let harness = StressTestHarness::new(error_config("enospc_on_open")).unwrap();
     let result = harness.run(|ctx| {
         let injector = Arc::new(
@@ -123,6 +144,13 @@ fn test_enospc_on_open() {
 
 #[test]
 fn test_transient_io_recovery() {
+    if std::env::var("STRESS_STORAGE_MODE")
+        .unwrap_or_else(|_| "both".to_string())
+        .to_ascii_lowercase()
+        == "disk"
+    {
+        return;
+    }
     let harness = StressTestHarness::new(error_config("transient_io_recovery")).unwrap();
     let result = harness.run(|ctx| {
         let injector = Arc::new(

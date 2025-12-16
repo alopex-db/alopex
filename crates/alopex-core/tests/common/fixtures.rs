@@ -2,15 +2,50 @@
 use super::fault_injection::FaultInjector;
 #[cfg(feature = "test-hooks")]
 use alopex_core::{CrashSimulator, IoHooks};
-use alopex_core::{KVStore, KVTransaction, MemoryKV, Result as CoreResult, TxnMode};
+use alopex_core::kv::AnyKV;
+use alopex_core::lsm::wal::{SyncMode, WalConfig};
+use alopex_core::lsm::LsmKVConfig;
+use alopex_core::{KVStore, KVTransaction, MemoryKV, Result as CoreResult, StorageFactory, StorageMode, TxnMode};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use std::env;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(feature = "test-hooks")]
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StressStorageMode {
+    Memory,
+    Disk,
+}
+
+impl StressStorageMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Disk => "disk",
+        }
+    }
+}
+
+/// 有効なストレージモード一覧を返す。
+///
+/// - `STRESS_STORAGE_MODE=memory|disk|both`（未指定は both）
+pub fn selected_storage_modes() -> Vec<StressStorageMode> {
+    match env::var("STRESS_STORAGE_MODE")
+        .unwrap_or_else(|_| "both".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "memory" => vec![StressStorageMode::Memory],
+        "disk" => vec![StressStorageMode::Disk],
+        "both" | "" => vec![StressStorageMode::Memory, StressStorageMode::Disk],
+        other => panic!("invalid STRESS_STORAGE_MODE={other} (expected memory|disk|both)"),
+    }
+}
 
 /// テスト環境（TempDir + DBパス）。
 pub struct TestEnvironment {
@@ -26,9 +61,100 @@ impl TestEnvironment {
     }
 }
 
+pub fn storage_root_for_mode(base_wal_path: &Path, mode: StressStorageMode) -> PathBuf {
+    match mode {
+        StressStorageMode::Memory => base_wal_path.to_path_buf(),
+        StressStorageMode::Disk => {
+            let parent = base_wal_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
+            let stem = base_wal_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("db");
+            parent.join(format!("{stem}.lsm"))
+        }
+    }
+}
+
+pub fn wal_path_for_mode(base_wal_path: &Path, mode: StressStorageMode) -> PathBuf {
+    match mode {
+        StressStorageMode::Memory => base_wal_path.to_path_buf(),
+        StressStorageMode::Disk => storage_root_for_mode(base_wal_path, mode).join("lsm.wal"),
+    }
+}
+
+/// 永続化なしの共有ストアを生成する（Disk の場合は TempDir を返す）。
+pub fn new_shared_store_for_mode(
+    mode: StressStorageMode,
+) -> CoreResult<(Arc<AnyKV>, Option<TempDir>)> {
+    match mode {
+        StressStorageMode::Memory => Ok((Arc::new(AnyKV::Memory(MemoryKV::new())), None)),
+        StressStorageMode::Disk => {
+            let dir = TempDir::new()?;
+            let cfg = LsmKVConfig {
+                wal: WalConfig {
+                    sync_mode: SyncMode::NoSync,
+                    ..WalConfig::default()
+                },
+                ..LsmKVConfig::default()
+            };
+            let store = StorageFactory::create(StorageMode::Disk {
+                path: dir.path().to_path_buf(),
+                config: Some(cfg),
+            })?;
+            Ok((Arc::new(store), Some(dir)))
+        }
+    }
+}
+
 /// ストアを開く。
-pub fn open_store(path: &Path) -> CoreResult<MemoryKV> {
-    MemoryKV::open(path)
+pub fn open_store_for_mode(base_wal_path: &Path, mode: StressStorageMode) -> CoreResult<AnyKV> {
+    match mode {
+        StressStorageMode::Memory => Ok(AnyKV::Memory(MemoryKV::open(base_wal_path)?)),
+        StressStorageMode::Disk => {
+            let root = storage_root_for_mode(base_wal_path, mode);
+            std::fs::create_dir_all(&root)?;
+            let cfg = LsmKVConfig {
+                wal: WalConfig {
+                    sync_mode: SyncMode::NoSync,
+                    ..WalConfig::default()
+                },
+                ..LsmKVConfig::default()
+            };
+            // 並列テストで同一ディレクトリを同時 open すると WAL 初期化が競合するため、
+            // 1プロセス内の簡易ロックで初期化を直列化する。
+            let lock_path = root.join(".init.lock");
+            let ready_path = root.join(".init.ready");
+            let initializer = match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(_) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(e) => return Err(e.into()),
+            };
+            if !initializer {
+                let start = Instant::now();
+                while !ready_path.exists() && start.elapsed() < Duration::from_secs(5) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            StorageFactory::create(StorageMode::Disk {
+                path: root,
+                config: Some(cfg),
+            })
+            .map(|store| {
+                if initializer {
+                    let _ = std::fs::write(&ready_path, b"");
+                    let _ = std::fs::remove_file(&lock_path);
+                }
+                store
+            })
+        }
+    }
 }
 
 /// ストアを障害注入フック付きで開く（test-hooks有効時のみ）。

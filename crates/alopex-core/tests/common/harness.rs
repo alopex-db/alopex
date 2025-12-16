@@ -1,8 +1,9 @@
-use alopex_core::{KVStore, KVTransaction, MemoryKV, Result as CoreResult, TxnMode};
+use alopex_core::{KVStore, KVTransaction, Result as CoreResult, TxnMode};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
+use super::fixtures::{open_store_for_mode, StressStorageMode};
 use super::metrics::{MetricsCollector, MetricsSummary, SloConfig, SloResult};
 use super::watchdog::{OperationGuard, Watchdog, WatchdogConfig, WatchdogResult};
 
@@ -253,8 +254,8 @@ impl StressTestHarness {
 }
 
 /// 簡易的なテストユーティリティ。
-pub fn do_put_get_roundtrip(ctx: &TestContext) -> CoreResult<()> {
-    let store = MemoryKV::open(&ctx.db_path)?;
+pub fn do_put_get_roundtrip(ctx: &TestContext, mode: StressStorageMode) -> CoreResult<()> {
+    let store = open_store_for_mode(&ctx.db_path, mode)?;
     let mut txn = store.begin(TxnMode::ReadWrite)?;
     let key = b"key".to_vec();
     let val = b"value".to_vec();
