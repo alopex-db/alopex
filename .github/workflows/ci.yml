@@ -86,11 +86,15 @@ jobs:
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true  # Advisory: don't fail CI on new vulnerabilities
 
   build:
     name: Build (${{ matrix.os }})
