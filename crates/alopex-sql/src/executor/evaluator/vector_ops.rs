@@ -40,7 +40,7 @@ pub enum VectorMetric {
 
 impl VectorMetric {
     /// 文字列をメトリクスに変換する（前後空白除去・小文字化）。
-    pub fn from_str(s: &str) -> Result<Self, VectorError> {
+    pub fn parse(s: &str) -> Result<Self, VectorError> {
         let normalized = s.trim().to_lowercase();
         match normalized.as_str() {
             "cosine" => Ok(Self::Cosine),
@@ -62,7 +62,7 @@ impl FromStr for VectorMetric {
     type Err = VectorError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        VectorMetric::from_str(s)
+        VectorMetric::parse(s)
     }
 }
 
@@ -132,19 +132,16 @@ mod tests {
     #[test]
     fn vector_metric_from_str_trims_and_lowercases() {
         assert_eq!(
-            VectorMetric::from_str(" COSINE ").unwrap(),
+            VectorMetric::parse(" COSINE ").unwrap(),
             VectorMetric::Cosine
         );
-        assert_eq!(VectorMetric::from_str("l2").unwrap(), VectorMetric::L2);
-        assert_eq!(
-            VectorMetric::from_str("Inner").unwrap(),
-            VectorMetric::Inner
-        );
+        assert_eq!(VectorMetric::parse("l2").unwrap(), VectorMetric::L2);
+        assert_eq!(VectorMetric::parse("Inner").unwrap(), VectorMetric::Inner);
     }
 
     #[test]
     fn vector_metric_from_str_empty_rejected() {
-        let err = VectorMetric::from_str("").unwrap_err();
+        let err = VectorMetric::parse("").unwrap_err();
         assert!(matches!(
             err,
             VectorError::InvalidMetric { reason, .. } if reason.contains("empty")
@@ -153,7 +150,7 @@ mod tests {
 
     #[test]
     fn vector_metric_from_str_unknown_rejected() {
-        let err = VectorMetric::from_str("minkowski").unwrap_err();
+        let err = VectorMetric::parse("minkowski").unwrap_err();
         assert!(matches!(
             err,
             VectorError::InvalidMetric { reason, .. } if reason.contains("expected 'cosine', 'l2', or 'inner'")

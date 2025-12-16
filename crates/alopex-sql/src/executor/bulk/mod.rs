@@ -7,10 +7,22 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use alopex_core::kv::KVStore;
+use alopex_core::columnar::encoding::{Column, LogicalType};
+use alopex_core::columnar::encoding_v2::Bitmap;
+use alopex_core::columnar::kvs_bridge::key_layout;
+use alopex_core::columnar::segment_v2::{
+    ColumnSchema, ColumnSegmentV2, RecordBatch, Schema, SegmentConfigV2, SegmentWriterV2,
+};
+use alopex_core::kv::{KVStore, KVTransaction};
+use alopex_core::storage::compression::CompressionV2;
+use alopex_core::storage::format::bincode_config;
+use bincode::config::Options;
 
 use crate::ast::ddl::IndexMethod;
-use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
+use crate::catalog::{
+    Catalog, ColumnMetadata, Compression, IndexMetadata, RowIdMode, TableMetadata,
+};
+use crate::columnar::statistics::compute_row_group_statistics;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::planner::types::ResolvedType;
@@ -30,34 +42,19 @@ pub enum FileFormat {
 }
 
 /// COPY オプション。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CopyOptions {
     /// CSV ヘッダ行の有無。
     pub header: bool,
 }
 
-impl Default for CopyOptions {
-    fn default() -> Self {
-        Self { header: false }
-    }
-}
-
 /// COPY セキュリティ設定。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CopySecurityConfig {
     /// 許可するベースディレクトリ一覧（None なら無制限）。
     pub allowed_base_dirs: Option<Vec<PathBuf>>,
     /// シンボリックリンクを許可するか。
     pub allow_symlinks: bool,
-}
-
-impl Default for CopySecurityConfig {
-    fn default() -> Self {
-        Self {
-            allowed_base_dirs: None,
-            allow_symlinks: false,
-        }
-    }
 }
 
 /// 入力スキーマのフィールド。
@@ -210,29 +207,29 @@ pub fn validate_schema(schema: &CopySchema, table_meta: &TableMetadata) -> Resul
         .zip(table_meta.columns.iter())
         .enumerate()
     {
-        if let Some(dt) = &field.data_type {
-            if !is_type_compatible(dt, &col.data_type) {
-                return Err(ExecutorError::SchemaMismatch {
-                    expected: table_meta.columns.len(),
-                    actual: schema.fields.len(),
-                    reason: format!(
-                        "type mismatch for column '{}': expected {:?}, got {:?}",
-                        col.name, col.data_type, dt
-                    ),
-                });
-            }
+        if let Some(dt) = &field.data_type
+            && !is_type_compatible(dt, &col.data_type)
+        {
+            return Err(ExecutorError::SchemaMismatch {
+                expected: table_meta.columns.len(),
+                actual: schema.fields.len(),
+                reason: format!(
+                    "type mismatch for column '{}': expected {:?}, got {:?}",
+                    col.name, col.data_type, dt
+                ),
+            });
         }
-        if let Some(name) = &field.name {
-            if name != &col.name {
-                return Err(ExecutorError::SchemaMismatch {
-                    expected: table_meta.columns.len(),
-                    actual: schema.fields.len(),
-                    reason: format!(
-                        "column name mismatch at position {}: expected '{}', got '{}'",
-                        idx, col.name, name
-                    ),
-                });
-            }
+        if let Some(name) = &field.name
+            && name != &col.name
+        {
+            return Err(ExecutorError::SchemaMismatch {
+                expected: table_meta.columns.len(),
+                actual: schema.fields.len(),
+                reason: format!(
+                    "column name mismatch at position {}: expected '{}', got '{}'",
+                    idx, col.name, name
+                ),
+            });
         }
     }
 
@@ -289,10 +286,480 @@ fn bulk_load_columnar<S: KVStore, C: Catalog>(
     txn: &mut SqlTransaction<'_, S>,
     catalog: &C,
     table: &TableMetadata,
-    reader: Box<dyn BulkReader>,
+    mut reader: Box<dyn BulkReader>,
 ) -> Result<u64> {
-    // Columnar エンジン未実装のため、Row と同じ処理で取り込む。
-    bulk_load_row(txn, catalog, table, reader)
+    let _ = catalog; // reserved for future index integration
+
+    let row_group_size = table.storage_options.row_group_size.max(1) as usize;
+    let compression = map_compression(table.storage_options.compression);
+    let mut writer = SegmentWriterV2::new(SegmentConfigV2 {
+        row_group_size: row_group_size as u64,
+        compression,
+        ..Default::default()
+    });
+    let schema = build_segment_schema(table)?;
+
+    let mut row_group_stats = Vec::new();
+    let mut total_rows = 0u64;
+    while let Some(batch) = reader.next_batch(row_group_size)? {
+        if batch.is_empty() {
+            continue;
+        }
+        let stats = compute_row_group_statistics(&batch);
+        let record_batch = build_record_batch(&schema, table, &batch)?;
+        writer
+            .write_batch(record_batch)
+            .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+        row_group_stats.push(stats);
+        total_rows += batch.len() as u64;
+    }
+
+    if total_rows == 0 {
+        return Ok(0);
+    }
+
+    let segment = writer
+        .finish()
+        .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+    let _segment_id = persist_segment(txn, table, segment, &row_group_stats)?;
+
+    Ok(total_rows)
+}
+
+fn map_compression(compression: Compression) -> CompressionV2 {
+    let desired = match compression {
+        Compression::None => CompressionV2::None,
+        Compression::Lz4 => CompressionV2::Lz4,
+        Compression::Zstd => CompressionV2::Zstd { level: 3 },
+    };
+
+    if desired.is_available() {
+        desired
+    } else {
+        CompressionV2::None
+    }
+}
+
+fn build_segment_schema(table: &TableMetadata) -> Result<Schema> {
+    let mut columns = Vec::with_capacity(table.column_count());
+    for col in &table.columns {
+        let logical_type = logical_type_for(&col.data_type)?;
+        columns.push(ColumnSchema {
+            name: col.name.clone(),
+            logical_type,
+            nullable: !col.not_null,
+            fixed_len: fixed_len_for(&col.data_type),
+        });
+    }
+    Ok(Schema { columns })
+}
+
+fn logical_type_for(ty: &ResolvedType) -> Result<LogicalType> {
+    match ty {
+        ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Timestamp => {
+            Ok(LogicalType::Int64)
+        }
+        ResolvedType::Vector { dimension, .. } => {
+            Ok(LogicalType::Fixed(dimension.checked_mul(4).ok_or_else(|| {
+                ExecutorError::Columnar("vector dimension overflow when computing fixed len".into())
+            })? as u16))
+        }
+        ResolvedType::Float => Ok(LogicalType::Float32),
+        ResolvedType::Double => Ok(LogicalType::Float64),
+        ResolvedType::Boolean => Ok(LogicalType::Bool),
+        ResolvedType::Text | ResolvedType::Blob => Ok(LogicalType::Binary),
+        ResolvedType::Null => Err(ExecutorError::Columnar(
+            "NULL column type is not supported for columnar storage".into(),
+        )),
+    }
+}
+
+fn fixed_len_for(ty: &ResolvedType) -> Option<u32> {
+    match ty {
+        ResolvedType::Vector { dimension, .. } => Some(dimension.saturating_mul(4)),
+        _ => None,
+    }
+}
+
+fn build_record_batch(
+    schema: &Schema,
+    table: &TableMetadata,
+    rows: &[Vec<SqlValue>],
+) -> Result<RecordBatch> {
+    for row in rows {
+        if row.len() != table.column_count() {
+            return Err(ExecutorError::BulkLoad(format!(
+                "row has {} columns, expected {}",
+                row.len(),
+                table.column_count()
+            )));
+        }
+    }
+
+    let mut columns = Vec::with_capacity(table.column_count());
+    let mut bitmaps = Vec::with_capacity(table.column_count());
+    for (idx, col_meta) in table.columns.iter().enumerate() {
+        let (col, bitmap) = build_column(idx, col_meta, rows)?;
+        columns.push(col);
+        bitmaps.push(bitmap);
+    }
+
+    Ok(RecordBatch::new(schema.clone(), columns, bitmaps))
+}
+
+fn validity_bitmap(validity: &[bool]) -> Option<Bitmap> {
+    if validity.iter().all(|v| *v) {
+        None
+    } else {
+        Some(Bitmap::from_bools(validity))
+    }
+}
+
+fn build_column(
+    col_idx: usize,
+    col_meta: &ColumnMetadata,
+    rows: &[Vec<SqlValue>],
+) -> Result<(Column, Option<Bitmap>)> {
+    match &col_meta.data_type {
+        ResolvedType::Integer => {
+            let mut validity = Vec::with_capacity(rows.len());
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                match row
+                    .get(col_idx)
+                    .ok_or_else(|| ExecutorError::BulkLoad("row too short".into()))?
+                {
+                    SqlValue::Null => {
+                        validity.push(false);
+                        values.push(0);
+                    }
+                    SqlValue::Integer(v) => {
+                        validity.push(true);
+                        values.push(*v as i64);
+                    }
+                    SqlValue::BigInt(v) => {
+                        validity.push(true);
+                        values.push(*v);
+                    }
+                    other => {
+                        return Err(ExecutorError::BulkLoad(format!(
+                            "type mismatch for column '{}': expected Integer, got {}",
+                            col_meta.name,
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok((Column::Int64(values), validity_bitmap(&validity)))
+        }
+        ResolvedType::BigInt | ResolvedType::Timestamp => {
+            let mut validity = Vec::with_capacity(rows.len());
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                match row
+                    .get(col_idx)
+                    .ok_or_else(|| ExecutorError::BulkLoad("row too short".into()))?
+                {
+                    SqlValue::Null => {
+                        validity.push(false);
+                        values.push(0);
+                    }
+                    SqlValue::BigInt(v) | SqlValue::Timestamp(v) => {
+                        validity.push(true);
+                        values.push(*v);
+                    }
+                    SqlValue::Integer(v) => {
+                        validity.push(true);
+                        values.push(*v as i64);
+                    }
+                    other => {
+                        return Err(ExecutorError::BulkLoad(format!(
+                            "type mismatch for column '{}': expected BigInt/Timestamp, got {}",
+                            col_meta.name,
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok((Column::Int64(values), validity_bitmap(&validity)))
+        }
+        ResolvedType::Float => {
+            let mut validity = Vec::with_capacity(rows.len());
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                match row
+                    .get(col_idx)
+                    .ok_or_else(|| ExecutorError::BulkLoad("row too short".into()))?
+                {
+                    SqlValue::Null => {
+                        validity.push(false);
+                        values.push(0.0);
+                    }
+                    SqlValue::Float(v) => {
+                        validity.push(true);
+                        values.push(*v);
+                    }
+                    other => {
+                        return Err(ExecutorError::BulkLoad(format!(
+                            "type mismatch for column '{}': expected Float, got {}",
+                            col_meta.name,
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok((Column::Float32(values), validity_bitmap(&validity)))
+        }
+        ResolvedType::Double => {
+            let mut validity = Vec::with_capacity(rows.len());
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                match row
+                    .get(col_idx)
+                    .ok_or_else(|| ExecutorError::BulkLoad("row too short".into()))?
+                {
+                    SqlValue::Null => {
+                        validity.push(false);
+                        values.push(0.0);
+                    }
+                    SqlValue::Double(v) => {
+                        validity.push(true);
+                        values.push(*v);
+                    }
+                    other => {
+                        return Err(ExecutorError::BulkLoad(format!(
+                            "type mismatch for column '{}': expected Double, got {}",
+                            col_meta.name,
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok((Column::Float64(values), validity_bitmap(&validity)))
+        }
+        ResolvedType::Boolean => {
+            let mut validity = Vec::with_capacity(rows.len());
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                match row
+                    .get(col_idx)
+                    .ok_or_else(|| ExecutorError::BulkLoad("row too short".into()))?
+                {
+                    SqlValue::Null => {
+                        validity.push(false);
+                        values.push(false);
+                    }
+                    SqlValue::Boolean(v) => {
+                        validity.push(true);
+                        values.push(*v);
+                    }
+                    other => {
+                        return Err(ExecutorError::BulkLoad(format!(
+                            "type mismatch for column '{}': expected Boolean, got {}",
+                            col_meta.name,
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok((Column::Bool(values), validity_bitmap(&validity)))
+        }
+        ResolvedType::Text => {
+            let mut validity = Vec::with_capacity(rows.len());
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                match row
+                    .get(col_idx)
+                    .ok_or_else(|| ExecutorError::BulkLoad("row too short".into()))?
+                {
+                    SqlValue::Null => {
+                        validity.push(false);
+                        values.push(Vec::new());
+                    }
+                    SqlValue::Text(v) => {
+                        validity.push(true);
+                        values.push(v.as_bytes().to_vec());
+                    }
+                    other => {
+                        return Err(ExecutorError::BulkLoad(format!(
+                            "type mismatch for column '{}': expected Text, got {}",
+                            col_meta.name,
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok((Column::Binary(values), validity_bitmap(&validity)))
+        }
+        ResolvedType::Blob => {
+            let mut validity = Vec::with_capacity(rows.len());
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                match row
+                    .get(col_idx)
+                    .ok_or_else(|| ExecutorError::BulkLoad("row too short".into()))?
+                {
+                    SqlValue::Null => {
+                        validity.push(false);
+                        values.push(Vec::new());
+                    }
+                    SqlValue::Blob(v) => {
+                        validity.push(true);
+                        values.push(v.clone());
+                    }
+                    other => {
+                        return Err(ExecutorError::BulkLoad(format!(
+                            "type mismatch for column '{}': expected Blob, got {}",
+                            col_meta.name,
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok((Column::Binary(values), validity_bitmap(&validity)))
+        }
+        ResolvedType::Vector { dimension, .. } => {
+            let fixed_len = dimension.saturating_mul(4) as usize;
+            let mut validity = Vec::with_capacity(rows.len());
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                match row
+                    .get(col_idx)
+                    .ok_or_else(|| ExecutorError::BulkLoad("row too short".into()))?
+                {
+                    SqlValue::Null => {
+                        validity.push(false);
+                        values.push(vec![0u8; fixed_len]);
+                    }
+                    SqlValue::Vector(v) => {
+                        if v.len() as u32 != *dimension {
+                            return Err(ExecutorError::BulkLoad(format!(
+                                "vector dimension mismatch for column '{}': expected {}, got {}",
+                                col_meta.name,
+                                dimension,
+                                v.len()
+                            )));
+                        }
+                        validity.push(true);
+                        let mut buf = Vec::with_capacity(fixed_len);
+                        for f in v {
+                            buf.extend_from_slice(&f.to_le_bytes());
+                        }
+                        values.push(buf);
+                    }
+                    other => {
+                        return Err(ExecutorError::BulkLoad(format!(
+                            "type mismatch for column '{}': expected Vector, got {}",
+                            col_meta.name,
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok((
+                Column::Fixed {
+                    len: fixed_len,
+                    values,
+                },
+                validity_bitmap(&validity),
+            ))
+        }
+        ResolvedType::Null => Err(ExecutorError::Columnar(
+            "NULL column type is not supported for columnar storage".into(),
+        )),
+    }
+}
+
+fn persist_segment<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    table: &TableMetadata,
+    mut segment: ColumnSegmentV2,
+    row_group_stats: &[crate::columnar::statistics::RowGroupStatistics],
+) -> Result<u64> {
+    if row_group_stats.len() != segment.meta.row_groups.len() {
+        return Err(ExecutorError::Columnar(
+            "row group statistics length mismatch".into(),
+        ));
+    }
+
+    let table_id = table.table_id;
+    let index_key = key_layout::segment_index_key(table_id);
+    let existing = txn.inner_mut().get(&index_key)?;
+    let mut index: Vec<u64> = if let Some(bytes) = existing {
+        bincode_config()
+            .deserialize(&bytes)
+            .map_err(|e| ExecutorError::Columnar(e.to_string()))?
+    } else {
+        Vec::new()
+    };
+    let segment_id = index
+        .last()
+        .copied()
+        .map(|id| id.saturating_add(1))
+        .unwrap_or(0);
+
+    let mut row_group_stats = row_group_stats.to_vec();
+    if table.storage_options.row_id_mode == RowIdMode::Direct {
+        let total_rows = usize::try_from(segment.meta.num_rows)
+            .map_err(|_| ExecutorError::Columnar("segment row count exceeds usize::MAX".into()))?;
+        segment.row_ids = (0..total_rows)
+            .map(|idx| {
+                alopex_core::columnar::segment_v2::encode_row_id(segment_id, idx as u64)
+                    .map_err(|e| ExecutorError::Columnar(e.to_string()))
+            })
+            .collect::<Result<Vec<u64>>>()?;
+
+        for (idx, meta) in segment.meta.row_groups.iter().enumerate() {
+            let start = usize::try_from(meta.row_start)
+                .map_err(|_| ExecutorError::Columnar("row_start exceeds usize::MAX".into()))?;
+            let count = usize::try_from(meta.row_count)
+                .map_err(|_| ExecutorError::Columnar("row_count exceeds usize::MAX".into()))?;
+            if count == 0 {
+                continue;
+            }
+            let end = start
+                .checked_add(count)
+                .ok_or_else(|| ExecutorError::Columnar("row_id range overflow".into()))?;
+            if end > segment.row_ids.len() {
+                return Err(ExecutorError::Columnar(
+                    "row_ids length is smaller than row_group range".into(),
+                ));
+            }
+            row_group_stats[idx].row_id_min = segment.row_ids.get(start).copied();
+            row_group_stats[idx].row_id_max = segment.row_ids.get(end - 1).copied();
+        }
+    } else {
+        segment.row_ids.clear();
+    }
+
+    let segment_bytes = bincode_config()
+        .serialize(&segment)
+        .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+    txn.inner_mut().put(
+        key_layout::column_segment_key(table_id, segment_id, 0),
+        segment_bytes,
+    )?;
+
+    let meta_bytes = bincode_config()
+        .serialize(&segment.meta)
+        .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+    txn.inner_mut()
+        .put(key_layout::statistics_key(table_id, segment_id), meta_bytes)?;
+
+    let rg_bytes = bincode_config()
+        .serialize(&row_group_stats)
+        .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+    txn.inner_mut().put(
+        key_layout::row_group_stats_key(table_id, segment_id),
+        rg_bytes,
+    )?;
+
+    index.push(segment_id);
+    let index_bytes = bincode_config()
+        .serialize(&index)
+        .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+    txn.inner_mut().put(index_key, index_bytes)?;
+    Ok(segment_id)
 }
 
 /// テキストをテーブル型に合わせて `SqlValue` へ変換する。
@@ -322,7 +789,7 @@ pub(crate) fn parse_value(raw: &str, ty: &ResolvedType) -> Result<SqlValue> {
         ResolvedType::Boolean => {
             let parsed = trimmed
                 .parse::<bool>()
-                .or_else(|_| match trimmed {
+                .or(match trimmed {
                     "1" => Ok(true),
                     "0" => Ok(false),
                     _ => Err(()),

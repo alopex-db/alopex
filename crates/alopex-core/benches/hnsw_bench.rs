@@ -36,7 +36,8 @@ fn bench_insert_throughput(c: &mut Criterion) {
     let dim = 128;
     for &n in &[1_000usize, 10_000, 100_000] {
         let data = generate_dataset(n, dim);
-        c.bench_function(format!("hnsw_insert_{}_vectors", n), |b| {
+        let name = format!("hnsw_insert_{}_vectors", n);
+        c.bench_function(&name, |b| {
             b.iter_batched(
                 || {
                     (

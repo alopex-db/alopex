@@ -116,9 +116,12 @@ dependencies = [
  "alopex-core",
  "arrow-array",
  "arrow-schema",
+ "bincode",
  "criterion",
  "parquet",
  "proptest",
+ "serde",
+ "tempfile",
  "thiserror 2.0.17",
 ]
 

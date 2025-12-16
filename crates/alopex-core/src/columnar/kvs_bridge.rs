@@ -9,11 +9,11 @@ use crate::columnar::error::{ColumnarError, Result};
 use crate::columnar::segment_v2::{
     ColumnSegmentV2, InMemorySegmentSource, RecordBatch, SegmentMetaV2, SegmentReaderV2,
 };
-use crate::kv::{memory::MemoryTransaction, KVStore, KVTransaction};
+use crate::kv::any::{AnyKV, AnyKVTransaction};
+use crate::kv::{KVStore, KVTransaction};
 use crate::storage::format::bincode_config;
 use crate::txn::TxnManager;
 use crate::types::TxnMode;
-use crate::MemoryKV;
 
 /// キーレイアウトおよびプレフィックス。
 pub mod key_layout {
@@ -54,25 +54,34 @@ pub mod key_layout {
         key.extend_from_slice(&segment_id.to_le_bytes());
         key
     }
+
+    /// RowGroup 統計情報キーを生成する。
+    pub fn row_group_stats_key(table_id: u32, segment_id: u64) -> Vec<u8> {
+        let mut key = Vec::with_capacity(1 + 4 + 8);
+        key.push(PREFIX_ROW_GROUP);
+        key.extend_from_slice(&table_id.to_le_bytes());
+        key.extend_from_slice(&segment_id.to_le_bytes());
+        key
+    }
 }
 
 /// カラムナーセグメントを KVS に永続化するブリッジ。
 #[derive(Clone)]
 pub struct ColumnarKvsBridge {
-    store: Arc<MemoryKV>,
+    store: Arc<AnyKV>,
     max_retries: usize,
 }
 
 impl ColumnarKvsBridge {
     /// 新規ブリッジを生成する。
-    pub fn new(store: Arc<MemoryKV>) -> Self {
+    pub fn new(store: Arc<AnyKV>) -> Self {
         Self {
             store,
             max_retries: 3,
         }
     }
 
-    fn load_index<'a>(txn: &mut MemoryTransaction<'a>, table_id: u32) -> Result<Vec<u64>> {
+    fn load_index<'a>(txn: &mut AnyKVTransaction<'a>, table_id: u32) -> Result<Vec<u64>> {
         let key = key_layout::segment_index_key(table_id);
         if let Some(bytes) = txn.get(&key)? {
             bincode_config()
@@ -84,7 +93,7 @@ impl ColumnarKvsBridge {
     }
 
     fn persist_index<'a>(
-        txn: &mut MemoryTransaction<'a>,
+        txn: &mut AnyKVTransaction<'a>,
         table_id: u32,
         index: &[u64],
     ) -> Result<()> {
@@ -230,7 +239,7 @@ mod tests {
 
     #[test]
     fn test_segment_atomic_write_transaction() {
-        let store = MemoryKV::new_with_limit(Some(16));
+        let store = AnyKV::Memory(MemoryKV::new_with_limit(Some(16)));
         let bridge = ColumnarKvsBridge::new(Arc::new(store));
         let segment = make_segment();
 
@@ -249,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_segment_write_read_via_kvs() {
-        let store = Arc::new(MemoryKV::new());
+        let store = Arc::new(AnyKV::Memory(MemoryKV::new()));
         let bridge = ColumnarKvsBridge::new(store.clone());
         let segment = make_segment();
         let id = bridge.write_segment(7, &segment).unwrap();
@@ -270,12 +279,12 @@ mod tests {
         let wal_path = dir.path().join("wal.log");
         let segment = make_segment();
         {
-            let store = Arc::new(MemoryKV::open(&wal_path).unwrap());
+            let store = Arc::new(AnyKV::Memory(MemoryKV::open(&wal_path).unwrap()));
             let bridge = ColumnarKvsBridge::new(store);
             bridge.write_segment(9, &segment).unwrap();
         }
         // WAL から復旧
-        let reopened = Arc::new(MemoryKV::open(&wal_path).unwrap());
+        let reopened = Arc::new(AnyKV::Memory(MemoryKV::open(&wal_path).unwrap()));
         let bridge = ColumnarKvsBridge::new(reopened);
         let batches = bridge.read_segment(9, 0, &[1]).unwrap();
         if let Column::Int64(vals) = &batches[0].columns[0] {
@@ -287,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_multiple_segments_concurrent_access() {
-        let store = Arc::new(MemoryKV::new());
+        let store = Arc::new(AnyKV::Memory(MemoryKV::new()));
         let bridge = ColumnarKvsBridge::new(store.clone());
         let segment = make_segment();
         let bridge_arc = Arc::new(bridge);

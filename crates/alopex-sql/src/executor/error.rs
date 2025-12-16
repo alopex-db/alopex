@@ -100,6 +100,10 @@ pub enum ExecutorError {
     #[error("invalid row_group_size: {0}")]
     InvalidRowGroupSize(String),
 
+    /// Invalid rowid_mode option.
+    #[error("invalid rowid_mode: {0}")]
+    InvalidRowIdMode(String),
+
     /// Unknown table option key.
     #[error("unknown table option: {0}")]
     UnknownTableOption(String),

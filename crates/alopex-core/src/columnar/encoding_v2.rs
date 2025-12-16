@@ -1994,8 +1994,8 @@ fn select_int_encoding(hints: &EncodingHints) -> EncodingV2 {
 }
 
 fn select_binary_encoding(hints: &EncodingHints) -> EncodingV2 {
-    // Sorted strings: use IncrementalString
-    if hints.is_sorted {
+    // ソート済みデータ: 先頭との差分（prefix）を活用できるため IncrementalString を優先する。
+    if hints.is_sorted && hints.total_count > 0 {
         return EncodingV2::IncrementalString;
     }
 

@@ -5,16 +5,22 @@ edition = "2024"
 description = "SQL parser components for the Alopex DB dialect"
 license = "Apache-2.0"
 
+[features]
+default = []
+
 [dependencies]
 thiserror = "2.0"
 alopex-core = { path = "../alopex-core" }
 parquet = { version = "52", features = ["arrow"] }
 arrow-array = "52"
 arrow-schema = "52"
+serde = { workspace = true, features = ["derive"] }
+bincode = "1.3"
 
 [dev-dependencies]
 proptest = "1.4"
 criterion = "0.5"
+tempfile = "3.10"
 
 [[bench]]
 name = "key_encoding"
@@ -26,4 +32,8 @@ harness = false
 
 [[bench]]
 name = "storage_macro_bench"
+harness = false
+
+[[bench]]
+name = "knn_rowid"
 harness = false

@@ -1,5 +1,7 @@
 use crate::error::ParserError;
 
+pub const DEFAULT_RECURSION_LIMIT: usize = 50;
+
 /// Prevents runaway recursion during parsing.
 #[derive(Debug, Clone)]
 pub struct RecursionCounter {
@@ -64,5 +66,3 @@ mod tests {
         }
     }
 }
-
-pub const DEFAULT_RECURSION_LIMIT: usize = 50;

@@ -28,6 +28,7 @@
 
 pub mod ast;
 pub mod catalog;
+pub mod columnar;
 pub mod dialect;
 pub mod error;
 pub mod executor;
@@ -55,7 +56,7 @@ pub use tokenizer::token::{Token, TokenWithSpan, Word};
 
 // Catalog types (re-exported for convenience)
 pub use catalog::{
-    Catalog, ColumnMetadata, Compression, IndexMetadata, MemoryCatalog, StorageOptions,
+    Catalog, ColumnMetadata, Compression, IndexMetadata, MemoryCatalog, RowIdMode, StorageOptions,
     StorageType, TableMetadata,
 };
 
@@ -76,3 +77,6 @@ pub use executor::{
     ColumnInfo, ConstraintViolation, EvaluationError, ExecutionResult, Executor, ExecutorError,
     QueryResult, Row,
 };
+
+#[cfg(test)]
+mod integration;

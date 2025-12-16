@@ -21,7 +21,7 @@ fn parser_planner_executor_pipeline() {
     "#;
 
     // Parse statements
-    let dialect = AlopexDialect::default();
+    let dialect = AlopexDialect;
     let statements = Parser::parse_sql(&dialect, sql).expect("parse sql");
 
     // Shared catalog for planning+execution
@@ -38,9 +38,8 @@ fn parser_planner_executor_pipeline() {
         let plan = planner.plan(&stmt).expect("plan");
         drop(guard);
 
-        match executor.execute(plan).expect("execute") {
-            ExecutionResult::Query(q) => last_query = Some(q),
-            _ => {}
+        if let ExecutionResult::Query(q) = executor.execute(plan).expect("execute") {
+            last_query = Some(q);
         }
     }
 

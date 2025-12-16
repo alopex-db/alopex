@@ -12,19 +12,18 @@ use alopex_core::{
     columnar::{
         kvs_bridge::ColumnarKvsBridge, memory::InMemorySegmentStore, segment_v2::SegmentConfigV2,
     },
-    kv::memory::MemoryTransaction,
-    score,
-    storage::flush::write_empty_vector_segment,
-    storage::sstable::SstableWriter,
-    validate_dimensions, HnswConfig, HnswIndex, HnswSearchResult, HnswStats, KVStore,
+    kv::any::AnyKVTransaction,
+    kv::memory::MemoryKV,
+    kv::AnyKV,
+    score, validate_dimensions, HnswConfig, HnswIndex, HnswSearchResult, HnswStats, KVStore,
     KVTransaction, Key, LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter,
-    MemoryKV, StorageFactory, TxnManager, VectorType, DEFAULT_CHUNK_SIZE,
+    StorageFactory, VectorType, DEFAULT_CHUNK_SIZE,
 };
 pub use alopex_core::{MemoryStats, Metric, TxnMode};
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::result;
 use std::sync::Arc;
 
@@ -51,17 +50,32 @@ pub enum Error {
 /// The main database object.
 pub struct Database {
     /// The underlying key-value store.
-    pub(crate) store: Arc<MemoryKV>,
+    pub(crate) store: Arc<AnyKV>,
     pub(crate) columnar_mode: StorageMode,
     pub(crate) columnar_bridge: ColumnarKvsBridge,
     pub(crate) columnar_memory: Option<InMemorySegmentStore>,
     pub(crate) segment_config: SegmentConfigV2,
 }
 
+pub(crate) fn disk_data_dir_path(path: &Path) -> std::path::PathBuf {
+    if path.extension().is_some_and(|e| e == "alopex") {
+        // v0.1 file-mode はディレクトリに WAL/SSTable を持つため、`.alopex` の横に
+        // sidecar ディレクトリを作ってそこへ格納する。
+        path.with_extension("alopex.d")
+    } else {
+        path.to_path_buf()
+    }
+}
+
 impl Database {
     /// Opens a database at the specified path.
     pub fn open(path: &Path) -> Result<Self> {
-        let store = MemoryKV::open(path).map_err(Error::Core)?;
+        let data_dir = disk_data_dir_path(path);
+        let store = StorageFactory::create(alopex_core::StorageMode::Disk {
+            path: data_dir,
+            config: None,
+        })
+        .map_err(Error::Core)?;
         Ok(Self::init(
             store,
             StorageMode::Disk,
@@ -72,7 +86,7 @@ impl Database {
 
     /// Creates a new, purely in-memory (transient) database.
     pub fn new() -> Self {
-        let store = MemoryKV::new();
+        let store = AnyKV::Memory(MemoryKV::new());
         Self::init(
             store,
             StorageMode::InMemory,
@@ -103,7 +117,7 @@ impl Database {
     }
 
     pub(crate) fn init(
-        store: MemoryKV,
+        store: AnyKV,
         columnar_mode: StorageMode,
         memory_limit: Option<usize>,
         segment_config: SegmentConfigV2,
@@ -130,58 +144,69 @@ impl Database {
         self.store.flush().map_err(Error::Core)
     }
 
-    /// Returns current memory usage statistics.
-    pub fn memory_usage(&self) -> MemoryStats {
-        self.store.txn_manager().memory_stats()
+    /// Returns current memory usage statistics (in-memory KV only).
+    pub fn memory_usage(&self) -> Option<MemoryStats> {
+        match self.store.as_ref() {
+            AnyKV::Memory(kv) => Some(kv.memory_stats()),
+            AnyKV::Lsm(_) => None,
+        }
     }
 
     /// Persists the current in-memory database to disk atomically.
+    ///
+    /// `wal_path` は「データディレクトリ」として扱う（file-mode）。
     pub fn persist_to_disk(&self, wal_path: &Path) -> Result<()> {
-        let sst_path = wal_path.with_extension("sst");
-        let vec_path = wal_path.with_extension("vec");
-        if let Some(existing) = [wal_path, sst_path.as_path(), vec_path.as_path()]
-            .iter()
-            .find(|p| p.exists())
-        {
+        if !matches!(self.store.as_ref(), AnyKV::Memory(_)) {
+            return Err(Error::NotInMemoryMode);
+        }
+        let data_dir = disk_data_dir_path(wal_path);
+        if wal_path.exists() || data_dir.exists() {
             return Err(Error::Core(alopex_core::Error::PathExists(
-                (*existing).to_path_buf(),
+                wal_path.to_path_buf(),
             )));
         }
 
-        let tmp_sst = temp_path(&sst_path);
-        let tmp_vec = temp_path(&vec_path);
+        let tmp_dir = data_dir.with_extension("tmp");
+        if tmp_dir.exists() {
+            return Err(Error::Core(alopex_core::Error::PathExists(tmp_dir)));
+        }
 
-        let snapshot = self.store.txn_manager().snapshot();
-
+        let snapshot = self.snapshot_pairs()?;
         let write_result = (|| -> Result<()> {
-            let mut writer = SstableWriter::create(&tmp_sst).map_err(Error::Core)?;
+            let store = StorageFactory::create(alopex_core::StorageMode::Disk {
+                path: tmp_dir.clone(),
+                config: None,
+            })
+            .map_err(Error::Core)?;
+
+            let mut txn = store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
             for (key, value) in snapshot {
-                writer.append(&key, &value).map_err(Error::Core)?;
+                txn.put(key, value).map_err(Error::Core)?;
             }
-            writer.finish().map_err(Error::Core)?;
-            write_empty_vector_segment(&tmp_vec).map_err(Error::Core)?;
+            txn.commit_self().map_err(Error::Core)?;
+
             Ok(())
         })();
 
         if let Err(e) = write_result {
-            let _ = fs::remove_file(&tmp_sst);
-            let _ = fs::remove_file(&tmp_vec);
+            let _ = fs::remove_dir_all(&tmp_dir);
             return Err(e);
         }
 
-        fs::rename(&tmp_sst, &sst_path).map_err(|e| Error::Core(e.into()))?;
-        fs::rename(&tmp_vec, &vec_path).map_err(|e| Error::Core(e.into()))?;
-        let _ = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(wal_path);
+        fs::rename(&tmp_dir, &data_dir).map_err(|e| Error::Core(e.into()))?;
+        if wal_path.extension().is_some_and(|e| e == "alopex") {
+            // `.alopex` パスを渡した場合は、存在確認用のマーカーを作る。
+            let _ = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(wal_path);
+        }
         Ok(())
     }
 
     /// Creates a fully in-memory clone of the current database.
     pub fn clone_to_memory(&self) -> Result<Self> {
-        let snapshot = self.store.txn_manager().snapshot();
+        let snapshot = self.snapshot_pairs()?;
         let cloned = Database::open_in_memory()?;
         if snapshot.is_empty() {
             return Ok(cloned);
@@ -197,13 +222,7 @@ impl Database {
 
     /// Clears all data while keeping the database usable.
     pub fn clear(&self) -> Result<()> {
-        let keys: Vec<Key> = self
-            .store
-            .txn_manager()
-            .snapshot()
-            .into_iter()
-            .map(|(k, _)| k)
-            .collect();
+        let keys: Vec<Key> = self.snapshot_pairs()?.into_iter().map(|(k, _)| k).collect();
         if keys.is_empty() {
             return Ok(());
         }
@@ -216,12 +235,21 @@ impl Database {
 
     /// Updates the memory limit in bytes for the underlying in-memory store.
     pub fn set_memory_limit(&self, bytes: Option<usize>) {
-        self.store.txn_manager().set_memory_limit(bytes);
+        if let AnyKV::Memory(kv) = self.store.as_ref() {
+            kv.txn_manager().set_memory_limit(bytes);
+        }
     }
 
     /// Returns a read-only snapshot of all key-value pairs.
     pub fn snapshot(&self) -> Vec<(Key, Vec<u8>)> {
-        self.store.txn_manager().snapshot().into_iter().collect()
+        self.snapshot_pairs().unwrap_or_default()
+    }
+
+    fn snapshot_pairs(&self) -> Result<Vec<(Key, Vec<u8>)>> {
+        let mut txn = self.store.begin(TxnMode::ReadOnly).map_err(Error::Core)?;
+        let pairs: Vec<(Key, Vec<u8>)> = txn.scan_prefix(b"").map_err(Error::Core)?.collect();
+        txn.commit_self().map_err(Error::Core)?;
+        Ok(pairs)
     }
 
     /// HNSW インデックスを作成し、永続化する。
@@ -229,7 +257,7 @@ impl Database {
         let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
         let index = HnswIndex::create(name, config).map_err(Error::Core)?;
         index.save(&mut txn).map_err(Error::Core)?;
-        self.store.txn_manager().commit(txn).map_err(Error::Core)
+        txn.commit_self().map_err(Error::Core)
     }
 
     /// HNSW インデックスを削除する。
@@ -237,7 +265,7 @@ impl Database {
         let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
         let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
         index.drop(&mut txn).map_err(Error::Core)?;
-        self.store.txn_manager().commit(txn).map_err(Error::Core)
+        txn.commit_self().map_err(Error::Core)
     }
 
     /// HNSW 統計情報を取得する。
@@ -253,7 +281,7 @@ impl Database {
         let mut index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
         let result = index.compact().map_err(Error::Core)?;
         index.save(&mut txn).map_err(Error::Core)?;
-        self.store.txn_manager().commit(txn).map_err(Error::Core)?;
+        txn.commit_self().map_err(Error::Core)?;
         Ok(result)
     }
 
@@ -325,7 +353,7 @@ impl Default for Database {
 
 /// A database transaction.
 pub struct Transaction<'a> {
-    inner: Option<MemoryTransaction<'a>>,
+    inner: Option<AnyKVTransaction<'a>>,
     db: &'a Database,
     hnsw_indices: HashMap<String, (HnswIndex, alopex_core::vector::hnsw::HnswTransactionState)>,
 }
@@ -342,15 +370,6 @@ pub struct SearchResult {
 }
 
 const VECTOR_INDEX_KEY: &[u8] = b"__alopex_vector_index";
-
-fn temp_path(path: &Path) -> PathBuf {
-    let mut p = path.to_path_buf();
-    p.set_extension(format!(
-        "{}.tmp",
-        path.extension().and_then(|s| s.to_str()).unwrap_or("tmp")
-    ));
-    p
-}
 
 impl<'a> Transaction<'a> {
     /// Retrieves the value for a given key.
@@ -498,7 +517,7 @@ impl<'a> Transaction<'a> {
         }
         let txn = self.inner.take().ok_or(Error::TxnCompleted)?;
         self.hnsw_indices.clear();
-        self.db.store.txn_manager().commit(txn).map_err(Error::Core)
+        txn.commit_self().map_err(Error::Core)
     }
 
     /// Rolls back the transaction, discarding all changes.
@@ -508,17 +527,13 @@ impl<'a> Transaction<'a> {
                 let _ = index.rollback(state);
             }
             self.hnsw_indices.clear();
-            self.db
-                .store
-                .txn_manager()
-                .rollback(txn)
-                .map_err(Error::Core)
+            txn.rollback_self().map_err(Error::Core)
         } else {
             Err(Error::TxnCompleted)
         }
     }
 
-    fn inner_mut(&mut self) -> Result<&mut MemoryTransaction<'a>> {
+    fn inner_mut(&mut self) -> Result<&mut AnyKVTransaction<'a>> {
         self.inner.as_mut().ok_or(Error::TxnCompleted)
     }
 
@@ -550,7 +565,7 @@ impl<'a> Drop for Transaction<'a> {
                 let _ = index.rollback(state);
             }
             self.hnsw_indices.clear();
-            let _ = self.db.store.txn_manager().rollback(txn);
+            let _ = txn.rollback_self();
         }
     }
 }

@@ -55,11 +55,23 @@ name = "vector_flat"
 harness = false
 
 [[bench]]
+name = "vector_search"
+harness = false
+
+[[bench]]
 name = "scan_strategy_bench"
 harness = false
 
 [[bench]]
+name = "columnar_bench"
+harness = false
+
+[[bench]]
 name = "hnsw_bench"
+harness = false
+
+[[bench]]
+name = "lsm_kv_bench"
 harness = false
 
 [[bin]]

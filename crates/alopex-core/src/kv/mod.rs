@@ -6,9 +6,14 @@ use crate::types::{Key, TxnId, TxnMode, Value};
 
 #[cfg(feature = "test-hooks")]
 pub mod hooks;
+
+/// MemoryKV / LsmKV を 1 つの型として扱うためのラッパー。
+pub mod any;
 pub mod memory;
 /// Storage mode selection helpers (disk vs memory).
 pub mod storage;
+
+pub use any::AnyKV;
 
 /// A transaction for interacting with the key-value store.
 ///

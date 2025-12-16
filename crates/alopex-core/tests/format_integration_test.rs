@@ -34,7 +34,7 @@ fn file_roundtrip_metadata_and_sstable() {
     assert_eq!(reader.section_index().entries.len(), 2);
     let header = reader.header();
     assert_eq!(header.version, version);
-    assert_eq!(header.flags.is_value_separated(), true);
+    assert!(header.flags.is_value_separated());
 
     // metadata
     let meta = reader.read_section(0).unwrap();

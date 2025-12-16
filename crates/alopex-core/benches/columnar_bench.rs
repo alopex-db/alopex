@@ -93,7 +93,7 @@ fn bench_write_throughput(c: &mut Criterion) {
                 ..Default::default()
             };
             let mut writer = SegmentWriterV2::new(cfg);
-            if let Err(_) = writer.write_batch(batch.clone()) {
+            if writer.write_batch(batch.clone()).is_err() {
                 return;
             }
             let _ = writer.finish();

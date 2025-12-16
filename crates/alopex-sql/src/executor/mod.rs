@@ -42,7 +42,7 @@ mod dml;
 mod error;
 pub mod evaluator;
 mod hnsw_bridge;
-mod query;
+pub mod query;
 mod result;
 
 pub use error::{ConstraintViolation, EvaluationError, ExecutorError, Result};

@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn scalar_matches_reference() {
-        let k = ScalarKernel::default();
+        let k = ScalarKernel;
         let q = [1.0, 2.0, 3.0, 4.0];
         let v = [4.0, 3.0, 2.0, 1.0];
         let metrics = [Metric::Cosine, Metric::L2, Metric::InnerProduct];
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn scalar_cosine_zero_norm_returns_zero() {
-        let k = ScalarKernel::default();
+        let k = ScalarKernel;
         let q = [0.0, 0.0, 0.0];
         let v = [1.0, 2.0, 3.0];
         assert_eq!(k.cosine(&q, &v), 0.0);
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn batch_score_populates_all() {
-        let k = ScalarKernel::default();
+        let k = ScalarKernel;
         let q = [1.0, 0.0];
         let vectors = [1.0, 0.0, 0.0, 1.0];
         let mut scores = [0.0f32; 2];
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn select_kernel_matches_scalar_for_all_metrics() {
         let kernel = select_kernel();
-        let scalar = ScalarKernel::default();
+        let scalar = ScalarKernel;
         let q = vec![1.0f32, 2.0, 3.0, 4.0];
         let v1 = vec![4.0f32, 3.0, 2.0, 1.0];
         let v2 = vec![1.0f32, 1.0, 1.0, 1.0];
@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn kernel_handles_nan_and_inf_like_scalar() {
         let kernel = select_kernel();
-        let scalar = ScalarKernel::default();
+        let scalar = ScalarKernel;
         let cases = vec![
             (
                 Metric::Cosine,
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn cosine_with_nan_matches_scalar() {
         let kernel = select_kernel();
-        let scalar = ScalarKernel::default();
+        let scalar = ScalarKernel;
         let q = [f32::NAN, 1.0, 2.0, 3.0];
         let v = [1.0, 2.0, 3.0, 4.0];
         let s = scalar.cosine(&q, &v);
@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn l2_with_inf_matches_scalar() {
         let kernel = select_kernel();
-        let scalar = ScalarKernel::default();
+        let scalar = ScalarKernel;
         let q = [f32::INFINITY, 0.0, 1.0];
         let v = [1.0, 0.0, 1.0];
         let s = scalar.l2(&q, &v);
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn inner_product_with_nan_matches_scalar() {
         let kernel = select_kernel();
-        let scalar = ScalarKernel::default();
+        let scalar = ScalarKernel;
         let q = [1.0, f32::NAN];
         let v = [2.0, 3.0];
         let s = scalar.inner_product(&q, &v);
@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn batch_score_propagates_nan_inf_like_scalar() {
         let kernel = select_kernel();
-        let scalar = ScalarKernel::default();
+        let scalar = ScalarKernel;
         let q = [1.0, f32::NAN];
         let vectors = [2.0, 3.0, f32::INFINITY, 0.0];
         let mut scores_kernel = [0.0f32; 2];

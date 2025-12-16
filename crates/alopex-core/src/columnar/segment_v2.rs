@@ -25,6 +25,34 @@ pub const SEGMENT_MAGIC: &[u8; 4] = b"ALXC";
 pub const SEGMENT_FORMAT_VERSION_V2: u16 = 2;
 /// ヘッダの固定長（24バイト）。
 pub const SEGMENT_HEADER_SIZE: usize = 24;
+/// RowID のセグメントID割り当てビット数（上位 20bit）。
+pub const ROW_ID_SEGMENT_BITS: u8 = 20;
+/// RowID のセグメント内オフセットビット数（下位 44bit）。
+pub const ROW_ID_OFFSET_BITS: u8 = 44;
+const ROW_ID_OFFSET_MASK: u64 = (1u64 << ROW_ID_OFFSET_BITS) - 1;
+const ROW_ID_SEGMENT_MASK: u64 = (1u64 << ROW_ID_SEGMENT_BITS) - 1;
+
+/// RowID をエンコードする（segment_id << ROW_ID_OFFSET_BITS | local_offset）。
+pub fn encode_row_id(segment_id: u64, local_offset: u64) -> Result<u64> {
+    if segment_id > ROW_ID_SEGMENT_MASK {
+        return Err(ColumnarError::InvalidFormat(format!(
+            "segment_id overflow for RowID: {segment_id} > {ROW_ID_SEGMENT_MASK}"
+        )));
+    }
+    if local_offset > ROW_ID_OFFSET_MASK {
+        return Err(ColumnarError::InvalidFormat(format!(
+            "row offset overflow for RowID: {local_offset} > {ROW_ID_OFFSET_MASK}"
+        )));
+    }
+    Ok((segment_id << ROW_ID_OFFSET_BITS) | local_offset)
+}
+
+/// RowID から (segment_id, local_offset) をデコードする。
+pub fn decode_row_id(row_id: u64) -> (u64, u64) {
+    let segment_id = row_id >> ROW_ID_OFFSET_BITS;
+    let local_offset = row_id & ROW_ID_OFFSET_MASK;
+    (segment_id, local_offset)
+}
 
 /// チェックサムの適用範囲。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,6 +497,8 @@ pub struct RecordBatch {
     pub columns: Vec<Column>,
     /// NULL ビットマップ。
     pub null_bitmaps: Vec<Option<Bitmap>>,
+    /// 行ID（RowIDモードで利用）。
+    pub row_ids: Option<Vec<u64>>,
 }
 
 impl RecordBatch {
@@ -478,12 +508,19 @@ impl RecordBatch {
             schema,
             columns,
             null_bitmaps,
+            row_ids: None,
         }
     }
 
     /// 行数を返す（先頭カラム長で代表）。
     pub fn num_rows(&self) -> usize {
         self.columns.first().map(column_len).unwrap_or_default()
+    }
+
+    /// RowID を埋め込んだ新しいバッチを返す。
+    pub fn with_row_ids(mut self, row_ids: Option<Vec<u64>>) -> Self {
+        self.row_ids = row_ids;
+        self
     }
 }
 
@@ -520,6 +557,9 @@ pub struct ColumnSegmentV2 {
     pub meta: SegmentMetaV2,
     /// セグメント全体のバイト列。
     pub data: Vec<u8>,
+    /// RowID（セグメント内オフセットまたはエンコード済み）を保持する。無い場合は空。
+    #[serde(default)]
+    pub row_ids: Vec<u64>,
 }
 
 /// メモリバッファを入力とする SegmentSource 実装。
@@ -866,7 +906,12 @@ impl SegmentWriterV2 {
             row_groups: meta_row_groups,
         };
 
-        Ok(ColumnSegmentV2 { header, meta, data })
+        Ok(ColumnSegmentV2 {
+            header,
+            meta,
+            data,
+            row_ids: Vec::new(),
+        })
     }
 }
 
@@ -1089,9 +1134,7 @@ mod tests {
             writer.write_batch(b)?;
         }
         let segment = writer.finish()?;
-        Ok(SegmentReaderV2::open(Box::new(
-            InMemorySegmentSource::new(segment.data),
-        ))?)
+        SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data)))
     }
 
     #[test]
@@ -1248,5 +1291,30 @@ mod tests {
             SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(corrupted))).unwrap();
         let err = reader.read_columns(&[0]).unwrap_err();
         assert!(matches!(err, ColumnarError::ChecksumMismatch));
+    }
+
+    #[test]
+    fn row_id_encode_decode_roundtrip() {
+        let segment_id = 123u64;
+        let offset = 456u64;
+        let encoded = encode_row_id(segment_id, offset).expect("encode");
+        let (decoded_seg, decoded_off) = decode_row_id(encoded);
+        assert_eq!(decoded_seg, segment_id);
+        assert_eq!(decoded_off, offset);
+    }
+
+    #[test]
+    fn row_id_encode_rejects_overflow() {
+        let overflow_segment = (1u64 << ROW_ID_SEGMENT_BITS) + 1;
+        assert!(matches!(
+            encode_row_id(overflow_segment, 0),
+            Err(ColumnarError::InvalidFormat(_))
+        ));
+
+        let overflow_offset = (1u64 << ROW_ID_OFFSET_BITS) + 1;
+        assert!(matches!(
+            encode_row_id(0, overflow_offset),
+            Err(ColumnarError::InvalidFormat(_))
+        ));
     }
 }

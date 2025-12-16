@@ -225,7 +225,7 @@ mod tests {
         let seg = make_segment();
         let id = store.write_segment(4, seg.clone()).unwrap();
         let kv = MemoryKV::new();
-        let bridge = ColumnarKvsBridge::new(std::sync::Arc::new(kv));
+        let bridge = ColumnarKvsBridge::new(std::sync::Arc::new(crate::kv::AnyKV::Memory(kv)));
         let new_id = store.flush_to_kvs(4, id, &bridge).unwrap();
         assert_eq!(new_id, 0);
         let batches = bridge.read_segment(4, new_id, &[0, 1]).unwrap();
