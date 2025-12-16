@@ -10,28 +10,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  create-release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-    steps:
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
-          draft: false
-          prerelease: false
-
   build-release:
-    name: Build Release
-    needs: create-release
+    name: Build Release (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -59,6 +42,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p alopex-cli
 
@@ -66,40 +51,80 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
 
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
+      - name: Rename artifact
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} artifacts/${{ matrix.asset_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: artifacts/${{ matrix.asset_name }}
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
-          asset_name: ${{ matrix.asset_name }}
-          asset_content_type: application/octet-stream
 
   publish-crate:
     name: Publish to crates.io
-    needs: build-release
+    needs: create-release
     runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
       - name: Publish alopex-core
-        run: cargo publish -p alopex-core --token ${{ secrets.CARGO_TOKEN }}
+        run: cargo publish -p alopex-core
         continue-on-error: true
+
+      - name: Wait for crates.io index update
+        run: sleep 30
 
       - name: Publish alopex-sql
-        run: cargo publish -p alopex-sql --token ${{ secrets.CARGO_TOKEN }}
+        run: cargo publish -p alopex-sql
         continue-on-error: true
+
+      - name: Wait for crates.io index update
+        run: sleep 30
 
       - name: Publish alopex-embedded
-        run: cargo publish -p alopex-embedded --token ${{ secrets.CARGO_TOKEN }}
+        run: cargo publish -p alopex-embedded
         continue-on-error: true
+
+      - name: Wait for crates.io index update
+        run: sleep 30
 
       - name: Publish alopex-server
-        run: cargo publish -p alopex-server --token ${{ secrets.CARGO_TOKEN }}
+        run: cargo publish -p alopex-server
         continue-on-error: true
 
+      - name: Wait for crates.io index update
+        run: sleep 30
+
       - name: Publish alopex-cli
-        run: cargo publish -p alopex-cli --token ${{ secrets.CARGO_TOKEN }}
+        run: cargo publish -p alopex-cli
         continue-on-error: true
