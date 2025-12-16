@@ -1,10 +1,11 @@
 use alopex_core::{KVStore, KVTransaction, Result as CoreResult, TxnMode};
+use chrono::Utc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use super::fixtures::{open_store_for_mode, StressStorageMode};
-use super::metrics::{MetricsCollector, MetricsSummary, SloConfig, SloResult};
+use super::metrics::{metrics_output_dir, MetricsCollector, MetricsReport, MetricsSummary, SloConfig, SloResult};
 use super::watchdog::{OperationGuard, Watchdog, WatchdogConfig, WatchdogResult};
 
 /// 実行モデル（sync/async × single/multi）。
@@ -187,6 +188,7 @@ impl StressTestHarness {
         } else {
             SloResult::passed()
         };
+        self.maybe_write_metrics_report(duration, &metrics_summary, &slo_result, &watchdog_result);
         TestResult {
             watchdog: watchdog_result,
             metrics: metrics_summary,
@@ -242,6 +244,7 @@ impl StressTestHarness {
         } else {
             SloResult::passed()
         };
+        self.maybe_write_metrics_report(duration, &metrics_summary, &slo_result, &watchdog_result);
 
         TestResult {
             watchdog: watchdog_result,
@@ -250,6 +253,56 @@ impl StressTestHarness {
             duration,
             error,
         }
+    }
+
+    fn maybe_write_metrics_report(
+        &self,
+        duration: Duration,
+        summary: &MetricsSummary,
+        slo_result: &SloResult,
+        watchdog_result: &WatchdogResult,
+    ) {
+        if let Ok(v) = std::env::var("STRESS_REPORT_DIR") {
+            if v.is_empty() {
+                return;
+            }
+        }
+
+        let out_dir = metrics_output_dir();
+        if out_dir.as_os_str().is_empty() {
+            return;
+        }
+        if std::fs::create_dir_all(&out_dir).is_err() {
+            return;
+        }
+
+        let timestamp = Utc::now();
+        let execution_model = format!("{:?}", self.config.execution_model);
+        let report = MetricsReport::new(
+            self.config.name.clone(),
+            execution_model.clone(),
+            timestamp,
+            duration,
+            summary.clone(),
+            slo_result.clone(),
+            format!("{:?}", watchdog_result),
+        );
+
+        let sanitize = |s: &str| -> String {
+            s.chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                .collect()
+        };
+        let stamp = timestamp.format("%Y%m%dT%H%M%SZ").to_string();
+        let base = format!(
+            "{}__{}__{}",
+            sanitize(&self.config.name),
+            sanitize(&execution_model),
+            stamp
+        );
+
+        let _ = std::fs::write(out_dir.join(format!("{base}.json")), report.to_json());
+        let _ = std::fs::write(out_dir.join(format!("{base}.md")), report.to_markdown());
     }
 }
 
