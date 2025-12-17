@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "Core storage engine for Alopex DB - LSM-tree, columnar storage, and vector index"
 keywords = ["database", "storage", "lsm-tree", "columnar", "vector"]
 categories = ["database-implementations"]
