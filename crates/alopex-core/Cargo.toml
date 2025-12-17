@@ -1,7 +1,12 @@
 [package]
 name = "alopex-core"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core storage engine for Alopex DB - LSM-tree, columnar storage, and vector index"
+keywords = ["database", "storage", "lsm-tree", "columnar", "vector"]
+categories = ["database-implementations"]
 
 [features]
 default = []

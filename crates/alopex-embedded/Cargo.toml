@@ -1,10 +1,15 @@
 [package]
 name = "alopex-embedded"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embedded database interface for Alopex DB"
+keywords = ["database", "embedded"]
+categories = ["database-implementations"]
 
 [dependencies]
-alopex-core = { path = "../alopex-core" }
+alopex-core.workspace = true
 thiserror = "1.0"
 
 [dev-dependencies]

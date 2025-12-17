@@ -1,6 +1,11 @@
 [package]
 name = "alopex-cli"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line interface for Alopex DB"
+keywords = ["database", "cli"]
+categories = ["database-implementations", "command-line-utilities"]
 
 [dependencies]

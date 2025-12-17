@@ -6,7 +6,15 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+version = "0.1.0"
+license = "Apache-2.0"
+repository = "https://github.com/alopex-db/alopex"
+edition = "2021"
+
 [workspace.dependencies]
+# Internal crates
+alopex-core = { version = "0.1.0", path = "crates/alopex-core" }
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
 

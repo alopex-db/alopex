@@ -1,16 +1,19 @@
 [package]
 name = "alopex-sql"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition = "2024"  # Uses let chains feature
+license.workspace = true
+repository.workspace = true
 description = "SQL parser components for the Alopex DB dialect"
-license = "Apache-2.0"
+keywords = ["database", "sql", "parser"]
+categories = ["database-implementations", "parser-implementations"]
 
 [features]
 default = []
 
 [dependencies]
 thiserror = "2.0"
-alopex-core = { path = "../alopex-core" }
+alopex-core.workspace = true
 parquet = { version = "52", features = ["arrow"] }
 arrow-array = "52"
 arrow-schema = "52"
