@@ -36,6 +36,7 @@ pub mod parser;
 pub mod planner;
 pub mod storage;
 pub mod tokenizer;
+pub mod unified_error;
 
 // AST types
 pub use ast::{
@@ -53,6 +54,7 @@ pub use parser::Parser;
 pub use tokenizer::Tokenizer;
 pub use tokenizer::keyword::Keyword;
 pub use tokenizer::token::{Token, TokenWithSpan, Word};
+pub use unified_error::SqlError;
 
 // Catalog types (re-exported for convenience)
 pub use catalog::{
@@ -77,6 +79,9 @@ pub use executor::{
     ColumnInfo, ConstraintViolation, EvaluationError, ExecutionResult, Executor, ExecutorError,
     QueryResult, Row,
 };
+
+/// `ExecutionResult` の公開 API 名。
+pub type SqlResult = ExecutionResult;
 
 #[cfg(test)]
 mod integration;
