@@ -43,6 +43,19 @@ impl Database {
     ///
     /// - DDL/DML は ReadWrite トランザクションで実行し、成功時に自動コミットする。
     /// - SELECT は ReadOnly トランザクションで実行する。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use alopex_embedded::Database;
+    /// use alopex_sql::ExecutionResult;
+    ///
+    /// let db = Database::new();
+    /// let result = db.execute_sql(
+    ///     "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);",
+    /// ).unwrap();
+    /// assert!(matches!(result, ExecutionResult::Success));
+    /// ```
     pub fn execute_sql(&self, sql: &str) -> Result<SqlResult> {
         let stmts = parse_sql(sql)?;
         if stmts.is_empty() {
@@ -96,6 +109,18 @@ impl<'a> Transaction<'a> {
     ///
     /// 同一トランザクション内の複数回呼び出しでカタログ変更が見えるよう、`CatalogOverlay` は
     /// `Transaction` が所有して保持する。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use alopex_embedded::{Database, TxnMode};
+    ///
+    /// let db = Database::new();
+    /// let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+    /// txn.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);").unwrap();
+    /// txn.execute_sql("INSERT INTO t (id) VALUES (1);").unwrap();
+    /// txn.commit().unwrap();
+    /// ```
     pub fn execute_sql(&mut self, sql: &str) -> Result<SqlResult> {
         let stmts = parse_sql(sql)?;
         if stmts.is_empty() {

@@ -515,6 +515,20 @@ impl<'a, S: KVStore> Catalog for TxnCatalogView<'a, S> {
 
 /// 永続カタログ実装。
 #[derive(Debug)]
+/// 永続化対応のカタログ実装。
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::Arc;
+/// use alopex_core::kv::memory::MemoryKV;
+/// use alopex_sql::Catalog;
+/// use alopex_sql::catalog::PersistentCatalog;
+///
+/// let store = Arc::new(MemoryKV::new());
+/// let catalog = PersistentCatalog::new(store);
+/// assert!(catalog.table_exists("users") == false);
+/// ```
 pub struct PersistentCatalog<S: KVStore> {
     inner: MemoryCatalog,
     store: Arc<S>,

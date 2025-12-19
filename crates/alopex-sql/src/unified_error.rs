@@ -33,6 +33,16 @@ impl fmt::Display for ErrorLocation {
 }
 
 /// 統一 SQL エラー型（公開 API）。
+///
+/// # Examples
+///
+/// ```
+/// use alopex_sql::SqlError;
+/// use alopex_sql::StorageError;
+///
+/// let err = SqlError::from(StorageError::TransactionConflict);
+/// assert_eq!(err.code(), "ALOPEX-S001");
+/// ```
 #[derive(Debug)]
 pub enum SqlError {
     /// パースエラー。
