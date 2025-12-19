@@ -4,7 +4,6 @@ use alopex_core::KVTransaction;
 use alopex_sql::catalog::CatalogOverlay;
 use alopex_sql::catalog::TxnCatalogView;
 use alopex_sql::executor::Executor;
-use alopex_sql::storage::SqlTxn as _;
 use alopex_sql::storage::TxnBridge;
 use alopex_sql::AlopexDialect;
 use alopex_sql::Parser;
@@ -77,21 +76,11 @@ impl Database {
                 .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?;
         }
 
-        // 安全順序:
-        // 1) HNSW flush
-        // 2) KV commit
-        // 3) commit 成功後のみ overlay 適用
-        if mode == TxnMode::ReadWrite {
-            {
-                let (mut sql_txn, _) = borrowed.split_parts();
-                sql_txn
-                    .flush_hnsw()
-                    .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?;
-            }
-        }
-
         drop(borrowed);
 
+        // `execute_in_txn()` 成功時に HNSW flush 済み（失敗時は abandon 済み）なので、
+        // ここでは KV commit と overlay 適用のみを行う。
+        //
         // commit_self は `txn` を消費するため、失敗時に rollback はできない。
         txn.commit_self().map_err(Error::Core)?;
         if mode == TxnMode::ReadWrite {

@@ -6,6 +6,7 @@
 use std::error::Error as StdError;
 use std::fmt;
 
+use crate::catalog::CatalogError;
 use crate::error::ParserError;
 use crate::executor::ExecutorError;
 use crate::planner::PlannerError;
@@ -336,6 +337,19 @@ impl From<StorageError> for SqlError {
                 message: other.to_string(),
                 code: "ALOPEX-S999",
                 source: None,
+            },
+        }
+    }
+}
+
+impl From<CatalogError> for SqlError {
+    fn from(value: CatalogError) -> Self {
+        match value {
+            CatalogError::Kv(core_error) => Self::from(StorageError::from(core_error)),
+            other => Self::Catalog {
+                message: format!("catalog persistence error: {other}"),
+                location: ErrorLocation::default(),
+                code: "ALOPEX-C999",
             },
         }
     }

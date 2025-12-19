@@ -161,25 +161,13 @@ impl Database {
 
     fn load_sql_catalog(&mut self) -> Result<()> {
         use alopex_sql::catalog::CatalogError;
-        use alopex_sql::storage::StorageError as SqlStorageError;
 
         let loaded = match alopex_sql::catalog::PersistentCatalog::load(self.store.clone()) {
             Ok(catalog) => catalog,
             Err(CatalogError::Kv(alopex_core::Error::NotFound)) => {
                 alopex_sql::catalog::PersistentCatalog::new(self.store.clone())
             }
-            Err(CatalogError::Kv(core)) => {
-                return Err(Error::Sql(alopex_sql::SqlError::from(
-                    SqlStorageError::from(core),
-                )));
-            }
-            Err(other) => {
-                return Err(Error::Sql(alopex_sql::SqlError::Catalog {
-                    message: format!("failed to load catalog: {other}"),
-                    location: alopex_sql::unified_error::ErrorLocation::default(),
-                    code: "ALOPEX-C999",
-                }));
-            }
+            Err(other) => return Err(Error::Sql(other.into())),
         };
 
         self.sql_catalog = Arc::new(RwLock::new(loaded));
