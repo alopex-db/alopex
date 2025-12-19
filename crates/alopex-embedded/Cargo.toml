@@ -10,6 +10,7 @@ categories = ["database-implementations"]
 
 [dependencies]
 alopex-core.workspace = true
+alopex-sql = { path = "../alopex-sql" }
 thiserror = "1.0"
 
 [dev-dependencies]

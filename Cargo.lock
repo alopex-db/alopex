@@ -95,6 +95,7 @@ name = "alopex-embedded"
 version = "0.3.0"
 dependencies = [
  "alopex-core",
+ "alopex-sql",
  "criterion",
  "rand 0.8.5",
  "tempfile",

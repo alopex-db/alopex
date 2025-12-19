@@ -4,9 +4,12 @@
 
 pub mod columnar_api;
 pub mod options;
+mod sql_api;
 
 pub use crate::columnar_api::{EmbeddedConfig, StorageMode};
 pub use crate::options::DatabaseOptions;
+/// `Database::execute_sql()` / `Transaction::execute_sql()` の返却型。
+pub type SqlResult = alopex_sql::SqlResult;
 use alopex_core::vector::hnsw::{HnswTransactionState, SearchStats as HnswSearchStats};
 use alopex_core::{
     columnar::{
@@ -25,7 +28,7 @@ use std::convert::TryInto;
 use std::fs;
 use std::path::Path;
 use std::result;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// A convenience `Result` type for database operations.
 pub type Result<T> = result::Result<T, Error>;
@@ -36,6 +39,9 @@ pub enum Error {
     /// An error from the underlying core storage engine.
     #[error("core error: {0}")]
     Core(#[from] alopex_core::Error),
+    /// An error from the SQL execution pipeline.
+    #[error("{0}")]
+    Sql(#[from] alopex_sql::SqlError),
     /// The transaction has already been completed and cannot be used.
     #[error("transaction is completed")]
     TxnCompleted,
@@ -47,10 +53,21 @@ pub enum Error {
     NotInMemoryMode,
 }
 
+impl Error {
+    /// SQL エラーの場合はエラーコード（例: `ALOPEX-S003`）を返す。
+    pub fn sql_error_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Sql(err) => Some(err.code()),
+            _ => None,
+        }
+    }
+}
+
 /// The main database object.
 pub struct Database {
     /// The underlying key-value store.
     pub(crate) store: Arc<AnyKV>,
+    pub(crate) sql_catalog: Arc<RwLock<alopex_sql::catalog::PersistentCatalog<AnyKV>>>,
     pub(crate) columnar_mode: StorageMode,
     pub(crate) columnar_bridge: ColumnarKvsBridge,
     pub(crate) columnar_memory: Option<InMemorySegmentStore>,
@@ -76,12 +93,9 @@ impl Database {
             config: None,
         })
         .map_err(Error::Core)?;
-        Ok(Self::init(
-            store,
-            StorageMode::Disk,
-            None,
-            SegmentConfigV2::default(),
-        ))
+        let mut db = Self::init(store, StorageMode::Disk, None, SegmentConfigV2::default());
+        db.load_sql_catalog()?;
+        Ok(db)
     }
 
     /// Creates a new, purely in-memory (transient) database.
@@ -108,12 +122,14 @@ impl Database {
             )));
         }
         let store = StorageFactory::create(opts.to_storage_mode(None)).map_err(Error::Core)?;
-        Ok(Self::init(
+        let mut db = Self::init(
             store,
             StorageMode::InMemory,
             opts.memory_limit(),
             SegmentConfigV2::default(),
-        ))
+        );
+        db.load_sql_catalog()?;
+        Ok(db)
     }
 
     pub(crate) fn init(
@@ -123,6 +139,9 @@ impl Database {
         segment_config: SegmentConfigV2,
     ) -> Self {
         let store = Arc::new(store);
+        let sql_catalog = Arc::new(RwLock::new(alopex_sql::catalog::PersistentCatalog::new(
+            store.clone(),
+        )));
         let columnar_bridge = ColumnarKvsBridge::new(store.clone());
         let columnar_memory = if matches!(columnar_mode, StorageMode::InMemory) {
             Some(InMemorySegmentStore::new(memory_limit.map(|v| v as u64)))
@@ -132,11 +151,39 @@ impl Database {
 
         Self {
             store,
+            sql_catalog,
             columnar_mode,
             columnar_bridge,
             columnar_memory,
             segment_config,
         }
+    }
+
+    fn load_sql_catalog(&mut self) -> Result<()> {
+        use alopex_sql::catalog::CatalogError;
+        use alopex_sql::storage::StorageError as SqlStorageError;
+
+        let loaded = match alopex_sql::catalog::PersistentCatalog::load(self.store.clone()) {
+            Ok(catalog) => catalog,
+            Err(CatalogError::Kv(alopex_core::Error::NotFound)) => {
+                alopex_sql::catalog::PersistentCatalog::new(self.store.clone())
+            }
+            Err(CatalogError::Kv(core)) => {
+                return Err(Error::Sql(alopex_sql::SqlError::from(
+                    SqlStorageError::from(core),
+                )));
+            }
+            Err(other) => {
+                return Err(Error::Sql(alopex_sql::SqlError::Catalog {
+                    message: format!("failed to load catalog: {other}"),
+                    location: alopex_sql::unified_error::ErrorLocation::default(),
+                    code: "ALOPEX-C999",
+                }));
+            }
+        };
+
+        self.sql_catalog = Arc::new(RwLock::new(loaded));
+        Ok(())
     }
 
     /// Flushes the current in-memory data to an SSTable on disk (beta).
@@ -341,6 +388,7 @@ impl Database {
             inner: Some(txn),
             db: self,
             hnsw_indices: HashMap::new(),
+            overlay: alopex_sql::catalog::CatalogOverlay::new(),
         })
     }
 }
@@ -356,6 +404,7 @@ pub struct Transaction<'a> {
     inner: Option<AnyKVTransaction<'a>>,
     db: &'a Database,
     hnsw_indices: HashMap<String, (HnswIndex, alopex_core::vector::hnsw::HnswTransactionState)>,
+    overlay: alopex_sql::catalog::CatalogOverlay,
 }
 
 /// A search result row containing key, metadata, and similarity score.
@@ -517,7 +566,12 @@ impl<'a> Transaction<'a> {
         }
         let txn = self.inner.take().ok_or(Error::TxnCompleted)?;
         self.hnsw_indices.clear();
-        txn.commit_self().map_err(Error::Core)
+        txn.commit_self().map_err(Error::Core)?;
+
+        // KV commit 成功後のみ、カタログにオーバーレイを適用する。
+        let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
+        catalog.apply_overlay(std::mem::take(&mut self.overlay));
+        Ok(())
     }
 
     /// Rolls back the transaction, discarding all changes.
@@ -552,7 +606,7 @@ impl<'a> Transaction<'a> {
     fn ensure_write_txn(&self) -> Result<()> {
         let txn = self.inner.as_ref().ok_or(Error::TxnCompleted)?;
         if txn.mode() != TxnMode::ReadWrite {
-            return Err(Error::Core(alopex_core::Error::TxnConflict));
+            return Err(Error::Core(alopex_core::Error::TxnReadOnly));
         }
         Ok(())
     }
