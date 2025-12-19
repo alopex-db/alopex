@@ -83,10 +83,8 @@ impl Iterator for WalReader {
                     return None;
                 }
                 Ok(0) => {
-                    return Some(Err(Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "WAL header is truncated",
-                    ))));
+                    // Crash-tolerant behavior: treat a partially-written header as EOF.
+                    return None;
                 }
                 Ok(n) => {
                     read += n;
@@ -100,11 +98,14 @@ impl Iterator for WalReader {
 
         let mut data = vec![0u8; len as usize];
         if let Err(e) = self.reader.read_exact(&mut data) {
-            // If we can't read the full record body after reading a header, the log is corrupt.
-            return Some(Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("WAL file is truncated in the middle of a record: {e}"),
-            ))));
+            // Crash-tolerant behavior: treat a partially-written record body as EOF.
+            //
+            // This allows recovery from a torn/truncated WAL tail by replaying only the
+            // successfully-written prefix.
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                return None;
+            }
+            return Some(Err(Error::Io(e)));
         }
 
         let actual_checksum = crc32fast::hash(&data);
@@ -129,7 +130,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn wal_reader_errors_on_truncated_header() {
+    fn wal_reader_ignores_truncated_tail() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("wal.log");
 
@@ -151,10 +152,6 @@ mod tests {
         let mut reader = WalReader::new(&path).unwrap();
         assert!(reader.next().unwrap().is_ok());
         assert!(reader.next().unwrap().is_ok());
-        let err = reader.next().unwrap().unwrap_err();
-        match err {
-            Error::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(reader.next().is_none());
     }
 }
