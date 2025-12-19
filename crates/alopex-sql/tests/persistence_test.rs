@@ -210,13 +210,35 @@ fn persistence_test_wal_truncation_recovery_without_hooks() {
     }
 
     // WAL を途中で切り詰め（クラッシュ模擬）。
+    //
+    // 「末尾 N バイト」だと WAL レコード形式の変更でフレークし得るため、
+    // 最終レコードのボディを 1 バイト欠落させる形で確実に破損させる。
     {
+        let bytes = std::fs::read(&wal_path).unwrap();
+        let mut pos = 0usize;
+        let mut last_start = None::<usize>;
+        let mut last_len = 0usize;
+
+        while pos + 8 <= bytes.len() {
+            let len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+            let record_total = 8usize.saturating_add(len);
+            if pos + record_total > bytes.len() {
+                break;
+            }
+            last_start = Some(pos);
+            last_len = len;
+            pos += record_total;
+        }
+
+        let last_start = last_start.expect("wal must contain at least one full record");
+        assert!(last_len > 0, "wal record body must not be empty");
+        let new_len = (last_start + 8 + last_len - 1) as u64;
+
         let file = std::fs::OpenOptions::new()
             .write(true)
             .open(&wal_path)
             .unwrap();
-        let len = file.metadata().unwrap().len();
-        file.set_len(len.saturating_sub(10)).unwrap();
+        file.set_len(new_len).unwrap();
     }
 
     // Phase 3: 回復確認（t1 はアクセス可能、t2 は存在しないことを期待）。
