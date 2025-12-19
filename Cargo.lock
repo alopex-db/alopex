@@ -57,15 +57,15 @@ dependencies = [
 
 [[package]]
 name = "alopex-cli"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "alopex-cluster"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "alopex-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bincode",
  "crc32fast",
@@ -92,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-embedded"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "alopex-core",
  "alopex-sql",
@@ -104,11 +104,11 @@ dependencies = [
 
 [[package]]
 name = "alopex-server"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "alopex-sql"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "alopex-core",
  "arrow-array",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-tools"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "android_system_properties"
