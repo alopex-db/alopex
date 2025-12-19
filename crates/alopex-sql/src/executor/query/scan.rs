@@ -1,13 +1,13 @@
 use alopex_core::kv::KVStore;
 
 use crate::executor::Result;
-use crate::storage::SqlTransaction;
+use crate::storage::SqlTxn;
 
 use super::Row;
 
 /// Execute a table scan and return rows with RowIDs.
-pub fn execute_scan<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_scan<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table_meta: &crate::catalog::TableMetadata,
 ) -> Result<Vec<Row>> {
     Ok(txn.with_table(table_meta, |storage| {

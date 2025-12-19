@@ -6,11 +6,11 @@ use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::{TypedAssignment, TypedExpr};
-use crate::storage::{SqlTransaction, SqlValue, StorageError};
+use crate::storage::{SqlTxn, SqlValue, StorageError};
 
 /// Execute UPDATE statements.
-pub fn execute_update<S: KVStore, C: Catalog>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_update<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     catalog: &C,
     table_name: &str,
     assignments: Vec<TypedAssignment>,
@@ -78,8 +78,8 @@ pub fn execute_update<S: KVStore, C: Catalog>(
     Ok(ExecutionResult::RowsAffected(rows_affected))
 }
 
-fn fetch_batch<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn fetch_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     table: &TableMetadata,
     start_row_id: u64,
     batch_size: usize,
@@ -171,8 +171,8 @@ fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) ->
             .any(|&idx| row.get(idx).is_none_or(SqlValue::is_null))
 }
 
-fn update_indexes_batch<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn update_indexes_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     indexes: &[IndexMetadata],
     changes: &[(u64, Vec<SqlValue>, Vec<SqlValue>)],
 ) -> Result<()> {
@@ -206,8 +206,8 @@ fn update_indexes_batch<S: KVStore>(
     Ok(())
 }
 
-fn apply_table_updates<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn apply_table_updates<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     table: &TableMetadata,
     changes: &[(u64, Vec<SqlValue>, Vec<SqlValue>)],
 ) -> Result<()> {
@@ -220,8 +220,8 @@ fn apply_table_updates<S: KVStore>(
     Ok(())
 }
 
-fn update_hnsw_indexes<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn update_hnsw_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     table: &TableMetadata,
     indexes: &[IndexMetadata],
     changes: &[(u64, Vec<SqlValue>, Vec<SqlValue>)],

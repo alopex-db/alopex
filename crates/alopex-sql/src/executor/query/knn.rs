@@ -17,7 +17,7 @@ use crate::executor::{ExecutionResult, ExecutorError, Result, Row};
 use crate::planner::knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
 use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::typed_expr::{Projection, TypedExpr};
-use crate::storage::{SqlTransaction, SqlValue};
+use crate::storage::{SqlTxn, SqlValue};
 
 use super::{columnar_scan, project, scan};
 
@@ -46,8 +46,8 @@ pub fn extract_knn_context(
 
 /// KNN 最適化クエリを実行する。HNSW インデックスが存在しフィルタ無しならインデックス経路、
 /// それ以外はヒープベースの全件スキャンで Top-K を選択する。
-pub fn execute_knn_query<S: KVStore, C: Catalog>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog>(
+    txn: &mut impl SqlTxn<'txn, S>,
     catalog: &C,
     pattern: &KnnPattern,
     projection: &Projection,
@@ -103,8 +103,8 @@ pub fn execute_knn_query<S: KVStore, C: Catalog>(
     Ok(ExecutionResult::Query(projected))
 }
 
-fn execute_hnsw_search<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn execute_hnsw_search<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table_meta: &TableMetadata,
     index: &IndexMetadata,
     vector_idx: usize,
@@ -131,8 +131,8 @@ fn execute_hnsw_search<S: KVStore>(
     Ok(entries)
 }
 
-fn execute_heap_scan<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn execute_heap_scan<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table_meta: &TableMetadata,
     projection: &Projection,
     filter: Option<&TypedExpr>,
@@ -171,8 +171,8 @@ fn evaluate_filter(predicate: &TypedExpr, row: &Row) -> Result<bool> {
     Ok(matches!(value, SqlValue::Boolean(true)))
 }
 
-fn columnar_rows<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn columnar_rows<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table_meta: &TableMetadata,
     projection: &Projection,
     filter: Option<&TypedExpr>,
@@ -228,8 +228,8 @@ fn order_entries(entries: &mut [HeapEntry], higher_is_better: bool) {
     });
 }
 
-fn materialize_rows_by_id<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn materialize_rows_by_id<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table_meta: &TableMetadata,
     projection: &Projection,
     entries: Vec<HeapEntry>,
@@ -246,8 +246,8 @@ fn materialize_rows_by_id<S: KVStore>(
     Ok(entries.into_iter().map(|e| e.row).collect())
 }
 
-fn fetch_columnar_rows_by_id<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn fetch_columnar_rows_by_id<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table_meta: &TableMetadata,
     projection: &Projection,
     row_ids: &[u64],
@@ -523,7 +523,7 @@ mod tests {
     use crate::executor::evaluator::vector_ops::VectorMetric;
     use crate::planner::typed_expr::TypedExpr;
     use crate::planner::types::ResolvedType;
-    use crate::storage::TxnBridge;
+    use crate::storage::{SqlTransaction, TxnBridge};
     use alopex_core::kv::memory::MemoryKV;
 
     fn setup_table() -> (TxnBridge<MemoryKV>, MemoryCatalog, TableMetadata) {

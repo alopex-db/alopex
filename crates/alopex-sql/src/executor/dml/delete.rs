@@ -6,11 +6,11 @@ use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;
-use crate::storage::{SqlTransaction, SqlValue, StorageError};
+use crate::storage::{SqlTxn, SqlValue, StorageError};
 
 /// Execute DELETE statements.
-pub fn execute_delete<S: KVStore, C: Catalog>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_delete<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     catalog: &C,
     table_name: &str,
     filter: Option<TypedExpr>,
@@ -64,8 +64,8 @@ pub fn execute_delete<S: KVStore, C: Catalog>(
     Ok(ExecutionResult::RowsAffected(rows_affected))
 }
 
-fn fetch_batch<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn fetch_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     table: &TableMetadata,
     start_row_id: u64,
     batch_size: usize,
@@ -143,8 +143,8 @@ fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) ->
             .any(|&idx| row.get(idx).is_none_or(SqlValue::is_null))
 }
 
-fn remove_indexes_batch<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn remove_indexes_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     indexes: &[IndexMetadata],
     deletes: &[(u64, Vec<SqlValue>)],
 ) -> Result<()> {
@@ -163,8 +163,8 @@ fn remove_indexes_batch<S: KVStore>(
     Ok(())
 }
 
-fn remove_hnsw_indexes<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn remove_hnsw_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     indexes: &[IndexMetadata],
     deletes: &[(u64, Vec<SqlValue>)],
 ) -> Result<()> {
@@ -176,8 +176,8 @@ fn remove_hnsw_indexes<S: KVStore>(
     Ok(())
 }
 
-fn delete_rows<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn delete_rows<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     table: &TableMetadata,
     deletes: &[(u64, Vec<SqlValue>)],
 ) -> Result<()> {

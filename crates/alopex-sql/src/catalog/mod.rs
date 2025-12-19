@@ -52,6 +52,7 @@ mod tests;
 
 pub use index::IndexMetadata;
 pub use memory::MemoryCatalog;
+pub use persistent::TxnCatalogView;
 pub use persistent::{CatalogError, CatalogOverlay, PersistentCatalog};
 pub use table::{
     ColumnMetadata, Compression, RowIdMode, StorageOptions, StorageType, TableMetadata,

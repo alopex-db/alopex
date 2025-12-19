@@ -6,11 +6,11 @@ use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;
-use crate::storage::{SqlTransaction, SqlValue, StorageError};
+use crate::storage::{SqlTxn, SqlValue, StorageError};
 
 /// Execute INSERT statements.
-pub fn execute_insert<S: KVStore, C: Catalog>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_insert<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     catalog: &C,
     table_name: &str,
     columns: Vec<String>,
@@ -158,8 +158,8 @@ fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) ->
             .any(|&idx| row.get(idx).is_none_or(SqlValue::is_null))
 }
 
-fn populate_indexes<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn populate_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     indexes: &[IndexMetadata],
     rows: &[(u64, Vec<SqlValue>)],
 ) -> Result<()> {
@@ -178,8 +178,8 @@ fn populate_indexes<S: KVStore>(
     Ok(())
 }
 
-fn populate_hnsw_indexes<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn populate_hnsw_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     table: &TableMetadata,
     indexes: &[IndexMetadata],
     rows: &[(u64, Vec<SqlValue>)],

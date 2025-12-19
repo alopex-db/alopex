@@ -4,11 +4,11 @@ use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata};
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
-use crate::storage::{KeyEncoder, SqlTransaction};
+use crate::storage::{KeyEncoder, SqlTxn};
 
 /// Execute DROP TABLE.
-pub fn execute_drop_table<S: KVStore, C: Catalog>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_drop_table<'txn, S: KVStore + 'txn, C: Catalog>(
+    txn: &mut impl SqlTxn<'txn, S>,
     catalog: &mut C,
     table_name: &str,
     if_exists: bool,

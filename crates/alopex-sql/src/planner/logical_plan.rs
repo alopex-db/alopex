@@ -183,6 +183,22 @@ pub enum LogicalPlan {
 }
 
 impl LogicalPlan {
+    pub fn operation_name(&self) -> &'static str {
+        match self {
+            LogicalPlan::Scan { .. }
+            | LogicalPlan::Filter { .. }
+            | LogicalPlan::Sort { .. }
+            | LogicalPlan::Limit { .. } => "SELECT",
+            LogicalPlan::Insert { .. } => "INSERT",
+            LogicalPlan::Update { .. } => "UPDATE",
+            LogicalPlan::Delete { .. } => "DELETE",
+            LogicalPlan::CreateTable { .. } => "CREATE TABLE",
+            LogicalPlan::DropTable { .. } => "DROP TABLE",
+            LogicalPlan::CreateIndex { .. } => "CREATE INDEX",
+            LogicalPlan::DropIndex { .. } => "DROP INDEX",
+        }
+    }
+
     /// Creates a new Scan plan.
     pub fn scan(table: String, projection: Projection) -> Self {
         LogicalPlan::Scan { table, projection }

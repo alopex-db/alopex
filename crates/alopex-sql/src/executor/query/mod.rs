@@ -5,7 +5,7 @@ use crate::executor::evaluator::EvalContext;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::typed_expr::Projection;
-use crate::storage::{SqlTransaction, SqlValue};
+use crate::storage::{SqlTxn, SqlValue};
 
 use super::{ColumnInfo, Row};
 
@@ -28,8 +28,8 @@ pub use iterator::{FilterIterator, LimitIterator, RowIterator, SortIterator};
 /// Note: The Scan stage reads all matching rows into memory, but subsequent
 /// operators (Filter, Sort, Limit) process rows through an iterator pipeline.
 /// Sort operations additionally require materializing all input rows.
-pub fn execute_query<S: KVStore, C: Catalog>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_query<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     catalog: &C,
     plan: LogicalPlan,
 ) -> Result<ExecutionResult> {
@@ -55,8 +55,8 @@ pub fn execute_query<S: KVStore, C: Catalog>(
 /// structure. The scan phase reads rows into memory, then subsequent operators
 /// process them through an iterator pipeline enabling streaming execution and
 /// early termination.
-fn build_iterator_pipeline<S: KVStore, C: Catalog>(
-    txn: &mut SqlTransaction<'_, S>,
+fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
     catalog: &C,
     plan: LogicalPlan,
 ) -> Result<(

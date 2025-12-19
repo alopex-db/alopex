@@ -13,7 +13,7 @@ use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::{ExecutorError, Result, Row};
 use crate::planner::typed_expr::{Projection, TypedExpr, TypedExprKind};
 use crate::planner::types::ResolvedType;
-use crate::storage::{SqlTransaction, SqlValue};
+use crate::storage::{SqlTxn, SqlValue};
 use std::collections::BTreeSet;
 
 /// ColumnarScan オペレータ。
@@ -152,8 +152,8 @@ impl ColumnarScan {
 }
 
 /// ColumnarScan を実行する。
-pub fn execute_columnar_scan<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_columnar_scan<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table_meta: &TableMetadata,
     scan: &ColumnarScan,
 ) -> Result<Vec<Row>> {
@@ -237,8 +237,8 @@ pub fn execute_columnar_scan<S: KVStore>(
 ///
 /// RowIdMode::Direct で columnar ストレージの場合、行本体の読み込みを避けて
 /// RowID 再フェッチ用の候補セットを得る目的で使用する。
-pub fn execute_columnar_row_ids<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_columnar_row_ids<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table_meta: &TableMetadata,
     scan: &ColumnarScan,
 ) -> Result<Vec<u64>> {
@@ -598,8 +598,8 @@ fn collect_column_indices(expr: &TypedExpr, acc: &mut BTreeSet<usize>) {
     }
 }
 
-fn load_segment_index<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn load_segment_index<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table_id: u32,
 ) -> Result<Vec<u64>> {
     let key = key_layout::segment_index_key(table_id);
@@ -613,8 +613,8 @@ fn load_segment_index<S: KVStore>(
     }
 }
 
-fn load_segment<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn load_segment<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table_id: u32,
     segment_id: u64,
 ) -> Result<ColumnSegmentV2> {
@@ -628,8 +628,8 @@ fn load_segment<S: KVStore>(
         .map_err(|e| ExecutorError::Columnar(e.to_string()))
 }
 
-fn load_row_group_stats<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn load_row_group_stats<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table_id: u32,
     segment_id: u64,
 ) -> Option<Vec<RowGroupStatistics>> {

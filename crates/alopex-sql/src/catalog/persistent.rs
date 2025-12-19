@@ -434,6 +434,85 @@ impl CatalogOverlay {
     }
 }
 
+/// トランザクション内（オーバーレイ込み）で参照するための Catalog ビュー。
+///
+/// DML/SELECT の実行や Planner の参照用途に使う。書き込み系 API は利用しない前提のため、
+/// `Catalog` trait の書き込みメソッドは `unreachable!()` とする。
+pub struct TxnCatalogView<'a, S: KVStore> {
+    catalog: &'a PersistentCatalog<S>,
+    overlay: &'a CatalogOverlay,
+}
+
+impl<'a, S: KVStore> TxnCatalogView<'a, S> {
+    pub fn new(catalog: &'a PersistentCatalog<S>, overlay: &'a CatalogOverlay) -> Self {
+        Self { catalog, overlay }
+    }
+}
+
+impl<'a, S: KVStore> Catalog for TxnCatalogView<'a, S> {
+    fn create_table(&mut self, _table: TableMetadata) -> Result<(), PlannerError> {
+        unreachable!("TxnCatalogView は参照専用です")
+    }
+
+    fn get_table(&self, name: &str) -> Option<&TableMetadata> {
+        self.catalog.get_table_in_txn(name, self.overlay)
+    }
+
+    fn drop_table(&mut self, _name: &str) -> Result<(), PlannerError> {
+        unreachable!("TxnCatalogView は参照専用です")
+    }
+
+    fn create_index(&mut self, _index: IndexMetadata) -> Result<(), PlannerError> {
+        unreachable!("TxnCatalogView は参照専用です")
+    }
+
+    fn get_index(&self, name: &str) -> Option<&IndexMetadata> {
+        self.catalog.get_index_in_txn(name, self.overlay)
+    }
+
+    fn get_indexes_for_table(&self, table: &str) -> Vec<&IndexMetadata> {
+        if self.overlay.dropped_tables.contains(table) {
+            return Vec::new();
+        }
+
+        let mut indexes: Vec<&IndexMetadata> = self
+            .catalog
+            .inner
+            .get_indexes_for_table(table)
+            .into_iter()
+            .filter(|idx| !self.overlay.dropped_indexes.contains(&idx.name))
+            .collect();
+
+        for idx in self.overlay.added_indexes.values() {
+            if idx.table == table && !self.overlay.dropped_indexes.contains(&idx.name) {
+                indexes.push(idx);
+            }
+        }
+
+        indexes
+    }
+
+    fn drop_index(&mut self, _name: &str) -> Result<(), PlannerError> {
+        unreachable!("TxnCatalogView は参照専用です")
+    }
+
+    fn table_exists(&self, name: &str) -> bool {
+        self.catalog.table_exists_in_txn(name, self.overlay)
+    }
+
+    fn index_exists(&self, name: &str) -> bool {
+        self.catalog.index_exists_in_txn(name, self.overlay)
+    }
+
+    fn next_table_id(&mut self) -> u32 {
+        unreachable!("TxnCatalogView は参照専用です")
+    }
+
+    fn next_index_id(&mut self) -> u32 {
+        unreachable!("TxnCatalogView は参照専用です")
+    }
+}
+
 /// 永続カタログ実装。
 #[derive(Debug)]
 pub struct PersistentCatalog<S: KVStore> {

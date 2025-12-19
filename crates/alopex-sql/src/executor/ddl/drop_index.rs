@@ -4,13 +4,13 @@ use crate::ast::ddl::IndexMethod;
 use crate::catalog::Catalog;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
-use crate::storage::{KeyEncoder, SqlTransaction};
+use crate::storage::{KeyEncoder, SqlTxn};
 
 use super::is_implicit_pk_index;
 
 /// Execute DROP INDEX.
-pub fn execute_drop_index<S: KVStore, C: Catalog>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_drop_index<'txn, S: KVStore + 'txn, C: Catalog>(
+    txn: &mut impl SqlTxn<'txn, S>,
     catalog: &mut C,
     index_name: &str,
     if_exists: bool,

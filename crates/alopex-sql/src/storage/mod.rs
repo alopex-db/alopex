@@ -6,7 +6,7 @@ pub mod key;
 pub mod table;
 pub mod value;
 
-pub use bridge::{SqlTransaction, TxnBridge, TxnContext};
+pub use bridge::{BorrowedSqlTransaction, SqlTransaction, SqlTxn, TxnBridge, TxnContext};
 pub use codec::RowCodec;
 pub use error::StorageError;
 pub use index::{IndexScanIterator, IndexStorage};

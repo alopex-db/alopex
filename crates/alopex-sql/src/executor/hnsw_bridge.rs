@@ -7,15 +7,15 @@ use crate::ast::ddl::VectorMetric;
 use crate::catalog::{ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::executor::{ExecutorError, Result};
 use crate::planner::types::ResolvedType;
-use crate::storage::{SqlTransaction, SqlValue};
+use crate::storage::{SqlTxn, SqlValue};
 
 /// SQL と HNSW の橋渡しを行うユーティリティ。
 pub struct HnswBridge;
 
 impl HnswBridge {
     /// HNSW インデックスを作成し、既存行を取り込む。
-    pub fn create_index<S: KVStore>(
-        txn: &mut SqlTransaction<'_, S>,
+    pub fn create_index<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+        txn: &mut T,
         table: &TableMetadata,
         index: &IndexMetadata,
     ) -> Result<()> {
@@ -40,8 +40,8 @@ impl HnswBridge {
     }
 
     /// HNSW インデックスを削除する。
-    pub fn drop_index<S: KVStore>(
-        txn: &mut SqlTransaction<'_, S>,
+    pub fn drop_index<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+        txn: &mut T,
         index: &IndexMetadata,
         if_exists: bool,
     ) -> Result<()> {
@@ -54,8 +54,8 @@ impl HnswBridge {
     }
 
     /// INSERT/UPSERT 時のインデックス更新。
-    pub fn on_insert<S: KVStore>(
-        txn: &mut SqlTransaction<'_, S>,
+    pub fn on_insert<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+        txn: &mut T,
         table: &TableMetadata,
         index: &IndexMetadata,
         row_id: u64,
@@ -76,8 +76,8 @@ impl HnswBridge {
     }
 
     /// DELETE 時のインデックス更新。
-    pub fn on_delete<S: KVStore>(
-        txn: &mut SqlTransaction<'_, S>,
+    pub fn on_delete<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+        txn: &mut T,
         index: &IndexMetadata,
         row_id: u64,
     ) -> Result<()> {
@@ -94,8 +94,8 @@ impl HnswBridge {
     }
 
     /// UPDATE 時のインデックス更新。
-    pub fn on_update<S: KVStore>(
-        txn: &mut SqlTransaction<'_, S>,
+    pub fn on_update<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+        txn: &mut T,
         table: &TableMetadata,
         index: &IndexMetadata,
         row_id: u64,
@@ -126,8 +126,8 @@ impl HnswBridge {
 
     /// kNN 検索を実行する。
     #[allow(dead_code)]
-    pub fn search_knn<S: KVStore>(
-        txn: &mut SqlTransaction<'_, S>,
+    pub fn search_knn<'txn, S: KVStore + 'txn>(
+        txn: &mut impl SqlTxn<'txn, S>,
         index_name: &str,
         query: &[f32],
         k: usize,
@@ -155,8 +155,8 @@ impl HnswBridge {
 
     /// HNSW インデックスの存在確認。
     #[allow(dead_code)]
-    pub fn index_exists<S: KVStore>(
-        txn: &mut SqlTransaction<'_, S>,
+    pub fn index_exists<'txn, S: KVStore + 'txn>(
+        txn: &mut impl SqlTxn<'txn, S>,
         index_name: &str,
     ) -> Result<bool> {
         match txn.hnsw_entry(index_name) {

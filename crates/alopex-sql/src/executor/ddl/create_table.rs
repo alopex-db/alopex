@@ -5,13 +5,13 @@ use crate::catalog::{
     Catalog, Compression, IndexMetadata, RowIdMode, StorageOptions, StorageType, TableMetadata,
 };
 use crate::executor::{ExecutionResult, ExecutorError, Result};
-use crate::storage::{KeyEncoder, SqlTransaction};
+use crate::storage::{KeyEncoder, SqlTxn};
 
 use super::create_pk_index_name;
 
 /// Execute CREATE TABLE.
-pub fn execute_create_table<S: KVStore, C: Catalog>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_create_table<'txn, S: KVStore + 'txn, C: Catalog>(
+    txn: &mut impl SqlTxn<'txn, S>,
     catalog: &mut C,
     mut table: TableMetadata,
     with_options: Vec<(String, String)>,

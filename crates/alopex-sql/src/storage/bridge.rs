@@ -6,10 +6,67 @@ use alopex_core::types::TxnMode;
 use alopex_core::vector::hnsw::{HnswIndex, HnswTransactionState};
 use alopex_core::{Error as CoreError, Result as CoreResult};
 
+use crate::catalog::CatalogOverlay;
 use crate::catalog::TableMetadata;
 
 use super::error::Result;
 use super::{IndexStorage, TableStorage};
+
+pub trait SqlTxn<'txn, S: KVStore + 'txn> {
+    fn mode(&self) -> TxnMode;
+
+    fn ensure_write_txn(&self) -> CoreResult<()>;
+
+    fn inner_mut(&mut self) -> &mut S::Transaction<'txn>;
+
+    fn hnsw_entry(&mut self, name: &str) -> CoreResult<&HnswIndex>;
+
+    fn hnsw_entry_mut(&mut self, name: &str) -> CoreResult<&mut HnswTxnEntry>;
+
+    fn flush_hnsw(&mut self) -> Result<()>;
+
+    fn abandon_hnsw(&mut self) -> Result<()>;
+
+    fn delete_prefix(&mut self, prefix: &[u8]) -> Result<()>;
+
+    fn table_storage<'a>(
+        &'a mut self,
+        table_meta: &TableMetadata,
+    ) -> TableStorage<'a, 'txn, S::Transaction<'txn>> {
+        TableStorage::new(self.inner_mut(), table_meta)
+    }
+
+    fn index_storage<'a>(
+        &'a mut self,
+        index_id: u32,
+        unique: bool,
+        column_indices: Vec<usize>,
+    ) -> IndexStorage<'a, 'txn, S::Transaction<'txn>> {
+        IndexStorage::new(self.inner_mut(), index_id, unique, column_indices)
+    }
+
+    fn with_table<R, F>(&mut self, table_meta: &TableMetadata, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut TableStorage<'_, 'txn, S::Transaction<'txn>>) -> Result<R>,
+    {
+        let mut storage = self.table_storage(table_meta);
+        f(&mut storage)
+    }
+
+    fn with_index<R, F>(
+        &mut self,
+        index_id: u32,
+        unique: bool,
+        column_indices: Vec<usize>,
+        f: F,
+    ) -> Result<R>
+    where
+        F: FnOnce(&mut IndexStorage<'_, 'txn, S::Transaction<'txn>>) -> Result<R>,
+    {
+        let mut storage = self.index_storage(index_id, unique, column_indices);
+        f(&mut storage)
+    }
+}
 
 /// TxnBridge provides SQL-friendly transaction handles on top of a KVStore.
 pub struct TxnBridge<S: KVStore> {
@@ -40,6 +97,19 @@ impl<S: KVStore> TxnBridge<S> {
             mode: TxnMode::ReadWrite,
             hnsw_indices: HashMap::new(),
         })
+    }
+
+    pub fn wrap_external<'a, 'b, 'c>(
+        txn: &'a mut S::Transaction<'b>,
+        mode: TxnMode,
+        overlay: &'c mut CatalogOverlay,
+    ) -> BorrowedSqlTransaction<'a, 'b, 'c, S> {
+        BorrowedSqlTransaction {
+            inner: txn,
+            mode,
+            overlay,
+            hnsw_indices: HashMap::new(),
+        }
     }
 
     /// Execute a read-only transaction with automatic commit.
@@ -99,10 +169,10 @@ pub struct SqlTransaction<'a, S: KVStore + 'a> {
     hnsw_indices: HashMap<String, HnswTxnEntry>,
 }
 
-pub(crate) struct HnswTxnEntry {
-    pub(crate) index: HnswIndex,
-    pub(crate) state: HnswTransactionState,
-    pub(crate) dirty: bool,
+pub struct HnswTxnEntry {
+    pub index: HnswIndex,
+    pub state: HnswTransactionState,
+    pub dirty: bool,
 }
 
 impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
@@ -276,6 +346,175 @@ impl<'a, S: KVStore + 'a> SqlTransaction<'a, S> {
             }
         }
         self.hnsw_indices.clear();
+        Ok(())
+    }
+}
+
+impl<'a, S: KVStore + 'a> SqlTxn<'a, S> for SqlTransaction<'a, S> {
+    fn mode(&self) -> TxnMode {
+        self.mode()
+    }
+
+    fn ensure_write_txn(&self) -> CoreResult<()> {
+        self.ensure_write_txn()
+    }
+
+    fn inner_mut(&mut self) -> &mut S::Transaction<'a> {
+        self.inner_mut()
+    }
+
+    fn hnsw_entry(&mut self, name: &str) -> CoreResult<&HnswIndex> {
+        self.hnsw_entry(name)
+    }
+
+    fn hnsw_entry_mut(&mut self, name: &str) -> CoreResult<&mut HnswTxnEntry> {
+        self.hnsw_entry_mut(name)
+    }
+
+    fn flush_hnsw(&mut self) -> Result<()> {
+        self.commit_hnsw()
+    }
+
+    fn abandon_hnsw(&mut self) -> Result<()> {
+        self.rollback_hnsw()
+    }
+
+    fn delete_prefix(&mut self, prefix: &[u8]) -> Result<()> {
+        self.delete_prefix(prefix)
+    }
+}
+
+pub struct BorrowedSqlTransaction<'a, 'b, 'c, S: KVStore + 'b> {
+    inner: &'a mut S::Transaction<'b>,
+    mode: TxnMode,
+    overlay: &'c mut CatalogOverlay,
+    hnsw_indices: HashMap<String, HnswTxnEntry>,
+}
+
+impl<'a, 'b, 'c, S: KVStore + 'b> BorrowedSqlTransaction<'a, 'b, 'c, S> {
+    pub fn mode(&self) -> TxnMode {
+        self.mode
+    }
+
+    pub fn split_parts(&mut self) -> (BorrowedSqlTxn<'_, 'b, S>, &mut CatalogOverlay) {
+        (
+            BorrowedSqlTxn {
+                inner: self.inner,
+                mode: self.mode,
+                hnsw_indices: &mut self.hnsw_indices,
+            },
+            self.overlay,
+        )
+    }
+}
+
+impl<'a, 'b, 'c, S: KVStore + 'b> Drop for BorrowedSqlTransaction<'a, 'b, 'c, S> {
+    fn drop(&mut self) {
+        for entry in self.hnsw_indices.values_mut() {
+            if entry.dirty {
+                let _ = entry.index.rollback(&mut entry.state);
+                entry.dirty = false;
+            }
+        }
+        self.hnsw_indices.clear();
+    }
+}
+
+pub struct BorrowedSqlTxn<'a, 'b, S: KVStore + 'b> {
+    inner: &'a mut S::Transaction<'b>,
+    mode: TxnMode,
+    hnsw_indices: &'a mut HashMap<String, HnswTxnEntry>,
+}
+
+impl<'a, 'b, S: KVStore + 'b> SqlTxn<'b, S> for BorrowedSqlTxn<'a, 'b, S> {
+    fn mode(&self) -> TxnMode {
+        self.mode
+    }
+
+    fn ensure_write_txn(&self) -> CoreResult<()> {
+        if self.mode != TxnMode::ReadWrite {
+            return Err(CoreError::TxnConflict);
+        }
+        Ok(())
+    }
+
+    fn inner_mut(&mut self) -> &mut S::Transaction<'b> {
+        self.inner
+    }
+
+    fn hnsw_entry(&mut self, name: &str) -> CoreResult<&HnswIndex> {
+        if !self.hnsw_indices.contains_key(name) {
+            let index = HnswIndex::load(name, self.inner)?;
+            self.hnsw_indices.insert(
+                name.to_string(),
+                HnswTxnEntry {
+                    index,
+                    state: HnswTransactionState::default(),
+                    dirty: false,
+                },
+            );
+        }
+        Ok(&self.hnsw_indices.get(name).expect("inserted above").index)
+    }
+
+    fn hnsw_entry_mut(&mut self, name: &str) -> CoreResult<&mut HnswTxnEntry> {
+        if !self.hnsw_indices.contains_key(name) {
+            let index = HnswIndex::load(name, self.inner)?;
+            self.hnsw_indices.insert(
+                name.to_string(),
+                HnswTxnEntry {
+                    index,
+                    state: HnswTransactionState::default(),
+                    dirty: false,
+                },
+            );
+        }
+        Ok(self.hnsw_indices.get_mut(name).expect("inserted above"))
+    }
+
+    fn flush_hnsw(&mut self) -> Result<()> {
+        for entry in self.hnsw_indices.values_mut() {
+            if entry.dirty {
+                entry.index.commit_staged(self.inner, &mut entry.state)?;
+                entry.dirty = false;
+            }
+        }
+        self.hnsw_indices.clear();
+        Ok(())
+    }
+
+    fn abandon_hnsw(&mut self) -> Result<()> {
+        for entry in self.hnsw_indices.values_mut() {
+            if entry.dirty {
+                entry.index.rollback(&mut entry.state)?;
+                entry.dirty = false;
+            }
+        }
+        self.hnsw_indices.clear();
+        Ok(())
+    }
+
+    fn delete_prefix(&mut self, prefix: &[u8]) -> Result<()> {
+        // Process in small batches to avoid unbounded memory use.
+        const BATCH: usize = 512;
+        loop {
+            let mut keys = Vec::with_capacity(BATCH);
+            {
+                let iter = self.inner.scan_prefix(prefix)?;
+                for (key, _) in iter.take(BATCH) {
+                    keys.push(key);
+                }
+            }
+
+            if keys.is_empty() {
+                break;
+            }
+
+            for key in keys {
+                self.inner.delete(key)?;
+            }
+        }
+
         Ok(())
     }
 }
