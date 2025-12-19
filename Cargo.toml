@@ -14,7 +14,7 @@ edition = "2021"
 
 [workspace.dependencies]
 # Internal crates
-alopex-core = { version = "0.3.0", path = "crates/alopex-core" }
+alopex-core = { version = "0.3.1", path = "crates/alopex-core" }
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
 
