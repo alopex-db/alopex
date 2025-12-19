@@ -637,7 +637,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
             return Err(Error::TxnClosed);
         }
         if self.mode == TxnMode::ReadOnly {
-            return Err(Error::TxnConflict);
+            return Err(Error::TxnReadOnly);
         }
         self.writes.insert(key, Some(value));
         Ok(())
@@ -648,7 +648,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
             return Err(Error::TxnClosed);
         }
         if self.mode == TxnMode::ReadOnly {
-            return Err(Error::TxnConflict);
+            return Err(Error::TxnReadOnly);
         }
         self.writes.insert(key, None);
         Ok(())
@@ -974,9 +974,9 @@ mod tests {
         let mut txn = manager.begin(TxnMode::ReadOnly).unwrap();
         assert!(matches!(
             txn.put(key("k1"), value("v1")),
-            Err(Error::TxnConflict)
+            Err(Error::TxnReadOnly)
         ));
-        assert!(matches!(txn.delete(key("k1")), Err(Error::TxnConflict)));
+        assert!(matches!(txn.delete(key("k1")), Err(Error::TxnReadOnly)));
     }
 
     #[test]

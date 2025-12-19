@@ -18,6 +18,10 @@ pub enum Error {
     #[error("transaction is closed")]
     TxnClosed,
 
+    /// Read-only トランザクションで書き込み操作を試みた。
+    #[error("transaction is read-only")]
+    TxnReadOnly,
+
     /// A transaction conflict occurred (e.g., optimistic concurrency control failure).
     #[error("transaction conflict")]
     TxnConflict,

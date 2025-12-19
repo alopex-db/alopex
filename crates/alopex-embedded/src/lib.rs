@@ -872,7 +872,7 @@ mod tests {
         let err = ro
             .upsert_vector(b"k1", b"m", &[1.0, 0.0], Metric::Cosine)
             .unwrap_err();
-        assert!(matches!(err, Error::Core(alopex_core::Error::TxnConflict)));
+        assert!(matches!(err, Error::Core(alopex_core::Error::TxnReadOnly)));
     }
 
     #[test]

@@ -17,12 +17,12 @@ use alopex_sql::planner::typed_expr::{Projection, TypedExpr, TypedExprKind};
 use alopex_sql::planner::types::ResolvedType;
 use alopex_sql::storage::{SqlTxn as _, TxnBridge};
 
+type PersistentCatalogHandle = Arc<RwLock<PersistentCatalog<MemoryKV>>>;
+type PersistentExecutor = Executor<MemoryKV, PersistentCatalog<MemoryKV>>;
+
 fn executor_with_persistent_catalog(
     store: Arc<MemoryKV>,
-) -> (
-    Executor<MemoryKV, PersistentCatalog<MemoryKV>>,
-    Arc<RwLock<PersistentCatalog<MemoryKV>>>,
-) {
+) -> (PersistentExecutor, PersistentCatalogHandle) {
     let catalog = Arc::new(RwLock::new(PersistentCatalog::new(store.clone())));
     (Executor::new(store, catalog.clone()), catalog)
 }

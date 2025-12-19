@@ -27,6 +27,9 @@ pub enum StorageError {
     #[error("transaction conflict")]
     TransactionConflict,
 
+    #[error("transaction is read-only")]
+    TransactionReadOnly,
+
     #[error("transaction closed")]
     TransactionClosed,
 
@@ -42,6 +45,7 @@ impl From<alopex_core::error::Error> for StorageError {
         use alopex_core::error::Error as CoreError;
         match err {
             CoreError::TxnConflict => StorageError::TransactionConflict,
+            CoreError::TxnReadOnly => StorageError::TransactionReadOnly,
             CoreError::TxnClosed => StorageError::TransactionClosed,
             other => StorageError::KvError(other),
         }

@@ -433,7 +433,7 @@ impl<'a, 'b, S: KVStore + 'b> SqlTxn<'b, S> for BorrowedSqlTxn<'a, 'b, S> {
 
     fn ensure_write_txn(&self) -> CoreResult<()> {
         if self.mode != TxnMode::ReadWrite {
-            return Err(CoreError::TxnConflict);
+            return Err(CoreError::TxnReadOnly);
         }
         Ok(())
     }

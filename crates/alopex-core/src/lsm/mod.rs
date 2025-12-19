@@ -660,7 +660,7 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
 
     fn put(&mut self, key: Key, value: Value) -> Result<()> {
         if self.mode == TxnMode::ReadOnly {
-            return Err(Error::TxnConflict);
+            return Err(Error::TxnReadOnly);
         }
         self.write_set.insert(key, Some(value));
         Ok(())
@@ -668,7 +668,7 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
 
     fn delete(&mut self, key: Key) -> Result<()> {
         if self.mode == TxnMode::ReadOnly {
-            return Err(Error::TxnConflict);
+            return Err(Error::TxnReadOnly);
         }
         self.write_set.insert(key, None);
         Ok(())

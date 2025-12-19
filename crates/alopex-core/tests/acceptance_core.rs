@@ -29,7 +29,7 @@ fn txn_consistency_covers_readonly_error_and_rollback() {
     let mut ro = manager.begin(TxnMode::ReadOnly).unwrap();
     assert!(matches!(
         ro.put(key("k1"), value("forbidden")),
-        Err(Error::TxnConflict)
+        Err(Error::TxnReadOnly)
     ));
 
     let mut rollback_txn = manager.begin(TxnMode::ReadWrite).unwrap();

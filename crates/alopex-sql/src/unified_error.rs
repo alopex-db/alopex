@@ -139,6 +139,7 @@ impl From<alopex_core::Error> for SqlError {
         let code = match e {
             alopex_core::Error::TxnConflict => "ALOPEX-S001",
             alopex_core::Error::TxnClosed => "ALOPEX-S002",
+            alopex_core::Error::TxnReadOnly => "ALOPEX-S003",
             _ => "ALOPEX-S999",
         };
 
@@ -320,6 +321,11 @@ impl From<StorageError> for SqlError {
                 code: "ALOPEX-S001",
                 source: Some(alopex_core::Error::TxnConflict),
             },
+            StorageError::TransactionReadOnly => Self::Storage {
+                message: "transaction is read-only".to_string(),
+                code: "ALOPEX-S003",
+                source: Some(alopex_core::Error::TxnReadOnly),
+            },
             StorageError::TransactionClosed => Self::Storage {
                 message: "transaction is closed".to_string(),
                 code: "ALOPEX-S002",
@@ -344,6 +350,10 @@ impl From<ExecutorError> for SqlError {
             ExecutorError::TransactionConflict => Self::Execution {
                 message: "transaction conflict".to_string(),
                 code: "ALOPEX-E001",
+            },
+            ExecutorError::ReadOnlyTransaction { operation } => Self::Execution {
+                message: format!("read-only transaction: cannot execute {operation}"),
+                code: "ALOPEX-E002",
             },
             ExecutorError::TableNotFound(name) => Self::Catalog {
                 message: format!("table '{name}' not found"),
@@ -438,6 +448,30 @@ mod tests {
         assert_eq!(
             unified.message_with_location(),
             "error[ALOPEX-S001]: storage error: transaction conflict"
+        );
+    }
+
+    #[test]
+    fn from_executor_core_readonly_maps_to_storage_and_preserves_source() {
+        let unified: SqlError = ExecutorError::Core(alopex_core::Error::TxnReadOnly).into();
+        assert_eq!(unified.code(), "ALOPEX-S003");
+        assert!(unified.source().is_some());
+        assert_eq!(
+            unified.message_with_location(),
+            "error[ALOPEX-S003]: storage error: transaction is read-only"
+        );
+    }
+
+    #[test]
+    fn from_executor_readonly_transaction_maps_to_execution_code() {
+        let unified: SqlError = ExecutorError::ReadOnlyTransaction {
+            operation: "INSERT".to_string(),
+        }
+        .into();
+        assert_eq!(unified.code(), "ALOPEX-E002");
+        assert_eq!(
+            unified.message_with_location(),
+            "error[ALOPEX-E002]: read-only transaction: cannot execute INSERT"
         );
     }
 }
