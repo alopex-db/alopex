@@ -81,6 +81,32 @@ impl MemoryCatalog {
         self.tables.clear();
         self.indexes.clear();
     }
+
+    pub(crate) fn counters(&self) -> (u32, u32) {
+        (self.table_id_counter, self.index_id_counter)
+    }
+
+    pub(crate) fn set_counters(&mut self, table_id_counter: u32, index_id_counter: u32) {
+        self.table_id_counter = table_id_counter;
+        self.index_id_counter = index_id_counter;
+    }
+
+    pub(crate) fn insert_table_unchecked(&mut self, table: TableMetadata) {
+        self.tables.insert(table.name.clone(), table);
+    }
+
+    pub(crate) fn remove_table_unchecked(&mut self, name: &str) {
+        self.tables.remove(name);
+        self.indexes.retain(|_, idx| idx.table != name);
+    }
+
+    pub(crate) fn insert_index_unchecked(&mut self, index: IndexMetadata) {
+        self.indexes.insert(index.name.clone(), index);
+    }
+
+    pub(crate) fn remove_index_unchecked(&mut self, name: &str) {
+        self.indexes.remove(name);
+    }
 }
 
 impl Catalog for MemoryCatalog {

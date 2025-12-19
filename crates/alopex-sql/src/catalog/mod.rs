@@ -44,6 +44,7 @@
 
 mod index;
 mod memory;
+pub mod persistent;
 mod table;
 
 #[cfg(test)]
@@ -51,6 +52,7 @@ mod tests;
 
 pub use index::IndexMetadata;
 pub use memory::MemoryCatalog;
+pub use persistent::{CatalogError, CatalogOverlay, PersistentCatalog};
 pub use table::{
     ColumnMetadata, Compression, RowIdMode, StorageOptions, StorageType, TableMetadata,
 };
