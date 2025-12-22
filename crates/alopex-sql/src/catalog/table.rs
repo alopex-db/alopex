@@ -83,6 +83,10 @@ pub struct TableMetadata {
     pub table_id: u32,
     /// Table name.
     pub name: String,
+    /// Catalog name.
+    pub catalog_name: String,
+    /// Namespace name.
+    pub namespace_name: String,
     /// Column definitions (order is preserved).
     pub columns: Vec<ColumnMetadata>,
     /// Primary key columns (supports composite keys).
@@ -100,6 +104,8 @@ impl TableMetadata {
         Self {
             table_id: 0,
             name: name.into(),
+            catalog_name: "default".to_string(),
+            namespace_name: "default".to_string(),
             columns,
             primary_key: None,
             storage_options: StorageOptions::default(),

@@ -43,10 +43,64 @@ pub enum CatalogError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct CatalogMeta {
+struct CatalogState {
     version: u32,
     table_id_counter: u32,
     index_id_counter: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistedCatalogMeta {
+    pub name: String,
+    pub comment: Option<String>,
+    pub storage_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistedNamespaceMeta {
+    pub name: String,
+    pub catalog_name: String,
+    pub comment: Option<String>,
+    pub storage_root: Option<String>,
+}
+
+pub type CatalogMeta = PersistedCatalogMeta;
+pub type NamespaceMeta = PersistedNamespaceMeta;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TableFqn {
+    pub catalog: String,
+    pub namespace: String,
+    pub table: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IndexFqn {
+    pub catalog: String,
+    pub namespace: String,
+    pub table: String,
+    pub index: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TableType {
+    Managed,
+    External,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DataSourceFormat {
+    Alopex,
+    Parquet,
+    Delta,
+}
+
+impl Default for DataSourceFormat {
+    fn default() -> Self {
+        Self::Alopex
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -298,9 +352,16 @@ impl From<PersistedColumnMeta> for ColumnMetadata {
 pub struct PersistedTableMeta {
     pub table_id: u32,
     pub name: String,
+    pub catalog_name: String,
+    pub namespace_name: String,
+    pub table_type: TableType,
+    pub data_source_format: DataSourceFormat,
     pub columns: Vec<PersistedColumnMeta>,
     pub primary_key: Option<Vec<String>>,
     pub storage_options: PersistedStorageOptions,
+    pub storage_location: Option<String>,
+    pub comment: Option<String>,
+    pub properties: HashMap<String, String>,
 }
 
 impl From<&TableMetadata> for PersistedTableMeta {
@@ -308,6 +369,10 @@ impl From<&TableMetadata> for PersistedTableMeta {
         Self {
             table_id: value.table_id,
             name: value.name.clone(),
+            catalog_name: value.catalog_name.clone(),
+            namespace_name: value.namespace_name.clone(),
+            table_type: TableType::Managed,
+            data_source_format: DataSourceFormat::default(),
             columns: value
                 .columns
                 .iter()
@@ -315,6 +380,9 @@ impl From<&TableMetadata> for PersistedTableMeta {
                 .collect(),
             primary_key: value.primary_key.clone(),
             storage_options: value.storage_options.clone().into(),
+            storage_location: None,
+            comment: None,
+            properties: HashMap::new(),
         }
     }
 }
@@ -332,6 +400,8 @@ impl From<PersistedTableMeta> for TableMetadata {
         .with_table_id(value.table_id);
         table.primary_key = value.primary_key;
         table.storage_options = value.storage_options.into();
+        table.catalog_name = value.catalog_name;
+        table.namespace_name = value.namespace_name;
         table
     }
 }
@@ -566,7 +636,7 @@ impl<S: KVStore> PersistentCatalog<S> {
         let (mut table_id_counter, mut index_id_counter) = (max_table_id, max_index_id);
         let meta_key = META_KEY.to_vec();
         if let Some(meta_bytes) = txn.get(&meta_key)? {
-            let meta: CatalogMeta = bincode::deserialize(&meta_bytes)?;
+            let meta: CatalogState = bincode::deserialize(&meta_bytes)?;
             if meta.version == CATALOG_VERSION {
                 table_id_counter = table_id_counter.max(meta.table_id_counter);
                 index_id_counter = index_id_counter.max(meta.index_id_counter);
@@ -592,7 +662,7 @@ impl<S: KVStore> PersistentCatalog<S> {
 
     fn write_meta(&self, txn: &mut S::Transaction<'_>) -> Result<(), CatalogError> {
         let (table_id_counter, index_id_counter) = self.inner.counters();
-        let meta = CatalogMeta {
+        let meta = CatalogState {
             version: CATALOG_VERSION,
             table_id_counter,
             index_id_counter,
@@ -787,6 +857,7 @@ impl<S: KVStore> Catalog for PersistentCatalog<S> {
 mod tests {
     use super::*;
     use crate::planner::types::ResolvedType;
+    use std::collections::HashSet;
 
     fn test_table(name: &str, id: u32) -> TableMetadata {
         TableMetadata::new(
@@ -895,5 +966,96 @@ mod tests {
         PersistentCatalog::<alopex_core::kv::memory::MemoryKV>::discard_overlay(overlay);
 
         assert!(catalog.table_exists("users"));
+    }
+
+    #[test]
+    fn persisted_catalog_meta_roundtrip() {
+        let meta = PersistedCatalogMeta {
+            name: "main".to_string(),
+            comment: Some("primary catalog".to_string()),
+            storage_root: Some("/tmp/alopex".to_string()),
+        };
+        let bytes = bincode::serialize(&meta).unwrap();
+        let decoded: PersistedCatalogMeta = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(meta, decoded);
+    }
+
+    #[test]
+    fn persisted_namespace_meta_roundtrip() {
+        let meta = PersistedNamespaceMeta {
+            name: "analytics".to_string(),
+            catalog_name: "main".to_string(),
+            comment: Some("warehouse".to_string()),
+            storage_root: Some("s3://bucket/ns".to_string()),
+        };
+        let bytes = bincode::serialize(&meta).unwrap();
+        let decoded: PersistedNamespaceMeta = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(meta, decoded);
+    }
+
+    #[test]
+    fn table_fqn_hash_and_eq() {
+        let first = TableFqn {
+            catalog: "main".to_string(),
+            namespace: "default".to_string(),
+            table: "users".to_string(),
+        };
+        let same = TableFqn {
+            catalog: "main".to_string(),
+            namespace: "default".to_string(),
+            table: "users".to_string(),
+        };
+        let different = TableFqn {
+            catalog: "main".to_string(),
+            namespace: "default".to_string(),
+            table: "orders".to_string(),
+        };
+
+        let mut set = HashSet::new();
+        set.insert(first);
+        assert!(set.contains(&same));
+        assert!(!set.contains(&different));
+    }
+
+    #[test]
+    fn index_fqn_hash_and_eq() {
+        let first = IndexFqn {
+            catalog: "main".to_string(),
+            namespace: "default".to_string(),
+            table: "users".to_string(),
+            index: "idx_users_id".to_string(),
+        };
+        let same = IndexFqn {
+            catalog: "main".to_string(),
+            namespace: "default".to_string(),
+            table: "users".to_string(),
+            index: "idx_users_id".to_string(),
+        };
+        let different = IndexFqn {
+            catalog: "main".to_string(),
+            namespace: "default".to_string(),
+            table: "users".to_string(),
+            index: "idx_users_email".to_string(),
+        };
+
+        let mut set = HashSet::new();
+        set.insert(first);
+        assert!(set.contains(&same));
+        assert!(!set.contains(&different));
+    }
+
+    #[test]
+    fn table_type_and_data_source_format_serde() {
+        let managed = serde_json::to_string(&TableType::Managed).unwrap();
+        let external = serde_json::to_string(&TableType::External).unwrap();
+        let alopex = serde_json::to_string(&DataSourceFormat::Alopex).unwrap();
+        let parquet = serde_json::to_string(&DataSourceFormat::Parquet).unwrap();
+        let delta = serde_json::to_string(&DataSourceFormat::Delta).unwrap();
+
+        assert_eq!(managed, "\"MANAGED\"");
+        assert_eq!(external, "\"EXTERNAL\"");
+        assert_eq!(alopex, "\"ALOPEX\"");
+        assert_eq!(parquet, "\"PARQUET\"");
+        assert_eq!(delta, "\"DELTA\"");
     }
 }

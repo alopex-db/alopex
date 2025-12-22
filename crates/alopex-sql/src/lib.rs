@@ -57,7 +57,7 @@ pub use tokenizer::token::{Token, TokenWithSpan, Word};
 pub use unified_error::SqlError;
 
 // Catalog types (re-exported for convenience)
-pub use catalog::persistent::CatalogOverlay;
+pub use catalog::persistent::{CatalogOverlay, DataSourceFormat, TableType};
 pub use catalog::{
     Catalog, ColumnMetadata, Compression, IndexMetadata, MemoryCatalog, RowIdMode, StorageOptions,
     StorageType, TableMetadata,
