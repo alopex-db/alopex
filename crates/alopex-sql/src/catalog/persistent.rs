@@ -2046,9 +2046,8 @@ mod tests {
         assert!(catalog.get_table_in_txn("users", &overlay).is_none());
         assert!(!catalog.table_exists_in_txn("users", &overlay));
 
-        let mut base_index =
-            IndexMetadata::new(1, "idx_users_id", "users", vec!["id".to_string()])
-                .with_column_indices(vec![0]);
+        let mut base_index = IndexMetadata::new(1, "idx_users_id", "users", vec!["id".to_string()])
+            .with_column_indices(vec![0]);
         base_index.catalog_name = "main".to_string();
         base_index.namespace_name = "default".to_string();
         catalog.inner.insert_index_unchecked(base_index);
