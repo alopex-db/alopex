@@ -84,6 +84,44 @@ pub struct IndexFqn {
     pub index: String,
 }
 
+impl TableFqn {
+    pub fn new(catalog: &str, namespace: &str, table: &str) -> Self {
+        Self {
+            catalog: catalog.to_string(),
+            namespace: namespace.to_string(),
+            table: table.to_string(),
+        }
+    }
+}
+
+impl IndexFqn {
+    pub fn new(catalog: &str, namespace: &str, table: &str, index: &str) -> Self {
+        Self {
+            catalog: catalog.to_string(),
+            namespace: namespace.to_string(),
+            table: table.to_string(),
+            index: index.to_string(),
+        }
+    }
+}
+
+impl From<&TableMetadata> for TableFqn {
+    fn from(value: &TableMetadata) -> Self {
+        Self::new(&value.catalog_name, &value.namespace_name, &value.name)
+    }
+}
+
+impl From<&IndexMetadata> for IndexFqn {
+    fn from(value: &IndexMetadata) -> Self {
+        Self::new(
+            &value.catalog_name,
+            &value.namespace_name,
+            &value.table,
+            &value.name,
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TableType {
@@ -418,6 +456,20 @@ pub struct PersistedIndexMeta {
     pub unique: bool,
     pub method: Option<PersistedIndexType>,
     pub options: Vec<(String, String)>,
+    pub catalog_name: String,
+    pub namespace_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PersistedIndexMetaV1 {
+    index_id: u32,
+    name: String,
+    table: String,
+    columns: Vec<String>,
+    column_indices: Vec<usize>,
+    unique: bool,
+    method: Option<PersistedIndexType>,
+    options: Vec<(String, String)>,
 }
 
 impl From<&IndexMetadata> for PersistedIndexMeta {
@@ -433,6 +485,8 @@ impl From<&IndexMetadata> for PersistedIndexMeta {
                 .method
                 .and_then(|m| PersistedIndexType::try_from(m).ok()),
             options: value.options.clone(),
+            catalog_name: value.catalog_name.clone(),
+            namespace_name: value.namespace_name.clone(),
         }
     }
 }
@@ -443,10 +497,41 @@ impl From<PersistedIndexMeta> for IndexMetadata {
             .with_column_indices(value.column_indices)
             .with_unique(value.unique)
             .with_options(value.options);
+        index.catalog_name = value.catalog_name;
+        index.namespace_name = value.namespace_name;
         if let Some(method) = value.method {
             index = index.with_method(method.into());
         }
         index
+    }
+}
+
+fn deserialize_index_meta(bytes: &[u8]) -> Result<PersistedIndexMeta, CatalogError> {
+    match bincode::deserialize::<PersistedIndexMeta>(bytes) {
+        Ok(meta) => Ok(meta),
+        Err(err) => {
+            let is_legacy = matches!(
+                err.as_ref(),
+                bincode::ErrorKind::Io(io)
+                    if io.kind() == std::io::ErrorKind::UnexpectedEof
+            );
+            if !is_legacy {
+                return Err(err.into());
+            }
+            let legacy: PersistedIndexMetaV1 = bincode::deserialize(bytes)?;
+            Ok(PersistedIndexMeta {
+                index_id: legacy.index_id,
+                name: legacy.name,
+                table: legacy.table,
+                columns: legacy.columns,
+                column_indices: legacy.column_indices,
+                unique: legacy.unique,
+                method: legacy.method,
+                options: legacy.options,
+                catalog_name: "default".to_string(),
+                namespace_name: "default".to_string(),
+            })
+        }
     }
 }
 
@@ -491,10 +576,10 @@ pub struct CatalogOverlay {
     dropped_catalogs: HashSet<String>,
     added_namespaces: HashMap<(String, String), NamespaceMeta>,
     dropped_namespaces: HashSet<(String, String)>,
-    added_tables: HashMap<String, TableMetadata>,
-    dropped_tables: HashSet<String>,
-    added_indexes: HashMap<String, IndexMetadata>,
-    dropped_indexes: HashSet<String>,
+    added_tables: HashMap<TableFqn, TableMetadata>,
+    dropped_tables: HashSet<TableFqn>,
+    added_indexes: HashMap<IndexFqn, IndexMetadata>,
+    dropped_indexes: HashSet<IndexFqn>,
 }
 
 impl CatalogOverlay {
@@ -524,25 +609,85 @@ impl CatalogOverlay {
         self.dropped_namespaces.insert(key);
     }
 
-    pub fn add_table(&mut self, table: TableMetadata) {
-        self.dropped_tables.remove(&table.name);
-        self.added_tables.insert(table.name.clone(), table);
+    pub fn add_table(&mut self, fqn: TableFqn, table: TableMetadata) {
+        self.dropped_tables.remove(&fqn);
+        self.added_tables.insert(fqn, table);
     }
 
-    pub fn drop_table(&mut self, name: &str) {
-        self.added_tables.remove(name);
-        self.dropped_tables.insert(name.to_string());
-        self.added_indexes.retain(|_, idx| idx.table != name);
+    pub fn drop_table(&mut self, fqn: &TableFqn) {
+        self.added_tables.remove(fqn);
+        self.dropped_tables.insert(fqn.clone());
+        self.added_indexes.retain(|key, _| {
+            key.catalog != fqn.catalog || key.namespace != fqn.namespace || key.table != fqn.table
+        });
     }
 
-    pub fn add_index(&mut self, index: IndexMetadata) {
-        self.dropped_indexes.remove(&index.name);
-        self.added_indexes.insert(index.name.clone(), index);
+    pub fn add_index(&mut self, fqn: IndexFqn, index: IndexMetadata) {
+        self.dropped_indexes.remove(&fqn);
+        self.added_indexes.insert(fqn, index);
     }
 
-    pub fn drop_index(&mut self, name: &str) {
-        self.added_indexes.remove(name);
-        self.dropped_indexes.insert(name.to_string());
+    pub fn drop_index(&mut self, fqn: &IndexFqn) {
+        self.added_indexes.remove(fqn);
+        self.dropped_indexes.insert(fqn.clone());
+    }
+
+    pub fn drop_cascade_catalog(&mut self, catalog: &str) {
+        self.drop_catalog(catalog);
+
+        let namespace_keys: Vec<(String, String)> = self
+            .added_namespaces
+            .keys()
+            .filter(|(cat, _)| cat == catalog)
+            .cloned()
+            .collect();
+        for (catalog_name, namespace_name) in namespace_keys {
+            self.drop_namespace(&catalog_name, &namespace_name);
+        }
+
+        let index_keys: Vec<IndexFqn> = self
+            .added_indexes
+            .keys()
+            .filter(|fqn| fqn.catalog == catalog)
+            .cloned()
+            .collect();
+        for fqn in index_keys {
+            self.drop_index(&fqn);
+        }
+
+        let table_keys: Vec<TableFqn> = self
+            .added_tables
+            .keys()
+            .filter(|fqn| fqn.catalog == catalog)
+            .cloned()
+            .collect();
+        for fqn in table_keys {
+            self.drop_table(&fqn);
+        }
+    }
+
+    pub fn drop_cascade_namespace(&mut self, catalog: &str, namespace: &str) {
+        self.drop_namespace(catalog, namespace);
+
+        let index_keys: Vec<IndexFqn> = self
+            .added_indexes
+            .keys()
+            .filter(|fqn| fqn.catalog == catalog && fqn.namespace == namespace)
+            .cloned()
+            .collect();
+        for fqn in index_keys {
+            self.drop_index(&fqn);
+        }
+
+        let table_keys: Vec<TableFqn> = self
+            .added_tables
+            .keys()
+            .filter(|fqn| fqn.catalog == catalog && fqn.namespace == namespace)
+            .cloned()
+            .collect();
+        for fqn in table_keys {
+            self.drop_table(&fqn);
+        }
     }
 }
 
@@ -708,13 +853,17 @@ impl<S: KVStore> PersistentCatalog<S> {
 
         for (key, value) in txn.scan_prefix(INDEXES_PREFIX)? {
             let _index_name = key_suffix(INDEXES_PREFIX, &key)?;
-            let persisted: PersistedIndexMeta = bincode::deserialize(&value)?;
+            let persisted = deserialize_index_meta(&value)?;
             max_index_id = max_index_id.max(persisted.index_id);
             let mut index: IndexMetadata = persisted.into();
             // 参照先テーブルがない場合はスキップ（破損対策）
             if let Some(table) = inner.get_table(&index.table) {
-                index.catalog_name = table.catalog_name.clone();
-                index.namespace_name = table.namespace_name.clone();
+                if index.catalog_name != table.catalog_name
+                    || index.namespace_name != table.namespace_name
+                {
+                    index.catalog_name = table.catalog_name.clone();
+                    index.namespace_name = table.namespace_name.clone();
+                }
                 inner.insert_index_unchecked(index);
             }
         }
@@ -801,7 +950,7 @@ impl<S: KVStore> PersistentCatalog<S> {
         if !table_set.is_empty() {
             let mut index_keys = Vec::new();
             for (key, value) in txn.scan_prefix(INDEXES_PREFIX)? {
-                let persisted: PersistedIndexMeta = bincode::deserialize(&value)?;
+                let persisted = deserialize_index_meta(&value)?;
                 if table_set.contains(&persisted.table) {
                     index_keys.push(key);
                 }
@@ -907,7 +1056,7 @@ impl<S: KVStore> PersistentCatalog<S> {
         // テーブルに紐づくインデックスも削除する。
         let mut to_delete: Vec<String> = Vec::new();
         for (key, value) in txn.scan_prefix(INDEXES_PREFIX)? {
-            let persisted: PersistedIndexMeta = bincode::deserialize(&value)?;
+            let persisted = deserialize_index_meta(&value)?;
             if persisted.table == name {
                 let index_name = key_suffix(INDEXES_PREFIX, &key)?;
                 to_delete.push(index_name);
@@ -948,6 +1097,78 @@ impl<S: KVStore> PersistentCatalog<S> {
                 .contains(&(catalog.to_string(), namespace.to_string()))
     }
 
+    fn overlay_added_table_by_name<'a>(
+        overlay: &'a CatalogOverlay,
+        name: &str,
+    ) -> Option<&'a TableMetadata> {
+        let mut iter = overlay
+            .added_tables
+            .values()
+            .filter(|table| table.name == name);
+        let first = iter.next()?;
+        if iter.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
+    fn overlay_added_index_by_name<'a>(
+        overlay: &'a CatalogOverlay,
+        name: &str,
+    ) -> Option<&'a IndexMetadata> {
+        let mut iter = overlay
+            .added_indexes
+            .values()
+            .filter(|index| index.name == name);
+        let first = iter.next()?;
+        if iter.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
+    fn base_table_conflicts_with_overlay(
+        &self,
+        overlay: &CatalogOverlay,
+        table: &TableMetadata,
+    ) -> bool {
+        let Some(base) = self.inner.get_table(&table.name) else {
+            return false;
+        };
+        if self.table_hidden_by_overlay(base, overlay) {
+            return false;
+        }
+        if overlay.dropped_tables.contains(&TableFqn::from(base)) {
+            return false;
+        }
+        TableFqn::from(base) != TableFqn::from(table)
+    }
+
+    fn base_index_conflicts_with_overlay(
+        &self,
+        overlay: &CatalogOverlay,
+        index: &IndexMetadata,
+    ) -> bool {
+        let Some(base) = self.inner.get_index(&index.name) else {
+            return false;
+        };
+        if Self::namespace_dropped(overlay, &base.catalog_name, &base.namespace_name) {
+            return false;
+        }
+        if overlay.dropped_indexes.contains(&IndexFqn::from(base)) {
+            return false;
+        }
+        if self.dropped_table_matches_fqn(
+            &base.table,
+            &base.catalog_name,
+            &base.namespace_name,
+            overlay,
+        ) {
+            return false;
+        }
+        IndexFqn::from(base) != IndexFqn::from(index)
+    }
+
     fn table_hidden_by_overlay(&self, table: &TableMetadata, overlay: &CatalogOverlay) -> bool {
         Self::namespace_dropped(overlay, &table.catalog_name, &table.namespace_name)
     }
@@ -959,35 +1180,33 @@ impl<S: KVStore> PersistentCatalog<S> {
         namespace: &str,
         overlay: &CatalogOverlay,
     ) -> bool {
-        if !overlay.dropped_tables.contains(table_name) {
-            return false;
-        }
-
-        overlay
-            .added_tables
-            .get(table_name)
-            .map(|table| table.catalog_name == catalog && table.namespace_name == namespace)
-            .unwrap_or_else(|| {
-                self.inner
-                    .get_table(table_name)
-                    .map(|table| table.catalog_name == catalog && table.namespace_name == namespace)
-                    .unwrap_or(false)
-            })
+        let fqn = TableFqn::new(catalog, namespace, table_name);
+        overlay.dropped_tables.contains(&fqn)
     }
 
     fn index_hidden_by_overlay(&self, index: &IndexMetadata, overlay: &CatalogOverlay) -> bool {
-        if overlay.dropped_indexes.contains(&index.name) {
+        let index_fqn = IndexFqn::from(index);
+        if overlay.dropped_indexes.contains(&index_fqn) {
             return true;
         }
         if Self::namespace_dropped(overlay, &index.catalog_name, &index.namespace_name) {
             return true;
         }
-        self.dropped_table_matches_fqn(
+        if self.dropped_table_matches_fqn(
             &index.table,
             &index.catalog_name,
             &index.namespace_name,
             overlay,
-        ) || self.get_table_in_txn(&index.table, overlay).is_none()
+        ) {
+            return true;
+        }
+        match self.get_table_in_txn(&index.table, overlay) {
+            Some(table) => {
+                table.catalog_name != index.catalog_name
+                    || table.namespace_name != index.namespace_name
+            }
+            None => true,
+        }
     }
 
     pub fn get_catalog_in_txn<'a>(
@@ -1075,14 +1294,20 @@ impl<S: KVStore> PersistentCatalog<S> {
     }
 
     pub fn table_exists_in_txn(&self, name: &str, overlay: &CatalogOverlay) -> bool {
-        if overlay.dropped_tables.contains(name) {
-            return false;
-        }
-        if let Some(table) = overlay.added_tables.get(name) {
-            return !self.table_hidden_by_overlay(table, overlay);
+        if let Some(table) = Self::overlay_added_table_by_name(overlay, name) {
+            if self.table_hidden_by_overlay(table, overlay) {
+                return false;
+            }
+            if self.base_table_conflicts_with_overlay(overlay, table) {
+                return false;
+            }
+            return true;
         }
         match self.inner.get_table(name) {
-            Some(table) => !self.table_hidden_by_overlay(table, overlay),
+            Some(table) => {
+                !self.table_hidden_by_overlay(table, overlay)
+                    && !overlay.dropped_tables.contains(&TableFqn::from(table))
+            }
             None => false,
         }
     }
@@ -1092,23 +1317,30 @@ impl<S: KVStore> PersistentCatalog<S> {
         name: &str,
         overlay: &'a CatalogOverlay,
     ) -> Option<&'a TableMetadata> {
-        if overlay.dropped_tables.contains(name) {
-            return None;
-        }
-        if let Some(table) = overlay.added_tables.get(name) {
+        if let Some(table) = Self::overlay_added_table_by_name(overlay, name) {
             if self.table_hidden_by_overlay(table, overlay) {
+                return None;
+            }
+            if self.base_table_conflicts_with_overlay(overlay, table) {
                 return None;
             }
             return Some(table);
         }
-        self.inner
-            .get_table(name)
-            .filter(|table| !self.table_hidden_by_overlay(table, overlay))
+        self.inner.get_table(name).filter(|table| {
+            !self.table_hidden_by_overlay(table, overlay)
+                && !overlay.dropped_tables.contains(&TableFqn::from(*table))
+        })
     }
 
     pub fn index_exists_in_txn(&self, name: &str, overlay: &CatalogOverlay) -> bool {
-        if let Some(index) = overlay.added_indexes.get(name) {
-            return !self.index_hidden_by_overlay(index, overlay);
+        if let Some(index) = Self::overlay_added_index_by_name(overlay, name) {
+            if self.index_hidden_by_overlay(index, overlay) {
+                return false;
+            }
+            if self.base_index_conflicts_with_overlay(overlay, index) {
+                return false;
+            }
+            return true;
         }
         match self.inner.get_index(name) {
             Some(index) => !self.index_hidden_by_overlay(index, overlay),
@@ -1121,8 +1353,11 @@ impl<S: KVStore> PersistentCatalog<S> {
         name: &str,
         overlay: &'a CatalogOverlay,
     ) -> Option<&'a IndexMetadata> {
-        if let Some(index) = overlay.added_indexes.get(name) {
+        if let Some(index) = Self::overlay_added_index_by_name(overlay, name) {
             if self.index_hidden_by_overlay(index, overlay) {
+                return None;
+            }
+            if self.base_index_conflicts_with_overlay(overlay, index) {
                 return None;
             }
             return Some(index);
@@ -1148,25 +1383,22 @@ impl<S: KVStore> PersistentCatalog<S> {
         {
             return Vec::new();
         }
-        let mut tables: HashMap<String, TableMetadata> = HashMap::new();
+        let mut tables: HashMap<TableFqn, TableMetadata> = HashMap::new();
         for name in self.inner.table_names() {
-            if overlay.dropped_tables.contains(name) {
-                continue;
-            }
             if let Some(table) = self.inner.get_table(name)
                 && table.catalog_name == catalog_name
                 && table.namespace_name == namespace_name
             {
-                tables.insert(table.name.clone(), table.clone());
+                let fqn = TableFqn::from(table);
+                if !overlay.dropped_tables.contains(&fqn) {
+                    tables.insert(fqn, table.clone());
+                }
             }
         }
         for table in overlay.added_tables.values() {
             if table.catalog_name == catalog_name && table.namespace_name == namespace_name {
-                tables.insert(table.name.clone(), table.clone());
+                tables.insert(TableFqn::from(table), table.clone());
             }
-        }
-        for name in &overlay.dropped_tables {
-            tables.remove(name);
         }
         let mut values: Vec<TableMetadata> = tables.into_values().collect();
         values.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1187,34 +1419,20 @@ impl<S: KVStore> PersistentCatalog<S> {
         {
             return Vec::new();
         }
-        if overlay.dropped_tables.contains(&fqn.table) {
-            let matches_fqn = overlay
-                .added_tables
-                .get(&fqn.table)
-                .map(|table| {
-                    table.catalog_name == fqn.catalog && table.namespace_name == fqn.namespace
-                })
-                .unwrap_or_else(|| {
-                    self.inner
-                        .get_table(&fqn.table)
-                        .map(|table| {
-                            table.catalog_name == fqn.catalog
-                                && table.namespace_name == fqn.namespace
-                        })
-                        .unwrap_or(false)
-                });
-            if matches_fqn {
-                return Vec::new();
-            }
+        if overlay
+            .dropped_tables
+            .contains(&TableFqn::new(&fqn.catalog, &fqn.namespace, &fqn.table))
+        {
+            return Vec::new();
         }
 
-        let mut indexes: HashMap<String, IndexMetadata> = HashMap::new();
+        let mut indexes: HashMap<IndexFqn, IndexMetadata> = HashMap::new();
         for index in self.inner.get_indexes_for_table(&fqn.table) {
-            if overlay.dropped_indexes.contains(&index.name) {
-                continue;
-            }
             if index.catalog_name == fqn.catalog && index.namespace_name == fqn.namespace {
-                indexes.insert(index.name.clone(), index.clone());
+                let index_fqn = IndexFqn::from(index);
+                if !overlay.dropped_indexes.contains(&index_fqn) {
+                    indexes.insert(index_fqn, index.clone());
+                }
             }
         }
         for index in overlay.added_indexes.values() {
@@ -1222,11 +1440,8 @@ impl<S: KVStore> PersistentCatalog<S> {
                 && index.catalog_name == fqn.catalog
                 && index.namespace_name == fqn.namespace
             {
-                indexes.insert(index.name.clone(), index.clone());
+                indexes.insert(IndexFqn::from(index), index.clone());
             }
-        }
-        for name in &overlay.dropped_indexes {
-            indexes.remove(name);
         }
         let mut values: Vec<IndexMetadata> = indexes.into_values().collect();
         values.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1262,14 +1477,14 @@ impl<S: KVStore> PersistentCatalog<S> {
         for (_, table) in added_tables {
             self.inner.insert_table_unchecked(table);
         }
-        for name in dropped_tables {
-            self.inner.remove_table_unchecked(&name);
+        for fqn in dropped_tables {
+            self.inner.remove_table_unchecked(&fqn.table);
         }
         for (_, index) in added_indexes {
             self.inner.insert_index_unchecked(index);
         }
-        for name in dropped_indexes {
-            self.inner.remove_index_unchecked(&name);
+        for fqn in dropped_indexes {
+            self.inner.remove_index_unchecked(&fqn.index);
         }
     }
 
@@ -1408,11 +1623,13 @@ mod tests {
     fn overlay_applied_on_commit() {
         let store = Arc::new(alopex_core::kv::memory::MemoryKV::new());
         let mut catalog = PersistentCatalog::new(store);
-        catalog.inner.insert_table_unchecked(test_table("users", 1));
+        let users = test_table("users", 1);
+        catalog.inner.insert_table_unchecked(users.clone());
 
         let mut overlay = CatalogOverlay::new();
-        overlay.drop_table("users");
-        overlay.add_table(test_table("orders", 2));
+        overlay.drop_table(&TableFqn::from(&users));
+        let orders = test_table("orders", 2);
+        overlay.add_table(TableFqn::from(&orders), orders);
 
         assert!(!catalog.table_exists_in_txn("users", &overlay));
         assert!(catalog.table_exists_in_txn("orders", &overlay));
@@ -1427,10 +1644,11 @@ mod tests {
     fn overlay_discarded_on_rollback() {
         let store = Arc::new(alopex_core::kv::memory::MemoryKV::new());
         let mut catalog = PersistentCatalog::new(store);
-        catalog.inner.insert_table_unchecked(test_table("users", 1));
+        let users = test_table("users", 1);
+        catalog.inner.insert_table_unchecked(users.clone());
 
         let mut overlay = CatalogOverlay::new();
-        overlay.drop_table("users");
+        overlay.drop_table(&TableFqn::from(&users));
 
         PersistentCatalog::<alopex_core::kv::memory::MemoryKV>::discard_overlay(overlay);
 
@@ -1608,6 +1826,38 @@ mod tests {
     }
 
     #[test]
+    fn legacy_index_meta_loads_catalog_and_namespace_from_table() {
+        let store = Arc::new(alopex_core::kv::memory::MemoryKV::new());
+        let mut catalog = PersistentCatalog::new(store.clone());
+        catalog.inner.set_counters(1, 1);
+
+        let mut table = test_table("users", 1);
+        table.catalog_name = "main".to_string();
+        table.namespace_name = "analytics".to_string();
+
+        let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+        catalog.persist_create_table(&mut txn, &table).unwrap();
+        let legacy = PersistedIndexMetaV1 {
+            index_id: 1,
+            name: "idx_users_id".to_string(),
+            table: "users".to_string(),
+            columns: vec!["id".to_string()],
+            column_indices: vec![0],
+            unique: false,
+            method: Some(PersistedIndexType::BTree),
+            options: Vec::new(),
+        };
+        let bytes = bincode::serialize(&legacy).unwrap();
+        txn.put(index_key("idx_users_id"), bytes).unwrap();
+        txn.commit_self().unwrap();
+
+        let reloaded = PersistentCatalog::load(store).unwrap();
+        let index = reloaded.get_index("idx_users_id").unwrap();
+        assert_eq!(index.catalog_name, "main");
+        assert_eq!(index.namespace_name, "analytics");
+    }
+
+    #[test]
     fn overlay_catalog_get_and_list() {
         let store = Arc::new(alopex_core::kv::memory::MemoryKV::new());
         let mut catalog = PersistentCatalog::new(store);
@@ -1708,16 +1958,16 @@ mod tests {
         let mut orders = test_table("orders", 2);
         orders.catalog_name = "main".to_string();
         orders.namespace_name = "default".to_string();
-        overlay.add_table(orders.clone());
+        overlay.add_table(TableFqn::from(&orders), orders.clone());
 
         let mut orders_index =
             IndexMetadata::new(2, "idx_orders_id", "orders", vec!["id".to_string()])
                 .with_column_indices(vec![0]);
         orders_index.catalog_name = "main".to_string();
         orders_index.namespace_name = "default".to_string();
-        overlay.add_index(orders_index);
+        overlay.add_index(IndexFqn::from(&orders_index), orders_index);
 
-        overlay.drop_table("users");
+        overlay.drop_table(&TableFqn::from(&users));
 
         let table_names: Vec<String> = catalog
             .list_tables_in_txn("main", "default", &overlay)
@@ -1726,24 +1976,264 @@ mod tests {
             .collect();
         assert_eq!(table_names, vec!["orders".to_string()]);
 
-        let users_fqn = TableFqn {
-            catalog: "main".to_string(),
-            namespace: "default".to_string(),
-            table: "users".to_string(),
-        };
+        let users_fqn = TableFqn::new("main", "default", "users");
         assert!(catalog.list_indexes_in_txn(&users_fqn, &overlay).is_empty());
 
-        let orders_fqn = TableFqn {
-            catalog: "main".to_string(),
-            namespace: "default".to_string(),
-            table: "orders".to_string(),
-        };
+        let orders_fqn = TableFqn::new("main", "default", "orders");
         let index_names: Vec<String> = catalog
             .list_indexes_in_txn(&orders_fqn, &overlay)
             .into_iter()
             .map(|index| index.name)
             .collect();
         assert_eq!(index_names, vec!["idx_orders_id".to_string()]);
+    }
+
+    #[test]
+    fn overlay_name_lookup_ambiguous_returns_none() {
+        let store = Arc::new(alopex_core::kv::memory::MemoryKV::new());
+        let catalog = PersistentCatalog::new(store);
+
+        let mut overlay = CatalogOverlay::new();
+
+        let mut users_default = test_table("users", 1);
+        users_default.catalog_name = "main".to_string();
+        users_default.namespace_name = "default".to_string();
+        overlay.add_table(TableFqn::from(&users_default), users_default);
+
+        let mut users_analytics = test_table("users", 2);
+        users_analytics.catalog_name = "main".to_string();
+        users_analytics.namespace_name = "analytics".to_string();
+        overlay.add_table(TableFqn::from(&users_analytics), users_analytics);
+
+        assert!(catalog.get_table_in_txn("users", &overlay).is_none());
+        assert!(!catalog.table_exists_in_txn("users", &overlay));
+
+        let mut idx_default =
+            IndexMetadata::new(1, "idx_users_id", "users", vec!["id".to_string()])
+                .with_column_indices(vec![0]);
+        idx_default.catalog_name = "main".to_string();
+        idx_default.namespace_name = "default".to_string();
+        overlay.add_index(IndexFqn::from(&idx_default), idx_default);
+
+        let mut idx_analytics =
+            IndexMetadata::new(2, "idx_users_id", "users", vec!["id".to_string()])
+                .with_column_indices(vec![0]);
+        idx_analytics.catalog_name = "main".to_string();
+        idx_analytics.namespace_name = "analytics".to_string();
+        overlay.add_index(IndexFqn::from(&idx_analytics), idx_analytics);
+
+        assert!(catalog.get_index_in_txn("idx_users_id", &overlay).is_none());
+        assert!(!catalog.index_exists_in_txn("idx_users_id", &overlay));
+    }
+
+    #[test]
+    fn overlay_name_lookup_ambiguous_with_base_returns_none() {
+        let store = Arc::new(alopex_core::kv::memory::MemoryKV::new());
+        let mut catalog = PersistentCatalog::new(store);
+
+        let mut overlay = CatalogOverlay::new();
+
+        let mut base_users = test_table("users", 1);
+        base_users.catalog_name = "main".to_string();
+        base_users.namespace_name = "default".to_string();
+        catalog.inner.insert_table_unchecked(base_users);
+
+        let mut overlay_users = test_table("users", 2);
+        overlay_users.catalog_name = "main".to_string();
+        overlay_users.namespace_name = "analytics".to_string();
+        overlay.add_table(TableFqn::from(&overlay_users), overlay_users);
+
+        assert!(catalog.get_table_in_txn("users", &overlay).is_none());
+        assert!(!catalog.table_exists_in_txn("users", &overlay));
+
+        let mut base_index =
+            IndexMetadata::new(1, "idx_users_id", "users", vec!["id".to_string()])
+                .with_column_indices(vec![0]);
+        base_index.catalog_name = "main".to_string();
+        base_index.namespace_name = "default".to_string();
+        catalog.inner.insert_index_unchecked(base_index);
+
+        let mut overlay_index =
+            IndexMetadata::new(2, "idx_users_id", "users", vec!["id".to_string()])
+                .with_column_indices(vec![0]);
+        overlay_index.catalog_name = "main".to_string();
+        overlay_index.namespace_name = "analytics".to_string();
+        overlay.add_index(IndexFqn::from(&overlay_index), overlay_index);
+
+        assert!(catalog.get_index_in_txn("idx_users_id", &overlay).is_none());
+        assert!(!catalog.index_exists_in_txn("idx_users_id", &overlay));
+    }
+
+    #[test]
+    fn overlay_fqn_tables_separate_namespaces() {
+        let store = Arc::new(alopex_core::kv::memory::MemoryKV::new());
+        let catalog = PersistentCatalog::new(store);
+
+        let mut overlay = CatalogOverlay::new();
+
+        let mut users_default = test_table("users", 1);
+        users_default.catalog_name = "main".to_string();
+        users_default.namespace_name = "default".to_string();
+        overlay.add_table(TableFqn::from(&users_default), users_default.clone());
+
+        let mut users_analytics = test_table("users", 2);
+        users_analytics.catalog_name = "main".to_string();
+        users_analytics.namespace_name = "analytics".to_string();
+        overlay.add_table(TableFqn::from(&users_analytics), users_analytics.clone());
+
+        let default_tables: Vec<String> = catalog
+            .list_tables_in_txn("main", "default", &overlay)
+            .into_iter()
+            .map(|table| table.name)
+            .collect();
+        assert_eq!(default_tables, vec!["users".to_string()]);
+
+        let analytics_tables: Vec<String> = catalog
+            .list_tables_in_txn("main", "analytics", &overlay)
+            .into_iter()
+            .map(|table| table.name)
+            .collect();
+        assert_eq!(analytics_tables, vec!["users".to_string()]);
+
+        overlay.drop_table(&TableFqn::from(&users_default));
+
+        let default_tables_after: Vec<String> = catalog
+            .list_tables_in_txn("main", "default", &overlay)
+            .into_iter()
+            .map(|table| table.name)
+            .collect();
+        assert!(default_tables_after.is_empty());
+
+        let analytics_tables_after: Vec<String> = catalog
+            .list_tables_in_txn("main", "analytics", &overlay)
+            .into_iter()
+            .map(|table| table.name)
+            .collect();
+        assert_eq!(analytics_tables_after, vec!["users".to_string()]);
+    }
+
+    #[test]
+    fn overlay_fqn_indexes_separate_namespaces() {
+        let store = Arc::new(alopex_core::kv::memory::MemoryKV::new());
+        let catalog = PersistentCatalog::new(store);
+
+        let mut overlay = CatalogOverlay::new();
+
+        let mut users_default = test_table("users", 1);
+        users_default.catalog_name = "main".to_string();
+        users_default.namespace_name = "default".to_string();
+        overlay.add_table(TableFqn::from(&users_default), users_default.clone());
+
+        let mut users_analytics = test_table("users", 2);
+        users_analytics.catalog_name = "main".to_string();
+        users_analytics.namespace_name = "analytics".to_string();
+        overlay.add_table(TableFqn::from(&users_analytics), users_analytics.clone());
+
+        let mut idx_default =
+            IndexMetadata::new(1, "idx_users_id", "users", vec!["id".to_string()])
+                .with_column_indices(vec![0]);
+        idx_default.catalog_name = "main".to_string();
+        idx_default.namespace_name = "default".to_string();
+        overlay.add_index(IndexFqn::from(&idx_default), idx_default);
+
+        let mut idx_analytics =
+            IndexMetadata::new(2, "idx_users_id", "users", vec!["id".to_string()])
+                .with_column_indices(vec![0]);
+        idx_analytics.catalog_name = "main".to_string();
+        idx_analytics.namespace_name = "analytics".to_string();
+        overlay.add_index(IndexFqn::from(&idx_analytics), idx_analytics);
+
+        let default_fqn = TableFqn::new("main", "default", "users");
+        let analytics_fqn = TableFqn::new("main", "analytics", "users");
+
+        let default_indexes: Vec<String> = catalog
+            .list_indexes_in_txn(&default_fqn, &overlay)
+            .into_iter()
+            .map(|index| index.name)
+            .collect();
+        assert_eq!(default_indexes, vec!["idx_users_id".to_string()]);
+
+        let analytics_indexes: Vec<String> = catalog
+            .list_indexes_in_txn(&analytics_fqn, &overlay)
+            .into_iter()
+            .map(|index| index.name)
+            .collect();
+        assert_eq!(analytics_indexes, vec!["idx_users_id".to_string()]);
+    }
+
+    #[test]
+    fn overlay_drop_cascade_namespace_removes_children() {
+        let mut overlay = CatalogOverlay::new();
+
+        overlay.add_namespace(NamespaceMeta {
+            name: "default".to_string(),
+            catalog_name: "main".to_string(),
+            comment: None,
+            storage_root: None,
+        });
+
+        let mut users = test_table("users", 1);
+        users.catalog_name = "main".to_string();
+        users.namespace_name = "default".to_string();
+        overlay.add_table(TableFqn::from(&users), users.clone());
+
+        let mut users_index =
+            IndexMetadata::new(1, "idx_users_id", "users", vec!["id".to_string()])
+                .with_column_indices(vec![0]);
+        users_index.catalog_name = "main".to_string();
+        users_index.namespace_name = "default".to_string();
+        let users_index_fqn = IndexFqn::from(&users_index);
+        overlay.add_index(users_index_fqn.clone(), users_index);
+
+        overlay.drop_cascade_namespace("main", "default");
+
+        assert!(
+            overlay
+                .dropped_namespaces
+                .contains(&("main".to_string(), "default".to_string()))
+        );
+        assert!(overlay.dropped_tables.contains(&TableFqn::from(&users)));
+        assert!(overlay.dropped_indexes.contains(&users_index_fqn));
+        assert!(!overlay.added_tables.contains_key(&TableFqn::from(&users)));
+        assert!(!overlay.added_indexes.contains_key(&users_index_fqn));
+    }
+
+    #[test]
+    fn overlay_drop_cascade_catalog_removes_children() {
+        let mut overlay = CatalogOverlay::new();
+
+        overlay.add_catalog(CatalogMeta {
+            name: "main".to_string(),
+            comment: None,
+            storage_root: None,
+        });
+        overlay.add_namespace(NamespaceMeta {
+            name: "default".to_string(),
+            catalog_name: "main".to_string(),
+            comment: None,
+            storage_root: None,
+        });
+
+        let mut users = test_table("users", 1);
+        users.catalog_name = "main".to_string();
+        users.namespace_name = "default".to_string();
+        overlay.add_table(TableFqn::from(&users), users.clone());
+
+        let mut users_index =
+            IndexMetadata::new(1, "idx_users_id", "users", vec!["id".to_string()])
+                .with_column_indices(vec![0]);
+        users_index.catalog_name = "main".to_string();
+        users_index.namespace_name = "default".to_string();
+        let users_index_fqn = IndexFqn::from(&users_index);
+        overlay.add_index(users_index_fqn.clone(), users_index);
+
+        overlay.drop_cascade_catalog("main");
+
+        assert!(overlay.dropped_catalogs.contains("main"));
+        assert!(overlay.dropped_tables.contains(&TableFqn::from(&users)));
+        assert!(overlay.dropped_indexes.contains(&users_index_fqn));
+        assert!(!overlay.added_tables.contains_key(&TableFqn::from(&users)));
+        assert!(!overlay.added_indexes.contains_key(&users_index_fqn));
     }
 
     #[test]

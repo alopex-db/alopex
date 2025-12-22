@@ -54,6 +54,7 @@ use alopex_core::kv::KVStore;
 use alopex_core::types::TxnMode;
 
 use crate::catalog::Catalog;
+use crate::catalog::persistent::{IndexFqn, TableFqn};
 use crate::catalog::{CatalogError, CatalogOverlay, PersistentCatalog, TxnCatalogView};
 use crate::planner::LogicalPlan;
 use crate::storage::{BorrowedSqlTransaction, KeyEncoder, SqlTransaction, SqlTxn as _, TxnBridge};
@@ -406,16 +407,17 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 .collect::<Result<Vec<_>>>()?;
             let index_id = catalog.next_index_id();
             let index_name = ddl::create_pk_index_name(&table.name);
-            Some(
-                crate::catalog::IndexMetadata::new(
-                    index_id,
-                    index_name,
-                    table.name.clone(),
-                    pk_columns,
-                )
-                .with_column_indices(column_indices)
-                .with_unique(true),
+            let mut index = crate::catalog::IndexMetadata::new(
+                index_id,
+                index_name,
+                table.name.clone(),
+                pk_columns,
             )
+            .with_column_indices(column_indices)
+            .with_unique(true);
+            index.catalog_name = table.catalog_name.clone();
+            index.namespace_name = table.namespace_name.clone();
+            Some(index)
         } else {
             None
         };
@@ -438,9 +440,9 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         }
 
         // オーバーレイに反映（ベースカタログはコミットまで不変）
-        overlay.add_table(table);
+        overlay.add_table(TableFqn::from(&table), table);
         if let Some(index) = pk_index {
-            overlay.add_index(index);
+            overlay.add_index(IndexFqn::from(&index), index);
         }
 
         Ok(ExecutionResult::Success)
@@ -489,7 +491,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             .persist_drop_table(txn.inner_mut(), table_name)
             .map_err(Self::map_catalog_error)?;
 
-        overlay.drop_table(table_name);
+        overlay.drop_table(&TableFqn::from(&table_meta));
 
         Ok(ExecutionResult::Success)
     }
@@ -524,6 +526,8 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             .get_table_in_txn(&index.table, overlay)
             .ok_or_else(|| ExecutorError::TableNotFound(index.table.clone()))?
             .clone();
+        index.catalog_name = table.catalog_name.clone();
+        index.namespace_name = table.namespace_name.clone();
 
         let column_indices = index
             .columns
@@ -549,7 +553,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             .persist_create_index(txn.inner_mut(), &index)
             .map_err(Self::map_catalog_error)?;
 
-        overlay.add_index(index);
+        overlay.add_index(IndexFqn::from(&index), index);
 
         Ok(ExecutionResult::Success)
     }
@@ -593,7 +597,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             .persist_drop_index(txn.inner_mut(), index_name)
             .map_err(Self::map_catalog_error)?;
 
-        overlay.drop_index(index_name);
+        overlay.drop_index(&IndexFqn::from(&index));
 
         Ok(ExecutionResult::Success)
     }
