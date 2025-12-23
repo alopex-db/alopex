@@ -131,6 +131,12 @@ impl From<&TableMetadata> for TableInfo {
                 comment: None,
             })
             .collect();
+        let storage_options = if value.storage_options == StorageOptions::default() {
+            StorageInfo::default()
+        } else {
+            StorageInfo::from(&value.storage_options)
+        };
+
         Self {
             name: value.name.clone(),
             catalog_name: value.catalog_name.clone(),
@@ -141,7 +147,7 @@ impl From<&TableMetadata> for TableInfo {
             primary_key,
             storage_location: None,
             data_source_format: DataSourceFormat::Alopex,
-            storage_options: StorageInfo::from(&value.storage_options),
+            storage_options,
             comment: None,
             properties: HashMap::new(),
         }
@@ -597,6 +603,17 @@ mod tests {
         assert!(info.columns[0].is_primary_key);
         assert_eq!(info.storage_options.storage_type, "columnar");
         assert_eq!(info.storage_options.compression, "zstd");
+    }
+
+    #[test]
+    fn table_info_defaults_storage_options_to_row_none() {
+        let table = TableMetadata::new(
+            "logs",
+            vec![ColumnMetadata::new("id", ResolvedType::Integer)],
+        );
+        let info = TableInfo::from(table);
+        assert_eq!(info.storage_options.storage_type, "row");
+        assert_eq!(info.storage_options.compression, "none");
     }
 
     #[test]
