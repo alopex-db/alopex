@@ -2,7 +2,7 @@
 members = [
     "crates/alopex-core",
     "crates/alopex-sql",
-    "crates/alopex-embedded", "crates/alopex-server", "crates/alopex-cluster", "crates/alopex-cli", "crates/alopex-tools",
+    "crates/alopex-embedded", "crates/alopex-server", "crates/alopex-cluster", "crates/alopex-cli", "crates/alopex-tools", "crates/alopex-py",
 ]
 resolver = "2"
 

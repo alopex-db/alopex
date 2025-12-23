@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "alopex"
+dynamic = ["version"]
+description = "Python bindings for Alopex DB"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+keywords = ["database", "vector", "bindings"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "License :: OSI Approved :: Apache Software License",
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+numpy = ["numpy>=1.23"]
+polars = ["polars>=0.20"]
+full = ["numpy>=1.23", "polars>=0.20"]
+dev = ["pytest>=7", "pytest-benchmark>=4", "numpy>=1.23", "polars>=0.20"]
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "alopex._alopex"
+python-source = "python"
+features = ["pyo3/extension-module"]
