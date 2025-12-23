@@ -411,8 +411,8 @@ impl From<&TableMetadata> for PersistedTableMeta {
             name: value.name.clone(),
             catalog_name: value.catalog_name.clone(),
             namespace_name: value.namespace_name.clone(),
-            table_type: TableType::Managed,
-            data_source_format: DataSourceFormat::default(),
+            table_type: value.table_type,
+            data_source_format: value.data_source_format,
             columns: value
                 .columns
                 .iter()
@@ -420,9 +420,9 @@ impl From<&TableMetadata> for PersistedTableMeta {
                 .collect(),
             primary_key: value.primary_key.clone(),
             storage_options: value.storage_options.clone().into(),
-            storage_location: None,
-            comment: None,
-            properties: HashMap::new(),
+            storage_location: value.storage_location.clone(),
+            comment: value.comment.clone(),
+            properties: value.properties.clone(),
         }
     }
 }
@@ -442,6 +442,11 @@ impl From<PersistedTableMeta> for TableMetadata {
         table.storage_options = value.storage_options.into();
         table.catalog_name = value.catalog_name;
         table.namespace_name = value.namespace_name;
+        table.table_type = value.table_type;
+        table.data_source_format = value.data_source_format;
+        table.storage_location = value.storage_location;
+        table.comment = value.comment;
+        table.properties = value.properties;
         table
     }
 }

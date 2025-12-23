@@ -2,12 +2,17 @@
 
 use std::collections::HashMap;
 
+use alopex_core::{KVStore, KVTransaction};
 use alopex_sql::ast::ddl::{DataType, IndexMethod, VectorMetric};
-use alopex_sql::catalog::{Compression, IndexMetadata, StorageOptions, StorageType, TableMetadata};
+use alopex_sql::catalog::persistent::{CatalogMeta, NamespaceMeta, TableFqn};
+use alopex_sql::catalog::{
+    Catalog, CatalogOverlay, ColumnMetadata, Compression, IndexMetadata, StorageOptions,
+    StorageType, TableMetadata,
+};
 use alopex_sql::planner::types::ResolvedType;
 use alopex_sql::{DataSourceFormat, TableType};
 
-use crate::{Error, Result};
+use crate::{Database, Error, Result, Transaction, TxnMode};
 
 /// Catalog 情報（公開 API 返却用）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +23,16 @@ pub struct CatalogInfo {
     pub comment: Option<String>,
     /// ストレージルート。
     pub storage_root: Option<String>,
+}
+
+impl From<CatalogMeta> for CatalogInfo {
+    fn from(value: CatalogMeta) -> Self {
+        Self {
+            name: value.name,
+            comment: value.comment,
+            storage_root: value.storage_root,
+        }
+    }
 }
 
 /// Namespace 情報（公開 API 返却用）。
@@ -31,6 +46,17 @@ pub struct NamespaceInfo {
     pub comment: Option<String>,
     /// ストレージルート。
     pub storage_root: Option<String>,
+}
+
+impl From<NamespaceMeta> for NamespaceInfo {
+    fn from(value: NamespaceMeta) -> Self {
+        Self {
+            name: value.name,
+            catalog_name: value.catalog_name,
+            comment: value.comment,
+            storage_root: value.storage_root,
+        }
+    }
 }
 
 /// カラム情報（公開 API 返却用）。
@@ -142,14 +168,14 @@ impl From<&TableMetadata> for TableInfo {
             catalog_name: value.catalog_name.clone(),
             namespace_name: value.namespace_name.clone(),
             table_id: value.table_id,
-            table_type: TableType::Managed,
+            table_type: value.table_type,
             columns,
             primary_key,
-            storage_location: None,
-            data_source_format: DataSourceFormat::Alopex,
+            storage_location: value.storage_location.clone(),
+            data_source_format: value.data_source_format,
             storage_options,
-            comment: None,
-            properties: HashMap::new(),
+            comment: value.comment.clone(),
+            properties: value.properties.clone(),
         }
     }
 }
@@ -455,11 +481,941 @@ impl ColumnDefinition {
     }
 }
 
+impl Database {
+    /// Catalog 一覧を取得する。
+    pub fn list_catalogs(&self) -> Result<Vec<CatalogInfo>> {
+        let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
+        Ok(catalog
+            .list_catalogs()
+            .into_iter()
+            .map(CatalogInfo::from)
+            .collect())
+    }
+
+    /// Catalog を取得する。
+    pub fn get_catalog(&self, name: &str) -> Result<CatalogInfo> {
+        let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
+        let meta = catalog
+            .get_catalog(name)
+            .ok_or_else(|| Error::CatalogNotFound(name.to_string()))?;
+        Ok(meta.into())
+    }
+
+    /// Namespace 一覧を取得する。
+    pub fn list_namespaces(&self, catalog_name: &str) -> Result<Vec<NamespaceInfo>> {
+        let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
+        ensure_catalog_exists(&*catalog, catalog_name)?;
+        Ok(catalog
+            .list_namespaces(catalog_name)
+            .into_iter()
+            .map(NamespaceInfo::from)
+            .collect())
+    }
+
+    /// Namespace を取得する。
+    pub fn get_namespace(&self, catalog_name: &str, namespace_name: &str) -> Result<NamespaceInfo> {
+        let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
+        ensure_catalog_exists(&*catalog, catalog_name)?;
+        let meta = catalog
+            .get_namespace(catalog_name, namespace_name)
+            .ok_or_else(|| {
+                Error::NamespaceNotFound(catalog_name.to_string(), namespace_name.to_string())
+            })?;
+        Ok(meta.into())
+    }
+
+    /// テーブル一覧を取得する。
+    pub fn list_tables(&self, catalog_name: &str, namespace_name: &str) -> Result<Vec<TableInfo>> {
+        let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
+        ensure_namespace_exists(&*catalog, catalog_name, namespace_name)?;
+        let namespace = catalog
+            .get_namespace(catalog_name, namespace_name)
+            .ok_or_else(|| {
+                Error::NamespaceNotFound(catalog_name.to_string(), namespace_name.to_string())
+            })?;
+
+        let overlay = CatalogOverlay::new();
+        let tables = catalog.list_tables_in_txn(catalog_name, namespace_name, &overlay);
+        Ok(tables
+            .into_iter()
+            .map(|table| {
+                let info = TableInfo::from(table);
+                apply_storage_location(info, namespace.storage_root.as_deref())
+            })
+            .collect())
+    }
+
+    /// デフォルト catalog/namespace のテーブル一覧を取得する。
+    pub fn list_tables_simple(&self) -> Result<Vec<TableInfo>> {
+        self.list_tables("default", "default")
+    }
+
+    /// テーブル情報を取得する。
+    pub fn get_table_info(
+        &self,
+        catalog_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Result<TableInfo> {
+        let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
+        ensure_namespace_exists(&*catalog, catalog_name, namespace_name)?;
+        let namespace = catalog
+            .get_namespace(catalog_name, namespace_name)
+            .ok_or_else(|| {
+                Error::NamespaceNotFound(catalog_name.to_string(), namespace_name.to_string())
+            })?;
+
+        let overlay = CatalogOverlay::new();
+        let tables = catalog.list_tables_in_txn(catalog_name, namespace_name, &overlay);
+        let table = tables
+            .into_iter()
+            .find(|table| table.name == table_name)
+            .ok_or_else(|| {
+                Error::TableNotFound(table_full_name(catalog_name, namespace_name, table_name))
+            })?;
+
+        let info = TableInfo::from(table);
+        Ok(apply_storage_location(
+            info,
+            namespace.storage_root.as_deref(),
+        ))
+    }
+
+    /// デフォルト catalog/namespace のテーブル情報を取得する。
+    pub fn get_table_info_simple(&self, table_name: &str) -> Result<TableInfo> {
+        self.get_table_info("default", "default", table_name)
+    }
+
+    /// インデックス一覧を取得する。
+    pub fn list_indexes(
+        &self,
+        catalog_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
+        ensure_namespace_exists(&*catalog, catalog_name, namespace_name)?;
+        ensure_table_exists(&*catalog, catalog_name, namespace_name, table_name)?;
+
+        let overlay = CatalogOverlay::new();
+        let fqn = TableFqn::new(catalog_name, namespace_name, table_name);
+        let indexes = catalog.list_indexes_in_txn(&fqn, &overlay);
+        Ok(indexes.into_iter().map(IndexInfo::from).collect())
+    }
+
+    /// デフォルト catalog/namespace のインデックス一覧を取得する。
+    pub fn list_indexes_simple(&self, table_name: &str) -> Result<Vec<IndexInfo>> {
+        self.list_indexes("default", "default", table_name)
+    }
+
+    /// インデックス情報を取得する。
+    pub fn get_index_info(
+        &self,
+        catalog_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+        index_name: &str,
+    ) -> Result<IndexInfo> {
+        let indexes = self.list_indexes(catalog_name, namespace_name, table_name)?;
+        indexes
+            .into_iter()
+            .find(|index| index.name == index_name)
+            .ok_or_else(|| {
+                Error::IndexNotFound(index_full_name(
+                    catalog_name,
+                    namespace_name,
+                    table_name,
+                    index_name,
+                ))
+            })
+    }
+
+    /// デフォルト catalog/namespace のインデックス情報を取得する。
+    pub fn get_index_info_simple(&self, table_name: &str, index_name: &str) -> Result<IndexInfo> {
+        self.get_index_info("default", "default", table_name, index_name)
+    }
+
+    /// Catalog を作成する。
+    pub fn create_catalog(&self, request: CreateCatalogRequest) -> Result<CatalogInfo> {
+        let request = request.build()?;
+        let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
+        if catalog.get_catalog(&request.name).is_some() {
+            return Err(Error::CatalogAlreadyExists(request.name));
+        }
+        let meta = CatalogMeta {
+            name: request.name,
+            comment: request.comment,
+            storage_root: request.storage_root,
+        };
+        catalog
+            .create_catalog(meta.clone())
+            .map_err(|err| Error::Sql(err.into()))?;
+        Ok(meta.into())
+    }
+
+    /// Catalog を削除する。
+    pub fn delete_catalog(&self, name: &str, force: bool) -> Result<()> {
+        if name == "default" {
+            return Err(Error::CannotDeleteDefault("catalog".to_string()));
+        }
+        let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
+        ensure_catalog_exists(&*catalog, name)?;
+
+        if !force {
+            let namespaces = catalog.list_namespaces(name);
+            let has_non_default = namespaces.iter().any(|ns| ns.name != "default");
+            let has_tables = namespaces.iter().any(|ns| {
+                let overlay = CatalogOverlay::new();
+                !catalog
+                    .list_tables_in_txn(name, &ns.name, &overlay)
+                    .is_empty()
+            });
+            if has_non_default || has_tables {
+                return Err(Error::CatalogNotEmpty(name.to_string()));
+            }
+        }
+
+        catalog
+            .delete_catalog(name)
+            .map_err(|err| Error::Sql(err.into()))?;
+        Ok(())
+    }
+
+    /// Namespace を作成する。
+    pub fn create_namespace(&self, request: CreateNamespaceRequest) -> Result<NamespaceInfo> {
+        let request = request.build()?;
+        let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
+        let catalog_meta = catalog
+            .get_catalog(&request.catalog_name)
+            .ok_or_else(|| Error::CatalogNotFound(request.catalog_name.clone()))?;
+        if catalog
+            .get_namespace(&request.catalog_name, &request.name)
+            .is_some()
+        {
+            return Err(Error::NamespaceAlreadyExists(
+                request.catalog_name,
+                request.name,
+            ));
+        }
+
+        let storage_root = request
+            .storage_root
+            .or_else(|| catalog_meta.storage_root.clone());
+        let meta = NamespaceMeta {
+            name: request.name,
+            catalog_name: request.catalog_name,
+            comment: request.comment,
+            storage_root,
+        };
+        catalog
+            .create_namespace(meta.clone())
+            .map_err(|err| Error::Sql(err.into()))?;
+        Ok(meta.into())
+    }
+
+    /// Namespace を削除する。
+    pub fn delete_namespace(
+        &self,
+        catalog_name: &str,
+        namespace_name: &str,
+        force: bool,
+    ) -> Result<()> {
+        if namespace_name == "default" {
+            return Err(Error::CannotDeleteDefault("namespace".to_string()));
+        }
+        let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
+        ensure_namespace_exists(&*catalog, catalog_name, namespace_name)?;
+
+        let overlay = CatalogOverlay::new();
+        let tables = catalog.list_tables_in_txn(catalog_name, namespace_name, &overlay);
+        if !force && !tables.is_empty() {
+            return Err(Error::NamespaceNotEmpty(
+                catalog_name.to_string(),
+                namespace_name.to_string(),
+            ));
+        }
+
+        if force {
+            let store = catalog.store().clone();
+            let mut txn = store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
+            for table in &tables {
+                catalog
+                    .persist_drop_table(&mut txn, &table.name)
+                    .map_err(|err| Error::Sql(err.into()))?;
+            }
+            txn.commit_self().map_err(Error::Core)?;
+
+            let mut overlay = CatalogOverlay::new();
+            for table in tables {
+                overlay.drop_table(&TableFqn::from(&table));
+            }
+            catalog.apply_overlay(overlay);
+        }
+
+        catalog
+            .delete_namespace(catalog_name, namespace_name)
+            .map_err(|err| Error::Sql(err.into()))?;
+        Ok(())
+    }
+
+    /// テーブルを作成する。
+    pub fn create_table(&self, request: CreateTableRequest) -> Result<TableInfo> {
+        let request = request.build()?;
+        let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
+
+        ensure_namespace_exists(&*catalog, &request.catalog_name, &request.namespace_name)?;
+        ensure_table_absent(
+            &*catalog,
+            &request.catalog_name,
+            &request.namespace_name,
+            &request.name,
+        )?;
+
+        if request.table_type == TableType::Managed && request.storage_root.is_some() {
+            eprintln!("警告: managed テーブルの storage_root は無視されます");
+        }
+
+        let table_id = catalog.next_table_id();
+        let primary_key = request.primary_key.clone();
+        let columns = build_columns(request.schema.clone(), primary_key.as_ref())?;
+
+        let storage_options = request.storage_options.unwrap_or_else(|| StorageOptions {
+            compression: Compression::None,
+            ..StorageOptions::default()
+        });
+
+        let namespace = catalog.get_namespace(&request.catalog_name, &request.namespace_name);
+        let storage_location = resolve_storage_location(
+            &request.table_type,
+            request.storage_root.as_deref(),
+            namespace.as_ref(),
+            &request.name,
+        )?;
+
+        let mut table = TableMetadata::new(&request.name, columns).with_table_id(table_id);
+        table.catalog_name = request.catalog_name.clone();
+        table.namespace_name = request.namespace_name.clone();
+        table.primary_key = primary_key;
+        table.storage_options = storage_options;
+        table.table_type = request.table_type;
+        table.data_source_format = request
+            .data_source_format
+            .unwrap_or(DataSourceFormat::Alopex);
+        table.storage_location = storage_location;
+        table.comment = request.comment;
+        table.properties = request.properties.unwrap_or_default();
+
+        let store = catalog.store().clone();
+        let mut txn = store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
+        catalog
+            .persist_create_table(&mut txn, &table)
+            .map_err(|err| Error::Sql(err.into()))?;
+        txn.commit_self().map_err(Error::Core)?;
+
+        let mut overlay = CatalogOverlay::new();
+        overlay.add_table(TableFqn::from(&table), table.clone());
+        catalog.apply_overlay(overlay);
+
+        let info = TableInfo::from(table);
+        let namespace_root = namespace.and_then(|ns| ns.storage_root);
+        Ok(apply_storage_location(info, namespace_root.as_deref()))
+    }
+
+    /// デフォルト catalog/namespace のテーブルを作成する。
+    pub fn create_table_simple(
+        &self,
+        name: &str,
+        schema: Vec<ColumnDefinition>,
+    ) -> Result<TableInfo> {
+        self.create_table(CreateTableRequest::new(name).with_schema(schema))
+    }
+
+    /// テーブルを削除する。
+    pub fn delete_table(
+        &self,
+        catalog_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Result<()> {
+        let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
+        ensure_namespace_exists(&*catalog, catalog_name, namespace_name)?;
+        let table = find_table_metadata(&*catalog, catalog_name, namespace_name, table_name)?
+            .ok_or_else(|| {
+                Error::TableNotFound(table_full_name(catalog_name, namespace_name, table_name))
+            })?;
+
+        let store = catalog.store().clone();
+        let mut txn = store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
+        catalog
+            .persist_drop_table(&mut txn, &table.name)
+            .map_err(|err| Error::Sql(err.into()))?;
+        txn.commit_self().map_err(Error::Core)?;
+
+        let mut overlay = CatalogOverlay::new();
+        overlay.drop_table(&TableFqn::from(&table));
+        catalog.apply_overlay(overlay);
+        Ok(())
+    }
+
+    /// デフォルト catalog/namespace のテーブルを削除する。
+    pub fn delete_table_simple(&self, name: &str) -> Result<()> {
+        self.delete_table("default", "default", name)
+    }
+}
+
+impl<'a> Transaction<'a> {
+    /// Catalog 一覧を取得する（オーバーレイ反映）。
+    pub fn list_catalogs(&self) -> Result<Vec<CatalogInfo>> {
+        let catalog = self.db.sql_catalog.read().expect("catalog lock poisoned");
+        Ok(catalog
+            .list_catalogs_in_txn(self.catalog_overlay())
+            .into_iter()
+            .map(CatalogInfo::from)
+            .collect())
+    }
+
+    /// Catalog を取得する（オーバーレイ反映）。
+    pub fn get_catalog(&self, name: &str) -> Result<CatalogInfo> {
+        let catalog = self.db.sql_catalog.read().expect("catalog lock poisoned");
+        let meta = catalog
+            .get_catalog_in_txn(name, self.catalog_overlay())
+            .ok_or_else(|| Error::CatalogNotFound(name.to_string()))?;
+        Ok(meta.clone().into())
+    }
+
+    /// Namespace 一覧を取得する（オーバーレイ反映）。
+    pub fn list_namespaces(&self, catalog_name: &str) -> Result<Vec<NamespaceInfo>> {
+        let catalog = self.db.sql_catalog.read().expect("catalog lock poisoned");
+        ensure_catalog_exists_in_txn(&*catalog, self.catalog_overlay(), catalog_name)?;
+        Ok(catalog
+            .list_namespaces_in_txn(catalog_name, self.catalog_overlay())
+            .into_iter()
+            .map(NamespaceInfo::from)
+            .collect())
+    }
+
+    /// Namespace を取得する（オーバーレイ反映）。
+    pub fn get_namespace(&self, catalog_name: &str, namespace_name: &str) -> Result<NamespaceInfo> {
+        let catalog = self.db.sql_catalog.read().expect("catalog lock poisoned");
+        ensure_catalog_exists_in_txn(&*catalog, self.catalog_overlay(), catalog_name)?;
+        let meta = catalog
+            .get_namespace_in_txn(catalog_name, namespace_name, self.catalog_overlay())
+            .ok_or_else(|| {
+                Error::NamespaceNotFound(catalog_name.to_string(), namespace_name.to_string())
+            })?;
+        Ok(meta.clone().into())
+    }
+
+    /// テーブル一覧を取得する（オーバーレイ反映）。
+    pub fn list_tables(&self, catalog_name: &str, namespace_name: &str) -> Result<Vec<TableInfo>> {
+        let catalog = self.db.sql_catalog.read().expect("catalog lock poisoned");
+        ensure_namespace_exists_in_txn(
+            &*catalog,
+            self.catalog_overlay(),
+            catalog_name,
+            namespace_name,
+        )?;
+        let namespace = catalog
+            .get_namespace_in_txn(catalog_name, namespace_name, self.catalog_overlay())
+            .cloned()
+            .ok_or_else(|| {
+                Error::NamespaceNotFound(catalog_name.to_string(), namespace_name.to_string())
+            })?;
+        let tables =
+            catalog.list_tables_in_txn(catalog_name, namespace_name, self.catalog_overlay());
+        Ok(tables
+            .into_iter()
+            .map(|table| {
+                let info = TableInfo::from(table);
+                apply_storage_location(info, namespace.storage_root.as_deref())
+            })
+            .collect())
+    }
+
+    /// テーブル情報を取得する（オーバーレイ反映）。
+    pub fn get_table_info(
+        &self,
+        catalog_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Result<TableInfo> {
+        let catalog = self.db.sql_catalog.read().expect("catalog lock poisoned");
+        ensure_namespace_exists_in_txn(
+            &*catalog,
+            self.catalog_overlay(),
+            catalog_name,
+            namespace_name,
+        )?;
+        let namespace = catalog
+            .get_namespace_in_txn(catalog_name, namespace_name, self.catalog_overlay())
+            .cloned()
+            .ok_or_else(|| {
+                Error::NamespaceNotFound(catalog_name.to_string(), namespace_name.to_string())
+            })?;
+
+        let tables =
+            catalog.list_tables_in_txn(catalog_name, namespace_name, self.catalog_overlay());
+        let table = tables
+            .into_iter()
+            .find(|table| table.name == table_name)
+            .ok_or_else(|| {
+                Error::TableNotFound(table_full_name(catalog_name, namespace_name, table_name))
+            })?;
+        let info = TableInfo::from(table);
+        Ok(apply_storage_location(
+            info,
+            namespace.storage_root.as_deref(),
+        ))
+    }
+
+    /// Catalog を作成する（オーバーレイ反映）。
+    pub fn create_catalog(&mut self, request: CreateCatalogRequest) -> Result<CatalogInfo> {
+        ensure_write_mode(self)?;
+        let request = request.build()?;
+        let catalog = self.db.sql_catalog.read().expect("catalog lock poisoned");
+        if catalog
+            .get_catalog_in_txn(&request.name, self.catalog_overlay())
+            .is_some()
+        {
+            return Err(Error::CatalogAlreadyExists(request.name));
+        }
+
+        let meta = CatalogMeta {
+            name: request.name,
+            comment: request.comment,
+            storage_root: request.storage_root,
+        };
+        self.catalog_overlay_mut().add_catalog(meta.clone());
+        Ok(meta.into())
+    }
+
+    /// Catalog を削除する（オーバーレイ反映）。
+    pub fn delete_catalog(&mut self, name: &str, force: bool) -> Result<()> {
+        ensure_write_mode(self)?;
+        if name == "default" {
+            return Err(Error::CannotDeleteDefault("catalog".to_string()));
+        }
+        let catalog = self.db.sql_catalog.read().expect("catalog lock poisoned");
+        ensure_catalog_exists_in_txn(&*catalog, self.catalog_overlay(), name)?;
+
+        if !force {
+            let namespaces = catalog.list_namespaces_in_txn(name, self.catalog_overlay());
+            let has_non_default = namespaces.iter().any(|ns| ns.name != "default");
+            let has_tables = namespaces.iter().any(|ns| {
+                !catalog
+                    .list_tables_in_txn(name, &ns.name, self.catalog_overlay())
+                    .is_empty()
+            });
+            if has_non_default || has_tables {
+                return Err(Error::CatalogNotEmpty(name.to_string()));
+            }
+        }
+
+        if force {
+            self.catalog_overlay_mut().drop_cascade_catalog(name);
+        } else {
+            self.catalog_overlay_mut().drop_catalog(name);
+        }
+        Ok(())
+    }
+
+    /// Namespace を作成する（オーバーレイ反映）。
+    pub fn create_namespace(&mut self, request: CreateNamespaceRequest) -> Result<NamespaceInfo> {
+        ensure_write_mode(self)?;
+        let request = request.build()?;
+        let catalog = self.db.sql_catalog.read().expect("catalog lock poisoned");
+        let catalog_meta = catalog
+            .get_catalog_in_txn(&request.catalog_name, self.catalog_overlay())
+            .ok_or_else(|| Error::CatalogNotFound(request.catalog_name.clone()))?;
+        if catalog
+            .get_namespace_in_txn(&request.catalog_name, &request.name, self.catalog_overlay())
+            .is_some()
+        {
+            return Err(Error::NamespaceAlreadyExists(
+                request.catalog_name,
+                request.name,
+            ));
+        }
+
+        let storage_root = request
+            .storage_root
+            .or_else(|| catalog_meta.storage_root.clone());
+        let meta = NamespaceMeta {
+            name: request.name,
+            catalog_name: request.catalog_name,
+            comment: request.comment,
+            storage_root,
+        };
+        self.catalog_overlay_mut().add_namespace(meta.clone());
+        Ok(meta.into())
+    }
+
+    /// Namespace を削除する（オーバーレイ反映）。
+    pub fn delete_namespace(
+        &mut self,
+        catalog_name: &str,
+        namespace_name: &str,
+        force: bool,
+    ) -> Result<()> {
+        ensure_write_mode(self)?;
+        if namespace_name == "default" {
+            return Err(Error::CannotDeleteDefault("namespace".to_string()));
+        }
+        let catalog = self.db.sql_catalog.read().expect("catalog lock poisoned");
+        ensure_namespace_exists_in_txn(
+            &*catalog,
+            self.catalog_overlay(),
+            catalog_name,
+            namespace_name,
+        )?;
+
+        let tables =
+            catalog.list_tables_in_txn(catalog_name, namespace_name, self.catalog_overlay());
+        if !force && !tables.is_empty() {
+            return Err(Error::NamespaceNotEmpty(
+                catalog_name.to_string(),
+                namespace_name.to_string(),
+            ));
+        }
+
+        if force {
+            self.catalog_overlay_mut()
+                .drop_cascade_namespace(catalog_name, namespace_name);
+        } else {
+            self.catalog_overlay_mut()
+                .drop_namespace(catalog_name, namespace_name);
+        }
+        Ok(())
+    }
+
+    /// テーブルを作成する（オーバーレイ反映）。
+    pub fn create_table(&mut self, request: CreateTableRequest) -> Result<TableInfo> {
+        ensure_write_mode(self)?;
+        let request = request.build()?;
+
+        let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
+        ensure_namespace_exists_in_txn(
+            &*catalog,
+            self.catalog_overlay(),
+            &request.catalog_name,
+            &request.namespace_name,
+        )?;
+        ensure_table_absent_in_txn(
+            &*catalog,
+            self.catalog_overlay(),
+            &request.catalog_name,
+            &request.namespace_name,
+            &request.name,
+        )?;
+
+        if request.table_type == TableType::Managed && request.storage_root.is_some() {
+            eprintln!("警告: managed テーブルの storage_root は無視されます");
+        }
+
+        let table_id = catalog.next_table_id();
+        let primary_key = request.primary_key.clone();
+        let columns = build_columns(request.schema.clone(), primary_key.as_ref())?;
+
+        let storage_options = request.storage_options.unwrap_or_else(|| StorageOptions {
+            compression: Compression::None,
+            ..StorageOptions::default()
+        });
+
+        let namespace = catalog
+            .get_namespace_in_txn(
+                &request.catalog_name,
+                &request.namespace_name,
+                self.catalog_overlay(),
+            )
+            .cloned();
+        let storage_location = resolve_storage_location(
+            &request.table_type,
+            request.storage_root.as_deref(),
+            namespace.as_ref(),
+            &request.name,
+        )?;
+
+        let mut table = TableMetadata::new(&request.name, columns).with_table_id(table_id);
+        table.catalog_name = request.catalog_name.clone();
+        table.namespace_name = request.namespace_name.clone();
+        table.primary_key = primary_key;
+        table.storage_options = storage_options;
+        table.table_type = request.table_type;
+        table.data_source_format = request
+            .data_source_format
+            .unwrap_or(DataSourceFormat::Alopex);
+        table.storage_location = storage_location;
+        table.comment = request.comment;
+        table.properties = request.properties.unwrap_or_default();
+
+        self.catalog_overlay_mut()
+            .add_table(TableFqn::from(&table), table.clone());
+        let info = TableInfo::from(table);
+        let namespace_root = namespace.and_then(|ns| ns.storage_root);
+        Ok(apply_storage_location(info, namespace_root.as_deref()))
+    }
+
+    /// テーブルを削除する（オーバーレイ反映）。
+    pub fn delete_table(
+        &mut self,
+        catalog_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Result<()> {
+        ensure_write_mode(self)?;
+        let catalog = self.db.sql_catalog.read().expect("catalog lock poisoned");
+        ensure_namespace_exists_in_txn(
+            &*catalog,
+            self.catalog_overlay(),
+            catalog_name,
+            namespace_name,
+        )?;
+        let table = find_table_metadata_in_txn(
+            &*catalog,
+            self.catalog_overlay(),
+            catalog_name,
+            namespace_name,
+            table_name,
+        )?
+        .ok_or_else(|| {
+            Error::TableNotFound(table_full_name(catalog_name, namespace_name, table_name))
+        })?;
+
+        self.catalog_overlay_mut()
+            .drop_table(&TableFqn::from(&table));
+        Ok(())
+    }
+}
+
 fn validate_required(value: &str, label: &str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(Error::Core(alopex_core::Error::InvalidFormat(format!(
             "{label}が未指定です"
         ))));
+    }
+    Ok(())
+}
+
+fn ensure_catalog_exists<S: alopex_core::kv::KVStore>(
+    catalog: &alopex_sql::catalog::PersistentCatalog<S>,
+    name: &str,
+) -> Result<()> {
+    if catalog.get_catalog(name).is_none() {
+        return Err(Error::CatalogNotFound(name.to_string()));
+    }
+    Ok(())
+}
+
+fn ensure_catalog_exists_in_txn<S: alopex_core::kv::KVStore>(
+    catalog: &alopex_sql::catalog::PersistentCatalog<S>,
+    overlay: &CatalogOverlay,
+    name: &str,
+) -> Result<()> {
+    if catalog.get_catalog_in_txn(name, overlay).is_none() {
+        return Err(Error::CatalogNotFound(name.to_string()));
+    }
+    Ok(())
+}
+
+fn ensure_namespace_exists<S: alopex_core::kv::KVStore>(
+    catalog: &alopex_sql::catalog::PersistentCatalog<S>,
+    catalog_name: &str,
+    namespace_name: &str,
+) -> Result<()> {
+    ensure_catalog_exists(catalog, catalog_name)?;
+    if catalog
+        .get_namespace(catalog_name, namespace_name)
+        .is_none()
+    {
+        return Err(Error::NamespaceNotFound(
+            catalog_name.to_string(),
+            namespace_name.to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_namespace_exists_in_txn<S: alopex_core::kv::KVStore>(
+    catalog: &alopex_sql::catalog::PersistentCatalog<S>,
+    overlay: &CatalogOverlay,
+    catalog_name: &str,
+    namespace_name: &str,
+) -> Result<()> {
+    ensure_catalog_exists_in_txn(catalog, overlay, catalog_name)?;
+    if catalog
+        .get_namespace_in_txn(catalog_name, namespace_name, overlay)
+        .is_none()
+    {
+        return Err(Error::NamespaceNotFound(
+            catalog_name.to_string(),
+            namespace_name.to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_table_exists<S: alopex_core::kv::KVStore>(
+    catalog: &alopex_sql::catalog::PersistentCatalog<S>,
+    catalog_name: &str,
+    namespace_name: &str,
+    table_name: &str,
+) -> Result<()> {
+    let Some(table) = find_table_metadata(catalog, catalog_name, namespace_name, table_name)?
+    else {
+        return Err(Error::TableNotFound(table_full_name(
+            catalog_name,
+            namespace_name,
+            table_name,
+        )));
+    };
+    let _ = table;
+    Ok(())
+}
+
+fn ensure_table_absent<S: alopex_core::kv::KVStore>(
+    catalog: &alopex_sql::catalog::PersistentCatalog<S>,
+    catalog_name: &str,
+    namespace_name: &str,
+    table_name: &str,
+) -> Result<()> {
+    if find_table_metadata(catalog, catalog_name, namespace_name, table_name)?.is_some() {
+        return Err(Error::TableAlreadyExists(table_full_name(
+            catalog_name,
+            namespace_name,
+            table_name,
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_table_absent_in_txn<S: alopex_core::kv::KVStore>(
+    catalog: &alopex_sql::catalog::PersistentCatalog<S>,
+    overlay: &CatalogOverlay,
+    catalog_name: &str,
+    namespace_name: &str,
+    table_name: &str,
+) -> Result<()> {
+    if find_table_metadata_in_txn(catalog, overlay, catalog_name, namespace_name, table_name)?
+        .is_some()
+    {
+        return Err(Error::TableAlreadyExists(table_full_name(
+            catalog_name,
+            namespace_name,
+            table_name,
+        )));
+    }
+    Ok(())
+}
+
+fn find_table_metadata<S: alopex_core::kv::KVStore>(
+    catalog: &alopex_sql::catalog::PersistentCatalog<S>,
+    catalog_name: &str,
+    namespace_name: &str,
+    table_name: &str,
+) -> Result<Option<TableMetadata>> {
+    let overlay = CatalogOverlay::new();
+    let tables = catalog.list_tables_in_txn(catalog_name, namespace_name, &overlay);
+    Ok(tables.into_iter().find(|table| table.name == table_name))
+}
+
+fn find_table_metadata_in_txn<S: alopex_core::kv::KVStore>(
+    catalog: &alopex_sql::catalog::PersistentCatalog<S>,
+    overlay: &CatalogOverlay,
+    catalog_name: &str,
+    namespace_name: &str,
+    table_name: &str,
+) -> Result<Option<TableMetadata>> {
+    let tables = catalog.list_tables_in_txn(catalog_name, namespace_name, overlay);
+    Ok(tables.into_iter().find(|table| table.name == table_name))
+}
+
+fn table_full_name(catalog_name: &str, namespace_name: &str, table_name: &str) -> String {
+    format!("{catalog_name}.{namespace_name}.{table_name}")
+}
+
+fn index_full_name(
+    catalog_name: &str,
+    namespace_name: &str,
+    table_name: &str,
+    index_name: &str,
+) -> String {
+    format!("{catalog_name}.{namespace_name}.{table_name}.{index_name}")
+}
+
+fn apply_storage_location(mut info: TableInfo, namespace_root: Option<&str>) -> TableInfo {
+    if info.storage_location.is_none() && info.table_type == TableType::Managed {
+        if let Some(root) = namespace_root {
+            info.storage_location = Some(format!("{root}/{}", info.name));
+        }
+    }
+    info
+}
+
+fn resolve_storage_location(
+    table_type: &TableType,
+    request_storage_root: Option<&str>,
+    namespace: Option<&NamespaceMeta>,
+    table_name: &str,
+) -> Result<Option<String>> {
+    match table_type {
+        TableType::Managed => Ok(namespace
+            .and_then(|ns| ns.storage_root.as_deref())
+            .map(|root| format!("{root}/{table_name}"))),
+        TableType::External => {
+            let storage_root = request_storage_root
+                .map(|root| root.to_string())
+                .ok_or(Error::StorageRootRequired)?;
+            Ok(Some(storage_root))
+        }
+    }
+}
+
+fn build_columns(
+    schema: Option<Vec<ColumnDefinition>>,
+    primary_key: Option<&Vec<String>>,
+) -> Result<Vec<ColumnMetadata>> {
+    let Some(schema) = schema else {
+        return Ok(Vec::new());
+    };
+
+    let mut columns = Vec::with_capacity(schema.len());
+    for definition in schema {
+        validate_required(&definition.name, "column 名")?;
+        let mut column = ColumnMetadata::new(
+            definition.name.clone(),
+            ResolvedType::from_ast(&definition.data_type),
+        )
+        .with_not_null(!definition.nullable);
+        if primary_key
+            .map(|keys| keys.iter().any(|key| key == &definition.name))
+            .unwrap_or(false)
+        {
+            column = column.with_primary_key(true).with_not_null(true);
+        }
+        columns.push(column);
+    }
+
+    if let Some(keys) = primary_key {
+        let missing: Vec<String> = keys
+            .iter()
+            .filter(|key| !columns.iter().any(|col| col.name == **key))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            return Err(Error::Core(alopex_core::Error::InvalidFormat(format!(
+                "主キーが見つかりません: {}",
+                missing.join(", ")
+            ))));
+        }
+    }
+
+    Ok(columns)
+}
+
+fn ensure_write_mode(txn: &Transaction<'_>) -> Result<()> {
+    let mode = txn.txn_mode()?;
+    if mode != TxnMode::ReadWrite {
+        return Err(Error::TxnReadOnly);
     }
     Ok(())
 }
@@ -489,7 +1445,9 @@ fn resolved_type_to_string(resolved_type: &ResolvedType) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Database, TxnMode};
     use alopex_sql::catalog::{ColumnMetadata, RowIdMode};
+    use alopex_sql::ExecutionResult;
 
     #[test]
     fn storage_info_default_is_row_none() {
@@ -629,5 +1587,154 @@ mod tests {
         assert_eq!(info.table_name, "users");
         assert_eq!(info.method, "hnsw");
         assert!(info.is_unique);
+    }
+
+    fn ensure_default_catalog_and_namespace(db: &Database) {
+        let _ = db.create_catalog(CreateCatalogRequest::new("default"));
+        let _ = db.create_namespace(CreateNamespaceRequest::new("default", "default"));
+    }
+
+    #[test]
+    fn database_catalog_and_namespace_crud() {
+        let db = Database::new();
+
+        let catalog = db
+            .create_catalog(CreateCatalogRequest::new("main"))
+            .unwrap();
+        assert_eq!(catalog.name, "main");
+
+        let namespace = db
+            .create_namespace(CreateNamespaceRequest::new("main", "analytics"))
+            .unwrap();
+        assert_eq!(namespace.catalog_name, "main");
+        assert_eq!(namespace.name, "analytics");
+
+        let list = db.list_namespaces("main").unwrap();
+        assert_eq!(list.len(), 1);
+
+        let err = db.delete_catalog("main", false).unwrap_err();
+        assert!(matches!(err, Error::CatalogNotEmpty(_)));
+
+        db.delete_catalog("main", true).unwrap();
+
+        let err = db.get_catalog("main").unwrap_err();
+        assert!(matches!(err, Error::CatalogNotFound(_)));
+    }
+
+    #[test]
+    fn database_table_crud_and_simple_helpers() {
+        let db = Database::new();
+        ensure_default_catalog_and_namespace(&db);
+
+        let schema = vec![ColumnDefinition::new("id", DataType::Integer)];
+        let info = db.create_table_simple("users", schema).unwrap();
+        assert_eq!(info.catalog_name, "default");
+        assert_eq!(info.namespace_name, "default");
+        assert_eq!(info.table_type, TableType::Managed);
+        assert_eq!(info.data_source_format, DataSourceFormat::Alopex);
+        assert_eq!(info.storage_options.storage_type, "row");
+        assert_eq!(info.storage_options.compression, "none");
+
+        let tables = db.list_tables_simple().unwrap();
+        assert_eq!(tables.len(), 1);
+
+        let info = db.get_table_info_simple("users").unwrap();
+        assert_eq!(info.name, "users");
+
+        let err = db
+            .create_table_simple(
+                "users",
+                vec![ColumnDefinition::new("id", DataType::Integer)],
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::TableAlreadyExists(_)));
+
+        db.delete_table_simple("users").unwrap();
+        assert!(db.list_tables_simple().unwrap().is_empty());
+    }
+
+    #[test]
+    fn database_index_read_helpers() {
+        let db = Database::new();
+        ensure_default_catalog_and_namespace(&db);
+
+        let schema = vec![ColumnDefinition::new("id", DataType::Integer)];
+        db.create_table_simple("users", schema).unwrap();
+
+        let result = db
+            .execute_sql("CREATE INDEX idx_users_id ON users (id);")
+            .unwrap();
+        assert!(matches!(result, ExecutionResult::Success));
+
+        let indexes = db.list_indexes_simple("users").unwrap();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].name, "idx_users_id");
+        assert_eq!(indexes[0].method, "btree");
+
+        let index = db.get_index_info_simple("users", "idx_users_id").unwrap();
+        assert_eq!(index.table_name, "users");
+    }
+
+    #[test]
+    fn transaction_overlay_visibility_and_commit() {
+        let db = Database::new();
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+
+        txn.create_catalog(CreateCatalogRequest::new("main"))
+            .unwrap();
+        txn.create_namespace(CreateNamespaceRequest::new("main", "default"))
+            .unwrap();
+
+        let schema = vec![ColumnDefinition::new("id", DataType::Integer)];
+        txn.create_table(
+            CreateTableRequest::new("events")
+                .with_catalog_name("main")
+                .with_namespace_name("default")
+                .with_schema(schema),
+        )
+        .unwrap();
+
+        let tables = txn.list_tables("main", "default").unwrap();
+        assert_eq!(tables.len(), 1);
+
+        txn.commit().unwrap();
+
+        let info = db.get_table_info("main", "default", "events").unwrap();
+        assert_eq!(info.name, "events");
+    }
+
+    #[test]
+    fn transaction_rollback_discards_overlay() {
+        let db = Database::new();
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+
+        txn.create_catalog(CreateCatalogRequest::new("main"))
+            .unwrap();
+        txn.create_namespace(CreateNamespaceRequest::new("main", "default"))
+            .unwrap();
+
+        let schema = vec![ColumnDefinition::new("id", DataType::Integer)];
+        txn.create_table(
+            CreateTableRequest::new("staging")
+                .with_catalog_name("main")
+                .with_namespace_name("default")
+                .with_schema(schema),
+        )
+        .unwrap();
+
+        txn.rollback().unwrap();
+
+        let err = db.get_table_info("main", "default", "staging").unwrap_err();
+        assert!(matches!(err, Error::CatalogNotFound(_)));
+    }
+
+    #[test]
+    fn transaction_readonly_rejects_ddl() {
+        let db = Database::new();
+        let mut txn = db.begin(TxnMode::ReadOnly).unwrap();
+        let err = txn
+            .create_catalog(CreateCatalogRequest::new("main"))
+            .unwrap_err();
+        assert!(matches!(err, Error::TxnReadOnly));
     }
 }

@@ -446,6 +446,18 @@ pub struct SearchResult {
 const VECTOR_INDEX_KEY: &[u8] = b"__alopex_vector_index";
 
 impl<'a> Transaction<'a> {
+    pub(crate) fn catalog_overlay(&self) -> &alopex_sql::catalog::CatalogOverlay {
+        &self.overlay
+    }
+
+    pub(crate) fn catalog_overlay_mut(&mut self) -> &mut alopex_sql::catalog::CatalogOverlay {
+        &mut self.overlay
+    }
+
+    pub(crate) fn txn_mode(&self) -> Result<TxnMode> {
+        let txn = self.inner.as_ref().ok_or(Error::TxnCompleted)?;
+        Ok(txn.mode())
+    }
     /// Retrieves the value for a given key.
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         self.inner_mut()?.get(&key.to_vec()).map_err(Error::Core)
