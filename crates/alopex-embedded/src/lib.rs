@@ -600,6 +600,10 @@ impl<'a> Transaction<'a> {
             for (_, (index, state)) in self.hnsw_indices.iter_mut() {
                 index.commit_staged(txn, state).map_err(Error::Core)?;
             }
+            let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
+            catalog
+                .persist_overlay(txn, &self.overlay)
+                .map_err(|err| Error::Sql(err.into()))?;
         }
         let txn = self.inner.take().ok_or(Error::TxnCompleted)?;
         self.hnsw_indices.clear();

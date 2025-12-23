@@ -1622,6 +1622,27 @@ mod tests {
     }
 
     #[test]
+    fn cannot_delete_default_catalog_or_namespace() {
+        let db = Database::new();
+        ensure_default_catalog_and_namespace(&db);
+
+        let err = db.delete_catalog("default", true).unwrap_err();
+        assert!(matches!(err, Error::CannotDeleteDefault(_)));
+
+        let err = db.delete_namespace("default", "default", true).unwrap_err();
+        assert!(matches!(err, Error::CannotDeleteDefault(_)));
+
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+        let err = txn.delete_catalog("default", true).unwrap_err();
+        assert!(matches!(err, Error::CannotDeleteDefault(_)));
+
+        let err = txn
+            .delete_namespace("default", "default", true)
+            .unwrap_err();
+        assert!(matches!(err, Error::CannotDeleteDefault(_)));
+    }
+
+    #[test]
     fn database_table_crud_and_simple_helpers() {
         let db = Database::new();
         ensure_default_catalog_and_namespace(&db);
@@ -1701,6 +1722,33 @@ mod tests {
 
         let info = db.get_table_info("main", "default", "events").unwrap();
         assert_eq!(info.name, "events");
+    }
+
+    #[test]
+    fn transaction_commit_persists_overlay_to_store() {
+        let db = Database::new();
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+
+        txn.create_catalog(CreateCatalogRequest::new("main"))
+            .unwrap();
+        txn.create_namespace(CreateNamespaceRequest::new("main", "default"))
+            .unwrap();
+
+        let schema = vec![ColumnDefinition::new("id", DataType::Integer)];
+        txn.create_table(
+            CreateTableRequest::new("events")
+                .with_catalog_name("main")
+                .with_namespace_name("default")
+                .with_schema(schema),
+        )
+        .unwrap();
+
+        txn.commit().unwrap();
+
+        let reloaded = alopex_sql::catalog::PersistentCatalog::load(db.store.clone()).unwrap();
+        assert!(reloaded.get_catalog("main").is_some());
+        assert!(reloaded.get_namespace("main", "default").is_some());
+        assert!(reloaded.table_exists("events"));
     }
 
     #[test]
