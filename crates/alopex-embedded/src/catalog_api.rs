@@ -764,7 +764,7 @@ impl Database {
             let mut txn = store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
             for table in &tables {
                 catalog
-                    .persist_drop_table(&mut txn, &table.name)
+                    .persist_drop_table(&mut txn, &TableFqn::from(table))
                     .map_err(|err| Error::Sql(err.into()))?;
             }
             txn.commit_self().map_err(Error::Core)?;
@@ -892,7 +892,7 @@ impl Database {
         let store = catalog.store().clone();
         let mut txn = store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
         catalog
-            .persist_drop_table(&mut txn, &table.name)
+            .persist_drop_table(&mut txn, &TableFqn::from(&table))
             .map_err(|err| Error::Sql(err.into()))?;
         txn.commit_self().map_err(Error::Core)?;
 

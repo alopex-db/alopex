@@ -162,6 +162,130 @@ fn overlay_visible_in_same_txn() {
 }
 
 #[test]
+fn drop_table_in_txn_ignores_non_default_namespace() {
+    let store = Arc::new(MemoryKV::new());
+    let (mut executor, catalog) = executor_with_persistent_catalog(store.clone());
+
+    {
+        let mut catalog = catalog.write().expect("catalog lock poisoned");
+        let mut table = TableMetadata::new(
+            "users",
+            vec![
+                alopex_sql::catalog::ColumnMetadata::new("id", ResolvedType::Integer)
+                    .with_primary_key(true),
+                alopex_sql::catalog::ColumnMetadata::new("name", ResolvedType::Text),
+            ],
+        )
+        .with_primary_key(vec!["id".to_string()]);
+        table.catalog_name = "main".to_string();
+        table.namespace_name = "analytics".to_string();
+        catalog.create_table(table).unwrap();
+    }
+
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let mut overlay = CatalogOverlay::new();
+
+    {
+        let plan = LogicalPlan::DropTable {
+            name: "users".to_string(),
+            if_exists: true,
+        };
+        let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+        let result = executor.execute_in_txn(plan, &mut borrowed).unwrap();
+        assert!(matches!(result, ExecutionResult::Success));
+    }
+
+    {
+        let catalog = catalog.read().expect("catalog lock poisoned");
+        assert!(catalog.table_exists("users"));
+    }
+
+    {
+        let plan = LogicalPlan::DropTable {
+            name: "users".to_string(),
+            if_exists: false,
+        };
+        let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+        let err = executor.execute_in_txn(plan, &mut borrowed).unwrap_err();
+        assert!(matches!(err, ExecutorError::TableNotFound(_)));
+    }
+
+    {
+        let catalog = catalog.read().expect("catalog lock poisoned");
+        assert!(catalog.table_exists("users"));
+    }
+
+    drop(txn);
+}
+
+#[test]
+fn drop_index_in_txn_ignores_non_default_namespace() {
+    let store = Arc::new(MemoryKV::new());
+    let (mut executor, catalog) = executor_with_persistent_catalog(store.clone());
+
+    {
+        let mut catalog = catalog.write().expect("catalog lock poisoned");
+        let mut table = TableMetadata::new(
+            "users",
+            vec![
+                alopex_sql::catalog::ColumnMetadata::new("id", ResolvedType::Integer)
+                    .with_primary_key(true),
+                alopex_sql::catalog::ColumnMetadata::new("name", ResolvedType::Text),
+            ],
+        )
+        .with_primary_key(vec!["id".to_string()]);
+        table.catalog_name = "main".to_string();
+        table.namespace_name = "analytics".to_string();
+        catalog.create_table(table).unwrap();
+
+        let mut index = alopex_sql::catalog::IndexMetadata::new(
+            1,
+            "idx_users_name",
+            "users",
+            vec!["name".to_string()],
+        );
+        index.catalog_name = "main".to_string();
+        index.namespace_name = "analytics".to_string();
+        catalog.create_index(index).unwrap();
+    }
+
+    let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let mut overlay = CatalogOverlay::new();
+
+    {
+        let plan = LogicalPlan::DropIndex {
+            name: "idx_users_name".to_string(),
+            if_exists: true,
+        };
+        let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+        let result = executor.execute_in_txn(plan, &mut borrowed).unwrap();
+        assert!(matches!(result, ExecutionResult::Success));
+    }
+
+    {
+        let catalog = catalog.read().expect("catalog lock poisoned");
+        assert!(catalog.index_exists("idx_users_name"));
+    }
+
+    {
+        let plan = LogicalPlan::DropIndex {
+            name: "idx_users_name".to_string(),
+            if_exists: false,
+        };
+        let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
+        let err = executor.execute_in_txn(plan, &mut borrowed).unwrap_err();
+        assert!(matches!(err, ExecutorError::IndexNotFound(_)));
+    }
+
+    {
+        let catalog = catalog.read().expect("catalog lock poisoned");
+        assert!(catalog.index_exists("idx_users_name"));
+    }
+
+    drop(txn);
+}
+
+#[test]
 fn hnsw_flush_on_success() {
     let store = Arc::new(MemoryKV::new());
     let (mut executor, _catalog) = executor_with_persistent_catalog(store.clone());

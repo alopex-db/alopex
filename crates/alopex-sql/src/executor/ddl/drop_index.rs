@@ -32,6 +32,13 @@ pub fn execute_drop_index<'txn, S: KVStore + 'txn, C: Catalog>(
             };
         }
     };
+    if index.catalog_name != "default" || index.namespace_name != "default" {
+        return if if_exists {
+            Ok(ExecutionResult::Success)
+        } else {
+            Err(ExecutorError::IndexNotFound(index_name.to_string()))
+        };
+    }
 
     if matches!(index.method, Some(IndexMethod::Hnsw)) {
         HnswBridge::drop_index(txn, &index, if_exists)?;
@@ -161,5 +168,74 @@ mod tests {
         let result = execute_drop_index(&mut txn, &mut catalog, "missing_index", true);
         assert!(matches!(result, Ok(ExecutionResult::Success)));
         txn.commit().unwrap();
+    }
+
+    #[test]
+    fn drop_index_if_exists_ignores_non_default_namespace() {
+        let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+        let mut catalog = MemoryCatalog::new();
+        let mut table = TableMetadata::new(
+            "users",
+            vec![
+                ColumnMetadata::new("id", ResolvedType::Integer).with_primary_key(true),
+                ColumnMetadata::new("name", ResolvedType::Text),
+            ],
+        )
+        .with_primary_key(vec!["id".into()]);
+        table.catalog_name = "main".to_string();
+        table.namespace_name = "analytics".to_string();
+
+        let mut txn = bridge.begin_write().unwrap();
+        execute_create_table(&mut txn, &mut catalog, table, vec![], false).unwrap();
+        txn.commit().unwrap();
+
+        let mut index = IndexMetadata::new(1, "idx_users_name", "users", vec!["name".into()]);
+        index.catalog_name = "main".to_string();
+        index.namespace_name = "analytics".to_string();
+
+        let mut txn = bridge.begin_write().unwrap();
+        execute_create_index(&mut txn, &mut catalog, index, false).unwrap();
+        txn.commit().unwrap();
+
+        let mut txn = bridge.begin_write().unwrap();
+        let result = execute_drop_index(&mut txn, &mut catalog, "idx_users_name", true);
+        assert!(matches!(result, Ok(ExecutionResult::Success)));
+        txn.commit().unwrap();
+
+        assert!(catalog.index_exists("idx_users_name"));
+    }
+
+    #[test]
+    fn drop_index_rejects_non_default_namespace_without_if_exists() {
+        let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+        let mut catalog = MemoryCatalog::new();
+        let mut table = TableMetadata::new(
+            "users",
+            vec![
+                ColumnMetadata::new("id", ResolvedType::Integer).with_primary_key(true),
+                ColumnMetadata::new("name", ResolvedType::Text),
+            ],
+        )
+        .with_primary_key(vec!["id".into()]);
+        table.catalog_name = "main".to_string();
+        table.namespace_name = "analytics".to_string();
+
+        let mut txn = bridge.begin_write().unwrap();
+        execute_create_table(&mut txn, &mut catalog, table, vec![], false).unwrap();
+        txn.commit().unwrap();
+
+        let mut index = IndexMetadata::new(1, "idx_users_name", "users", vec!["name".into()]);
+        index.catalog_name = "main".to_string();
+        index.namespace_name = "analytics".to_string();
+
+        let mut txn = bridge.begin_write().unwrap();
+        execute_create_index(&mut txn, &mut catalog, index, false).unwrap();
+        txn.commit().unwrap();
+
+        let mut txn = bridge.begin_write().unwrap();
+        let err = execute_drop_index(&mut txn, &mut catalog, "idx_users_name", false).unwrap_err();
+        txn.rollback().unwrap();
+        assert!(matches!(err, ExecutorError::IndexNotFound(_)));
+        assert!(catalog.index_exists("idx_users_name"));
     }
 }

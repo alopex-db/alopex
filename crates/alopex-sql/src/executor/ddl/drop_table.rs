@@ -23,6 +23,13 @@ pub fn execute_drop_table<'txn, S: KVStore + 'txn, C: Catalog>(
             };
         }
     };
+    if table_meta.catalog_name != "default" || table_meta.namespace_name != "default" {
+        return if if_exists {
+            Ok(ExecutionResult::Success)
+        } else {
+            Err(ExecutorError::TableNotFound(table_name.to_string()))
+        };
+    }
 
     let indexes: Vec<IndexMetadata> = catalog
         .get_indexes_for_table(table_name)
@@ -134,5 +141,58 @@ mod tests {
         let result = execute_drop_table(&mut txn, &mut catalog, "missing", true);
         assert!(matches!(result, Ok(ExecutionResult::Success)));
         txn.commit().unwrap();
+    }
+
+    #[test]
+    fn drop_table_if_exists_ignores_non_default_namespace() {
+        let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+        let mut catalog = MemoryCatalog::new();
+        let mut table = TableMetadata::new(
+            "users",
+            vec![
+                ColumnMetadata::new("id", ResolvedType::Integer).with_primary_key(true),
+                ColumnMetadata::new("name", ResolvedType::Text),
+            ],
+        )
+        .with_primary_key(vec!["id".into()]);
+        table.catalog_name = "main".to_string();
+        table.namespace_name = "analytics".to_string();
+
+        let mut txn = bridge.begin_write().unwrap();
+        execute_create_table(&mut txn, &mut catalog, table, vec![], false).unwrap();
+        txn.commit().unwrap();
+
+        let mut txn = bridge.begin_write().unwrap();
+        let result = execute_drop_table(&mut txn, &mut catalog, "users", true);
+        assert!(matches!(result, Ok(ExecutionResult::Success)));
+        txn.commit().unwrap();
+
+        assert!(catalog.table_exists("users"));
+    }
+
+    #[test]
+    fn drop_table_rejects_non_default_namespace_without_if_exists() {
+        let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+        let mut catalog = MemoryCatalog::new();
+        let mut table = TableMetadata::new(
+            "users",
+            vec![
+                ColumnMetadata::new("id", ResolvedType::Integer).with_primary_key(true),
+                ColumnMetadata::new("name", ResolvedType::Text),
+            ],
+        )
+        .with_primary_key(vec!["id".into()]);
+        table.catalog_name = "main".to_string();
+        table.namespace_name = "analytics".to_string();
+
+        let mut txn = bridge.begin_write().unwrap();
+        execute_create_table(&mut txn, &mut catalog, table, vec![], false).unwrap();
+        txn.commit().unwrap();
+
+        let mut txn = bridge.begin_write().unwrap();
+        let err = execute_drop_table(&mut txn, &mut catalog, "users", false).unwrap_err();
+        txn.rollback().unwrap();
+        assert!(matches!(err, ExecutorError::TableNotFound(_)));
+        assert!(catalog.table_exists("users"));
     }
 }

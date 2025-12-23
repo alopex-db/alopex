@@ -469,6 +469,13 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 };
             }
         };
+        if table_meta.catalog_name != "default" || table_meta.namespace_name != "default" {
+            return if if_exists {
+                Ok(ExecutionResult::Success)
+            } else {
+                Err(ExecutorError::TableNotFound(table_name.to_string()))
+            };
+        }
 
         let indexes = TxnCatalogView::new(catalog, overlay)
             .get_indexes_for_table(table_name)
@@ -488,7 +495,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         txn.delete_prefix(&KeyEncoder::sequence_key(table_meta.table_id))?;
 
         catalog
-            .persist_drop_table(txn.inner_mut(), table_name)
+            .persist_drop_table(txn.inner_mut(), &TableFqn::from(&table_meta))
             .map_err(Self::map_catalog_error)?;
 
         overlay.drop_table(&TableFqn::from(&table_meta));
@@ -586,6 +593,13 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 };
             }
         };
+        if index.catalog_name != "default" || index.namespace_name != "default" {
+            return if if_exists {
+                Ok(ExecutionResult::Success)
+            } else {
+                Err(ExecutorError::IndexNotFound(index_name.to_string()))
+            };
+        }
 
         if matches!(index.method, Some(crate::ast::ddl::IndexMethod::Hnsw)) {
             crate::executor::hnsw_bridge::HnswBridge::drop_index(txn, &index, if_exists)?;
@@ -594,7 +608,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
         }
 
         catalog
-            .persist_drop_index(txn.inner_mut(), index_name)
+            .persist_drop_index(txn.inner_mut(), &IndexFqn::from(&index))
             .map_err(Self::map_catalog_error)?;
 
         overlay.drop_index(&IndexFqn::from(&index));

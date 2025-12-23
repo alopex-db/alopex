@@ -17,7 +17,8 @@ use crate::ast::dml::{
 use crate::ast::expr::{BinaryOp, Expr, ExprKind, Literal};
 use crate::ast::span::Span;
 use crate::ast::{Statement, StatementKind};
-use crate::catalog::{ColumnMetadata, MemoryCatalog, TableMetadata};
+use crate::catalog::{ColumnMetadata, IndexMetadata, MemoryCatalog, TableMetadata};
+use crate::{DataSourceFormat, TableType};
 
 // ============================================================
 // Test Helpers
@@ -162,6 +163,11 @@ fn test_plan_create_table() {
         assert!(table.columns[0].primary_key);
         assert!(table.columns[0].not_null);
         assert!(table.columns[1].not_null);
+        assert_eq!(table.catalog_name, "default");
+        assert_eq!(table.namespace_name, "default");
+        assert_eq!(table.table_type, TableType::Managed);
+        assert_eq!(table.data_source_format, DataSourceFormat::Alopex);
+        assert!(table.properties.is_empty());
     } else {
         panic!("Expected CreateTable plan");
     }
@@ -248,6 +254,31 @@ fn test_plan_drop_table_not_found() {
 }
 
 #[test]
+fn test_plan_drop_table_ignores_non_default_namespace() {
+    let mut catalog = MemoryCatalog::new();
+    let mut table = TableMetadata::new(
+        "events",
+        vec![ColumnMetadata::new("id", ResolvedType::Integer)],
+    );
+    table.catalog_name = "main".to_string();
+    table.namespace_name = "analytics".to_string();
+    catalog.create_table(table).unwrap();
+
+    let planner = Planner::new(&catalog);
+    let drop = DropTable {
+        if_exists: false,
+        name: "events".to_string(),
+        span: span(),
+    };
+
+    let result = planner.plan(&stmt(StatementKind::DropTable(drop)));
+    assert!(matches!(
+        result,
+        Err(PlannerError::TableNotFound { name, .. }) if name == "events"
+    ));
+}
+
+#[test]
 fn test_plan_create_index() {
     let catalog = create_test_catalog();
     let planner = Planner::new(&catalog);
@@ -314,6 +345,67 @@ fn test_plan_drop_index() {
     let drop = DropIndex {
         if_exists: false,
         name: "idx_test".to_string(),
+        span: span(),
+    };
+
+    let result = planner.plan(&stmt(StatementKind::DropIndex(drop)));
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_plan_drop_index_ignores_non_default_namespace() {
+    let mut catalog = MemoryCatalog::new();
+    let mut table = TableMetadata::new(
+        "users",
+        vec![ColumnMetadata::new("id", ResolvedType::Integer).with_primary_key(true)],
+    )
+    .with_primary_key(vec!["id".to_string()]);
+    table.catalog_name = "main".to_string();
+    table.namespace_name = "analytics".to_string();
+    catalog.create_table(table).unwrap();
+
+    let mut index = IndexMetadata::new(0, "idx_users_id", "users", vec!["id".into()]);
+    index.catalog_name = "main".to_string();
+    index.namespace_name = "analytics".to_string();
+    catalog.create_index(index).unwrap();
+
+    let planner = Planner::new(&catalog);
+
+    let drop = DropIndex {
+        if_exists: false,
+        name: "idx_users_id".to_string(),
+        span: span(),
+    };
+
+    let result = planner.plan(&stmt(StatementKind::DropIndex(drop)));
+    assert!(matches!(
+        result,
+        Err(PlannerError::IndexNotFound { name }) if name == "idx_users_id"
+    ));
+}
+
+#[test]
+fn test_plan_drop_index_if_exists_allows_non_default_namespace() {
+    let mut catalog = MemoryCatalog::new();
+    let mut table = TableMetadata::new(
+        "users",
+        vec![ColumnMetadata::new("id", ResolvedType::Integer).with_primary_key(true)],
+    )
+    .with_primary_key(vec!["id".to_string()]);
+    table.catalog_name = "main".to_string();
+    table.namespace_name = "analytics".to_string();
+    catalog.create_table(table).unwrap();
+
+    let mut index = IndexMetadata::new(0, "idx_users_id", "users", vec!["id".into()]);
+    index.catalog_name = "main".to_string();
+    index.namespace_name = "analytics".to_string();
+    catalog.create_index(index).unwrap();
+
+    let planner = Planner::new(&catalog);
+
+    let drop = DropIndex {
+        if_exists: true,
+        name: "idx_users_id".to_string(),
         span: span(),
     };
 

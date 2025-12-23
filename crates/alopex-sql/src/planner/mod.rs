@@ -37,6 +37,8 @@ use crate::ast::dml::{Delete, Insert, OrderByExpr, Select, SelectItem, Update};
 use crate::ast::expr::Literal;
 use crate::ast::{Statement, StatementKind};
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
+use crate::{DataSourceFormat, TableType};
+use std::collections::HashMap;
 
 /// The SQL query planner.
 ///
@@ -136,6 +138,11 @@ impl<'a, C: Catalog> Planner<'a, C> {
         if let Some(pk) = primary_key {
             table = table.with_primary_key(pk);
         }
+        table.catalog_name = "default".to_string();
+        table.namespace_name = "default".to_string();
+        table.table_type = TableType::Managed;
+        table.data_source_format = DataSourceFormat::Alopex;
+        table.properties = HashMap::new();
 
         Ok(LogicalPlan::CreateTable {
             table,
@@ -226,7 +233,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
     /// Validates that the table exists (unless IF EXISTS is specified).
     fn plan_drop_table(&self, stmt: &DropTable) -> Result<LogicalPlan, PlannerError> {
         // Check if table exists
-        if !stmt.if_exists && !self.catalog.table_exists(&stmt.name) {
+        if !stmt.if_exists && !self.table_exists_in_default(&stmt.name) {
             return Err(PlannerError::TableNotFound {
                 name: stmt.name.clone(),
                 line: stmt.span.start.line,
@@ -238,6 +245,13 @@ impl<'a, C: Catalog> Planner<'a, C> {
             name: stmt.name.clone(),
             if_exists: stmt.if_exists,
         })
+    }
+
+    fn table_exists_in_default(&self, name: &str) -> bool {
+        match self.catalog.get_table(name) {
+            Some(table) => table.catalog_name == "default" && table.namespace_name == "default",
+            None => false,
+        }
     }
 
     /// Plan a CREATE INDEX statement.
@@ -293,7 +307,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
     /// Validates that the index exists (unless IF EXISTS is specified).
     fn plan_drop_index(&self, stmt: &DropIndex) -> Result<LogicalPlan, PlannerError> {
         // Check if index exists
-        if !stmt.if_exists && !self.catalog.index_exists(&stmt.name) {
+        if !stmt.if_exists && !self.index_exists_in_default(&stmt.name) {
             return Err(PlannerError::index_not_found(&stmt.name));
         }
 
@@ -301,6 +315,13 @@ impl<'a, C: Catalog> Planner<'a, C> {
             name: stmt.name.clone(),
             if_exists: stmt.if_exists,
         })
+    }
+
+    fn index_exists_in_default(&self, name: &str) -> bool {
+        match self.catalog.get_index(name) {
+            Some(index) => index.catalog_name == "default" && index.namespace_name == "default",
+            None => false,
+        }
     }
 
     // ============================================================

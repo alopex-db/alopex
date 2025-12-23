@@ -30,7 +30,7 @@ pub const TABLES_PREFIX: &[u8] = b"__catalog__/tables/";
 pub const INDEXES_PREFIX: &[u8] = b"__catalog__/indexes/";
 pub const META_KEY: &[u8] = b"__catalog__/meta";
 
-const CATALOG_VERSION: u32 = 1;
+const CATALOG_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum CatalogError {
@@ -404,6 +404,15 @@ pub struct PersistedTableMeta {
     pub properties: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PersistedTableMetaV1 {
+    table_id: u32,
+    name: String,
+    columns: Vec<PersistedColumnMeta>,
+    primary_key: Option<Vec<String>>,
+    storage_options: PersistedStorageOptions,
+}
+
 impl From<&TableMetadata> for PersistedTableMeta {
     fn from(value: &TableMetadata) -> Self {
         Self {
@@ -511,6 +520,37 @@ impl From<PersistedIndexMeta> for IndexMetadata {
     }
 }
 
+fn deserialize_table_meta(bytes: &[u8]) -> Result<PersistedTableMeta, CatalogError> {
+    match bincode::deserialize::<PersistedTableMeta>(bytes) {
+        Ok(meta) => Ok(meta),
+        Err(err) => {
+            let is_legacy = matches!(
+                err.as_ref(),
+                bincode::ErrorKind::Io(io)
+                    if io.kind() == std::io::ErrorKind::UnexpectedEof
+            );
+            if !is_legacy {
+                return Err(err.into());
+            }
+            let legacy: PersistedTableMetaV1 = bincode::deserialize(bytes)?;
+            Ok(PersistedTableMeta {
+                table_id: legacy.table_id,
+                name: legacy.name,
+                catalog_name: "default".to_string(),
+                namespace_name: "default".to_string(),
+                table_type: TableType::Managed,
+                data_source_format: DataSourceFormat::Alopex,
+                columns: legacy.columns,
+                primary_key: legacy.primary_key,
+                storage_options: legacy.storage_options,
+                storage_location: None,
+                comment: None,
+                properties: HashMap::new(),
+            })
+        }
+    }
+}
+
 fn deserialize_index_meta(bytes: &[u8]) -> Result<PersistedIndexMeta, CatalogError> {
     match bincode::deserialize::<PersistedIndexMeta>(bytes) {
         Ok(meta) => Ok(meta),
@@ -540,9 +580,13 @@ fn deserialize_index_meta(bytes: &[u8]) -> Result<PersistedIndexMeta, CatalogErr
     }
 }
 
-fn table_key(name: &str) -> Vec<u8> {
+fn table_key(catalog_name: &str, namespace_name: &str, table_name: &str) -> Vec<u8> {
     let mut key = TABLES_PREFIX.to_vec();
-    key.extend_from_slice(name.as_bytes());
+    key.extend_from_slice(catalog_name.as_bytes());
+    key.push(b'/');
+    key.extend_from_slice(namespace_name.as_bytes());
+    key.push(b'/');
+    key.extend_from_slice(table_name.as_bytes());
     key
 }
 
@@ -560,9 +604,31 @@ fn namespace_key(catalog_name: &str, namespace_name: &str) -> Vec<u8> {
     key
 }
 
-fn index_key(name: &str) -> Vec<u8> {
+fn index_key(
+    catalog_name: &str,
+    namespace_name: &str,
+    table_name: &str,
+    index_name: &str,
+) -> Vec<u8> {
     let mut key = INDEXES_PREFIX.to_vec();
-    key.extend_from_slice(name.as_bytes());
+    key.extend_from_slice(catalog_name.as_bytes());
+    key.push(b'/');
+    key.extend_from_slice(namespace_name.as_bytes());
+    key.push(b'/');
+    key.extend_from_slice(table_name.as_bytes());
+    key.push(b'/');
+    key.extend_from_slice(index_name.as_bytes());
+    key
+}
+
+fn index_prefix(catalog_name: &str, namespace_name: &str, table_name: &str) -> Vec<u8> {
+    let mut key = INDEXES_PREFIX.to_vec();
+    key.extend_from_slice(catalog_name.as_bytes());
+    key.push(b'/');
+    key.extend_from_slice(namespace_name.as_bytes());
+    key.push(b'/');
+    key.extend_from_slice(table_name.as_bytes());
+    key.push(b'/');
     key
 }
 
@@ -573,6 +639,44 @@ fn key_suffix(prefix: &[u8], key: &[u8]) -> Result<String, CatalogError> {
     std::str::from_utf8(suffix)
         .map(|s| s.to_string())
         .map_err(|_| CatalogError::InvalidKey(format!("{key:?}")))
+}
+
+fn parse_table_key_suffix(suffix: &str) -> Result<TableFqn, CatalogError> {
+    let mut parts = suffix.splitn(3, '/');
+    let catalog = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| CatalogError::InvalidKey(suffix.to_string()))?;
+    let namespace = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| CatalogError::InvalidKey(suffix.to_string()))?;
+    let table = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| CatalogError::InvalidKey(suffix.to_string()))?;
+    Ok(TableFqn::new(catalog, namespace, table))
+}
+
+fn parse_index_key_suffix(suffix: &str) -> Result<IndexFqn, CatalogError> {
+    let mut parts = suffix.splitn(4, '/');
+    let catalog = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| CatalogError::InvalidKey(suffix.to_string()))?;
+    let namespace = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| CatalogError::InvalidKey(suffix.to_string()))?;
+    let table = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| CatalogError::InvalidKey(suffix.to_string()))?;
+    let index = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| CatalogError::InvalidKey(suffix.to_string()))?;
+    Ok(IndexFqn::new(catalog, namespace, table, index))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -809,6 +913,47 @@ pub struct PersistentCatalog<S: KVStore> {
 impl<S: KVStore> PersistentCatalog<S> {
     pub fn load(store: Arc<S>) -> Result<Self, CatalogError> {
         let mut txn = store.begin(TxnMode::ReadOnly)?;
+        let meta_key = META_KEY.to_vec();
+        let mut meta_state: Option<CatalogState> = None;
+
+        if let Some(meta_bytes) = txn.get(&meta_key)? {
+            let meta: CatalogState = bincode::deserialize(&meta_bytes)?;
+            if meta.version > CATALOG_VERSION {
+                return Err(CatalogError::InvalidKey(format!(
+                    "unsupported catalog version: {}",
+                    meta.version
+                )));
+            }
+            meta_state = Some(meta);
+        }
+
+        let mut needs_migration = meta_state
+            .as_ref()
+            .is_some_and(|meta| meta.version < CATALOG_VERSION);
+        if !needs_migration && meta_state.is_none() {
+            for (key, _) in txn.scan_prefix(TABLES_PREFIX)? {
+                let suffix = key_suffix(TABLES_PREFIX, &key)?;
+                if !suffix.contains('/') {
+                    needs_migration = true;
+                    break;
+                }
+            }
+            if !needs_migration {
+                for (key, _) in txn.scan_prefix(INDEXES_PREFIX)? {
+                    let suffix = key_suffix(INDEXES_PREFIX, &key)?;
+                    if !suffix.contains('/') {
+                        needs_migration = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if needs_migration {
+            txn.rollback_self()?;
+            Self::migrate_v1_to_v2(&store)?;
+            return Self::load(store);
+        }
 
         let mut inner = MemoryCatalog::new();
         let mut catalogs = HashMap::new();
@@ -849,16 +994,39 @@ impl<S: KVStore> PersistentCatalog<S> {
 
         // テーブルをロード（まずテーブルを入れてからインデックスを入れる）
         for (key, value) in txn.scan_prefix(TABLES_PREFIX)? {
-            let _table_name = key_suffix(TABLES_PREFIX, &key)?;
-            let persisted: PersistedTableMeta = bincode::deserialize(&value)?;
+            let suffix = key_suffix(TABLES_PREFIX, &key)?;
+            let fqn = parse_table_key_suffix(&suffix)?;
+            let mut persisted = deserialize_table_meta(&value)?;
+            if persisted.catalog_name != fqn.catalog {
+                persisted.catalog_name = fqn.catalog.clone();
+            }
+            if persisted.namespace_name != fqn.namespace {
+                persisted.namespace_name = fqn.namespace.clone();
+            }
+            if persisted.name != fqn.table {
+                persisted.name = fqn.table.clone();
+            }
             max_table_id = max_table_id.max(persisted.table_id);
             let table: TableMetadata = persisted.into();
             inner.insert_table_unchecked(table);
         }
 
         for (key, value) in txn.scan_prefix(INDEXES_PREFIX)? {
-            let _index_name = key_suffix(INDEXES_PREFIX, &key)?;
-            let persisted = deserialize_index_meta(&value)?;
+            let suffix = key_suffix(INDEXES_PREFIX, &key)?;
+            let fqn = parse_index_key_suffix(&suffix)?;
+            let mut persisted = deserialize_index_meta(&value)?;
+            if persisted.catalog_name != fqn.catalog {
+                persisted.catalog_name = fqn.catalog.clone();
+            }
+            if persisted.namespace_name != fqn.namespace {
+                persisted.namespace_name = fqn.namespace.clone();
+            }
+            if persisted.table != fqn.table {
+                persisted.table = fqn.table.clone();
+            }
+            if persisted.name != fqn.index {
+                persisted.name = fqn.index.clone();
+            }
             max_index_id = max_index_id.max(persisted.index_id);
             let mut index: IndexMetadata = persisted.into();
             // 参照先テーブルがない場合はスキップ（破損対策）
@@ -874,13 +1042,12 @@ impl<S: KVStore> PersistentCatalog<S> {
         }
 
         let (mut table_id_counter, mut index_id_counter) = (max_table_id, max_index_id);
-        let meta_key = META_KEY.to_vec();
-        if let Some(meta_bytes) = txn.get(&meta_key)? {
-            let meta: CatalogState = bincode::deserialize(&meta_bytes)?;
-            if meta.version == CATALOG_VERSION {
-                table_id_counter = table_id_counter.max(meta.table_id_counter);
-                index_id_counter = index_id_counter.max(meta.index_id_counter);
-            }
+        if let Some(meta) = meta_state
+            .as_ref()
+            .filter(|meta| meta.version == CATALOG_VERSION)
+        {
+            table_id_counter = table_id_counter.max(meta.table_id_counter);
+            index_id_counter = index_id_counter.max(meta.index_id_counter);
         }
         inner.set_counters(table_id_counter, index_id_counter);
 
@@ -892,6 +1059,120 @@ impl<S: KVStore> PersistentCatalog<S> {
             catalogs,
             namespaces,
         })
+    }
+
+    fn migrate_v1_to_v2(store: &Arc<S>) -> Result<(), CatalogError> {
+        let mut txn = store.begin(TxnMode::ReadWrite)?;
+
+        if txn.get(&catalog_key("default"))?.is_none() {
+            let meta = CatalogMeta {
+                name: "default".to_string(),
+                comment: None,
+                storage_root: None,
+            };
+            let value = bincode::serialize(&meta)?;
+            txn.put(catalog_key("default"), value)?;
+        }
+
+        if txn.get(&namespace_key("default", "default"))?.is_none() {
+            let meta = NamespaceMeta {
+                name: "default".to_string(),
+                catalog_name: "default".to_string(),
+                comment: None,
+                storage_root: None,
+            };
+            let value = bincode::serialize(&meta)?;
+            txn.put(namespace_key("default", "default"), value)?;
+        }
+
+        let mut table_updates = Vec::new();
+        let mut table_keys_to_delete = Vec::new();
+        let mut max_table_id = 0u32;
+        for (key, value) in txn.scan_prefix(TABLES_PREFIX)? {
+            let suffix = key_suffix(TABLES_PREFIX, &key)?;
+            if suffix.contains('/') {
+                continue;
+            }
+            let mut persisted = deserialize_table_meta(&value)?;
+            if persisted.catalog_name.is_empty() {
+                persisted.catalog_name = "default".to_string();
+            }
+            if persisted.namespace_name.is_empty() {
+                persisted.namespace_name = "default".to_string();
+            }
+            persisted.table_type = TableType::Managed;
+            persisted.data_source_format = DataSourceFormat::Alopex;
+            max_table_id = max_table_id.max(persisted.table_id);
+
+            let new_key = table_key(
+                &persisted.catalog_name,
+                &persisted.namespace_name,
+                &persisted.name,
+            );
+            let bytes = bincode::serialize(&persisted)?;
+            table_updates.push((new_key, bytes));
+            table_keys_to_delete.push(key);
+        }
+
+        for (key, value) in table_updates {
+            txn.put(key, value)?;
+        }
+        for key in table_keys_to_delete {
+            txn.delete(key)?;
+        }
+
+        let mut index_updates = Vec::new();
+        let mut index_keys_to_delete = Vec::new();
+        let mut max_index_id = 0u32;
+        for (key, value) in txn.scan_prefix(INDEXES_PREFIX)? {
+            let suffix = key_suffix(INDEXES_PREFIX, &key)?;
+            if suffix.contains('/') {
+                continue;
+            }
+            let mut persisted = deserialize_index_meta(&value)?;
+            if persisted.catalog_name.is_empty() {
+                persisted.catalog_name = "default".to_string();
+            }
+            if persisted.namespace_name.is_empty() {
+                persisted.namespace_name = "default".to_string();
+            }
+            max_index_id = max_index_id.max(persisted.index_id);
+
+            let new_key = index_key(
+                &persisted.catalog_name,
+                &persisted.namespace_name,
+                &persisted.table,
+                &persisted.name,
+            );
+            let bytes = bincode::serialize(&persisted)?;
+            index_updates.push((new_key, bytes));
+            index_keys_to_delete.push(key);
+        }
+
+        for (key, value) in index_updates {
+            txn.put(key, value)?;
+        }
+        for key in index_keys_to_delete {
+            txn.delete(key)?;
+        }
+
+        let mut table_id_counter = max_table_id;
+        let mut index_id_counter = max_index_id;
+        if let Some(meta_bytes) = txn.get(&META_KEY.to_vec())? {
+            let meta: CatalogState = bincode::deserialize(&meta_bytes)?;
+            table_id_counter = table_id_counter.max(meta.table_id_counter);
+            index_id_counter = index_id_counter.max(meta.index_id_counter);
+        }
+        let meta = CatalogState {
+            version: CATALOG_VERSION,
+            table_id_counter,
+            index_id_counter,
+        };
+        let meta_bytes = bincode::serialize(&meta)?;
+        txn.put(META_KEY.to_vec(), meta_bytes)?;
+        txn.commit_self()?;
+
+        Ok(())
     }
 
     pub fn new(store: Arc<S>) -> Self {
@@ -940,15 +1221,19 @@ impl<S: KVStore> PersistentCatalog<S> {
             txn.delete(key)?;
         }
         let mut table_keys = Vec::new();
-        let mut table_names = Vec::new();
+        let mut table_fqns = Vec::new();
         for (key, value) in txn.scan_prefix(TABLES_PREFIX)? {
-            let persisted: PersistedTableMeta = bincode::deserialize(&value)?;
+            let persisted = deserialize_table_meta(&value)?;
             if persisted.catalog_name == name {
-                table_names.push(persisted.name.clone());
+                table_fqns.push(TableFqn::new(
+                    &persisted.catalog_name,
+                    &persisted.namespace_name,
+                    &persisted.name,
+                ));
                 table_keys.push(key);
             }
         }
-        let table_set: HashSet<String> = table_names.iter().cloned().collect();
+        let table_set: HashSet<TableFqn> = table_fqns.iter().cloned().collect();
         for key in table_keys {
             txn.delete(key)?;
         }
@@ -956,7 +1241,12 @@ impl<S: KVStore> PersistentCatalog<S> {
             let mut index_keys = Vec::new();
             for (key, value) in txn.scan_prefix(INDEXES_PREFIX)? {
                 let persisted = deserialize_index_meta(&value)?;
-                if table_set.contains(&persisted.table) {
+                let fqn = TableFqn::new(
+                    &persisted.catalog_name,
+                    &persisted.namespace_name,
+                    &persisted.table,
+                );
+                if table_set.contains(&fqn) {
                     index_keys.push(key);
                 }
             }
@@ -967,8 +1257,8 @@ impl<S: KVStore> PersistentCatalog<S> {
         txn.commit_self()?;
         self.catalogs.remove(name);
         self.namespaces.retain(|(catalog, _), _| catalog != name);
-        for table_name in table_names {
-            self.inner.remove_table_unchecked(&table_name);
+        for fqn in table_fqns {
+            self.inner.remove_table_unchecked(&fqn.table);
         }
         Ok(())
     }
@@ -1056,15 +1346,19 @@ impl<S: KVStore> PersistentCatalog<S> {
         }
 
         let mut table_keys = Vec::new();
-        let mut table_names = Vec::new();
+        let mut table_fqns = Vec::new();
         for (key, value) in txn.scan_prefix(TABLES_PREFIX)? {
-            let persisted: PersistedTableMeta = bincode::deserialize(&value)?;
+            let persisted = deserialize_table_meta(&value)?;
             if persisted.catalog_name == name {
-                table_names.push(persisted.name.clone());
+                table_fqns.push(TableFqn::new(
+                    &persisted.catalog_name,
+                    &persisted.namespace_name,
+                    &persisted.name,
+                ));
                 table_keys.push(key);
             }
         }
-        let table_set: HashSet<String> = table_names.iter().cloned().collect();
+        let table_set: HashSet<TableFqn> = table_fqns.iter().cloned().collect();
         for key in table_keys {
             txn.delete(key)?;
         }
@@ -1072,7 +1366,12 @@ impl<S: KVStore> PersistentCatalog<S> {
             let mut index_keys = Vec::new();
             for (key, value) in txn.scan_prefix(INDEXES_PREFIX)? {
                 let persisted = deserialize_index_meta(&value)?;
-                if table_set.contains(&persisted.table) {
+                let fqn = TableFqn::new(
+                    &persisted.catalog_name,
+                    &persisted.namespace_name,
+                    &persisted.table,
+                );
+                if table_set.contains(&fqn) {
                     index_keys.push(key);
                 }
             }
@@ -1102,16 +1401,20 @@ impl<S: KVStore> PersistentCatalog<S> {
         txn.delete(namespace_key(catalog_name, namespace_name))?;
 
         let mut table_keys = Vec::new();
-        let mut table_names = Vec::new();
+        let mut table_fqns = Vec::new();
         for (key, value) in txn.scan_prefix(TABLES_PREFIX)? {
-            let persisted: PersistedTableMeta = bincode::deserialize(&value)?;
+            let persisted = deserialize_table_meta(&value)?;
             if persisted.catalog_name == catalog_name && persisted.namespace_name == namespace_name
             {
-                table_names.push(persisted.name.clone());
+                table_fqns.push(TableFqn::new(
+                    &persisted.catalog_name,
+                    &persisted.namespace_name,
+                    &persisted.name,
+                ));
                 table_keys.push(key);
             }
         }
-        let table_set: HashSet<String> = table_names.iter().cloned().collect();
+        let table_set: HashSet<TableFqn> = table_fqns.iter().cloned().collect();
         for key in table_keys {
             txn.delete(key)?;
         }
@@ -1119,7 +1422,12 @@ impl<S: KVStore> PersistentCatalog<S> {
             let mut index_keys = Vec::new();
             for (key, value) in txn.scan_prefix(INDEXES_PREFIX)? {
                 let persisted = deserialize_index_meta(&value)?;
-                if table_set.contains(&persisted.table) {
+                let fqn = TableFqn::new(
+                    &persisted.catalog_name,
+                    &persisted.namespace_name,
+                    &persisted.table,
+                );
+                if table_set.contains(&fqn) {
                     index_keys.push(key);
                 }
             }
@@ -1149,7 +1457,10 @@ impl<S: KVStore> PersistentCatalog<S> {
     ) -> Result<(), CatalogError> {
         let persisted = PersistedTableMeta::from(table);
         let value = bincode::serialize(&persisted)?;
-        txn.put(table_key(&table.name), value)?;
+        txn.put(
+            table_key(&table.catalog_name, &table.namespace_name, &table.name),
+            value,
+        )?;
         self.write_meta(txn)?;
         Ok(())
     }
@@ -1157,21 +1468,24 @@ impl<S: KVStore> PersistentCatalog<S> {
     pub fn persist_drop_table(
         &mut self,
         txn: &mut S::Transaction<'_>,
-        name: &str,
+        fqn: &TableFqn,
     ) -> Result<(), CatalogError> {
-        txn.delete(table_key(name))?;
+        txn.delete(table_key(&fqn.catalog, &fqn.namespace, &fqn.table))?;
 
         // テーブルに紐づくインデックスも削除する。
         let mut to_delete: Vec<String> = Vec::new();
-        for (key, value) in txn.scan_prefix(INDEXES_PREFIX)? {
-            let persisted = deserialize_index_meta(&value)?;
-            if persisted.table == name {
-                let index_name = key_suffix(INDEXES_PREFIX, &key)?;
-                to_delete.push(index_name);
-            }
+        let prefix = index_prefix(&fqn.catalog, &fqn.namespace, &fqn.table);
+        for (key, _) in txn.scan_prefix(&prefix)? {
+            let index_name = key_suffix(&prefix, &key)?;
+            to_delete.push(index_name);
         }
         for index_name in to_delete {
-            txn.delete(index_key(&index_name))?;
+            txn.delete(index_key(
+                &fqn.catalog,
+                &fqn.namespace,
+                &fqn.table,
+                &index_name,
+            ))?;
         }
 
         Ok(())
@@ -1184,7 +1498,15 @@ impl<S: KVStore> PersistentCatalog<S> {
     ) -> Result<(), CatalogError> {
         let persisted = PersistedIndexMeta::from(index);
         let value = bincode::serialize(&persisted)?;
-        txn.put(index_key(&index.name), value)?;
+        txn.put(
+            index_key(
+                &index.catalog_name,
+                &index.namespace_name,
+                &index.table,
+                &index.name,
+            ),
+            value,
+        )?;
         self.write_meta(txn)?;
         Ok(())
     }
@@ -1192,9 +1514,14 @@ impl<S: KVStore> PersistentCatalog<S> {
     pub fn persist_drop_index(
         &mut self,
         txn: &mut S::Transaction<'_>,
-        name: &str,
+        fqn: &IndexFqn,
     ) -> Result<(), CatalogError> {
-        txn.delete(index_key(name))?;
+        txn.delete(index_key(
+            &fqn.catalog,
+            &fqn.namespace,
+            &fqn.table,
+            &fqn.index,
+        ))?;
         Ok(())
     }
 
@@ -1224,7 +1551,7 @@ impl<S: KVStore> PersistentCatalog<S> {
             {
                 continue;
             }
-            self.persist_drop_table(txn, &fqn.table)?;
+            self.persist_drop_table(txn, fqn)?;
         }
 
         for fqn in overlay.dropped_indexes.iter() {
@@ -1235,7 +1562,7 @@ impl<S: KVStore> PersistentCatalog<S> {
             {
                 continue;
             }
-            self.persist_drop_index(txn, &fqn.index)?;
+            self.persist_drop_index(txn, fqn)?;
         }
 
         for meta in overlay.added_catalogs.values() {
@@ -1833,12 +2160,131 @@ mod tests {
         .with_primary_key(vec!["id".to_string()])
     }
 
+    fn legacy_table_key(table_name: &str) -> Vec<u8> {
+        let mut key = TABLES_PREFIX.to_vec();
+        key.extend_from_slice(table_name.as_bytes());
+        key
+    }
+
+    fn legacy_index_key(index_name: &str) -> Vec<u8> {
+        let mut key = INDEXES_PREFIX.to_vec();
+        key.extend_from_slice(index_name.as_bytes());
+        key
+    }
+
+    fn seed_legacy_store(store: &Arc<alopex_core::kv::memory::MemoryKV>) {
+        let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+        let table = test_table("users", 7);
+        let legacy_table = PersistedTableMetaV1 {
+            table_id: table.table_id,
+            name: table.name.clone(),
+            columns: table
+                .columns
+                .iter()
+                .map(PersistedColumnMeta::from)
+                .collect(),
+            primary_key: table.primary_key.clone(),
+            storage_options: table.storage_options.clone().into(),
+        };
+        let table_bytes = bincode::serialize(&legacy_table).unwrap();
+        txn.put(legacy_table_key("users"), table_bytes).unwrap();
+
+        let legacy_index = PersistedIndexMetaV1 {
+            index_id: 3,
+            name: "idx_users_id".to_string(),
+            table: "users".to_string(),
+            columns: vec!["id".to_string()],
+            column_indices: vec![0],
+            unique: false,
+            method: Some(PersistedIndexType::BTree),
+            options: Vec::new(),
+        };
+        let index_bytes = bincode::serialize(&legacy_index).unwrap();
+        txn.put(legacy_index_key("idx_users_id"), index_bytes)
+            .unwrap();
+
+        let meta = CatalogState {
+            version: 1,
+            table_id_counter: 7,
+            index_id_counter: 3,
+        };
+        let meta_bytes = bincode::serialize(&meta).unwrap();
+        txn.put(META_KEY.to_vec(), meta_bytes).unwrap();
+        txn.commit_self().unwrap();
+    }
+
     #[test]
     fn load_empty_store() {
         let store = Arc::new(alopex_core::kv::memory::MemoryKV::new());
         let catalog = PersistentCatalog::load(store).unwrap();
         assert_eq!(catalog.inner.table_count(), 0);
         assert_eq!(catalog.inner.index_count(), 0);
+    }
+
+    #[test]
+    fn load_migrates_v1_keys_and_meta() {
+        let store = Arc::new(alopex_core::kv::memory::MemoryKV::new());
+        seed_legacy_store(&store);
+
+        let reloaded = PersistentCatalog::load(store.clone()).unwrap();
+        assert!(reloaded.get_catalog("default").is_some());
+        assert!(reloaded.get_namespace("default", "default").is_some());
+
+        let table = reloaded.get_table("users").unwrap();
+        assert_eq!(table.catalog_name, "default");
+        assert_eq!(table.namespace_name, "default");
+
+        let index = reloaded.get_index("idx_users_id").unwrap();
+        assert_eq!(index.catalog_name, "default");
+        assert_eq!(index.namespace_name, "default");
+        assert_eq!(index.table, "users");
+
+        let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+        assert!(txn.get(&legacy_table_key("users")).unwrap().is_none());
+        assert!(
+            txn.get(&table_key("default", "default", "users"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            txn.get(&legacy_index_key("idx_users_id"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            txn.get(&index_key("default", "default", "users", "idx_users_id"))
+                .unwrap()
+                .is_some()
+        );
+        let meta_bytes = txn.get(&META_KEY.to_vec()).unwrap().unwrap();
+        let meta: CatalogState = bincode::deserialize(&meta_bytes).unwrap();
+        assert_eq!(meta.version, CATALOG_VERSION);
+        txn.rollback_self().unwrap();
+    }
+
+    #[test]
+    fn load_after_migration_keeps_v2_keys() {
+        let store = Arc::new(alopex_core::kv::memory::MemoryKV::new());
+        seed_legacy_store(&store);
+
+        let _ = PersistentCatalog::load(store.clone()).unwrap();
+        let reloaded = PersistentCatalog::load(store.clone()).unwrap();
+
+        let table = reloaded.get_table("users").unwrap();
+        assert_eq!(table.catalog_name, "default");
+        assert_eq!(table.namespace_name, "default");
+
+        let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
+        assert!(txn.get(&legacy_table_key("users")).unwrap().is_none());
+        assert!(
+            txn.get(&table_key("default", "default", "users"))
+                .unwrap()
+                .is_some()
+        );
+        let meta_bytes = txn.get(&META_KEY.to_vec()).unwrap().unwrap();
+        let meta: CatalogState = bincode::deserialize(&meta_bytes).unwrap();
+        assert_eq!(meta.version, CATALOG_VERSION);
+        txn.rollback_self().unwrap();
     }
 
     #[test]
@@ -1871,7 +2317,8 @@ mod tests {
         txn.commit_self().unwrap();
 
         let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
-        catalog.persist_drop_table(&mut txn, "users").unwrap();
+        let fqn = TableFqn::new("default", "default", "users");
+        catalog.persist_drop_table(&mut txn, &fqn).unwrap();
         txn.commit_self().unwrap();
 
         let reloaded = PersistentCatalog::load(store).unwrap();
@@ -2075,8 +2522,16 @@ mod tests {
         assert!(catalog.inner.get_index("idx_users_id").is_none());
 
         let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
-        assert!(txn.get(&table_key("users")).unwrap().is_none());
-        assert!(txn.get(&index_key("idx_users_id")).unwrap().is_none());
+        assert!(
+            txn.get(&table_key("main", "default", "users"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            txn.get(&index_key("main", "default", "users", "idx_users_id"))
+                .unwrap()
+                .is_none()
+        );
         txn.rollback_self().unwrap();
     }
 
@@ -2129,7 +2584,11 @@ mod tests {
             options: Vec::new(),
         };
         let bytes = bincode::serialize(&legacy).unwrap();
-        txn.put(index_key("idx_users_id"), bytes).unwrap();
+        txn.put(
+            index_key("main", "analytics", "users", "idx_users_id"),
+            bytes,
+        )
+        .unwrap();
         txn.commit_self().unwrap();
 
         let reloaded = PersistentCatalog::load(store).unwrap();

@@ -84,6 +84,27 @@ fn test_resolve_table_success() {
 }
 
 #[test]
+fn test_resolve_table_ignores_non_default_namespace() {
+    let mut catalog = MemoryCatalog::new();
+    let mut table = TableMetadata::new(
+        "events",
+        vec![ColumnMetadata::new("id", ResolvedType::Integer)],
+    );
+    table.catalog_name = "main".to_string();
+    table.namespace_name = "analytics".to_string();
+    catalog.create_table(table).unwrap();
+
+    let resolver = NameResolver::new(&catalog);
+    let span = span_at(3, 1);
+    let result = resolver.resolve_table("events", span);
+
+    assert!(matches!(
+        result,
+        Err(PlannerError::TableNotFound { name, .. }) if name == "events"
+    ));
+}
+
+#[test]
 fn test_resolve_table_not_found() {
     let catalog = create_test_catalog();
     let resolver = NameResolver::new(&catalog);
