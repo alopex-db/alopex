@@ -2,6 +2,7 @@
 
 #![deny(missing_docs)]
 
+pub mod catalog_api;
 pub mod columnar_api;
 pub mod options;
 mod sql_api;
