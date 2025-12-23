@@ -636,6 +636,16 @@ impl Database {
     }
 
     /// Catalog を作成する。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use alopex_embedded::{CreateCatalogRequest, Database};
+    ///
+    /// let db = Database::new();
+    /// let catalog = db.create_catalog(CreateCatalogRequest::new("main")).unwrap();
+    /// assert_eq!(catalog.name, "main");
+    /// ```
     pub fn create_catalog(&self, request: CreateCatalogRequest) -> Result<CatalogInfo> {
         let request = request.build()?;
         let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
@@ -682,6 +692,20 @@ impl Database {
     }
 
     /// Namespace を作成する。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use alopex_embedded::{CreateCatalogRequest, CreateNamespaceRequest, Database};
+    ///
+    /// let db = Database::new();
+    /// db.create_catalog(CreateCatalogRequest::new("main")).unwrap();
+    /// let namespace = db
+    ///     .create_namespace(CreateNamespaceRequest::new("main", "analytics"))
+    ///     .unwrap();
+    /// assert_eq!(namespace.catalog_name, "main");
+    /// assert_eq!(namespace.name, "analytics");
+    /// ```
     pub fn create_namespace(&self, request: CreateNamespaceRequest) -> Result<NamespaceInfo> {
         let request = request.build()?;
         let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
@@ -759,6 +783,27 @@ impl Database {
     }
 
     /// テーブルを作成する。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use alopex_embedded::{
+    ///     ColumnDefinition, CreateCatalogRequest, CreateNamespaceRequest, CreateTableRequest,
+    ///     Database,
+    /// };
+    /// use alopex_sql::ast::ddl::DataType;
+    ///
+    /// let db = Database::new();
+    /// db.create_catalog(CreateCatalogRequest::new("default")).unwrap();
+    /// db.create_namespace(CreateNamespaceRequest::new("default", "default"))
+    ///     .unwrap();
+    ///
+    /// let schema = vec![ColumnDefinition::new("id", DataType::Integer)];
+    /// let table = db
+    ///     .create_table(CreateTableRequest::new("users").with_schema(schema))
+    ///     .unwrap();
+    /// assert_eq!(table.name, "users");
+    /// ```
     pub fn create_table(&self, request: CreateTableRequest) -> Result<TableInfo> {
         let request = request.build()?;
         let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
@@ -969,6 +1014,17 @@ impl<'a> Transaction<'a> {
     }
 
     /// Catalog を作成する（オーバーレイ反映）。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use alopex_embedded::{CreateCatalogRequest, Database, TxnMode};
+    ///
+    /// let db = Database::new();
+    /// let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+    /// let catalog = txn.create_catalog(CreateCatalogRequest::new("main")).unwrap();
+    /// assert_eq!(catalog.name, "main");
+    /// ```
     pub fn create_catalog(&mut self, request: CreateCatalogRequest) -> Result<CatalogInfo> {
         ensure_write_mode(self)?;
         let request = request.build()?;
@@ -1089,6 +1145,33 @@ impl<'a> Transaction<'a> {
     }
 
     /// テーブルを作成する（オーバーレイ反映）。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use alopex_embedded::{
+    ///     ColumnDefinition, CreateCatalogRequest, CreateNamespaceRequest, CreateTableRequest,
+    ///     Database, TxnMode,
+    /// };
+    /// use alopex_sql::ast::ddl::DataType;
+    ///
+    /// let db = Database::new();
+    /// let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+    /// txn.create_catalog(CreateCatalogRequest::new("main")).unwrap();
+    /// txn.create_namespace(CreateNamespaceRequest::new("main", "default"))
+    ///     .unwrap();
+    ///
+    /// let schema = vec![ColumnDefinition::new("id", DataType::Integer)];
+    /// let table = txn
+    ///     .create_table(
+    ///         CreateTableRequest::new("events")
+    ///             .with_catalog_name("main")
+    ///             .with_namespace_name("default")
+    ///             .with_schema(schema),
+    ///     )
+    ///     .unwrap();
+    /// assert_eq!(table.name, "events");
+    /// ```
     pub fn create_table(&mut self, request: CreateTableRequest) -> Result<TableInfo> {
         ensure_write_mode(self)?;
         let request = request.build()?;

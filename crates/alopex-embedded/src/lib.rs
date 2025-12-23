@@ -7,8 +7,13 @@ pub mod columnar_api;
 pub mod options;
 mod sql_api;
 
+pub use crate::catalog_api::{
+    CatalogInfo, ColumnDefinition, ColumnInfo, CreateCatalogRequest, CreateNamespaceRequest,
+    CreateTableRequest, IndexInfo, NamespaceInfo, StorageInfo, TableInfo,
+};
 pub use crate::columnar_api::{EmbeddedConfig, StorageMode};
 pub use crate::options::DatabaseOptions;
+pub use alopex_sql::{DataSourceFormat, TableType};
 /// `Database::execute_sql()` / `Transaction::execute_sql()` の返却型。
 pub type SqlResult = alopex_sql::SqlResult;
 use alopex_core::vector::hnsw::{HnswTransactionState, SearchStats as HnswSearchStats};
