@@ -45,9 +45,45 @@ pub enum Error {
     /// The transaction has already been completed and cannot be used.
     #[error("transaction is completed")]
     TxnCompleted,
+    /// Catalog が見つかりません。
+    #[error("カタログが見つかりません: {0}")]
+    CatalogNotFound(String),
+    /// Catalog が既に存在します。
+    #[error("カタログは既に存在します: {0}")]
+    CatalogAlreadyExists(String),
+    /// Catalog が空ではありません。
+    #[error("カタログが空ではありません: {0}")]
+    CatalogNotEmpty(String),
+    /// Namespace が見つかりません。
+    #[error("ネームスペースが見つかりません: {0}.{1}")]
+    NamespaceNotFound(String, String),
+    /// Namespace が既に存在します。
+    #[error("ネームスペースは既に存在します: {0}.{1}")]
+    NamespaceAlreadyExists(String, String),
+    /// Namespace が空ではありません。
+    #[error("ネームスペースが空ではありません: {0}.{1}")]
+    NamespaceNotEmpty(String, String),
     /// The requested table was not found or is invalid.
     #[error("table not found: {0}")]
     TableNotFound(String),
+    /// Table が既に存在します。
+    #[error("テーブルは既に存在します: {0}")]
+    TableAlreadyExists(String),
+    /// Index が見つかりません。
+    #[error("インデックスが見つかりません: {0}")]
+    IndexNotFound(String),
+    /// default オブジェクトは削除できません。
+    #[error("default オブジェクトは削除できません: {0}")]
+    CannotDeleteDefault(String),
+    /// Managed テーブルにはスキーマが必要です。
+    #[error("managed テーブルにはスキーマが必要です")]
+    SchemaRequired,
+    /// External テーブルには storage_root が必要です。
+    #[error("external テーブルには storage_root が必要です")]
+    StorageRootRequired,
+    /// トランザクションは read-only です。
+    #[error("トランザクションは読み取り専用です")]
+    TxnReadOnly,
     /// The operation requires in-memory columnar mode.
     #[error("not in in-memory columnar mode")]
     NotInMemoryMode,
