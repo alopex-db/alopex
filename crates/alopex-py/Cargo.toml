@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Python bindings for Alopex DB"
 keywords = ["database", "python", "bindings"]
 categories = ["database-implementations", "api-bindings"]
+build = "build.rs"
 
 [lib]
 name = "_alopex"

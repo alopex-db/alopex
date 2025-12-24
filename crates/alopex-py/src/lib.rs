@@ -3,10 +3,12 @@ use pyo3::types::PyModule;
 
 mod catalog;
 mod embedded;
+mod error;
 mod types;
 
 #[pymodule]
 fn _alopex(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("AlopexError", py.get_type::<error::AlopexError>())?;
     let database_module = PyModule::new(py, "database")?;
     embedded::database::register(py, &database_module)?;
     m.add_submodule(&database_module)?;

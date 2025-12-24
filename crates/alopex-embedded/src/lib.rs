@@ -562,6 +562,19 @@ impl<'a> Transaction<'a> {
         Ok(())
     }
 
+    /// トランザクションを消費せずにロールバックする（失敗時の再試行を可能にする）。
+    pub fn rollback_in_place(&mut self) -> Result<()> {
+        let txn = self.inner.as_mut().ok_or(Error::TxnCompleted)?;
+        txn.rollback_in_place().map_err(Error::Core)?;
+        for (_, (index, state)) in self.hnsw_indices.iter_mut() {
+            let _ = index.rollback(state);
+        }
+        self.hnsw_indices.clear();
+        self.overlay = alopex_sql::catalog::CatalogOverlay::default();
+        self.inner = None;
+        Ok(())
+    }
+
     /// Rolls back the transaction, discarding all changes.
     pub fn rollback(mut self) -> Result<()> {
         if let Some(txn) = self.inner.take() {

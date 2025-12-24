@@ -628,6 +628,13 @@ impl<'a> LsmTransaction<'a> {
         }
     }
 
+    /// トランザクションを消費せずにロールバックする。
+    pub(crate) fn rollback_in_place(&mut self) -> Result<()> {
+        self.read_set.clear();
+        self.write_set.clear();
+        Ok(())
+    }
+
     fn write_iter_prefix<'b>(
         &'b self,
         prefix: &'b [u8],
