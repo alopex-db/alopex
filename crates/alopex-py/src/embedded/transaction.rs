@@ -2,9 +2,20 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
+use pyo3::PyObject;
+
+use crate::error;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TxnState {
+    Active,
+    Committed,
+    RolledBack,
+}
 
 pub(crate) struct PyTransactionInner {
     pub(crate) txn: Mutex<Option<alopex_embedded::Transaction<'static>>>,
+    state: Mutex<TxnState>,
 }
 
 #[pyclass(name = "Transaction")]
@@ -29,15 +40,203 @@ impl PyTransaction {
         };
         let inner = PyTransactionInner {
             txn: Mutex::new(Some(txn_static)),
+            state: Mutex::new(TxnState::Active),
         };
         Self {
             db,
             inner: Arc::new(inner),
         }
     }
+
+    fn ensure_active(&self) -> PyResult<()> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| error::to_py_err("transaction state lock poisoned"))?;
+        if *state != TxnState::Active {
+            return Err(error::to_py_err("transaction is closed"));
+        }
+        Ok(())
+    }
+
+    fn is_active(&self) -> PyResult<bool> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| error::to_py_err("transaction state lock poisoned"))?;
+        Ok(*state == TxnState::Active)
+    }
+
+    fn with_txn_mut<F, T>(&self, op: F) -> PyResult<T>
+    where
+        F: FnOnce(&mut alopex_embedded::Transaction<'static>) -> Result<T, alopex_embedded::Error>,
+    {
+        self.ensure_active()?;
+        let mut guard = self
+            .inner
+            .txn
+            .lock()
+            .map_err(|_| error::to_py_err("transaction lock poisoned"))?;
+        let txn = guard
+            .as_mut()
+            .ok_or_else(|| error::to_py_err("transaction is closed"))?;
+        op(txn).map_err(error::embedded_err)
+    }
+
+    fn finalize_with<F>(&self, op: F, success_state: TxnState) -> PyResult<()>
+    where
+        F: FnOnce(alopex_embedded::Transaction<'static>) -> Result<(), alopex_embedded::Error>,
+    {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| error::to_py_err("transaction state lock poisoned"))?;
+        if *state != TxnState::Active {
+            return Err(error::to_py_err("transaction is closed"));
+        }
+        let mut guard = self
+            .inner
+            .txn
+            .lock()
+            .map_err(|_| error::to_py_err("transaction lock poisoned"))?;
+        let txn = guard
+            .take()
+            .ok_or_else(|| error::to_py_err("transaction is closed"))?;
+        match op(txn) {
+            Ok(()) => {
+                *state = success_state;
+                Ok(())
+            }
+            Err(err) => {
+                *state = TxnState::RolledBack;
+                Err(error::embedded_err(err))
+            }
+        }
+    }
+}
+
+#[pymethods]
+impl PyTransaction {
+    fn get(&self, key: &[u8]) -> PyResult<Option<Vec<u8>>> {
+        self.with_txn_mut(|txn| txn.get(key))
+    }
+
+    fn put(&self, key: &[u8], value: &[u8]) -> PyResult<()> {
+        self.with_txn_mut(|txn| txn.put(key, value))
+    }
+
+    fn delete(&self, key: &[u8]) -> PyResult<()> {
+        self.with_txn_mut(|txn| txn.delete(key))
+    }
+
+    fn commit(&self) -> PyResult<()> {
+        self.finalize_with(|txn| txn.commit(), TxnState::Committed)
+    }
+
+    fn rollback(&self) -> PyResult<()> {
+        self.finalize_with(|txn| txn.rollback(), TxnState::RolledBack)
+    }
+
+    fn __enter__(slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
+        slf.ensure_active()?;
+        Ok(slf)
+    }
+
+    #[pyo3(signature = (_exc_type = None, _exc = None, _traceback = None))]
+    fn __exit__(
+        &self,
+        _exc_type: Option<PyObject>,
+        _exc: Option<PyObject>,
+        _traceback: Option<PyObject>,
+    ) -> PyResult<bool> {
+        if self.is_active()? {
+            self.finalize_with(|txn| txn.rollback(), TxnState::RolledBack)?;
+        }
+        Ok(false)
+    }
+}
+
+impl Drop for PyTransaction {
+    fn drop(&mut self) {
+        let mut state = match self.inner.state.lock() {
+            Ok(state) => state,
+            Err(_) => return,
+        };
+        if *state != TxnState::Active {
+            return;
+        }
+        let mut guard = match self.inner.txn.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+        if let Some(txn) = guard.take() {
+            let _ = txn.rollback();
+        }
+        *state = TxnState::RolledBack;
+    }
 }
 
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTransaction>()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use alopex_core::TxnMode;
+    use std::sync::Arc;
+
+    #[test]
+    fn put_get_and_rollback() {
+        let db = Arc::new(alopex_embedded::Database::new());
+        let txn = db
+            .begin(TxnMode::ReadWrite)
+            .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
+            .expect("txn");
+        txn.put(b"key", b"value").expect("put");
+        txn.rollback().expect("rollback");
+
+        let mut txn2 = db.begin(TxnMode::ReadOnly).expect("txn2");
+        let value = txn2.get(b"key").expect("get");
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn commit_closes_transaction() {
+        let db = Arc::new(alopex_embedded::Database::new());
+        let txn = db
+            .begin(TxnMode::ReadWrite)
+            .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
+            .expect("txn");
+        txn.commit().expect("commit");
+        assert!(txn.get(b"key").is_err());
+    }
+
+    #[test]
+    fn read_only_put_is_error() {
+        let db = Arc::new(alopex_embedded::Database::new());
+        let txn = db
+            .begin(TxnMode::ReadOnly)
+            .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
+            .expect("txn");
+        assert!(txn.put(b"key", b"value").is_err());
+    }
+
+    #[test]
+    fn drop_rolls_back_uncommitted() {
+        let db = Arc::new(alopex_embedded::Database::new());
+        {
+            let txn = db
+                .begin(TxnMode::ReadWrite)
+                .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
+                .expect("txn");
+            txn.put(b"key", b"value").expect("put");
+        }
+        let mut txn2 = db.begin(TxnMode::ReadOnly).expect("txn2");
+        let value = txn2.get(b"key").expect("get");
+        assert!(value.is_none());
+    }
 }
