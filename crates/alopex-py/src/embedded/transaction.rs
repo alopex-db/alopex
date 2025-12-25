@@ -176,8 +176,12 @@ impl PyTransaction {
         let query = query.bind(py);
         let metric = metric.into();
         vector::with_ndarray_f32(query, |values| {
-            let results = self.with_txn_mut(|txn| {
-                txn.search_similar(values, metric, k, filter_keys.as_deref())
+            let values = values.to_vec();
+            let filter_keys = filter_keys.clone();
+            let results = py.allow_threads(|| {
+                self.with_txn_mut(|txn| {
+                    txn.search_similar(&values, metric, k, filter_keys.as_deref())
+                })
             })?;
             Ok(results.into_iter().map(PySearchResult::from).collect())
         })
@@ -216,8 +220,34 @@ impl PyTransaction {
             .map(|_| ())
     }
 
-    fn commit(&self) -> PyResult<()> {
-        self.finalize_with(|txn| txn.commit(), TxnState::Committed)
+    fn commit(&self, py: Python<'_>) -> PyResult<()> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| error::to_py_err("transaction state lock poisoned"))?;
+        if *state != TxnState::Active {
+            return Err(error::to_py_err("transaction is closed"));
+        }
+        let mut guard = self
+            .inner
+            .txn
+            .lock()
+            .map_err(|_| error::to_py_err("transaction lock poisoned"))?;
+        let txn = guard
+            .take()
+            .ok_or_else(|| error::to_py_err("transaction is closed"))?;
+        let result = py.allow_threads(|| txn.commit());
+        match result {
+            Ok(()) => {
+                *state = TxnState::Committed;
+                Ok(())
+            }
+            Err(err) => {
+                *state = TxnState::RolledBack;
+                Err(error::embedded_err(err))
+            }
+        }
     }
 
     fn rollback(&self) -> PyResult<()> {
@@ -271,6 +301,7 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use alopex_core::TxnMode;
+    use pyo3::Python;
     use std::sync::Arc;
 
     #[test]
@@ -290,12 +321,15 @@ mod tests {
 
     #[test]
     fn commit_closes_transaction() {
+        pyo3::prepare_freethreaded_python();
         let db = Arc::new(alopex_embedded::Database::new());
         let txn = db
             .begin(TxnMode::ReadWrite)
             .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
             .expect("txn");
-        txn.commit().expect("commit");
+        Python::with_gil(|py| {
+            txn.commit(py).expect("commit");
+        });
         assert!(txn.get(b"key").is_err());
     }
 

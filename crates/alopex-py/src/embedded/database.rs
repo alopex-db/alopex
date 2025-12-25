@@ -103,10 +103,12 @@ impl PyDatabase {
         Ok(py_txn)
     }
 
-    fn flush(&self) -> PyResult<()> {
+    fn flush(&self, py: Python<'_>) -> PyResult<()> {
         let db = self.ensure_open()?;
         match self.mode {
-            alopex_embedded::StorageMode::Disk => db.flush().map_err(error::embedded_err),
+            alopex_embedded::StorageMode::Disk => {
+                py.allow_threads(|| db.flush()).map_err(error::embedded_err)
+            }
             alopex_embedded::StorageMode::InMemory => {
                 Err(error::to_py_err("flush is only supported in disk mode"))
             }
@@ -204,10 +206,12 @@ impl PyDatabase {
         vector::require_numpy(py)?;
         let query = query.bind(py);
         vector::with_ndarray_f32(query, |values| {
-            let (results, _stats) = db
-                .search_hnsw(name, values, k, ef_search)
+            let name = name.to_string();
+            let values = values.to_vec();
+            let (results, _stats) = py
+                .allow_threads(|| db.search_hnsw(&name, &values, k, ef_search))
                 .map_err(error::embedded_err)?;
-            let stats = db.get_hnsw_stats(name).map_err(error::embedded_err)?;
+            let stats = db.get_hnsw_stats(&name).map_err(error::embedded_err)?;
             let results = results.into_iter().map(PySearchResult::from).collect();
             Ok((results, PyHnswStats::from(stats)))
         })
