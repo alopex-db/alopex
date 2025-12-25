@@ -24,6 +24,16 @@ impl PySearchResult {
     }
 }
 
+impl From<alopex_embedded::SearchResult> for PySearchResult {
+    fn from(value: alopex_embedded::SearchResult) -> Self {
+        Self {
+            key: value.key,
+            score: value.score,
+            metadata: Some(value.metadata),
+        }
+    }
+}
+
 #[pyclass(name = "HnswStats")]
 #[derive(Clone, Debug)]
 pub struct PyHnswStats {

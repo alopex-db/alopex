@@ -5,6 +5,12 @@ use pyo3::types::PyModule;
 use pyo3::PyObject;
 
 use crate::error;
+#[cfg(feature = "numpy")]
+use crate::types::{PyMetric, PySearchResult};
+#[cfg(feature = "numpy")]
+use crate::vector;
+#[cfg(feature = "numpy")]
+use pyo3::types::PyAnyMethods;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TxnState {
@@ -130,6 +136,51 @@ impl PyTransaction {
 
     fn delete(&self, key: &[u8]) -> PyResult<()> {
         self.with_txn_mut(|txn| txn.delete(key))
+    }
+
+    #[cfg(feature = "numpy")]
+    fn upsert_vector(
+        &self,
+        py: Python<'_>,
+        key: &[u8],
+        metadata: PyObject,
+        vector: PyObject,
+        metric: PyMetric,
+    ) -> PyResult<()> {
+        vector::require_numpy(py)?;
+        let vector = vector.bind(py);
+        let metadata = metadata.bind(py);
+        let payload = if metadata.is_none() {
+            None
+        } else {
+            Some(metadata.extract::<&[u8]>()?)
+        };
+        let metric = metric.into();
+        let payload = payload.unwrap_or(&[]);
+        vector::with_ndarray_f32(vector, |values| {
+            self.with_txn_mut(|txn| txn.upsert_vector(key, payload, values, metric))
+        })
+    }
+
+    #[cfg(feature = "numpy")]
+    #[pyo3(signature = (query, metric, k, filter_keys = None))]
+    fn search_similar(
+        &self,
+        py: Python<'_>,
+        query: PyObject,
+        metric: PyMetric,
+        k: usize,
+        filter_keys: Option<Vec<Vec<u8>>>,
+    ) -> PyResult<Vec<PySearchResult>> {
+        vector::require_numpy(py)?;
+        let query = query.bind(py);
+        let metric = metric.into();
+        vector::with_ndarray_f32(query, |values| {
+            let results = self.with_txn_mut(|txn| {
+                txn.search_similar(values, metric, k, filter_keys.as_deref())
+            })?;
+            Ok(results.into_iter().map(PySearchResult::from).collect())
+        })
     }
 
     fn commit(&self) -> PyResult<()> {

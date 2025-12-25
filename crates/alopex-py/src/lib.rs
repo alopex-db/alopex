@@ -5,6 +5,8 @@ mod catalog;
 mod embedded;
 mod error;
 mod types;
+#[cfg(feature = "numpy")]
+mod vector;
 
 #[pymodule]
 fn _alopex(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
