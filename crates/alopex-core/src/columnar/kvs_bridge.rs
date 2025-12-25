@@ -194,6 +194,31 @@ impl ColumnarKvsBridge {
             .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
         Ok(meta.schema.column_count())
     }
+
+    /// すべてのセグメント (table_id, segment_id) を返す。
+    ///
+    /// セグメントインデックスキーをスキャンして全テーブルのセグメントを収集する。
+    pub fn list_segments(&self) -> Result<Vec<(u32, u64)>> {
+        let mut txn = self.store.begin(TxnMode::ReadOnly)?;
+        let mut result = Vec::new();
+
+        // PREFIX_SEGMENT_INDEX (0x12) で始まるキーをスキャンし、
+        // 各テーブルのインデックスを読み取る
+        let prefix = vec![key_layout::PREFIX_SEGMENT_INDEX];
+        for (key, value) in txn.scan_prefix(&prefix)? {
+            if key.len() >= 5 {
+                // キー形式: [prefix(1) + table_id(4)]
+                let table_id = u32::from_le_bytes([key[1], key[2], key[3], key[4]]);
+                let index: Vec<u64> = bincode_config()
+                    .deserialize(&value)
+                    .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
+                for seg_id in index {
+                    result.push((table_id, seg_id));
+                }
+            }
+        }
+        Ok(result)
+    }
 }
 
 #[cfg(test)]

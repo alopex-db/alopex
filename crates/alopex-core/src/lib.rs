@@ -22,6 +22,8 @@ pub use error::{Error, Result};
 pub use kv::memory::{MemoryKV, MemoryStats, MemoryTransaction, MemoryTxnManager};
 pub use kv::storage::{StorageFactory, StorageMode};
 pub use kv::{KVStore, KVTransaction};
+#[cfg(feature = "s3")]
+pub use kv::{S3Config, S3KV};
 pub use storage::large_value::{
     LargeValueChunkInfo, LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter,
     DEFAULT_CHUNK_SIZE,

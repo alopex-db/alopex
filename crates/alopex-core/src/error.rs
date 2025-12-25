@@ -147,4 +147,12 @@ pub enum Error {
     /// Errors originating from columnar components.
     #[error("columnar error: {0}")]
     Columnar(#[from] ColumnarError),
+
+    /// An S3 operation failed.
+    #[error("S3 error: {0}")]
+    S3(String),
+
+    /// Required credentials are missing.
+    #[error("missing credentials: {0}")]
+    MissingCredentials(String),
 }

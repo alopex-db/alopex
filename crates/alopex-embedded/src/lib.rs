@@ -6,8 +6,9 @@ pub mod columnar_api;
 pub mod options;
 mod sql_api;
 
-pub use crate::columnar_api::{EmbeddedConfig, StorageMode};
+pub use crate::columnar_api::{ColumnarRowIterator, EmbeddedConfig, StorageMode};
 pub use crate::options::DatabaseOptions;
+pub use crate::sql_api::{SqlStreamingResult, StreamingQueryResult, StreamingRows};
 /// `Database::execute_sql()` / `Transaction::execute_sql()` の返却型。
 pub type SqlResult = alopex_sql::SqlResult;
 use alopex_core::vector::hnsw::{HnswTransactionState, SearchStats as HnswSearchStats};
@@ -18,11 +19,15 @@ use alopex_core::{
     kv::any::AnyKVTransaction,
     kv::memory::MemoryKV,
     kv::AnyKV,
-    score, validate_dimensions, HnswConfig, HnswIndex, HnswSearchResult, HnswStats, KVStore,
-    KVTransaction, Key, LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter,
-    StorageFactory, VectorType, DEFAULT_CHUNK_SIZE,
+    score, validate_dimensions, HnswIndex, KVStore, KVTransaction, Key, LargeValueKind,
+    LargeValueMeta, LargeValueReader, LargeValueWriter, StorageFactory, VectorType,
+    DEFAULT_CHUNK_SIZE,
 };
-pub use alopex_core::{MemoryStats, Metric, TxnMode};
+pub use alopex_core::{HnswConfig, HnswSearchResult, HnswStats, MemoryStats, Metric, TxnMode};
+/// Query result column information.
+pub use alopex_sql::executor::ColumnInfo;
+/// Streaming query row iterator for FR-7 compliance.
+pub use alopex_sql::executor::QueryRowIterator;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs;
@@ -132,6 +137,74 @@ impl Database {
         Ok(db)
     }
 
+    /// Opens a database from a URI string.
+    ///
+    /// Supported URI schemes:
+    /// - `file://path` or bare path: Local filesystem
+    /// - `s3://bucket/prefix`: S3-compatible storage (requires `s3` feature)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Local path
+    /// let db = Database::open_with_uri("/path/to/db")?;
+    ///
+    /// // S3 URI (requires s3 feature and credentials)
+    /// let db = Database::open_with_uri("s3://my-bucket/data")?;
+    /// ```
+    pub fn open_with_uri(uri: &str) -> Result<Self> {
+        // Check for S3 URI
+        if uri.starts_with("s3://") {
+            #[cfg(feature = "s3")]
+            {
+                return Self::open_s3(uri);
+            }
+            #[cfg(not(feature = "s3"))]
+            {
+                return Err(Error::Core(alopex_core::Error::InvalidFormat(
+                    "S3 support requires the 's3' feature".into(),
+                )));
+            }
+        }
+
+        // Strip file:// prefix if present
+        let path = if let Some(stripped) = uri.strip_prefix("file://") {
+            stripped
+        } else {
+            uri
+        };
+
+        Self::open(Path::new(path))
+    }
+
+    /// Opens a database backed by S3 storage.
+    ///
+    /// This method downloads data from S3 to a local cache, operates on it
+    /// using LsmKV, and syncs changes back to S3 on flush/close.
+    ///
+    /// # Arguments
+    ///
+    /// * `uri` - S3 URI in the format `s3://bucket/prefix`
+    ///
+    /// # Environment Variables
+    ///
+    /// Required:
+    /// * `AWS_ACCESS_KEY_ID` - AWS access key
+    /// * `AWS_SECRET_ACCESS_KEY` - AWS secret key
+    ///
+    /// Optional:
+    /// * `AWS_REGION` - AWS region (default: us-east-1)
+    /// * `AWS_ENDPOINT_URL` - Custom endpoint for S3-compatible services
+    #[cfg(feature = "s3")]
+    pub fn open_s3(uri: &str) -> Result<Self> {
+        let s3_config = alopex_core::S3Config::from_uri(uri).map_err(Error::Core)?;
+        let store = StorageFactory::create(alopex_core::StorageMode::S3 { config: s3_config })
+            .map_err(Error::Core)?;
+        let mut db = Self::init(store, StorageMode::Disk, None, SegmentConfigV2::default());
+        db.load_sql_catalog()?;
+        Ok(db)
+    }
+
     pub(crate) fn init(
         store: AnyKV,
         columnar_mode: StorageMode,
@@ -184,6 +257,8 @@ impl Database {
         match self.store.as_ref() {
             AnyKV::Memory(kv) => Some(kv.memory_stats()),
             AnyKV::Lsm(_) => None,
+            #[cfg(feature = "s3")]
+            AnyKV::S3(_) => None,
         }
     }
 
@@ -424,6 +499,16 @@ impl<'a> Transaction<'a> {
     /// Deletes a key-value pair.
     pub fn delete(&mut self, key: &[u8]) -> Result<()> {
         self.inner_mut()?.delete(key.to_vec()).map_err(Error::Core)
+    }
+
+    /// Scans all key-value pairs whose keys start with the given prefix.
+    ///
+    /// Returns an iterator over (key, value) pairs.
+    pub fn scan_prefix(
+        &mut self,
+        prefix: &[u8],
+    ) -> Result<Box<dyn Iterator<Item = (Key, Vec<u8>)> + '_>> {
+        self.inner_mut()?.scan_prefix(prefix).map_err(Error::Core)
     }
 
     /// HNSW にベクトルをステージング挿入/更新する。

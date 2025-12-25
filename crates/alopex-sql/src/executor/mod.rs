@@ -46,7 +46,8 @@ pub mod query;
 mod result;
 
 pub use error::{ConstraintViolation, EvaluationError, ExecutorError, Result};
-pub use result::{ColumnInfo, ExecutionResult, QueryResult, Row};
+pub use query::{RowIterator, ScanIterator, build_streaming_pipeline};
+pub use result::{ColumnInfo, ExecutionResult, QueryResult, QueryRowIterator, Row};
 
 use std::sync::{Arc, RwLock};
 
