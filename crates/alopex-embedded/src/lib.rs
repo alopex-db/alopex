@@ -51,6 +51,9 @@ pub enum Error {
     /// The requested catalog was not found.
     #[error("catalog not found: {0}")]
     CatalogNotFound(String),
+    /// The requested catalog already exists.
+    #[error("catalog already exists: {0}")]
+    CatalogAlreadyExists(String),
     /// The requested namespace was not found.
     #[error("namespace not found: {catalog}.{namespace}")]
     NamespaceNotFound {
@@ -59,12 +62,33 @@ pub enum Error {
         /// Namespace name.
         namespace: String,
     },
+    /// The requested namespace already exists.
+    #[error("namespace already exists: {catalog}.{namespace}")]
+    NamespaceAlreadyExists {
+        /// Catalog name.
+        catalog: String,
+        /// Namespace name.
+        namespace: String,
+    },
     /// The requested table was not found or is invalid.
     #[error("table not found: {0}")]
     TableNotFound(String),
+    /// The requested table already exists.
+    #[error("table already exists: {catalog}.{namespace}.{table}")]
+    TableAlreadyExists {
+        /// Catalog name.
+        catalog: String,
+        /// Namespace name.
+        namespace: String,
+        /// Table name.
+        table: String,
+    },
     /// The operation requires in-memory columnar mode.
     #[error("not in in-memory columnar mode")]
     NotInMemoryMode,
+    /// The requested data source format is not supported.
+    #[error("unsupported data source format: {0}")]
+    UnsupportedDataSourceFormat(String),
     /// The catalog store lock was poisoned.
     #[error("catalog lock poisoned")]
     CatalogLockPoisoned,
