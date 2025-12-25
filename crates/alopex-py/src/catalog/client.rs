@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyModule};
+use pyo3::types::{PyAny, PyDict, PyList, PyModule};
 
 use crate::catalog::resolve_credentials;
 use crate::error;
@@ -10,6 +10,28 @@ use crate::types::{PyCatalogInfo, PyColumnInfo, PyNamespaceInfo, PyTableInfo};
 #[allow(deprecated)]
 fn default_credential_provider() -> PyObject {
     Python::with_gil(|py| "auto".into_py(py))
+}
+
+fn columns_from_schema(schema: &Bound<'_, PyDict>) -> PyResult<Vec<alopex_embedded::ColumnInfo>> {
+    let mut columns = Vec::with_capacity(schema.len());
+    for (position, (name, dtype)) in schema.iter().enumerate() {
+        let name: String = name.extract()?;
+        let type_name = dtype.str()?.extract::<String>()?;
+        columns.push(alopex_embedded::ColumnInfo {
+            name,
+            type_name,
+            position,
+            nullable: true,
+            comment: None,
+        });
+    }
+    Ok(columns)
+}
+
+fn schema_from_dataframe(df: &Bound<'_, PyAny>) -> PyResult<Vec<alopex_embedded::ColumnInfo>> {
+    let schema = df.getattr("schema")?;
+    let schema = schema.downcast::<PyDict>()?;
+    columns_from_schema(schema)
 }
 
 fn to_embedded_columns(columns: Vec<PyColumnInfo>) -> Vec<alopex_embedded::ColumnInfo> {
@@ -171,6 +193,139 @@ impl PyCatalog {
         };
         let lazy_frame = scan_parquet.call(args, kwargs.as_ref())?;
         Ok(lazy_frame.into())
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (
+        df,
+        catalog_name,
+        namespace,
+        table_name,
+        delta_mode = "error",
+        storage_location = None,
+        credential_provider = default_credential_provider()
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn write_table(
+        py: Python<'_>,
+        df: PyObject,
+        catalog_name: &str,
+        namespace: &str,
+        table_name: &str,
+        delta_mode: &str,
+        storage_location: Option<String>,
+        credential_provider: PyObject,
+    ) -> PyResult<()> {
+        require_polars(py)?;
+        let df = df.bind(py);
+        let df_type = df.get_type().name()?;
+        let df_obj = if df_type == "LazyFrame" {
+            df.call_method0("collect")?.unbind()
+        } else {
+            df.clone().unbind()
+        };
+        let df_bound = df_obj.bind(py);
+        let columns = schema_from_dataframe(df_bound)?;
+        let credential_provider = credential_provider.bind(py);
+
+        let table_info =
+            match alopex_embedded::Catalog::get_table_info(catalog_name, namespace, table_name) {
+                Ok(info) => Some(info),
+                Err(alopex_embedded::Error::TableNotFound(_)) => None,
+                Err(err) => return Err(error::embedded_err(err)),
+            };
+
+        let target_location = match table_info {
+            Some(info) => {
+                if info.data_source_format.as_deref() != Some("parquet") {
+                    return Err(error::to_py_err(format!(
+                        "Unsupported format: {:?}",
+                        info.data_source_format
+                    )));
+                }
+                match delta_mode {
+                    "error" => {
+                        return Err(error::to_py_err("table already exists"));
+                    }
+                    "ignore" => {
+                        return Ok(());
+                    }
+                    "append" | "overwrite" => info.storage_location,
+                    other => {
+                        return Err(error::to_py_err(format!(
+                            "Unsupported delta_mode: {}",
+                            other
+                        )));
+                    }
+                }
+            }
+            None => match delta_mode {
+                "ignore" => return Ok(()),
+                "error" => {
+                    return Err(error::to_py_err("table not found"));
+                }
+                "append" | "overwrite" => {
+                    let location = storage_location
+                        .ok_or_else(|| error::to_py_err("storage_location is required"))?;
+                    alopex_embedded::Catalog::create_table(
+                        catalog_name,
+                        namespace,
+                        table_name,
+                        columns,
+                        Some(location.clone()),
+                        Some("parquet".to_string()),
+                    )
+                    .map_err(error::embedded_err)?;
+                    Some(location)
+                }
+                other => {
+                    return Err(error::to_py_err(format!(
+                        "Unsupported delta_mode: {}",
+                        other
+                    )));
+                }
+            },
+        };
+
+        let storage_location =
+            target_location.ok_or_else(|| error::to_py_err("storage_location is required"))?;
+        let resolved = resolve_credentials(py, credential_provider, None, &storage_location)?;
+        let polars = PyModule::import(py, "polars")?;
+
+        let mut to_write = df_obj.clone_ref(py);
+        if delta_mode == "append" {
+            let scan_parquet = polars.getattr("scan_parquet")?;
+            let read_options = PyDict::new(py);
+            for (key, value) in &resolved {
+                read_options.set_item(key, value)?;
+            }
+            let args = (storage_location.as_str(),);
+            let kwargs = if read_options.is_empty() {
+                None
+            } else {
+                Some(read_options)
+            };
+            let existing_lf = scan_parquet.call(args, kwargs.as_ref())?;
+            let existing_df = existing_lf.call_method0("collect")?;
+            let concat = polars.getattr("concat")?;
+            let list = PyList::new(py, &[existing_df.unbind(), to_write.clone_ref(py)])?;
+            let combined = concat.call1((list,))?;
+            to_write = combined.unbind();
+        }
+
+        let write_options = PyDict::new(py);
+        for (key, value) in resolved {
+            write_options.set_item(key, value)?;
+        }
+        let args = (storage_location.as_str(),);
+        let kwargs = if write_options.is_empty() {
+            None
+        } else {
+            Some(write_options)
+        };
+        let df_to_write = to_write.bind(py);
+        df_to_write.call_method("write_parquet", args, kwargs.as_ref())?;
+        Ok(())
     }
 }
 
