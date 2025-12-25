@@ -24,6 +24,16 @@ impl PyCatalogInfo {
     }
 }
 
+impl From<alopex_embedded::CatalogInfo> for PyCatalogInfo {
+    fn from(info: alopex_embedded::CatalogInfo) -> Self {
+        Self {
+            name: info.name,
+            comment: info.comment,
+            storage_root: info.storage_root,
+        }
+    }
+}
+
 #[pyclass(name = "NamespaceInfo")]
 #[derive(Clone, Debug)]
 pub struct PyNamespaceInfo {
@@ -52,6 +62,17 @@ impl PyNamespaceInfo {
             catalog_name,
             comment,
             storage_root,
+        }
+    }
+}
+
+impl From<alopex_embedded::NamespaceInfo> for PyNamespaceInfo {
+    fn from(info: alopex_embedded::NamespaceInfo) -> Self {
+        Self {
+            name: info.name,
+            catalog_name: info.catalog_name,
+            comment: info.comment,
+            storage_root: info.storage_root,
         }
     }
 }
@@ -88,6 +109,18 @@ impl PyColumnInfo {
             position,
             nullable,
             comment,
+        }
+    }
+}
+
+impl From<alopex_embedded::ColumnInfo> for PyColumnInfo {
+    fn from(info: alopex_embedded::ColumnInfo) -> Self {
+        Self {
+            name: info.name,
+            type_name: info.type_name,
+            position: info.position,
+            nullable: info.nullable,
+            comment: info.comment,
         }
     }
 }
@@ -135,6 +168,19 @@ impl PyTableInfo {
             storage_location,
             data_source_format,
             columns,
+        }
+    }
+}
+
+impl From<alopex_embedded::TableInfo> for PyTableInfo {
+    fn from(info: alopex_embedded::TableInfo) -> Self {
+        Self {
+            name: info.name,
+            catalog_name: info.catalog_name,
+            namespace_name: info.namespace_name,
+            storage_location: info.storage_location,
+            data_source_format: info.data_source_format,
+            columns: info.columns.into_iter().map(PyColumnInfo::from).collect(),
         }
     }
 }

@@ -2,10 +2,13 @@
 
 #![deny(missing_docs)]
 
+/// Catalog metadata API.
+pub mod catalog;
 pub mod columnar_api;
 pub mod options;
 mod sql_api;
 
+pub use crate::catalog::{Catalog, CatalogInfo, ColumnInfo, NamespaceInfo, TableInfo};
 pub use crate::columnar_api::{EmbeddedConfig, StorageMode};
 pub use crate::options::DatabaseOptions;
 /// `Database::execute_sql()` / `Transaction::execute_sql()` の返却型。
@@ -45,12 +48,26 @@ pub enum Error {
     /// The transaction has already been completed and cannot be used.
     #[error("transaction is completed")]
     TxnCompleted,
+    /// The requested catalog was not found.
+    #[error("catalog not found: {0}")]
+    CatalogNotFound(String),
+    /// The requested namespace was not found.
+    #[error("namespace not found: {catalog}.{namespace}")]
+    NamespaceNotFound {
+        /// Catalog name.
+        catalog: String,
+        /// Namespace name.
+        namespace: String,
+    },
     /// The requested table was not found or is invalid.
     #[error("table not found: {0}")]
     TableNotFound(String),
     /// The operation requires in-memory columnar mode.
     #[error("not in in-memory columnar mode")]
     NotInMemoryMode,
+    /// The catalog store lock was poisoned.
+    #[error("catalog lock poisoned")]
+    CatalogLockPoisoned,
 }
 
 impl Error {
