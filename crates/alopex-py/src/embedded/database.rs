@@ -3,10 +3,16 @@ use std::sync::{Arc, Mutex, Weak};
 
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
+#[cfg(feature = "numpy")]
+use pyo3::PyObject;
 
 use crate::embedded::transaction::{PyTransaction, PyTransactionInner};
 use crate::error;
-use crate::types::{PyEmbeddedConfig, PyMemoryStats, PyTxnMode};
+#[cfg(feature = "numpy")]
+use crate::types::PySearchResult;
+use crate::types::{PyEmbeddedConfig, PyHnswConfig, PyHnswStats, PyMemoryStats, PyTxnMode};
+#[cfg(feature = "numpy")]
+use crate::vector;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -176,6 +182,47 @@ impl PyDatabase {
         self.closed = true;
         self.inner = None;
         Ok(())
+    }
+
+    fn create_hnsw_index(&self, name: &str, config: PyHnswConfig) -> PyResult<()> {
+        let db = self.ensure_open()?;
+        db.create_hnsw_index(name, config.into())
+            .map_err(error::embedded_err)
+    }
+
+    #[cfg(feature = "numpy")]
+    #[pyo3(signature = (name, query, k, ef_search = None))]
+    fn search_hnsw(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        query: PyObject,
+        k: usize,
+        ef_search: Option<usize>,
+    ) -> PyResult<(Vec<PySearchResult>, PyHnswStats)> {
+        let db = self.ensure_open()?;
+        vector::require_numpy(py)?;
+        let query = query.bind(py);
+        vector::with_ndarray_f32(query, |values| {
+            let (results, _stats) = db
+                .search_hnsw(name, values, k, ef_search)
+                .map_err(error::embedded_err)?;
+            let stats = db.get_hnsw_stats(name).map_err(error::embedded_err)?;
+            let results = results.into_iter().map(PySearchResult::from).collect();
+            Ok((results, PyHnswStats::from(stats)))
+        })
+    }
+
+    fn drop_hnsw_index(&self, name: &str) -> PyResult<()> {
+        let db = self.ensure_open()?;
+        db.drop_hnsw_index(name).map_err(error::embedded_err)
+    }
+
+    fn get_hnsw_stats(&self, name: &str) -> PyResult<PyHnswStats> {
+        let db = self.ensure_open()?;
+        db.get_hnsw_stats(name)
+            .map(PyHnswStats::from)
+            .map_err(error::embedded_err)
     }
 }
 

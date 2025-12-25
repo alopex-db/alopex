@@ -183,6 +183,39 @@ impl PyTransaction {
         })
     }
 
+    #[cfg(feature = "numpy")]
+    #[pyo3(signature = (name, key, vector, metadata = None))]
+    fn upsert_to_hnsw(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        key: &[u8],
+        vector: PyObject,
+        metadata: Option<PyObject>,
+    ) -> PyResult<()> {
+        vector::require_numpy(py)?;
+        let vector = vector.bind(py);
+        let payload: Vec<u8> = if let Some(metadata) = metadata {
+            let metadata = metadata.bind(py);
+            if metadata.is_none() {
+                Vec::new()
+            } else {
+                metadata.extract::<Vec<u8>>()?
+            }
+        } else {
+            Vec::new()
+        };
+        vector::with_ndarray_f32(vector, |values| {
+            self.with_txn_mut(|txn| txn.upsert_to_hnsw(name, key, values, &payload))
+        })
+    }
+
+    #[cfg(feature = "numpy")]
+    fn delete_from_hnsw(&self, name: &str, key: &[u8]) -> PyResult<()> {
+        self.with_txn_mut(|txn| txn.delete_from_hnsw(name, key))
+            .map(|_| ())
+    }
+
     fn commit(&self) -> PyResult<()> {
         self.finalize_with(|txn| txn.commit(), TxnState::Committed)
     }
