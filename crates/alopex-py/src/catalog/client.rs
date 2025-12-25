@@ -1,8 +1,16 @@
-use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use std::collections::HashMap;
 
+use pyo3::prelude::*;
+use pyo3::types::{PyAny, PyDict, PyModule};
+
+use crate::catalog::resolve_credentials;
 use crate::error;
 use crate::types::{PyCatalogInfo, PyColumnInfo, PyNamespaceInfo, PyTableInfo};
+
+#[allow(deprecated)]
+fn default_credential_provider() -> PyObject {
+    Python::with_gil(|py| "auto".into_py(py))
+}
 
 fn to_embedded_columns(columns: Vec<PyColumnInfo>) -> Vec<alopex_embedded::ColumnInfo> {
     columns
@@ -115,6 +123,54 @@ impl PyCatalog {
     fn delete_table(catalog_name: &str, namespace: &str, table_name: &str) -> PyResult<()> {
         alopex_embedded::Catalog::delete_table(catalog_name, namespace, table_name)
             .map_err(error::embedded_err)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (
+        catalog_name,
+        namespace,
+        table_name,
+        credential_provider = default_credential_provider(),
+        storage_options = None
+    ))]
+    fn scan_table(
+        py: Python<'_>,
+        catalog_name: &str,
+        namespace: &str,
+        table_name: &str,
+        credential_provider: PyObject,
+        storage_options: Option<HashMap<String, String>>,
+    ) -> PyResult<Py<PyAny>> {
+        require_polars(py)?;
+        let table_info =
+            alopex_embedded::Catalog::get_table_info(catalog_name, namespace, table_name)
+                .map_err(error::embedded_err)?;
+        if table_info.data_source_format.as_deref() != Some("parquet") {
+            return Err(error::to_py_err(format!(
+                "Unsupported format: {:?}",
+                table_info.data_source_format
+            )));
+        }
+        let storage_location = table_info
+            .storage_location
+            .ok_or_else(|| error::to_py_err("storage_location is required"))?;
+        let credential_provider = credential_provider.bind(py);
+        let resolved =
+            resolve_credentials(py, credential_provider, storage_options, &storage_location)?;
+        let polars = PyModule::import(py, "polars")?;
+        let scan_parquet = polars.getattr("scan_parquet")?;
+        let options = PyDict::new(py);
+        for (key, value) in resolved {
+            options.set_item(key, value)?;
+        }
+        let args = (storage_location,);
+        let kwargs = if options.is_empty() {
+            None
+        } else {
+            Some(options)
+        };
+        let lazy_frame = scan_parquet.call(args, kwargs.as_ref())?;
+        Ok(lazy_frame.into())
     }
 }
 
