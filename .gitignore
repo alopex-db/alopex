@@ -21,3 +21,13 @@ target
 #.idea/
 dhat-heap.json
 .cargo/config.toml
+
+# act (local GitHub Actions testing)
+.act-artifacts/
+.secrets
+
+# Python test artifacts
+.venv/
+**/__pycache__/
+.pytest_cache/
+crates/alopex-py/python/alopex/_alopex*.so
