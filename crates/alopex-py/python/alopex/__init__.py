@@ -1,8 +1,8 @@
 from . import _alopex as _alopex
-from ._alopex import catalog as _catalog
-from ._alopex import database as _database
-from ._alopex import transaction as _transaction
-from ._alopex import types as _types
+from ._alopex import catalog as _catalog  # type: ignore[attr-defined]
+from ._alopex import database as _database  # type: ignore[attr-defined]
+from ._alopex import transaction as _transaction  # type: ignore[attr-defined]
+from ._alopex import types as _types  # type: ignore[attr-defined]
 
 _EXCLUDE = {"catalog", "database", "transaction", "types"}
 _seen = set()
