@@ -8,10 +8,19 @@ description = "Embedded database interface for Alopex DB"
 keywords = ["database", "embedded"]
 categories = ["database-implementations"]
 
+[features]
+default = []
+s3 = ["alopex-core/s3", "tokio", "object_store", "bytes", "futures", "url"]
+
 [dependencies]
 alopex-core.workspace = true
 alopex-sql = { path = "../alopex-sql" }
 thiserror = "1.0"
+tokio = { workspace = true, optional = true }
+object_store = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.8"

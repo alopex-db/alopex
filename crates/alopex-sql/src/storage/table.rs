@@ -165,7 +165,8 @@ pub struct TableScanIterator<'a> {
 }
 
 impl<'a> TableScanIterator<'a> {
-    fn new(inner: Box<dyn Iterator<Item = (Key, Value)> + 'a>, table_id: u32) -> Self {
+    /// Create a new table scan iterator from a KV iterator and table ID.
+    pub fn new(inner: Box<dyn Iterator<Item = (Key, Value)> + 'a>, table_id: u32) -> Self {
         Self { inner, table_id }
     }
 }

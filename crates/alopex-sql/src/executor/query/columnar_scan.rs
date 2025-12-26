@@ -1,15 +1,18 @@
 use alopex_core::columnar::encoding::Column;
 use alopex_core::columnar::encoding_v2::Bitmap;
 use alopex_core::columnar::kvs_bridge::key_layout;
-use alopex_core::columnar::segment_v2::{ColumnSegmentV2, InMemorySegmentSource, SegmentReaderV2};
+use alopex_core::columnar::segment_v2::{
+    ColumnSegmentV2, InMemorySegmentSource, RecordBatch, SegmentReaderV2,
+};
 use alopex_core::kv::{KVStore, KVTransaction};
 use alopex_core::storage::format::bincode_config;
 use bincode::config::Options;
 
 use crate::ast::expr::BinaryOp;
-use crate::catalog::{RowIdMode, TableMetadata};
+use crate::catalog::{ColumnMetadata, RowIdMode, TableMetadata};
 use crate::columnar::statistics::RowGroupStatistics;
 use crate::executor::evaluator::{EvalContext, evaluate};
+use crate::executor::query::iterator::RowIterator;
 use crate::executor::{ExecutorError, Result, Row};
 use crate::planner::typed_expr::{Projection, TypedExpr, TypedExprKind};
 use crate::planner::types::ResolvedType;
@@ -149,6 +152,319 @@ impl ColumnarScan {
             }
         }
     }
+}
+
+// ============================================================================
+// ColumnarScanIterator - FR-7 Streaming Iterator for Columnar Storage
+// ============================================================================
+
+/// Pre-loaded segment data for streaming iteration.
+struct LoadedSegment {
+    /// Segment reader for reading row groups.
+    reader: SegmentReaderV2,
+    /// Row group statistics for pruning (if available).
+    row_group_stats: Option<Vec<RowGroupStatistics>>,
+    /// Row IDs for RowIdMode::Direct.
+    row_ids: Vec<u64>,
+    /// Row group metadata for row ID slicing.
+    row_groups: Vec<alopex_core::columnar::segment_v2::RowGroupMeta>,
+}
+
+/// Streaming iterator for columnar storage (FR-7 compliant).
+///
+/// This iterator yields rows one at a time from columnar storage,
+/// avoiding the need to materialize all rows into a `Vec<Row>` upfront.
+/// Segments are pre-loaded during construction, but row conversion is
+/// performed lazily as rows are requested.
+pub struct ColumnarScanIterator {
+    /// Pre-loaded segments.
+    segments: Vec<LoadedSegment>,
+    /// Current segment index.
+    segment_idx: usize,
+    /// Current row group index within the segment.
+    row_group_idx: usize,
+    /// Current row index within the batch.
+    row_idx: usize,
+    /// Current loaded RecordBatch (lazy loaded per row group).
+    current_batch: Option<RecordBatch>,
+    /// Projected column indices.
+    projected: Vec<usize>,
+    /// Table metadata.
+    table_meta: TableMetadata,
+    /// Schema for RowIterator trait.
+    schema: Vec<ColumnMetadata>,
+    /// ColumnarScan operator for filter evaluation.
+    scan: ColumnarScan,
+    /// RowID column index for RowIdMode::Direct.
+    row_id_col_idx: Option<usize>,
+    /// Next synthetic row ID (for RowIdMode::None).
+    next_row_id: u64,
+}
+
+impl ColumnarScanIterator {
+    /// Advances to the next valid row, loading batches as needed.
+    ///
+    /// Returns `Some(Ok(row))` for valid rows, `Some(Err(_))` for errors,
+    /// or `None` when all rows have been consumed.
+    fn advance(&mut self) -> Option<Result<Row>> {
+        loop {
+            // Check if we need to load a new batch
+            if self.current_batch.is_none() && !self.load_next_batch() {
+                return None; // No more batches
+            }
+
+            // Get row count to check if exhausted
+            let row_count = match &self.current_batch {
+                Some(batch) => batch.num_rows(),
+                None => continue,
+            };
+
+            // Check if we've exhausted the current batch
+            if self.row_idx >= row_count {
+                self.current_batch = None;
+                self.row_idx = 0;
+                self.row_group_idx += 1;
+                continue;
+            }
+
+            // Convert current row (take batch temporarily to avoid borrow conflict)
+            let row_idx = self.row_idx;
+            match self.convert_current_row(row_idx) {
+                Ok(Some(row)) => {
+                    self.row_idx += 1;
+                    return Some(Ok(row));
+                }
+                Ok(None) => {
+                    // Row filtered out by residual filter
+                    self.row_idx += 1;
+                    continue;
+                }
+                Err(e) => {
+                    self.row_idx += 1;
+                    return Some(Err(e));
+                }
+            }
+        }
+    }
+
+    /// Loads the next row group batch, advancing segments as needed.
+    ///
+    /// Returns `true` if a batch was successfully loaded, `false` if no more data.
+    fn load_next_batch(&mut self) -> bool {
+        while self.segment_idx < self.segments.len() {
+            let segment = &self.segments[self.segment_idx];
+            let row_group_count = segment.row_groups.len();
+
+            while self.row_group_idx < row_group_count {
+                // Check if this row group should be skipped via pushdown
+                let should_skip = match segment.row_group_stats.as_ref() {
+                    Some(stats) if stats.len() == row_group_count => {
+                        self.scan.should_skip_row_group(&stats[self.row_group_idx])
+                    }
+                    _ => false,
+                };
+
+                if should_skip {
+                    self.row_group_idx += 1;
+                    continue;
+                }
+
+                // Load the batch
+                match segment
+                    .reader
+                    .read_row_group_by_index(&self.projected, self.row_group_idx)
+                {
+                    Ok(mut batch) => {
+                        // Attach row IDs if available
+                        if !segment.row_ids.is_empty()
+                            && let Some(meta) = segment.row_groups.get(self.row_group_idx)
+                        {
+                            let start = meta.row_start as usize;
+                            let end = start + meta.row_count as usize;
+                            if end <= segment.row_ids.len() {
+                                batch =
+                                    batch.with_row_ids(Some(segment.row_ids[start..end].to_vec()));
+                            }
+                        }
+                        self.current_batch = Some(batch);
+                        self.row_idx = 0;
+                        return true;
+                    }
+                    Err(_) => {
+                        // Skip this row group on error
+                        self.row_group_idx += 1;
+                        continue;
+                    }
+                }
+            }
+
+            // Move to next segment
+            self.segment_idx += 1;
+            self.row_group_idx = 0;
+        }
+
+        false
+    }
+
+    /// Converts a row from the current batch, applying residual filter.
+    ///
+    /// Returns `Ok(Some(row))` if row passes filter, `Ok(None)` if filtered out.
+    fn convert_current_row(&mut self, row_idx: usize) -> Result<Option<Row>> {
+        let batch = self
+            .current_batch
+            .as_ref()
+            .ok_or_else(|| ExecutorError::Columnar("no current batch".into()))?;
+
+        let column_count = self.table_meta.column_count();
+        let mut values = vec![SqlValue::Null; column_count];
+
+        for (pos, &table_col_idx) in self.projected.iter().enumerate() {
+            let column = batch
+                .columns
+                .get(pos)
+                .ok_or_else(|| ExecutorError::Columnar("missing projected column".into()))?;
+            let bitmap = batch.null_bitmaps.get(pos).and_then(|b| b.as_ref());
+            let col_meta = self
+                .table_meta
+                .columns
+                .get(table_col_idx)
+                .ok_or_else(|| ExecutorError::Columnar("column index out of bounds".into()))?;
+            let value = value_from_column(column, bitmap, row_idx, &col_meta.data_type)?;
+            values[table_col_idx] = value;
+        }
+
+        // Apply residual filter
+        if let Some(predicate) = self.scan.residual_filter.as_ref() {
+            let ctx = EvalContext::new(&values);
+            let keep = matches!(evaluate(predicate, &ctx)?, SqlValue::Boolean(true));
+            if !keep {
+                return Ok(None);
+            }
+        }
+
+        // Determine row ID - need to access batch again for row_ids
+        let batch = self
+            .current_batch
+            .as_ref()
+            .ok_or_else(|| ExecutorError::Columnar("no current batch".into()))?;
+
+        let row_id = match self.table_meta.storage_options.row_id_mode {
+            RowIdMode::Direct => {
+                if let Some(row_ids) = batch.row_ids.as_ref() {
+                    *row_ids.get(row_idx).ok_or_else(|| {
+                        ExecutorError::Columnar(
+                            "row_id missing for row in row_id_mode=direct".into(),
+                        )
+                    })?
+                } else if let Some(idx) = self.row_id_col_idx {
+                    let val = values.get(idx).ok_or_else(|| {
+                        ExecutorError::Columnar("row_id column missing in projected values".into())
+                    })?;
+                    match val {
+                        SqlValue::Integer(v) if *v >= 0 => *v as u64,
+                        SqlValue::BigInt(v) if *v >= 0 => *v as u64,
+                        other => {
+                            return Err(ExecutorError::Columnar(format!(
+                                "row_id column must be non-negative integer, got {}",
+                                other.type_name()
+                            )));
+                        }
+                    }
+                } else {
+                    let rid = self.next_row_id;
+                    self.next_row_id = self.next_row_id.saturating_add(1);
+                    rid
+                }
+            }
+            RowIdMode::None => {
+                let rid = self.next_row_id;
+                self.next_row_id = self.next_row_id.saturating_add(1);
+                rid
+            }
+        };
+
+        Ok(Some(Row::new(row_id, values)))
+    }
+}
+
+impl RowIterator for ColumnarScanIterator {
+    fn next_row(&mut self) -> Option<Result<Row>> {
+        self.advance()
+    }
+
+    fn schema(&self) -> &[ColumnMetadata] {
+        &self.schema
+    }
+}
+
+/// Create a streaming columnar scan iterator (FR-7 compliant).
+///
+/// This function pre-loads segment data during construction but yields rows
+/// one at a time during iteration, avoiding full materialization of all rows.
+///
+/// # Arguments
+///
+/// * `txn` - Transaction for loading segment data
+/// * `table_meta` - Table metadata
+/// * `scan` - ColumnarScan operator with projection and filters
+///
+/// # Returns
+///
+/// A `ColumnarScanIterator` that implements `RowIterator`.
+pub fn create_columnar_scan_iterator<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    table_meta: &TableMetadata,
+    scan: &ColumnarScan,
+) -> Result<ColumnarScanIterator> {
+    debug_assert_eq!(scan.table_id, table_meta.table_id);
+
+    let projected: Vec<usize> = if scan.projected_columns.is_empty() {
+        (0..table_meta.columns.len()).collect()
+    } else {
+        scan.projected_columns.clone()
+    };
+
+    let segment_ids = load_segment_index(txn, table_meta.table_id)?;
+
+    let row_id_col_idx = if table_meta.storage_options.row_id_mode == RowIdMode::Direct {
+        table_meta
+            .columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case("row_id"))
+    } else {
+        None
+    };
+
+    // Pre-load all segments
+    let mut segments = Vec::with_capacity(segment_ids.len());
+    for segment_id in segment_ids {
+        let segment = load_segment(txn, table_meta.table_id, segment_id)?;
+        let reader =
+            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))
+                .map_err(|e| ExecutorError::Columnar(e.to_string()))?;
+        let row_group_stats = load_row_group_stats(txn, table_meta.table_id, segment_id);
+
+        segments.push(LoadedSegment {
+            reader,
+            row_group_stats,
+            row_ids: segment.row_ids.clone(),
+            row_groups: segment.meta.row_groups.clone(),
+        });
+    }
+
+    Ok(ColumnarScanIterator {
+        segments,
+        segment_idx: 0,
+        row_group_idx: 0,
+        row_idx: 0,
+        current_batch: None,
+        projected,
+        schema: table_meta.columns.clone(),
+        table_meta: table_meta.clone(),
+        scan: scan.clone(),
+        row_id_col_idx,
+        next_row_id: 0,
+    })
 }
 
 /// ColumnarScan を実行する。

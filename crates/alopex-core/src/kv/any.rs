@@ -1,4 +1,4 @@
-//! 複数の KV 実装（MemoryKV / LsmKV）を 1 つの型にまとめるためのラッパー。
+//! 複数の KV 実装（MemoryKV / LsmKV / S3KV）を 1 つの型にまとめるためのラッパー。
 //!
 //! `KVStore` / `KVTransaction` は GAT を含むため `dyn KVStore` としてオブジェクト安全に扱いづらい。
 //! そのため、列挙型で具体型をまとめて扱う。
@@ -10,12 +10,18 @@ use crate::lsm::{LsmKV, LsmTransaction, LsmTxnManagerRef};
 use crate::txn::TxnManager;
 use crate::types::{TxnId, TxnMode};
 
-/// ディスク/インメモリいずれの KV も扱えるラッパー。
+#[cfg(feature = "s3")]
+use crate::kv::s3::S3KV;
+
+/// ディスク/インメモリ/S3 いずれの KV も扱えるラッパー。
 pub enum AnyKV {
     /// 既存のインメモリ KV（永続化パスも持つ）。
     Memory(MemoryKV),
     /// LSM-Tree（file-mode）。
     Lsm(Box<LsmKV>),
+    /// S3-backed storage (requires `s3` feature).
+    #[cfg(feature = "s3")]
+    S3(Box<S3KV>),
 }
 
 impl AnyKV {
@@ -24,6 +30,8 @@ impl AnyKV {
         match self {
             Self::Memory(kv) => kv.flush(),
             Self::Lsm(kv) => kv.flush(),
+            #[cfg(feature = "s3")]
+            Self::S3(kv) => kv.flush(),
         }
     }
 }
@@ -148,6 +156,8 @@ impl KVStore for AnyKV {
         match self {
             Self::Memory(kv) => AnyKVManager::Memory(kv.txn_manager()),
             Self::Lsm(kv) => AnyKVManager::Lsm(kv.as_ref().txn_manager()),
+            #[cfg(feature = "s3")]
+            Self::S3(kv) => AnyKVManager::Lsm(kv.inner().txn_manager()),
         }
     }
 
@@ -155,6 +165,8 @@ impl KVStore for AnyKV {
         match self {
             Self::Memory(kv) => Ok(AnyKVTransaction::Memory(kv.begin(mode)?)),
             Self::Lsm(kv) => Ok(AnyKVTransaction::Lsm(kv.as_ref().begin(mode)?)),
+            #[cfg(feature = "s3")]
+            Self::S3(kv) => Ok(AnyKVTransaction::Lsm(kv.inner().begin(mode)?)),
         }
     }
 }

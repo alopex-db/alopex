@@ -52,24 +52,18 @@ impl RowIterator for Box<dyn RowIterator + '_> {
 }
 
 // ============================================================================
-// ScanIterator - Reads rows from storage (reserved for future streaming)
+// ScanIterator - Reads rows from storage for true streaming execution
 // ============================================================================
 
 /// Iterator that reads rows from table storage.
 ///
 /// This is the leaf node in the iterator tree, providing rows from the
-/// underlying storage layer.
-///
-/// **Note**: Currently unused due to lifetime constraints with SqlTransaction.
-/// Reserved for future true streaming execution when those constraints are resolved.
-/// The current implementation uses VecIterator after collecting all rows from scan.
-#[allow(dead_code)]
+/// underlying storage layer. Used for FR-7 streaming output compliance.
 pub struct ScanIterator<'a> {
     inner: TableScanIterator<'a>,
     schema: Vec<ColumnMetadata>,
 }
 
-#[allow(dead_code)]
 impl<'a> ScanIterator<'a> {
     /// Creates a new scan iterator from a table scan iterator and metadata.
     pub fn new(inner: TableScanIterator<'a>, table_meta: &TableMetadata) -> Self {

@@ -10,7 +10,14 @@ pub mod memory;
 /// Storage mode selection helpers (disk vs memory).
 pub mod storage;
 
+/// S3-backed storage (requires `s3` feature).
+#[cfg(feature = "s3")]
+pub mod s3;
+
 pub use any::AnyKV;
+
+#[cfg(feature = "s3")]
+pub use s3::{S3Config, S3KV};
 
 /// A transaction for interacting with the key-value store.
 ///

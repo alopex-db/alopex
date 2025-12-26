@@ -150,6 +150,12 @@ impl InMemorySegmentStore {
             .ok_or(ColumnarError::NotFound)?;
         Ok(segment.meta.schema.column_count())
     }
+
+    /// すべてのセグメント (table_id, segment_id) を返す。
+    pub fn list_segments(&self) -> Vec<(u32, u64)> {
+        let guard = self.segments.read().unwrap();
+        guard.keys().cloned().collect()
+    }
 }
 
 #[cfg(test)]

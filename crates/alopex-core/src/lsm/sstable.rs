@@ -1398,7 +1398,10 @@ mod tests {
             b"v2".to_vec()
         );
         assert!(r.get(b"b", 99).unwrap().unwrap().value.is_none());
-        assert_eq!(r.get(b"c", 99).unwrap().unwrap().value.unwrap(), Vec::new());
+        assert_eq!(
+            r.get(b"c", 99).unwrap().unwrap().value.unwrap(),
+            Vec::<u8>::new()
+        );
     }
 
     #[test]

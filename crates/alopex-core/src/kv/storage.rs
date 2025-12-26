@@ -4,6 +4,9 @@ use crate::kv::memory::MemoryKV;
 use crate::lsm::{LsmKV, LsmKVConfig};
 use std::path::PathBuf;
 
+#[cfg(feature = "s3")]
+use crate::kv::s3::S3Config;
+
 /// Storage mode selection for the KV store.
 pub enum StorageMode {
     /// Disk-backed storage using LSM-Tree (file-mode).
@@ -18,6 +21,12 @@ pub enum StorageMode {
         /// Optional memory cap in bytes; None means unlimited.
         max_size: Option<usize>,
     },
+    /// S3-backed storage (requires `s3` feature).
+    #[cfg(feature = "s3")]
+    S3 {
+        /// S3 configuration.
+        config: S3Config,
+    },
 }
 
 /// Factory for creating storage instances based on mode.
@@ -28,6 +37,7 @@ impl StorageFactory {
     ///
     /// - Disk: LsmKV（file-mode）を使用する。
     /// - Memory: 既存の MemoryKV を使用する。
+    /// - S3: S3KV（requires `s3` feature）を使用する。
     pub fn create(mode: StorageMode) -> Result<AnyKV> {
         match mode {
             StorageMode::Disk { path, config } => {
@@ -39,6 +49,11 @@ impl StorageFactory {
             }
             StorageMode::Memory { max_size } => {
                 Ok(AnyKV::Memory(MemoryKV::new_with_limit(max_size)))
+            }
+            #[cfg(feature = "s3")]
+            StorageMode::S3 { config } => {
+                let kv = crate::kv::s3::S3KV::open(config)?;
+                Ok(AnyKV::S3(Box::new(kv)))
             }
         }
     }
