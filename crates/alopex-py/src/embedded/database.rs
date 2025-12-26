@@ -8,9 +8,9 @@ use pyo3::PyObject;
 
 use crate::embedded::transaction::{PyTransaction, PyTransactionInner};
 use crate::error;
+use crate::types::{PyEmbeddedConfig, PyMemoryStats, PyTxnMode};
 #[cfg(feature = "numpy")]
-use crate::types::PySearchResult;
-use crate::types::{PyEmbeddedConfig, PyHnswConfig, PyHnswStats, PyMemoryStats, PyTxnMode};
+use crate::types::{PyHnswConfig, PyHnswStats, PySearchResult};
 #[cfg(feature = "numpy")]
 use crate::vector;
 
@@ -186,6 +186,7 @@ impl PyDatabase {
         Ok(())
     }
 
+    #[cfg(feature = "numpy")]
     fn create_hnsw_index(&self, name: &str, config: PyHnswConfig) -> PyResult<()> {
         let db = self.ensure_open()?;
         db.create_hnsw_index(name, config.into())
@@ -217,11 +218,13 @@ impl PyDatabase {
         })
     }
 
+    #[cfg(feature = "numpy")]
     fn drop_hnsw_index(&self, name: &str) -> PyResult<()> {
         let db = self.ensure_open()?;
         db.drop_hnsw_index(name).map_err(error::embedded_err)
     }
 
+    #[cfg(feature = "numpy")]
     fn get_hnsw_stats(&self, name: &str) -> PyResult<PyHnswStats> {
         let db = self.ensure_open()?;
         db.get_hnsw_stats(name)

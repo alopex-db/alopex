@@ -28,6 +28,8 @@ jobs:
         uses: actions/checkout@v4
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - name: Cargo fmt
         run: cargo fmt --all -- --check
       - name: Cargo clippy
@@ -44,31 +46,81 @@ jobs:
         feature: ["numpy", "no-numpy"]
     steps:
       - name: Checkout
+        if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         uses: actions/checkout@v4
       - name: Setup Python
+        if: ${{ !env.ACT }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
       - name: Setup Rust
+        if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         uses: dtolnay/rust-toolchain@stable
       - name: Install base dependencies
+        if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         run: |
+          if [[ -n "${ACT:-}" ]]; then
+            rm -rf .venv
+            python3 -m venv .venv
+            echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+            source .venv/bin/activate
+            python -m pip install --upgrade pip
+            python -m pip install maturin pytest pytest-benchmark
+            exit 0
+          fi
           python -m pip install --upgrade pip
           python -m pip install maturin pytest
       - name: Install numpy
-        if: matrix.feature == 'numpy'
-        run: python -m pip install numpy
-      - name: Maturin develop
+        if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.feature == 'numpy' }}
         run: |
+          if [[ -n "${ACT:-}" ]]; then
+            python -m pip install numpy
+            exit 0
+          fi
+          python -m pip install numpy
+      - name: Install patchelf (Linux)
+        if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
+        run: |
+          if [[ "${{ matrix.os }}" != "ubuntu-latest" ]]; then
+            exit 0
+          fi
+          if command -v patchelf &> /dev/null; then
+            exit 0
+          fi
+          if command -v sudo &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y patchelf
+            exit 0
+          fi
+          apt-get update
+          apt-get install -y patchelf
+      - name: Maturin develop
+        if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
+        run: |
+          if [[ -n "${ACT:-}" ]]; then
+            if [[ "${{ matrix.feature }}" == "numpy" ]]; then
+              maturin develop -m crates/alopex-py/Cargo.toml --features numpy
+            else
+              maturin develop -m crates/alopex-py/Cargo.toml
+            fi
+            exit 0
+          fi
           if [[ "${{ matrix.feature }}" == "numpy" ]]; then
             maturin develop -m crates/alopex-py/pyproject.toml --features numpy
           else
             maturin develop -m crates/alopex-py/pyproject.toml
           fi
       - name: Run pytest
-        run: pytest crates/alopex-py/tests
+        if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
+        run: |
+          if [[ -n "${ACT:-}" ]]; then
+            python -m pytest crates/alopex-py/tests -k "not benchmark"
+            exit 0
+          fi
+          pytest crates/alopex-py/tests
       - name: Verify vector APIs are absent
-        if: matrix.feature == 'no-numpy'
+        if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.feature == 'no-numpy' }}
         run: |
           python - <<'PY'
           from alopex import Database, Transaction
@@ -99,15 +151,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Setup Python
+        if: ${{ !env.ACT }}
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Install mypy
         run: |
+          if [[ -n "${ACT:-}" ]]; then
+            python3 -m venv .venv
+            echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+            source .venv/bin/activate
+            python -m pip install --upgrade pip
+            python -m pip install mypy
+            exit 0
+          fi
           python -m pip install --upgrade pip
           python -m pip install mypy
       - name: Run mypy
-        run: mypy crates/alopex-py/python/alopex
+        run: |
+          if [[ -n "${ACT:-}" ]]; then
+            python3 -m mypy crates/alopex-py/python/alopex
+            exit 0
+          fi
+          mypy crates/alopex-py/python/alopex
 
   ci-success:
     name: ci-success

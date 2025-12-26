@@ -1,0 +1,23 @@
+FROM catthehacker/ubuntu:act-latest
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        patchelf \
+        python3 \
+        python3-venv \
+        python3-pip \
+        python3-dev \
+        python-is-python3 \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
+    && rustup --version \
+    && rustup toolchain install stable \
+    && rustup default stable
