@@ -284,11 +284,9 @@ impl MemoryTxnManager {
 
     /// Flushes the current in-memory data to an SSTable file.
     pub fn flush(&self) -> Result<()> {
-        let path = self
-            .state
-            .sstable_path
-            .as_ref()
-            .ok_or_else(|| Error::InvalidFormat("sstable path is not configured".into()))?;
+        let Some(path) = self.state.sstable_path.as_ref() else {
+            return Ok(());
+        };
 
         let data = self.state.data.read().unwrap();
         let mut writer = SstableWriter::create(path)?;

@@ -129,18 +129,13 @@ pub enum TableType {
     External,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DataSourceFormat {
+    #[default]
     Alopex,
     Parquet,
     Delta,
-}
-
-impl Default for DataSourceFormat {
-    fn default() -> Self {
-        Self::Alopex
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

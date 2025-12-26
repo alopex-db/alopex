@@ -53,12 +53,16 @@ pub fn vec_to_ndarray<'py>(py: Python<'py>, values: &[f32]) -> PyResult<PyObject
 mod tests {
     use super::with_ndarray_f32;
     use numpy::PyArray1;
+    use pyo3::types::PyModule;
     use pyo3::IntoPyObject;
     use pyo3::Python;
 
     #[test]
     fn ndarray_to_vec_converts_to_float32() {
         Python::with_gil(|py| {
+            if PyModule::import(py, "numpy").is_err() {
+                return;
+            }
             let array = PyArray1::from_vec(py, vec![1.25_f64, 2.5_f64]);
             let bound = array.into_pyobject(py).unwrap();
             let values =

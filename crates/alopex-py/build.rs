@@ -26,7 +26,14 @@ fn main() {
     }
 
     let python = env::var("PYO3_PYTHON").unwrap_or_else(|_| "python3".to_string());
-    let config = python_config_from_exe(&python).unwrap_or_else(|| PathBuf::from("python3-config"));
+    let mut config =
+        python_config_from_exe(&python).unwrap_or_else(|| PathBuf::from("python3-config"));
+    if config.as_path() == Path::new("python3-config") {
+        let system_config = PathBuf::from("/usr/bin/python3-config");
+        if system_config.exists() {
+            config = system_config;
+        }
+    }
     let output = match Command::new(&config)
         .args(["--ldflags", "--embed"])
         .output()

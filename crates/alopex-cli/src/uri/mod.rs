@@ -161,6 +161,12 @@ pub fn validate_s3_credentials() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     // ========== Local URI Tests ==========
 
@@ -280,6 +286,8 @@ mod tests {
 
     #[test]
     fn test_validate_s3_credentials_missing() {
+        let _guard = env_lock().lock().unwrap();
+
         // Save current values
         let access_key = std::env::var("AWS_ACCESS_KEY_ID").ok();
         let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
@@ -309,6 +317,8 @@ mod tests {
 
     #[test]
     fn test_validate_s3_credentials_present() {
+        let _guard = env_lock().lock().unwrap();
+
         // Save current values
         let access_key = std::env::var("AWS_ACCESS_KEY_ID").ok();
         let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY").ok();

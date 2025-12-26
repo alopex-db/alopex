@@ -18,6 +18,6 @@ def test_binding_overhead_get_put(benchmark):
     benchmark.pedantic(
         run,
         iterations=10000,
+        rounds=1,
         warmup_rounds=1,
-        warmup_iterations=1000,
     )

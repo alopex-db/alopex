@@ -3400,14 +3400,17 @@ mod tests {
                     }
                 }
                 if cfg.per_stream_lz4 {
-                    if let Ok(compressed) = lz4::block::compress(
-                        stream,
-                        Some(lz4::block::CompressionMode::HIGHCOMPRESSION(12)),
-                        false,
-                    ) {
-                        if compressed.len() < stream.len() {
-                            payload_concat.extend_from_slice(&compressed);
-                            continue;
+                    #[cfg(feature = "compression-lz4")]
+                    {
+                        if let Ok(compressed) = lz4::block::compress(
+                            stream,
+                            Some(lz4::block::CompressionMode::HIGHCOMPRESSION(12)),
+                            false,
+                        ) {
+                            if compressed.len() < stream.len() {
+                                payload_concat.extend_from_slice(&compressed);
+                                continue;
+                            }
                         }
                     }
                 }
@@ -3647,6 +3650,7 @@ mod tests {
                     .len() as f32;
             #[cfg(not(feature = "compression-zstd"))]
             let compressed_len_outer_zstd = 0f32;
+            #[cfg(feature = "compression-lz4")]
             let compressed_len_per_stream: usize = if cfg.per_stream_lz4 {
                 encoded.sign_bytes.len()
                     + encoded
@@ -3665,6 +3669,8 @@ mod tests {
             } else {
                 0
             };
+            #[cfg(not(feature = "compression-lz4"))]
+            let compressed_len_per_stream: usize = 0;
             #[cfg(feature = "compression-zstd")]
             let compressed_len_per_stream_zstd: usize = if cfg.per_stream_zstd {
                 encoded.sign_bytes.len()
