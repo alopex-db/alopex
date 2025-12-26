@@ -549,6 +549,15 @@ impl<'a> MemoryTransaction<'a> {
         Ok(())
     }
 
+    /// トランザクションを消費せずにロールバックする。
+    pub(crate) fn rollback_in_place(&mut self) -> Result<()> {
+        if self.state != TxnState::Active {
+            return Err(Error::TxnClosed);
+        }
+        self.state = TxnState::RolledBack;
+        Ok(())
+    }
+
     fn scan_range_internal(&mut self, start: &[u8], end: &[u8]) -> MergedScanIter<'_> {
         let start_vec = start.to_vec();
         let end_vec = end.to_vec();

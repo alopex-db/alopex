@@ -2,11 +2,14 @@
 
 #![deny(missing_docs)]
 
+/// Catalog metadata API (in-memory, primarily for Python bindings).
+pub mod catalog;
 pub mod catalog_api;
 pub mod columnar_api;
 pub mod options;
 mod sql_api;
 
+pub use crate::catalog::Catalog;
 pub use crate::catalog_api::{
     CatalogInfo, ColumnDefinition, ColumnInfo, CreateCatalogRequest, CreateNamespaceRequest,
     CreateTableRequest, IndexInfo, NamespaceInfo, StorageInfo, TableInfo,
@@ -96,6 +99,12 @@ pub enum Error {
     /// The operation requires in-memory columnar mode.
     #[error("not in in-memory columnar mode")]
     NotInMemoryMode,
+    /// The requested data source format is not supported.
+    #[error("unsupported data source format: {0}")]
+    UnsupportedDataSourceFormat(String),
+    /// The catalog store lock was poisoned.
+    #[error("catalog lock poisoned")]
+    CatalogLockPoisoned,
 }
 
 impl Error {
@@ -700,6 +709,19 @@ impl<'a> Transaction<'a> {
         // KV commit 成功後のみ、カタログにオーバーレイを適用する。
         let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
         catalog.apply_overlay(std::mem::take(&mut self.overlay));
+        Ok(())
+    }
+
+    /// トランザクションを消費せずにロールバックする（失敗時の再試行を可能にする）。
+    pub fn rollback_in_place(&mut self) -> Result<()> {
+        let txn = self.inner.as_mut().ok_or(Error::TxnCompleted)?;
+        txn.rollback_in_place().map_err(Error::Core)?;
+        for (_, (index, state)) in self.hnsw_indices.iter_mut() {
+            let _ = index.rollback(state);
+        }
+        self.hnsw_indices.clear();
+        self.overlay = alopex_sql::catalog::CatalogOverlay::default();
+        self.inner = None;
         Ok(())
     }
 

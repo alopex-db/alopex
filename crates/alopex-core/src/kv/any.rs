@@ -116,6 +116,16 @@ impl<'a> KVTransaction<'a> for AnyKVTransaction<'a> {
     }
 }
 
+impl<'a> AnyKVTransaction<'a> {
+    /// トランザクションを消費せずにロールバックする。
+    pub fn rollback_in_place(&mut self) -> Result<()> {
+        match self {
+            Self::Memory(tx) => tx.rollback_in_place(),
+            Self::Lsm(tx) => tx.rollback_in_place(),
+        }
+    }
+}
+
 /// `AnyKV` のトランザクションマネージャ（薄いラッパー）。
 #[derive(Clone, Copy)]
 pub enum AnyKVManager<'a> {

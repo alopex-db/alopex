@@ -1,0 +1,124 @@
+name: alopex-py-release
+
+on:
+  push:
+    tags:
+      - "alopex-py-v*"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  linux:
+    name: linux (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          manylinux: auto
+          args: -m crates/alopex-py/pyproject.toml --release --out dist
+          target: ${{ matrix.target }}
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist/*
+
+  macos:
+    name: macos (${{ matrix.target }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: -m crates/alopex-py/pyproject.toml --release --out dist
+          target: ${{ matrix.target }}
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist/*
+
+  windows:
+    name: windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: -m crates/alopex-py/pyproject.toml --release --out dist
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64
+          path: dist/*
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: -m crates/alopex-py/pyproject.toml --out dist
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*
+
+  publish-pypi:
+    name: publish-pypi
+    runs-on: ubuntu-latest
+    needs: [linux, macos, windows, sdist]
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Publish to PyPI
+        uses: PyO3/maturin-action@v1
+        with:
+          command: upload
+          args: --non-interactive --skip-existing dist/**/*
+
+  github-release:
+    name: github-release
+    runs-on: ubuntu-latest
+    needs: [linux, macos, windows, sdist]
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*

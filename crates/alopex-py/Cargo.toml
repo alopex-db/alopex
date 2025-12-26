@@ -1,0 +1,31 @@
+[package]
+name = "alopex-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Python bindings for Alopex DB"
+keywords = ["database", "python", "bindings"]
+categories = ["database-implementations", "api-bindings"]
+build = "build.rs"
+
+[lib]
+name = "_alopex"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["abi3-py38", "extension-module"] }
+numpy = { version = "0.23", optional = true }
+alopex-core.workspace = true
+alopex-embedded = { path = "../alopex-embedded" }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[features]
+default = []
+numpy = ["dep:numpy"]
+
+[[bench]]
+name = "binding_overhead"
+harness = false
