@@ -25,7 +25,7 @@ jobs:
         with:
           command: build
           manylinux: auto
-          args: -m crates/alopex-py/pyproject.toml --release --out dist
+          args: -m crates/alopex-py/Cargo.toml --release --out dist
           target: ${{ matrix.target }}
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -47,7 +47,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: -m crates/alopex-py/pyproject.toml --release --out dist
+          args: -m crates/alopex-py/Cargo.toml --release --out dist
           target: ${{ matrix.target }}
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -65,7 +65,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: -m crates/alopex-py/pyproject.toml --release --out dist
+          args: -m crates/alopex-py/Cargo.toml --release --out dist
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -82,7 +82,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
-          args: -m crates/alopex-py/pyproject.toml --out dist
+          args: -m crates/alopex-py/Cargo.toml --out dist
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
