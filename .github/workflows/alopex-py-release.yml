@@ -108,10 +108,11 @@ jobs:
           find dist -name "*.tar.gz" -exec cp {} wheels/ \;
           ls -la wheels/
       - name: Publish to TestPyPI
-        uses: PyO3/maturin-action@v1
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          command: upload
-          args: --non-interactive --skip-existing --repository testpypi wheels/*
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: wheels/
+          skip-existing: true
 
   verify-testpypi:
     name: verify-testpypi
@@ -153,10 +154,10 @@ jobs:
           find dist -name "*.tar.gz" -exec cp {} wheels/ \;
           ls -la wheels/
       - name: Publish to PyPI
-        uses: PyO3/maturin-action@v1
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          command: upload
-          args: --non-interactive --skip-existing wheels/*
+          packages-dir: wheels/
+          skip-existing: true
 
   github-release:
     name: github-release
