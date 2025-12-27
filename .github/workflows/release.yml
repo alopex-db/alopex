@@ -37,19 +37,19 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: alopex-cli
+            artifact_name: alopex
             asset_name: alopex-linux-x86_64
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact_name: alopex-cli
+            artifact_name: alopex
             asset_name: alopex-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: alopex-cli
+            artifact_name: alopex
             asset_name: alopex-macos-aarch64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: alopex-cli.exe
+            artifact_name: alopex.exe
             asset_name: alopex-windows-x86_64.exe
 
     steps:
