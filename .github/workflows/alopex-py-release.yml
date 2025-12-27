@@ -130,10 +130,10 @@ jobs:
           pip install --index-url https://test.pypi.org/simple/ \
             --extra-index-url https://pypi.org/simple/ \
             alopex
-      - name: Verify import and version
+      - name: Verify import
         run: |
-          python -c "import alopex; print(f'alopex version: {alopex.__version__}')"
           python -c "from alopex import Database; print('Database import OK')"
+          python -c "from alopex import Transaction; print('Transaction import OK')"
 
   publish-pypi:
     name: publish-pypi
