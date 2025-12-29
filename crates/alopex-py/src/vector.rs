@@ -229,6 +229,17 @@ mod tests {
     use pyo3::PyResult;
     use pyo3::Python;
     use std::fmt::Display;
+    use std::sync::Once;
+
+    static PY_INIT: Once = Once::new();
+
+    fn with_py<F, R>(f: F) -> R
+    where
+        F: for<'py> FnOnce(Python<'py>) -> R,
+    {
+        PY_INIT.call_once(pyo3::prepare_freethreaded_python);
+        Python::with_gil(f)
+    }
 
     fn tc_fail(msg: impl Into<String>) -> TestCaseError {
         TestCaseError::fail(msg.into())
@@ -244,7 +255,7 @@ mod tests {
 
     #[test]
     fn ndarray_to_vec_converts_to_float32() {
-        Python::with_gil(|py| {
+        with_py(|py| {
             if PyModule::import(py, "numpy").is_err() {
                 return;
             }
@@ -258,7 +269,7 @@ mod tests {
 
     #[test]
     fn with_ndarray_f32_gil_safe_borrowed_for_contiguous_f32() {
-        Python::with_gil(|py| {
+        with_py(|py| {
             if PyModule::import(py, "numpy").is_err() {
                 return;
             }
@@ -283,7 +294,7 @@ mod tests {
 
     #[test]
     fn with_ndarray_f32_gil_safe_owned_for_strided_f32() {
-        Python::with_gil(|py| {
+        with_py(|py| {
             let numpy = match PyModule::import(py, "numpy") {
                 Ok(m) => m,
                 Err(_) => return,
@@ -305,7 +316,7 @@ mod tests {
 
     #[test]
     fn with_ndarray_f32_gil_safe_copies_float64_and_returns_f32_values() {
-        Python::with_gil(|py| {
+        with_py(|py| {
             let numpy = PyModule::import(py, "numpy").expect("numpy must be available");
             let float64 = numpy.getattr("float64").unwrap();
             let kwargs = PyDict::new(py);
@@ -332,7 +343,7 @@ mod tests {
     proptest! {
         #[test]
         fn owned_to_ndarray_roundtrips(values in proptest::collection::vec(any::<f32>(), 1..256)) {
-            Python::with_gil(|py| -> Result<(), TestCaseError> {
+            with_py(|py| -> Result<(), TestCaseError> {
                 PyModule::import(py, "numpy").map_err(|_| tc_err("numpy must be available"))?;
                 let obj = tc_py(owned_to_ndarray(py, values.clone().into_boxed_slice()))?;
                 let bound = obj.bind(py);
@@ -348,7 +359,7 @@ mod tests {
 
         #[test]
         fn vec_to_ndarray_opt_copy_roundtrips(values in proptest::collection::vec(any::<f32>(), 0..256)) {
-            Python::with_gil(|py| -> Result<(), TestCaseError> {
+            with_py(|py| -> Result<(), TestCaseError> {
                 PyModule::import(py, "numpy").map_err(|_| tc_err("numpy must be available"))?;
                 let obj = tc_py(vec_to_ndarray_opt_copy(py, Some(values.as_slice())))?
                     .expect("some");
