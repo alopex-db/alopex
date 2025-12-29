@@ -13,6 +13,8 @@ use crate::types::{PyEmbeddedConfig, PyMemoryStats, PyTxnMode};
 use crate::types::{PyHnswConfig, PyHnswStats, PySearchResult};
 #[cfg(feature = "numpy")]
 use crate::vector;
+#[cfg(feature = "numpy")]
+use crate::vector::SliceOrOwned;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -205,12 +207,20 @@ impl PyDatabase {
     ) -> PyResult<(Vec<PySearchResult>, PyHnswStats)> {
         let db = self.ensure_open()?;
         vector::require_numpy(py)?;
-        let query = query.bind(py);
-        vector::with_ndarray_f32(query, |values| {
-            let name = name.to_string();
-            let values = values.to_vec();
+        let name = name.to_string();
+        vector::with_ndarray_f32_gil_safe(query.bind(py), |slice_or_owned| {
+            let db_clone = Arc::clone(&db);
+            let name_clone = name.clone();
             let (results, _stats) = py
-                .allow_threads(|| db.search_hnsw(&name, &values, k, ef_search))
+                .allow_threads(move || match slice_or_owned {
+                    SliceOrOwned::Borrowed { ptr, len, .. } => {
+                        let values = unsafe { std::slice::from_raw_parts(ptr, len) };
+                        db_clone.search_hnsw(&name_clone, values, k, ef_search)
+                    }
+                    SliceOrOwned::Owned(vec) => {
+                        db_clone.search_hnsw(&name_clone, &vec, k, ef_search)
+                    }
+                })
                 .map_err(error::embedded_err)?;
             let stats = db.get_hnsw_stats(&name).map_err(error::embedded_err)?;
             let results = results.into_iter().map(PySearchResult::from).collect();

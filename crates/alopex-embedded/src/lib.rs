@@ -624,6 +624,25 @@ impl<'a> Transaction<'a> {
         Ok(())
     }
 
+    /// Retrieves a vector stored under the given key.
+    ///
+    /// Returns `None` if the key does not exist. If the key exists but has a different
+    /// metric than specified, returns an error.
+    pub fn get_vector(&mut self, key: &[u8], metric: Metric) -> Result<Option<Vec<f32>>> {
+        let txn = self.inner_mut()?;
+        let key_vec = key.to_vec();
+        let Some(raw) = txn.get(&key_vec).map_err(Error::Core)? else {
+            return Ok(None);
+        };
+        let decoded = decode_vector_entry(&raw).map_err(Error::Core)?;
+        if decoded.metric != metric {
+            return Err(Error::Core(alopex_core::Error::UnsupportedMetric {
+                metric: metric.as_str().to_string(),
+            }));
+        }
+        Ok(Some(decoded.vector))
+    }
+
     /// Executes a flat similarity search over stored vectors using the provided metric and query.
     ///
     /// The optional `filter_keys` restricts the scan to the given keys; otherwise the full

@@ -10,6 +10,8 @@ use crate::types::{PyMetric, PySearchResult};
 #[cfg(feature = "numpy")]
 use crate::vector;
 #[cfg(feature = "numpy")]
+use crate::vector::SliceOrOwned;
+#[cfg(feature = "numpy")]
 use pyo3::types::PyAnyMethods;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,22 +150,30 @@ impl PyTransaction {
         metric: PyMetric,
     ) -> PyResult<()> {
         vector::require_numpy(py)?;
-        let vector = vector.bind(py);
         let metadata = metadata.bind(py);
-        let payload = if metadata.is_none() {
-            None
+        let payload: Vec<u8> = if metadata.is_none() {
+            Vec::new()
         } else {
-            Some(metadata.extract::<&[u8]>()?)
+            metadata.extract::<Vec<u8>>()?
         };
         let metric = metric.into();
-        let payload = payload.unwrap_or(&[]);
-        vector::with_ndarray_f32(vector, |values| {
-            self.with_txn_mut(|txn| txn.upsert_vector(key, payload, values, metric))
+        let key = key.to_vec();
+        vector::with_ndarray_f32_gil_safe(vector.bind(py), |slice_or_owned| {
+            py.allow_threads(move || match slice_or_owned {
+                SliceOrOwned::Borrowed { ptr, len, .. } => {
+                    let values = unsafe { std::slice::from_raw_parts(ptr, len) };
+                    self.with_txn_mut(|txn| txn.upsert_vector(&key, &payload, values, metric))
+                }
+                SliceOrOwned::Owned(vec) => {
+                    self.with_txn_mut(|txn| txn.upsert_vector(&key, &payload, &vec, metric))
+                }
+            })
         })
     }
 
     #[cfg(feature = "numpy")]
-    #[pyo3(signature = (query, metric, k, filter_keys = None))]
+    #[pyo3(signature = (query, metric, k, filter_keys = None, return_vectors = false, zero_copy_return = true))]
+    #[allow(unused_variables, clippy::too_many_arguments)]
     fn search_similar(
         &self,
         py: Python<'_>,
@@ -171,19 +181,54 @@ impl PyTransaction {
         metric: PyMetric,
         k: usize,
         filter_keys: Option<Vec<Vec<u8>>>,
+        return_vectors: bool,
+        zero_copy_return: bool,
     ) -> PyResult<Vec<PySearchResult>> {
         vector::require_numpy(py)?;
-        let query = query.bind(py);
-        let metric = metric.into();
-        vector::with_ndarray_f32(query, |values| {
-            let values = values.to_vec();
-            let filter_keys = filter_keys.clone();
-            let results = py.allow_threads(|| {
-                self.with_txn_mut(|txn| {
-                    txn.search_similar(&values, metric, k, filter_keys.as_deref())
-                })
+        let metric_enum = metric.into();
+        vector::with_ndarray_f32_gil_safe(query.bind(py), |slice_or_owned| {
+            let results = py.allow_threads(move || match slice_or_owned {
+                SliceOrOwned::Borrowed { ptr, len, .. } => {
+                    let values = unsafe { std::slice::from_raw_parts(ptr, len) };
+                    self.with_txn_mut(|txn| {
+                        txn.search_similar(values, metric_enum, k, filter_keys.as_deref())
+                    })
+                }
+                SliceOrOwned::Owned(vec) => self.with_txn_mut(|txn| {
+                    txn.search_similar(&vec, metric_enum, k, filter_keys.as_deref())
+                }),
             })?;
-            Ok(results.into_iter().map(PySearchResult::from).collect())
+
+            if !return_vectors {
+                return Ok(results.into_iter().map(PySearchResult::from).collect());
+            }
+
+            // return_vectors=True の場合、各結果にベクトルを含める
+            let mut py_results = Vec::with_capacity(results.len());
+            for result in results {
+                // ベクトルを取得
+                let vector_data =
+                    self.with_txn_mut(|txn| txn.get_vector(&result.key, metric_enum))?;
+                // zero_copy_return に応じて変換方法を切り替え
+                let vector_obj = if zero_copy_return {
+                    vector::vec_to_ndarray_opt(py, vector_data)?
+                } else {
+                    vector::vec_to_ndarray_opt_copy(py, vector_data.as_ref())?
+                };
+                // metadata が空の場合は None
+                let metadata = if result.metadata.is_empty() {
+                    None
+                } else {
+                    Some(result.metadata)
+                };
+                py_results.push(PySearchResult::with_vector(
+                    result.key,
+                    result.score,
+                    metadata,
+                    vector_obj,
+                ));
+            }
+            Ok(py_results)
         })
     }
 
@@ -198,7 +243,6 @@ impl PyTransaction {
         metadata: Option<PyObject>,
     ) -> PyResult<()> {
         vector::require_numpy(py)?;
-        let vector = vector.bind(py);
         let payload: Vec<u8> = if let Some(metadata) = metadata {
             let metadata = metadata.bind(py);
             if metadata.is_none() {
@@ -209,8 +253,18 @@ impl PyTransaction {
         } else {
             Vec::new()
         };
-        vector::with_ndarray_f32(vector, |values| {
-            self.with_txn_mut(|txn| txn.upsert_to_hnsw(name, key, values, &payload))
+        let name = name.to_string();
+        let key = key.to_vec();
+        vector::with_ndarray_f32_gil_safe(vector.bind(py), |slice_or_owned| {
+            py.allow_threads(move || match slice_or_owned {
+                SliceOrOwned::Borrowed { ptr, len, .. } => {
+                    let values = unsafe { std::slice::from_raw_parts(ptr, len) };
+                    self.with_txn_mut(|txn| txn.upsert_to_hnsw(&name, &key, values, &payload))
+                }
+                SliceOrOwned::Owned(vec) => {
+                    self.with_txn_mut(|txn| txn.upsert_to_hnsw(&name, &key, &vec, &payload))
+                }
+            })
         })
     }
 
@@ -218,6 +272,50 @@ impl PyTransaction {
     fn delete_from_hnsw(&self, name: &str, key: &[u8]) -> PyResult<()> {
         self.with_txn_mut(|txn| txn.delete_from_hnsw(name, key))
             .map(|_| ())
+    }
+
+    /// ベクトルを取得する
+    ///
+    /// # Arguments
+    /// * `key` - ベクトルのキー
+    /// * `metric` - メトリック（保存時と一致する必要がある）
+    /// * `zero_copy_return` - True の場合、所有権移譲によるゼロコピー返却
+    ///
+    /// # Returns
+    /// NumPy ndarray (float32)
+    ///
+    /// # Raises
+    /// KeyError: キーが存在しない場合
+    #[cfg(feature = "numpy")]
+    #[pyo3(signature = (key, metric, zero_copy_return = true))]
+    fn get_vector(
+        &self,
+        py: Python<'_>,
+        key: &[u8],
+        metric: PyMetric,
+        zero_copy_return: bool,
+    ) -> PyResult<PyObject> {
+        vector::require_numpy(py)?;
+        let metric_enum = metric.into();
+        let vector_opt = self.with_txn_mut(|txn| txn.get_vector(key, metric_enum))?;
+        match vector_opt {
+            Some(vec) => {
+                if zero_copy_return {
+                    vector::owned_vec_to_ndarray(py, vec)
+                } else {
+                    vector::vec_to_ndarray_copy(py, &vec)
+                }
+            }
+            None => {
+                // Format key as hex for readability
+                let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
+                Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "Vector not found for key (len={}): 0x{}",
+                    key.len(),
+                    key_hex
+                )))
+            }
+        }
     }
 
     fn commit(&self, py: Python<'_>) -> PyResult<()> {
