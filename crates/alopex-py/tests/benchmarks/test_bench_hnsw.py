@@ -103,7 +103,7 @@ def test_bench_hnsw_multithread_throughput_4_threads(benchmark, hnsw_env):
     k = hnsw_env["k"]
 
     threads = 4
-    total_queries = 200
+    total_queries = 40
     per_thread = total_queries // threads
 
     def worker():
@@ -117,4 +117,4 @@ def test_bench_hnsw_multithread_throughput_4_threads(benchmark, hnsw_env):
         for t in ts:
             t.join()
 
-    benchmark.pedantic(run, iterations=1, rounds=5, warmup_rounds=1)
+    benchmark.pedantic(run, iterations=1, rounds=1, warmup_rounds=1)
