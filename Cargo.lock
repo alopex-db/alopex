@@ -135,6 +135,7 @@ dependencies = [
  "alopex-embedded",
  "criterion",
  "numpy",
+ "proptest",
  "pyo3",
 ]
 

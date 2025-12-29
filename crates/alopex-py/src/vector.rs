@@ -213,11 +213,34 @@ pub fn vec_to_ndarray<'py>(py: Python<'py>, values: &[f32]) -> PyResult<PyObject
 
 #[cfg(test)]
 mod tests {
+    use super::vec_to_ndarray_opt_copy;
     use super::with_ndarray_f32;
+    use super::with_ndarray_f32_gil_safe;
+    use super::{owned_to_ndarray, SliceOrOwned};
     use numpy::PyArray1;
+    use proptest::prelude::*;
+    use proptest::test_runner::TestCaseError;
+    use pyo3::types::PyAnyMethods;
+    use pyo3::types::PyDict;
+    use pyo3::types::PyDictMethods;
     use pyo3::types::PyModule;
+    use pyo3::types::PySlice;
     use pyo3::IntoPyObject;
+    use pyo3::PyResult;
     use pyo3::Python;
+    use std::fmt::Display;
+
+    fn tc_fail(msg: impl Into<String>) -> TestCaseError {
+        TestCaseError::fail(msg.into())
+    }
+
+    fn tc_py<T>(result: PyResult<T>) -> Result<T, TestCaseError> {
+        result.map_err(|e| tc_fail(format!("{e}")))
+    }
+
+    fn tc_err(msg: impl Display) -> TestCaseError {
+        tc_fail(msg.to_string())
+    }
 
     #[test]
     fn ndarray_to_vec_converts_to_float32() {
@@ -231,5 +254,113 @@ mod tests {
                 with_ndarray_f32(bound.as_any(), |values| Ok(values.to_vec())).expect("convert");
             assert_eq!(values, vec![1.25_f32, 2.5_f32]);
         });
+    }
+
+    #[test]
+    fn with_ndarray_f32_gil_safe_borrowed_for_contiguous_f32() {
+        Python::with_gil(|py| {
+            if PyModule::import(py, "numpy").is_err() {
+                return;
+            }
+            let array = PyArray1::from_vec(py, vec![1.0_f32, 2.0_f32, 3.0_f32]);
+            let bound = array.into_pyobject(py).unwrap();
+            let observed =
+                with_ndarray_f32_gil_safe(bound.as_any(), |slice_or_owned| match slice_or_owned {
+                    SliceOrOwned::Borrowed {
+                        ptr,
+                        len,
+                        _guard: _,
+                    } => {
+                        let values = unsafe { std::slice::from_raw_parts(ptr, len) };
+                        Ok(values.to_vec())
+                    }
+                    SliceOrOwned::Owned(_) => panic!("expected Borrowed"),
+                })
+                .expect("convert");
+            assert_eq!(observed, vec![1.0_f32, 2.0_f32, 3.0_f32]);
+        });
+    }
+
+    #[test]
+    fn with_ndarray_f32_gil_safe_owned_for_strided_f32() {
+        Python::with_gil(|py| {
+            let numpy = match PyModule::import(py, "numpy") {
+                Ok(m) => m,
+                Err(_) => return,
+            };
+            let base = numpy.call_method1("arange", (10,)).unwrap();
+            let float32 = numpy.getattr("float32").unwrap();
+            let base = base.call_method1("astype", (float32,)).unwrap();
+            let slice = PySlice::new(py, 0, 10, 2);
+            let strided = base.get_item(slice).unwrap();
+            let observed =
+                with_ndarray_f32_gil_safe(&strided, |slice_or_owned| match slice_or_owned {
+                    SliceOrOwned::Borrowed { .. } => panic!("expected Owned"),
+                    SliceOrOwned::Owned(vec) => Ok(vec),
+                })
+                .expect("convert");
+            assert_eq!(observed, vec![0.0, 2.0, 4.0, 6.0, 8.0]);
+        });
+    }
+
+    #[test]
+    fn with_ndarray_f32_gil_safe_copies_float64_and_returns_f32_values() {
+        Python::with_gil(|py| {
+            let numpy = PyModule::import(py, "numpy").expect("numpy must be available");
+            let float64 = numpy.getattr("float64").unwrap();
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", float64).unwrap();
+            let arr = numpy
+                .call_method("array", (vec![1.25_f64, 2.5_f64],), Some(&kwargs))
+                .unwrap();
+            let observed = with_ndarray_f32_gil_safe(&arr, |slice_or_owned| match slice_or_owned {
+                SliceOrOwned::Borrowed {
+                    ptr,
+                    len,
+                    _guard: _,
+                } => {
+                    let values = unsafe { std::slice::from_raw_parts(ptr, len) };
+                    Ok(values.to_vec())
+                }
+                SliceOrOwned::Owned(_) => panic!("expected Borrowed after astype(float32)"),
+            })
+            .expect("convert");
+            assert_eq!(observed, vec![1.25_f32, 2.5_f32]);
+        });
+    }
+
+    proptest! {
+        #[test]
+        fn owned_to_ndarray_roundtrips(values in proptest::collection::vec(any::<f32>(), 1..256)) {
+            Python::with_gil(|py| -> Result<(), TestCaseError> {
+                PyModule::import(py, "numpy").map_err(|_| tc_err("numpy must be available"))?;
+                let obj = tc_py(owned_to_ndarray(py, values.clone().into_boxed_slice()))?;
+                let bound = obj.bind(py);
+                let arr = tc_py(bound.extract::<numpy::PyReadonlyArray1<'_, f32>>())?;
+                let slice = arr.as_slice().map_err(|e| tc_fail(format!("{e}")))?;
+                prop_assert_eq!(slice.len(), values.len());
+                for (a, b) in slice.iter().copied().zip(values.iter().copied()) {
+                    prop_assert_eq!(a.to_bits(), b.to_bits());
+                }
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        fn vec_to_ndarray_opt_copy_roundtrips(values in proptest::collection::vec(any::<f32>(), 0..256)) {
+            Python::with_gil(|py| -> Result<(), TestCaseError> {
+                PyModule::import(py, "numpy").map_err(|_| tc_err("numpy must be available"))?;
+                let obj = tc_py(vec_to_ndarray_opt_copy(py, Some(values.as_slice())))?
+                    .expect("some");
+                let bound = obj.bind(py);
+                let arr = tc_py(bound.extract::<numpy::PyReadonlyArray1<'_, f32>>())?;
+                let slice = arr.as_slice().map_err(|e| tc_fail(format!("{e}")))?;
+                prop_assert_eq!(slice.len(), values.len());
+                for (a, b) in slice.iter().copied().zip(values.iter().copied()) {
+                    prop_assert_eq!(a.to_bits(), b.to_bits());
+                }
+                Ok(())
+            })?;
+        }
     }
 }
