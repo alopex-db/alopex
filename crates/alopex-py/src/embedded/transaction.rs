@@ -12,6 +12,8 @@ use crate::vector;
 #[cfg(feature = "numpy")]
 use crate::vector::SliceOrOwned;
 #[cfg(feature = "numpy")]
+use alopex_core::Key;
+#[cfg(feature = "numpy")]
 use pyo3::types::PyAnyMethods;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,15 +161,21 @@ impl PyTransaction {
         let metric = metric.into();
         let key = key.to_vec();
         vector::with_ndarray_f32_gil_safe(vector.bind(py), |slice_or_owned| {
-            py.allow_threads(move || match slice_or_owned {
-                SliceOrOwned::Borrowed { ptr, len, .. } => {
-                    let values = unsafe { std::slice::from_raw_parts(ptr, len) };
-                    self.with_txn_mut(|txn| txn.upsert_vector(&key, &payload, values, metric))
+            match slice_or_owned {
+                SliceOrOwned::Borrowed { ptr, len, _guard } => {
+                    let _guard = _guard;
+                    // `*const f32` is not `Send`; pass it as an integer to `allow_threads`.
+                    let ptr = ptr as usize;
+                    py.allow_threads(move || {
+                        let ptr = ptr as *const f32;
+                        let values = unsafe { std::slice::from_raw_parts(ptr, len) };
+                        self.with_txn_mut(|txn| txn.upsert_vector(&key, &payload, values, metric))
+                    })
                 }
-                SliceOrOwned::Owned(vec) => {
+                SliceOrOwned::Owned(vec) => py.allow_threads(move || {
                     self.with_txn_mut(|txn| txn.upsert_vector(&key, &payload, &vec, metric))
-                }
-            })
+                }),
+            }
         })
     }
 
@@ -187,45 +195,61 @@ impl PyTransaction {
         vector::require_numpy(py)?;
         let metric_enum = metric.into();
         vector::with_ndarray_f32_gil_safe(query.bind(py), |slice_or_owned| {
-            let results = py.allow_threads(move || match slice_or_owned {
-                SliceOrOwned::Borrowed { ptr, len, .. } => {
-                    let values = unsafe { std::slice::from_raw_parts(ptr, len) };
-                    self.with_txn_mut(|txn| {
-                        txn.search_similar(values, metric_enum, k, filter_keys.as_deref())
+            let results = match slice_or_owned {
+                SliceOrOwned::Borrowed { ptr, len, _guard } => {
+                    let _guard = _guard;
+                    // `*const f32` is not `Send`; pass it as an integer to `allow_threads`.
+                    let ptr = ptr as usize;
+                    py.allow_threads(move || {
+                        let ptr = ptr as *const f32;
+                        let values = unsafe { std::slice::from_raw_parts(ptr, len) };
+                        self.with_txn_mut(|txn| {
+                            txn.search_similar(values, metric_enum, k, filter_keys.as_deref())
+                        })
                     })
                 }
-                SliceOrOwned::Owned(vec) => self.with_txn_mut(|txn| {
-                    txn.search_similar(&vec, metric_enum, k, filter_keys.as_deref())
+                SliceOrOwned::Owned(vec) => py.allow_threads(move || {
+                    self.with_txn_mut(|txn| {
+                        txn.search_similar(&vec, metric_enum, k, filter_keys.as_deref())
+                    })
                 }),
-            })?;
+            }?;
 
             if !return_vectors {
                 return Ok(results.into_iter().map(PySearchResult::from).collect());
             }
 
-            // return_vectors=True の場合、各結果にベクトルを含める
-            let mut py_results = Vec::with_capacity(results.len());
+            // return_vectors=True の場合、結果キーをまとめて取得し N+1 を避ける
+            let mut keys: Vec<Key> = Vec::with_capacity(results.len());
+            let mut rows: Vec<(f32, Option<Vec<u8>>)> = Vec::with_capacity(results.len());
             for result in results {
-                // ベクトルを取得
-                let vector_data =
-                    self.with_txn_mut(|txn| txn.get_vector(&result.key, metric_enum))?;
-                // zero_copy_return に応じて変換方法を切り替え
-                let vector_obj = if zero_copy_return {
-                    vector::vec_to_ndarray_opt(py, vector_data)?
-                } else {
-                    vector::vec_to_ndarray_opt_copy(py, vector_data.as_ref())?
+                keys.push(result.key);
+                rows.push((
+                    result.score,
+                    if result.metadata.is_empty() {
+                        None
+                    } else {
+                        Some(result.metadata)
+                    },
+                ));
+            }
+            let vectors: Vec<Option<Vec<f32>>> =
+                py.allow_threads(|| self.with_txn_mut(|txn| txn.get_vectors(&keys, metric_enum)))?;
+
+            let mut py_results = Vec::with_capacity(rows.len());
+            for ((key, (score, metadata)), vector_data) in keys.into_iter().zip(rows).zip(vectors) {
+                let Some(vector_data) = vector_data else {
+                    return Err(error::to_py_err(
+                        "internal error: missing vector for a search result key",
+                    ));
                 };
-                // metadata が空の場合は None
-                let metadata = if result.metadata.is_empty() {
-                    None
+                let vector_obj = if zero_copy_return {
+                    vector::vec_to_ndarray_opt(py, Some(vector_data))?
                 } else {
-                    Some(result.metadata)
+                    vector::vec_to_ndarray_opt_copy(py, Some(vector_data.as_slice()))?
                 };
                 py_results.push(PySearchResult::with_vector(
-                    result.key,
-                    result.score,
-                    metadata,
-                    vector_obj,
+                    key, score, metadata, vector_obj,
                 ));
             }
             Ok(py_results)
@@ -256,15 +280,21 @@ impl PyTransaction {
         let name = name.to_string();
         let key = key.to_vec();
         vector::with_ndarray_f32_gil_safe(vector.bind(py), |slice_or_owned| {
-            py.allow_threads(move || match slice_or_owned {
-                SliceOrOwned::Borrowed { ptr, len, .. } => {
-                    let values = unsafe { std::slice::from_raw_parts(ptr, len) };
-                    self.with_txn_mut(|txn| txn.upsert_to_hnsw(&name, &key, values, &payload))
+            match slice_or_owned {
+                SliceOrOwned::Borrowed { ptr, len, _guard } => {
+                    let _guard = _guard;
+                    // `*const f32` is not `Send`; pass it as an integer to `allow_threads`.
+                    let ptr = ptr as usize;
+                    py.allow_threads(move || {
+                        let ptr = ptr as *const f32;
+                        let values = unsafe { std::slice::from_raw_parts(ptr, len) };
+                        self.with_txn_mut(|txn| txn.upsert_to_hnsw(&name, &key, values, &payload))
+                    })
                 }
-                SliceOrOwned::Owned(vec) => {
+                SliceOrOwned::Owned(vec) => py.allow_threads(move || {
                     self.with_txn_mut(|txn| txn.upsert_to_hnsw(&name, &key, &vec, &payload))
-                }
-            })
+                }),
+            }
         })
     }
 

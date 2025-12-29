@@ -643,6 +643,32 @@ impl<'a> Transaction<'a> {
         Ok(Some(decoded.vector))
     }
 
+    /// Retrieves vectors stored under the given keys in a single transaction call.
+    ///
+    /// Returned list order matches the input `keys` order. Each entry is:
+    /// - `None` if the key does not exist
+    /// - `Some(Vec<f32>)` if the key exists and metric matches
+    ///
+    /// If any existing entry has a different metric than specified, returns an error.
+    pub fn get_vectors(&mut self, keys: &[Key], metric: Metric) -> Result<Vec<Option<Vec<f32>>>> {
+        let txn = self.inner_mut()?;
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            let Some(raw) = txn.get(key).map_err(Error::Core)? else {
+                out.push(None);
+                continue;
+            };
+            let decoded = decode_vector_entry(&raw).map_err(Error::Core)?;
+            if decoded.metric != metric {
+                return Err(Error::Core(alopex_core::Error::UnsupportedMetric {
+                    metric: metric.as_str().to_string(),
+                }));
+            }
+            out.push(Some(decoded.vector));
+        }
+        Ok(out)
+    }
+
     /// Executes a flat similarity search over stored vectors using the provided metric and query.
     ///
     /// The optional `filter_keys` restricts the scan to the given keys; otherwise the full

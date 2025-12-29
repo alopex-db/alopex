@@ -176,10 +176,58 @@ jobs:
           fi
           mypy crates/alopex-py/python/alopex
 
+  benchmarks:
+    name: benchmarks (small/medium)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        if: ${{ !env.ACT }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: |
+          if [[ -n "${ACT:-}" ]]; then
+            rm -rf .venv
+            python3 -m venv .venv
+            echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+            source .venv/bin/activate
+          fi
+          python -m pip install --upgrade pip
+          python -m pip install maturin pytest pytest-benchmark numpy
+      - name: Install patchelf (Linux)
+        run: |
+          if command -v patchelf &> /dev/null; then
+            exit 0
+          fi
+          if command -v sudo &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y patchelf
+            exit 0
+          fi
+          apt-get update
+          apt-get install -y patchelf
+      - name: Maturin develop (numpy)
+        run: |
+          maturin develop -m crates/alopex-py/pyproject.toml --features numpy
+      - name: Run benchmarks
+        run: |
+          pytest crates/alopex-py/tests/benchmarks/ -v --benchmark-only --benchmark-json=benchmark.json -m "not large"
+      - name: Upload benchmark artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: alopex-py-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: benchmark.json
+
   ci-success:
     name: ci-success
     if: ${{ always() }}
-    needs: [rust-check, test, typecheck]
+    needs: [rust-check, test, typecheck, benchmarks]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -191,5 +239,8 @@ jobs:
             exit 1
           fi
           if [[ "${{ needs.typecheck.result }}" != "success" ]]; then
+            exit 1
+          fi
+          if [[ "${{ needs.benchmarks.result }}" != "success" ]]; then
             exit 1
           fi

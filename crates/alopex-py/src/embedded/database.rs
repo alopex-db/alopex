@@ -211,17 +211,21 @@ impl PyDatabase {
         vector::with_ndarray_f32_gil_safe(query.bind(py), |slice_or_owned| {
             let db_clone = Arc::clone(&db);
             let name_clone = name.clone();
-            let (results, _stats) = py
-                .allow_threads(move || match slice_or_owned {
-                    SliceOrOwned::Borrowed { ptr, len, .. } => {
+            let (results, _stats) = match slice_or_owned {
+                SliceOrOwned::Borrowed { ptr, len, _guard } => {
+                    let _guard = _guard;
+                    let ptr = ptr as usize;
+                    py.allow_threads(move || {
+                        let ptr = ptr as *const f32;
                         let values = unsafe { std::slice::from_raw_parts(ptr, len) };
                         db_clone.search_hnsw(&name_clone, values, k, ef_search)
-                    }
-                    SliceOrOwned::Owned(vec) => {
-                        db_clone.search_hnsw(&name_clone, &vec, k, ef_search)
-                    }
-                })
-                .map_err(error::embedded_err)?;
+                    })
+                }
+                SliceOrOwned::Owned(vec) => {
+                    py.allow_threads(move || db_clone.search_hnsw(&name_clone, &vec, k, ef_search))
+                }
+            }
+            .map_err(error::embedded_err)?;
             let stats = db.get_hnsw_stats(&name).map_err(error::embedded_err)?;
             let results = results.into_iter().map(PySearchResult::from).collect();
             Ok((results, PyHnswStats::from(stats)))

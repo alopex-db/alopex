@@ -33,11 +33,6 @@ pub enum SliceOrOwned {
     Owned(Vec<f32>),
 }
 
-// SAFETY: SliceOrOwned::Borrowed の ptr は _guard が生存している間のみ有効
-// _guard は Py<T> であり Send を実装しているため、SliceOrOwned も Send を実装可能
-// ただし、ptr のデリファレンスは _guard が生存している間のみ安全
-unsafe impl Send for SliceOrOwned {}
-
 pub fn require_numpy(py: Python<'_>) -> PyResult<()> {
     if PyModule::import(py, "numpy").is_ok() {
         Ok(())
@@ -202,7 +197,7 @@ pub fn vec_to_ndarray_copy(py: Python<'_>, values: &[f32]) -> PyResult<PyObject>
 #[allow(dead_code)]
 pub fn vec_to_ndarray_opt_copy(
     py: Python<'_>,
-    values: Option<&Vec<f32>>,
+    values: Option<&[f32]>,
 ) -> PyResult<Option<PyObject>> {
     match values {
         Some(v) => Ok(Some(vec_to_ndarray_copy(py, v)?)),
