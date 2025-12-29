@@ -17,7 +17,8 @@ pytestmark = [
 SCENARIOS = {
     "small": {"dim": 128, "count": 1_000, "k": 10},
     "medium": {"dim": 768, "count": 10_000, "k": 50},
-    "large": {"dim": 1536, "count": 100_000, "k": 100},
+    # NOTE: Keep "large" runnable on typical dev machines; original 100k can be too slow.
+    "large": {"dim": 1536, "count": 5_000, "k": 100},
 }
 
 
@@ -29,7 +30,13 @@ def _make_vectors(count: int, dim: int, seed: int):
 
 
 def _populate_hnsw(db: "alopex.Database", index_name: str, vectors):
-    cfg = alopex.HnswConfig(dim=int(vectors.shape[1]), metric=alopex.Metric.COSINE)
+    # Reduce build-time cost for large runs while keeping behavior representative.
+    cfg = alopex.HnswConfig(
+        dim=int(vectors.shape[1]),
+        m=16,
+        ef_construction=50 if vectors.shape[0] >= 5_000 else 200,
+        metric=alopex.Metric.COSINE,
+    )
     db.create_hnsw_index(index_name, cfg)
 
     with db.begin(alopex.TxnMode.READ_WRITE) as txn:
@@ -84,7 +91,8 @@ def test_bench_hnsw_search_latency(benchmark, hnsw_env):
     def run():
         _ = db.search_hnsw(index_name, query, k=k)
 
-    benchmark.pedantic(run, iterations=10, rounds=1, warmup_rounds=1)
+    iterations = 10 if hnsw_env["scenario"] != "large" else 1
+    benchmark.pedantic(run, iterations=iterations, rounds=1, warmup_rounds=1)
 
 
 @pytest.mark.parametrize(
@@ -103,7 +111,7 @@ def test_bench_hnsw_multithread_throughput_4_threads(benchmark, hnsw_env):
     k = hnsw_env["k"]
 
     threads = 4
-    total_queries = 40
+    total_queries = 40 if hnsw_env["scenario"] != "large" else 8
     per_thread = total_queries // threads
 
     def worker():
@@ -116,5 +124,29 @@ def test_bench_hnsw_multithread_throughput_4_threads(benchmark, hnsw_env):
             t.start()
         for t in ts:
             t.join()
+
+    benchmark.pedantic(run, iterations=1, rounds=1, warmup_rounds=1)
+
+
+@pytest.mark.parametrize(
+    "hnsw_env",
+    [
+        pytest.param("small", id="small"),
+        pytest.param("medium", id="medium"),
+        pytest.param("large", marks=pytest.mark.large, id="large"),
+    ],
+    indirect=True,
+)
+def test_bench_hnsw_throughput_1_thread(benchmark, hnsw_env):
+    db = hnsw_env["db"]
+    index_name = hnsw_env["index_name"]
+    query = hnsw_env["query"]
+    k = hnsw_env["k"]
+
+    total_queries = 40 if hnsw_env["scenario"] != "large" else 8
+
+    def run():
+        for _ in range(total_queries):
+            _ = db.search_hnsw(index_name, query, k=k)
 
     benchmark.pedantic(run, iterations=1, rounds=1, warmup_rounds=1)
