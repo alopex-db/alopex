@@ -35,10 +35,10 @@ def test_hnsw_multithreaded_search_releases_gil():
 
     db = Database.new()
     name = "idx_mt"
-    dim = 64
-    count = 500
+    dim = 128
+    count = 1000
     k = 10
-    ef_search = 100
+    ef_search = 200
 
     db.create_hnsw_index(name, HnswConfig(dim))
     rng = np.random.default_rng(0)
@@ -51,7 +51,7 @@ def test_hnsw_multithreaded_search_releases_gil():
         txn.commit()
 
     threads = 4
-    repeats = 3
+    repeats = 10
     barrier = threading.Barrier(threads)
 
     def worker():
@@ -65,6 +65,10 @@ def test_hnsw_multithreaded_search_releases_gil():
 
     with ThreadPoolExecutor(max_workers=threads) as pool:
         futures = [pool.submit(worker) for _ in range(threads)]
+        start = time.perf_counter()
+        main_ticks = 0
+        while any(not f.done() for f in futures) and (time.perf_counter() - start) < 0.25:
+            main_ticks += 1
         intervals = [future.result() for future in futures]
 
     overlap = False
@@ -78,4 +82,7 @@ def test_hnsw_multithreaded_search_releases_gil():
         if overlap:
             break
 
-    assert overlap, "search_hnsw calls did not overlap; GIL may not be released during search"
+    assert (
+        main_ticks > 1000
+    ), "main thread did not make progress while workers were searching; GIL may not be released"
+    assert overlap, "worker search_hnsw calls did not overlap; parallelism may be limited"
