@@ -15,6 +15,8 @@ fn python_config_from_exe(python: &str) -> Option<PathBuf> {
 }
 
 fn main() {
+    pyo3_build_config::add_extension_module_link_args();
+
     if cfg!(target_os = "windows") {
         println!("cargo:warning=Windows では python3-config が利用できないため埋め込みフラグをスキップします");
         return;

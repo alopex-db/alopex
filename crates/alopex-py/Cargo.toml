@@ -19,6 +19,9 @@ numpy = { version = "0.23", optional = true }
 alopex-core.workspace = true
 alopex-embedded = { path = "../alopex-embedded" }
 
+[build-dependencies]
+pyo3-build-config = "0.23"
+
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = "1"
