@@ -113,9 +113,9 @@ jobs:
             exit 0
           fi
           if [[ "${{ matrix.feature }}" == "numpy" ]]; then
-            maturin develop -m crates/alopex-py/pyproject.toml --features numpy
+            maturin develop -m crates/alopex-py/Cargo.toml --features numpy
           else
-            maturin develop -m crates/alopex-py/pyproject.toml
+            maturin develop -m crates/alopex-py/Cargo.toml
           fi
       - name: Run pytest
         if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
@@ -223,7 +223,7 @@ jobs:
           apt-get install -y patchelf
       - name: Maturin develop (numpy)
         run: |
-          maturin develop -m crates/alopex-py/pyproject.toml --features numpy
+          maturin develop -m crates/alopex-py/Cargo.toml --features numpy
       - name: Run benchmarks
         run: |
           pytest crates/alopex-py/tests/benchmarks/ -v --benchmark-only --benchmark-json=benchmark.json -m "not large"
