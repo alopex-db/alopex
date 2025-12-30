@@ -31,3 +31,5 @@ dhat-heap.json
 **/__pycache__/
 .pytest_cache/
 crates/alopex-py/python/alopex/_alopex*.so
+crates/alopex-py/benchmark-*.json
+crates/alopex-py/profile-*.log
