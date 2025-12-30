@@ -137,6 +137,7 @@ dependencies = [
  "numpy",
  "proptest",
  "pyo3",
+ "pyo3-build-config",
 ]
 
 [[package]]
