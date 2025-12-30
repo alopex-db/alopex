@@ -200,7 +200,8 @@ impl Database {
             return Ok(alopex_sql::ExecutionResult::Success);
         }
 
-        let mode = if stmts.iter().any(stmt_requires_write) {
+        let requires_write = stmts.iter().any(stmt_requires_write);
+        let mode = if requires_write {
             TxnMode::ReadWrite
         } else {
             TxnMode::ReadOnly
@@ -237,6 +238,15 @@ impl Database {
         if mode == TxnMode::ReadWrite {
             let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
             catalog.apply_overlay(overlay);
+        }
+        if requires_write {
+            let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
+            cache.clear();
+            let mut vector_cache = self
+                .vector_cache
+                .write()
+                .expect("vector cache lock poisoned");
+            *vector_cache = None;
         }
         Ok(last)
     }
@@ -463,6 +473,21 @@ impl<'a> Transaction<'a> {
         let stmts = parse_sql(sql)?;
         if stmts.is_empty() {
             return Ok(alopex_sql::ExecutionResult::Success);
+        }
+
+        if stmts.iter().any(stmt_requires_write) {
+            let mut cache = self
+                .db
+                .hnsw_cache
+                .write()
+                .expect("hnsw cache lock poisoned");
+            cache.clear();
+            let mut vector_cache = self
+                .db
+                .vector_cache
+                .write()
+                .expect("vector cache lock poisoned");
+            *vector_cache = None;
         }
 
         let store = self.db.store.clone();
