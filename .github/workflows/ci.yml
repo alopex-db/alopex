@@ -36,9 +36,6 @@ jobs:
   test:
     name: Test Suite (${{ matrix.os }}, ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
-    env:
-      PYO3_PYTHON: python
-      PYTHON_SYS_EXECUTABLE: python
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +77,8 @@ jobs:
           fi
           echo "$VENV_BIN" >> "$GITHUB_PATH"
           echo "VIRTUAL_ENV=$VENV_ROOT" >> "$GITHUB_ENV"
+          echo "PYO3_PYTHON=$VENV_PY" >> "$GITHUB_ENV"
+          echo "PYTHON_SYS_EXECUTABLE=$VENV_PY" >> "$GITHUB_ENV"
           "$VENV_PY" -m ensurepip --upgrade
           "$VENV_PY" -m pip install --upgrade pip
           "$VENV_PY" -m pip install numpy
@@ -91,14 +90,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python deps
-        run: python -m pip install --upgrade pip numpy
-
       - name: Run tests
         run: cargo test --all-features --workspace
 
@@ -108,9 +99,6 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
-    env:
-      PYO3_PYTHON: python
-      PYTHON_SYS_EXECUTABLE: python
     steps:
       - uses: actions/checkout@v4
       - name: Setup Python
@@ -141,19 +129,13 @@ jobs:
           fi
           echo "$VENV_BIN" >> "$GITHUB_PATH"
           echo "VIRTUAL_ENV=$VENV_ROOT" >> "$GITHUB_ENV"
+          echo "PYO3_PYTHON=$VENV_PY" >> "$GITHUB_ENV"
+          echo "PYTHON_SYS_EXECUTABLE=$VENV_PY" >> "$GITHUB_ENV"
           "$VENV_PY" -m ensurepip --upgrade
           "$VENV_PY" -m pip install --upgrade pip
           "$VENV_PY" -m pip install numpy
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python deps
-        run: python -m pip install --upgrade pip numpy
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
