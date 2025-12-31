@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule};
 
-use super::{validate_identifier, PyCatalogInfo, PyColumnInfo, PyNamespaceInfo, PyTableInfo};
+use super::{
+    validate_identifier, validate_storage_location, PyCatalogInfo, PyColumnInfo, PyNamespaceInfo,
+    PyTableInfo,
+};
 use crate::catalog::resolve_credentials;
 use crate::error;
 
@@ -106,24 +109,37 @@ impl PyCatalog {
     }
 
     #[staticmethod]
-    fn create_catalog(name: &str) -> PyResult<()> {
-        alopex_embedded::Catalog::create_catalog(name).map_err(error::embedded_err)
-    }
-
-    #[staticmethod]
-    fn delete_catalog(name: &str) -> PyResult<()> {
-        alopex_embedded::Catalog::delete_catalog(name).map_err(error::embedded_err)
-    }
-
-    #[staticmethod]
-    fn create_namespace(catalog_name: &str, namespace: &str) -> PyResult<()> {
-        alopex_embedded::Catalog::create_namespace(catalog_name, namespace)
+    fn create_catalog(py: Python<'_>, name: &str) -> PyResult<()> {
+        validate_identifier(name)?;
+        py.allow_threads(|| alopex_embedded::Catalog::create_catalog(name))
             .map_err(error::embedded_err)
     }
 
     #[staticmethod]
-    fn delete_namespace(catalog_name: &str, namespace: &str) -> PyResult<()> {
-        alopex_embedded::Catalog::delete_namespace(catalog_name, namespace)
+    fn delete_catalog(py: Python<'_>, name: &str) -> PyResult<()> {
+        validate_identifier(name)?;
+        py.allow_threads(|| alopex_embedded::Catalog::delete_catalog(name))
+            .map_err(error::embedded_err)
+    }
+
+    #[staticmethod]
+    fn create_namespace(py: Python<'_>, catalog_name: &str, namespace: &str) -> PyResult<()> {
+        validate_identifier(catalog_name)?;
+        validate_identifier(namespace)?;
+        py.allow_threads(|| alopex_embedded::Catalog::create_namespace(catalog_name, namespace))
+            .map_err(|err| match err {
+                alopex_embedded::Error::CatalogNotFound(name) => {
+                    error::AlopexError::ParentNotFound(name).into()
+                }
+                other => error::embedded_err(other),
+            })
+    }
+
+    #[staticmethod]
+    fn delete_namespace(py: Python<'_>, catalog_name: &str, namespace: &str) -> PyResult<()> {
+        validate_identifier(catalog_name)?;
+        validate_identifier(namespace)?;
+        py.allow_threads(|| alopex_embedded::Catalog::delete_namespace(catalog_name, namespace))
             .map_err(error::embedded_err)
     }
 
@@ -134,9 +150,10 @@ impl PyCatalog {
         table_name,
         columns,
         storage_location,
-        data_source_format = "parquet"
+        data_source_format = "PARQUET"
     ))]
     fn create_table(
+        py: Python<'_>,
         catalog_name: &str,
         namespace: &str,
         table_name: &str,
@@ -144,28 +161,52 @@ impl PyCatalog {
         storage_location: String,
         data_source_format: &str,
     ) -> PyResult<()> {
-        if data_source_format != "parquet" {
-            return Err(error::to_py_err(format!(
-                "Unsupported format: {}",
-                data_source_format
-            )));
+        validate_identifier(catalog_name)?;
+        validate_identifier(namespace)?;
+        validate_identifier(table_name)?;
+        validate_storage_location(&storage_location)?;
+
+        let normalized_format = data_source_format.trim().to_ascii_uppercase();
+        if normalized_format != "PARQUET" {
+            return Err(error::AlopexError::UnsupportedFormat(normalized_format).into());
         }
+        let embedded_format = normalized_format.to_ascii_lowercase();
         let columns = to_embedded_columns(columns);
-        alopex_embedded::Catalog::create_table(
-            catalog_name,
-            namespace,
-            table_name,
-            columns,
-            Some(storage_location),
-            Some(data_source_format.to_string()),
-        )
-        .map_err(error::embedded_err)
+        py.allow_threads(move || {
+            alopex_embedded::Catalog::create_table(
+                catalog_name,
+                namespace,
+                table_name,
+                columns,
+                Some(storage_location),
+                Some(embedded_format),
+            )
+        })
+        .map_err(|err| match err {
+            alopex_embedded::Error::CatalogNotFound(name) => {
+                error::AlopexError::ParentNotFound(name).into()
+            }
+            alopex_embedded::Error::NamespaceNotFound(catalog, namespace) => {
+                error::AlopexError::ParentNotFound(format!("{}.{}", catalog, namespace)).into()
+            }
+            other => error::embedded_err(other),
+        })
     }
 
     #[staticmethod]
-    fn delete_table(catalog_name: &str, namespace: &str, table_name: &str) -> PyResult<()> {
-        alopex_embedded::Catalog::delete_table(catalog_name, namespace, table_name)
-            .map_err(error::embedded_err)
+    fn delete_table(
+        py: Python<'_>,
+        catalog_name: &str,
+        namespace: &str,
+        table_name: &str,
+    ) -> PyResult<()> {
+        validate_identifier(catalog_name)?;
+        validate_identifier(namespace)?;
+        validate_identifier(table_name)?;
+        py.allow_threads(|| {
+            alopex_embedded::Catalog::delete_table(catalog_name, namespace, table_name)
+        })
+        .map_err(error::embedded_err)
     }
 
     #[staticmethod]
