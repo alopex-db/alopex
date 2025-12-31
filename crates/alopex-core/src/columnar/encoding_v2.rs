@@ -914,16 +914,18 @@ impl Decoder for ByteStreamSplitDecoder {
                 ));
             }
 
-            let sign_bitmap = if has_sign_bitmap {
+            let mut sign_bitmap = if has_sign_bitmap {
                 let bm = Bitmap::from_bytes(&data[pos..])?;
                 pos += 4 + bm.len().div_ceil(8);
                 Some(bm)
             } else {
                 None
             };
+            if !matches!(logical_type, LogicalType::Float32 | LogicalType::Float64) {
+                sign_bitmap = None;
+            }
 
-            let mut streams: Vec<Vec<u8>> = Vec::with_capacity(stream_count);
-            for _ in 0..stream_count {
+            for stream_idx in 0..stream_count {
                 if pos + 9 > data.len() {
                     return Err(ColumnarError::InvalidFormat(
                         "ByteStreamSplit stream header truncated".into(),
@@ -950,7 +952,7 @@ impl Decoder for ByteStreamSplitDecoder {
                 let payload = &data[pos..pos + payload_len];
                 pos += payload_len;
 
-                let stream = match flag {
+                let stream_buf = match flag {
                     BYTE_STREAM_SPLIT_FLAG_LZ4 => {
                         #[cfg(feature = "compression-lz4")]
                         {
@@ -959,11 +961,13 @@ impl Decoder for ByteStreamSplitDecoder {
                                     "ByteStreamSplit stream length too large".into(),
                                 )
                             })?;
-                            lz4::block::decompress(payload, Some(orig_len_i32)).map_err(|_| {
-                                ColumnarError::InvalidFormat(
-                                    "ByteStreamSplit stream decompress failed".into(),
-                                )
-                            })?
+                            Some(lz4::block::decompress(payload, Some(orig_len_i32)).map_err(
+                                |_| {
+                                    ColumnarError::InvalidFormat(
+                                        "ByteStreamSplit stream decompress failed".into(),
+                                    )
+                                },
+                            )?)
                         }
                         #[cfg(not(feature = "compression-lz4"))]
                         {
@@ -975,13 +979,11 @@ impl Decoder for ByteStreamSplitDecoder {
                     BYTE_STREAM_SPLIT_FLAG_ZSTD => {
                         #[cfg(feature = "compression-zstd")]
                         {
-                            zstd::stream::decode_all(std::io::Cursor::new(payload)).map_err(
-                                |_| {
-                                    ColumnarError::InvalidFormat(
-                                        "ByteStreamSplit stream decompress failed".into(),
-                                    )
-                                },
-                            )?
+                            Some(zstd::bulk::decompress(payload, orig_len).map_err(|_| {
+                                ColumnarError::InvalidFormat(
+                                    "ByteStreamSplit stream decompress failed".into(),
+                                )
+                            })?)
                         }
                         #[cfg(not(feature = "compression-zstd"))]
                         {
@@ -990,7 +992,15 @@ impl Decoder for ByteStreamSplitDecoder {
                             ));
                         }
                     }
-                    _ => payload.to_vec(),
+                    _ => {
+                        // Raw stream: reuse the payload slice without allocating.
+                        None
+                    }
+                };
+
+                let stream = match stream_buf.as_deref() {
+                    Some(buf) => buf,
+                    None => payload,
                 };
 
                 if stream.len() != count {
@@ -998,34 +1008,27 @@ impl Decoder for ByteStreamSplitDecoder {
                         "ByteStreamSplit stream length invalid".into(),
                     ));
                 }
-                streams.push(stream);
-            }
 
-            for (stream_idx, stream) in streams.iter().enumerate() {
                 let byte_idx = bytes_per_value - 1 - stream_idx;
-                for (value_idx, &byte) in stream.iter().enumerate() {
-                    raw_bytes[value_idx * bytes_per_value + byte_idx] = byte;
+                if stream_idx == 0 {
+                    if let Some(sign_bitmap) = sign_bitmap.as_ref() {
+                        let mut dst_index = byte_idx;
+                        for (value_idx, &byte) in stream.iter().enumerate() {
+                            let mut out = byte;
+                            if sign_bitmap.get(value_idx) {
+                                out |= 0x80;
+                            }
+                            raw_bytes[dst_index] = out;
+                            dst_index += bytes_per_value;
+                        }
+                        continue;
+                    }
                 }
-            }
 
-            // Reapply sign bits if present
-            if let Some(sign_bitmap) = sign_bitmap {
-                match logical_type {
-                    LogicalType::Float32 => {
-                        for (idx, chunk) in raw_bytes.chunks_exact_mut(4).enumerate() {
-                            if sign_bitmap.get(idx) {
-                                chunk[3] |= 0x80;
-                            }
-                        }
-                    }
-                    LogicalType::Float64 => {
-                        for (idx, chunk) in raw_bytes.chunks_exact_mut(8).enumerate() {
-                            if sign_bitmap.get(idx) {
-                                chunk[7] |= 0x80;
-                            }
-                        }
-                    }
-                    _ => {}
+                let mut dst_index = byte_idx;
+                for &byte in stream {
+                    raw_bytes[dst_index] = byte;
+                    dst_index += bytes_per_value;
                 }
             }
         } else {
@@ -1036,9 +1039,12 @@ impl Decoder for ByteStreamSplitDecoder {
             }
 
             for byte_idx in 0..bytes_per_value {
-                for value_idx in 0..count {
-                    let offset = pos + byte_idx * count + value_idx;
-                    raw_bytes[value_idx * bytes_per_value + byte_idx] = data[offset];
+                let mut dst_index = byte_idx;
+                let mut src_index = pos + byte_idx * count;
+                for _ in 0..count {
+                    raw_bytes[dst_index] = data[src_index];
+                    dst_index += bytes_per_value;
+                    src_index += 1;
                 }
             }
         }
