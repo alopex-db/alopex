@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 use alopex_core::storage::checksum::{compute, verify, ChecksumAlgorithm};
 use alopex_core::storage::compression::{compress, decompress, CompressionAlgorithm};
 use alopex_core::storage::format::FormatError;

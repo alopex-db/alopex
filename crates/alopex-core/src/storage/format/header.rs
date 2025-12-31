@@ -2,6 +2,8 @@
 
 use std::convert::TryInto;
 use std::mem;
+
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::storage::checksum::ChecksumAlgorithm;
@@ -83,10 +85,7 @@ impl FileHeader {
     /// タイムスタンプは現在時刻のマイクロ秒、圧縮アルゴリズムはSnappy、
     /// チェックサムはCRC32をデフォルトとする。
     pub fn new(version: FileVersion, flags: FileFlags) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros() as u64;
+        let now = now_micros();
         Self {
             magic: MAGIC,
             version,
@@ -191,5 +190,25 @@ impl FileHeader {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn now_micros() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_micros() -> u64 {
+    #[cfg(feature = "wasm-indexeddb")]
+    {
+        (js_sys::Date::now() * 1000.0) as u64
+    }
+    #[cfg(not(feature = "wasm-indexeddb"))]
+    {
+        0
     }
 }

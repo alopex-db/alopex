@@ -56,10 +56,33 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install Python dependencies
+      - name: Setup Python venv
+        shell: bash
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install numpy
+          VENV_DIR="${RUNNER_TEMP:-/tmp}/alopex-ci-venv"
+          rm -rf "$VENV_DIR"
+          python -m venv "$VENV_DIR"
+          VENV_ROOT=$(VENV_DIR="$VENV_DIR" python -c "import os; from pathlib import Path; print(Path(os.environ['VENV_DIR']).resolve().as_posix())")
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            VENV_BIN="$VENV_ROOT/Scripts"
+            VENV_PY="$VENV_BIN/python.exe"
+          else
+            VENV_BIN="$VENV_ROOT/bin"
+            VENV_PY="$VENV_BIN/python"
+            if [[ ! -x "$VENV_PY" ]]; then
+              VENV_PY="$VENV_BIN/python3"
+            fi
+          fi
+          if [[ ! -x "$VENV_PY" ]]; then
+            echo "venv python not found at $VENV_PY" >&2
+            ls -la "$VENV_ROOT" || true
+            exit 1
+          fi
+          echo "$VENV_BIN" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$VENV_ROOT" >> "$GITHUB_ENV"
+          "$VENV_PY" -m ensurepip --upgrade
+          "$VENV_PY" -m pip install --upgrade pip
+          "$VENV_PY" -m pip install numpy
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -86,10 +109,33 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install Python dependencies
+      - name: Setup Python venv
+        shell: bash
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install numpy
+          VENV_DIR="${RUNNER_TEMP:-/tmp}/alopex-ci-venv"
+          rm -rf "$VENV_DIR"
+          python -m venv "$VENV_DIR"
+          VENV_ROOT=$(VENV_DIR="$VENV_DIR" python -c "import os; from pathlib import Path; print(Path(os.environ['VENV_DIR']).resolve().as_posix())")
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            VENV_BIN="$VENV_ROOT/Scripts"
+            VENV_PY="$VENV_BIN/python.exe"
+          else
+            VENV_BIN="$VENV_ROOT/bin"
+            VENV_PY="$VENV_BIN/python"
+            if [[ ! -x "$VENV_PY" ]]; then
+              VENV_PY="$VENV_BIN/python3"
+            fi
+          fi
+          if [[ ! -x "$VENV_PY" ]]; then
+            echo "venv python not found at $VENV_PY" >&2
+            ls -la "$VENV_ROOT" || true
+            exit 1
+          fi
+          echo "$VENV_BIN" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$VENV_ROOT" >> "$GITHUB_ENV"
+          "$VENV_PY" -m ensurepip --upgrade
+          "$VENV_PY" -m pip install --upgrade pip
+          "$VENV_PY" -m pip install numpy
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 

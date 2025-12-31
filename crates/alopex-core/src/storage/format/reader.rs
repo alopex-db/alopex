@@ -287,10 +287,12 @@ impl Default for WasmReaderConfig {
 pub struct AlopexFileReader {
     buffer: Option<Vec<u8>>,
     loader: Option<Box<dyn RangeLoader>>,
+    #[allow(dead_code)]
     length: u64,
     header: FileHeader,
     footer: FileFooter,
     section_index: SectionIndex,
+    #[allow(dead_code)]
     config: WasmReaderConfig,
 }
 
@@ -353,7 +355,6 @@ impl AlopexFileReader {
         })
     }
 
-    #[cfg(feature = "wasm-indexeddb")]
     fn from_indexed_db(length: u64, mut config: WasmReaderConfig) -> Result<Self, FormatError> {
         let loader = config
             .range_loader

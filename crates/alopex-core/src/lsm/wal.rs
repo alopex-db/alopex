@@ -677,7 +677,7 @@ fn load_section_header(file: &mut File, offset: u64) -> Result<WalSectionHeader>
     Ok(WalSectionHeader::from_bytes(&bytes))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use std::fs::File;
@@ -1674,7 +1674,7 @@ impl WalReader {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod reader {
     use super::*;
     use tempfile::tempdir;

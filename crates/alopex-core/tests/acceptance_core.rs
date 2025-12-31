@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 //! 受け入れ基準を網羅するコア側の統合テスト。
 
 use alopex_core::{

@@ -885,7 +885,7 @@ impl KVStore for LsmKV {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod kv_store {
     use super::*;
 
@@ -992,7 +992,7 @@ mod kv_store {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod txn {
     use super::*;
 
@@ -1064,7 +1064,7 @@ mod txn {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod methods {
     use super::*;
 
@@ -1128,7 +1128,7 @@ mod methods {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod write_path {
     use super::*;
 
@@ -1180,7 +1180,7 @@ mod write_path {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod read_path {
     use super::*;
 
@@ -1240,5 +1240,5 @@ mod read_path {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod integration;

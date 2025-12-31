@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 use alopex_core::storage::large_value::{
     LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter,
 };

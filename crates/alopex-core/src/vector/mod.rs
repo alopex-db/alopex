@@ -17,10 +17,10 @@ pub use columnar::{
 pub use hnsw::{HnswConfig, HnswIndex, HnswSearchResult, HnswStats};
 pub use simd::{select_kernel, DistanceKernel, ScalarKernel};
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod disk;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod integration;
 
 /// Batch delete result.
@@ -174,7 +174,7 @@ pub fn score(metric: Metric, query: &[f32], item: &[f32]) -> Result<f32> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 
