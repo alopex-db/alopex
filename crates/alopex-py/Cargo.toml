@@ -20,7 +20,7 @@ alopex-core.workspace = true
 alopex-embedded = { path = "../alopex-embedded" }
 
 [build-dependencies]
-pyo3-build-config = "0.23"
+pyo3-build-config = "0.24.1"
 
 [dev-dependencies]
 criterion = { workspace = true }
