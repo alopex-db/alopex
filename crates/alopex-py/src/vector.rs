@@ -228,6 +228,7 @@ mod tests {
     use pyo3::IntoPyObject;
     use pyo3::PyResult;
     use pyo3::Python;
+    use std::env;
     use std::fmt::Display;
     use std::sync::Once;
 
@@ -253,10 +254,39 @@ mod tests {
         tc_fail(msg.to_string())
     }
 
+    fn add_site_dirs_from_pythonpath(py: Python<'_>, pythonpath: &str) -> PyResult<()> {
+        let site = PyModule::import(py, "site")?;
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        for entry in pythonpath.split(sep).filter(|s| !s.is_empty()) {
+            site.call_method1("addsitedir", (entry,))?;
+        }
+        Ok(())
+    }
+
+    fn ensure_numpy<'py>(py: Python<'py>) -> PyResult<pyo3::Bound<'py, PyModule>> {
+        let err = match PyModule::import(py, "numpy") {
+            Ok(module) => return Ok(module),
+            Err(err) => err,
+        };
+        if let Ok(pythonpath) = env::var("PYTHONPATH") {
+            add_site_dirs_from_pythonpath(py, &pythonpath)?;
+            return PyModule::import(py, "numpy");
+        }
+        Err(err)
+    }
+
+    fn require_numpy<'py>(py: Python<'py>) -> pyo3::Bound<'py, PyModule> {
+        ensure_numpy(py).expect("numpy must be available")
+    }
+
+    fn require_numpy_tc<'py>(py: Python<'py>) -> Result<pyo3::Bound<'py, PyModule>, TestCaseError> {
+        ensure_numpy(py).map_err(|e| tc_err(format!("numpy must be available: {e}")))
+    }
+
     #[test]
     fn ndarray_to_vec_converts_to_float32() {
         with_py(|py| {
-            if PyModule::import(py, "numpy").is_err() {
+            if ensure_numpy(py).is_err() {
                 return;
             }
             let array = PyArray1::from_vec(py, vec![1.25_f64, 2.5_f64]);
@@ -270,7 +300,7 @@ mod tests {
     #[test]
     fn with_ndarray_f32_gil_safe_borrowed_for_contiguous_f32() {
         with_py(|py| {
-            if PyModule::import(py, "numpy").is_err() {
+            if ensure_numpy(py).is_err() {
                 return;
             }
             let array = PyArray1::from_vec(py, vec![1.0_f32, 2.0_f32, 3.0_f32]);
@@ -295,7 +325,7 @@ mod tests {
     #[test]
     fn with_ndarray_f32_gil_safe_owned_for_strided_f32() {
         with_py(|py| {
-            let numpy = match PyModule::import(py, "numpy") {
+            let numpy = match ensure_numpy(py) {
                 Ok(m) => m,
                 Err(_) => return,
             };
@@ -317,7 +347,7 @@ mod tests {
     #[test]
     fn with_ndarray_f32_gil_safe_copies_float64_and_returns_f32_values() {
         with_py(|py| {
-            let numpy = PyModule::import(py, "numpy").expect("numpy must be available");
+            let numpy = require_numpy(py);
             let float64 = numpy.getattr("float64").unwrap();
             let kwargs = PyDict::new(py);
             kwargs.set_item("dtype", float64).unwrap();
@@ -344,7 +374,7 @@ mod tests {
         #[test]
         fn owned_to_ndarray_roundtrips(values in proptest::collection::vec(any::<f32>(), 1..256)) {
             with_py(|py| -> Result<(), TestCaseError> {
-                PyModule::import(py, "numpy").map_err(|_| tc_err("numpy must be available"))?;
+                require_numpy_tc(py)?;
                 let obj = tc_py(owned_to_ndarray(py, values.clone().into_boxed_slice()))?;
                 let bound = obj.bind(py);
                 let arr = tc_py(bound.extract::<numpy::PyReadonlyArray1<'_, f32>>())?;
@@ -360,7 +390,7 @@ mod tests {
         #[test]
         fn vec_to_ndarray_opt_copy_roundtrips(values in proptest::collection::vec(any::<f32>(), 0..256)) {
             with_py(|py| -> Result<(), TestCaseError> {
-                PyModule::import(py, "numpy").map_err(|_| tc_err("numpy must be available"))?;
+                require_numpy_tc(py)?;
                 let obj = tc_py(vec_to_ndarray_opt_copy(py, Some(values.as_slice())))?
                     .expect("some");
                 let bound = obj.bind(py);
