@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule};
 
+use super::{PyCatalogInfo, PyColumnInfo, PyNamespaceInfo, PyTableInfo};
 use crate::catalog::resolve_credentials;
 use crate::error;
-use crate::types::{PyCatalogInfo, PyColumnInfo, PyNamespaceInfo, PyTableInfo};
 
 #[allow(deprecated)]
 fn default_credential_provider() -> PyObject {

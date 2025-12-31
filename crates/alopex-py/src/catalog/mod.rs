@@ -4,6 +4,8 @@ use pyo3::wrap_pyfunction;
 
 mod client;
 mod credentials;
+mod models;
+mod validation;
 
 use crate::catalog::credentials::_resolve_credentials;
 
@@ -11,6 +13,10 @@ use crate::catalog::credentials::_resolve_credentials;
 pub use client::{require_polars, PyCatalog};
 #[allow(unused_imports)]
 pub use credentials::resolve_credentials;
+#[allow(unused_imports)]
+pub use models::{PyCatalogInfo, PyColumnInfo, PyNamespaceInfo, PyTableInfo};
+#[allow(unused_imports)]
+pub use validation::{validate_identifier, validate_storage_location};
 
 pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     client::register(py, m)?;
