@@ -226,35 +226,55 @@ impl PyCatalog {
         storage_options: Option<HashMap<String, String>>,
     ) -> PyResult<Py<PyAny>> {
         require_polars(py)?;
-        let table_info =
-            alopex_embedded::Catalog::get_table_info(catalog_name, namespace, table_name)
-                .map_err(error::embedded_err)?;
-        if table_info.data_source_format.as_deref() != Some("parquet") {
-            return Err(error::to_py_err(format!(
-                "Unsupported format: {:?}",
-                table_info.data_source_format
-            )));
-        }
+        validate_identifier(catalog_name)?;
+        validate_identifier(namespace)?;
+        validate_identifier(table_name)?;
+        let table_info = py
+            .allow_threads(|| {
+                alopex_embedded::Catalog::get_table_info(catalog_name, namespace, table_name)
+            })
+            .map_err(error::embedded_err)?;
         let storage_location = table_info
             .storage_location
-            .ok_or_else(|| error::to_py_err("storage_location is required"))?;
+            .ok_or_else(|| pyo3::PyErr::from(error::AlopexError::StorageLocationRequired))?;
+        validate_storage_location(&storage_location)?;
+        let normalized_format = table_info
+            .data_source_format
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_uppercase();
+        if normalized_format != "PARQUET" {
+            return Err(error::AlopexError::UnsupportedFormat(normalized_format).into());
+        }
         let credential_provider = credential_provider.bind(py);
         let resolved =
             resolve_credentials(py, credential_provider, storage_options, &storage_location)?;
         let polars = PyModule::import(py, "polars")?;
-        let scan_parquet = polars.getattr("scan_parquet")?;
+        let scan_parquet = polars.getattr("scan_parquet")?.unbind();
         let options = PyDict::new(py);
         for (key, value) in resolved {
             options.set_item(key, value)?;
         }
-        let args = (storage_location,);
         let kwargs = if options.is_empty() {
             None
         } else {
-            Some(options)
+            Some(options.unbind())
         };
-        let lazy_frame = scan_parquet.call(args, kwargs.as_ref())?;
-        Ok(lazy_frame.into())
+        let storage_location = storage_location.clone();
+        let lazy_frame = py.allow_threads(move || {
+            Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                let scan_parquet = scan_parquet.bind(py);
+                let args = (storage_location.as_str(),);
+                let result = if let Some(kwargs_obj) = kwargs.as_ref() {
+                    scan_parquet.call(args, Some(kwargs_obj.bind(py)))?
+                } else {
+                    scan_parquet.call1(args)?
+                };
+                Ok(result.unbind())
+            })
+        })?;
+        Ok(lazy_frame)
     }
 
     #[staticmethod]
@@ -396,9 +416,7 @@ pub fn require_polars(py: Python<'_>) -> PyResult<()> {
     if PyModule::import(py, "polars").is_ok() {
         Ok(())
     } else {
-        Err(error::to_py_err(
-            "polars が見つかりません。`pip install alopex[polars]` を実行してください",
-        ))
+        Err(error::AlopexError::PolarsNotInstalled.into())
     }
 }
 
