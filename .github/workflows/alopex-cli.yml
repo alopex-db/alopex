@@ -283,20 +283,6 @@ jobs:
     name: S3 Compatibility Test (MinIO)
     runs-on: ubuntu-latest
     needs: cli-check
-    services:
-      minio:
-        image: minio/minio:latest
-        ports:
-          - 9000:9000
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        options: >-
-          --health-cmd "mc ready local || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-          --entrypoint "minio server /data"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -304,6 +290,26 @@ jobs:
 
       - name: Build CLI
         run: cargo build -p alopex-cli --release
+
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:latest server /data --console-address ":9001"
+
+      - name: Wait for MinIO
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:9000/minio/health/ready >/dev/null; then
+              echo "MinIO is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "MinIO failed to become ready" >&2
+          docker logs minio || true
+          exit 1
 
       - name: Install MinIO client
         run: |
@@ -331,6 +337,11 @@ jobs:
           # Test with valid credentials (should not error on credential check)
           $CLI --help
           echo "PASS: CLI accepts S3 environment variables"
+
+      - name: Stop MinIO
+        if: always()
+        run: |
+          docker rm -f minio || true
 
   # ============================================================================
   # Success gate
