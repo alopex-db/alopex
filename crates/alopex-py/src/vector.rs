@@ -230,6 +230,7 @@ mod tests {
     use pyo3::Python;
     use std::env;
     use std::fmt::Display;
+    use std::path::Path;
     use std::sync::Once;
 
     static PY_INIT: Once = Once::new();
@@ -254,24 +255,90 @@ mod tests {
         tc_fail(msg.to_string())
     }
 
-    fn add_site_dirs_from_pythonpath(py: Python<'_>, pythonpath: &str) -> PyResult<()> {
-        let site = PyModule::import(py, "site")?;
-        let sep = if cfg!(windows) { ';' } else { ':' };
-        for entry in pythonpath.split(sep).filter(|s| !s.is_empty()) {
-            site.call_method1("addsitedir", (entry,))?;
+    fn prepend_sys_path(py: Python<'_>, entry: &str) -> PyResult<()> {
+        if entry.is_empty() {
+            return Ok(());
+        }
+        let sys = PyModule::import(py, "sys")?;
+        let path = sys.getattr("path")?;
+        let contains: bool = path.call_method1("__contains__", (entry,))?.extract()?;
+        if !contains {
+            path.call_method1("insert", (0, entry))?;
         }
         Ok(())
     }
 
+    fn add_pythonpath_entries(py: Python<'_>, pythonpath: &str) -> PyResult<()> {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        let entries: Vec<&str> = pythonpath.split(sep).filter(|s| !s.is_empty()).collect();
+        for entry in entries.into_iter().rev() {
+            prepend_sys_path(py, entry)?;
+        }
+        Ok(())
+    }
+
+    fn add_venv_site_packages(py: Python<'_>) -> PyResult<()> {
+        let venv_root = match env::var("VIRTUAL_ENV") {
+            Ok(root) => root,
+            Err(_) => return Ok(()),
+        };
+        let sys = PyModule::import(py, "sys")?;
+        let version = sys.getattr("version_info")?;
+        let major: u8 = version.getattr("major")?.extract()?;
+        let minor: u8 = version.getattr("minor")?.extract()?;
+        if cfg!(windows) {
+            let path = format!("{venv_root}\\Lib\\site-packages");
+            if Path::new(&path).is_dir() {
+                prepend_sys_path(py, &path)?;
+            }
+            return Ok(());
+        }
+        let base = format!("{venv_root}/lib/python{major}.{minor}/site-packages");
+        if Path::new(&base).is_dir() {
+            prepend_sys_path(py, &base)?;
+        }
+        let base64 = format!("{venv_root}/lib64/python{major}.{minor}/site-packages");
+        if Path::new(&base64).is_dir() {
+            prepend_sys_path(py, &base64)?;
+        }
+        Ok(())
+    }
+
+    fn clear_numpy_modules(py: Python<'_>) -> PyResult<()> {
+        let sys = PyModule::import(py, "sys")?;
+        let modules = sys.getattr("modules")?;
+        let locals = PyDict::new(py);
+        locals.set_item("modules", modules)?;
+        py.run(
+            pyo3::ffi::c_str!(
+                "for name in list(modules.keys()):\n    if name == 'numpy' or name.startswith('numpy.'):\n        modules.pop(name, None)\n"
+            ),
+            None,
+            Some(&locals),
+        )?;
+        Ok(())
+    }
+
+    fn invalidate_import_caches(py: Python<'_>) -> PyResult<()> {
+        let importlib = PyModule::import(py, "importlib")?;
+        importlib.call_method0("invalidate_caches")?;
+        Ok(())
+    }
+
     fn ensure_numpy<'py>(py: Python<'py>) -> PyResult<pyo3::Bound<'py, PyModule>> {
+        if let Ok(module) = PyModule::import(py, "numpy") {
+            return Ok(module);
+        }
+        clear_numpy_modules(py)?;
+        if let Ok(pythonpath) = env::var("PYTHONPATH") {
+            add_pythonpath_entries(py, &pythonpath)?;
+        }
+        add_venv_site_packages(py)?;
+        invalidate_import_caches(py)?;
         let err = match PyModule::import(py, "numpy") {
             Ok(module) => return Ok(module),
             Err(err) => err,
         };
-        if let Ok(pythonpath) = env::var("PYTHONPATH") {
-            add_site_dirs_from_pythonpath(py, &pythonpath)?;
-            return PyModule::import(py, "numpy");
-        }
         Err(err)
     }
 
