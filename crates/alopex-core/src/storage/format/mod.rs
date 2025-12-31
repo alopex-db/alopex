@@ -19,6 +19,8 @@
 //!
 //! ## 典型的な書き込みフロー（native）
 //! ```rust,no_run
+//! # #[cfg(not(target_arch = "wasm32"))]
+//! # {
 //! use alopex_core::storage::format::{
 //!     AlopexFileWriter, FileFlags, FileVersion, SectionType, FormatError,
 //! };
@@ -36,10 +38,13 @@
 //!     writer.finalize()?;
 //!     Ok(())
 //! }
+//! # }
 //! ```
 //!
 //! ## 典型的な読み取りフロー（native）
 //! ```rust,no_run
+//! # #[cfg(not(target_arch = "wasm32"))]
+//! # {
 //! use alopex_core::storage::format::{AlopexFileReader, FileReader, FileSource, FormatError};
 //!
 //! fn read_and_validate() -> Result<(), FormatError> {
@@ -51,6 +56,7 @@
 //!     assert!(!data_raw.is_empty());
 //!     Ok(())
 //! }
+//! # }
 //! ```
 //!
 //! ## WASM 読み取りフローの留意点
@@ -83,9 +89,13 @@ pub use models::{
 pub use reader::AlopexFileReader;
 #[cfg(target_arch = "wasm32")]
 pub use reader::{AlopexFileReader, WasmReaderConfig};
+#[cfg(target_arch = "wasm32")]
+pub use reader::{BufferRangeLoader, RangeLoader};
 pub use reader::{FileReader, FileSource, PrefetchFuture};
 pub use section::{SectionEntry, SectionIndex, SectionType};
-pub use section_columnar::{ColumnarSectionReader, ColumnarSectionWriter, SECTION_TYPE_COLUMNAR};
+#[cfg(not(target_arch = "wasm32"))]
+pub use section_columnar::ColumnarSectionWriter;
+pub use section_columnar::{ColumnarSectionReader, SECTION_TYPE_COLUMNAR};
 pub use value_separator::{LargeValuePointer, ValueRef, ValueSeparationConfig, ValueSeparator};
 #[cfg(not(target_arch = "wasm32"))]
 pub use writer::AlopexFileWriter;

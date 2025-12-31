@@ -1,7 +1,6 @@
 use pyo3::prelude::*;
 
 #[pyclass(name = "SearchResult")]
-#[derive(Clone, Debug)]
 pub struct PySearchResult {
     #[pyo3(get, set)]
     pub key: Vec<u8>,
@@ -9,17 +8,47 @@ pub struct PySearchResult {
     pub score: f32,
     #[pyo3(get, set)]
     pub metadata: Option<Vec<u8>>,
+    /// ベクトルデータ（`return_vectors=True` の場合のみ設定）
+    /// NumPy ndarray[float32] または None
+    #[pyo3(get)]
+    pub vector: Option<PyObject>,
+}
+
+impl Clone for PySearchResult {
+    fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            score: self.score,
+            metadata: self.metadata.clone(),
+            vector: self
+                .vector
+                .as_ref()
+                .map(|obj| Python::with_gil(|py| obj.clone_ref(py))),
+        }
+    }
+}
+
+impl std::fmt::Debug for PySearchResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PySearchResult")
+            .field("key", &self.key)
+            .field("score", &self.score)
+            .field("metadata", &self.metadata)
+            .field("vector", &self.vector.as_ref().map(|_| "<ndarray>"))
+            .finish()
+    }
 }
 
 #[pymethods]
 impl PySearchResult {
     #[new]
-    #[pyo3(signature = (key, score, metadata = None))]
-    fn new(key: Vec<u8>, score: f32, metadata: Option<Vec<u8>>) -> Self {
+    #[pyo3(signature = (key, score, metadata = None, vector = None))]
+    fn new(key: Vec<u8>, score: f32, metadata: Option<Vec<u8>>, vector: Option<PyObject>) -> Self {
         Self {
             key,
             score,
             metadata,
+            vector,
         }
     }
 }
@@ -29,7 +58,12 @@ impl From<alopex_embedded::SearchResult> for PySearchResult {
         Self {
             key: value.key,
             score: value.score,
-            metadata: Some(value.metadata),
+            metadata: if value.metadata.is_empty() {
+                None
+            } else {
+                Some(value.metadata)
+            },
+            vector: None, // デフォルトは None（後方互換性）
         }
     }
 }
@@ -39,7 +73,30 @@ impl From<alopex_core::HnswSearchResult> for PySearchResult {
         Self {
             key: value.key,
             score: value.distance,
-            metadata: Some(value.metadata),
+            metadata: if value.metadata.is_empty() {
+                None
+            } else {
+                Some(value.metadata)
+            },
+            vector: None, // デフォルトは None（後方互換性）
+        }
+    }
+}
+
+impl PySearchResult {
+    /// ベクトルデータを含む検索結果を作成
+    #[allow(dead_code)]
+    pub fn with_vector(
+        key: Vec<u8>,
+        score: f32,
+        metadata: Option<Vec<u8>>,
+        vector: Option<PyObject>,
+    ) -> Self {
+        Self {
+            key,
+            score,
+            metadata,
+            vector,
         }
     }
 }

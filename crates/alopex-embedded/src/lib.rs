@@ -28,9 +28,8 @@ use alopex_core::{
     kv::any::AnyKVTransaction,
     kv::memory::MemoryKV,
     kv::AnyKV,
-    score, validate_dimensions, HnswIndex, KVStore, KVTransaction, Key, LargeValueKind,
-    LargeValueMeta, LargeValueReader, LargeValueWriter, StorageFactory, VectorType,
-    DEFAULT_CHUNK_SIZE,
+    validate_dimensions, HnswIndex, KVStore, KVTransaction, Key, LargeValueKind, LargeValueMeta,
+    LargeValueReader, LargeValueWriter, StorageFactory, VectorType, DEFAULT_CHUNK_SIZE,
 };
 pub use alopex_core::{HnswConfig, HnswSearchResult, HnswStats, MemoryStats, Metric, TxnMode};
 /// Streaming query row iterator for FR-7 compliance.
@@ -122,6 +121,8 @@ pub struct Database {
     /// The underlying key-value store.
     pub(crate) store: Arc<AnyKV>,
     pub(crate) sql_catalog: Arc<RwLock<alopex_sql::catalog::PersistentCatalog<AnyKV>>>,
+    pub(crate) hnsw_cache: RwLock<HashMap<String, Arc<HnswIndex>>>,
+    pub(crate) vector_cache: RwLock<Option<HashMap<Key, CachedVector>>>,
     pub(crate) columnar_mode: StorageMode,
     pub(crate) columnar_bridge: ColumnarKvsBridge,
     pub(crate) columnar_memory: Option<InMemorySegmentStore>,
@@ -274,6 +275,8 @@ impl Database {
         Self {
             store,
             sql_catalog,
+            hnsw_cache: RwLock::new(HashMap::new()),
+            vector_cache: RwLock::new(None),
             columnar_mode,
             columnar_bridge,
             columnar_memory,
@@ -294,6 +297,23 @@ impl Database {
 
         self.sql_catalog = Arc::new(RwLock::new(loaded));
         Ok(())
+    }
+
+    fn hnsw_cache_get(&self, name: &str) -> Option<Arc<HnswIndex>> {
+        let cache = self.hnsw_cache.read().expect("hnsw cache lock poisoned");
+        cache.get(name).cloned()
+    }
+
+    fn hnsw_cache_insert(&self, name: &str, index: HnswIndex) -> Arc<HnswIndex> {
+        let index = Arc::new(index);
+        let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
+        cache.insert(name.to_string(), Arc::clone(&index));
+        index
+    }
+
+    fn hnsw_cache_remove(&self, name: &str) {
+        let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
+        cache.remove(name);
     }
 
     /// Flushes the current in-memory data to an SSTable on disk (beta).
@@ -416,7 +436,9 @@ impl Database {
         let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
         let index = HnswIndex::create(name, config).map_err(Error::Core)?;
         index.save(&mut txn).map_err(Error::Core)?;
-        txn.commit_self().map_err(Error::Core)
+        txn.commit_self().map_err(Error::Core)?;
+        self.hnsw_cache_insert(name, index);
+        Ok(())
     }
 
     /// HNSW インデックスを削除する。
@@ -424,14 +446,21 @@ impl Database {
         let mut txn = self.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
         let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
         index.drop(&mut txn).map_err(Error::Core)?;
-        txn.commit_self().map_err(Error::Core)
+        txn.commit_self().map_err(Error::Core)?;
+        self.hnsw_cache_remove(name);
+        Ok(())
     }
 
     /// HNSW 統計情報を取得する。
     pub fn get_hnsw_stats(&self, name: &str) -> Result<HnswStats> {
+        if let Some(index) = self.hnsw_cache_get(name) {
+            return Ok(index.stats());
+        }
         let mut txn = self.store.begin(TxnMode::ReadOnly).map_err(Error::Core)?;
         let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
-        Ok(index.stats())
+        let stats = index.stats();
+        self.hnsw_cache_insert(name, index);
+        Ok(stats)
     }
 
     /// HNSW インデックスをコンパクションし、結果を返す。
@@ -441,6 +470,7 @@ impl Database {
         let result = index.compact().map_err(Error::Core)?;
         index.save(&mut txn).map_err(Error::Core)?;
         txn.commit_self().map_err(Error::Core)?;
+        self.hnsw_cache_insert(name, index);
         Ok(result)
     }
 
@@ -452,9 +482,69 @@ impl Database {
         k: usize,
         ef_search: Option<usize>,
     ) -> Result<(Vec<HnswSearchResult>, HnswSearchStats)> {
+        let profile = std::env::var_os("ALOPEX_PROFILE_HNSW").is_some();
+        let total_start = if profile {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        if let Some(index) = self.hnsw_cache_get(name) {
+            let search_start = if profile {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            let result = index.search(query, k, ef_search).map_err(Error::Core)?;
+            if let (true, Some(total_start), Some(search_start)) =
+                (profile, total_start, search_start)
+            {
+                let search_time = search_start.elapsed();
+                let total_time = total_start.elapsed();
+                eprintln!(
+                    "alopex.hnsw_search cache=hit name={} k={} ef_search={:?} search_ms={:.2} total_ms={:.2}",
+                    name,
+                    k,
+                    ef_search,
+                    search_time.as_secs_f64() * 1000.0,
+                    total_time.as_secs_f64() * 1000.0
+                );
+            }
+            return Ok(result);
+        }
+
+        let load_start = if profile {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let mut txn = self.store.begin(TxnMode::ReadOnly).map_err(Error::Core)?;
         let index = HnswIndex::load(name, &mut txn).map_err(Error::Core)?;
-        index.search(query, k, ef_search).map_err(Error::Core)
+        let load_time = load_start.map(|start| start.elapsed());
+        let index = self.hnsw_cache_insert(name, index);
+        let search_start = if profile {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        let result = index.search(query, k, ef_search).map_err(Error::Core)?;
+        if let (true, Some(total_start), Some(search_start)) = (profile, total_start, search_start)
+        {
+            let search_time = search_start.elapsed();
+            let total_time = total_start.elapsed();
+            let load_time_ms = load_time
+                .map(|elapsed| elapsed.as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            eprintln!(
+                "alopex.hnsw_search cache=miss name={} k={} ef_search={:?} load_ms={:.2} search_ms={:.2} total_ms={:.2}",
+                name,
+                k,
+                ef_search,
+                load_time_ms,
+                search_time.as_secs_f64() * 1000.0,
+                total_time.as_secs_f64() * 1000.0
+            );
+        }
+        Ok(result)
     }
 
     /// Creates a chunked large value writer for opaque blobs (beta).
@@ -501,6 +591,9 @@ impl Database {
             db: self,
             hnsw_indices: HashMap::new(),
             overlay: alopex_sql::catalog::CatalogOverlay::new(),
+            vector_cache_updates: HashMap::new(),
+            vector_cache_deletes: Vec::new(),
+            vector_cache_invalidated: false,
         })
     }
 }
@@ -517,6 +610,9 @@ pub struct Transaction<'a> {
     db: &'a Database,
     hnsw_indices: HashMap<String, (HnswIndex, alopex_core::vector::hnsw::HnswTransactionState)>,
     overlay: alopex_sql::catalog::CatalogOverlay,
+    vector_cache_updates: HashMap<Key, CachedVector>,
+    vector_cache_deletes: Vec<Key>,
+    vector_cache_invalidated: bool,
 }
 
 /// A search result row containing key, metadata, and similarity score.
@@ -552,6 +648,9 @@ impl<'a> Transaction<'a> {
 
     /// Sets a value for a given key.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.vector_cache_invalidated = true;
+        self.vector_cache_updates.clear();
+        self.vector_cache_deletes.clear();
         self.inner_mut()?
             .put(key.to_vec(), value.to_vec())
             .map_err(Error::Core)
@@ -559,6 +658,7 @@ impl<'a> Transaction<'a> {
 
     /// Deletes a key-value pair.
     pub fn delete(&mut self, key: &[u8]) -> Result<()> {
+        self.vector_cache_deletes.push(key.to_vec());
         self.inner_mut()?.delete(key.to_vec()).map_err(Error::Core)
     }
 
@@ -621,7 +721,56 @@ impl<'a> Transaction<'a> {
             keys.push(key.to_vec());
             self.persist_vector_index(&keys)?;
         }
+
+        let cached = cached_vector_from_entry(metric, metadata.to_vec(), vector.to_vec());
+        self.vector_cache_updates.insert(key.to_vec(), cached);
+        self.vector_cache_deletes.retain(|k| k != key);
         Ok(())
+    }
+
+    /// Retrieves a vector stored under the given key.
+    ///
+    /// Returns `None` if the key does not exist. If the key exists but has a different
+    /// metric than specified, returns an error.
+    pub fn get_vector(&mut self, key: &[u8], metric: Metric) -> Result<Option<Vec<f32>>> {
+        let txn = self.inner_mut()?;
+        let key_vec = key.to_vec();
+        let Some(raw) = txn.get(&key_vec).map_err(Error::Core)? else {
+            return Ok(None);
+        };
+        let decoded = decode_vector_entry(&raw).map_err(Error::Core)?;
+        if decoded.metric != metric {
+            return Err(Error::Core(alopex_core::Error::UnsupportedMetric {
+                metric: metric.as_str().to_string(),
+            }));
+        }
+        Ok(Some(decoded.vector))
+    }
+
+    /// Retrieves vectors stored under the given keys in a single transaction call.
+    ///
+    /// Returned list order matches the input `keys` order. Each entry is:
+    /// - `None` if the key does not exist
+    /// - `Some(Vec<f32>)` if the key exists and metric matches
+    ///
+    /// If any existing entry has a different metric than specified, returns an error.
+    pub fn get_vectors(&mut self, keys: &[Key], metric: Metric) -> Result<Vec<Option<Vec<f32>>>> {
+        let txn = self.inner_mut()?;
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            let Some(raw) = txn.get(key).map_err(Error::Core)? else {
+                out.push(None);
+                continue;
+            };
+            let decoded = decode_vector_entry(&raw).map_err(Error::Core)?;
+            if decoded.metric != metric {
+                return Err(Error::Core(alopex_core::Error::UnsupportedMetric {
+                    metric: metric.as_str().to_string(),
+                }));
+            }
+            out.push(Some(decoded.vector));
+        }
+        Ok(out)
     }
 
     /// Executes a flat similarity search over stored vectors using the provided metric and query.
@@ -639,38 +788,211 @@ impl<'a> Transaction<'a> {
             return Ok(Vec::new());
         }
 
-        let mut keys = match filter_keys {
-            Some(keys) => keys.to_vec(),
-            None => self.load_vector_index()?,
+        let profile = std::env::var_os("ALOPEX_PROFILE_SEARCH_SIMILAR").is_some();
+        let total_start = if profile {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        let query_norm_sq = query_vector.iter().map(|v| v * v).sum::<f32>();
+        let query_norm = if matches!(metric, Metric::Cosine) {
+            query_norm_sq.sqrt()
+        } else {
+            0.0
+        };
+        let inv_query_norm = if query_norm == 0.0 {
+            0.0
+        } else {
+            1.0 / query_norm
+        };
+
+        if filter_keys.is_none() && self.txn_mode()? == TxnMode::ReadOnly {
+            let cache = self
+                .db
+                .vector_cache
+                .read()
+                .expect("vector cache lock poisoned");
+            if let Some(cache) = cache.as_ref() {
+                if cache.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let keys_len = cache.len();
+                let mut rows = Vec::with_capacity(keys_len);
+                let mut score_time = std::time::Duration::ZERO;
+                for (key, cached) in cache.iter() {
+                    if cached.metric != metric {
+                        return Err(Error::Core(alopex_core::Error::UnsupportedMetric {
+                            metric: metric.as_str().to_string(),
+                        }));
+                    }
+                    validate_dimensions(cached.vector.len(), query_vector.len())
+                        .map_err(Error::Core)?;
+                    let score_start = if profile {
+                        Some(std::time::Instant::now())
+                    } else {
+                        None
+                    };
+                    let dot = dot_product(query_vector, &cached.vector);
+                    let score = match metric {
+                        Metric::Cosine => {
+                            if cached.inv_norm == 0.0 || inv_query_norm == 0.0 {
+                                0.0
+                            } else {
+                                dot * cached.inv_norm * inv_query_norm
+                            }
+                        }
+                        Metric::L2 => {
+                            let dist_sq = query_norm_sq + cached.norm_sq - 2.0 * dot;
+                            -dist_sq.sqrt()
+                        }
+                        Metric::InnerProduct => dot,
+                    };
+                    if let Some(score_start) = score_start {
+                        score_time += score_start.elapsed();
+                    }
+                    rows.push(SearchResult {
+                        key: key.clone(),
+                        metadata: cached.metadata.clone(),
+                        score,
+                    });
+                }
+
+                let rows_total = rows.len();
+                let sort_start = if profile {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+                if rows.len() > top_k {
+                    rows.select_nth_unstable_by(top_k - 1, |a, b| {
+                        b.score.total_cmp(&a.score).then_with(|| a.key.cmp(&b.key))
+                    });
+                    rows.truncate(top_k);
+                }
+                rows.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.key.cmp(&b.key)));
+                if let (true, Some(total_start), Some(sort_start)) =
+                    (profile, total_start, sort_start)
+                {
+                    let sort_time = sort_start.elapsed();
+                    let total_time = total_start.elapsed();
+                    eprintln!(
+                        "alopex.search_similar keys={} results={} top_k={} load_keys_ms={:.2} get_ms={:.2} decode_ms={:.2} score_ms={:.2} sort_ms={:.2} total_ms={:.2}",
+                        keys_len,
+                        rows_total,
+                        top_k,
+                        0.0,
+                        0.0,
+                        0.0,
+                        score_time.as_secs_f64() * 1000.0,
+                        sort_time.as_secs_f64() * 1000.0,
+                        total_time.as_secs_f64() * 1000.0
+                    );
+                }
+                return Ok(rows);
+            }
+        }
+
+        let (keys, load_keys_time) = if profile {
+            let start = std::time::Instant::now();
+            let keys = match filter_keys {
+                Some(keys) => keys.to_vec(),
+                None => self.load_vector_index()?,
+            };
+            (keys, start.elapsed())
+        } else {
+            let keys = match filter_keys {
+                Some(keys) => keys.to_vec(),
+                None => self.load_vector_index()?,
+            };
+            (keys, std::time::Duration::ZERO)
         };
         if keys.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut rows = Vec::new();
+        let keys_len = keys.len();
+        let mut rows = Vec::with_capacity(keys.len());
         let txn = self.inner_mut()?;
-        for key in keys.drain(..) {
-            let Some(raw) = txn.get(&key).map_err(Error::Core)? else {
-                continue;
-            };
-            let decoded = decode_vector_entry(&raw).map_err(Error::Core)?;
-            if decoded.metric != metric {
-                return Err(Error::Core(alopex_core::Error::UnsupportedMetric {
-                    metric: metric.as_str().to_string(),
-                }));
+        let mut get_time = std::time::Duration::ZERO;
+        let mut decode_time = std::time::Duration::ZERO;
+        let mut score_time = std::time::Duration::ZERO;
+        if profile {
+            for key in keys {
+                let get_start = std::time::Instant::now();
+                let Some(raw) = txn.get(&key).map_err(Error::Core)? else {
+                    get_time += get_start.elapsed();
+                    continue;
+                };
+                get_time += get_start.elapsed();
+                let decode_start = std::time::Instant::now();
+                let decoded = decode_vector_entry_view(&raw).map_err(Error::Core)?;
+                decode_time += decode_start.elapsed();
+                if decoded.metric != metric {
+                    return Err(Error::Core(alopex_core::Error::UnsupportedMetric {
+                        metric: metric.as_str().to_string(),
+                    }));
+                }
+                validate_dimensions(decoded.dim, query_vector.len()).map_err(Error::Core)?;
+                let score_start = std::time::Instant::now();
+                let score =
+                    score_from_bytes(metric, query_vector, query_norm, decoded.vector_bytes)?;
+                score_time += score_start.elapsed();
+                rows.push(SearchResult {
+                    key,
+                    metadata: decoded.metadata,
+                    score,
+                });
             }
-            validate_dimensions(decoded.dim, query_vector.len()).map_err(Error::Core)?;
-            let score = score(metric, query_vector, &decoded.vector).map_err(Error::Core)?;
-            rows.push(SearchResult {
-                key,
-                metadata: decoded.metadata,
-                score,
-            });
+        } else {
+            for key in keys {
+                let Some(raw) = txn.get(&key).map_err(Error::Core)? else {
+                    continue;
+                };
+                let decoded = decode_vector_entry_view(&raw).map_err(Error::Core)?;
+                if decoded.metric != metric {
+                    return Err(Error::Core(alopex_core::Error::UnsupportedMetric {
+                        metric: metric.as_str().to_string(),
+                    }));
+                }
+                validate_dimensions(decoded.dim, query_vector.len()).map_err(Error::Core)?;
+                let score =
+                    score_from_bytes(metric, query_vector, query_norm, decoded.vector_bytes)?;
+                rows.push(SearchResult {
+                    key,
+                    metadata: decoded.metadata,
+                    score,
+                });
+            }
         }
 
-        rows.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.key.cmp(&b.key)));
+        let rows_total = rows.len();
+        let sort_start = if profile {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         if rows.len() > top_k {
+            rows.select_nth_unstable_by(top_k - 1, |a, b| {
+                b.score.total_cmp(&a.score).then_with(|| a.key.cmp(&b.key))
+            });
             rows.truncate(top_k);
+        }
+        rows.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.key.cmp(&b.key)));
+        if let (true, Some(total_start), Some(sort_start)) = (profile, total_start, sort_start) {
+            let sort_time = sort_start.elapsed();
+            let total_time = total_start.elapsed();
+            eprintln!(
+                "alopex.search_similar keys={} results={} top_k={} load_keys_ms={:.2} get_ms={:.2} decode_ms={:.2} score_ms={:.2} sort_ms={:.2} total_ms={:.2}",
+                keys_len,
+                rows_total,
+                top_k,
+                load_keys_time.as_secs_f64() * 1000.0,
+                get_time.as_secs_f64() * 1000.0,
+                decode_time.as_secs_f64() * 1000.0,
+                score_time.as_secs_f64() * 1000.0,
+                sort_time.as_secs_f64() * 1000.0,
+                total_time.as_secs_f64() * 1000.0
+            );
         }
         Ok(rows)
     }
@@ -701,10 +1023,64 @@ impl<'a> Transaction<'a> {
             catalog
                 .persist_overlay(txn, &self.overlay)
                 .map_err(|err| Error::Sql(err.into()))?;
+
+            let vector_cache_invalidated = self.vector_cache_invalidated;
+            let vector_cache_updates = std::mem::take(&mut self.vector_cache_updates);
+            let vector_cache_deletes = std::mem::take(&mut self.vector_cache_deletes);
+            if vector_cache_invalidated {
+                let mut cache = self
+                    .db
+                    .vector_cache
+                    .write()
+                    .expect("vector cache lock poisoned");
+                *cache = None;
+            } else if !vector_cache_updates.is_empty() || !vector_cache_deletes.is_empty() {
+                let needs_rebuild = {
+                    let cache = self
+                        .db
+                        .vector_cache
+                        .read()
+                        .expect("vector cache lock poisoned");
+                    cache.is_none()
+                };
+                if needs_rebuild {
+                    let rebuilt = build_vector_cache_from_txn(txn).map_err(Error::Core)?;
+                    let mut cache = self
+                        .db
+                        .vector_cache
+                        .write()
+                        .expect("vector cache lock poisoned");
+                    *cache = Some(rebuilt);
+                } else {
+                    let mut cache = self
+                        .db
+                        .vector_cache
+                        .write()
+                        .expect("vector cache lock poisoned");
+                    if let Some(cache) = cache.as_mut() {
+                        for key in vector_cache_deletes {
+                            cache.remove(&key);
+                        }
+                        for (key, cached) in vector_cache_updates {
+                            cache.insert(key, cached);
+                        }
+                    }
+                }
+            }
         }
         let txn = self.inner.take().ok_or(Error::TxnCompleted)?;
-        self.hnsw_indices.clear();
+        let hnsw_indices = std::mem::take(&mut self.hnsw_indices);
         txn.commit_self().map_err(Error::Core)?;
+        if !hnsw_indices.is_empty() {
+            let mut cache = self
+                .db
+                .hnsw_cache
+                .write()
+                .expect("hnsw cache lock poisoned");
+            for (name, (index, _state)) in hnsw_indices {
+                cache.insert(name, Arc::new(index));
+            }
+        }
 
         // KV commit 成功後のみ、カタログにオーバーレイを適用する。
         let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
@@ -810,9 +1186,23 @@ fn encode_vector_entry(vector_type: VectorType, metadata: &[u8], vector: &[f32])
 
 struct DecodedEntry {
     metric: Metric,
-    dim: usize,
+    vector: Vec<f32>,
+}
+
+#[derive(Clone)]
+struct CachedVector {
+    metric: Metric,
     metadata: Vec<u8>,
     vector: Vec<f32>,
+    norm_sq: f32,
+    inv_norm: f32,
+}
+
+struct VectorEntryView<'a> {
+    metric: Metric,
+    dim: usize,
+    metadata: Vec<u8>,
+    vector_bytes: &'a [u8],
 }
 
 fn decode_vector_entry(bytes: &[u8]) -> result::Result<DecodedEntry, alopex_core::Error> {
@@ -833,19 +1223,219 @@ fn decode_vector_entry(bytes: &[u8]) -> result::Result<DecodedEntry, alopex_core
         ));
     }
 
-    let metadata = bytes[header..header + meta_len].to_vec();
     let mut vector = Vec::with_capacity(dim);
     let vec_bytes = &bytes[header + meta_len..expected_len];
     for chunk in vec_bytes.chunks_exact(4) {
         vector.push(f32::from_le_bytes(chunk.try_into().unwrap()));
     }
 
-    Ok(DecodedEntry {
+    Ok(DecodedEntry { metric, vector })
+}
+
+fn decode_vector_entry_view(
+    bytes: &[u8],
+) -> result::Result<VectorEntryView<'_>, alopex_core::Error> {
+    if bytes.len() < 9 {
+        return Err(alopex_core::Error::InvalidFormat(
+            "vector entry too short".into(),
+        ));
+    }
+    let metric = byte_to_metric(bytes[0])?;
+    let dim = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+    let meta_len = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
+
+    let header = 9;
+    let expected_len = header + meta_len + dim * std::mem::size_of::<f32>();
+    if bytes.len() < expected_len {
+        return Err(alopex_core::Error::InvalidFormat(
+            "vector entry truncated".into(),
+        ));
+    }
+
+    let metadata = bytes[header..header + meta_len].to_vec();
+    let vector_bytes = &bytes[header + meta_len..expected_len];
+
+    Ok(VectorEntryView {
         metric,
         dim,
         metadata,
-        vector,
+        vector_bytes,
     })
+}
+
+fn vector_bytes_to_vec(bytes: &[u8]) -> Vec<f32> {
+    let mut vector = Vec::with_capacity(bytes.len() / 4);
+    for chunk in bytes.chunks_exact(4) {
+        vector.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    }
+    vector
+}
+
+fn cached_vector_from_entry(metric: Metric, metadata: Vec<u8>, vector: Vec<f32>) -> CachedVector {
+    let norm_sq = vector.iter().map(|v| v * v).sum::<f32>();
+    let inv_norm = if norm_sq == 0.0 {
+        0.0
+    } else {
+        1.0 / norm_sq.sqrt()
+    };
+    CachedVector {
+        metric,
+        metadata,
+        vector,
+        norm_sq,
+        inv_norm,
+    }
+}
+
+fn build_vector_cache_from_txn<'a>(
+    txn: &mut AnyKVTransaction<'a>,
+) -> result::Result<HashMap<Key, CachedVector>, alopex_core::Error> {
+    let Some(raw) = txn.get(&VECTOR_INDEX_KEY.to_vec())? else {
+        return Ok(HashMap::new());
+    };
+    let keys = decode_index(&raw)?;
+    let mut cache = HashMap::with_capacity(keys.len());
+    for key in keys {
+        let Some(raw) = txn.get(&key)? else {
+            continue;
+        };
+        let decoded = decode_vector_entry_view(&raw)?;
+        let vector = vector_bytes_to_vec(decoded.vector_bytes);
+        let cached = cached_vector_from_entry(decoded.metric, decoded.metadata, vector);
+        cache.insert(key, cached);
+    }
+    Ok(cache)
+}
+
+fn dot_product(query: &[f32], item: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx") {
+            // SAFETY: guarded by runtime feature detection.
+            unsafe {
+                return dot_product_avx(query, item);
+            }
+        }
+    }
+    dot_product_scalar(query, item)
+}
+
+fn dot_product_scalar(query: &[f32], item: &[f32]) -> f32 {
+    query.iter().zip(item.iter()).map(|(q, v)| q * v).sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+unsafe fn dot_product_avx(query: &[f32], item: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+
+    let len = query.len();
+    let mut i = 0;
+    let mut acc = _mm256_setzero_ps();
+    let q_ptr = query.as_ptr();
+    let v_ptr = item.as_ptr();
+    while i + 8 <= len {
+        let q = _mm256_loadu_ps(q_ptr.add(i));
+        let v = _mm256_loadu_ps(v_ptr.add(i));
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(q, v));
+        i += 8;
+    }
+
+    let mut tmp = [0f32; 8];
+    _mm256_storeu_ps(tmp.as_mut_ptr(), acc);
+    let mut sum = tmp.iter().sum::<f32>();
+    while i < len {
+        sum += *q_ptr.add(i) * *v_ptr.add(i);
+        i += 1;
+    }
+    sum
+}
+
+fn score_from_slice(metric: Metric, query: &[f32], query_norm: f32, item: &[f32]) -> f32 {
+    match metric {
+        Metric::Cosine => {
+            if query_norm == 0.0 {
+                return 0.0;
+            }
+            let mut dot = 0.0;
+            let mut item_norm_sq = 0.0;
+            for (q, v) in query.iter().zip(item.iter()) {
+                dot += q * v;
+                item_norm_sq += v * v;
+            }
+            let item_norm = item_norm_sq.sqrt();
+            if item_norm == 0.0 {
+                0.0
+            } else {
+                dot / (query_norm * item_norm)
+            }
+        }
+        Metric::L2 => {
+            let mut dist_sq = 0.0;
+            for (q, v) in query.iter().zip(item.iter()) {
+                let d = q - v;
+                dist_sq += d * d;
+            }
+            -dist_sq.sqrt()
+        }
+        Metric::InnerProduct => query.iter().zip(item.iter()).map(|(q, v)| q * v).sum(),
+    }
+}
+
+fn score_from_bytes(
+    metric: Metric,
+    query: &[f32],
+    query_norm: f32,
+    vector_bytes: &[u8],
+) -> result::Result<f32, alopex_core::Error> {
+    let len = vector_bytes.len() / 4;
+    #[cfg(target_endian = "little")]
+    {
+        let ptr = vector_bytes.as_ptr();
+        if (ptr as usize).is_multiple_of(std::mem::align_of::<f32>()) {
+            let items = unsafe { std::slice::from_raw_parts(ptr as *const f32, len) };
+            return Ok(score_from_slice(metric, query, query_norm, items));
+        }
+    }
+
+    // Fallback for unaligned or big-endian targets: decode each f32 from bytes.
+    let mut iter = vector_bytes.chunks_exact(4);
+    let score = match metric {
+        Metric::Cosine => {
+            if query_norm == 0.0 {
+                0.0
+            } else {
+                let mut dot = 0.0;
+                let mut item_norm_sq = 0.0;
+                for (q, chunk) in query.iter().zip(&mut iter) {
+                    let v = f32::from_le_bytes(chunk.try_into().unwrap());
+                    dot += q * v;
+                    item_norm_sq += v * v;
+                }
+                let item_norm = item_norm_sq.sqrt();
+                if item_norm == 0.0 {
+                    0.0
+                } else {
+                    dot / (query_norm * item_norm)
+                }
+            }
+        }
+        Metric::L2 => {
+            let mut dist_sq = 0.0;
+            for (q, chunk) in query.iter().zip(&mut iter) {
+                let v = f32::from_le_bytes(chunk.try_into().unwrap());
+                let d = q - v;
+                dist_sq += d * d;
+            }
+            -dist_sq.sqrt()
+        }
+        Metric::InnerProduct => query
+            .iter()
+            .zip(&mut iter)
+            .map(|(q, chunk)| q * f32::from_le_bytes(chunk.try_into().unwrap()))
+            .sum(),
+    };
+    Ok(score)
 }
 
 fn encode_index(keys: &[Key]) -> result::Result<Vec<u8>, alopex_core::Error> {

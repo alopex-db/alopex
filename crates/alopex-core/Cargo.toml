@@ -37,16 +37,16 @@ bytes = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 
-[dev-dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+memmap2 = "0.9"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tempfile = "3.8"
 criterion = { workspace = true }
 rand = { workspace = true }
 proptest = "1.4"
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 crossbeam-skiplist = "0.1"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-memmap2 = "0.9"
 
 # jemalloc doesn't support Windows
 [target.'cfg(not(target_os = "windows"))'.dependencies]
@@ -58,6 +58,8 @@ web-sys = { version = "0.3", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [[bench]]
 name = "vector_flat"

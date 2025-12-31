@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 use alopex_core::storage::format::{
     FileFlags, FileFooter, FileHeader, FileVersion, FormatError, FOOTER_SIZE, HEADER_SIZE,
 };

@@ -757,7 +757,7 @@ fn decode_bitpack(bytes: &[u8], logical: LogicalType) -> Result<Column> {
     Ok(Column::Bool(out))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 use alopex_core::storage::compression::CompressionAlgorithm;
 #[cfg(not(target_arch = "wasm32"))]
 use alopex_core::storage::format::AlopexFileWriter;

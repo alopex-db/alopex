@@ -23,3 +23,66 @@ def test_hnsw_create_search_delete():
         txn.commit()
 
     db.drop_hnsw_index("idx")
+
+
+@pytest.mark.requires_numpy
+def test_hnsw_multithreaded_search_releases_gil():
+    import time
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import numpy as np
+
+    db = Database.new()
+    name = "idx_mt"
+    dim = 128
+    count = 1000
+    k = 10
+    ef_search = 200
+
+    db.create_hnsw_index(name, HnswConfig(dim))
+    rng = np.random.default_rng(0)
+    vectors = rng.standard_normal((count, dim)).astype(np.float32, copy=False)
+    query = rng.standard_normal((dim,)).astype(np.float32, copy=False)
+
+    with db.begin(TxnMode.READ_WRITE) as txn:
+        for i in range(count):
+            txn.upsert_to_hnsw(name, f"k{i}".encode(), vectors[i], None)
+        txn.commit()
+
+    threads = 4
+    repeats = 10
+    barrier = threading.Barrier(threads)
+
+    def worker():
+        barrier.wait()
+        started = time.perf_counter()
+        for _ in range(repeats):
+            results, _stats = db.search_hnsw(name, query, k, ef_search=ef_search)
+            assert len(results) == k
+        finished = time.perf_counter()
+        return started, finished
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        futures = [pool.submit(worker) for _ in range(threads)]
+        start = time.perf_counter()
+        main_ticks = 0
+        while any(not f.done() for f in futures) and (time.perf_counter() - start) < 0.25:
+            main_ticks += 1
+        intervals = [future.result() for future in futures]
+
+    overlap = False
+    for i in range(len(intervals)):
+        s1, e1 = intervals[i]
+        for j in range(i + 1, len(intervals)):
+            s2, e2 = intervals[j]
+            if max(s1, s2) < min(e1, e2):
+                overlap = True
+                break
+        if overlap:
+            break
+
+    assert (
+        main_ticks > 1000
+    ), "main thread did not make progress while workers were searching; GIL may not be released"
+    assert overlap, "worker search_hnsw calls did not overlap; parallelism may be limited"

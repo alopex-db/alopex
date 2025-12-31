@@ -326,7 +326,7 @@ fn slice_column(column: &Column, start: usize, len: usize) -> Result<Column> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use tempfile::tempdir;

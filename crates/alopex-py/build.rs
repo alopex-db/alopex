@@ -14,7 +14,46 @@ fn python_config_from_exe(python: &str) -> Option<PathBuf> {
     }
 }
 
+fn python_config_from_sysconfig(python: &str) -> Option<PathBuf> {
+    let output = Command::new(python)
+        .args([
+            "-c",
+            "import sys, sysconfig; \
+print(sysconfig.get_config_var('BINDIR') or ''); \
+print(sys.version_info.major); \
+print(sys.version_info.minor);",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let bindir = lines.next()?.trim();
+    let major = lines.next()?.trim();
+    let minor = lines.next()?.trim();
+    if bindir.is_empty() {
+        return None;
+    }
+    let candidates = [
+        format!("python{major}.{minor}-config"),
+        format!("python{major}-config"),
+        "python3-config".to_string(),
+        "python-config".to_string(),
+    ];
+    for name in candidates {
+        let candidate = Path::new(bindir).join(name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn main() {
+    pyo3_build_config::add_extension_module_link_args();
+
     if cfg!(target_os = "windows") {
         println!("cargo:warning=Windows では python3-config が利用できないため埋め込みフラグをスキップします");
         return;
@@ -26,8 +65,9 @@ fn main() {
     }
 
     let python = env::var("PYO3_PYTHON").unwrap_or_else(|_| "python3".to_string());
-    let mut config =
-        python_config_from_exe(&python).unwrap_or_else(|| PathBuf::from("python3-config"));
+    let mut config = python_config_from_exe(&python)
+        .or_else(|| python_config_from_sysconfig(&python))
+        .unwrap_or_else(|| PathBuf::from("python3-config"));
     if config.as_path() == Path::new("python3-config") {
         let system_config = PathBuf::from("/usr/bin/python3-config");
         if system_config.exists() {

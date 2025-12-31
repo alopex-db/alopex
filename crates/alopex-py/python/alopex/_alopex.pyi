@@ -70,8 +70,15 @@ class SearchResult:
     key: bytes
     score: float
     metadata: Optional[bytes]
+    vector: Optional[Any]  # numpy.ndarray[float32] when return_vectors=True
 
-    def __init__(self, key: bytes, score: float, metadata: Optional[bytes] = None) -> None: ...
+    def __init__(
+        self,
+        key: bytes,
+        score: float,
+        metadata: Optional[bytes] = None,
+        vector: Optional[Any] = None,
+    ) -> None: ...
 
 
 class HnswStats:
@@ -79,13 +86,15 @@ class HnswStats:
     deleted_count: int
     level_distribution: List[int]
     memory_bytes: int
+    avg_edges_per_node: float
 
     def __init__(
         self,
-        node_count: int,
-        deleted_count: int,
-        level_distribution: List[int],
-        memory_bytes: int,
+        node_count: int = 0,
+        deleted_count: int = 0,
+        level_distribution: List[int] = [],
+        memory_bytes: int = 0,
+        avg_edges_per_node: float = 0.0,
     ) -> None: ...
 
 
@@ -207,7 +216,29 @@ class Transaction:
         metric: Metric,
         k: int,
         filter_keys: Optional[List[bytes]] = None,
+        return_vectors: bool = False,
+        zero_copy_return: bool = True,
     ) -> List[SearchResult]: ...
+    def get_vector(
+        self,
+        key: bytes,
+        metric: Metric,
+        zero_copy_return: bool = True,
+    ) -> Any:
+        """Get vector by key.
+
+        Args:
+            key: Vector key.
+            metric: Metric (must match the metric used when storing).
+            zero_copy_return: If True, uses zero-copy ownership transfer.
+
+        Returns:
+            numpy.ndarray[float32]: The vector data.
+
+        Raises:
+            KeyError: If the key does not exist.
+        """
+        ...
     def upsert_to_hnsw(
         self,
         name: str,

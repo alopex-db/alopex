@@ -89,6 +89,8 @@ dependencies = [
  "crossbeam-skiplist",
  "dhat",
  "futures",
+ "getrandom 0.2.16",
+ "getrandom 0.3.4",
  "jemalloc-ctl",
  "js-sys",
  "lz4",
@@ -129,13 +131,15 @@ dependencies = [
 
 [[package]]
 name = "alopex-py"
-version = "0.3.3"
+version = "0.3.5"
 dependencies = [
  "alopex-core",
  "alopex-embedded",
  "criterion",
  "numpy",
+ "proptest",
  "pyo3",
+ "pyo3-build-config",
 ]
 
 [[package]]

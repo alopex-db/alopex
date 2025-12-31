@@ -2294,7 +2294,7 @@ fn decode_varint(data: &[u8]) -> Result<(u64, usize)> {
 // Tests
 // ============================================================================
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

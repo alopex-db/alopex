@@ -47,7 +47,7 @@ pub fn drain_to_writer<W: Write>(reader: &mut LargeValueReader, mut sink: W) -> 
     Ok(copied)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::storage::large_value::chunk::{LargeValueKind, LargeValueMeta, LargeValueWriter};

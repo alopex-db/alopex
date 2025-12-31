@@ -1,6 +1,6 @@
 [package]
 name = "alopex-py"
-version.workspace = true
+version = "0.3.5"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -19,8 +19,12 @@ numpy = { version = "0.24", optional = true }
 alopex-core.workspace = true
 alopex-embedded = { path = "../alopex-embedded" }
 
+[build-dependencies]
+pyo3-build-config = "0.24.1"
+
 [dev-dependencies]
 criterion = { workspace = true }
+proptest = "1"
 
 [features]
 default = []

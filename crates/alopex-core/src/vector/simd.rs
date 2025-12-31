@@ -228,7 +228,7 @@ mod avx2 {
         Box::new(Avx2Kernel)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     mod tests {
         use super::*;
 
@@ -382,7 +382,7 @@ pub fn select_kernel() -> Box<dyn DistanceKernel> {
     Box::new(ScalarKernel)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::vector::score;

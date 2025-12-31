@@ -50,9 +50,28 @@ db = Database.new()
 with db.begin(TxnMode.READ_WRITE) as txn:
     vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
     txn.upsert_vector(b"k1", None, vec, Metric.COSINE)
-    results = txn.search_similar(vec, Metric.COSINE, 1)
+    results = txn.search_similar(vec, Metric.COSINE, 1, return_vectors=True)
     print(results[0].key, results[0].score)
+    if results[0].vector is not None:
+        print(results[0].vector.dtype, results[0].vector.shape)
 ```
+
+#### NumPy 入出力とゼロコピー条件（v0.3.5）
+
+入力（Python → Rust）:
+
+- dtype: `float32` が優先。`float64` は `float32` に変換して処理します。
+- layout: C-contiguous が優先。非連続（strided/Fortran order 等）は C-contiguous に変換して処理します。
+- **ゼロコピー入力**: `float32` かつ C-contiguous の場合は Rust 側でコピーなしに参照します。
+
+出力（Rust → Python）:
+
+- `Transaction.search_similar(..., return_vectors=True)` の場合、`SearchResult.vector` に `numpy.ndarray[float32]` を含められます。
+- `Transaction.search_similar(..., zero_copy_return=True)` / `Transaction.get_vector(..., zero_copy_return=True)` の場合、可能なら所有権移譲によるゼロコピー返却を行います（`False` の場合はコピー）。
+
+GIL:
+
+- `upsert_vector` / `search_similar` / `search_hnsw` は重い処理中に GIL を解放します。
 
 ### HNSW インデックス（numpy 必須）
 

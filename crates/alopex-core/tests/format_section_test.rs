@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 use alopex_core::storage::compression::CompressionAlgorithm;
 use alopex_core::storage::format::{SectionEntry, SectionIndex, SectionType, SECTION_ENTRY_SIZE};
 

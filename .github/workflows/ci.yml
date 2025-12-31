@@ -49,6 +49,50 @@ jobs:
             rust: beta
     steps:
       - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Setup Python venv
+        shell: bash
+        run: |
+          VENV_DIR="${RUNNER_TEMP:-/tmp}/alopex-ci-venv"
+          rm -rf "$VENV_DIR"
+          python -m venv "$VENV_DIR"
+          VENV_ROOT=$(VENV_DIR="$VENV_DIR" python -c "import os; from pathlib import Path; print(Path(os.environ['VENV_DIR']).resolve().as_posix())")
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            VENV_BIN="$VENV_ROOT/Scripts"
+            VENV_PY="$VENV_BIN/python.exe"
+          else
+            VENV_BIN="$VENV_ROOT/bin"
+            VENV_PY="$VENV_BIN/python"
+            if [[ ! -x "$VENV_PY" ]]; then
+              VENV_PY="$VENV_BIN/python3"
+            fi
+          fi
+          if [[ ! -x "$VENV_PY" ]]; then
+            echo "venv python not found at $VENV_PY" >&2
+            ls -la "$VENV_ROOT" || true
+            exit 1
+          fi
+          echo "$VENV_BIN" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$VENV_ROOT" >> "$GITHUB_ENV"
+          echo "PYO3_PYTHON=$VENV_PY" >> "$GITHUB_ENV"
+          echo "PYTHON_SYS_EXECUTABLE=$VENV_PY" >> "$GITHUB_ENV"
+          "$VENV_PY" -m ensurepip --upgrade
+          "$VENV_PY" -m pip install --upgrade pip
+          "$VENV_PY" -m pip install "numpy<2"
+          PYTHON_SITE=$("$VENV_PY" -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            PATH_SEP=";"
+          else
+            PATH_SEP=":"
+          fi
+          if [[ -n "${PYTHONPATH:-}" ]]; then
+            echo "PYTHONPATH=$PYTHON_SITE$PATH_SEP$PYTHONPATH" >> "$GITHUB_ENV"
+          else
+            echo "PYTHONPATH=$PYTHON_SITE" >> "$GITHUB_ENV"
+          fi
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -76,6 +120,50 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Setup Python venv
+        shell: bash
+        run: |
+          VENV_DIR="${RUNNER_TEMP:-/tmp}/alopex-ci-venv"
+          rm -rf "$VENV_DIR"
+          python -m venv "$VENV_DIR"
+          VENV_ROOT=$(VENV_DIR="$VENV_DIR" python -c "import os; from pathlib import Path; print(Path(os.environ['VENV_DIR']).resolve().as_posix())")
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            VENV_BIN="$VENV_ROOT/Scripts"
+            VENV_PY="$VENV_BIN/python.exe"
+          else
+            VENV_BIN="$VENV_ROOT/bin"
+            VENV_PY="$VENV_BIN/python"
+            if [[ ! -x "$VENV_PY" ]]; then
+              VENV_PY="$VENV_BIN/python3"
+            fi
+          fi
+          if [[ ! -x "$VENV_PY" ]]; then
+            echo "venv python not found at $VENV_PY" >&2
+            ls -la "$VENV_ROOT" || true
+            exit 1
+          fi
+          echo "$VENV_BIN" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$VENV_ROOT" >> "$GITHUB_ENV"
+          echo "PYO3_PYTHON=$VENV_PY" >> "$GITHUB_ENV"
+          echo "PYTHON_SYS_EXECUTABLE=$VENV_PY" >> "$GITHUB_ENV"
+          "$VENV_PY" -m ensurepip --upgrade
+          "$VENV_PY" -m pip install --upgrade pip
+          "$VENV_PY" -m pip install "numpy<2"
+          PYTHON_SITE=$("$VENV_PY" -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            PATH_SEP=";"
+          else
+            PATH_SEP=":"
+          fi
+          if [[ -n "${PYTHONPATH:-}" ]]; then
+            echo "PYTHONPATH=$PYTHON_SITE$PATH_SEP$PYTHONPATH" >> "$GITHUB_ENV"
+          else
+            echo "PYTHONPATH=$PYTHON_SITE" >> "$GITHUB_ENV"
+          fi
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -115,12 +203,19 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      PYO3_PYTHON: python
+      PYTHON_SYS_EXECUTABLE: python
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 

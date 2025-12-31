@@ -1426,7 +1426,7 @@ fn column_to_scalar_values(column: Column) -> Result<Vec<ScalarValue>> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::columnar::encoding_v2::EncodingV2;
