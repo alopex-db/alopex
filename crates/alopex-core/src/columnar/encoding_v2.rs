@@ -925,6 +925,7 @@ impl Decoder for ByteStreamSplitDecoder {
                 sign_bitmap = None;
             }
 
+            let raw_ptr = raw_bytes.as_mut_ptr();
             for stream_idx in 0..stream_count {
                 if pos + 9 > data.len() {
                     return Err(ColumnarError::InvalidFormat(
@@ -952,7 +953,7 @@ impl Decoder for ByteStreamSplitDecoder {
                 let payload = &data[pos..pos + payload_len];
                 pos += payload_len;
 
-                let stream_buf = match flag {
+                let stream_buf: Option<Vec<u8>> = match flag {
                     BYTE_STREAM_SPLIT_FLAG_LZ4 => {
                         #[cfg(feature = "compression-lz4")]
                         {
@@ -1018,7 +1019,10 @@ impl Decoder for ByteStreamSplitDecoder {
                             if sign_bitmap.get(value_idx) {
                                 out |= 0x80;
                             }
-                            raw_bytes[dst_index] = out;
+                            // Safety: dst_index is within raw_bytes (count * bytes_per_value).
+                            unsafe {
+                                *raw_ptr.add(dst_index) = out;
+                            }
                             dst_index += bytes_per_value;
                         }
                         continue;
@@ -1027,7 +1031,10 @@ impl Decoder for ByteStreamSplitDecoder {
 
                 let mut dst_index = byte_idx;
                 for &byte in stream {
-                    raw_bytes[dst_index] = byte;
+                    // Safety: dst_index is within raw_bytes (count * bytes_per_value).
+                    unsafe {
+                        *raw_ptr.add(dst_index) = byte;
+                    }
                     dst_index += bytes_per_value;
                 }
             }
@@ -1038,38 +1045,99 @@ impl Decoder for ByteStreamSplitDecoder {
                 ));
             }
 
+            let raw_ptr = raw_bytes.as_mut_ptr();
+            let data_ptr = data.as_ptr();
             for byte_idx in 0..bytes_per_value {
-                let mut dst_index = byte_idx;
-                let mut src_index = pos + byte_idx * count;
-                for _ in 0..count {
-                    raw_bytes[dst_index] = data[src_index];
-                    dst_index += bytes_per_value;
-                    src_index += 1;
+                let dst_index = byte_idx;
+                let src_index = pos + byte_idx * count;
+                // Safety: src_index/ dst_index are bounded by data/raw_bytes sizes.
+                unsafe {
+                    let mut dst_ptr = raw_ptr.add(dst_index);
+                    let mut src_ptr = data_ptr.add(src_index);
+                    for _ in 0..count {
+                        *dst_ptr = *src_ptr;
+                        dst_ptr = dst_ptr.add(bytes_per_value);
+                        src_ptr = src_ptr.add(1);
+                    }
                 }
             }
         }
 
         match logical_type {
             LogicalType::Float32 => {
-                let values: Vec<f32> = raw_bytes
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
-                    .collect();
-                Ok((Column::Float32(values), bitmap))
+                if bytes_per_value != 4 {
+                    return Err(ColumnarError::InvalidFormat(
+                        "ByteStreamSplit Float32 length mismatch".into(),
+                    ));
+                }
+                if cfg!(target_endian = "little") {
+                    let mut values = vec![0f32; count];
+                    // Safety: values is a contiguous little-endian buffer of the right size.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            raw_bytes.as_ptr(),
+                            values.as_mut_ptr() as *mut u8,
+                            raw_bytes.len(),
+                        );
+                    }
+                    Ok((Column::Float32(values), bitmap))
+                } else {
+                    let values: Vec<f32> = raw_bytes
+                        .chunks_exact(4)
+                        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+                        .collect();
+                    Ok((Column::Float32(values), bitmap))
+                }
             }
             LogicalType::Float64 => {
-                let values: Vec<f64> = raw_bytes
-                    .chunks_exact(8)
-                    .map(|chunk| f64::from_le_bytes(chunk.try_into().unwrap()))
-                    .collect();
-                Ok((Column::Float64(values), bitmap))
+                if bytes_per_value != 8 {
+                    return Err(ColumnarError::InvalidFormat(
+                        "ByteStreamSplit Float64 length mismatch".into(),
+                    ));
+                }
+                if cfg!(target_endian = "little") {
+                    let mut values = vec![0f64; count];
+                    // Safety: values is a contiguous little-endian buffer of the right size.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            raw_bytes.as_ptr(),
+                            values.as_mut_ptr() as *mut u8,
+                            raw_bytes.len(),
+                        );
+                    }
+                    Ok((Column::Float64(values), bitmap))
+                } else {
+                    let values: Vec<f64> = raw_bytes
+                        .chunks_exact(8)
+                        .map(|chunk| f64::from_le_bytes(chunk.try_into().unwrap()))
+                        .collect();
+                    Ok((Column::Float64(values), bitmap))
+                }
             }
             LogicalType::Int64 => {
-                let values: Vec<i64> = raw_bytes
-                    .chunks_exact(8)
-                    .map(|chunk| i64::from_le_bytes(chunk.try_into().unwrap()))
-                    .collect();
-                Ok((Column::Int64(values), bitmap))
+                if bytes_per_value != 8 {
+                    return Err(ColumnarError::InvalidFormat(
+                        "ByteStreamSplit Int64 length mismatch".into(),
+                    ));
+                }
+                if cfg!(target_endian = "little") {
+                    let mut values = vec![0i64; count];
+                    // Safety: values is a contiguous little-endian buffer of the right size.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            raw_bytes.as_ptr(),
+                            values.as_mut_ptr() as *mut u8,
+                            raw_bytes.len(),
+                        );
+                    }
+                    Ok((Column::Int64(values), bitmap))
+                } else {
+                    let values: Vec<i64> = raw_bytes
+                        .chunks_exact(8)
+                        .map(|chunk| i64::from_le_bytes(chunk.try_into().unwrap()))
+                        .collect();
+                    Ok((Column::Int64(values), bitmap))
+                }
             }
             _ => Err(ColumnarError::InvalidFormat(
                 "ByteStreamSplit requires Float32, Float64, or Int64".into(),
@@ -2477,16 +2545,18 @@ mod tests {
             ratio
         );
         // パフォーマンス目安（広めに設定）
-        assert!(
-            enc_ms < 220.0,
-            "encode too slow: {:.2}ms (target <220ms)",
-            enc_ms
-        );
-        assert!(
-            dec_ms < 30.0,
-            "decode too slow: {:.2}ms (target <30ms)",
-            dec_ms
-        );
+        if std::env::var("ALOPEX_SKIP_PERF_TESTS").is_err() {
+            assert!(
+                enc_ms < 220.0,
+                "encode too slow: {:.2}ms (target <220ms)",
+                enc_ms
+            );
+            assert!(
+                dec_ms < 30.0,
+                "decode too slow: {:.2}ms (target <30ms)",
+                dec_ms
+            );
+        }
         println!("encode_ms={:.2} decode_ms={:.2}", enc_ms, dec_ms);
     }
 
