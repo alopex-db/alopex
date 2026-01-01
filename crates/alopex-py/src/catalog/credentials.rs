@@ -17,6 +17,19 @@ const SENSITIVE_KEYS: &[&str] = &[
     "secret",
 ];
 
+/// Resolve storage credentials from environment variables.
+///
+/// Args:
+///     storage_location (str): Storage URI or path (s3://, gs://, az://, abfs://).
+///
+/// Returns:
+///     dict[str, str]: Credential key/value pairs for storage options.
+///
+/// Examples:
+///     >>> auto_resolve_credentials("s3://bucket/path")
+///
+/// Raises:
+///     None
 pub fn auto_resolve_credentials(storage_location: &str) -> PyResult<HashMap<String, String>> {
     let location = storage_location.trim().to_ascii_lowercase();
     let mut credentials = HashMap::new();
@@ -47,6 +60,20 @@ pub fn auto_resolve_credentials(storage_location: &str) -> PyResult<HashMap<Stri
     Ok(credentials)
 }
 
+/// Merge resolved credentials with explicit storage options.
+///
+/// Args:
+///     resolved (dict[str, str]): Resolved credential options.
+///     storage_options (dict[str, str] | None): Explicit storage options.
+///
+/// Returns:
+///     dict[str, str]: Merged options with storage_options taking precedence.
+///
+/// Examples:
+///     >>> merge_storage_options({"token": "a"}, {"token": "b"})
+///
+/// Raises:
+///     None
 pub fn merge_storage_options(
     mut resolved: HashMap<String, String>,
     storage_options: Option<HashMap<String, String>>,
@@ -59,6 +86,19 @@ pub fn merge_storage_options(
     resolved
 }
 
+/// Mask sensitive values in storage options.
+///
+/// Args:
+///     storage_options (dict[str, str]): Storage options to mask.
+///
+/// Returns:
+///     dict[str, str]: New map with sensitive values replaced by "***".
+///
+/// Examples:
+///     >>> mask_sensitive_values({"token": "secret"})
+///
+/// Raises:
+///     None
 #[allow(dead_code)]
 pub fn mask_sensitive_values(storage_options: &HashMap<String, String>) -> HashMap<String, String> {
     storage_options
@@ -78,6 +118,21 @@ pub fn mask_sensitive_values(storage_options: &HashMap<String, String>) -> HashM
         .collect()
 }
 
+/// Resolve credentials using a provider and merge with storage options.
+///
+/// Args:
+///     credential_provider (str | dict | None): "auto" or explicit options dict.
+///     storage_options (dict[str, str] | None): Extra options to merge.
+///     storage_location (str): Storage URI or path.
+///
+/// Returns:
+///     dict[str, str]: Resolved and merged storage options.
+///
+/// Examples:
+///     >>> resolve_credentials(py, "auto", None, "s3://bucket/path")
+///
+/// Raises:
+///     AlopexError: If credential_provider is not "auto" or dict.
 #[allow(dead_code)]
 pub fn resolve_credentials(
     py: Python<'_>,
@@ -113,6 +168,22 @@ pub fn resolve_credentials(
     Ok(merge_storage_options(resolved, storage_options))
 }
 
+/// Resolve credentials for Python callers.
+///
+/// Args:
+///     storage_location (str): Storage URI or path.
+///     credential_provider (str | dict | None): "auto" or explicit options dict.
+///     storage_options (dict[str, str] | None): Extra options to merge.
+///
+/// Returns:
+///     dict[str, str]: Resolved and merged storage options.
+///
+/// Examples:
+///     >>> from alopex._alopex import catalog as _catalog
+///     >>> _catalog._resolve_credentials("s3://bucket/path", "auto")
+///
+/// Raises:
+///     AlopexError: If credential_provider is invalid.
 #[pyfunction]
 #[pyo3(signature = (storage_location, credential_provider = None, storage_options = None))]
 pub fn _resolve_credentials(

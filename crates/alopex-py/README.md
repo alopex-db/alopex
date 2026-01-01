@@ -9,6 +9,12 @@ Database/Transaction の基本機能に加え、ベクトル検索（numpy）と
 pip install alopex
 ```
 
+Catalog API (polars) を使う場合:
+
+```bash
+pip install alopex[polars]
+```
+
 開発中は maturin を利用できます。
 
 ```bash
@@ -19,6 +25,14 @@ maturin develop -m crates/alopex-py/pyproject.toml
 
 - numpy を使う場合: `pip install alopex[numpy]`
 - polars を使う場合: `pip install alopex[polars]`
+
+## 対応バージョン
+
+| 依存関係 | 対応バージョン |
+| --- | --- |
+| Python | 3.8+ |
+| Polars | 0.20+ (Catalog API) |
+| NumPy | 1.20+ (Vector API) |
 
 ## 基本的な使い方
 

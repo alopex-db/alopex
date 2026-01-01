@@ -19,10 +19,10 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-numpy = ["numpy>=1.23"]
+numpy = ["numpy>=1.20"]
 polars = ["polars>=0.20"]
-full = ["numpy>=1.23", "polars>=0.20"]
-dev = ["pytest>=7", "pytest-benchmark>=4", "numpy>=1.23", "polars>=0.20"]
+full = ["numpy>=1.20", "polars>=0.20"]
+dev = ["pytest>=7", "pytest-benchmark>=4", "numpy>=1.20", "polars>=0.20"]
 
 [tool.maturin]
 bindings = "pyo3"

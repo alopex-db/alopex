@@ -88,11 +88,33 @@ fn to_embedded_columns(columns: Vec<PyColumnInfo>) -> Vec<alopex_embedded::catal
         .collect()
 }
 
+/// Catalog API entry point for Unity Catalog-style metadata and DDL operations.
+///
+/// Examples:
+///     >>> from alopex import Catalog
+///     >>> Catalog.list_catalogs()
+///
+/// Raises:
+///     AlopexError: Raised by individual methods when an operation fails.
+///     ValueError: Raised by methods when identifiers or storage locations are invalid.
+///     RuntimeError: Raised by methods when a resource already exists.
 #[pyclass(name = "Catalog")]
 pub struct PyCatalog;
 
 #[pymethods]
 impl PyCatalog {
+    /// List catalogs in the metadata store.
+    ///
+    /// Returns:
+    ///     list[CatalogInfo]: Catalog metadata entries.
+    ///
+    /// Examples:
+    ///     >>> from alopex import Catalog
+    ///     >>> catalogs = Catalog.list_catalogs()
+    ///     >>> [c.name for c in catalogs]
+    ///
+    /// Raises:
+    ///     AlopexError: If the underlying catalog store returns an error.
     #[staticmethod]
     fn list_catalogs(py: Python<'_>) -> PyResult<Vec<PyCatalogInfo>> {
         let catalogs = py
@@ -101,6 +123,21 @@ impl PyCatalog {
         Ok(catalogs.into_iter().map(PyCatalogInfo::from).collect())
     }
 
+    /// List namespaces within a catalog.
+    ///
+    /// Args:
+    ///     catalog_name (str): Catalog name.
+    ///
+    /// Returns:
+    ///     list[NamespaceInfo]: Namespaces registered in the catalog.
+    ///
+    /// Examples:
+    ///     >>> from alopex import Catalog
+    ///     >>> Catalog.list_namespaces("main")
+    ///
+    /// Raises:
+    ///     ValueError: If catalog_name is invalid or the catalog does not exist.
+    ///     AlopexError: For other catalog store errors.
     #[staticmethod]
     fn list_namespaces(py: Python<'_>, catalog_name: &str) -> PyResult<Vec<PyNamespaceInfo>> {
         validate_identifier(catalog_name)?;
@@ -110,6 +147,22 @@ impl PyCatalog {
         Ok(namespaces.into_iter().map(PyNamespaceInfo::from).collect())
     }
 
+    /// List tables in a catalog namespace.
+    ///
+    /// Args:
+    ///     catalog_name (str): Catalog name.
+    ///     namespace (str): Namespace name.
+    ///
+    /// Returns:
+    ///     list[TableInfo]: Tables registered in the namespace.
+    ///
+    /// Examples:
+    ///     >>> from alopex import Catalog
+    ///     >>> Catalog.list_tables("main", "default")
+    ///
+    /// Raises:
+    ///     ValueError: If an identifier is invalid or the catalog/namespace does not exist.
+    ///     AlopexError: For other catalog store errors.
     #[staticmethod]
     fn list_tables(
         py: Python<'_>,
@@ -124,6 +177,24 @@ impl PyCatalog {
         Ok(tables.into_iter().map(PyTableInfo::from).collect())
     }
 
+    /// Fetch detailed metadata for a table.
+    ///
+    /// Args:
+    ///     catalog_name (str): Catalog name.
+    ///     namespace (str): Namespace name.
+    ///     table_name (str): Table name.
+    ///
+    /// Returns:
+    ///     TableInfo: Metadata for the requested table.
+    ///
+    /// Examples:
+    ///     >>> from alopex import Catalog
+    ///     >>> info = Catalog.get_table_info("main", "default", "users")
+    ///     >>> info.storage_location
+    ///
+    /// Raises:
+    ///     ValueError: If an identifier is invalid or the table does not exist.
+    ///     AlopexError: For other catalog store errors.
     #[staticmethod]
     fn get_table_info(
         py: Python<'_>,
@@ -142,6 +213,19 @@ impl PyCatalog {
         Ok(PyTableInfo::from(table_info))
     }
 
+    /// Create a new catalog.
+    ///
+    /// Args:
+    ///     name (str): Catalog name.
+    ///
+    /// Examples:
+    ///     >>> from alopex import Catalog
+    ///     >>> Catalog.create_catalog("main")
+    ///
+    /// Raises:
+    ///     ValueError: If the name is invalid.
+    ///     RuntimeError: If the catalog already exists.
+    ///     AlopexError: For other catalog store errors.
     #[staticmethod]
     fn create_catalog(py: Python<'_>, name: &str) -> PyResult<()> {
         validate_identifier(name)?;
@@ -149,6 +233,18 @@ impl PyCatalog {
             .map_err(error::embedded_err)
     }
 
+    /// Delete an existing catalog.
+    ///
+    /// Args:
+    ///     name (str): Catalog name.
+    ///
+    /// Examples:
+    ///     >>> from alopex import Catalog
+    ///     >>> Catalog.delete_catalog("main")
+    ///
+    /// Raises:
+    ///     ValueError: If the name is invalid or the catalog does not exist.
+    ///     AlopexError: For other catalog store errors.
     #[staticmethod]
     fn delete_catalog(py: Python<'_>, name: &str) -> PyResult<()> {
         validate_identifier(name)?;
@@ -156,6 +252,20 @@ impl PyCatalog {
             .map_err(error::embedded_err)
     }
 
+    /// Create a namespace within a catalog.
+    ///
+    /// Args:
+    ///     catalog_name (str): Catalog name.
+    ///     namespace (str): Namespace name.
+    ///
+    /// Examples:
+    ///     >>> from alopex import Catalog
+    ///     >>> Catalog.create_namespace("main", "default")
+    ///
+    /// Raises:
+    ///     ValueError: If an identifier is invalid or the parent catalog does not exist.
+    ///     RuntimeError: If the namespace already exists.
+    ///     AlopexError: For other catalog store errors.
     #[staticmethod]
     fn create_namespace(py: Python<'_>, catalog_name: &str, namespace: &str) -> PyResult<()> {
         validate_identifier(catalog_name)?;
@@ -169,6 +279,19 @@ impl PyCatalog {
             })
     }
 
+    /// Delete a namespace from a catalog.
+    ///
+    /// Args:
+    ///     catalog_name (str): Catalog name.
+    ///     namespace (str): Namespace name.
+    ///
+    /// Examples:
+    ///     >>> from alopex import Catalog
+    ///     >>> Catalog.delete_namespace("main", "default")
+    ///
+    /// Raises:
+    ///     ValueError: If an identifier is invalid or the namespace does not exist.
+    ///     AlopexError: For other catalog store errors.
     #[staticmethod]
     fn delete_namespace(py: Python<'_>, catalog_name: &str, namespace: &str) -> PyResult<()> {
         validate_identifier(catalog_name)?;
@@ -177,6 +300,29 @@ impl PyCatalog {
             .map_err(error::embedded_err)
     }
 
+    /// Create a table in a catalog namespace.
+    ///
+    /// Args:
+    ///     catalog_name (str): Catalog name.
+    ///     namespace (str): Namespace name.
+    ///     table_name (str): Table name.
+    ///     columns (list[ColumnInfo]): Column definitions.
+    ///     storage_location (str): Table storage location (file://, s3://, gs://, az://, abfs://).
+    ///     data_source_format (str): Data source format (default: "PARQUET").
+    ///
+    /// Examples:
+    ///     >>> from alopex import Catalog, ColumnInfo
+    ///     >>> Catalog.create_table(
+    ///     ...     "main",
+    ///     ...     "default",
+    ///     ...     "users",
+    ///     ...     [ColumnInfo("id", "INTEGER", 0, False)],
+    ///     ...     "/tmp/users.parquet",
+    ///     ... )
+    ///
+    /// Raises:
+    ///     ValueError: If identifiers or storage_location are invalid, or parent resources are missing.
+    ///     AlopexError: If the format is unsupported or the table already exists.
     #[staticmethod]
     #[pyo3(signature = (
         catalog_name,
@@ -227,6 +373,20 @@ impl PyCatalog {
         })
     }
 
+    /// Delete a table from a catalog namespace.
+    ///
+    /// Args:
+    ///     catalog_name (str): Catalog name.
+    ///     namespace (str): Namespace name.
+    ///     table_name (str): Table name.
+    ///
+    /// Examples:
+    ///     >>> from alopex import Catalog
+    ///     >>> Catalog.delete_table("main", "default", "users")
+    ///
+    /// Raises:
+    ///     ValueError: If an identifier is invalid or the table does not exist.
+    ///     AlopexError: For other catalog store errors.
     #[staticmethod]
     fn delete_table(
         py: Python<'_>,
@@ -243,6 +403,27 @@ impl PyCatalog {
         .map_err(error::embedded_err)
     }
 
+    /// Lazily scan a table as a Polars LazyFrame.
+    ///
+    /// Args:
+    ///     catalog_name (str): Catalog name.
+    ///     namespace (str): Namespace name.
+    ///     table_name (str): Table name.
+    ///     credential_provider (str | dict | None): "auto" (default) or storage options dict.
+    ///     storage_options (dict | None): Additional storage options to merge.
+    ///
+    /// Returns:
+    ///     polars.LazyFrame: Lazy scan of the table data.
+    ///
+    /// Examples:
+    ///     >>> import polars as pl
+    ///     >>> from alopex import Catalog
+    ///     >>> lf = Catalog.scan_table("main", "default", "users")
+    ///     >>> isinstance(lf, pl.LazyFrame)
+    ///
+    /// Raises:
+    ///     ValueError: If identifiers are invalid or the table does not exist.
+    ///     AlopexError: If polars is unavailable, the format is unsupported, or storage is missing.
     #[staticmethod]
     #[pyo3(signature = (
         catalog_name,
@@ -311,6 +492,35 @@ impl PyCatalog {
         Ok(lazy_frame)
     }
 
+    /// Write a DataFrame into a catalog table.
+    ///
+    /// Args:
+    ///     df (polars.DataFrame | polars.LazyFrame): Data to write.
+    ///     catalog_name (str): Catalog name.
+    ///     namespace (str): Namespace name.
+    ///     table_name (str): Table name.
+    ///     delta_mode (str): "error", "ignore", "append", "overwrite", or "merge".
+    ///     storage_location (str | None): Required when creating a new table.
+    ///     credential_provider (str | dict | None): "auto" (default) or storage options dict.
+    ///     storage_options (dict | None): Additional storage options to merge.
+    ///     primary_key (list[str] | None): Required when delta_mode="merge".
+    ///
+    /// Examples:
+    ///     >>> import polars as pl
+    ///     >>> from alopex import Catalog
+    ///     >>> df = pl.DataFrame({"id": [1]})
+    ///     >>> Catalog.write_table(
+    ///     ...     df,
+    ///     ...     "main",
+    ///     ...     "default",
+    ///     ...     "users",
+    ///     ...     delta_mode="append",
+    ///     ...     storage_location="/tmp/users.parquet",
+    ///     ... )
+    ///
+    /// Raises:
+    ///     ValueError: If identifiers or storage_location are invalid.
+    ///     AlopexError: If polars is unavailable, storage is missing, or merge keys are required.
     #[staticmethod]
     #[pyo3(signature = (
         df,
@@ -461,6 +671,20 @@ impl PyCatalog {
     }
 }
 
+/// Ensure that Polars is available for catalog operations.
+///
+/// Args:
+///     py (Python): GIL token.
+///
+/// Returns:
+///     None
+///
+/// Examples:
+///     >>> from alopex import Catalog
+///     >>> # Catalog.scan_table() will fail if polars is missing.
+///
+/// Raises:
+///     AlopexError: If polars is not installed.
 #[allow(dead_code)]
 pub fn require_polars(py: Python<'_>) -> PyResult<()> {
     if PyModule::import(py, "polars").is_ok() {
@@ -470,6 +694,19 @@ pub fn require_polars(py: Python<'_>) -> PyResult<()> {
     }
 }
 
+/// Register catalog types in a Python module.
+///
+/// Args:
+///     m (module): Python module to receive Catalog bindings.
+///
+/// Returns:
+///     None
+///
+/// Examples:
+///     >>> # Internal use from module initialization.
+///
+/// Raises:
+///     AlopexError: If registration fails.
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCatalog>()?;
     Ok(())

@@ -1,11 +1,47 @@
+#![allow(unused_doc_comments)]
+
 use std::fmt::{self, Display};
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
 use pyo3::PyErr;
 
+/// Python-visible base exception for Alopex bindings.
+///
+/// Exposed to Python as `alopex.AlopexError` in module initialization.
+/// Used when an error does not map to `ValueError` or `RuntimeError`.
+///
+/// Examples:
+///     >>> from alopex import AlopexError
+///     >>> isinstance(AlopexError("message"), Exception)
+///
+/// Raises:
+///     AlopexError: Raised when an operation fails with a generic error.
 create_exception!(crate::error, PyAlopexError, PyException);
 
+/// Internal error enum for Alopex Python bindings.
+///
+/// Variants:
+///     - CatalogNotFound, NamespaceNotFound, TableNotFound, ParentNotFound
+///     - CatalogAlreadyExists, NamespaceAlreadyExists, TableExists
+///     - WriteTargetNotFound, StorageLocationRequired, PrimaryKeyRequired
+///     - UnsupportedFormat, PolarsNotInstalled, CloudAuthFailed, TypeConversionError
+///
+/// Exception mapping:
+///     - *NotFound and ParentNotFound -> ValueError
+///     - *AlreadyExists -> RuntimeError
+///     - others -> AlopexError
+///
+/// Examples:
+///     ```ignore
+///     use crate::error::AlopexError;
+///     let err = AlopexError::PolarsNotInstalled;
+///     ```
+///
+/// Raises:
+///     ValueError: For *NotFound and ParentNotFound variants when converted to PyErr.
+///     RuntimeError: For *AlreadyExists variants when converted to PyErr.
+///     AlopexError: For all other variants when converted to PyErr.
 #[derive(Debug)]
 pub enum AlopexError {
     CatalogNotFound(String),
@@ -89,11 +125,45 @@ impl From<AlopexError> for PyErr {
     }
 }
 
+/// Convert a Display error into a Python exception.
+///
+/// Args:
+///     err: Any error that implements Display.
+///
+/// Returns:
+///     PyErr: Python exception wrapping the message.
+///
+/// Examples:
+///     ```ignore
+///     use crate::error::to_py_err;
+///     let err = to_py_err("oops");
+///     ```
+///
+/// Raises:
+///     AlopexError: Raised in Python with the provided message.
 #[allow(dead_code)]
 pub fn to_py_err<E: Display>(err: E) -> PyErr {
     PyAlopexError::new_err(err.to_string())
 }
 
+/// Convert embedded catalog errors into Python exceptions.
+///
+/// Conversion rules:
+///     - CatalogNotFound, NamespaceNotFound, TableNotFound -> ValueError
+///     - CatalogAlreadyExists, NamespaceAlreadyExists -> RuntimeError
+///     - TableAlreadyExists, UnsupportedDataSourceFormat -> AlopexError
+///     - other errors -> AlopexError
+///
+/// Examples:
+///     ```ignore
+///     use crate::error::embedded_err;
+///     let err = embedded_err(alopex_embedded::Error::CatalogNotFound("main".to_string()));
+///     ```
+///
+/// Raises:
+///     ValueError: For not-found errors.
+///     RuntimeError: For already-exists errors.
+///     AlopexError: For other embedded errors.
 #[allow(dead_code)]
 pub fn embedded_err(err: alopex_embedded::Error) -> PyErr {
     match err {
@@ -117,6 +187,22 @@ pub fn embedded_err(err: alopex_embedded::Error) -> PyErr {
     }
 }
 
+/// Convert core engine errors into a Python exception.
+///
+/// Args:
+///     err (alopex_core::Error): Core engine error value.
+///
+/// Returns:
+///     PyErr: Python exception wrapping the message.
+///
+/// Examples:
+///     ```ignore
+///     use crate::error::core_err;
+///     let err = core_err(alopex_core::Error::Internal("oops".into()));
+///     ```
+///
+/// Raises:
+///     AlopexError: Raised in Python with the provided message.
 #[allow(dead_code)]
 pub fn core_err(err: alopex_core::Error) -> PyErr {
     to_py_err(err)

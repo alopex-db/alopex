@@ -1,5 +1,15 @@
 use pyo3::prelude::*;
 
+/// Catalog metadata returned by Catalog APIs.
+///
+/// Attributes:
+///     name (str): Catalog name.
+///     comment (str | None): Optional catalog comment.
+///     storage_root (str | None): Optional storage root URI.
+///
+/// Examples:
+///     >>> from alopex import CatalogInfo
+///     >>> CatalogInfo("main")
 #[pyclass(name = "CatalogInfo")]
 #[derive(Clone, Debug)]
 pub struct PyCatalogInfo {
@@ -13,6 +23,22 @@ pub struct PyCatalogInfo {
 
 #[pymethods]
 impl PyCatalogInfo {
+    /// Create a CatalogInfo instance.
+    ///
+    /// Args:
+    ///     name (str): Catalog name.
+    ///     comment (str | None): Optional catalog comment.
+    ///     storage_root (str | None): Optional storage root URI.
+    ///
+    /// Returns:
+    ///     CatalogInfo: New instance.
+    ///
+    /// Examples:
+    ///     >>> from alopex import CatalogInfo
+    ///     >>> CatalogInfo("main", comment="primary")
+    ///
+    /// Raises:
+    ///     None
     #[new]
     #[pyo3(signature = (name, comment = None, storage_root = None))]
     fn new(name: String, comment: Option<String>, storage_root: Option<String>) -> Self {
@@ -34,6 +60,17 @@ impl From<alopex_embedded::catalog::CatalogInfo> for PyCatalogInfo {
     }
 }
 
+/// Namespace metadata returned by Catalog APIs.
+///
+/// Attributes:
+///     name (str): Namespace name.
+///     catalog_name (str): Parent catalog name.
+///     comment (str | None): Optional namespace comment.
+///     storage_root (str | None): Optional storage root URI.
+///
+/// Examples:
+///     >>> from alopex import NamespaceInfo
+///     >>> NamespaceInfo("default", "main")
 #[pyclass(name = "NamespaceInfo")]
 #[derive(Clone, Debug)]
 pub struct PyNamespaceInfo {
@@ -49,6 +86,23 @@ pub struct PyNamespaceInfo {
 
 #[pymethods]
 impl PyNamespaceInfo {
+    /// Create a NamespaceInfo instance.
+    ///
+    /// Args:
+    ///     name (str): Namespace name.
+    ///     catalog_name (str): Parent catalog name.
+    ///     comment (str | None): Optional namespace comment.
+    ///     storage_root (str | None): Optional storage root URI.
+    ///
+    /// Returns:
+    ///     NamespaceInfo: New instance.
+    ///
+    /// Examples:
+    ///     >>> from alopex import NamespaceInfo
+    ///     >>> NamespaceInfo("default", "main")
+    ///
+    /// Raises:
+    ///     None
     #[new]
     #[pyo3(signature = (name, catalog_name, comment = None, storage_root = None))]
     fn new(
@@ -77,6 +131,18 @@ impl From<alopex_embedded::catalog::NamespaceInfo> for PyNamespaceInfo {
     }
 }
 
+/// Column metadata used in table definitions.
+///
+/// Attributes:
+///     name (str): Column name.
+///     type_name (str): Data type name (e.g., "INTEGER", "TEXT").
+///     position (int): Column position (zero-based).
+///     nullable (bool): Whether the column allows nulls.
+///     comment (str | None): Optional column comment.
+///
+/// Examples:
+///     >>> from alopex import ColumnInfo
+///     >>> ColumnInfo("id", "INTEGER", 0, False)
 #[pyclass(name = "ColumnInfo")]
 #[derive(Clone, Debug)]
 pub struct PyColumnInfo {
@@ -94,6 +160,24 @@ pub struct PyColumnInfo {
 
 #[pymethods]
 impl PyColumnInfo {
+    /// Create a ColumnInfo instance.
+    ///
+    /// Args:
+    ///     name (str): Column name.
+    ///     type_name (str): Data type name.
+    ///     position (int): Column position (default: 0).
+    ///     nullable (bool): Whether the column allows nulls (default: True).
+    ///     comment (str | None): Optional column comment.
+    ///
+    /// Returns:
+    ///     ColumnInfo: New instance.
+    ///
+    /// Examples:
+    ///     >>> from alopex import ColumnInfo
+    ///     >>> ColumnInfo("id", "INTEGER", 0, False)
+    ///
+    /// Raises:
+    ///     None
     #[new]
     #[pyo3(signature = (name, type_name, position = 0, nullable = true, comment = None))]
     fn new(
@@ -125,6 +209,22 @@ impl From<alopex_embedded::catalog::ColumnInfo> for PyColumnInfo {
     }
 }
 
+/// Table metadata returned by Catalog APIs.
+///
+/// Attributes:
+///     name (str): Table name.
+///     catalog_name (str): Parent catalog name.
+///     namespace_name (str): Parent namespace name.
+///     table_type (str): Table type (default: "MANAGED").
+///     storage_location (str | None): Storage location URI/path.
+///     data_source_format (str | None): Data source format (e.g., "PARQUET").
+///     columns (list[ColumnInfo]): Column definitions.
+///     primary_key (list[str] | None): Optional primary key column names.
+///     comment (str | None): Optional table comment.
+///
+/// Examples:
+///     >>> from alopex import TableInfo
+///     >>> TableInfo("users", "main", "default")
 #[pyclass(name = "TableInfo")]
 #[derive(Clone, Debug)]
 pub struct PyTableInfo {
@@ -150,6 +250,28 @@ pub struct PyTableInfo {
 
 #[pymethods]
 impl PyTableInfo {
+    /// Create a TableInfo instance.
+    ///
+    /// Args:
+    ///     name (str): Table name.
+    ///     catalog_name (str): Parent catalog name.
+    ///     namespace_name (str): Parent namespace name.
+    ///     table_type (str): Table type (default: "MANAGED").
+    ///     storage_location (str | None): Storage location URI/path.
+    ///     data_source_format (str | None): Data source format (e.g., "PARQUET").
+    ///     columns (list[ColumnInfo]): Column definitions.
+    ///     primary_key (list[str] | None): Optional primary key column names.
+    ///     comment (str | None): Optional table comment.
+    ///
+    /// Returns:
+    ///     TableInfo: New instance.
+    ///
+    /// Examples:
+    ///     >>> from alopex import TableInfo
+    ///     >>> TableInfo("users", "main", "default")
+    ///
+    /// Raises:
+    ///     None
     #[new]
     #[pyo3(signature = (
         name,
