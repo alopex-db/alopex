@@ -27,3 +27,6 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_resolve_credentials, m)?)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
