@@ -20,6 +20,10 @@ pub use validation::{validate_identifier, validate_storage_location};
 
 pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     client::register(py, m)?;
+    m.add_class::<models::PyCatalogInfo>()?;
+    m.add_class::<models::PyNamespaceInfo>()?;
+    m.add_class::<models::PyTableInfo>()?;
+    m.add_class::<models::PyColumnInfo>()?;
     m.add_function(wrap_pyfunction!(_resolve_credentials, m)?)?;
     Ok(())
 }

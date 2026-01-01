@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 
 class AlopexError(Exception):
@@ -105,6 +105,43 @@ class MemoryStats:
 
     def __init__(self, total_bytes: int, used_bytes: int, free_bytes: int) -> None: ...
 
+TableType = Literal[
+    "MANAGED",
+    "EXTERNAL",
+    "VIEW",
+    "MATERIALIZED_VIEW",
+    "STREAMING_TABLE",
+    "MANAGED_SHALLOW_CLONE",
+    "FOREIGN",
+    "EXTERNAL_SHALLOW_CLONE",
+]
+
+DataSourceFormat = Literal[
+    "DELTA",
+    "CSV",
+    "JSON",
+    "AVRO",
+    "PARQUET",
+    "ORC",
+    "TEXT",
+    "UNITY_CATALOG",
+    "DELTASHARING",
+    "DATABRICKS_FORMAT",
+    "REDSHIFT_FORMAT",
+    "SNOWFLAKE_FORMAT",
+    "SQLDW_FORMAT",
+    "SALESFORCE_FORMAT",
+    "BIGQUERY_FORMAT",
+    "NETSUITE_FORMAT",
+    "WORKDAY_RAAS_FORMAT",
+    "HIVE_SERDE",
+    "HIVE_CUSTOM",
+    "VECTOR_INDEX_FORMAT",
+]
+
+DeltaMode = Literal["error", "ignore", "append", "overwrite", "merge"]
+CredentialProvider = Union[Literal["auto"], Dict[str, str]]
+
 
 class CatalogInfo:
     name: str
@@ -145,8 +182,8 @@ class ColumnInfo:
         self,
         name: str,
         type_name: str,
-        position: int,
-        nullable: bool,
+        position: int = 0,
+        nullable: bool = True,
         comment: Optional[str] = None,
     ) -> None: ...
 
@@ -155,18 +192,24 @@ class TableInfo:
     name: str
     catalog_name: str
     namespace_name: str
+    table_type: TableType
     storage_location: Optional[str]
-    data_source_format: Optional[str]
+    data_source_format: Optional[DataSourceFormat]
     columns: List[ColumnInfo]
+    primary_key: Optional[List[str]]
+    comment: Optional[str]
 
     def __init__(
         self,
         name: str,
         catalog_name: str,
         namespace_name: str,
+        table_type: TableType = "MANAGED",
         storage_location: Optional[str] = None,
-        data_source_format: Optional[str] = None,
+        data_source_format: Optional[DataSourceFormat] = None,
         columns: List[ColumnInfo] = [],
+        primary_key: Optional[List[str]] = None,
+        comment: Optional[str] = None,
     ) -> None: ...
 
 
@@ -289,7 +332,7 @@ class Catalog:
         table_name: str,
         columns: List[ColumnInfo],
         storage_location: str,
-        data_source_format: str = "parquet",
+        data_source_format: DataSourceFormat = "PARQUET",
     ) -> None: ...
 
     @staticmethod
@@ -300,17 +343,19 @@ class Catalog:
         catalog_name: str,
         namespace: str,
         table_name: str,
-        credential_provider: Any = "auto",
+        credential_provider: CredentialProvider = "auto",
         storage_options: Optional[Dict[str, str]] = None,
-    ) -> Any: ...
+    ) -> "polars.LazyFrame": ...
 
     @staticmethod
     def write_table(
-        df: Any,
+        df: "polars.DataFrame | polars.LazyFrame",
         catalog_name: str,
         namespace: str,
         table_name: str,
-        delta_mode: str = "error",
+        delta_mode: DeltaMode = "error",
         storage_location: Optional[str] = None,
-        credential_provider: Any = "auto",
+        credential_provider: CredentialProvider = "auto",
+        storage_options: Optional[Dict[str, str]] = None,
+        primary_key: Optional[List[str]] = None,
     ) -> None: ...

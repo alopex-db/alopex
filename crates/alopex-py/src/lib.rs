@@ -11,6 +11,11 @@ mod vector;
 #[pymodule]
 fn _alopex(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("AlopexError", py.get_type::<error::PyAlopexError>())?;
+    m.add_class::<catalog::PyCatalog>()?;
+    m.add_class::<catalog::PyCatalogInfo>()?;
+    m.add_class::<catalog::PyNamespaceInfo>()?;
+    m.add_class::<catalog::PyTableInfo>()?;
+    m.add_class::<catalog::PyColumnInfo>()?;
     let database_module = PyModule::new(py, "database")?;
     embedded::database::register(py, &database_module)?;
     m.add_submodule(&database_module)?;
