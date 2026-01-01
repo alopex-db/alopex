@@ -801,41 +801,10 @@ impl Encoder for ByteStreamSplitEncoder {
         }
         for stream in streams {
             let original_len = stream.len() as u32;
-            #[cfg(feature = "compression-zstd")]
-            let zstd_compressed = zstd::stream::encode_all(std::io::Cursor::new(&stream), 3).ok();
-            #[cfg(not(feature = "compression-zstd"))]
-            let zstd_compressed: Option<Vec<u8>> = None;
-
-            #[cfg(feature = "compression-lz4")]
-            let lz4_compressed = lz4::block::compress(
-                &stream,
-                Some(lz4::block::CompressionMode::HIGHCOMPRESSION(12)),
-                false,
-            )
-            .ok();
-            #[cfg(not(feature = "compression-lz4"))]
-            let lz4_compressed: Option<Vec<u8>> = None;
-
-            let mut flag = BYTE_STREAM_SPLIT_FLAG_RAW;
-            let mut payload = stream.clone();
-
-            if let Some(lz) = lz4_compressed.as_ref() {
-                if lz.len() < payload.len() {
-                    flag = BYTE_STREAM_SPLIT_FLAG_LZ4;
-                    payload = lz.clone();
-                }
-            }
-            if let Some(zs) = zstd_compressed.as_ref() {
-                if zs.len() < payload.len() {
-                    flag = BYTE_STREAM_SPLIT_FLAG_ZSTD;
-                    payload = zs.clone();
-                }
-            }
-
-            buf.push(flag);
+            buf.push(BYTE_STREAM_SPLIT_FLAG_RAW);
             buf.extend_from_slice(&original_len.to_le_bytes());
-            buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&payload);
+            buf.extend_from_slice(&original_len.to_le_bytes());
+            buf.extend_from_slice(&stream);
         }
         buf[4] = header;
         Ok(buf)
