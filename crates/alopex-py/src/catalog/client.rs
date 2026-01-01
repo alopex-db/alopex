@@ -585,12 +585,10 @@ fn write_table_merge(
                 .collect::<Vec<_>>();
             let pk_cols = PyList::new(py, pk_cols)?.unbind();
             let join_kwargs = PyDict::new(py);
+            join_kwargs.set_item("on", pk_cols.bind(py))?;
             join_kwargs.set_item("how", "anti")?;
-            let existing_without_updates = existing_df.call_method(
-                "join",
-                (new_df, pk_cols.bind(py), pk_cols.bind(py)),
-                Some(&join_kwargs),
-            )?;
+            let existing_without_updates =
+                existing_df.call_method("join", (new_df,), Some(&join_kwargs))?;
             let concat = polars.getattr("concat")?;
             let merged = concat.call1((PyList::new(
                 py,
