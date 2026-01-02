@@ -2,89 +2,137 @@ use std::collections::HashMap;
 use std::env;
 
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyDict};
 
 use crate::error;
 
-fn scheme_from_location(storage_location: &str) -> Option<&str> {
-    storage_location
-        .find("://")
-        .map(|pos| &storage_location[..pos])
-}
+#[allow(dead_code)]
+const SENSITIVE_KEYS: &[&str] = &[
+    "aws_secret_access_key",
+    "aws_access_key_id",
+    "account_key",
+    "service_account_path",
+    "token",
+    "password",
+    "secret",
+];
 
-fn merge_if_missing(target: &mut HashMap<String, String>, key: &str, value: String) {
-    if !target.contains_key(key) {
-        target.insert(key.to_string(), value);
-    }
-}
+/// Resolve storage credentials from environment variables.
+///
+/// Args:
+///     storage_location (str): Storage URI or path (s3://, gs://, az://, abfs://).
+///
+/// Returns:
+///     dict[str, str]: Credential key/value pairs for storage options.
+///
+/// Examples:
+///     >>> auto_resolve_credentials("s3://bucket/path")
+///
+/// Raises:
+///     None
+pub fn auto_resolve_credentials(storage_location: &str) -> PyResult<HashMap<String, String>> {
+    let location = storage_location.trim().to_ascii_lowercase();
+    let mut credentials = HashMap::new();
 
-fn auto_credentials(
-    storage_location: &str,
-    mut options: HashMap<String, String>,
-) -> PyResult<HashMap<String, String>> {
-    let scheme = scheme_from_location(storage_location);
-    let Some(scheme) = scheme else {
-        return Ok(options);
-    };
-
-    match scheme {
-        "file" => Ok(options),
-        "s3" => {
-            let access_key = env::var("AWS_ACCESS_KEY_ID").ok();
-            let secret_key = env::var("AWS_SECRET_ACCESS_KEY").ok();
-            match (access_key, secret_key) {
-                (Some(access_key), Some(secret_key)) => {
-                    merge_if_missing(&mut options, "aws_access_key_id", access_key);
-                    merge_if_missing(&mut options, "aws_secret_access_key", secret_key);
-                    if let Ok(token) = env::var("AWS_SESSION_TOKEN") {
-                        merge_if_missing(&mut options, "aws_session_token", token);
-                    }
-                    if let Ok(region) = env::var("AWS_REGION") {
-                        merge_if_missing(&mut options, "aws_region", region);
-                    }
-                    Ok(options)
-                }
-                _ => Err(error::to_py_err("Credentials not found for s3://...")),
-            }
+    if location.starts_with("s3://") {
+        if let Ok(access_key) = env::var("AWS_ACCESS_KEY_ID") {
+            credentials.insert("aws_access_key_id".to_string(), access_key);
         }
-        "az" | "abfs" | "abfss" => {
-            let account_name = env::var("AZURE_STORAGE_ACCOUNT_NAME").ok();
-            let account_key = env::var("AZURE_STORAGE_ACCOUNT_KEY").ok();
-            let sas_token = env::var("AZURE_STORAGE_SAS_TOKEN").ok();
-            match (account_name, account_key, sas_token) {
-                (Some(account_name), Some(account_key), _) => {
-                    merge_if_missing(&mut options, "azure_storage_account_name", account_name);
-                    merge_if_missing(&mut options, "azure_storage_account_key", account_key);
-                    Ok(options)
-                }
-                (account_name, _, Some(sas_token)) => {
-                    if let Some(account_name) = account_name {
-                        merge_if_missing(
-                            &mut options,
-                            "azure_storage_account_name",
-                            account_name,
-                        );
-                    }
-                    merge_if_missing(&mut options, "azure_storage_sas_token", sas_token);
-                    Ok(options)
-                }
-                _ => Err(error::to_py_err("Credentials not found for az://...")),
-            }
+        if let Ok(secret_key) = env::var("AWS_SECRET_ACCESS_KEY") {
+            credentials.insert("aws_secret_access_key".to_string(), secret_key);
         }
-        "gs" => match env::var("GOOGLE_APPLICATION_CREDENTIALS") {
-            Ok(path) => {
-                merge_if_missing(&mut options, "google_service_account_path", path);
-                Ok(options)
-            }
-            Err(_) => Err(error::to_py_err("Credentials not found for gs://...")),
-        },
-        other => Err(error::to_py_err(format!(
-            "Unsupported storage scheme: {}. Supported: file, s3, az, gs, abfs, abfss, or local paths",
-            other
-        ))),
+        if let Ok(region) = env::var("AWS_REGION") {
+            credentials.insert("aws_region".to_string(), region);
+        }
+    } else if location.starts_with("gs://") {
+        if let Ok(path) = env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+            credentials.insert("service_account_path".to_string(), path);
+        }
+    } else if location.starts_with("az://") || location.starts_with("abfs://") {
+        if let Ok(account) = env::var("AZURE_STORAGE_ACCOUNT") {
+            credentials.insert("account_name".to_string(), account);
+        }
+        if let Ok(key) = env::var("AZURE_STORAGE_KEY") {
+            credentials.insert("account_key".to_string(), key);
+        }
     }
+
+    Ok(credentials)
 }
 
+/// Merge resolved credentials with explicit storage options.
+///
+/// Args:
+///     resolved (dict[str, str]): Resolved credential options.
+///     storage_options (dict[str, str] | None): Explicit storage options.
+///
+/// Returns:
+///     dict[str, str]: Merged options with storage_options taking precedence.
+///
+/// Examples:
+///     >>> merge_storage_options({"token": "a"}, {"token": "b"})
+///
+/// Raises:
+///     None
+pub fn merge_storage_options(
+    mut resolved: HashMap<String, String>,
+    storage_options: Option<HashMap<String, String>>,
+) -> HashMap<String, String> {
+    if let Some(options) = storage_options {
+        for (key, value) in options {
+            resolved.insert(key, value);
+        }
+    }
+    resolved
+}
+
+/// Mask sensitive values in storage options.
+///
+/// Args:
+///     storage_options (dict[str, str]): Storage options to mask.
+///
+/// Returns:
+///     dict[str, str]: New map with sensitive values replaced by "***".
+///
+/// Examples:
+///     >>> mask_sensitive_values({"token": "secret"})
+///
+/// Raises:
+///     None
+#[allow(dead_code)]
+pub fn mask_sensitive_values(storage_options: &HashMap<String, String>) -> HashMap<String, String> {
+    storage_options
+        .iter()
+        .map(|(key, value)| {
+            let key_lower = key.to_ascii_lowercase();
+            let masked = if SENSITIVE_KEYS
+                .iter()
+                .any(|sensitive| key_lower.contains(sensitive))
+            {
+                "***".to_string()
+            } else {
+                value.clone()
+            };
+            (key.clone(), masked)
+        })
+        .collect()
+}
+
+/// Resolve credentials using a provider and merge with storage options.
+///
+/// Args:
+///     credential_provider (str | dict | None): "auto" or explicit options dict.
+///     storage_options (dict[str, str] | None): Extra options to merge.
+///     storage_location (str): Storage URI or path.
+///
+/// Returns:
+///     dict[str, str]: Resolved and merged storage options.
+///
+/// Examples:
+///     >>> resolve_credentials(py, "auto", None, "s3://bucket/path")
+///
+/// Raises:
+///     AlopexError: If credential_provider is not "auto" or dict.
 #[allow(dead_code)]
 pub fn resolve_credentials(
     py: Python<'_>,
@@ -92,36 +140,50 @@ pub fn resolve_credentials(
     storage_options: Option<HashMap<String, String>>,
     storage_location: &str,
 ) -> PyResult<HashMap<String, String>> {
+    let mut resolved = HashMap::new();
     if credential_provider.is_none() {
-        return auto_credentials(storage_location, storage_options.unwrap_or_default());
-    }
-
-    if credential_provider.is_callable() {
-        let result = credential_provider
-            .call0()
-            .map_err(|err| error::to_py_err(format!("Credential provider failed: {}", err)))?;
-        let options = result
-            .extract::<HashMap<String, String>>()
-            .map_err(|_| error::to_py_err("Credential provider must return dict[str, str]"))?;
-        return Ok(options);
-    }
-
-    if let Ok(provider) = credential_provider.extract::<String>() {
-        if provider == "auto" {
-            return auto_credentials(storage_location, storage_options.unwrap_or_default());
+        resolved = auto_resolve_credentials(storage_location)?;
+    } else if let Ok(dict) = credential_provider.downcast::<PyDict>() {
+        for (key, value) in dict {
+            let key: String = key.extract()?;
+            let value: String = value.extract()?;
+            resolved.insert(key, value);
         }
-        return Err(error::to_py_err(format!(
-            "Unsupported credential_provider: {}",
-            provider
-        )));
+    } else if let Ok(provider) = credential_provider.extract::<String>() {
+        if provider == "auto" {
+            resolved = auto_resolve_credentials(storage_location)?;
+        } else {
+            return Err(error::to_py_err(format!(
+                "Unsupported credential_provider: {}",
+                provider
+            )));
+        }
+    } else {
+        return Err(error::to_py_err(
+            "credential_provider must be \"auto\" or dict[str, str]",
+        ));
     }
 
     let _ = py;
-    Err(error::to_py_err(
-        "credential_provider must be \"auto\" or Callable",
-    ))
+    Ok(merge_storage_options(resolved, storage_options))
 }
 
+/// Resolve credentials for Python callers.
+///
+/// Args:
+///     storage_location (str): Storage URI or path.
+///     credential_provider (str | dict | None): "auto" or explicit options dict.
+///     storage_options (dict[str, str] | None): Extra options to merge.
+///
+/// Returns:
+///     dict[str, str]: Resolved and merged storage options.
+///
+/// Examples:
+///     >>> from alopex._alopex import catalog as _catalog
+///     >>> _catalog._resolve_credentials("s3://bucket/path", "auto")
+///
+/// Raises:
+///     AlopexError: If credential_provider is invalid.
 #[pyfunction]
 #[pyo3(signature = (storage_location, credential_provider = None, storage_options = None))]
 pub fn _resolve_credentials(

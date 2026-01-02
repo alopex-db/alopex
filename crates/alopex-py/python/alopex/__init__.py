@@ -23,3 +23,9 @@ _export_public(_database)
 _export_public(_transaction)
 _export_public(_types)
 _export_public(_catalog)
+
+for _name in ("Catalog", "CatalogInfo", "NamespaceInfo", "TableInfo", "ColumnInfo"):
+    globals()[_name] = getattr(_catalog, _name)
+    if _name not in _seen:
+        __all__.append(_name)
+        _seen.add(_name)

@@ -29,9 +29,10 @@ dhat-heap.json
 .secrets
 
 # Python test artifacts
-.venv/
+.venv*/
 **/__pycache__/
 .pytest_cache/
 crates/alopex-py/python/alopex/_alopex*.so
 benchmark*.json
 profile*.log
+crates/alopex-py/proptest-regressions/

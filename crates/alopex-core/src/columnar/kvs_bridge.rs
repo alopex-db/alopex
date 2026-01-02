@@ -77,7 +77,7 @@ impl ColumnarKvsBridge {
     pub fn new(store: Arc<AnyKV>) -> Self {
         Self {
             store,
-            max_retries: 3,
+            max_retries: 10,
         }
     }
 
@@ -144,7 +144,8 @@ impl ColumnarKvsBridge {
             match commit_result {
                 Ok(()) => return Ok(next_id),
                 Err(ColumnarError::TxnConflict) if attempts < self.max_retries => {
-                    std::thread::sleep(Duration::from_millis(10));
+                    let backoff_ms = 10u64.saturating_mul(attempts as u64);
+                    std::thread::sleep(Duration::from_millis(backoff_ms));
                     continue;
                 }
                 Err(e) => return Err(e),
