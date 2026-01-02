@@ -36,6 +36,118 @@ fn parse_select_with_clauses() {
 }
 
 #[test]
+fn parse_select_group_by_single_column() {
+    let select = parse_with("SELECT dept FROM employees GROUP BY dept", |p| {
+        p.parse_select().unwrap()
+    });
+
+    assert_eq!(select.group_by.len(), 1);
+    match &select.group_by[0].kind {
+        ExprKind::ColumnRef { table, column } => {
+            assert!(table.is_none());
+            assert_eq!(column, "dept");
+        }
+        other => panic!("unexpected group_by expr {:?}", other),
+    }
+}
+
+#[test]
+fn parse_select_group_by_multiple_columns() {
+    let select = parse_with(
+        "SELECT dept, city FROM employees GROUP BY dept, city",
+        |p| p.parse_select().unwrap(),
+    );
+
+    assert_eq!(select.group_by.len(), 2);
+    let cols: Vec<&str> = select
+        .group_by
+        .iter()
+        .map(|expr| match &expr.kind {
+            ExprKind::ColumnRef { column, .. } => column.as_str(),
+            other => panic!("unexpected group_by expr {:?}", other),
+        })
+        .collect();
+    assert_eq!(cols, vec!["dept", "city"]);
+}
+
+#[test]
+fn parse_select_group_by_expression() {
+    let select = parse_with(
+        "SELECT YEAR(hire_date) FROM employees GROUP BY YEAR(hire_date)",
+        |p| p.parse_select().unwrap(),
+    );
+
+    assert_eq!(select.group_by.len(), 1);
+    match &select.group_by[0].kind {
+        ExprKind::FunctionCall { name, args } => {
+            assert_eq!(name, "YEAR");
+            assert_eq!(args.len(), 1);
+        }
+        other => panic!("unexpected group_by expr {:?}", other),
+    }
+}
+
+#[test]
+fn parse_select_with_having() {
+    let select = parse_with(
+        "SELECT dept, COUNT(*) FROM employees GROUP BY dept HAVING COUNT(*) > 5",
+        |p| p.parse_select().unwrap(),
+    );
+
+    assert_eq!(select.group_by.len(), 1);
+    assert!(select.having.is_some());
+    assert!(matches!(
+        select.having.as_ref().unwrap().kind,
+        ExprKind::BinaryOp { .. }
+    ));
+}
+
+#[test]
+fn parse_select_having_without_group_by() {
+    let select = parse_with("SELECT COUNT(*) FROM employees HAVING COUNT(*) > 0", |p| {
+        p.parse_select().unwrap()
+    });
+
+    assert!(select.group_by.is_empty());
+    assert!(select.having.is_some());
+}
+
+#[test]
+fn parse_select_global_aggregation() {
+    let select = parse_with("SELECT COUNT(*) FROM employees", |p| {
+        p.parse_select().unwrap()
+    });
+
+    assert!(select.group_by.is_empty());
+    assert!(select.having.is_none());
+    match &select.projection[0] {
+        SelectItem::Expr { expr, .. } => match &expr.kind {
+            ExprKind::FunctionCall { name, args } => {
+                assert_eq!(name, "COUNT");
+                assert_eq!(args.len(), 1);
+                assert!(matches!(
+                    args[0].kind,
+                    ExprKind::ColumnRef { ref column, .. } if column == "*"
+                ));
+            }
+            other => panic!("unexpected projection expr {:?}", other),
+        },
+        other => panic!("unexpected projection item {:?}", other),
+    }
+}
+
+#[test]
+fn group_by_requires_expression() {
+    let err = parse_with("SELECT dept FROM employees GROUP BY", |p| {
+        p.parse_select().unwrap_err()
+    });
+    assert!(matches!(
+        err,
+        ParserError::ExpectedToken { .. } | ParserError::UnexpectedToken { .. }
+    ));
+}
+
+#[test]
 fn select_requires_from() {
     let err = parse_with("SELECT id", |p| p.parse_select().unwrap_err());
     match err {
