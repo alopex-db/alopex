@@ -9,6 +9,7 @@
 //! - [`TypeChecker`]: Expression type inference and validation
 //! - [`Planner`]: Main entry point for converting AST to LogicalPlan
 
+pub mod aggregate_expr;
 mod error;
 pub mod knn_optimizer;
 pub mod logical_plan;
@@ -20,6 +21,7 @@ pub mod types;
 #[cfg(test)]
 mod planner_tests;
 
+pub use aggregate_expr::{AggregateExpr, AggregateFunction};
 pub use error::PlannerError;
 pub use knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
 pub use logical_plan::LogicalPlan;
