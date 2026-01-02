@@ -1,6 +1,14 @@
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 
+class polars:
+    class DataFrame:
+        ...
+
+    class LazyFrame:
+        ...
+
+
 class AlopexError(Exception):
     ...
 
