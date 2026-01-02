@@ -539,6 +539,41 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_kv_txn_begin() {
+        let args = vec!["alopex", "kv", "txn", "begin", "--timeout-secs", "30"];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Kv {
+                command: KvCommand::Txn(KvTxnCommand::Begin {
+                    timeout_secs: Some(30)
+                })
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_kv_txn_get_requires_txn_id() {
+        let args = vec!["alopex", "kv", "txn", "get", "mykey"];
+
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+
+    #[test]
+    fn test_parse_kv_txn_get() {
+        let args = vec!["alopex", "kv", "txn", "get", "mykey", "--txn-id", "txn123"];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Kv {
+                command: KvCommand::Txn(KvTxnCommand::Get { key, txn_id })
+            } if key == "mykey" && txn_id == "txn123"
+        ));
+    }
+
+    #[test]
     fn test_parse_kv_list_with_prefix() {
         let args = vec!["alopex", "--in-memory", "kv", "list", "--prefix", "user:"];
         let cli = Cli::try_parse_from(args).unwrap();

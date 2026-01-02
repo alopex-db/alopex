@@ -263,12 +263,17 @@ fn execute_command(
 
 /// Get columns for KV command output.
 fn get_kv_columns(cmd: &cli::KvCommand) -> Vec<Column> {
-    use cli::KvCommand;
+    use cli::{KvCommand, KvTxnCommand};
     match cmd {
         KvCommand::Get { .. } | KvCommand::List { .. } => commands::kv::kv_columns(),
-        KvCommand::Put { .. } | KvCommand::Delete { .. } | KvCommand::Txn(_) => {
-            commands::kv::kv_status_columns()
-        }
+        KvCommand::Put { .. } | KvCommand::Delete { .. } => commands::kv::kv_status_columns(),
+        KvCommand::Txn(txn_cmd) => match txn_cmd {
+            KvTxnCommand::Get { .. } | KvTxnCommand::Begin { .. } => commands::kv::kv_columns(),
+            KvTxnCommand::Put { .. }
+            | KvTxnCommand::Delete { .. }
+            | KvTxnCommand::Commit { .. }
+            | KvTxnCommand::Rollback { .. } => commands::kv::kv_status_columns(),
+        },
     }
 }
 
