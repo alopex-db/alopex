@@ -13,6 +13,10 @@ pub struct Cli {
     #[arg(long)]
     pub data_dir: Option<String>,
 
+    /// Profile name to use for database configuration
+    #[arg(long)]
+    pub profile: Option<String>,
+
     /// Run in in-memory mode (no persistence)
     #[arg(long, conflicts_with = "data_dir")]
     pub in_memory: bool,
@@ -36,6 +40,14 @@ pub struct Cli {
     /// Thread mode (multi or single)
     #[arg(long, value_enum, default_value = "multi")]
     pub thread_mode: ThreadMode,
+
+    /// Enable batch mode (non-interactive)
+    #[arg(long, short = 'b')]
+    pub batch: bool,
+
+    /// Automatically answer yes to prompts
+    #[arg(long)]
+    pub yes: bool,
 
     /// Subcommand to execute
     #[command(subcommand)]
@@ -77,6 +89,11 @@ pub enum ThreadMode {
 /// Top-level subcommands
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Profile management
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
     /// Key-Value operations
     Kv {
         #[command(subcommand)]
@@ -98,6 +115,36 @@ pub enum Command {
     Columnar {
         #[command(subcommand)]
         command: ColumnarCommand,
+    },
+}
+
+/// Profile subcommands
+#[derive(Subcommand, Debug)]
+pub enum ProfileCommand {
+    /// Create a profile
+    Create {
+        /// Profile name
+        name: String,
+        /// Path to the database directory (local path or S3 URI)
+        #[arg(long)]
+        data_dir: String,
+    },
+    /// List profiles
+    List,
+    /// Show profile details
+    Show {
+        /// Profile name
+        name: String,
+    },
+    /// Delete a profile
+    Delete {
+        /// Profile name
+        name: String,
+    },
+    /// Set the default profile
+    SetDefault {
+        /// Profile name
+        name: String,
     },
 }
 
@@ -319,6 +366,54 @@ mod tests {
         let cli = Cli::try_parse_from(args).unwrap();
 
         assert_eq!(cli.thread_mode, ThreadMode::Single);
+    }
+
+    #[test]
+    fn test_parse_profile_option_batch_yes() {
+        let args = vec![
+            "alopex",
+            "--profile",
+            "dev",
+            "--batch",
+            "--yes",
+            "--in-memory",
+            "kv",
+            "list",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert_eq!(cli.profile.as_deref(), Some("dev"));
+        assert!(cli.batch);
+        assert!(cli.yes);
+    }
+
+    #[test]
+    fn test_parse_batch_short_flag() {
+        let args = vec!["alopex", "-b", "--in-memory", "kv", "list"];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(cli.batch);
+    }
+
+    #[test]
+    fn test_parse_profile_create_subcommand() {
+        let args = vec![
+            "alopex",
+            "profile",
+            "create",
+            "dev",
+            "--data-dir",
+            "/path/to/db",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Profile {
+                command: ProfileCommand::Create { name, data_dir }
+            }
+                if name == "dev" && data_dir == "/path/to/db"
+        ));
     }
 
     #[test]

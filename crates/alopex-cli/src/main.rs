@@ -83,6 +83,12 @@ fn init_logging(verbose: bool, quiet: bool) {
 
 /// Main entry point logic.
 fn run(cli: Cli) -> Result<()> {
+    if matches!(&cli.command, Command::Profile { .. }) {
+        return Err(CliError::InvalidArgument(
+            "Profile commands are not implemented yet".to_string(),
+        ));
+    }
+
     // Open the database
     let db = open_database(&cli)?;
 
@@ -126,6 +132,7 @@ fn is_write_command(command: &Command) -> bool {
             )
         }
         Command::Columnar { .. } => false, // Columnar commands are read-only (scan, stats, list)
+        Command::Profile { .. } => false,
     }
 }
 
@@ -236,6 +243,9 @@ fn execute_command(
                 quiet,
             )
         }
+        Command::Profile { .. } => Err(CliError::InvalidArgument(
+            "Profile commands are not implemented yet".to_string(),
+        )),
     }
 }
 
