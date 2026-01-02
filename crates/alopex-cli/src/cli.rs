@@ -174,6 +174,58 @@ pub enum KvCommand {
         #[arg(long)]
         prefix: Option<String>,
     },
+    /// Transaction operations
+    #[command(subcommand)]
+    Txn(KvTxnCommand),
+}
+
+/// KV transaction subcommands
+#[derive(Subcommand, Debug)]
+pub enum KvTxnCommand {
+    /// Begin a transaction
+    Begin {
+        /// Transaction timeout in seconds (default: 60)
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+    },
+    /// Get a value within a transaction
+    Get {
+        /// The key to retrieve
+        key: String,
+        /// Transaction ID
+        #[arg(long)]
+        txn_id: String,
+    },
+    /// Put a key-value pair within a transaction
+    Put {
+        /// The key to set
+        key: String,
+        /// The value to store
+        value: String,
+        /// Transaction ID
+        #[arg(long)]
+        txn_id: String,
+    },
+    /// Delete a key within a transaction
+    Delete {
+        /// The key to delete
+        key: String,
+        /// Transaction ID
+        #[arg(long)]
+        txn_id: String,
+    },
+    /// Commit a transaction
+    Commit {
+        /// Transaction ID
+        #[arg(long)]
+        txn_id: String,
+    },
+    /// Roll back a transaction
+    Rollback {
+        /// Transaction ID
+        #[arg(long)]
+        txn_id: String,
+    },
 }
 
 /// SQL subcommand
@@ -287,6 +339,50 @@ pub enum ColumnarCommand {
     },
     /// List all columnar segments
     List,
+    /// Index management
+    #[command(subcommand)]
+    Index(IndexCommand),
+}
+
+/// Columnar index subcommands
+#[derive(Subcommand, Debug)]
+pub enum IndexCommand {
+    /// Create an index
+    Create {
+        /// Segment ID
+        #[arg(long)]
+        segment: String,
+        /// Column name
+        #[arg(long)]
+        column: String,
+        /// Index type
+        #[arg(long, value_enum)]
+        index_type: IndexType,
+    },
+    /// List indexes
+    List {
+        /// Segment ID
+        #[arg(long)]
+        segment: String,
+    },
+    /// Drop an index
+    Drop {
+        /// Segment ID
+        #[arg(long)]
+        segment: String,
+        /// Column name
+        #[arg(long)]
+        column: String,
+    },
+}
+
+/// Index type for columnar segments
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum IndexType {
+    /// Min/max index
+    Minmax,
+    /// Bloom filter index
+    Bloom,
 }
 
 #[cfg(test)]

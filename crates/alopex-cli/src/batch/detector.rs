@@ -1,6 +1,9 @@
 use std::io::{self, IsTerminal};
 
-use crate::cli::{Cli, Command, HnswCommand, KvCommand, ProfileCommand};
+use crate::cli::{
+    Cli, ColumnarCommand, Command, HnswCommand, IndexCommand, KvCommand, KvTxnCommand,
+    ProfileCommand,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchMode {
@@ -66,21 +69,28 @@ impl BatchMode {
     }
 
     pub fn should_show_progress(&self, explicit_progress: bool) -> bool {
-        explicit_progress || !self.is_batch
+        let _ = self;
+        explicit_progress
     }
 }
 
 pub fn is_destructive_command(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::Kv {
-            command: KvCommand::Delete { .. }
-        } | Command::Hnsw {
-            command: HnswCommand::Drop { .. }
-        } | Command::Profile {
-            command: ProfileCommand::Delete { .. }
-        }
-    )
+    match command {
+        Command::Kv { command: kv_cmd } => matches!(
+            kv_cmd,
+            KvCommand::Delete { .. } | KvCommand::Txn(KvTxnCommand::Delete { .. })
+        ),
+        Command::Hnsw {
+            command: HnswCommand::Drop { .. },
+        } => true,
+        Command::Profile {
+            command: ProfileCommand::Delete { .. },
+        } => true,
+        Command::Columnar {
+            command: ColumnarCommand::Index(IndexCommand::Drop { .. }),
+        } => true,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -178,7 +188,8 @@ mod tests {
 
         assert!(batch.should_show_progress(true));
         assert!(!batch.should_show_progress(false));
-        assert!(interactive.should_show_progress(false));
+        assert!(!interactive.should_show_progress(false));
+        assert!(interactive.should_show_progress(true));
     }
 
     #[test]
@@ -200,5 +211,21 @@ mod tests {
         assert!(!is_destructive_command(&kv_list));
         assert!(is_destructive_command(&profile_delete));
         assert!(is_destructive_command(&hnsw_drop));
+
+        let kv_txn_delete = Command::Kv {
+            command: KvCommand::Txn(KvTxnCommand::Delete {
+                key: "key".into(),
+                txn_id: "txn".into(),
+            }),
+        };
+        let columnar_index_drop = Command::Columnar {
+            command: ColumnarCommand::Index(IndexCommand::Drop {
+                segment: "seg".into(),
+                column: "col".into(),
+            }),
+        };
+
+        assert!(is_destructive_command(&kv_txn_delete));
+        assert!(is_destructive_command(&columnar_index_drop));
     }
 }

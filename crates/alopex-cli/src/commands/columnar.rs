@@ -7,7 +7,7 @@ use std::io::Write;
 use alopex_embedded::Database;
 
 use crate::cli::ColumnarCommand;
-use crate::error::Result;
+use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
 use crate::streaming::{StreamingWriter, WriteStatus};
@@ -49,6 +49,9 @@ pub fn execute_with_formatter<W: Write>(
                 StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
             execute_list(db, &mut streaming_writer)
         }
+        ColumnarCommand::Index(_) => Err(CliError::InvalidArgument(
+            "Columnar index commands are not implemented yet".to_string(),
+        )),
     }
 }
 

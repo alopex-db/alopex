@@ -6,7 +6,7 @@ use std::io::Write;
 
 use alopex_embedded::{Database, TxnMode};
 
-use crate::cli::KvCommand;
+use crate::cli::{KvCommand, KvTxnCommand};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::streaming::{StreamingWriter, WriteStatus};
@@ -28,7 +28,18 @@ pub fn execute<W: Write>(
         KvCommand::Put { key, value } => execute_put(db, &key, &value, writer),
         KvCommand::Delete { key } => execute_delete(db, &key, writer),
         KvCommand::List { prefix } => execute_list(db, prefix.as_deref(), writer),
+        KvCommand::Txn(cmd) => execute_txn(db, cmd, writer),
     }
+}
+
+fn execute_txn<W: Write>(
+    _db: &Database,
+    _cmd: KvTxnCommand,
+    _writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    Err(CliError::InvalidArgument(
+        "KV txn commands are not implemented yet".to_string(),
+    ))
 }
 
 /// Execute a KV get command.

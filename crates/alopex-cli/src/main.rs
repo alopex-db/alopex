@@ -112,12 +112,21 @@ fn run(cli: Cli) -> Result<()> {
 /// Returns true for commands that write data (put, delete, insert, create, etc.)
 /// Returns false for read-only commands (get, list, select, stats, etc.)
 fn is_write_command(command: &Command) -> bool {
-    use cli::{HnswCommand, KvCommand, VectorCommand};
+    use cli::{ColumnarCommand, HnswCommand, IndexCommand, KvCommand, KvTxnCommand, VectorCommand};
 
     match command {
-        Command::Kv { command: kv_cmd } => {
-            matches!(kv_cmd, KvCommand::Put { .. } | KvCommand::Delete { .. })
-        }
+        Command::Kv { command: kv_cmd } => matches!(
+            kv_cmd,
+            KvCommand::Put { .. }
+                | KvCommand::Delete { .. }
+                | KvCommand::Txn(
+                    KvTxnCommand::Begin { .. }
+                        | KvTxnCommand::Put { .. }
+                        | KvTxnCommand::Delete { .. }
+                        | KvTxnCommand::Commit { .. }
+                        | KvTxnCommand::Rollback { .. }
+                )
+        ),
         Command::Sql(sql_cmd) => is_write_sql(sql_cmd),
         Command::Vector { command: vec_cmd } => {
             matches!(
@@ -131,7 +140,10 @@ fn is_write_command(command: &Command) -> bool {
                 HnswCommand::Create { .. } | HnswCommand::Drop { .. }
             )
         }
-        Command::Columnar { .. } => false, // Columnar commands are read-only (scan, stats, list)
+        Command::Columnar { command: col_cmd } => matches!(
+            col_cmd,
+            ColumnarCommand::Index(IndexCommand::Create { .. } | IndexCommand::Drop { .. })
+        ),
         Command::Profile { .. } => false,
     }
 }
@@ -254,7 +266,9 @@ fn get_kv_columns(cmd: &cli::KvCommand) -> Vec<Column> {
     use cli::KvCommand;
     match cmd {
         KvCommand::Get { .. } | KvCommand::List { .. } => commands::kv::kv_columns(),
-        KvCommand::Put { .. } | KvCommand::Delete { .. } => commands::kv::kv_status_columns(),
+        KvCommand::Put { .. } | KvCommand::Delete { .. } | KvCommand::Txn(_) => {
+            commands::kv::kv_status_columns()
+        }
     }
 }
 
