@@ -85,7 +85,18 @@ impl<'a> Parser<'a> {
                         let mut args = Vec::new();
                         if !matches!(self.peek().token, Token::RParen) {
                             loop {
-                                args.push(self.parse_subexpr(PREC_UNKNOWN)?);
+                                if matches!(self.peek().token, Token::Mul) {
+                                    let star = self.advance();
+                                    args.push(Expr::new(
+                                        ExprKind::ColumnRef {
+                                            table: None,
+                                            column: "*".to_string(),
+                                        },
+                                        star.span,
+                                    ));
+                                } else {
+                                    args.push(self.parse_subexpr(PREC_UNKNOWN)?);
+                                }
                                 if matches!(self.peek().token, Token::Comma) {
                                     self.advance();
                                     continue;

@@ -1,5 +1,7 @@
 use crate::ast::span::Spanned;
-use crate::ast::{Assignment, Delete, Insert, OrderByExpr, Select, SelectItem, TableRef, Update};
+use crate::ast::{
+    Assignment, Delete, Expr, Insert, OrderByExpr, Select, SelectItem, TableRef, Update,
+};
 use crate::error::Result;
 use crate::tokenizer::keyword::Keyword;
 use crate::tokenizer::token::{Token, Word};
@@ -24,6 +26,16 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+
+        let group_by = self.parse_group_by()?;
+        if let Some(last) = group_by.last() {
+            end_span = end_span.union(&last.span());
+        }
+
+        let having = self.parse_having()?;
+        if let Some(expr) = &having {
+            end_span = end_span.union(&expr.span());
+        }
 
         let order_by = if self.consume_keyword(Keyword::ORDER) {
             self.expect_keyword("BY", Keyword::BY)?;
@@ -56,11 +68,39 @@ impl<'a> Parser<'a> {
             projection,
             from,
             selection,
+            group_by,
+            having,
             order_by,
             limit,
             offset,
             span,
         })
+    }
+
+    fn parse_group_by(&mut self) -> Result<Vec<Expr>> {
+        if !self.consume_keyword(Keyword::GROUP) {
+            return Ok(Vec::new());
+        }
+        self.expect_keyword("BY", Keyword::BY)?;
+
+        let mut items = Vec::new();
+        loop {
+            items.push(self.parse_expr()?);
+            if matches!(self.peek().token, Token::Comma) {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+        Ok(items)
+    }
+
+    fn parse_having(&mut self) -> Result<Option<Expr>> {
+        if !self.consume_keyword(Keyword::HAVING) {
+            return Ok(None);
+        }
+        let expr = self.parse_expr()?;
+        Ok(Some(expr))
     }
 
     fn parse_projection_list(&mut self) -> Result<Vec<SelectItem>> {
