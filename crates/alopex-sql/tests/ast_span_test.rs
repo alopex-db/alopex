@@ -45,6 +45,8 @@ fn dml_nodes_carry_spans() {
             span: span(1, 10),
         },
         selection: None,
+        group_by: vec![],
+        having: None,
         order_by: vec![OrderByExpr {
             expr: alopex_sql::Expr::new(
                 alopex_sql::ExprKind::Literal(alopex_sql::Literal::Number("1".into())),

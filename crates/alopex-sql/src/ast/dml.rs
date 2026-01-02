@@ -7,6 +7,8 @@ pub struct Select {
     pub projection: Vec<SelectItem>,
     pub from: TableRef,
     pub selection: Option<Expr>,
+    pub group_by: Vec<Expr>,
+    pub having: Option<Expr>,
     pub order_by: Vec<OrderByExpr>,
     pub limit: Option<Expr>,
     pub offset: Option<Expr>,
