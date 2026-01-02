@@ -25,7 +25,7 @@ impl BatchMode {
         Self::detect_with(cli, is_tty, env_mode.as_deref())
     }
 
-    fn detect_with(cli: &Cli, is_tty: bool, env_mode: Option<&str>) -> Self {
+    pub(crate) fn detect_with(cli: &Cli, is_tty: bool, env_mode: Option<&str>) -> Self {
         if cli.batch {
             return Self {
                 is_batch: true,
