@@ -289,3 +289,57 @@ fn e2e_empty_table_aggregate_behavior() {
     };
     assert!(q.rows.is_empty());
 }
+
+#[test]
+fn e2e_aggregate_error_cases() {
+    let (mut executor, catalog, config) = setup_executor();
+    execute_sql(
+        "CREATE TABLE emp (dept TEXT, name TEXT);",
+        &mut executor,
+        &catalog,
+        &config,
+    );
+
+    let err = plan_single(
+        "SELECT dept, name, COUNT(*) FROM emp GROUP BY dept",
+        &catalog,
+    )
+    .unwrap_err();
+    assert!(matches!(err, PlannerError::InvalidGroupBy { .. }));
+
+    let err = plan_single("SELECT COUNT(*) FROM emp WHERE COUNT(*) > 0", &catalog).unwrap_err();
+    assert!(matches!(err, PlannerError::AggregateInWhere { .. }));
+
+    let err = plan_single("SELECT name FROM emp HAVING COUNT(*) > 0", &catalog).unwrap_err();
+    assert!(matches!(err, PlannerError::InvalidHaving { .. }));
+
+    let err = plan_single("SELECT SUM(name) FROM emp", &catalog).unwrap_err();
+    assert!(matches!(err, PlannerError::TypeMismatch { .. }));
+
+    execute_sql(
+        r#"
+        INSERT INTO emp (dept, name) VALUES
+            ('engineering', 'alice'),
+            ('sales', 'bob');
+        "#,
+        &mut executor,
+        &catalog,
+        &config,
+    );
+
+    let limited = ExecutionConfig { max_groups: 1 };
+    let err = execute_query(
+        "SELECT dept, COUNT(*) FROM emp GROUP BY dept",
+        &mut executor,
+        &catalog,
+        &limited,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecutorError::TooManyGroups {
+            limit: 1,
+            actual: 2
+        }
+    ));
+}
