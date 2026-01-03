@@ -1,5 +1,6 @@
 use crate::config::EXIT_CODE_INTERRUPTED;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ExitCode {
@@ -9,18 +10,21 @@ pub enum ExitCode {
     Interrupted = EXIT_CODE_INTERRUPTED,
 }
 
+#[allow(dead_code)]
 impl ExitCode {
     pub fn as_i32(self) -> i32 {
         self as i32
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct ExitCodeCollector {
     success_count: usize,
     error_count: usize,
 }
 
+#[allow(dead_code)]
 impl ExitCodeCollector {
     pub fn new() -> Self {
         Self::default()

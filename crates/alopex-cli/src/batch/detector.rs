@@ -60,6 +60,7 @@ impl BatchMode {
         }
     }
 
+    #[allow(dead_code)]
     pub fn should_prompt(&self, cli: &Cli, is_destructive: bool) -> bool {
         if cli.yes || self.is_batch {
             return false;
@@ -68,12 +69,14 @@ impl BatchMode {
         is_destructive
     }
 
+    #[allow(dead_code)]
     pub fn should_show_progress(&self, explicit_progress: bool) -> bool {
         let _ = self;
         explicit_progress
     }
 }
 
+#[allow(dead_code)]
 pub fn is_destructive_command(command: &Command) -> bool {
     match command {
         Command::Kv { command: kv_cmd } => matches!(

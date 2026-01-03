@@ -1,7 +1,9 @@
 pub mod detector;
 pub mod exit_code;
 
+#[allow(unused_imports)]
 pub use detector::{BatchMode, BatchModeSource};
+#[allow(unused_imports)]
 pub use exit_code::{ExitCode, ExitCodeCollector};
 
 #[cfg(test)]

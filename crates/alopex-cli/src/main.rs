@@ -3,6 +3,7 @@
 //! This binary provides a CLI for interacting with Alopex DB,
 //! supporting KV, SQL, Vector, HNSW, and Columnar operations.
 
+mod batch;
 mod cli;
 mod commands;
 mod config;
@@ -18,6 +19,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use batch::BatchMode;
 use cli::{Cli, Command};
 use config::{setup_signal_handler, validate_thread_mode, EXIT_CODE_INTERRUPTED};
 use error::{handle_error, CliError, Result};
@@ -96,7 +98,15 @@ fn run(cli: Cli) -> Result<()> {
     let is_write = is_write_command(&cli.command);
 
     // Execute the command
-    execute_command(&db, cli.command, cli.output, cli.limit, cli.quiet)?;
+    let batch_mode = BatchMode::detect(&cli);
+    execute_command(
+        &db,
+        cli.command,
+        &batch_mode,
+        cli.output,
+        cli.limit,
+        cli.quiet,
+    )?;
 
     // Flush only for write commands to ensure S3 sync errors are propagated
     // Read-only commands should work even with S3 read-only permissions
@@ -211,6 +221,7 @@ fn open_database(cli: &Cli) -> Result<alopex_embedded::Database> {
 fn execute_command(
     db: &alopex_embedded::Database,
     command: Command,
+    batch_mode: &BatchMode,
     output_format: cli::OutputFormat,
     limit: Option<usize>,
     quiet: bool,
@@ -229,7 +240,15 @@ fn execute_command(
         }
         Command::Sql(sql_cmd) => {
             let formatter = create_formatter(output_format);
-            commands::sql::execute_with_formatter(db, sql_cmd, &mut handle, formatter, limit, quiet)
+            commands::sql::execute_with_formatter(
+                db,
+                sql_cmd,
+                batch_mode,
+                &mut handle,
+                formatter,
+                limit,
+                quiet,
+            )
         }
         Command::Vector { command: vec_cmd } => {
             let columns = get_vector_columns(&vec_cmd);

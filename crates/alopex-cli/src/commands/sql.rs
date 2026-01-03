@@ -3,10 +3,11 @@
 //! Supports: query execution, file-based queries
 
 use std::fs;
-use std::io::Write;
+use std::io::{self, Read, Write};
 
 use alopex_embedded::Database;
 
+use crate::batch::BatchMode;
 use crate::cli::SqlCommand;
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
@@ -29,29 +30,13 @@ use crate::streaming::{StreamingWriter, WriteStatus};
 pub fn execute_with_formatter<W: Write>(
     db: &Database,
     cmd: SqlCommand,
+    batch_mode: &BatchMode,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
     limit: Option<usize>,
     quiet: bool,
 ) -> Result<()> {
-    // Get SQL from query or file
-    let sql = match (cmd.query, cmd.file) {
-        (Some(query), None) => query,
-        (None, Some(file)) => fs::read_to_string(&file).map_err(|e| {
-            CliError::InvalidArgument(format!("Failed to read SQL file '{}': {}", file, e))
-        })?,
-        (None, None) => {
-            return Err(CliError::InvalidArgument(
-                "Either a SQL query or --file must be provided".to_string(),
-            ));
-        }
-        (Some(_), Some(_)) => {
-            // This shouldn't happen due to clap conflicts_with, but handle it anyway
-            return Err(CliError::InvalidArgument(
-                "Cannot specify both query and file".to_string(),
-            ));
-        }
-    };
+    let sql = cmd.resolve_query(batch_mode)?;
 
     execute_sql_with_formatter(db, &sql, writer, formatter, limit, quiet)
 }
@@ -61,28 +46,33 @@ pub fn execute_with_formatter<W: Write>(
 pub fn execute<W: Write>(
     db: &Database,
     cmd: SqlCommand,
+    batch_mode: &BatchMode,
     writer: &mut StreamingWriter<W>,
 ) -> Result<()> {
-    // Get SQL from query or file
-    let sql = match (cmd.query, cmd.file) {
-        (Some(query), None) => query,
-        (None, Some(file)) => fs::read_to_string(&file).map_err(|e| {
-            CliError::InvalidArgument(format!("Failed to read SQL file '{}': {}", file, e))
-        })?,
-        (None, None) => {
-            return Err(CliError::InvalidArgument(
-                "Either a SQL query or --file must be provided".to_string(),
-            ));
-        }
-        (Some(_), Some(_)) => {
-            // This shouldn't happen due to clap conflicts_with, but handle it anyway
-            return Err(CliError::InvalidArgument(
-                "Cannot specify both query and file".to_string(),
-            ));
-        }
-    };
+    let sql = cmd.resolve_query(batch_mode)?;
 
     execute_sql(db, &sql, writer)
+}
+
+impl SqlCommand {
+    /// Resolve the SQL query source (argument, file, or stdin).
+    pub fn resolve_query(&self, batch_mode: &BatchMode) -> Result<String> {
+        match (&self.query, &self.file) {
+            (Some(query), None) => Ok(query.clone()),
+            (None, Some(file)) => fs::read_to_string(file).map_err(|e| {
+                CliError::InvalidArgument(format!("Failed to read SQL file '{}': {}", file, e))
+            }),
+            (None, None) if !batch_mode.is_tty => {
+                let mut buf = String::new();
+                io::stdin().read_to_string(&mut buf)?;
+                Ok(buf)
+            }
+            (None, None) => Err(CliError::NoQueryProvided),
+            (Some(_), Some(_)) => Err(CliError::InvalidArgument(
+                "Cannot specify both query and file".to_string(),
+            )),
+        }
+    }
 }
 
 /// Execute SQL and write results.
@@ -382,6 +372,7 @@ pub fn sql_status_columns() -> Vec<Column> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::batch::BatchModeSource;
     use crate::output::jsonl::JsonlFormatter;
 
     fn create_test_db() -> Database {
@@ -400,6 +391,14 @@ mod tests {
     ) -> StreamingWriter<&mut Vec<u8>> {
         let formatter = Box::new(JsonlFormatter::new());
         StreamingWriter::new(output, formatter, columns, None)
+    }
+
+    fn default_batch_mode() -> BatchMode {
+        BatchMode {
+            is_batch: false,
+            is_tty: true,
+            source: BatchModeSource::Default,
+        }
     }
 
     #[test]
@@ -521,5 +520,55 @@ mod tests {
         assert!(
             matches!(sql_value_to_value(SqlValue::Text("hello".to_string())), Value::Text(s) if s == "hello")
         );
+    }
+
+    #[test]
+    fn resolve_query_from_argument() {
+        let cmd = SqlCommand {
+            query: Some("SELECT 1".to_string()),
+            file: None,
+        };
+
+        let sql = cmd.resolve_query(&default_batch_mode()).unwrap();
+        assert_eq!(sql, "SELECT 1");
+    }
+
+    #[test]
+    fn resolve_query_from_file() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file, "SELECT * FROM users").unwrap();
+
+        let cmd = SqlCommand {
+            query: None,
+            file: Some(file.path().display().to_string()),
+        };
+
+        let sql = cmd.resolve_query(&default_batch_mode()).unwrap();
+        assert_eq!(sql, "SELECT * FROM users\n");
+    }
+
+    #[test]
+    fn resolve_query_returns_no_query_error() {
+        let cmd = SqlCommand {
+            query: None,
+            file: None,
+        };
+
+        let err = cmd.resolve_query(&default_batch_mode()).unwrap_err();
+        assert!(matches!(err, CliError::NoQueryProvided));
+    }
+
+    #[test]
+    fn resolve_query_rejects_query_and_file() {
+        let cmd = SqlCommand {
+            query: Some("SELECT 1".to_string()),
+            file: Some("query.sql".into()),
+        };
+
+        let err = cmd.resolve_query(&default_batch_mode()).unwrap_err();
+        assert!(matches!(
+            err,
+            CliError::InvalidArgument(msg) if msg == "Cannot specify both query and file"
+        ));
     }
 }
