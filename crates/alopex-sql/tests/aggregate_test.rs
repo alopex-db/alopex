@@ -253,3 +253,39 @@ fn e2e_having_order_by_and_limit() {
         vec![SqlValue::Text("C".to_string()), SqlValue::Integer(1200)]
     );
 }
+
+#[test]
+fn e2e_empty_table_aggregate_behavior() {
+    let (mut executor, catalog, config) = setup_executor();
+    execute_sql(
+        "CREATE TABLE empty_orders (category TEXT, amount INT);",
+        &mut executor,
+        &catalog,
+        &config,
+    );
+
+    let result = execute_query(
+        "SELECT COUNT(*), SUM(amount) FROM empty_orders",
+        &mut executor,
+        &catalog,
+        &config,
+    )
+    .expect("execute");
+    let ExecutionResult::Query(q) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(q.rows.len(), 1);
+    assert_eq!(q.rows[0], vec![SqlValue::BigInt(0), SqlValue::Null]);
+
+    let result = execute_query(
+        "SELECT category, COUNT(*) FROM empty_orders GROUP BY category",
+        &mut executor,
+        &catalog,
+        &config,
+    )
+    .expect("execute");
+    let ExecutionResult::Query(q) = result else {
+        panic!("expected query result");
+    };
+    assert!(q.rows.is_empty());
+}
