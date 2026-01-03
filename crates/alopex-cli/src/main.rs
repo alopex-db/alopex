@@ -142,7 +142,8 @@ fn is_write_command(command: &Command) -> bool {
         }
         Command::Columnar { command: col_cmd } => matches!(
             col_cmd,
-            ColumnarCommand::Index(IndexCommand::Create { .. } | IndexCommand::Drop { .. })
+            ColumnarCommand::Ingest { .. }
+                | ColumnarCommand::Index(IndexCommand::Create { .. } | IndexCommand::Drop { .. })
         ),
         Command::Profile { .. } => false,
     }

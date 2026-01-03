@@ -59,15 +59,19 @@ dependencies = [
 name = "alopex-cli"
 version = "0.3.3"
 dependencies = [
+ "alopex-core",
  "alopex-embedded",
  "alopex-sql",
  "anyhow",
+ "arrow-array",
+ "arrow-schema",
  "clap",
  "comfy-table",
  "csv",
  "ctrlc",
  "dirs",
  "indicatif",
+ "parquet",
  "serde",
  "serde_json",
  "tempfile",

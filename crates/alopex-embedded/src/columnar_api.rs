@@ -9,7 +9,7 @@ use alopex_core::columnar::segment_v2::{RecordBatch, SegmentWriterV2};
 use alopex_core::storage::format::AlopexFileWriter;
 use alopex_core::{StorageFactory, StorageMode as CoreStorageMode};
 
-use crate::{Database, Error, Result, SegmentConfigV2, Transaction};
+use crate::{Database, Error, Result, SegmentConfigV2, Transaction, TxnMode};
 
 /// セグメント統計情報。
 #[derive(Debug, Clone)]
@@ -20,6 +20,34 @@ pub struct ColumnarSegmentStats {
     pub column_count: usize,
     /// セグメントのサイズ（バイト）。
     pub size_bytes: usize,
+}
+
+/// カラムナーインデックス種別。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnarIndexType {
+    /// 最小値/最大値インデックス。
+    Minmax,
+    /// Bloom フィルタインデックス。
+    Bloom,
+}
+
+impl ColumnarIndexType {
+    /// 文字列表現を返す。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Minmax => "minmax",
+            Self::Bloom => "bloom",
+        }
+    }
+}
+
+/// カラムナーインデックス情報。
+#[derive(Debug, Clone)]
+pub struct ColumnarIndexInfo {
+    /// 対象カラム名。
+    pub column: String,
+    /// インデックス種別。
+    pub index_type: ColumnarIndexType,
 }
 
 /// カラムナー関連設定。
@@ -118,6 +146,38 @@ impl Database {
     /// カラムナーセグメントを書き込む。
     pub fn write_columnar_segment(&self, table: &str, batch: RecordBatch) -> Result<u64> {
         let mut writer = SegmentWriterV2::new(self.segment_config.clone());
+        writer
+            .write_batch(batch)
+            .map_err(|e| Error::Core(e.into()))?;
+        let segment = writer.finish().map_err(|e| Error::Core(e.into()))?;
+        let table_id = table_id(table)?;
+
+        match self.columnar_mode {
+            StorageMode::Disk => self
+                .columnar_bridge
+                .write_segment(table_id, &segment)
+                .map_err(|e| Error::Core(e.into())),
+            StorageMode::InMemory => {
+                let store = self.columnar_memory.as_ref().ok_or_else(|| {
+                    Error::Core(alopex_core::Error::InvalidFormat(
+                        "in-memory columnar store is not initialized".into(),
+                    ))
+                })?;
+                store
+                    .write_segment(table_id, segment)
+                    .map_err(|e| Error::Core(e.into()))
+            }
+        }
+    }
+
+    /// カラムナーセグメントを書き込む（構成上書き）。
+    pub fn write_columnar_segment_with_config(
+        &self,
+        table: &str,
+        batch: RecordBatch,
+        config: SegmentConfigV2,
+    ) -> Result<u64> {
+        let mut writer = SegmentWriterV2::new(config);
         writer
             .write_batch(batch)
             .map_err(|e| Error::Core(e.into()))?;
@@ -411,6 +471,55 @@ impl Database {
         }
     }
 
+    /// Create a columnar index for a segment/column.
+    pub fn create_columnar_index(
+        &self,
+        segment_id: &str,
+        column: &str,
+        index_type: ColumnarIndexType,
+    ) -> Result<()> {
+        let _ = self.get_columnar_segment_stats(segment_id)?;
+        let key = columnar_index_key(segment_id, column);
+        let value = index_type.as_str().as_bytes().to_vec();
+        let mut txn = self.begin(TxnMode::ReadWrite)?;
+        txn.put(&key, &value)?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// List columnar indexes for a segment.
+    pub fn list_columnar_indexes(&self, segment_id: &str) -> Result<Vec<ColumnarIndexInfo>> {
+        let _ = self.get_columnar_segment_stats(segment_id)?;
+        let prefix = columnar_index_prefix(segment_id);
+        let mut txn = self.begin(TxnMode::ReadOnly)?;
+        let mut entries = Vec::new();
+        for (key, value) in txn.scan_prefix(&prefix)? {
+            let column = parse_index_column(segment_id, &key)?;
+            let index_type = parse_index_type(&value)?;
+            entries.push(ColumnarIndexInfo { column, index_type });
+        }
+        txn.commit()?;
+        Ok(entries)
+    }
+
+    /// Drop a columnar index for a segment/column.
+    pub fn drop_columnar_index(&self, segment_id: &str, column: &str) -> Result<()> {
+        let _ = self.get_columnar_segment_stats(segment_id)?;
+        let key = columnar_index_key(segment_id, column);
+        let mut txn = self.begin(TxnMode::ReadWrite)?;
+        let exists = txn.get(&key)?.is_some();
+        if !exists {
+            txn.rollback()?;
+            return Err(Error::IndexNotFound(format!(
+                "columnar index {}:{}",
+                segment_id, column
+            )));
+        }
+        txn.delete(&key)?;
+        txn.commit()?;
+        Ok(())
+    }
+
     /// InMemory モードのセグメントをファイルへフラッシュする。
     pub fn flush_in_memory_segment_to_file(
         &self,
@@ -540,6 +649,56 @@ fn project_batches(batches: Vec<RecordBatch>, indices: &[usize]) -> Result<Vec<R
         projected.push(RecordBatch::new(schema, cols, bitmaps));
     }
     Ok(projected)
+}
+
+const COLUMNAR_INDEX_PREFIX: &str = "__alopex_columnar_index__:";
+
+fn columnar_index_key(segment: &str, column: &str) -> Vec<u8> {
+    let mut key =
+        String::with_capacity(COLUMNAR_INDEX_PREFIX.len() + segment.len() + column.len() + 1);
+    key.push_str(COLUMNAR_INDEX_PREFIX);
+    key.push_str(segment);
+    key.push(':');
+    key.push_str(column);
+    key.into_bytes()
+}
+
+fn columnar_index_prefix(segment: &str) -> Vec<u8> {
+    let mut key = String::with_capacity(COLUMNAR_INDEX_PREFIX.len() + segment.len() + 1);
+    key.push_str(COLUMNAR_INDEX_PREFIX);
+    key.push_str(segment);
+    key.push(':');
+    key.into_bytes()
+}
+
+fn parse_index_column(segment: &str, key: &[u8]) -> Result<String> {
+    let prefix = columnar_index_prefix(segment);
+    if !key.starts_with(&prefix) {
+        return Err(Error::Core(alopex_core::Error::InvalidFormat(
+            "columnar index key is invalid".into(),
+        )));
+    }
+    let suffix = &key[prefix.len()..];
+    String::from_utf8(suffix.to_vec()).map_err(|_| {
+        Error::Core(alopex_core::Error::InvalidFormat(
+            "columnar index column is not valid UTF-8".into(),
+        ))
+    })
+}
+
+fn parse_index_type(raw: &[u8]) -> Result<ColumnarIndexType> {
+    let value = std::str::from_utf8(raw).map_err(|_| {
+        Error::Core(alopex_core::Error::InvalidFormat(
+            "columnar index type is not valid UTF-8".into(),
+        ))
+    })?;
+    match value {
+        "minmax" => Ok(ColumnarIndexType::Minmax),
+        "bloom" => Ok(ColumnarIndexType::Bloom),
+        other => Err(Error::Core(alopex_core::Error::InvalidFormat(format!(
+            "unknown columnar index type: {other}"
+        )))),
+    }
 }
 
 /// セグメントID文字列をパースする。

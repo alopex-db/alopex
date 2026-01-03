@@ -2,6 +2,8 @@
 //!
 //! This module defines the CLI structure using clap derive macros.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand, ValueEnum};
 
 /// Alopex CLI - Command-line interface for Alopex DB
@@ -339,6 +341,32 @@ pub enum ColumnarCommand {
     },
     /// List all columnar segments
     List,
+    /// Ingest a file into columnar storage
+    Ingest {
+        /// Input file path (CSV or Parquet)
+        #[arg(long)]
+        file: PathBuf,
+        /// Target table name
+        #[arg(long)]
+        table: String,
+        /// CSV delimiter character
+        #[arg(long, default_value = ",", value_parser = clap::value_parser!(char))]
+        delimiter: char,
+        /// Whether the CSV has a header row
+        #[arg(
+            long,
+            default_value = "true",
+            value_parser = clap::value_parser!(bool),
+            action = clap::ArgAction::Set
+        )]
+        header: bool,
+        /// Compression type (lz4, zstd, none)
+        #[arg(long, default_value = "lz4")]
+        compression: String,
+        /// Row group size (rows per group)
+        #[arg(long)]
+        row_group_size: Option<usize>,
+    },
     /// Index management
     #[command(subcommand)]
     Index(IndexCommand),
@@ -355,9 +383,9 @@ pub enum IndexCommand {
         /// Column name
         #[arg(long)]
         column: String,
-        /// Index type
-        #[arg(long, value_enum)]
-        index_type: IndexType,
+        /// Index type (minmax, bloom)
+        #[arg(long = "type")]
+        index_type: String,
     },
     /// List indexes
     List {
@@ -374,15 +402,6 @@ pub enum IndexCommand {
         #[arg(long)]
         column: String,
     },
-}
-
-/// Index type for columnar segments
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum IndexType {
-    /// Min/max index
-    Minmax,
-    /// Bloom filter index
-    Bloom,
 }
 
 #[cfg(test)]
@@ -761,6 +780,113 @@ mod tests {
             Command::Columnar {
                 command: ColumnarCommand::List
             }
+        ));
+    }
+
+    #[test]
+    fn test_parse_columnar_ingest_defaults() {
+        let args = vec![
+            "alopex",
+            "--in-memory",
+            "columnar",
+            "ingest",
+            "--file",
+            "data.csv",
+            "--table",
+            "events",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Columnar {
+                command: ColumnarCommand::Ingest {
+                    file,
+                    table,
+                    delimiter,
+                    header,
+                    compression,
+                    row_group_size,
+                }
+            } if file == PathBuf::from("data.csv")
+                && table == "events"
+                && delimiter == ','
+                && header
+                && compression == "lz4"
+                && row_group_size.is_none()
+        ));
+    }
+
+    #[test]
+    fn test_parse_columnar_ingest_custom_options() {
+        let args = vec![
+            "alopex",
+            "--in-memory",
+            "columnar",
+            "ingest",
+            "--file",
+            "data.csv",
+            "--table",
+            "events",
+            "--delimiter",
+            ";",
+            "--header",
+            "false",
+            "--compression",
+            "zstd",
+            "--row-group-size",
+            "500",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Columnar {
+                command: ColumnarCommand::Ingest {
+                    file,
+                    table,
+                    delimiter,
+                    header,
+                    compression,
+                    row_group_size,
+                }
+            } if file == PathBuf::from("data.csv")
+                && table == "events"
+                && delimiter == ';'
+                && !header
+                && compression == "zstd"
+                && row_group_size == Some(500)
+        ));
+    }
+
+    #[test]
+    fn test_parse_columnar_index_create() {
+        let args = vec![
+            "alopex",
+            "--in-memory",
+            "columnar",
+            "index",
+            "create",
+            "--segment",
+            "123:1",
+            "--column",
+            "col1",
+            "--type",
+            "bloom",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Columnar {
+                command: ColumnarCommand::Index(IndexCommand::Create {
+                    segment,
+                    column,
+                    index_type,
+                })
+            } if segment == "123:1"
+                && column == "col1"
+                && index_type == "bloom"
         ));
     }
 

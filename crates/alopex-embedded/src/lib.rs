@@ -15,7 +15,9 @@ pub use crate::catalog_api::{
     CatalogInfo, ColumnDefinition, ColumnInfo, CreateCatalogRequest, CreateNamespaceRequest,
     CreateTableRequest, IndexInfo, NamespaceInfo, StorageInfo, TableInfo,
 };
-pub use crate::columnar_api::{ColumnarRowIterator, EmbeddedConfig, StorageMode};
+pub use crate::columnar_api::{
+    ColumnarIndexInfo, ColumnarIndexType, ColumnarRowIterator, EmbeddedConfig, StorageMode,
+};
 pub use crate::options::DatabaseOptions;
 pub use crate::sql_api::{SqlStreamingResult, StreamingQueryResult, StreamingRows};
 pub use crate::txn_manager::{TransactionInfo, TransactionManager};
