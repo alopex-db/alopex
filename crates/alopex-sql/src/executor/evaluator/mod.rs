@@ -4,6 +4,7 @@
 //! emitted by the planner. The evaluator operates on a borrowed row slice
 //! via [`EvalContext`] and returns [`SqlValue`] results or [`ExecutorError`].
 
+pub mod aggregate;
 mod binary_op;
 mod column_ref;
 mod context;
