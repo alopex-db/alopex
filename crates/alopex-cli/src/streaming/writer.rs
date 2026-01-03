@@ -494,4 +494,22 @@ mod tests {
         assert!(result.contains("Alice"));
         assert!(result.contains("Bob"));
     }
+
+    #[test]
+    fn test_streaming_large_row_count_does_not_buffer() {
+        let formatter = Box::new(JsonlFormatter::new());
+        let columns = test_columns();
+
+        let mut writer = StreamingWriter::new(std::io::sink(), formatter, columns, None);
+
+        writer.prepare(None).unwrap();
+        for i in 0..12_000 {
+            writer.write_row(test_row(i, "row")).unwrap();
+        }
+
+        assert_eq!(writer.written_count(), 12_000);
+        assert!(writer.buffer.is_empty());
+
+        writer.finish().unwrap();
+    }
 }
