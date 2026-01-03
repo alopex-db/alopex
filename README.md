@@ -143,3 +143,4 @@ See [CONTRIBUTING.md](https://www.google.com/search?q=CONTRIBUTING.md) for detai
 <div align="center">
 <sub>Built with 🦀 and ❤️ by the Alopex DB Team.</sub>
 </div>
+# Discord hook test
