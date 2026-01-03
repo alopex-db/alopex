@@ -31,6 +31,10 @@ name = "key_encoding"
 harness = false
 
 [[bench]]
+name = "aggregate_bench"
+harness = false
+
+[[bench]]
 name = "storage_bench"
 harness = false
 
