@@ -5,3 +5,4 @@ pub mod error;
 pub mod models;
 pub mod output;
 pub mod profile;
+pub mod version;

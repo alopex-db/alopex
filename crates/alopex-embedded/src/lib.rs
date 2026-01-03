@@ -41,7 +41,7 @@ pub use alopex_sql::executor::QueryRowIterator;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::{Arc, RwLock};
 
@@ -144,6 +144,63 @@ pub(crate) fn disk_data_dir_path(path: &Path) -> std::path::PathBuf {
     } else {
         path.to_path_buf()
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_file_version_from_storage(path: &Path) -> alopex_core::storage::format::FileVersion {
+    use alopex_core::storage::format::{FileHeader, FileVersion, HEADER_SIZE};
+    use std::io::Read;
+
+    let Some(file_path) = resolve_format_file_path(path) else {
+        return FileVersion::CURRENT;
+    };
+
+    let mut header_bytes = [0u8; HEADER_SIZE];
+    let Ok(mut file) = fs::File::open(file_path) else {
+        return FileVersion::CURRENT;
+    };
+    if file.read_exact(&mut header_bytes).is_err() {
+        return FileVersion::CURRENT;
+    }
+    match FileHeader::from_bytes(&header_bytes) {
+        Ok(header) => header.version,
+        Err(_) => FileVersion::CURRENT,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn read_file_version_from_storage(_path: &Path) -> alopex_core::storage::format::FileVersion {
+    alopex_core::storage::format::FileVersion::CURRENT
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_format_file_path(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+        return Some(path.to_path_buf());
+    }
+
+    if path.is_dir() {
+        if let Some(ext) = path.extension() {
+            if ext == "d" {
+                let candidate = path.with_extension("");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if entry_path.extension().is_some_and(|ext| ext == "alopex") && entry_path.is_file()
+                {
+                    return Some(entry_path);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 impl Database {
@@ -326,6 +383,18 @@ impl Database {
     /// Flushes the current in-memory data to an SSTable on disk (beta).
     pub fn flush(&self) -> Result<()> {
         self.store.flush().map_err(Error::Core)
+    }
+
+    /// Returns the file format version supported by the embedded engine.
+    pub fn file_format_version(&self) -> alopex_core::storage::format::FileVersion {
+        use alopex_core::storage::format::FileVersion;
+
+        match self.store.as_ref() {
+            AnyKV::Memory(_) => FileVersion::CURRENT,
+            AnyKV::Lsm(kv) => read_file_version_from_storage(&kv.data_dir),
+            #[cfg(feature = "s3")]
+            AnyKV::S3(kv) => read_file_version_from_storage(kv.cache_dir()),
+        }
     }
 
     /// Returns current memory usage statistics (in-memory KV only).
@@ -1512,6 +1581,22 @@ mod tests {
         let mut txn = db.begin(TxnMode::ReadOnly).unwrap();
         let val = txn.get(b"non-existent-key").unwrap();
         assert!(val.is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_file_format_version_reads_alopex_header() {
+        use alopex_core::storage::format::{AlopexFileWriter, FileFlags, FileVersion};
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("format-test.alopex");
+        let expected = FileVersion::new(0, 0, 1);
+
+        let writer = AlopexFileWriter::new(path.clone(), expected, FileFlags(0)).unwrap();
+        writer.finalize().unwrap();
+
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.file_format_version(), expected);
     }
 
     #[test]

@@ -12,6 +12,7 @@ mod models;
 mod output;
 mod streaming;
 mod uri;
+mod version;
 
 use std::io;
 use std::process::ExitCode;
@@ -85,14 +86,20 @@ fn init_logging(verbose: bool, quiet: bool) {
 
 /// Main entry point logic.
 fn run(cli: Cli) -> Result<()> {
-    if matches!(&cli.command, Command::Profile { .. }) {
-        return Err(CliError::InvalidArgument(
-            "Profile commands are not implemented yet".to_string(),
-        ));
+    match &cli.command {
+        Command::Profile { .. } => {
+            return Err(CliError::InvalidArgument(
+                "Profile commands are not implemented yet".to_string(),
+            ));
+        }
+        Command::Version => {
+            return commands::version::execute_version(cli.output);
+        }
+        _ => {}
     }
 
     // Open the database
-    let db = open_database(&cli)?;
+    let db = open_database_with_check(&cli)?;
 
     // Check if this is a write command before executing
     let is_write = is_write_command(&cli.command);
@@ -155,7 +162,7 @@ fn is_write_command(command: &Command) -> bool {
             ColumnarCommand::Ingest { .. }
                 | ColumnarCommand::Index(IndexCommand::Create { .. } | IndexCommand::Drop { .. })
         ),
-        Command::Profile { .. } => false,
+        Command::Profile { .. } | Command::Version => false,
     }
 }
 
@@ -186,6 +193,30 @@ fn is_write_sql(sql_cmd: &cli::SqlCommand) -> bool {
         || trimmed.starts_with("DROP")
         || trimmed.starts_with("ALTER")
         || trimmed.starts_with("TRUNCATE")
+}
+
+fn open_database_with_check(cli: &Cli) -> Result<alopex_embedded::Database> {
+    let db = open_database(cli)?;
+    let checker = version::compatibility::VersionChecker::new();
+    let file_version = version::Version::from(db.file_format_version());
+
+    match checker.check_compatibility(file_version) {
+        version::compatibility::VersionCheckResult::Compatible => {}
+        version::compatibility::VersionCheckResult::CliOlderThanFile { cli, file } => {
+            eprintln!(
+                "Warning: CLI v{} は ファイルフォーマット v{} より古いです。アップグレードを推奨します。",
+                cli, file
+            );
+        }
+        version::compatibility::VersionCheckResult::Incompatible { cli, file } => {
+            return Err(CliError::IncompatibleVersion {
+                cli: cli.to_string(),
+                file: file.to_string(),
+            });
+        }
+    }
+
+    Ok(db)
 }
 
 /// Open the database based on CLI options.
@@ -275,6 +306,7 @@ fn execute_command(
                 quiet,
             )
         }
+        Command::Version => commands::version::execute_version(output_format),
         Command::Profile { .. } => Err(CliError::InvalidArgument(
             "Profile commands are not implemented yet".to_string(),
         )),

@@ -118,6 +118,8 @@ pub enum Command {
         #[command(subcommand)]
         command: ColumnarCommand,
     },
+    /// Show CLI and file format version information
+    Version,
 }
 
 /// Profile subcommands
