@@ -852,7 +852,7 @@ mod tests {
                     compression,
                     row_group_size,
                 }
-            } if file == PathBuf::from("data.csv")
+            } if file == std::path::Path::new("data.csv")
                 && table == "events"
                 && delimiter == ','
                 && header
@@ -894,7 +894,7 @@ mod tests {
                     compression,
                     row_group_size,
                 }
-            } if file == PathBuf::from("data.csv")
+            } if file == std::path::Path::new("data.csv")
                 && table == "events"
                 && delimiter == ';'
                 && !header

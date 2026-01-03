@@ -1,4 +1,5 @@
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use clap::Parser;
@@ -14,7 +15,7 @@ fn parse_cli(args: &[&str]) -> Cli {
 }
 
 #[test]
-fn test_profile_create_save_load_and_permissions() {
+fn test_profile_create_save_load() {
     let temp = tempdir().unwrap();
     let config_path = temp.path().join(".alopex").join("config.toml");
 
@@ -30,13 +31,31 @@ fn test_profile_create_save_load_and_permissions() {
     manager.set_default("dev").unwrap();
     manager.save().unwrap();
 
-    let metadata = fs::metadata(&config_path).unwrap();
-    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-
     let loaded = ProfileManager::load_from_path(config_path).unwrap();
     let profile = loaded.get("dev").unwrap();
     assert_eq!(profile.data_dir, "/tmp/dev");
     assert_eq!(loaded.default_profile(), Some("dev"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_profile_permissions_unix() {
+    let temp = tempdir().unwrap();
+    let config_path = temp.path().join(".alopex").join("config.toml");
+
+    let mut manager = ProfileManager::load_from_path(config_path.clone()).unwrap();
+    manager
+        .create(
+            "dev",
+            Profile {
+                data_dir: "/tmp/dev".to_string(),
+            },
+        )
+        .unwrap();
+    manager.save().unwrap();
+
+    let metadata = fs::metadata(&config_path).unwrap();
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
 }
 
 #[test]
