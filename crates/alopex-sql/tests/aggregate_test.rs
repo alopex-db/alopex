@@ -288,6 +288,19 @@ fn e2e_empty_table_aggregate_behavior() {
         panic!("expected query result");
     };
     assert!(q.rows.is_empty());
+
+    // Use a BigInt literal to match COUNT(*) result type.
+    let result = execute_query(
+        "SELECT COUNT(*) FROM empty_orders HAVING COUNT(*) > 2147483648",
+        &mut executor,
+        &catalog,
+        &config,
+    )
+    .expect("execute");
+    let ExecutionResult::Query(q) = result else {
+        panic!("expected query result");
+    };
+    assert!(q.rows.is_empty());
 }
 
 #[test]
