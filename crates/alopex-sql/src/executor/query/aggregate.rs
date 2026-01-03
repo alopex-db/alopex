@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use crate::catalog::ColumnMetadata;
 use crate::executor::evaluator::aggregate::{AggregateState, GroupKey, create_aggregate_state};
@@ -62,7 +63,9 @@ impl AggregateIterator {
             return Ok(());
         }
 
-        if self.group_keys.is_empty() {
+        let is_global = self.group_keys.is_empty();
+        let global_key = GroupKey::empty();
+        if is_global {
             if self.max_groups == 0 {
                 return Err(ExecutorError::TooManyGroups {
                     limit: self.max_groups,
@@ -71,7 +74,7 @@ impl AggregateIterator {
             }
             let states = self.aggregates.iter().map(create_aggregate_state).collect();
             self.groups.insert(
-                GroupKey::empty(),
+                global_key.clone(),
                 GroupState {
                     key_values: Vec::new(),
                     states,
@@ -79,44 +82,48 @@ impl AggregateIterator {
             );
         }
 
+        let max_groups = self.max_groups;
+        let group_keys = &self.group_keys;
+        let aggregates = &self.aggregates;
+        let groups = &mut self.groups;
+
         while let Some(result) = self.input.next_row() {
             let row = result?;
-            let group_key = if self.group_keys.is_empty() {
-                GroupKey::empty()
-            } else {
-                GroupKey::from_row(&row, &self.group_keys)?
-            };
+            if is_global {
+                let group = groups
+                    .get_mut(&global_key)
+                    .expect("global group entry should exist");
+                update_group_states(aggregates, group, &row)?;
+                continue;
+            }
 
-            let mut needs_insert = false;
-            if !self.groups.contains_key(&group_key) {
-                if self.groups.len() + 1 > self.max_groups {
-                    return Err(ExecutorError::TooManyGroups {
-                        limit: self.max_groups,
-                        actual: self.groups.len() + 1,
-                    });
+            let group_key = GroupKey::from_row(&row, group_keys)?;
+            let current_groups = groups.len();
+            let group = match groups.entry(group_key) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    if current_groups + 1 > max_groups {
+                        return Err(ExecutorError::TooManyGroups {
+                            limit: max_groups,
+                            actual: current_groups + 1,
+                        });
+                    }
+                    let key_values = Self::evaluate_group_key_values_for(&row, group_keys)?;
+                    let states = aggregates.iter().map(create_aggregate_state).collect();
+                    entry.insert(GroupState { key_values, states })
                 }
-                needs_insert = true;
-            }
-
-            if needs_insert {
-                let key_values = self.evaluate_group_key_values(&row)?;
-                let states = self.aggregates.iter().map(create_aggregate_state).collect();
-                self.groups
-                    .insert(group_key.clone(), GroupState { key_values, states });
-            }
-
-            let group = self
-                .groups
-                .get_mut(&group_key)
-                .expect("group entry should exist");
-            update_group_states(&self.aggregates, group, &row)?;
+            };
+            update_group_states(aggregates, group, &row)?;
         }
 
-        let mut result_rows = Vec::new();
+        let group_count = self.groups.len();
+        let groups = std::mem::take(&mut self.groups);
+        let mut result_rows = Vec::with_capacity(group_count);
         let mut row_id = 0u64;
-        for group in self.groups.values() {
-            let mut values = group.key_values.clone();
-            for state in &group.states {
+        for group in groups.into_values() {
+            let mut values = group.key_values;
+            values.reserve(group.states.len());
+            for state in group.states {
                 values.push(state.finalize());
             }
 
@@ -130,16 +137,17 @@ impl AggregateIterator {
         Ok(())
     }
 
-    fn evaluate_group_key_values(&self, row: &Row) -> Result<Vec<SqlValue>> {
-        if self.group_keys.is_empty() {
+    fn evaluate_group_key_values_for(row: &Row, group_keys: &[TypedExpr]) -> Result<Vec<SqlValue>> {
+        if group_keys.is_empty() {
             return Ok(Vec::new());
         }
 
         let ctx = EvalContext::new(&row.values);
-        self.group_keys
-            .iter()
-            .map(|expr| evaluate(expr, &ctx))
-            .collect()
+        let mut values = Vec::with_capacity(group_keys.len());
+        for expr in group_keys {
+            values.push(evaluate(expr, &ctx)?);
+        }
+        Ok(values)
     }
 
     fn passes_having(&self, values: &[SqlValue]) -> Result<bool> {
