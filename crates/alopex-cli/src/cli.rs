@@ -5,6 +5,20 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
+
+fn parse_shell(value: &str) -> Result<Shell, String> {
+    match value {
+        "bash" => Ok(Shell::Bash),
+        "zsh" => Ok(Shell::Zsh),
+        "fish" => Ok(Shell::Fish),
+        "pwsh" | "powershell" => Ok(Shell::PowerShell),
+        _ => Err(format!(
+            "Unsupported shell: {}. Use bash, zsh, fish, or pwsh.",
+            value
+        )),
+    }
+}
 
 /// Alopex CLI - Command-line interface for Alopex DB
 #[derive(Parser, Debug)]
@@ -120,10 +134,16 @@ pub enum Command {
     },
     /// Show CLI and file format version information
     Version,
+    /// Generate shell completion scripts
+    Completions {
+        /// Shell type (bash, zsh, fish, pwsh)
+        #[arg(value_parser = parse_shell, value_name = "SHELL")]
+        shell: Shell,
+    },
 }
 
 /// Profile subcommands
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum ProfileCommand {
     /// Create a profile
     Create {
@@ -530,6 +550,28 @@ mod tests {
                 command: ProfileCommand::Create { name, data_dir }
             }
                 if name == "dev" && data_dir == "/path/to/db"
+        ));
+    }
+
+    #[test]
+    fn test_parse_completions_bash() {
+        let args = vec!["alopex", "completions", "bash"];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Completions { shell } if shell == Shell::Bash
+        ));
+    }
+
+    #[test]
+    fn test_parse_completions_pwsh() {
+        let args = vec!["alopex", "completions", "pwsh"];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Completions { shell } if shell == Shell::PowerShell
         ));
     }
 

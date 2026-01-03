@@ -10,6 +10,7 @@ mod config;
 mod error;
 mod models;
 mod output;
+mod profile;
 mod progress;
 mod streaming;
 mod uri;
@@ -18,7 +19,8 @@ mod version;
 use std::io;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::{generate, Shell};
 use tracing_subscriber::EnvFilter;
 
 use batch::BatchMode;
@@ -27,6 +29,7 @@ use config::{setup_signal_handler, validate_thread_mode, EXIT_CODE_INTERRUPTED};
 use error::{handle_error, CliError, Result};
 use models::Column;
 use output::create_formatter;
+use profile::{execute_profile_command, ProfileManager, ResolvedConfig};
 use streaming::StreamingWriter;
 use uri::{validate_s3_credentials, StorageUri};
 
@@ -85,13 +88,47 @@ fn init_logging(verbose: bool, quiet: bool) {
         .init();
 }
 
+fn generate_completions(shell: Shell) -> Result<()> {
+    let mut command = Cli::command();
+    let name = command.get_name().to_string();
+    let mut stdout = io::stdout();
+    generate(shell, &mut command, name, &mut stdout);
+    Ok(())
+}
+
+fn resolve_config(cli: &Cli) -> Result<ResolvedConfig> {
+    if cli.in_memory {
+        return Ok(ResolvedConfig {
+            data_dir: None,
+            in_memory: true,
+            profile_name: None,
+        });
+    }
+
+    if cli.profile.is_some() && cli.data_dir.is_some() {
+        return Err(CliError::ConflictingOptions);
+    }
+
+    if let Some(data_dir) = cli.data_dir.as_ref() {
+        return Ok(ResolvedConfig {
+            data_dir: Some(data_dir.clone()),
+            in_memory: false,
+            profile_name: None,
+        });
+    }
+
+    let manager = ProfileManager::load()?;
+    manager.resolve(cli)
+}
+
 /// Main entry point logic.
 fn run(cli: Cli) -> Result<()> {
     match &cli.command {
-        Command::Profile { .. } => {
-            return Err(CliError::InvalidArgument(
-                "Profile commands are not implemented yet".to_string(),
-            ));
+        Command::Profile { command } => {
+            return execute_profile_command(command.clone(), cli.output);
+        }
+        Command::Completions { shell } => {
+            return generate_completions(*shell);
         }
         Command::Version => {
             return commands::version::execute_version(cli.output);
@@ -100,13 +137,14 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     // Open the database
-    let db = open_database_with_check(&cli)?;
+    let resolved = resolve_config(&cli)?;
+    let db = open_database_with_check(&resolved)?;
 
     // Check if this is a write command before executing
     let is_write = is_write_command(&cli.command);
 
-    // Execute the command
     let batch_mode = BatchMode::detect(&cli);
+    // Execute the command
     execute_command(
         &db,
         cli.command,
@@ -163,7 +201,7 @@ fn is_write_command(command: &Command) -> bool {
             ColumnarCommand::Ingest { .. }
                 | ColumnarCommand::Index(IndexCommand::Create { .. } | IndexCommand::Drop { .. })
         ),
-        Command::Profile { .. } | Command::Version => false,
+        Command::Profile { .. } | Command::Version | Command::Completions { .. } => false,
     }
 }
 
@@ -196,8 +234,8 @@ fn is_write_sql(sql_cmd: &cli::SqlCommand) -> bool {
         || trimmed.starts_with("TRUNCATE")
 }
 
-fn open_database_with_check(cli: &Cli) -> Result<alopex_embedded::Database> {
-    let db = open_database(cli)?;
+fn open_database_with_check(config: &ResolvedConfig) -> Result<alopex_embedded::Database> {
+    let db = open_database(config)?;
     let checker = version::compatibility::VersionChecker::new();
     let file_version = version::Version::from(db.file_format_version());
 
@@ -221,14 +259,14 @@ fn open_database_with_check(cli: &Cli) -> Result<alopex_embedded::Database> {
 }
 
 /// Open the database based on CLI options.
-fn open_database(cli: &Cli) -> Result<alopex_embedded::Database> {
+fn open_database(config: &ResolvedConfig) -> Result<alopex_embedded::Database> {
     use alopex_embedded::Database;
 
-    if cli.in_memory {
+    if config.in_memory {
         // In-memory mode
         tracing::debug!("Opening database in in-memory mode");
         Ok(Database::open_in_memory()?)
-    } else if let Some(ref data_dir) = cli.data_dir {
+    } else if let Some(ref data_dir) = config.data_dir {
         // Parse URI
         let uri = StorageUri::parse(data_dir)?;
 
@@ -244,7 +282,7 @@ fn open_database(cli: &Cli) -> Result<alopex_embedded::Database> {
     } else {
         // Neither in-memory nor data-dir specified
         Err(CliError::InvalidArgument(
-            "Either --in-memory or --data-dir must be specified".to_string(),
+            "Either --in-memory, --data-dir, or --profile must be specified".to_string(),
         ))
     }
 }
@@ -309,9 +347,8 @@ fn execute_command(
             )
         }
         Command::Version => commands::version::execute_version(output_format),
-        Command::Profile { .. } => Err(CliError::InvalidArgument(
-            "Profile commands are not implemented yet".to_string(),
-        )),
+        Command::Completions { shell } => generate_completions(shell),
+        Command::Profile { command } => execute_profile_command(command, output_format),
     }
 }
 

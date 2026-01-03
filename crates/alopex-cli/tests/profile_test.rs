@@ -6,7 +6,8 @@ use tempfile::tempdir;
 
 use alopex_cli::cli::Cli;
 use alopex_cli::error::CliError;
-use alopex_cli::profile::{Profile, ProfileManager};
+use alopex_cli::profile::config::Profile;
+use alopex_cli::profile::ProfileManager;
 
 fn parse_cli(args: &[&str]) -> Cli {
     Cli::try_parse_from(args).expect("cli parse")

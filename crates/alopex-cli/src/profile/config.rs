@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,7 @@ pub struct Profile {
 pub struct ResolvedConfig {
     pub data_dir: Option<String>,
     pub in_memory: bool,
+    #[allow(dead_code)]
     pub profile_name: Option<String>,
 }
 
@@ -132,10 +133,6 @@ impl ProfileManager {
 
     pub fn default_profile(&self) -> Option<&str> {
         self.default_profile.as_deref()
-    }
-
-    pub fn config_path(&self) -> &Path {
-        &self.config_path
     }
 
     pub fn resolve(&self, cli: &Cli) -> Result<ResolvedConfig> {

@@ -14,7 +14,7 @@ pub struct ProfileListOutput {
     pub profiles: Vec<ProfileListItem>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct ProfileListItem {
     pub name: String,
     pub data_dir: String,
@@ -136,23 +136,10 @@ fn write_list_json(items: &[ProfileListItem]) -> Result<()> {
 }
 
 fn write_list_json_to(writer: &mut dyn Write, items: &[ProfileListItem]) -> Result<()> {
-    let columns = vec![
-        Column::new("name", DataType::Text),
-        Column::new("data_dir", DataType::Text),
-        Column::new("is_default", DataType::Bool),
-    ];
-    let rows: Vec<Row> = items
-        .iter()
-        .map(|item| {
-            Row::new(vec![
-                Value::Text(item.name.clone()),
-                Value::Text(item.data_dir.clone()),
-                Value::Bool(item.is_default),
-            ])
-        })
-        .collect();
-    let array = rows_to_json_array(&columns, &rows)?;
-    let value = serde_json::json!({ "profiles": array });
+    let output = ProfileListOutput {
+        profiles: items.to_vec(),
+    };
+    let value = serde_json::to_value(output)?;
     write_json_value_to(writer, &value)
 }
 

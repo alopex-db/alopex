@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 
 # Database
 alopex-core = { path = "../alopex-core" }
