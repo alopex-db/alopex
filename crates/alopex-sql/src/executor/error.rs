@@ -72,6 +72,10 @@ pub enum ExecutorError {
     #[error("invalid operation: {operation} - {reason}")]
     InvalidOperation { operation: String, reason: String },
 
+    /// Too many groups generated during aggregation.
+    #[error("too many groups: {actual} exceeds limit {limit}")]
+    TooManyGroups { limit: usize, actual: usize },
+
     /// Input file not found.
     #[error("file not found: {0}")]
     FileNotFound(String),

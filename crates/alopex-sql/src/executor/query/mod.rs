@@ -9,12 +9,14 @@ use crate::storage::{SqlTxn, SqlValue};
 
 use super::{ColumnInfo, Row};
 
+mod aggregate;
 pub mod columnar_scan;
 pub mod iterator;
 mod knn;
 mod project;
 mod scan;
 
+pub use aggregate::AggregateIterator;
 pub use columnar_scan::{ColumnarScanIterator, create_columnar_scan_iterator};
 pub use iterator::{FilterIterator, LimitIterator, RowIterator, ScanIterator, SortIterator};
 pub use scan::create_scan_iterator;

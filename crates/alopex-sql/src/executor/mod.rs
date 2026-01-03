@@ -37,6 +37,7 @@
 //! ```
 
 pub mod bulk;
+mod config;
 mod ddl;
 mod dml;
 mod error;
@@ -45,6 +46,7 @@ mod hnsw_bridge;
 pub mod query;
 mod result;
 
+pub use config::ExecutionConfig;
 pub use error::{ConstraintViolation, EvaluationError, ExecutorError, Result};
 pub use query::{RowIterator, ScanIterator, build_streaming_pipeline};
 pub use result::{ColumnInfo, ExecutionResult, QueryResult, QueryRowIterator, Row};
