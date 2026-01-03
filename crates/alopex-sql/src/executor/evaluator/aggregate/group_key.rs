@@ -1,8 +1,8 @@
 use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::{Result, Row};
-use crate::planner::typed_expr::TypedExpr;
+use crate::planner::typed_expr::{TypedExpr, TypedExprKind};
 
-use super::sql_value_key::value_to_bytes;
+use super::sql_value_key::write_value_bytes;
 
 /// Hashable group key representation for multi-column GROUP BY.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -20,8 +20,16 @@ impl GroupKey {
         let ctx = EvalContext::new(&row.values);
         let mut bytes = Vec::new();
         for expr in key_exprs {
-            let value = evaluate(expr, &ctx)?;
-            bytes.extend_from_slice(&value_to_bytes(&value));
+            match &expr.kind {
+                TypedExprKind::ColumnRef { column_index, .. } => {
+                    let value = ctx.get(*column_index)?;
+                    write_value_bytes(value, &mut bytes);
+                }
+                _ => {
+                    let value = evaluate(expr, &ctx)?;
+                    write_value_bytes(&value, &mut bytes);
+                }
+            }
         }
 
         Ok(Self { bytes })

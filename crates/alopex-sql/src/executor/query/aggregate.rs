@@ -223,8 +223,16 @@ fn update_group_states(
                 if aggregate.arg.is_none() {
                     state.update(None);
                 } else if let Some(arg) = aggregate.arg.as_ref() {
-                    let value = evaluate(arg, &ctx)?;
-                    state.update(Some(&value));
+                    match &arg.kind {
+                        TypedExprKind::ColumnRef { column_index, .. } => {
+                            let value = ctx.get(*column_index)?;
+                            state.update(Some(value));
+                        }
+                        _ => {
+                            let value = evaluate(arg, &ctx)?;
+                            state.update(Some(&value));
+                        }
+                    }
                 }
             }
             AggregateFunction::Sum
@@ -232,8 +240,16 @@ fn update_group_states(
             | AggregateFunction::Min
             | AggregateFunction::Max => {
                 if let Some(arg) = aggregate.arg.as_ref() {
-                    let value = evaluate(arg, &ctx)?;
-                    state.update(Some(&value));
+                    match &arg.kind {
+                        TypedExprKind::ColumnRef { column_index, .. } => {
+                            let value = ctx.get(*column_index)?;
+                            state.update(Some(value));
+                        }
+                        _ => {
+                            let value = evaluate(arg, &ctx)?;
+                            state.update(Some(&value));
+                        }
+                    }
                 }
             }
         }
