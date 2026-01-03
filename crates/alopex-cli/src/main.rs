@@ -3,26 +3,33 @@
 //! This binary provides a CLI for interacting with Alopex DB,
 //! supporting KV, SQL, Vector, HNSW, and Columnar operations.
 
+mod batch;
 mod cli;
 mod commands;
 mod config;
 mod error;
 mod models;
 mod output;
+mod profile;
+mod progress;
 mod streaming;
 mod uri;
+mod version;
 
 use std::io;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::{generate, Shell};
 use tracing_subscriber::EnvFilter;
 
+use batch::BatchMode;
 use cli::{Cli, Command};
 use config::{setup_signal_handler, validate_thread_mode, EXIT_CODE_INTERRUPTED};
 use error::{handle_error, CliError, Result};
 use models::Column;
 use output::create_formatter;
+use profile::{execute_profile_command, ProfileManager, ResolvedConfig};
 use streaming::StreamingWriter;
 use uri::{validate_s3_credentials, StorageUri};
 
@@ -81,16 +88,71 @@ fn init_logging(verbose: bool, quiet: bool) {
         .init();
 }
 
+fn generate_completions(shell: Shell) -> Result<()> {
+    let mut command = Cli::command();
+    let name = command.get_name().to_string();
+    let mut stdout = io::stdout();
+    generate(shell, &mut command, name, &mut stdout);
+    Ok(())
+}
+
+fn resolve_config(cli: &Cli) -> Result<ResolvedConfig> {
+    if cli.in_memory {
+        return Ok(ResolvedConfig {
+            data_dir: None,
+            in_memory: true,
+            profile_name: None,
+        });
+    }
+
+    if cli.profile.is_some() && cli.data_dir.is_some() {
+        return Err(CliError::ConflictingOptions);
+    }
+
+    if let Some(data_dir) = cli.data_dir.as_ref() {
+        return Ok(ResolvedConfig {
+            data_dir: Some(data_dir.clone()),
+            in_memory: false,
+            profile_name: None,
+        });
+    }
+
+    let manager = ProfileManager::load()?;
+    manager.resolve(cli)
+}
+
 /// Main entry point logic.
 fn run(cli: Cli) -> Result<()> {
+    match &cli.command {
+        Command::Profile { command } => {
+            return execute_profile_command(command.clone(), cli.output);
+        }
+        Command::Completions { shell } => {
+            return generate_completions(*shell);
+        }
+        Command::Version => {
+            return commands::version::execute_version(cli.output);
+        }
+        _ => {}
+    }
+
     // Open the database
-    let db = open_database(&cli)?;
+    let resolved = resolve_config(&cli)?;
+    let db = open_database_with_check(&resolved)?;
 
     // Check if this is a write command before executing
     let is_write = is_write_command(&cli.command);
 
+    let batch_mode = BatchMode::detect(&cli);
     // Execute the command
-    execute_command(&db, cli.command, cli.output, cli.limit, cli.quiet)?;
+    execute_command(
+        &db,
+        cli.command,
+        &batch_mode,
+        cli.output,
+        cli.limit,
+        cli.quiet,
+    )?;
 
     // Flush only for write commands to ensure S3 sync errors are propagated
     // Read-only commands should work even with S3 read-only permissions
@@ -106,12 +168,21 @@ fn run(cli: Cli) -> Result<()> {
 /// Returns true for commands that write data (put, delete, insert, create, etc.)
 /// Returns false for read-only commands (get, list, select, stats, etc.)
 fn is_write_command(command: &Command) -> bool {
-    use cli::{HnswCommand, KvCommand, VectorCommand};
+    use cli::{ColumnarCommand, HnswCommand, IndexCommand, KvCommand, KvTxnCommand, VectorCommand};
 
     match command {
-        Command::Kv { command: kv_cmd } => {
-            matches!(kv_cmd, KvCommand::Put { .. } | KvCommand::Delete { .. })
-        }
+        Command::Kv { command: kv_cmd } => matches!(
+            kv_cmd,
+            KvCommand::Put { .. }
+                | KvCommand::Delete { .. }
+                | KvCommand::Txn(
+                    KvTxnCommand::Begin { .. }
+                        | KvTxnCommand::Put { .. }
+                        | KvTxnCommand::Delete { .. }
+                        | KvTxnCommand::Commit { .. }
+                        | KvTxnCommand::Rollback { .. }
+                )
+        ),
         Command::Sql(sql_cmd) => is_write_sql(sql_cmd),
         Command::Vector { command: vec_cmd } => {
             matches!(
@@ -125,7 +196,12 @@ fn is_write_command(command: &Command) -> bool {
                 HnswCommand::Create { .. } | HnswCommand::Drop { .. }
             )
         }
-        Command::Columnar { .. } => false, // Columnar commands are read-only (scan, stats, list)
+        Command::Columnar { command: col_cmd } => matches!(
+            col_cmd,
+            ColumnarCommand::Ingest { .. }
+                | ColumnarCommand::Index(IndexCommand::Create { .. } | IndexCommand::Drop { .. })
+        ),
+        Command::Profile { .. } | Command::Version | Command::Completions { .. } => false,
     }
 }
 
@@ -158,15 +234,39 @@ fn is_write_sql(sql_cmd: &cli::SqlCommand) -> bool {
         || trimmed.starts_with("TRUNCATE")
 }
 
+fn open_database_with_check(config: &ResolvedConfig) -> Result<alopex_embedded::Database> {
+    let db = open_database(config)?;
+    let checker = version::compatibility::VersionChecker::new();
+    let file_version = version::Version::from(db.file_format_version());
+
+    match checker.check_compatibility(file_version) {
+        version::compatibility::VersionCheckResult::Compatible => {}
+        version::compatibility::VersionCheckResult::CliOlderThanFile { cli, file } => {
+            eprintln!(
+                "Warning: CLI v{} は ファイルフォーマット v{} より古いです。アップグレードを推奨します。",
+                cli, file
+            );
+        }
+        version::compatibility::VersionCheckResult::Incompatible { cli, file } => {
+            return Err(CliError::IncompatibleVersion {
+                cli: cli.to_string(),
+                file: file.to_string(),
+            });
+        }
+    }
+
+    Ok(db)
+}
+
 /// Open the database based on CLI options.
-fn open_database(cli: &Cli) -> Result<alopex_embedded::Database> {
+fn open_database(config: &ResolvedConfig) -> Result<alopex_embedded::Database> {
     use alopex_embedded::Database;
 
-    if cli.in_memory {
+    if config.in_memory {
         // In-memory mode
         tracing::debug!("Opening database in in-memory mode");
         Ok(Database::open_in_memory()?)
-    } else if let Some(ref data_dir) = cli.data_dir {
+    } else if let Some(ref data_dir) = config.data_dir {
         // Parse URI
         let uri = StorageUri::parse(data_dir)?;
 
@@ -182,7 +282,7 @@ fn open_database(cli: &Cli) -> Result<alopex_embedded::Database> {
     } else {
         // Neither in-memory nor data-dir specified
         Err(CliError::InvalidArgument(
-            "Either --in-memory or --data-dir must be specified".to_string(),
+            "Either --in-memory, --data-dir, or --profile must be specified".to_string(),
         ))
     }
 }
@@ -191,6 +291,7 @@ fn open_database(cli: &Cli) -> Result<alopex_embedded::Database> {
 fn execute_command(
     db: &alopex_embedded::Database,
     command: Command,
+    batch_mode: &BatchMode,
     output_format: cli::OutputFormat,
     limit: Option<usize>,
     quiet: bool,
@@ -209,14 +310,22 @@ fn execute_command(
         }
         Command::Sql(sql_cmd) => {
             let formatter = create_formatter(output_format);
-            commands::sql::execute_with_formatter(db, sql_cmd, &mut handle, formatter, limit, quiet)
+            commands::sql::execute_with_formatter(
+                db,
+                sql_cmd,
+                batch_mode,
+                &mut handle,
+                formatter,
+                limit,
+                quiet,
+            )
         }
         Command::Vector { command: vec_cmd } => {
             let columns = get_vector_columns(&vec_cmd);
             let formatter = create_formatter(output_format);
             let mut writer =
                 StreamingWriter::new(&mut handle, formatter, columns, limit).with_quiet(quiet);
-            commands::vector::execute(db, vec_cmd, &mut writer)
+            commands::vector::execute(db, vec_cmd, batch_mode, &mut writer)
         }
         Command::Hnsw { command: hnsw_cmd } => {
             let columns = get_hnsw_columns(&hnsw_cmd);
@@ -230,21 +339,32 @@ fn execute_command(
             commands::columnar::execute_with_formatter(
                 db,
                 col_cmd,
+                batch_mode,
                 &mut handle,
                 formatter,
                 limit,
                 quiet,
             )
         }
+        Command::Version => commands::version::execute_version(output_format),
+        Command::Completions { shell } => generate_completions(shell),
+        Command::Profile { command } => execute_profile_command(command, output_format),
     }
 }
 
 /// Get columns for KV command output.
 fn get_kv_columns(cmd: &cli::KvCommand) -> Vec<Column> {
-    use cli::KvCommand;
+    use cli::{KvCommand, KvTxnCommand};
     match cmd {
         KvCommand::Get { .. } | KvCommand::List { .. } => commands::kv::kv_columns(),
         KvCommand::Put { .. } | KvCommand::Delete { .. } => commands::kv::kv_status_columns(),
+        KvCommand::Txn(txn_cmd) => match txn_cmd {
+            KvTxnCommand::Get { .. } | KvTxnCommand::Begin { .. } => commands::kv::kv_columns(),
+            KvTxnCommand::Put { .. }
+            | KvTxnCommand::Delete { .. }
+            | KvTxnCommand::Commit { .. }
+            | KvTxnCommand::Rollback { .. } => commands::kv::kv_status_columns(),
+        },
     }
 }
 

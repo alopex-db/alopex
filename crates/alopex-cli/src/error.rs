@@ -21,6 +21,52 @@ pub enum CliError {
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// A specified profile was not found.
+    #[error("プロファイル '{0}' が見つかりません。alopex profile list で一覧を確認してください。")]
+    #[allow(dead_code)]
+    ProfileNotFound(String),
+
+    /// Conflicting CLI options were provided.
+    #[error(
+        "`--profile` と `--data-dir` は同時に指定できません。どちらか一方を使用してください。"
+    )]
+    #[allow(dead_code)]
+    ConflictingOptions,
+
+    /// A transaction ID is invalid.
+    #[error(
+        "トランザクション ID '{0}' は無効です。alopex kv txn begin で新しいトランザクションを開始してください。"
+    )]
+    #[allow(dead_code)]
+    InvalidTransactionId(String),
+
+    /// A transaction timed out and was rolled back.
+    #[error(
+        "トランザクション '{0}' がタイムアウトしました（60秒）。自動的にロールバックされました。"
+    )]
+    #[allow(dead_code)]
+    TransactionTimeout(String),
+
+    /// No SQL query was provided.
+    #[error("SQL クエリを指定してください。引数、-f オプション、または標準入力から入力できます。")]
+    #[allow(dead_code)]
+    NoQueryProvided,
+
+    /// An unknown index type was specified.
+    #[error("未知のインデックスタイプ: '{0}'。許可値: minmax, bloom")]
+    #[allow(dead_code)]
+    UnknownIndexType(String),
+
+    /// An unknown compression type was specified.
+    #[error("未知の圧縮形式: '{0}'。許可値: lz4, zstd, none")]
+    #[allow(dead_code)]
+    UnknownCompressionType(String),
+
+    /// File format is incompatible with the CLI version.
+    #[error("ファイルフォーマット v{file} は CLI v{cli} でサポートされていません。CLI をアップグレードしてください。")]
+    #[allow(dead_code)]
+    IncompatibleVersion { cli: String, file: String },
+
     /// An S3-related error occurred.
     #[error("S3 error: {0}")]
     #[allow(dead_code)]
