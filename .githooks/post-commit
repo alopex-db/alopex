@@ -1,0 +1,28 @@
+#!/bin/bash
+# Discord通知: コミット時に投稿
+
+# ALOPEX_ROOT環境変数、またはgit toplevelから親ディレクトリを探索
+if [ -n "$ALOPEX_ROOT" ]; then
+  SCRIPT_DIR="$ALOPEX_ROOT/scripts"
+else
+  # gitリポジトリのルートから親を辿ってscriptsを探す
+  dir="$(git rev-parse --show-toplevel)"
+  while [ "$dir" != "/" ]; do
+    if [ -f "$dir/scripts/discord_notify.sh" ]; then
+      SCRIPT_DIR="$dir/scripts"
+      break
+    fi
+    dir="$(dirname "$dir")"
+  done
+fi
+
+[ -z "$SCRIPT_DIR" ] && exit 0
+
+# コミット情報を取得
+COMMIT_HASH=$(git rev-parse --short HEAD)
+COMMIT_MSG=$(git log -1 --pretty=%s)
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+AUTHOR=$(git log -1 --pretty=%an)
+
+# Discord通知
+"$SCRIPT_DIR/discord_notify.sh" "📝 Commit: ${COMMIT_MSG}" "branch: ${BRANCH} | ${COMMIT_HASH} by ${AUTHOR}"
