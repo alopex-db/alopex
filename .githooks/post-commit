@@ -19,10 +19,11 @@ fi
 [ -z "$SCRIPT_DIR" ] && exit 0
 
 # コミット情報を取得
+REPO_NAME=$(basename "$(git rev-parse --show-toplevel)")
 COMMIT_HASH=$(git rev-parse --short HEAD)
 COMMIT_MSG=$(git log -1 --pretty=%s)
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 AUTHOR=$(git log -1 --pretty=%an)
 
 # Discord通知
-"$SCRIPT_DIR/discord_notify.sh" "📝 Commit: ${COMMIT_MSG}" "branch: ${BRANCH} | ${COMMIT_HASH} by ${AUTHOR}"
+"$SCRIPT_DIR/discord_notify.sh" "📝 [${REPO_NAME}] ${COMMIT_MSG}" "${BRANCH} | ${COMMIT_HASH} by ${AUTHOR}"
