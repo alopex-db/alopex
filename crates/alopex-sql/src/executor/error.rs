@@ -73,7 +73,7 @@ pub enum ExecutorError {
     InvalidOperation { operation: String, reason: String },
 
     /// Too many groups generated during aggregation.
-    #[error("too many groups: {actual} exceeds limit {limit}")]
+    #[error("Too many groups: {actual} exceeds limit {limit}")]
     TooManyGroups { limit: usize, actual: usize },
 
     /// Input file not found.
