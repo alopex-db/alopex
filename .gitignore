@@ -35,4 +35,4 @@ dhat-heap.json
 crates/alopex-py/python/alopex/_alopex*.so
 benchmark*.json
 profile*.log
-crates/alopex-py/proptest-regressions/
+crates/*/proptest-regressions/
