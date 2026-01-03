@@ -6,9 +6,11 @@ use std::io::Write;
 
 use alopex_embedded::{Database, TxnMode};
 
+use crate::batch::BatchMode;
 use crate::cli::VectorCommand;
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
+use crate::progress::ProgressIndicator;
 use crate::streaming::{StreamingWriter, WriteStatus};
 
 /// Execute a Vector command.
@@ -21,6 +23,7 @@ use crate::streaming::{StreamingWriter, WriteStatus};
 pub fn execute<W: Write>(
     db: &Database,
     cmd: VectorCommand,
+    batch_mode: &BatchMode,
     writer: &mut StreamingWriter<W>,
 ) -> Result<()> {
     match cmd {
@@ -29,7 +32,7 @@ pub fn execute<W: Write>(
             query,
             k,
             progress,
-        } => execute_search(db, &index, &query, k, progress, writer),
+        } => execute_search(db, &index, &query, k, progress, batch_mode, writer),
         VectorCommand::Upsert { index, key, vector } => {
             execute_upsert(db, &index, &key, &vector, writer)
         }
@@ -44,28 +47,24 @@ fn execute_search<W: Write>(
     query_json: &str,
     k: usize,
     progress: bool,
+    batch_mode: &BatchMode,
     writer: &mut StreamingWriter<W>,
 ) -> Result<()> {
     // Parse vector from JSON array
     let query_vector: Vec<f32> = serde_json::from_str(query_json)
         .map_err(|e| CliError::InvalidArgument(format!("Invalid vector JSON: {}", e)))?;
 
-    // Show progress indicator (respect --quiet flag)
-    let show_progress = progress && !writer.is_quiet();
-    if show_progress {
-        eprint!(
-            "Searching index '{}' for {} nearest neighbors... ",
-            index, k
-        );
-    }
+    let mut progress_indicator = ProgressIndicator::new(
+        batch_mode,
+        progress,
+        writer.is_quiet(),
+        format!("Searching index '{}' for {} nearest neighbors...", index, k),
+    );
 
     // Perform search
     let (results, _stats) = db.search_hnsw(index, &query_vector, k, None)?;
 
-    // Complete progress indicator
-    if show_progress {
-        eprintln!("found {} results.", results.len());
-    }
+    progress_indicator.finish_with_message(format!("found {} results.", results.len()));
 
     // Prepare writer with hint
     writer.prepare(Some(results.len()))?;
@@ -169,6 +168,7 @@ pub fn vector_status_columns() -> Vec<Column> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::batch::BatchModeSource;
     use crate::output::jsonl::JsonlFormatter;
     use alopex_embedded::HnswConfig;
 
@@ -180,6 +180,14 @@ mod tests {
         let formatter = Box::new(JsonlFormatter::new());
         let columns = vector_search_columns();
         StreamingWriter::new(output, formatter, columns, None)
+    }
+
+    fn default_batch_mode() -> BatchMode {
+        BatchMode {
+            is_batch: false,
+            is_tty: true,
+            source: BatchModeSource::Default,
+        }
     }
 
     fn create_status_writer(output: &mut Vec<u8>) -> StreamingWriter<&mut Vec<u8>> {
@@ -238,7 +246,16 @@ mod tests {
         let mut output = Vec::new();
         {
             let mut writer = create_search_writer(&mut output);
-            execute_search(&db, "search_test", query, 2, false, &mut writer).unwrap();
+            execute_search(
+                &db,
+                "search_test",
+                query,
+                2,
+                false,
+                &default_batch_mode(),
+                &mut writer,
+            )
+            .unwrap();
         }
 
         let result = String::from_utf8(output).unwrap();

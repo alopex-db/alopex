@@ -10,6 +10,7 @@ mod config;
 mod error;
 mod models;
 mod output;
+mod progress;
 mod streaming;
 mod uri;
 mod version;
@@ -286,7 +287,7 @@ fn execute_command(
             let formatter = create_formatter(output_format);
             let mut writer =
                 StreamingWriter::new(&mut handle, formatter, columns, limit).with_quiet(quiet);
-            commands::vector::execute(db, vec_cmd, &mut writer)
+            commands::vector::execute(db, vec_cmd, batch_mode, &mut writer)
         }
         Command::Hnsw { command: hnsw_cmd } => {
             let columns = get_hnsw_columns(&hnsw_cmd);
@@ -300,6 +301,7 @@ fn execute_command(
             commands::columnar::execute_with_formatter(
                 db,
                 col_cmd,
+                batch_mode,
                 &mut handle,
                 formatter,
                 limit,

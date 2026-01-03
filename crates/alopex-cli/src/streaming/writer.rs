@@ -222,7 +222,7 @@ impl<W: Write> StreamingWriter<W> {
     fn trigger_fallback(&mut self) -> Result<()> {
         if !self.quiet {
             eprintln!(
-                "Warning: Result count exceeds {} rows. Switching to jsonl format.",
+                "Warning: Result count exceeds {} rows. Consider --output jsonl. Switching to jsonl format.",
                 self.buffer_limit
             );
         }

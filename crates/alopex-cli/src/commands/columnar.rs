@@ -19,10 +19,12 @@ use arrow_schema::DataType as ArrowDataType;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Serialize;
 
+use crate::batch::BatchMode;
 use crate::cli::{ColumnarCommand, IndexCommand};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
+use crate::progress::ProgressIndicator;
 use crate::streaming::{StreamingWriter, WriteStatus};
 
 /// Execute a Columnar command with segment-based operations.
@@ -38,6 +40,7 @@ use crate::streaming::{StreamingWriter, WriteStatus};
 pub fn execute_with_formatter<W: Write>(
     db: &Database,
     cmd: ColumnarCommand,
+    batch_mode: &BatchMode,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
     limit: Option<usize>,
@@ -48,7 +51,7 @@ pub fn execute_with_formatter<W: Write>(
             let columns = columnar_scan_columns();
             let mut streaming_writer =
                 StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
-            execute_scan(db, &segment, progress, &mut streaming_writer)
+            execute_scan(db, &segment, progress, batch_mode, &mut streaming_writer)
         }
         ColumnarCommand::Stats { segment } => {
             let columns = columnar_stats_columns();
@@ -105,13 +108,15 @@ fn execute_scan<W: Write>(
     db: &Database,
     segment_id: &str,
     progress: bool,
+    batch_mode: &BatchMode,
     writer: &mut StreamingWriter<W>,
 ) -> Result<()> {
-    // Show progress indicator (respect --quiet flag)
-    let show_progress = progress && !writer.is_quiet();
-    if show_progress {
-        eprint!("Scanning segment '{}'... ", segment_id);
-    }
+    let mut progress_indicator = ProgressIndicator::new(
+        batch_mode,
+        progress,
+        writer.is_quiet(),
+        format!("Scanning segment '{}'...", segment_id),
+    );
 
     // FR-7: Use streaming API to avoid materializing all rows upfront
     let iter = db.scan_columnar_segment_streaming(segment_id)?;
@@ -134,10 +139,7 @@ fn execute_scan<W: Write>(
 
     writer.finish()?;
 
-    // Complete progress indicator with final count (after streaming is done)
-    if show_progress {
-        eprintln!("done ({} rows).", row_count);
-    }
+    progress_indicator.finish_with_message(format!("done ({} rows).", row_count));
 
     Ok(())
 }
