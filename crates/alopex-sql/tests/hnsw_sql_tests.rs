@@ -7,7 +7,7 @@ use alopex_core::kv::KVTransaction;
 use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::MemoryCatalog;
 use alopex_sql::dialect::AlopexDialect;
-use alopex_sql::executor::{ExecutionResult, Executor, ExecutorError};
+use alopex_sql::executor::{ExecutionConfig, ExecutionResult, Executor, ExecutorError};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
 
@@ -18,6 +18,7 @@ fn run_sql(
 ) -> Vec<ExecutionResult> {
     let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(&dialect, sql).expect("SQL のパースに失敗");
+    let config = ExecutionConfig::default();
     let mut results = Vec::new();
     for stmt in stmts {
         let plan = {
@@ -25,7 +26,7 @@ fn run_sql(
             let planner = Planner::new(&*guard);
             planner.plan(&stmt).expect("プラン作成に失敗")
         };
-        let res = executor.execute(plan).expect("実行に失敗");
+        let res = executor.execute(plan, &config).expect("実行に失敗");
         results.push(res);
     }
     results
@@ -80,7 +81,8 @@ fn invalid_with_option_returns_error() {
         let planner = Planner::new(&*guard);
         planner.plan(stmt).unwrap()
     };
-    let err = executor.execute(plan).unwrap_err();
+    let config = ExecutionConfig::default();
+    let err = executor.execute(plan, &config).unwrap_err();
     match err {
         ExecutorError::Core(alopex_core::Error::UnknownOption { key }) => {
             assert_eq!(key, "unknown");

@@ -10,7 +10,7 @@ use alopex_sql::Parser;
 use alopex_sql::Planner;
 use alopex_sql::SqlValue;
 use alopex_sql::catalog::{CatalogOverlay, PersistentCatalog, TxnCatalogView};
-use alopex_sql::executor::{ExecutionResult, Executor};
+use alopex_sql::executor::{ExecutionConfig, ExecutionResult, Executor};
 use alopex_sql::storage::TxnBridge;
 
 fn run_sql_in_txn(
@@ -27,6 +27,7 @@ fn run_sql_in_txn(
     let mut overlay = CatalogOverlay::new();
     let mut borrowed = TxnBridge::<MemoryKV>::wrap_external(&mut txn, mode, &mut overlay);
     let mut executor: Executor<_, _> = Executor::new(store.clone(), catalog.clone());
+    let config = ExecutionConfig::default();
 
     let mut last = ExecutionResult::Success;
     for stmt in &stmts {
@@ -39,7 +40,7 @@ fn run_sql_in_txn(
         };
 
         last = executor
-            .execute_in_txn(plan, &mut borrowed)
+            .execute_in_txn(plan, &config, &mut borrowed)
             .expect("execute_in_txn");
     }
 

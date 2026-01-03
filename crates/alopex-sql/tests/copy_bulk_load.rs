@@ -8,7 +8,7 @@ use alopex_sql::Catalog;
 use alopex_sql::catalog::MemoryCatalog;
 use alopex_sql::dialect::AlopexDialect;
 use alopex_sql::executor::bulk::{CopyOptions, CopySecurityConfig, FileFormat, execute_copy};
-use alopex_sql::executor::{ExecutionResult, Executor, ExecutorError};
+use alopex_sql::executor::{ExecutionConfig, ExecutionResult, Executor, ExecutorError};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
 use alopex_sql::storage::TxnBridge;
@@ -28,7 +28,8 @@ fn create_table(
         let guard = catalog.read().unwrap();
         Planner::new(&*guard).plan(&stmt).unwrap()
     };
-    executor.execute(plan).unwrap();
+    let config = ExecutionConfig::default();
+    executor.execute(plan, &config).unwrap();
 }
 
 fn write_csv(path: &Path) {
@@ -74,7 +75,8 @@ fn copy_csv_success_and_query() {
         let guard = catalog.read().unwrap();
         Planner::new(&*guard).plan(&stmt).unwrap()
     };
-    match executor.execute(plan).unwrap() {
+    let config = ExecutionConfig::default();
+    match executor.execute(plan, &config).unwrap() {
         ExecutionResult::Query(q) => {
             assert_eq!(
                 q.rows,

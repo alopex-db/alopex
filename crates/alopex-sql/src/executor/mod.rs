@@ -33,7 +33,8 @@
 //! let mut executor = Executor::new(store, catalog);
 //!
 //! // Execute a plan
-//! let result = executor.execute(plan)?;
+//! let config = alopex_sql::executor::ExecutionConfig::default();
+//! let result = executor.execute(plan, &config)?;
 //! ```
 
 pub mod bulk;
@@ -115,6 +116,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
     /// # Arguments
     ///
     /// - `plan`: The logical plan to execute
+    /// - `config`: Execution configuration for query operations
     ///
     /// # Returns
     ///
@@ -136,7 +138,11 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
     /// # Query Operations
     ///
     /// - `Scan`, `Filter`, `Sort`, `Limit`: SELECT query execution
-    pub fn execute(&mut self, plan: LogicalPlan) -> Result<ExecutionResult> {
+    pub fn execute(
+        &mut self,
+        plan: LogicalPlan,
+        config: &ExecutionConfig,
+    ) -> Result<ExecutionResult> {
         match plan {
             // DDL Operations
             LogicalPlan::CreateTable {
@@ -169,7 +175,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
             | LogicalPlan::Filter { .. }
             | LogicalPlan::Aggregate { .. }
             | LogicalPlan::Sort { .. }
-            | LogicalPlan::Limit { .. } => self.execute_query(plan),
+            | LogicalPlan::Limit { .. } => self.execute_query(plan, config),
         }
     }
 
@@ -257,9 +263,13 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
     // Query Operations (to be implemented in Phase 5)
     // ========================================================================
 
-    fn execute_query(&mut self, plan: LogicalPlan) -> Result<ExecutionResult> {
+    fn execute_query(
+        &mut self,
+        plan: LogicalPlan,
+        config: &ExecutionConfig,
+    ) -> Result<ExecutionResult> {
         let catalog = self.catalog.read().expect("catalog lock poisoned");
-        self.run_in_write_txn(|txn| query::execute_query(txn, &*catalog, plan))
+        self.run_in_write_txn(|txn| query::execute_query(txn, &*catalog, config, plan))
     }
 }
 
@@ -267,6 +277,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
     pub fn execute_in_txn<'a, 'b, 'c>(
         &mut self,
         plan: LogicalPlan,
+        config: &ExecutionConfig,
         txn: &mut BorrowedSqlTransaction<'a, 'b, 'c, S>,
     ) -> Result<ExecutionResult> {
         if txn.mode() == TxnMode::ReadOnly
@@ -350,7 +361,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             | LogicalPlan::Sort { .. }
             | LogicalPlan::Limit { .. } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
-                query::execute_query(&mut sql_txn, &view, plan)
+                query::execute_query(&mut sql_txn, &view, config, plan)
             }
         };
 
@@ -644,6 +655,7 @@ mod tests {
     #[test]
     fn create_table_is_supported() {
         let mut executor = create_executor();
+        let config = ExecutionConfig::default();
 
         use crate::catalog::{ColumnMetadata, TableMetadata};
         use crate::planner::ResolvedType;
@@ -653,11 +665,14 @@ mod tests {
             vec![ColumnMetadata::new("id", ResolvedType::Integer)],
         );
 
-        let result = executor.execute(LogicalPlan::CreateTable {
-            table,
-            if_not_exists: false,
-            with_options: vec![],
-        });
+        let result = executor.execute(
+            LogicalPlan::CreateTable {
+                table,
+                if_not_exists: false,
+                with_options: vec![],
+            },
+            &config,
+        );
         assert!(matches!(result, Ok(ExecutionResult::Success)));
 
         let catalog = executor.catalog.read().unwrap();
@@ -672,27 +687,34 @@ mod tests {
         use crate::planner::types::ResolvedType;
 
         let mut executor = create_executor();
+        let config = ExecutionConfig::default();
 
         let table = TableMetadata::new("t", vec![ColumnMetadata::new("id", ResolvedType::Integer)])
             .with_primary_key(vec!["id".into()]);
 
         executor
-            .execute(LogicalPlan::CreateTable {
-                table,
-                if_not_exists: false,
-                with_options: vec![],
-            })
+            .execute(
+                LogicalPlan::CreateTable {
+                    table,
+                    if_not_exists: false,
+                    with_options: vec![],
+                },
+                &config,
+            )
             .unwrap();
 
-        let result = executor.execute(LogicalPlan::Insert {
-            table: "t".into(),
-            columns: vec!["id".into()],
-            values: vec![vec![crate::planner::typed_expr::TypedExpr {
-                kind: TypedExprKind::Literal(crate::ast::expr::Literal::Number("1".into())),
-                resolved_type: ResolvedType::Integer,
-                span: Span::default(),
-            }]],
-        });
+        let result = executor.execute(
+            LogicalPlan::Insert {
+                table: "t".into(),
+                columns: vec!["id".into()],
+                values: vec![vec![crate::planner::typed_expr::TypedExpr {
+                    kind: TypedExprKind::Literal(crate::ast::expr::Literal::Number("1".into())),
+                    resolved_type: ResolvedType::Integer,
+                    span: Span::default(),
+                }]],
+            },
+            &config,
+        );
         assert!(matches!(result, Ok(ExecutionResult::RowsAffected(1))));
     }
 }

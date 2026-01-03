@@ -5,7 +5,9 @@ use alopex_sql::catalog::CatalogOverlay;
 use alopex_sql::catalog::TxnCatalogView;
 use alopex_sql::executor::query::execute_query_streaming;
 use alopex_sql::executor::query::RowIterator;
-use alopex_sql::executor::{build_streaming_pipeline, ColumnInfo, Executor, QueryRowIterator, Row};
+use alopex_sql::executor::{
+    build_streaming_pipeline, ColumnInfo, ExecutionConfig, Executor, QueryRowIterator, Row,
+};
 use alopex_sql::planner::typed_expr::Projection;
 use alopex_sql::storage::{SqlValue, TxnBridge};
 use alopex_sql::AlopexDialect;
@@ -215,6 +217,7 @@ impl Database {
         let mut executor: Executor<_, _> =
             Executor::new(self.store.clone(), self.sql_catalog.clone());
 
+        let config = ExecutionConfig::default();
         let mut last = alopex_sql::ExecutionResult::Success;
         for stmt in &stmts {
             let plan = {
@@ -224,7 +227,7 @@ impl Database {
             };
 
             last = executor
-                .execute_in_txn(plan, &mut borrowed)
+                .execute_in_txn(plan, &config, &mut borrowed)
                 .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?;
         }
 
@@ -312,8 +315,10 @@ impl Database {
             let view = TxnCatalogView::new(&*catalog, overlay_ref);
 
             // Build streaming pipeline - iterator lifetime tied to sql_txn
-            let (iter, projection, schema) = build_streaming_pipeline(&mut sql_txn, &view, plan)
-                .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?;
+            let config = ExecutionConfig::default();
+            let (iter, projection, schema) =
+                build_streaming_pipeline(&mut sql_txn, &view, &config, plan)
+                    .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?;
 
             // Build column info from projection and schema
             let columns = build_column_info(&projection, &schema)?;
@@ -409,7 +414,8 @@ impl Database {
 
             let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
             let view = TxnCatalogView::new(&*catalog, _overlay);
-            let iter = execute_query_streaming(&mut sql_txn, &view, plan)
+            let config = ExecutionConfig::default();
+            let iter = execute_query_streaming(&mut sql_txn, &view, &config, plan)
                 .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?;
 
             drop(catalog);
@@ -500,6 +506,7 @@ impl<'a> Transaction<'a> {
             TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(txn, mode, &mut self.overlay);
         let mut executor: Executor<_, _> = Executor::new(store, sql_catalog.clone());
 
+        let config = ExecutionConfig::default();
         let mut last = alopex_sql::ExecutionResult::Success;
         for stmt in &stmts {
             let plan = {
@@ -509,7 +516,7 @@ impl<'a> Transaction<'a> {
             };
 
             last = executor
-                .execute_in_txn(plan, &mut borrowed)
+                .execute_in_txn(plan, &config, &mut borrowed)
                 .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?;
         }
 

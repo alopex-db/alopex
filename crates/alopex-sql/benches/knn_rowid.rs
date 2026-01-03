@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::MemoryCatalog;
 use alopex_sql::dialect::AlopexDialect;
-use alopex_sql::executor::{ExecutionResult, Executor};
+use alopex_sql::executor::{ExecutionConfig, ExecutionResult, Executor};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::LogicalPlan;
 use alopex_sql::planner::Planner;
@@ -44,7 +44,8 @@ impl Harness {
 
     fn exec_sql(&mut self, sql: &str) -> ExecutionResult {
         let plan = self.plan(sql);
-        self.executor.execute(plan).expect("execute")
+        let config = ExecutionConfig::default();
+        self.executor.execute(plan, &config).expect("execute")
     }
 }
 

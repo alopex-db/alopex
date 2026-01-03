@@ -233,3 +233,53 @@ fn update_group_states(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Span;
+    use crate::executor::query::iterator::VecIterator;
+    use crate::planner::types::ResolvedType;
+
+    #[test]
+    fn global_aggregate_empty_input_returns_single_row() {
+        let schema = vec![ColumnMetadata::new("value", ResolvedType::Integer)];
+        let input = VecIterator::new(Vec::new(), schema);
+        let aggregates = vec![
+            AggregateExpr::count_star(),
+            AggregateExpr::sum(TypedExpr::column_ref(
+                "t".into(),
+                "value".into(),
+                0,
+                ResolvedType::Integer,
+                Span::default(),
+            )),
+        ];
+
+        let mut iter = AggregateIterator::new(Box::new(input), Vec::new(), aggregates, None, 100);
+
+        let row = iter.next_row().expect("expected first row").unwrap();
+        assert_eq!(row.values.len(), 2);
+        assert_eq!(row.values[0], SqlValue::BigInt(0));
+        assert_eq!(row.values[1], SqlValue::Null);
+        assert!(iter.next_row().is_none());
+    }
+
+    #[test]
+    fn group_by_empty_input_returns_no_rows() {
+        let schema = vec![ColumnMetadata::new("group_id", ResolvedType::Integer)];
+        let input = VecIterator::new(Vec::new(), schema);
+        let group_keys = vec![TypedExpr::column_ref(
+            "t".into(),
+            "group_id".into(),
+            0,
+            ResolvedType::Integer,
+            Span::default(),
+        )];
+        let aggregates = vec![AggregateExpr::count_star()];
+
+        let mut iter = AggregateIterator::new(Box::new(input), group_keys, aggregates, None, 100);
+
+        assert!(iter.next_row().is_none());
+    }
+}

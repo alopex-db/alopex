@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::MemoryCatalog;
 use alopex_sql::dialect::AlopexDialect;
-use alopex_sql::executor::{ExecutionResult, Executor};
+use alopex_sql::executor::{ExecutionConfig, ExecutionResult, Executor};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
 
@@ -13,13 +13,14 @@ fn run_sql(sql: &str) -> Vec<ExecutionResult> {
     let mut executor = Executor::new(store, catalog.clone());
     let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(&dialect, sql).expect("parse sql");
+    let config = ExecutionConfig::default();
     let mut results = Vec::new();
     for stmt in stmts {
         let plan = {
             let guard = catalog.read().unwrap();
             Planner::new(&*guard).plan(&stmt).expect("plan")
         };
-        results.push(executor.execute(plan).expect("execute"));
+        results.push(executor.execute(plan, &config).expect("execute"));
     }
     results
 }
@@ -70,7 +71,8 @@ fn vector_function_invalid_args_return_error() {
         let guard = catalog.read().unwrap();
         Planner::new(&*guard).plan(&create).unwrap()
     };
-    executor.execute(plan).unwrap();
+    let config = ExecutionConfig::default();
+    executor.execute(plan, &config).unwrap();
 
     // invalid vector length
     let bad = Parser::parse_sql(

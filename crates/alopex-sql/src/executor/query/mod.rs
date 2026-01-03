@@ -2,7 +2,7 @@ use alopex_core::kv::KVStore;
 
 use crate::catalog::{Catalog, StorageType};
 use crate::executor::evaluator::EvalContext;
-use crate::executor::{ExecutionResult, ExecutorError, QueryRowIterator, Result};
+use crate::executor::{ExecutionConfig, ExecutionResult, ExecutorError, QueryRowIterator, Result};
 use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::typed_expr::Projection;
 use crate::storage::{SqlTxn, SqlValue};
@@ -35,13 +35,14 @@ pub use scan::create_scan_iterator;
 pub fn execute_query<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
+    config: &ExecutionConfig,
     plan: LogicalPlan,
 ) -> Result<ExecutionResult> {
     if let Some((pattern, projection, filter)) = knn::extract_knn_context(&plan) {
         return knn::execute_knn_query(txn, catalog, &pattern, &projection, filter.as_ref());
     }
 
-    let (mut iter, projection, schema) = build_iterator_pipeline(txn, catalog, plan)?;
+    let (mut iter, projection, schema) = build_iterator_pipeline(txn, catalog, config, plan)?;
 
     // Collect rows from iterator and apply projection
     let mut rows = Vec::new();
@@ -71,12 +72,13 @@ pub fn execute_query<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
 pub fn execute_query_streaming<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
+    config: &ExecutionConfig,
     plan: LogicalPlan,
 ) -> Result<QueryRowIterator<'static>> {
     // KNN queries not yet supported for streaming - fall back would need different handling
     if knn::extract_knn_context(&plan).is_some() {
         // For KNN, we materialize and wrap in VecIterator
-        let result = execute_query(txn, catalog, plan)?;
+        let result = execute_query(txn, catalog, config, plan)?;
         if let ExecutionResult::Query(qr) = result {
             let column_names: Vec<String> = qr.columns.iter().map(|c| c.name.clone()).collect();
             let schema: Vec<crate::catalog::ColumnMetadata> = qr
@@ -103,7 +105,7 @@ pub fn execute_query_streaming<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'t
         });
     }
 
-    let (iter, projection, schema) = build_iterator_pipeline(txn, catalog, plan)?;
+    let (iter, projection, schema) = build_iterator_pipeline(txn, catalog, config, plan)?;
 
     Ok(QueryRowIterator::new(iter, projection, schema))
 }
@@ -117,6 +119,7 @@ pub fn execute_query_streaming<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'t
 fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
+    config: &ExecutionConfig,
     plan: LogicalPlan,
 ) -> Result<(
     Box<dyn RowIterator>,
@@ -163,12 +166,34 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, 
                 let iter = iterator::VecIterator::new(rows, schema.clone());
                 return Ok((Box::new(iter), projection.clone(), schema));
             }
-            let (input_iter, projection, schema) = build_iterator_pipeline(txn, catalog, *input)?;
+            let (input_iter, projection, schema) =
+                build_iterator_pipeline(txn, catalog, config, *input)?;
             let filter_iter = FilterIterator::new(input_iter, predicate);
             Ok((Box::new(filter_iter), projection, schema))
         }
+        LogicalPlan::Aggregate {
+            input,
+            group_keys,
+            aggregates,
+            having,
+        } => {
+            let (input_iter, _projection, _schema) =
+                build_iterator_pipeline(txn, catalog, config, *input)?;
+            let aggregate_iter = AggregateIterator::new(
+                input_iter,
+                group_keys,
+                aggregates,
+                having,
+                config.max_groups,
+            );
+            let schema = aggregate_iter.schema().to_vec();
+            let names = schema.iter().map(|col| col.name.clone()).collect();
+            let projection = Projection::All(names);
+            Ok((Box::new(aggregate_iter), projection, schema))
+        }
         LogicalPlan::Sort { input, order_by } => {
-            let (input_iter, projection, schema) = build_iterator_pipeline(txn, catalog, *input)?;
+            let (input_iter, projection, schema) =
+                build_iterator_pipeline(txn, catalog, config, *input)?;
             let sort_iter = SortIterator::new(input_iter, &order_by)?;
             Ok((Box::new(sort_iter), projection, schema))
         }
@@ -177,7 +202,8 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, 
             limit,
             offset,
         } => {
-            let (input_iter, projection, schema) = build_iterator_pipeline(txn, catalog, *input)?;
+            let (input_iter, projection, schema) =
+                build_iterator_pipeline(txn, catalog, config, *input)?;
             let limit_iter = LimitIterator::new(input_iter, limit, offset);
             Ok((Box::new(limit_iter), projection, schema))
         }
@@ -201,12 +227,14 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, 
 pub fn build_streaming_pipeline<'a, 'txn: 'a, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
     txn: &'a mut T,
     catalog: &C,
+    config: &ExecutionConfig,
     plan: LogicalPlan,
 ) -> Result<(
     Box<dyn RowIterator + 'a>,
     Projection,
     Vec<crate::catalog::ColumnMetadata>,
 )> {
+    let _ = config;
     build_streaming_pipeline_inner(txn, catalog, plan)
 }
 
@@ -388,9 +416,11 @@ mod tests {
         )
         .unwrap();
 
+        let config = ExecutionConfig::default();
         let result = execute_query(
             &mut txn,
             &catalog,
+            &config,
             LogicalPlan::scan(
                 "users".into(),
                 Projection::All(vec!["id".into(), "name".into()]),

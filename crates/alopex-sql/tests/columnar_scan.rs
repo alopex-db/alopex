@@ -6,11 +6,11 @@ use std::sync::{Arc, RwLock};
 use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::MemoryCatalog;
 use alopex_sql::dialect::AlopexDialect;
-use alopex_sql::executor::Executor;
 use alopex_sql::executor::bulk::{CopyOptions, CopySecurityConfig, FileFormat, execute_copy};
 use alopex_sql::executor::query::columnar_scan::{
     build_columnar_scan_for_filter, execute_columnar_scan,
 };
+use alopex_sql::executor::{ExecutionConfig, Executor};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
 use alopex_sql::planner::typed_expr::{ProjectedColumn, Projection, TypedExpr};
@@ -32,7 +32,8 @@ fn create_table(
         let guard = catalog.read().unwrap();
         Planner::new(&*guard).plan(&stmt).unwrap()
     };
-    executor.execute(plan).unwrap();
+    let config = ExecutionConfig::default();
+    executor.execute(plan, &config).unwrap();
 }
 
 fn write_csv(path: &Path) {

@@ -10,7 +10,7 @@ use alopex_sql::Catalog;
 use alopex_sql::catalog::{ColumnMetadata, MemoryCatalog, TableMetadata};
 use alopex_sql::dialect::AlopexDialect;
 use alopex_sql::executor::bulk::{CopyOptions, CopySecurityConfig, FileFormat, execute_copy};
-use alopex_sql::executor::{ExecutionResult, Executor};
+use alopex_sql::executor::{ExecutionConfig, ExecutionResult, Executor};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
 use alopex_sql::planner::logical_plan::LogicalPlan;
@@ -42,15 +42,19 @@ fn create_table(executor: &mut Executor<MemoryKV, MemoryCatalog>) {
             ColumnMetadata::new("name", ResolvedType::Text),
         ],
     );
+    let config = ExecutionConfig::default();
     executor
-        .execute(LogicalPlan::CreateTable {
-            table,
-            if_not_exists: false,
-            with_options: vec![
-                ("storage".into(), "columnar".into()),
-                ("row_group_size".into(), "1000".into()),
-            ],
-        })
+        .execute(
+            LogicalPlan::CreateTable {
+                table,
+                if_not_exists: false,
+                with_options: vec![
+                    ("storage".into(), "columnar".into()),
+                    ("row_group_size".into(), "1000".into()),
+                ],
+            },
+            &config,
+        )
         .unwrap();
 }
 
@@ -66,20 +70,24 @@ fn create_table_with_row_id_mode(
             ColumnMetadata::new("name", ResolvedType::Text),
         ],
     );
+    let config = ExecutionConfig::default();
     let mode_str = match mode {
         RowIdMode::None => "none",
         RowIdMode::Direct => "direct",
     };
     executor
-        .execute(LogicalPlan::CreateTable {
-            table,
-            if_not_exists: false,
-            with_options: vec![
-                ("storage".into(), "columnar".into()),
-                ("row_group_size".into(), "1000".into()),
-                ("rowid_mode".into(), mode_str.into()),
-            ],
-        })
+        .execute(
+            LogicalPlan::CreateTable {
+                table,
+                if_not_exists: false,
+                with_options: vec![
+                    ("storage".into(), "columnar".into()),
+                    ("row_group_size".into(), "1000".into()),
+                    ("rowid_mode".into(), mode_str.into()),
+                ],
+            },
+            &config,
+        )
         .unwrap();
 }
 
@@ -135,7 +143,8 @@ fn copy_and_select_columnar_with_pruning_and_projection() {
         let guard = catalog.read().unwrap();
         Planner::new(&*guard).plan(&stmt).unwrap()
     };
-    let query_result = executor.execute(plan).unwrap();
+    let config = ExecutionConfig::default();
+    let query_result = executor.execute(plan, &config).unwrap();
 
     match query_result {
         ExecutionResult::Query(q) => {
@@ -372,7 +381,8 @@ fn columnar_scan_falls_back_when_statistics_missing() {
         let guard = catalog.read().unwrap();
         Planner::new(&*guard).plan(&stmt).unwrap()
     };
-    let result = executor.execute(plan).unwrap();
+    let config = ExecutionConfig::default();
+    let result = executor.execute(plan, &config).unwrap();
 
     match result {
         ExecutionResult::Query(q) => {

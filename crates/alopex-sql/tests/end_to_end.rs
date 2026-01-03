@@ -1,7 +1,7 @@
 use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::MemoryCatalog;
 use alopex_sql::dialect::AlopexDialect;
-use alopex_sql::executor::{ExecutionResult, Executor};
+use alopex_sql::executor::{ExecutionConfig, ExecutionResult, Executor};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
 use std::sync::{Arc, RwLock};
@@ -30,6 +30,7 @@ fn parser_planner_executor_pipeline() {
     // Executor
     let store = Arc::new(MemoryKV::new());
     let mut executor = Executor::new(store, catalog.clone());
+    let config = ExecutionConfig::default();
 
     let mut last_query = None;
     for stmt in statements {
@@ -38,7 +39,7 @@ fn parser_planner_executor_pipeline() {
         let plan = planner.plan(&stmt).expect("plan");
         drop(guard);
 
-        if let ExecutionResult::Query(q) = executor.execute(plan).expect("execute") {
+        if let ExecutionResult::Query(q) = executor.execute(plan, &config).expect("execute") {
             last_query = Some(q);
         }
     }

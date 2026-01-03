@@ -8,7 +8,7 @@ use alopex_core::{StorageFactory, StorageMode};
 
 use crate::ast::expr::Literal;
 use crate::catalog::{Catalog, ColumnMetadata, MemoryCatalog, TableMetadata};
-use crate::executor::{ExecutionResult, Executor};
+use crate::executor::{ExecutionConfig, ExecutionResult, Executor};
 use crate::planner::typed_expr::{Projection, TypedAssignment, TypedExpr};
 use crate::planner::types::ResolvedType;
 use crate::{LogicalPlan, Span};
@@ -53,13 +53,17 @@ pub mod disk {
             );
             let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
             let mut executor = Executor::new(store, catalog.clone());
+            let config = ExecutionConfig::default();
 
             let res = executor
-                .execute(LogicalPlan::CreateTable {
-                    table: table.clone(),
-                    if_not_exists: false,
-                    with_options: vec![],
-                })
+                .execute(
+                    LogicalPlan::CreateTable {
+                        table: table.clone(),
+                        if_not_exists: false,
+                        with_options: vec![],
+                    },
+                    &config,
+                )
                 .unwrap();
             assert!(matches!(res, ExecutionResult::Success));
 
@@ -90,11 +94,14 @@ pub mod disk {
                 ],
             ];
             let res = executor
-                .execute(LogicalPlan::Insert {
-                    table: "users".into(),
-                    columns: vec!["id".into(), "name".into()],
-                    values,
-                })
+                .execute(
+                    LogicalPlan::Insert {
+                        table: "users".into(),
+                        columns: vec!["id".into(), "name".into()],
+                        values,
+                    },
+                    &config,
+                )
                 .unwrap();
             assert!(matches!(res, ExecutionResult::RowsAffected(2)));
 
@@ -116,13 +123,17 @@ pub mod disk {
             c.create_table(table.with_table_id(table_id)).unwrap();
         }
         let mut executor = Executor::new(store, catalog.clone());
+        let config = ExecutionConfig::default();
 
         // QUERY: SELECT（Scan のみ）
         let res = executor
-            .execute(LogicalPlan::Scan {
-                table: "users".into(),
-                projection: Projection::All(vec!["id".into(), "name".into()]),
-            })
+            .execute(
+                LogicalPlan::Scan {
+                    table: "users".into(),
+                    projection: Projection::All(vec!["id".into(), "name".into()]),
+                },
+                &config,
+            )
             .unwrap();
         let ExecutionResult::Query(q) = res else {
             panic!("expected query result");
@@ -140,28 +151,37 @@ pub mod disk {
             ),
         };
         let res = executor
-            .execute(LogicalPlan::Update {
-                table: "users".into(),
-                assignments: vec![assign],
-                filter: None,
-            })
+            .execute(
+                LogicalPlan::Update {
+                    table: "users".into(),
+                    assignments: vec![assign],
+                    filter: None,
+                },
+                &config,
+            )
             .unwrap();
         assert!(matches!(res, ExecutionResult::RowsAffected(2)));
 
         // DML: DELETE（全行を削除）
         let res = executor
-            .execute(LogicalPlan::Delete {
-                table: "users".into(),
-                filter: None,
-            })
+            .execute(
+                LogicalPlan::Delete {
+                    table: "users".into(),
+                    filter: None,
+                },
+                &config,
+            )
             .unwrap();
         assert!(matches!(res, ExecutionResult::RowsAffected(2)));
 
         let res = executor
-            .execute(LogicalPlan::Scan {
-                table: "users".into(),
-                projection: Projection::All(vec!["id".into(), "name".into()]),
-            })
+            .execute(
+                LogicalPlan::Scan {
+                    table: "users".into(),
+                    projection: Projection::All(vec!["id".into(), "name".into()]),
+                },
+                &config,
+            )
             .unwrap();
         let ExecutionResult::Query(q) = res else {
             panic!("expected query result");
@@ -170,10 +190,13 @@ pub mod disk {
 
         // DDL: DROP TABLE
         let res = executor
-            .execute(LogicalPlan::DropTable {
-                name: "users".into(),
-                if_exists: false,
-            })
+            .execute(
+                LogicalPlan::DropTable {
+                    name: "users".into(),
+                    if_exists: false,
+                },
+                &config,
+            )
             .unwrap();
         assert!(matches!(res, ExecutionResult::Success));
     }

@@ -11,7 +11,7 @@ use alopex_sql::ast::expr::Literal;
 use alopex_sql::catalog::{
     Catalog, CatalogOverlay, PersistentCatalog, TableMetadata, TxnCatalogView,
 };
-use alopex_sql::executor::{ExecutionResult, Executor, ExecutorError};
+use alopex_sql::executor::{ExecutionConfig, ExecutionResult, Executor, ExecutorError};
 use alopex_sql::planner::logical_plan::LogicalPlan;
 use alopex_sql::planner::typed_expr::{Projection, TypedExpr, TypedExprKind};
 use alopex_sql::planner::types::ResolvedType;
@@ -69,6 +69,7 @@ fn wrap_external_preserves_mode() {
 fn execute_in_txn_readonly_rejects_dml() {
     let store = Arc::new(MemoryKV::new());
     let (mut executor, _catalog) = executor_with_persistent_catalog(store.clone());
+    let config = ExecutionConfig::default();
 
     let mut txn = store.begin(TxnMode::ReadOnly).unwrap();
     let mut overlay = CatalogOverlay::new();
@@ -79,7 +80,9 @@ fn execute_in_txn_readonly_rejects_dml() {
         if_exists: true,
     };
 
-    let err = executor.execute_in_txn(plan, &mut borrowed).unwrap_err();
+    let err = executor
+        .execute_in_txn(plan, &config, &mut borrowed)
+        .unwrap_err();
     assert!(matches!(err, ExecutorError::ReadOnlyTransaction { .. }));
 }
 
@@ -87,6 +90,7 @@ fn execute_in_txn_readonly_rejects_dml() {
 fn execute_in_txn_readonly_allows_select() {
     let store = Arc::new(MemoryKV::new());
     let (mut executor, catalog) = executor_with_persistent_catalog(store.clone());
+    let config = ExecutionConfig::default();
 
     // ベースカタログにテーブルを投入（ReadOnly で SELECT を通す目的）。
     {
@@ -111,7 +115,9 @@ fn execute_in_txn_readonly_allows_select() {
         projection: Projection::All(vec!["id".to_string()]),
     };
 
-    let result = executor.execute_in_txn(plan, &mut borrowed).unwrap();
+    let result = executor
+        .execute_in_txn(plan, &config, &mut borrowed)
+        .unwrap();
     assert!(matches!(result, ExecutionResult::Query(_)));
 }
 
@@ -120,6 +126,7 @@ fn overlay_visible_in_same_txn() {
     let store = Arc::new(MemoryKV::new());
     let (mut executor, catalog) = executor_with_persistent_catalog(store.clone());
     let mut overlay = CatalogOverlay::new();
+    let config = ExecutionConfig::default();
 
     let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
 
@@ -140,7 +147,9 @@ fn overlay_visible_in_same_txn() {
             with_options: vec![],
         };
         let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
-        executor.execute_in_txn(plan, &mut borrowed).unwrap();
+        executor
+            .execute_in_txn(plan, &config, &mut borrowed)
+            .unwrap();
     }
 
     {
@@ -157,7 +166,9 @@ fn overlay_visible_in_same_txn() {
             if_exists: false,
         };
         let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
-        executor.execute_in_txn(plan, &mut borrowed).unwrap();
+        executor
+            .execute_in_txn(plan, &config, &mut borrowed)
+            .unwrap();
     }
 }
 
@@ -165,6 +176,7 @@ fn overlay_visible_in_same_txn() {
 fn drop_table_in_txn_ignores_non_default_namespace() {
     let store = Arc::new(MemoryKV::new());
     let (mut executor, catalog) = executor_with_persistent_catalog(store.clone());
+    let config = ExecutionConfig::default();
 
     {
         let mut catalog = catalog.write().expect("catalog lock poisoned");
@@ -191,7 +203,9 @@ fn drop_table_in_txn_ignores_non_default_namespace() {
             if_exists: true,
         };
         let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
-        let result = executor.execute_in_txn(plan, &mut borrowed).unwrap();
+        let result = executor
+            .execute_in_txn(plan, &config, &mut borrowed)
+            .unwrap();
         assert!(matches!(result, ExecutionResult::Success));
     }
 
@@ -206,7 +220,9 @@ fn drop_table_in_txn_ignores_non_default_namespace() {
             if_exists: false,
         };
         let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
-        let err = executor.execute_in_txn(plan, &mut borrowed).unwrap_err();
+        let err = executor
+            .execute_in_txn(plan, &config, &mut borrowed)
+            .unwrap_err();
         assert!(matches!(err, ExecutorError::TableNotFound(_)));
     }
 
@@ -222,6 +238,7 @@ fn drop_table_in_txn_ignores_non_default_namespace() {
 fn drop_index_in_txn_ignores_non_default_namespace() {
     let store = Arc::new(MemoryKV::new());
     let (mut executor, catalog) = executor_with_persistent_catalog(store.clone());
+    let config = ExecutionConfig::default();
 
     {
         let mut catalog = catalog.write().expect("catalog lock poisoned");
@@ -258,7 +275,9 @@ fn drop_index_in_txn_ignores_non_default_namespace() {
             if_exists: true,
         };
         let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
-        let result = executor.execute_in_txn(plan, &mut borrowed).unwrap();
+        let result = executor
+            .execute_in_txn(plan, &config, &mut borrowed)
+            .unwrap();
         assert!(matches!(result, ExecutionResult::Success));
     }
 
@@ -273,7 +292,9 @@ fn drop_index_in_txn_ignores_non_default_namespace() {
             if_exists: false,
         };
         let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
-        let err = executor.execute_in_txn(plan, &mut borrowed).unwrap_err();
+        let err = executor
+            .execute_in_txn(plan, &config, &mut borrowed)
+            .unwrap_err();
         assert!(matches!(err, ExecutorError::IndexNotFound(_)));
     }
 
@@ -291,6 +312,7 @@ fn hnsw_flush_on_success() {
     let (mut executor, _catalog) = executor_with_persistent_catalog(store.clone());
     let mut overlay = CatalogOverlay::new();
     let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let config = ExecutionConfig::default();
 
     // CREATE TABLE
     {
@@ -300,7 +322,9 @@ fn hnsw_flush_on_success() {
             with_options: vec![],
         };
         let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
-        executor.execute_in_txn(plan, &mut borrowed).unwrap();
+        executor
+            .execute_in_txn(plan, &config, &mut borrowed)
+            .unwrap();
     }
 
     // CREATE INDEX (HNSW)
@@ -316,7 +340,9 @@ fn hnsw_flush_on_success() {
             if_not_exists: false,
         };
         let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
-        executor.execute_in_txn(plan, &mut borrowed).unwrap();
+        executor
+            .execute_in_txn(plan, &config, &mut borrowed)
+            .unwrap();
     }
 
     // INSERT（HNSW は staged -> execute_in_txn が flush する）
@@ -340,7 +366,9 @@ fn hnsw_flush_on_success() {
             values: vec![vec![id, embedding]],
         };
         let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
-        executor.execute_in_txn(plan, &mut borrowed).unwrap();
+        executor
+            .execute_in_txn(plan, &config, &mut borrowed)
+            .unwrap();
     }
 
     // flush が効いていれば、同一トランザクション内でも HNSW インデックスがロードできる。
@@ -355,6 +383,7 @@ fn hnsw_abandon_on_drop() {
     let (mut executor, catalog) = executor_with_persistent_catalog(store.clone());
     let mut overlay = CatalogOverlay::new();
     let mut txn = store.begin(TxnMode::ReadWrite).unwrap();
+    let config = ExecutionConfig::default();
 
     // CREATE TABLE + HNSW INDEX（ベースとなるインデックスを作成）
     {
@@ -364,7 +393,9 @@ fn hnsw_abandon_on_drop() {
             with_options: vec![],
         };
         let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
-        executor.execute_in_txn(plan, &mut borrowed).unwrap();
+        executor
+            .execute_in_txn(plan, &config, &mut borrowed)
+            .unwrap();
     }
     {
         let plan = LogicalPlan::CreateIndex {
@@ -378,7 +409,9 @@ fn hnsw_abandon_on_drop() {
             if_not_exists: false,
         };
         let mut borrowed = wrap_external(&mut txn, TxnMode::ReadWrite, &mut overlay);
-        executor.execute_in_txn(plan, &mut borrowed).unwrap();
+        executor
+            .execute_in_txn(plan, &config, &mut borrowed)
+            .unwrap();
     }
 
     // dirty 状態だけ作って Drop させる（flush しない）。

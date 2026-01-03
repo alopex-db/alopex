@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::MemoryCatalog;
 use alopex_sql::dialect::AlopexDialect;
-use alopex_sql::executor::{ExecutionResult, Executor};
+use alopex_sql::executor::{ExecutionConfig, ExecutionResult, Executor};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
 
@@ -18,12 +18,13 @@ fn run_sql(
     let mut executor = Executor::new(store, catalog.clone());
     let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(&dialect, sql).expect("parse sql");
+    let config = ExecutionConfig::default();
     for stmt in stmts {
         let plan = {
             let guard = catalog.read().unwrap();
             Planner::new(&*guard).plan(&stmt).expect("plan")
         };
-        let _ = executor.execute(plan).expect("execute");
+        let _ = executor.execute(plan, &config).expect("execute");
     }
     (executor, catalog)
 }
@@ -49,7 +50,8 @@ fn knn_optimization_without_index() {
         let guard = catalog.read().unwrap();
         Planner::new(&*guard).plan(&stmt).unwrap()
     };
-    match executor.execute(plan).unwrap() {
+    let config = ExecutionConfig::default();
+    match executor.execute(plan, &config).unwrap() {
         ExecutionResult::Query(q) => {
             let mut ids: Vec<i32> = q
                 .rows
