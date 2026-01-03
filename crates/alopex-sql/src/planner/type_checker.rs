@@ -86,7 +86,7 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
                 self.infer_unary_op_type(*op, operand, table, span)
             }
 
-            ExprKind::FunctionCall { name, args } => {
+            ExprKind::FunctionCall { name, args, .. } => {
                 self.infer_function_call_type(name, args, table, span)
             }
 
@@ -335,12 +335,11 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
         if compatible {
             Ok(())
         } else {
-            Err(PlannerError::TypeMismatch {
-                expected: left.type_name().to_string(),
-                found: right.type_name().to_string(),
-                line: span.start.line,
-                column: span.start.column,
-            })
+            Err(PlannerError::type_mismatch(
+                left.type_name(),
+                right.type_name(),
+                span,
+            ))
         }
     }
 
@@ -358,21 +357,19 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
         let right_ok = matches!(right, Boolean | Null);
 
         if !left_ok {
-            return Err(PlannerError::TypeMismatch {
-                expected: "Boolean".to_string(),
-                found: left.type_name().to_string(),
-                line: span.start.line,
-                column: span.start.column,
-            });
+            return Err(PlannerError::type_mismatch(
+                "Boolean",
+                left.type_name(),
+                span,
+            ));
         }
 
         if !right_ok {
-            return Err(PlannerError::TypeMismatch {
-                expected: "Boolean".to_string(),
-                found: right.type_name().to_string(),
-                line: span.start.line,
-                column: span.start.column,
-            });
+            return Err(PlannerError::type_mismatch(
+                "Boolean",
+                right.type_name(),
+                span,
+            ));
         }
 
         Ok(())
@@ -392,21 +389,11 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
         let right_ok = matches!(right, Text | Null);
 
         if !left_ok {
-            return Err(PlannerError::TypeMismatch {
-                expected: "Text".to_string(),
-                found: left.type_name().to_string(),
-                line: span.start.line,
-                column: span.start.column,
-            });
+            return Err(PlannerError::type_mismatch("Text", left.type_name(), span));
         }
 
         if !right_ok {
-            return Err(PlannerError::TypeMismatch {
-                expected: "Text".to_string(),
-                found: right.type_name().to_string(),
-                line: span.start.line,
-                column: span.start.column,
-            });
+            return Err(PlannerError::type_mismatch("Text", right.type_name(), span));
         }
 
         Ok(())
@@ -429,12 +416,11 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
                     operand_typed.resolved_type,
                     ResolvedType::Boolean | ResolvedType::Null
                 ) {
-                    return Err(PlannerError::TypeMismatch {
-                        expected: "Boolean".to_string(),
-                        found: operand_typed.resolved_type.type_name().to_string(),
-                        line: span.start.line,
-                        column: span.start.column,
-                    });
+                    return Err(PlannerError::type_mismatch(
+                        "Boolean",
+                        operand_typed.resolved_type.type_name(),
+                        span,
+                    ));
                 }
                 ResolvedType::Boolean
             }
@@ -543,12 +529,11 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
             expr_typed.resolved_type,
             ResolvedType::Text | ResolvedType::Null
         ) {
-            return Err(PlannerError::TypeMismatch {
-                expected: "Text".to_string(),
-                found: expr_typed.resolved_type.type_name().to_string(),
-                line: expr.span.start.line,
-                column: expr.span.start.column,
-            });
+            return Err(PlannerError::type_mismatch(
+                "Text",
+                expr_typed.resolved_type.type_name(),
+                expr.span,
+            ));
         }
 
         // Pattern must be text
@@ -556,23 +541,21 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
             pattern_typed.resolved_type,
             ResolvedType::Text | ResolvedType::Null
         ) {
-            return Err(PlannerError::TypeMismatch {
-                expected: "Text".to_string(),
-                found: pattern_typed.resolved_type.type_name().to_string(),
-                line: pattern.span.start.line,
-                column: pattern.span.start.column,
-            });
+            return Err(PlannerError::type_mismatch(
+                "Text",
+                pattern_typed.resolved_type.type_name(),
+                pattern.span,
+            ));
         }
 
         let escape_typed = if let Some(esc) = escape {
             let typed = self.infer_type(esc, table)?;
             if !matches!(typed.resolved_type, ResolvedType::Text | ResolvedType::Null) {
-                return Err(PlannerError::TypeMismatch {
-                    expected: "Text".to_string(),
-                    found: typed.resolved_type.type_name().to_string(),
-                    line: esc.span.start.line,
-                    column: esc.span.start.column,
-                });
+                return Err(PlannerError::type_mismatch(
+                    "Text",
+                    typed.resolved_type.type_name(),
+                    esc.span,
+                ));
             }
             Some(Box::new(typed))
         } else {
@@ -731,24 +714,22 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
         span: Span,
     ) -> Result<ResolvedType, PlannerError> {
         if args.len() != 3 {
-            return Err(PlannerError::TypeMismatch {
-                expected: "3 arguments".to_string(),
-                found: format!("{} arguments", args.len()),
-                line: span.start.line,
-                column: span.start.column,
-            });
+            return Err(PlannerError::type_mismatch(
+                "3 arguments",
+                format!("{} arguments", args.len()),
+                span,
+            ));
         }
 
         // First argument: Vector column
         let col_dim = match &args[0].resolved_type {
             ResolvedType::Vector { dimension, .. } => *dimension,
             other => {
-                return Err(PlannerError::TypeMismatch {
-                    expected: "Vector".to_string(),
-                    found: other.type_name().to_string(),
-                    line: args[0].span.start.line,
-                    column: args[0].span.start.column,
-                });
+                return Err(PlannerError::type_mismatch(
+                    "Vector",
+                    other.type_name(),
+                    args[0].span,
+                ));
             }
         };
 
@@ -756,12 +737,11 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
         let vec_dim = match &args[1].resolved_type {
             ResolvedType::Vector { dimension, .. } => *dimension,
             other => {
-                return Err(PlannerError::TypeMismatch {
-                    expected: "Vector".to_string(),
-                    found: other.type_name().to_string(),
-                    line: args[1].span.start.line,
-                    column: args[1].span.start.column,
-                });
+                return Err(PlannerError::type_mismatch(
+                    "Vector",
+                    other.type_name(),
+                    args[1].span,
+                ));
             }
         };
 
@@ -778,20 +758,18 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
             }
             ResolvedType::Null => {
                 // NULL metric is not allowed
-                return Err(PlannerError::TypeMismatch {
-                    expected: "Text (metric)".to_string(),
-                    found: "Null".to_string(),
-                    line: args[2].span.start.line,
-                    column: args[2].span.start.column,
-                });
+                return Err(PlannerError::type_mismatch(
+                    "Text (metric)",
+                    "Null",
+                    args[2].span,
+                ));
             }
             other => {
-                return Err(PlannerError::TypeMismatch {
-                    expected: "Text (metric)".to_string(),
-                    found: other.type_name().to_string(),
-                    line: args[2].span.start.line,
-                    column: args[2].span.start.column,
-                });
+                return Err(PlannerError::type_mismatch(
+                    "Text (metric)",
+                    other.type_name(),
+                    args[2].span,
+                ));
             }
         }
 
@@ -1055,12 +1033,11 @@ impl<'a, C: Catalog> TypeChecker<'a, C> {
             // Different dimensions will fall through to TypeMismatch error
         }
 
-        Err(PlannerError::TypeMismatch {
-            expected: expected.type_name().to_string(),
-            found: actual.type_name().to_string(),
-            line: span.start.line,
-            column: span.start.column,
-        })
+        Err(PlannerError::type_mismatch(
+            expected.type_name(),
+            actual.type_name(),
+            span,
+        ))
     }
 }
 

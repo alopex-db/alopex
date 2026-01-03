@@ -9,10 +9,12 @@
 //! - [`TypeChecker`]: Expression type inference and validation
 //! - [`Planner`]: Main entry point for converting AST to LogicalPlan
 
+pub mod aggregate_expr;
 mod error;
 pub mod knn_optimizer;
 pub mod logical_plan;
 pub mod name_resolver;
+mod select;
 pub mod type_checker;
 pub mod typed_expr;
 pub mod types;
@@ -20,6 +22,7 @@ pub mod types;
 #[cfg(test)]
 mod planner_tests;
 
+pub use aggregate_expr::{AggregateExpr, AggregateFunction};
 pub use error::PlannerError;
 pub use knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
 pub use logical_plan::LogicalPlan;
@@ -333,6 +336,19 @@ impl<'a, C: Catalog> Planner<'a, C> {
     /// Builds a logical plan tree: Scan -> Filter -> Sort -> Limit
     /// Each layer is optional and only added if the corresponding clause is present.
     fn plan_select(&self, stmt: &Select) -> Result<LogicalPlan, PlannerError> {
+        self.validate_group_by_semantics(
+            &stmt.projection,
+            &stmt.group_by,
+            &stmt.having,
+            &stmt.selection,
+        )?;
+
+        let has_grouping =
+            !stmt.group_by.is_empty() || stmt.having.is_some() || self.has_aggregates(stmt);
+        if has_grouping {
+            return self.plan_aggregate_select(stmt);
+        }
+
         // 1. Resolve the FROM table
         let table = self
             .name_resolver

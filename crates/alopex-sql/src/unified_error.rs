@@ -258,11 +258,14 @@ impl From<PlannerError> for SqlError {
             },
             PlannerError::TypeMismatch {
                 expected,
-                found,
+                actual,
+                function,
                 line,
                 column,
             } => Self::Plan {
-                message: format!("type mismatch: expected {expected}, found {found}"),
+                message: format!(
+                    "type mismatch in {function}: expected {expected}, found {actual}"
+                ),
                 location: ErrorLocation { line, column },
                 code: "ALOPEX-T001",
             },
@@ -309,6 +312,29 @@ impl From<PlannerError> for SqlError {
                 message: format!("column count ({columns}) does not match value count ({values})"),
                 location: ErrorLocation { line, column },
                 code: "ALOPEX-T006",
+            },
+            PlannerError::InvalidGroupBy { column, line, col } => Self::Plan {
+                message: format!(
+                    "column '{column}' must appear in GROUP BY clause or be used in an aggregate function"
+                ),
+                location: ErrorLocation { line, column: col },
+                code: "ALOPEX-T007",
+            },
+            PlannerError::AggregateInWhere {
+                function,
+                line,
+                column,
+            } => Self::Plan {
+                message: format!(
+                    "aggregate function '{function}' is not allowed in WHERE clause (use HAVING)"
+                ),
+                location: ErrorLocation { line, column },
+                code: "ALOPEX-T008",
+            },
+            PlannerError::InvalidHaving { line, column } => Self::Plan {
+                message: "HAVING clause requires GROUP BY or aggregate functions".to_string(),
+                location: ErrorLocation { line, column },
+                code: "ALOPEX-T009",
             },
             PlannerError::UnsupportedFeature {
                 feature,

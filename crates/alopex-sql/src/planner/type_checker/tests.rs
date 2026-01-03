@@ -889,10 +889,10 @@ fn test_check_insert_values_type_mismatch() {
     assert!(result.is_err());
     match result.unwrap_err() {
         PlannerError::TypeMismatch {
-            expected, found, ..
+            expected, actual, ..
         } => {
             assert_eq!(expected, "Integer");
-            assert_eq!(found, "Text");
+            assert_eq!(actual, "Text");
         }
         e => panic!("Expected TypeMismatch, got {:?}", e),
     }
@@ -1018,10 +1018,10 @@ fn test_check_assignment_type_mismatch() {
     assert!(result.is_err());
     match result.unwrap_err() {
         PlannerError::TypeMismatch {
-            expected, found, ..
+            expected, actual, ..
         } => {
             assert_eq!(expected, "Integer");
-            assert_eq!(found, "Text");
+            assert_eq!(actual, "Text");
         }
         e => panic!("Expected TypeMismatch, got {:?}", e),
     }
@@ -1522,6 +1522,7 @@ fn test_unknown_function_error() {
                 },
                 span: test_span(),
             }],
+            distinct: false,
         },
         span: span_at(3, 5),
     };

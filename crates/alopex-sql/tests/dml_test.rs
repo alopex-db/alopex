@@ -79,7 +79,7 @@ fn parse_select_group_by_expression() {
 
     assert_eq!(select.group_by.len(), 1);
     match &select.group_by[0].kind {
-        ExprKind::FunctionCall { name, args } => {
+        ExprKind::FunctionCall { name, args, .. } => {
             assert_eq!(name, "YEAR");
             assert_eq!(args.len(), 1);
         }
@@ -122,7 +122,7 @@ fn parse_select_global_aggregation() {
     assert!(select.having.is_none());
     match &select.projection[0] {
         SelectItem::Expr { expr, .. } => match &expr.kind {
-            ExprKind::FunctionCall { name, args } => {
+            ExprKind::FunctionCall { name, args, .. } => {
                 assert_eq!(name, "COUNT");
                 assert_eq!(args.len(), 1);
                 assert!(matches!(

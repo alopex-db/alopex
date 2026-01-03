@@ -82,6 +82,7 @@ impl<'a> Parser<'a> {
                     let ident_span = token.span;
                     if let Token::LParen = self.peek().token {
                         self.advance(); // consume '('
+                        let distinct = self.consume_keyword(Keyword::DISTINCT);
                         let mut args = Vec::new();
                         if !matches!(self.peek().token, Token::RParen) {
                             loop {
@@ -110,6 +111,7 @@ impl<'a> Parser<'a> {
                             ExprKind::FunctionCall {
                                 name: value.clone(),
                                 args,
+                                distinct,
                             },
                             ident_span.union(&end_span),
                         ))

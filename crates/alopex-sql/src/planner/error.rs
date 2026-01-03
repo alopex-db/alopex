@@ -57,11 +57,12 @@ pub enum PlannerError {
     // === Type Errors (ALOPEX-T*) ===
     /// ALOPEX-T001: Type mismatch.
     #[error(
-        "error[ALOPEX-T001]: type mismatch at line {line}, column {column}: expected {expected}, found {found}"
+        "error[ALOPEX-T001]: type mismatch in {function} at line {line}, column {column}: expected {expected}, found {actual}"
     )]
     TypeMismatch {
         expected: String,
-        found: String,
+        actual: String,
+        function: String,
         line: u64,
         column: u64,
     },
@@ -114,6 +115,28 @@ pub enum PlannerError {
         line: u64,
         column: u64,
     },
+
+    /// ALOPEX-T007: Invalid GROUP BY usage.
+    #[error(
+        "error[ALOPEX-T007]: column '{column}' must appear in GROUP BY clause or be used in an aggregate function at line {line}, column {col}"
+    )]
+    InvalidGroupBy { column: String, line: u64, col: u64 },
+
+    /// ALOPEX-T008: Aggregate function used in WHERE clause.
+    #[error(
+        "error[ALOPEX-T008]: aggregate function '{function}' is not allowed in WHERE clause at line {line}, column {column}. Use HAVING instead"
+    )]
+    AggregateInWhere {
+        function: String,
+        line: u64,
+        column: u64,
+    },
+
+    /// ALOPEX-T009: HAVING clause without GROUP BY or aggregates.
+    #[error(
+        "error[ALOPEX-T009]: HAVING clause requires GROUP BY or aggregate functions at line {line}, column {column}"
+    )]
+    InvalidHaving { line: u64, column: u64 },
 
     // === Feature Errors (ALOPEX-F*) ===
     /// ALOPEX-F001: Unsupported feature.
@@ -180,12 +203,29 @@ impl PlannerError {
     /// Create a TypeMismatch error from a span.
     pub fn type_mismatch(
         expected: impl Into<String>,
-        found: impl Into<String>,
+        actual: impl Into<String>,
         span: Span,
     ) -> Self {
         Self::TypeMismatch {
             expected: expected.into(),
-            found: found.into(),
+            actual: actual.into(),
+            function: "expression".to_string(),
+            line: span.start.line,
+            column: span.start.column,
+        }
+    }
+
+    /// Create a TypeMismatch error in a function context.
+    pub fn type_mismatch_in_function(
+        function: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+        span: Span,
+    ) -> Self {
+        Self::TypeMismatch {
+            expected: expected.into(),
+            actual: actual.into(),
+            function: function.into(),
             line: span.start.line,
             column: span.start.column,
         }
@@ -238,6 +278,32 @@ impl PlannerError {
         Self::ColumnValueCountMismatch {
             columns,
             values,
+            line: span.start.line,
+            column: span.start.column,
+        }
+    }
+
+    /// Create an InvalidGroupBy error from a span.
+    pub fn invalid_group_by(column: impl Into<String>, span: Span) -> Self {
+        Self::InvalidGroupBy {
+            column: column.into(),
+            line: span.start.line,
+            col: span.start.column,
+        }
+    }
+
+    /// Create an AggregateInWhere error from a span.
+    pub fn aggregate_in_where(function: impl Into<String>, span: Span) -> Self {
+        Self::AggregateInWhere {
+            function: function.into(),
+            line: span.start.line,
+            column: span.start.column,
+        }
+    }
+
+    /// Create an InvalidHaving error from a span.
+    pub fn invalid_having(span: Span) -> Self {
+        Self::InvalidHaving {
             line: span.start.line,
             column: span.start.column,
         }

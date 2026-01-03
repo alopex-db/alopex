@@ -116,6 +116,23 @@ fn binary_op(left: Expr, op: BinaryOp, right: Expr) -> Expr {
     }
 }
 
+/// Create a function call expression.
+fn func_call(name: &str, args: Vec<Expr>) -> Expr {
+    Expr {
+        kind: ExprKind::FunctionCall {
+            name: name.to_string(),
+            args,
+            distinct: false,
+        },
+        span: span(),
+    }
+}
+
+/// Create COUNT(*) expression.
+fn count_star_expr() -> Expr {
+    func_call("COUNT", vec![col_ref(None, "*")])
+}
+
 // ============================================================
 // DDL Tests
 // ============================================================
@@ -699,6 +716,327 @@ fn test_plan_select_table_not_found() {
     assert!(matches!(
         result,
         Err(PlannerError::TableNotFound { name, .. }) if name == "nonexistent"
+    ));
+}
+
+// ============================================================
+// Aggregate Planner Tests
+// ============================================================
+
+#[test]
+fn test_extract_aggregates_from_projection() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+    let table = catalog.get_table("users").unwrap();
+
+    let projection = vec![
+        SelectItem::Expr {
+            expr: col_ref(None, "name"),
+            alias: None,
+            span: span(),
+        },
+        SelectItem::Expr {
+            expr: count_star_expr(),
+            alias: Some("cnt".to_string()),
+            span: span(),
+        },
+        SelectItem::Expr {
+            expr: func_call("SUM", vec![col_ref(None, "age")]),
+            alias: None,
+            span: span(),
+        },
+    ];
+
+    let aggregates = planner.extract_aggregates(&projection, table).unwrap();
+    assert_eq!(aggregates.len(), 2);
+    assert_eq!(aggregates[0].function, AggregateFunction::Count);
+    assert!(aggregates[0].arg.is_none());
+    assert_eq!(aggregates[1].function, AggregateFunction::Sum);
+    assert!(aggregates[1].arg.is_some());
+}
+
+#[test]
+fn test_validate_group_by_semantics_ok() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+
+    let projection = vec![
+        SelectItem::Expr {
+            expr: col_ref(None, "name"),
+            alias: None,
+            span: span(),
+        },
+        SelectItem::Expr {
+            expr: count_star_expr(),
+            alias: None,
+            span: span(),
+        },
+    ];
+    let group_by = vec![col_ref(None, "name")];
+
+    let result = planner.validate_group_by_semantics(&projection, &group_by, &None, &None);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_validate_group_by_semantics_invalid() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+
+    let projection = vec![
+        SelectItem::Expr {
+            expr: col_ref(None, "name"),
+            alias: None,
+            span: span(),
+        },
+        SelectItem::Expr {
+            expr: col_ref(None, "age"),
+            alias: None,
+            span: span(),
+        },
+        SelectItem::Expr {
+            expr: count_star_expr(),
+            alias: None,
+            span: span(),
+        },
+    ];
+    let group_by = vec![col_ref(None, "name")];
+
+    let result = planner.validate_group_by_semantics(&projection, &group_by, &None, &None);
+    assert!(matches!(
+        result,
+        Err(PlannerError::InvalidGroupBy { column, .. }) if column == "age"
+    ));
+}
+
+#[test]
+fn test_plan_select_group_by_aggregate() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+
+    let select = Select {
+        distinct: false,
+        projection: vec![
+            SelectItem::Expr {
+                expr: col_ref(None, "name"),
+                alias: None,
+                span: span(),
+            },
+            SelectItem::Expr {
+                expr: count_star_expr(),
+                alias: None,
+                span: span(),
+            },
+        ],
+        from: TableRef {
+            name: "users".to_string(),
+            alias: None,
+            span: span(),
+        },
+        selection: None,
+        group_by: vec![col_ref(None, "name")],
+        having: None,
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        span: span(),
+    };
+
+    let result = planner.plan(&stmt(StatementKind::Select(select)));
+    assert!(result.is_ok());
+
+    if let LogicalPlan::Aggregate {
+        input,
+        group_keys,
+        aggregates,
+        having,
+    } = result.unwrap()
+    {
+        assert!(matches!(*input, LogicalPlan::Scan { .. }));
+        assert_eq!(group_keys.len(), 1);
+        assert_eq!(aggregates.len(), 1);
+        assert!(having.is_none());
+    } else {
+        panic!("Expected Aggregate plan");
+    }
+}
+
+#[test]
+fn test_plan_select_global_aggregate_with_having() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+
+    let having_expr = binary_op(count_star_expr(), BinaryOp::Gt, int_lit(0));
+    let select = Select {
+        distinct: false,
+        projection: vec![SelectItem::Expr {
+            expr: count_star_expr(),
+            alias: None,
+            span: span(),
+        }],
+        from: TableRef {
+            name: "users".to_string(),
+            alias: None,
+            span: span(),
+        },
+        selection: None,
+        group_by: vec![],
+        having: Some(having_expr),
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        span: span(),
+    };
+
+    let result = planner.plan(&stmt(StatementKind::Select(select)));
+    assert!(result.is_ok());
+
+    if let LogicalPlan::Aggregate {
+        group_keys,
+        aggregates,
+        having,
+        ..
+    } = result.unwrap()
+    {
+        assert!(group_keys.is_empty());
+        assert_eq!(aggregates.len(), 1);
+        assert!(matches!(having, Some(expr) if expr.resolved_type == ResolvedType::Boolean));
+    } else {
+        panic!("Expected Aggregate plan");
+    }
+}
+
+#[test]
+fn test_plan_select_having_only_error() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+
+    let having_expr = binary_op(count_star_expr(), BinaryOp::Gt, int_lit(0));
+    let select = Select {
+        distinct: false,
+        projection: vec![SelectItem::Expr {
+            expr: col_ref(None, "name"),
+            alias: None,
+            span: span(),
+        }],
+        from: TableRef {
+            name: "users".to_string(),
+            alias: None,
+            span: span(),
+        },
+        selection: None,
+        group_by: vec![],
+        having: Some(having_expr),
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        span: span(),
+    };
+
+    let result = planner.plan(&stmt(StatementKind::Select(select)));
+    assert!(matches!(result, Err(PlannerError::InvalidHaving { .. })));
+}
+
+#[test]
+fn test_plan_select_order_by_aggregate() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+
+    let select = Select {
+        distinct: false,
+        projection: vec![
+            SelectItem::Expr {
+                expr: col_ref(None, "name"),
+                alias: None,
+                span: span(),
+            },
+            SelectItem::Expr {
+                expr: count_star_expr(),
+                alias: Some("cnt".to_string()),
+                span: span(),
+            },
+        ],
+        from: TableRef {
+            name: "users".to_string(),
+            alias: None,
+            span: span(),
+        },
+        selection: None,
+        group_by: vec![col_ref(None, "name")],
+        having: None,
+        order_by: vec![
+            OrderByExpr {
+                expr: col_ref(None, "cnt"),
+                asc: Some(false),
+                nulls_first: None,
+                span: span(),
+            },
+            OrderByExpr {
+                expr: count_star_expr(),
+                asc: Some(true),
+                nulls_first: Some(true),
+                span: span(),
+            },
+        ],
+        limit: None,
+        offset: None,
+        span: span(),
+    };
+
+    let result = planner.plan(&stmt(StatementKind::Select(select)));
+    assert!(result.is_ok());
+
+    if let LogicalPlan::Sort { input, order_by } = result.unwrap() {
+        assert_eq!(order_by.len(), 2);
+        assert!(!order_by[0].asc);
+        assert!(order_by[1].asc);
+        assert!(order_by[1].nulls_first);
+
+        for sort_expr in &order_by {
+            match &sort_expr.expr.kind {
+                TypedExprKind::ColumnRef { column_index, .. } => {
+                    assert_eq!(*column_index, 1);
+                }
+                other => panic!("Expected ColumnRef, got {other:?}"),
+            }
+        }
+
+        assert!(matches!(*input, LogicalPlan::Aggregate { .. }));
+    } else {
+        panic!("Expected Sort plan");
+    }
+}
+
+#[test]
+fn test_plan_select_aggregate_type_mismatch() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+
+    let select = Select {
+        distinct: false,
+        projection: vec![SelectItem::Expr {
+            expr: func_call("SUM", vec![col_ref(None, "name")]),
+            alias: None,
+            span: span(),
+        }],
+        from: TableRef {
+            name: "users".to_string(),
+            alias: None,
+            span: span(),
+        },
+        selection: None,
+        group_by: vec![],
+        having: None,
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        span: span(),
+    };
+
+    let result = planner.plan(&stmt(StatementKind::Select(select)));
+    assert!(matches!(
+        result,
+        Err(PlannerError::TypeMismatch { function, .. }) if function == "SUM"
     ));
 }
 
