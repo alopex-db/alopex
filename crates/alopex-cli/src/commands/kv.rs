@@ -2,15 +2,10 @@
 //!
 //! Supports: get, put, delete, list
 
-use std::collections::BTreeMap;
-use std::env;
-use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use alopex_embedded::{Database, TxnMode};
-use serde::{Deserialize, Serialize};
+use alopex_embedded::{Database, TransactionManager as Transaction, TxnMode};
 
 use crate::cli::{KvCommand, KvTxnCommand};
 use crate::error::{CliError, Result};
@@ -18,7 +13,6 @@ use crate::models::{Column, DataType, Row, Value};
 use crate::streaming::{StreamingWriter, WriteStatus};
 
 const DEFAULT_TXN_TIMEOUT_SECS: u64 = 60;
-const TXN_DIR_ENV: &str = "ALOPEX_TXN_DIR";
 
 /// Execute a KV command.
 ///
@@ -41,19 +35,29 @@ pub fn execute<W: Write>(
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct TxnState {
-    txn_id: String,
-    created_at: u64,
-    timeout_secs: u64,
-    writes: BTreeMap<String, Option<String>>,
+fn map_txn_error(txn_id: &str, err: alopex_embedded::Error) -> CliError {
+    match err {
+        alopex_embedded::Error::InvalidTransactionId(_) => {
+            CliError::InvalidTransactionId(txn_id.to_string())
+        }
+        other => CliError::Database(other),
+    }
 }
 
-impl TxnState {
-    fn is_expired(&self) -> bool {
-        let now = current_timestamp_secs();
-        now.saturating_sub(self.created_at) >= self.timeout_secs
+fn map_txn_result<T>(
+    txn_id: &str,
+    result: std::result::Result<T, alopex_embedded::Error>,
+) -> Result<T> {
+    result.map_err(|err| map_txn_error(txn_id, err))
+}
+
+fn ensure_txn_not_expired(db: &Database, txn_id: &str) -> Result<()> {
+    let expired = map_txn_result(txn_id, Transaction::is_expired(db, txn_id))?;
+    if expired {
+        let _ = Transaction::rollback(db, txn_id);
+        return Err(CliError::TransactionTimeout(txn_id.to_string()));
     }
+    Ok(())
 }
 
 fn execute_txn_command<W: Write>(
@@ -62,27 +66,24 @@ fn execute_txn_command<W: Write>(
     writer: &mut StreamingWriter<W>,
 ) -> Result<()> {
     match cmd {
-        KvTxnCommand::Begin { timeout_secs } => execute_txn_begin(timeout_secs, writer),
+        KvTxnCommand::Begin { timeout_secs } => execute_txn_begin(db, timeout_secs, writer),
         KvTxnCommand::Get { key, txn_id } => execute_txn_get(db, &key, &txn_id, writer),
-        KvTxnCommand::Put { key, value, txn_id } => execute_txn_put(&key, &value, &txn_id, writer),
-        KvTxnCommand::Delete { key, txn_id } => execute_txn_delete(&key, &txn_id, writer),
+        KvTxnCommand::Put { key, value, txn_id } => {
+            execute_txn_put(db, &key, &value, &txn_id, writer)
+        }
+        KvTxnCommand::Delete { key, txn_id } => execute_txn_delete(db, &key, &txn_id, writer),
         KvTxnCommand::Commit { txn_id } => execute_txn_commit(db, &txn_id, writer),
-        KvTxnCommand::Rollback { txn_id } => execute_txn_rollback(&txn_id, writer),
+        KvTxnCommand::Rollback { txn_id } => execute_txn_rollback(db, &txn_id, writer),
     }
 }
 
 fn execute_txn_begin<W: Write>(
+    db: &Database,
     timeout_secs: Option<u64>,
     writer: &mut StreamingWriter<W>,
 ) -> Result<()> {
-    let txn_id = generate_txn_id();
-    let state = TxnState {
-        txn_id: txn_id.clone(),
-        created_at: current_timestamp_secs(),
-        timeout_secs: timeout_secs.unwrap_or(DEFAULT_TXN_TIMEOUT_SECS),
-        writes: BTreeMap::new(),
-    };
-    save_txn_state(&state)?;
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TXN_TIMEOUT_SECS));
+    let txn_id = Transaction::begin_with_timeout(db, timeout)?;
 
     writer.prepare(Some(1))?;
     let row = Row::new(vec![Value::Text("txn_id".to_string()), Value::Text(txn_id)]);
@@ -97,37 +98,35 @@ fn execute_txn_get<W: Write>(
     txn_id: &str,
     writer: &mut StreamingWriter<W>,
 ) -> Result<()> {
-    let state = load_active_txn_state(txn_id)?;
-    if let Some(value) = state.writes.get(key) {
-        return write_kv_value(key, value.clone(), writer);
-    }
-
-    execute_get(db, key, writer)
+    ensure_txn_not_expired(db, txn_id)?;
+    let value = map_txn_result(txn_id, Transaction::get(db, txn_id, key.as_bytes()))?;
+    write_kv_value(key, value, writer)
 }
 
 fn execute_txn_put<W: Write>(
+    db: &Database,
     key: &str,
     value: &str,
     txn_id: &str,
     writer: &mut StreamingWriter<W>,
 ) -> Result<()> {
-    let mut state = load_active_txn_state(txn_id)?;
-    state
-        .writes
-        .insert(key.to_string(), Some(value.to_string()));
-    save_txn_state(&state)?;
+    ensure_txn_not_expired(db, txn_id)?;
+    map_txn_result(
+        txn_id,
+        Transaction::put(db, txn_id, key.as_bytes(), value.as_bytes()),
+    )?;
 
     write_status_if_needed(writer, &format!("Staged key: {}", key))
 }
 
 fn execute_txn_delete<W: Write>(
+    db: &Database,
     key: &str,
     txn_id: &str,
     writer: &mut StreamingWriter<W>,
 ) -> Result<()> {
-    let mut state = load_active_txn_state(txn_id)?;
-    state.writes.insert(key.to_string(), None);
-    save_txn_state(&state)?;
+    ensure_txn_not_expired(db, txn_id)?;
+    map_txn_result(txn_id, Transaction::delete(db, txn_id, key.as_bytes()))?;
 
     write_status_if_needed(writer, &format!("Staged delete: {}", key))
 }
@@ -137,132 +136,37 @@ fn execute_txn_commit<W: Write>(
     txn_id: &str,
     writer: &mut StreamingWriter<W>,
 ) -> Result<()> {
-    let state = load_active_txn_state(txn_id)?;
-    let mut txn = db.begin(TxnMode::ReadWrite)?;
-
-    for (key, value) in &state.writes {
-        match value {
-            Some(value) => txn.put(key.as_bytes(), value.as_bytes())?,
-            None => txn.delete(key.as_bytes())?,
-        }
-    }
-
-    txn.commit()?;
-    delete_txn_state(txn_id)?;
+    ensure_txn_not_expired(db, txn_id)?;
+    map_txn_result(txn_id, Transaction::commit(db, txn_id))?;
 
     write_status_if_needed(writer, &format!("Committed transaction: {}", txn_id))
 }
 
-fn execute_txn_rollback<W: Write>(txn_id: &str, writer: &mut StreamingWriter<W>) -> Result<()> {
-    let state = load_active_txn_state(txn_id)?;
-    delete_txn_state(&state.txn_id)?;
+fn execute_txn_rollback<W: Write>(
+    db: &Database,
+    txn_id: &str,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    map_txn_result(txn_id, Transaction::rollback(db, txn_id))?;
 
     write_status_if_needed(writer, &format!("Rolled back transaction: {}", txn_id))
 }
 
-fn current_timestamp_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn generate_txn_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("txn-{}-{}", nanos, std::process::id())
-}
-
-fn txn_dir() -> Result<PathBuf> {
-    if let Ok(dir) = env::var(TXN_DIR_ENV) {
-        if !dir.trim().is_empty() {
-            return Ok(PathBuf::from(dir));
-        }
-    }
-
-    let mut dir = dirs::home_dir().ok_or_else(|| {
-        CliError::InvalidArgument("Home directory not found for txn storage".to_string())
-    })?;
-    dir.push(".alopex");
-    dir.push("transactions");
-    Ok(dir)
-}
-
-fn validate_txn_id(txn_id: &str) -> Result<()> {
-    if txn_id.is_empty() || txn_id.contains('/') || txn_id.contains('\\') || txn_id.contains("..") {
-        return Err(CliError::InvalidTransactionId(txn_id.to_string()));
-    }
-    Ok(())
-}
-
-fn txn_file_path(txn_id: &str) -> Result<PathBuf> {
-    validate_txn_id(txn_id)?;
-    let dir = txn_dir()?;
-    Ok(dir.join(format!("{}.json", txn_id)))
-}
-
-fn save_txn_state(state: &TxnState) -> Result<()> {
-    let path = txn_file_path(&state.txn_id)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp_path = path.with_extension("json.tmp");
-    let payload = serde_json::to_vec(state)?;
-    fs::write(&tmp_path, payload)?;
-    fs::rename(&tmp_path, &path)?;
-    Ok(())
-}
-
-fn load_txn_state(txn_id: &str) -> Result<TxnState> {
-    let path = txn_file_path(txn_id)?;
-    let payload = fs::read(&path).map_err(|err| {
-        if err.kind() == std::io::ErrorKind::NotFound {
-            CliError::InvalidTransactionId(txn_id.to_string())
-        } else {
-            CliError::Io(err)
-        }
-    })?;
-    let state: TxnState = serde_json::from_slice(&payload)
-        .map_err(|_| CliError::InvalidTransactionId(txn_id.to_string()))?;
-    if state.txn_id != txn_id {
-        return Err(CliError::InvalidTransactionId(txn_id.to_string()));
-    }
-    Ok(state)
-}
-
-fn load_active_txn_state(txn_id: &str) -> Result<TxnState> {
-    let state = load_txn_state(txn_id)?;
-    if state.is_expired() {
-        let _ = delete_txn_state(txn_id);
-        return Err(CliError::TransactionTimeout(txn_id.to_string()));
-    }
-    Ok(state)
-}
-
-fn delete_txn_state(txn_id: &str) -> Result<()> {
-    let path = txn_file_path(txn_id)?;
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Err(CliError::InvalidTransactionId(txn_id.to_string()))
-        }
-        Err(err) => Err(CliError::Io(err)),
-    }
-}
-
 fn write_kv_value<W: Write>(
     key: &str,
-    value: Option<String>,
+    value: Option<Vec<u8>>,
     writer: &mut StreamingWriter<W>,
 ) -> Result<()> {
     let Some(value) = value else {
         return Err(CliError::InvalidArgument(format!("Key not found: {}", key)));
     };
 
+    let value_display = match std::str::from_utf8(&value) {
+        Ok(s) => Value::Text(s.to_string()),
+        Err(_) => Value::Bytes(value),
+    };
     writer.prepare(Some(1))?;
-    let row = Row::new(vec![Value::Text(key.to_string()), Value::Text(value)]);
+    let row = Row::new(vec![Value::Text(key.to_string()), value_display]);
     writer.write_row(row)?;
     writer.finish()?;
     Ok(())

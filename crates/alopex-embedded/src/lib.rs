@@ -8,6 +8,7 @@ pub mod catalog_api;
 pub mod columnar_api;
 pub mod options;
 mod sql_api;
+mod txn_manager;
 
 pub use crate::catalog::Catalog;
 pub use crate::catalog_api::{
@@ -17,6 +18,7 @@ pub use crate::catalog_api::{
 pub use crate::columnar_api::{ColumnarRowIterator, EmbeddedConfig, StorageMode};
 pub use crate::options::DatabaseOptions;
 pub use crate::sql_api::{SqlStreamingResult, StreamingQueryResult, StreamingRows};
+pub use crate::txn_manager::{TransactionInfo, TransactionManager};
 pub use alopex_sql::{DataSourceFormat, TableType};
 /// `Database::execute_sql()` / `Transaction::execute_sql()` の返却型。
 pub type SqlResult = alopex_sql::SqlResult;
@@ -95,6 +97,9 @@ pub enum Error {
     /// トランザクションは read-only です。
     #[error("トランザクションは読み取り専用です")]
     TxnReadOnly,
+    /// Transaction ID is invalid or missing.
+    #[error("invalid transaction id: {0}")]
+    InvalidTransactionId(String),
     /// The operation requires in-memory columnar mode.
     #[error("not in in-memory columnar mode")]
     NotInMemoryMode,
