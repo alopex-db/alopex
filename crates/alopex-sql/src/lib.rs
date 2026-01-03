@@ -25,6 +25,31 @@
 //! let planner = Planner::new(&catalog);
 //! let plan = planner.plan(stmt).unwrap();
 //! ```
+//!
+//! # Aggregation and GROUP BY
+//!
+//! ```sql
+//! SELECT dept, COUNT(*) FROM emp GROUP BY dept;
+//! SELECT category, SUM(price) AS total
+//! FROM products
+//! GROUP BY category
+//! HAVING SUM(price) > 1000
+//! ORDER BY total DESC
+//! LIMIT 5;
+//! ```
+//!
+//! Global aggregation works without GROUP BY and can use HAVING:
+//!
+//! ```sql
+//! SELECT COUNT(*) FROM orders HAVING COUNT(*) > 0;
+//! ```
+//!
+//! Supported aggregate functions:
+//! - COUNT (including COUNT(DISTINCT col) and COUNT(*))
+//! - SUM
+//! - AVG
+//! - MIN
+//! - MAX
 
 pub mod ast;
 pub mod catalog;
