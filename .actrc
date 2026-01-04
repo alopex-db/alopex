@@ -1,4 +1,4 @@
-# act configuration for alopex-py local CI testing
+# act configuration for alopex local CI testing
 # https://github.com/nektos/act
 
 # Use medium-sized Ubuntu image (good balance of size vs compatibility)
@@ -7,13 +7,13 @@
 # Reuse containers for faster subsequent runs
 --reuse
 
-# Avoid bind mounts by default: act runs as root and checkout rewrites files,
-# which would leave root-owned files in the host workspace.
-# Use scripts/local-ci.sh or scripts/container-ci.sh for workflow-aware policies.
+# IMPORTANT: Do NOT use --bind
+# act runs as root inside containers, and actions/checkout rewrites files.
+# This leaves root-owned files in the host workspace, causing permission errors.
 # --bind
 
-# Default artifact server path
---artifact-server-path /home/roomtv/works/alopex-db/alopex-core-worktrees/alopex-py-v0.1/.act-artifacts
+# Artifact server path (relative to working directory)
+--artifact-server-path .act-artifacts
 
 # Verbose output for debugging
 # --verbose
