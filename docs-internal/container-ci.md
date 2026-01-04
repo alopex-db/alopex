@@ -23,6 +23,24 @@ Use it to keep your host environment clean and idempotent.
 ./scripts/local-ci.sh --custom alopex-py test
 ```
 
+## Bind policy (checkout vs no-checkout)
+
+`scripts/local-ci.sh` と `scripts/container-ci.sh` は workflow 内の
+`actions/checkout@` を検出し、以下のポリシーを自動適用します。
+
+- **checkout あり**: workspace をコピー実行（`--bind` なし）
+  - root 所有ファイルの生成を避ける
+  - `CARGO_TARGET_DIR=/tmp/act-target` を付与
+- **checkout なし**: workspace を bind（`--bind`）
+  - 高速だが、書き込みが発生すると root 所有になる点に注意
+
+明示的に上書きしたい場合は以下の環境変数を使用します。
+
+```bash
+ACT_BIND_POLICY=bind ./scripts/local-ci.sh alopex-py
+ACT_BIND_POLICY=copy ./scripts/container-ci.sh alopex-py
+```
+
 ## Run workflows with act inside a container
 
 This avoids installing `act` on the host. It still requires access to the Docker daemon.

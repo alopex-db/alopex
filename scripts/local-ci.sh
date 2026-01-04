@@ -32,6 +32,37 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Workflow policy helpers
+workflow_uses_checkout() {
+    local workflow_file="$1"
+    grep -q "actions/checkout@" "${workflow_file}"
+}
+
+resolve_bind_policy() {
+    local workflow_file="$1"
+    local policy="${ACT_BIND_POLICY:-auto}"
+
+    case "${policy}" in
+        auto)
+            if workflow_uses_checkout "${workflow_file}"; then
+                echo "copy"
+            else
+                echo "bind"
+            fi
+            ;;
+        bind)
+            echo "bind"
+            ;;
+        copy|nobind|no-bind)
+            echo "copy"
+            ;;
+        *)
+            log_error "Unknown ACT_BIND_POLICY: ${policy} (use auto|bind|copy)"
+            exit 1
+            ;;
+    esac
+}
+
 # Check prerequisites
 check_prerequisites() {
     if ! command -v docker &> /dev/null; then
@@ -100,15 +131,27 @@ run_workflow() {
 
     log_info "Running workflow: ${workflow}"
 
+    local bind_policy
+    bind_policy=$(resolve_bind_policy "${workflow_file}")
+
     local act_args=(
         "-W" "${workflow_file}"
         "--platform" "ubuntu-latest=catthehacker/ubuntu:act-latest"
         "--platform" "macos-latest=catthehacker/ubuntu:act-latest"
         "--platform" "windows-latest=catthehacker/ubuntu:act-latest"
         "--artifact-server-path" "${ARTIFACTS_DIR}"
-        "--bind"
         "--reuse"
     )
+
+    if [[ "${bind_policy}" == "bind" ]]; then
+        act_args+=("--bind")
+        log_info "Bind policy: bind workspace (no actions/checkout detected)"
+    else
+        local cargo_target_dir="${ACT_CARGO_TARGET_DIR:-/tmp/act-target}"
+        act_args+=("--env" "CARGO_TARGET_DIR=${cargo_target_dir}")
+        log_info "Bind policy: copy workspace (actions/checkout detected)"
+        log_info "CARGO_TARGET_DIR=${cargo_target_dir}"
+    fi
 
     # Add job filter if specified
     if [[ -n "${job}" ]]; then
@@ -143,16 +186,28 @@ run_with_custom_image() {
 
     log_info "Running workflow with custom image: ${workflow}"
 
+    local bind_policy
+    bind_policy=$(resolve_bind_policy "${workflow_file}")
+
     local act_args=(
         "-W" "${workflow_file}"
         "--platform" "ubuntu-latest=alopex-py-ci:latest"
         "--platform" "macos-latest=alopex-py-ci:latest"
         "--platform" "windows-latest=alopex-py-ci:latest"
         "--artifact-server-path" "${ARTIFACTS_DIR}"
-        "--bind"
         "--reuse"
         "--pull=false"
     )
+
+    if [[ "${bind_policy}" == "bind" ]]; then
+        act_args+=("--bind")
+        log_info "Bind policy: bind workspace (no actions/checkout detected)"
+    else
+        local cargo_target_dir="${ACT_CARGO_TARGET_DIR:-/tmp/act-target}"
+        act_args+=("--env" "CARGO_TARGET_DIR=${cargo_target_dir}")
+        log_info "Bind policy: copy workspace (actions/checkout detected)"
+        log_info "CARGO_TARGET_DIR=${cargo_target_dir}"
+    fi
 
     if [[ -n "${job}" ]]; then
         act_args+=("-j" "${job}")
@@ -187,6 +242,8 @@ Note:
     - Only ubuntu-latest jobs are supported (macOS/Windows are skipped)
     - First run may take a while to pull Docker images
     - Use --custom for faster runs after building the image
+    - Bind policy is auto by default; override with ACT_BIND_POLICY=bind|copy
+    - Copy mode sets CARGO_TARGET_DIR=/tmp/act-target (override via ACT_CARGO_TARGET_DIR)
 EOF
 }
 

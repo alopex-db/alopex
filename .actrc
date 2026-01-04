@@ -7,8 +7,10 @@
 # Reuse containers for faster subsequent runs
 --reuse
 
-# Bind workdir as volume for faster file access
---bind
+# Avoid bind mounts by default: act runs as root and checkout rewrites files,
+# which would leave root-owned files in the host workspace.
+# Use scripts/local-ci.sh or scripts/container-ci.sh for workflow-aware policies.
+# --bind
 
 # Default artifact server path
 --artifact-server-path /home/roomtv/works/alopex-db/alopex-core-worktrees/alopex-py-v0.1/.act-artifacts
