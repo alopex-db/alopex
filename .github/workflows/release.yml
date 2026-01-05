@@ -26,7 +26,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
         # Exclude alopex-py as it requires numpy and has its own CI workflow
-        run: cargo test --all-features --exclude alopex-py
+        run: cargo test --workspace --all-features --exclude alopex-py
 
   build-release:
     name: Build Release (${{ matrix.target }})
