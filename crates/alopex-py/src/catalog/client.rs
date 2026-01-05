@@ -15,6 +15,7 @@ use crate::error;
 thread_local! {
     static POLARS_SCAN_PARQUET: RefCell<Option<Py<PyAny>>> = const { RefCell::new(None) };
     static SCAN_TABLE_CACHE: RefCell<Option<ScanTableCacheEntry>> = const { RefCell::new(None) };
+    static POLARS_AVAILABLE: RefCell<Option<bool>> = const { RefCell::new(None) };
 }
 
 static SCAN_TABLE_CACHE_EPOCH: AtomicU64 = AtomicU64::new(0);
@@ -673,12 +674,20 @@ impl PyCatalog {
                 if cached.format_upper != "PARQUET" {
                     return Err(error::AlopexError::UnsupportedFormat(cached.format_upper).into());
                 }
-                let resolved = resolve_credentials(
-                    py,
-                    credential_provider,
-                    storage_options.clone(),
-                    &cached.storage_location,
-                )?;
+                // Skip credential resolution for local files when using default "auto" provider
+                let resolved = if is_local_storage_location(&cached.storage_location)
+                    && credential_provider_is_auto(credential_provider)?
+                    && storage_options.is_none()
+                {
+                    HashMap::new()
+                } else {
+                    resolve_credentials(
+                        py,
+                        credential_provider,
+                        storage_options.clone(),
+                        &cached.storage_location,
+                    )?
+                };
                 return if delta_mode == "overwrite" {
                     write_parquet_overwrite(
                         py,
@@ -842,11 +851,22 @@ impl PyCatalog {
 ///     AlopexError: If polars is not installed.
 #[allow(dead_code)]
 pub fn require_polars(py: Python<'_>) -> PyResult<()> {
-    if PyModule::import(py, "polars").is_ok() {
-        Ok(())
-    } else {
-        Err(error::AlopexError::PolarsNotInstalled.into())
-    }
+    POLARS_AVAILABLE.with(|cell| {
+        if let Some(available) = *cell.borrow() {
+            return if available {
+                Ok(())
+            } else {
+                Err(error::AlopexError::PolarsNotInstalled.into())
+            };
+        }
+        let available = PyModule::import(py, "polars").is_ok();
+        *cell.borrow_mut() = Some(available);
+        if available {
+            Ok(())
+        } else {
+            Err(error::AlopexError::PolarsNotInstalled.into())
+        }
+    })
 }
 
 /// Register catalog types in a Python module.
