@@ -667,6 +667,36 @@ impl PyCatalog {
         let df_obj = df.unbind();
         let credential_provider = credential_provider.bind(py);
 
+        // Fast path: use cache for overwrite/append on existing table (avoids DB lookup)
+        if matches!(delta_mode, "overwrite" | "append") {
+            if let Some(cached) = load_scan_table_cache(catalog_name, namespace, table_name) {
+                if cached.format_upper != "PARQUET" {
+                    return Err(error::AlopexError::UnsupportedFormat(cached.format_upper).into());
+                }
+                let resolved = resolve_credentials(
+                    py,
+                    credential_provider,
+                    storage_options.clone(),
+                    &cached.storage_location,
+                )?;
+                return if delta_mode == "overwrite" {
+                    write_parquet_overwrite(
+                        py,
+                        df_obj.clone_ref(py),
+                        cached.storage_location,
+                        &resolved,
+                    )
+                } else {
+                    write_parquet_append(
+                        py,
+                        df_obj.clone_ref(py),
+                        cached.storage_location,
+                        &resolved,
+                    )
+                };
+            }
+        }
+
         let table_info = match py.allow_threads(|| {
             alopex_embedded::Catalog::get_table_info(catalog_name, namespace, table_name)
         }) {
@@ -690,6 +720,14 @@ impl PyCatalog {
                 .as_ref()
                 .ok_or(error::AlopexError::StorageLocationRequired)?;
             validate_storage_location(location)?;
+            // Store in cache for subsequent operations
+            store_scan_table_cache(
+                catalog_name,
+                namespace,
+                table_name,
+                location.clone(),
+                normalized_format,
+            );
         }
 
         match (table_info.as_ref(), delta_mode) {
@@ -764,6 +802,14 @@ impl PyCatalog {
                     df_obj.bind(py),
                     storage_location.clone(),
                 )?;
+                // Cache newly created table for subsequent operations
+                store_scan_table_cache(
+                    catalog_name,
+                    namespace,
+                    table_name,
+                    storage_location.clone(),
+                    "PARQUET".to_string(),
+                );
                 let resolved = resolve_credentials(
                     py,
                     credential_provider,
