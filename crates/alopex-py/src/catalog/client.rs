@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
@@ -10,9 +11,50 @@ use super::{
 use crate::catalog::resolve_credentials;
 use crate::error;
 
+thread_local! {
+    /// Cached polars.scan_parquet function (Python-specific optimization)
+    static POLARS_SCAN_PARQUET: RefCell<Option<Py<PyAny>>> = const { RefCell::new(None) };
+    /// Cached polars availability check (Python-specific optimization)
+    static POLARS_AVAILABLE: RefCell<Option<bool>> = const { RefCell::new(None) };
+}
+
 #[allow(deprecated)]
 fn default_credential_provider() -> PyObject {
     Python::with_gil(|py| "auto".into_py(py))
+}
+
+fn get_scan_parquet(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    POLARS_SCAN_PARQUET.with(|cell| {
+        if let Some(func) = cell.borrow().as_ref() {
+            return Ok(func.clone_ref(py));
+        }
+        let polars = PyModule::import(py, "polars")
+            .map_err(|_| PyErr::from(error::AlopexError::PolarsNotInstalled))?;
+        let func: Py<PyAny> = polars.getattr("scan_parquet")?.into();
+        *cell.borrow_mut() = Some(func.clone_ref(py));
+        Ok(func)
+    })
+}
+
+fn credential_provider_is_auto(credential_provider: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if credential_provider.is_none() {
+        return Ok(true);
+    }
+    if let Ok(provider) = credential_provider.extract::<String>() {
+        return Ok(provider == "auto");
+    }
+    Ok(false)
+}
+
+fn is_local_storage_location(location: &str) -> bool {
+    let Some(pos) = location.find("://") else {
+        return true;
+    };
+    let scheme = &location[..pos];
+    !(scheme.eq_ignore_ascii_case("s3")
+        || scheme.eq_ignore_ascii_case("gs")
+        || scheme.eq_ignore_ascii_case("az")
+        || scheme.eq_ignore_ascii_case("abfs"))
 }
 
 fn normalize_to_dataframe<'py>(
@@ -229,6 +271,7 @@ impl PyCatalog {
     #[staticmethod]
     fn create_catalog(py: Python<'_>, name: &str) -> PyResult<()> {
         validate_identifier(name)?;
+        // Cache invalidation is now handled at the embedded layer
         py.allow_threads(|| alopex_embedded::Catalog::create_catalog(name))
             .map_err(error::embedded_err)
     }
@@ -248,6 +291,7 @@ impl PyCatalog {
     #[staticmethod]
     fn delete_catalog(py: Python<'_>, name: &str) -> PyResult<()> {
         validate_identifier(name)?;
+        // Cache invalidation is now handled at the embedded layer
         py.allow_threads(|| alopex_embedded::Catalog::delete_catalog(name))
             .map_err(error::embedded_err)
     }
@@ -270,6 +314,7 @@ impl PyCatalog {
     fn create_namespace(py: Python<'_>, catalog_name: &str, namespace: &str) -> PyResult<()> {
         validate_identifier(catalog_name)?;
         validate_identifier(namespace)?;
+        // Cache invalidation is now handled at the embedded layer
         py.allow_threads(|| alopex_embedded::Catalog::create_namespace(catalog_name, namespace))
             .map_err(|err| match err {
                 alopex_embedded::Error::CatalogNotFound(name) => {
@@ -296,6 +341,7 @@ impl PyCatalog {
     fn delete_namespace(py: Python<'_>, catalog_name: &str, namespace: &str) -> PyResult<()> {
         validate_identifier(catalog_name)?;
         validate_identifier(namespace)?;
+        // Cache invalidation is now handled at the embedded layer
         py.allow_threads(|| alopex_embedded::Catalog::delete_namespace(catalog_name, namespace))
             .map_err(error::embedded_err)
     }
@@ -345,6 +391,7 @@ impl PyCatalog {
         validate_identifier(namespace)?;
         validate_identifier(table_name)?;
         validate_storage_location(&storage_location)?;
+        // Cache invalidation is now handled at the embedded layer
 
         let normalized_format = data_source_format.trim().to_ascii_uppercase();
         if normalized_format != "PARQUET" {
@@ -397,6 +444,7 @@ impl PyCatalog {
         validate_identifier(catalog_name)?;
         validate_identifier(namespace)?;
         validate_identifier(table_name)?;
+        // Cache invalidation is now handled at the embedded layer
         py.allow_threads(|| {
             alopex_embedded::Catalog::delete_table(catalog_name, namespace, table_name)
         })
@@ -440,56 +488,41 @@ impl PyCatalog {
         credential_provider: PyObject,
         storage_options: Option<HashMap<String, String>>,
     ) -> PyResult<Py<PyAny>> {
-        require_polars(py)?;
         validate_identifier(catalog_name)?;
         validate_identifier(namespace)?;
         validate_identifier(table_name)?;
-        let table_info = py
-            .allow_threads(|| {
-                alopex_embedded::Catalog::get_table_info(catalog_name, namespace, table_name)
-            })
-            .map_err(error::embedded_err)?;
-        let storage_location = table_info
+        // Use the embedded layer's cached table info for performance
+        let cached_info =
+            alopex_embedded::Catalog::get_table_info_cached(catalog_name, namespace, table_name)
+                .map_err(error::embedded_err)?;
+        let storage_location = cached_info
             .storage_location
             .ok_or_else(|| pyo3::PyErr::from(error::AlopexError::StorageLocationRequired))?;
         validate_storage_location(&storage_location)?;
-        let normalized_format = table_info
-            .data_source_format
-            .as_deref()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_uppercase();
-        if normalized_format != "PARQUET" {
-            return Err(error::AlopexError::UnsupportedFormat(normalized_format).into());
+        let format_upper = cached_info.format;
+        if format_upper != "PARQUET" {
+            return Err(error::AlopexError::UnsupportedFormat(format_upper).into());
         }
         let credential_provider = credential_provider.bind(py);
-        let resolved =
-            resolve_credentials(py, credential_provider, storage_options, &storage_location)?;
-        let polars = PyModule::import(py, "polars")?;
-        let scan_parquet = polars.getattr("scan_parquet")?.unbind();
-        let options = PyDict::new(py);
-        for (key, value) in resolved {
-            options.set_item(key, value)?;
-        }
-        let kwargs = if options.is_empty() {
-            None
+        let use_fast_path = storage_options.is_none()
+            && credential_provider_is_auto(credential_provider)?
+            && is_local_storage_location(&storage_location);
+        let scan_parquet = get_scan_parquet(py)?;
+        let scan_parquet = scan_parquet.bind(py);
+        let args = (storage_location.as_str(),);
+        let result = if use_fast_path {
+            scan_parquet.call1(args)?
         } else {
-            Some(options.unbind())
+            let resolved =
+                resolve_credentials(py, credential_provider, storage_options, &storage_location)?;
+            let kwargs = storage_options_to_kwargs(py, &resolved)?;
+            if let Some(kwargs_obj) = kwargs.as_ref() {
+                scan_parquet.call(args, Some(kwargs_obj.bind(py)))?
+            } else {
+                scan_parquet.call1(args)?
+            }
         };
-        let storage_location = storage_location.clone();
-        let lazy_frame = py.allow_threads(move || {
-            Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                let scan_parquet = scan_parquet.bind(py);
-                let args = (storage_location.as_str(),);
-                let result = if let Some(kwargs_obj) = kwargs.as_ref() {
-                    scan_parquet.call(args, Some(kwargs_obj.bind(py)))?
-                } else {
-                    scan_parquet.call1(args)?
-                };
-                Ok(result.unbind())
-            })
-        })?;
-        Ok(lazy_frame)
+        Ok(result.unbind())
     }
 
     /// Write a DataFrame into a catalog table.
@@ -558,6 +591,38 @@ impl PyCatalog {
         let df_obj = df.unbind();
         let credential_provider = credential_provider.bind(py);
 
+        // Fast path: use embedded cache for overwrite/append on existing table (avoids full DB lookup)
+        if matches!(delta_mode, "overwrite" | "append") {
+            if let Ok(cached) =
+                alopex_embedded::Catalog::get_table_info_cached(catalog_name, namespace, table_name)
+            {
+                if cached.format != "PARQUET" {
+                    return Err(error::AlopexError::UnsupportedFormat(cached.format).into());
+                }
+                if let Some(storage_loc) = cached.storage_location {
+                    // Skip credential resolution for local files when using default "auto" provider
+                    let resolved = if is_local_storage_location(&storage_loc)
+                        && credential_provider_is_auto(credential_provider)?
+                        && storage_options.is_none()
+                    {
+                        HashMap::new()
+                    } else {
+                        resolve_credentials(
+                            py,
+                            credential_provider,
+                            storage_options.clone(),
+                            &storage_loc,
+                        )?
+                    };
+                    return if delta_mode == "overwrite" {
+                        write_parquet_overwrite(py, df_obj.clone_ref(py), storage_loc, &resolved)
+                    } else {
+                        write_parquet_append(py, df_obj.clone_ref(py), storage_loc, &resolved)
+                    };
+                }
+            }
+        }
+
         let table_info = match py.allow_threads(|| {
             alopex_embedded::Catalog::get_table_info(catalog_name, namespace, table_name)
         }) {
@@ -581,6 +646,7 @@ impl PyCatalog {
                 .as_ref()
                 .ok_or(error::AlopexError::StorageLocationRequired)?;
             validate_storage_location(location)?;
+            // Caching is now handled at the embedded layer
         }
 
         match (table_info.as_ref(), delta_mode) {
@@ -655,6 +721,7 @@ impl PyCatalog {
                     df_obj.bind(py),
                     storage_location.clone(),
                 )?;
+                // Caching is now handled at the embedded layer
                 let resolved = resolve_credentials(
                     py,
                     credential_provider,
@@ -687,11 +754,22 @@ impl PyCatalog {
 ///     AlopexError: If polars is not installed.
 #[allow(dead_code)]
 pub fn require_polars(py: Python<'_>) -> PyResult<()> {
-    if PyModule::import(py, "polars").is_ok() {
-        Ok(())
-    } else {
-        Err(error::AlopexError::PolarsNotInstalled.into())
-    }
+    POLARS_AVAILABLE.with(|cell| {
+        if let Some(available) = *cell.borrow() {
+            return if available {
+                Ok(())
+            } else {
+                Err(error::AlopexError::PolarsNotInstalled.into())
+            };
+        }
+        let available = PyModule::import(py, "polars").is_ok();
+        *cell.borrow_mut() = Some(available);
+        if available {
+            Ok(())
+        } else {
+            Err(error::AlopexError::PolarsNotInstalled.into())
+        }
+    })
 }
 
 /// Register catalog types in a Python module.
@@ -720,6 +798,7 @@ fn create_table_from_dataframe(
     df: &Bound<'_, PyAny>,
     storage_location: String,
 ) -> PyResult<()> {
+    // Cache invalidation is now handled at the embedded layer
     let columns = infer_columns_from_dataframe(df)?;
     let columns = to_embedded_columns(columns);
     let embedded_format = "parquet".to_string();

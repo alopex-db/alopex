@@ -586,6 +586,31 @@ impl Database {
         self.get_table_info("default", "default", table_name)
     }
 
+    /// テーブル情報をキャッシュから取得する（キャッシュミス時は DB ルックアップ）。
+    ///
+    /// パフォーマンス最適化のため、キャッシュを使用してテーブルメタデータを取得する。
+    /// DDL 操作（テーブル作成/削除など）が発生するとキャッシュは自動的に無効化される。
+    pub fn get_table_info_cached(
+        &self,
+        catalog_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Result<crate::CachedTableInfo> {
+        // Check cache first
+        if let Some(cached) = self.get_cached_table_info(catalog_name, namespace_name, table_name) {
+            return Ok(cached);
+        }
+
+        // Cache miss: fetch from database and cache the result
+        let info = self.get_table_info(catalog_name, namespace_name, table_name)?;
+        let cached = crate::CachedTableInfo {
+            storage_location: info.storage_location.clone(),
+            format: format!("{:?}", info.data_source_format).to_uppercase(),
+        };
+        self.cache_table_info(catalog_name, namespace_name, table_name, cached.clone());
+        Ok(cached)
+    }
+
     /// インデックス一覧を取得する。
     pub fn list_indexes(
         &self,
@@ -660,6 +685,7 @@ impl Database {
         catalog
             .create_catalog(meta.clone())
             .map_err(|err| Error::Sql(err.into()))?;
+        self.invalidate_table_info_cache();
         Ok(meta.into())
     }
 
@@ -688,6 +714,7 @@ impl Database {
         catalog
             .delete_catalog(name)
             .map_err(|err| Error::Sql(err.into()))?;
+        self.invalidate_table_info_cache();
         Ok(())
     }
 
@@ -734,6 +761,7 @@ impl Database {
         catalog
             .create_namespace(meta.clone())
             .map_err(|err| Error::Sql(err.into()))?;
+        self.invalidate_table_info_cache();
         Ok(meta.into())
     }
 
@@ -779,6 +807,7 @@ impl Database {
         catalog
             .delete_namespace(catalog_name, namespace_name)
             .map_err(|err| Error::Sql(err.into()))?;
+        self.invalidate_table_info_cache();
         Ok(())
     }
 
@@ -860,6 +889,8 @@ impl Database {
         let mut overlay = CatalogOverlay::new();
         overlay.add_table(TableFqn::from(&table), table.clone());
         catalog.apply_overlay(overlay);
+        drop(catalog); // Release lock before invalidating cache
+        self.invalidate_table_info_cache();
 
         let info = TableInfo::from(table);
         let namespace_root = namespace.and_then(|ns| ns.storage_root);
@@ -899,6 +930,8 @@ impl Database {
         let mut overlay = CatalogOverlay::new();
         overlay.drop_table(&TableFqn::from(&table));
         catalog.apply_overlay(overlay);
+        drop(catalog); // Release lock before invalidating cache
+        self.invalidate_table_info_cache();
         Ok(())
     }
 
@@ -1042,6 +1075,7 @@ impl<'a> Transaction<'a> {
             storage_root: request.storage_root,
         };
         self.catalog_overlay_mut().add_catalog(meta.clone());
+        self.catalog_modified = true;
         Ok(meta.into())
     }
 
@@ -1072,6 +1106,7 @@ impl<'a> Transaction<'a> {
         } else {
             self.catalog_overlay_mut().drop_catalog(name);
         }
+        self.catalog_modified = true;
         Ok(())
     }
 
@@ -1103,6 +1138,7 @@ impl<'a> Transaction<'a> {
             storage_root,
         };
         self.catalog_overlay_mut().add_namespace(meta.clone());
+        self.catalog_modified = true;
         Ok(meta.into())
     }
 
@@ -1141,6 +1177,7 @@ impl<'a> Transaction<'a> {
             self.catalog_overlay_mut()
                 .drop_namespace(catalog_name, namespace_name);
         }
+        self.catalog_modified = true;
         Ok(())
     }
 
@@ -1233,6 +1270,7 @@ impl<'a> Transaction<'a> {
 
         self.catalog_overlay_mut()
             .add_table(TableFqn::from(&table), table.clone());
+        self.catalog_modified = true;
         let info = TableInfo::from(table);
         let namespace_root = namespace.and_then(|ns| ns.storage_root);
         Ok(apply_storage_location(info, namespace_root.as_deref()))
@@ -1266,6 +1304,7 @@ impl<'a> Transaction<'a> {
 
         self.catalog_overlay_mut()
             .drop_table(&TableFqn::from(&table));
+        self.catalog_modified = true;
         Ok(())
     }
 }

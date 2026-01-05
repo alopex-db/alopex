@@ -2,7 +2,23 @@
 //!
 //! This module defines the CLI structure using clap derive macros.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
+
+fn parse_shell(value: &str) -> Result<Shell, String> {
+    match value {
+        "bash" => Ok(Shell::Bash),
+        "zsh" => Ok(Shell::Zsh),
+        "fish" => Ok(Shell::Fish),
+        "pwsh" | "powershell" => Ok(Shell::PowerShell),
+        _ => Err(format!(
+            "Unsupported shell: {}. Use bash, zsh, fish, or pwsh.",
+            value
+        )),
+    }
+}
 
 /// Alopex CLI - Command-line interface for Alopex DB
 #[derive(Parser, Debug)]
@@ -12,6 +28,10 @@ pub struct Cli {
     /// Path to the database directory (local path or S3 URI)
     #[arg(long)]
     pub data_dir: Option<String>,
+
+    /// Profile name to use for database configuration
+    #[arg(long)]
+    pub profile: Option<String>,
 
     /// Run in in-memory mode (no persistence)
     #[arg(long, conflicts_with = "data_dir")]
@@ -36,6 +56,14 @@ pub struct Cli {
     /// Thread mode (multi or single)
     #[arg(long, value_enum, default_value = "multi")]
     pub thread_mode: ThreadMode,
+
+    /// Enable batch mode (non-interactive)
+    #[arg(long, short = 'b')]
+    pub batch: bool,
+
+    /// Automatically answer yes to prompts
+    #[arg(long)]
+    pub yes: bool,
 
     /// Subcommand to execute
     #[command(subcommand)]
@@ -77,6 +105,11 @@ pub enum ThreadMode {
 /// Top-level subcommands
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Profile management
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
     /// Key-Value operations
     Kv {
         #[command(subcommand)]
@@ -98,6 +131,44 @@ pub enum Command {
     Columnar {
         #[command(subcommand)]
         command: ColumnarCommand,
+    },
+    /// Show CLI and file format version information
+    Version,
+    /// Generate shell completion scripts
+    Completions {
+        /// Shell type (bash, zsh, fish, pwsh)
+        #[arg(value_parser = parse_shell, value_name = "SHELL")]
+        shell: Shell,
+    },
+}
+
+/// Profile subcommands
+#[derive(Subcommand, Debug, Clone)]
+pub enum ProfileCommand {
+    /// Create a profile
+    Create {
+        /// Profile name
+        name: String,
+        /// Path to the database directory (local path or S3 URI)
+        #[arg(long)]
+        data_dir: String,
+    },
+    /// List profiles
+    List,
+    /// Show profile details
+    Show {
+        /// Profile name
+        name: String,
+    },
+    /// Delete a profile
+    Delete {
+        /// Profile name
+        name: String,
+    },
+    /// Set the default profile
+    SetDefault {
+        /// Profile name
+        name: String,
     },
 }
 
@@ -126,6 +197,58 @@ pub enum KvCommand {
         /// Filter keys by prefix
         #[arg(long)]
         prefix: Option<String>,
+    },
+    /// Transaction operations
+    #[command(subcommand)]
+    Txn(KvTxnCommand),
+}
+
+/// KV transaction subcommands
+#[derive(Subcommand, Debug)]
+pub enum KvTxnCommand {
+    /// Begin a transaction
+    Begin {
+        /// Transaction timeout in seconds (default: 60)
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+    },
+    /// Get a value within a transaction
+    Get {
+        /// The key to retrieve
+        key: String,
+        /// Transaction ID
+        #[arg(long)]
+        txn_id: String,
+    },
+    /// Put a key-value pair within a transaction
+    Put {
+        /// The key to set
+        key: String,
+        /// The value to store
+        value: String,
+        /// Transaction ID
+        #[arg(long)]
+        txn_id: String,
+    },
+    /// Delete a key within a transaction
+    Delete {
+        /// The key to delete
+        key: String,
+        /// Transaction ID
+        #[arg(long)]
+        txn_id: String,
+    },
+    /// Commit a transaction
+    Commit {
+        /// Transaction ID
+        #[arg(long)]
+        txn_id: String,
+    },
+    /// Roll back a transaction
+    Rollback {
+        /// Transaction ID
+        #[arg(long)]
+        txn_id: String,
     },
 }
 
@@ -240,6 +363,67 @@ pub enum ColumnarCommand {
     },
     /// List all columnar segments
     List,
+    /// Ingest a file into columnar storage
+    Ingest {
+        /// Input file path (CSV or Parquet)
+        #[arg(long)]
+        file: PathBuf,
+        /// Target table name
+        #[arg(long)]
+        table: String,
+        /// CSV delimiter character
+        #[arg(long, default_value = ",", value_parser = clap::value_parser!(char))]
+        delimiter: char,
+        /// Whether the CSV has a header row
+        #[arg(
+            long,
+            default_value = "true",
+            value_parser = clap::value_parser!(bool),
+            action = clap::ArgAction::Set
+        )]
+        header: bool,
+        /// Compression type (lz4, zstd, none)
+        #[arg(long, default_value = "lz4")]
+        compression: String,
+        /// Row group size (rows per group)
+        #[arg(long)]
+        row_group_size: Option<usize>,
+    },
+    /// Index management
+    #[command(subcommand)]
+    Index(IndexCommand),
+}
+
+/// Columnar index subcommands
+#[derive(Subcommand, Debug)]
+pub enum IndexCommand {
+    /// Create an index
+    Create {
+        /// Segment ID
+        #[arg(long)]
+        segment: String,
+        /// Column name
+        #[arg(long)]
+        column: String,
+        /// Index type (minmax, bloom)
+        #[arg(long = "type")]
+        index_type: String,
+    },
+    /// List indexes
+    List {
+        /// Segment ID
+        #[arg(long)]
+        segment: String,
+    },
+    /// Drop an index
+    Drop {
+        /// Segment ID
+        #[arg(long)]
+        segment: String,
+        /// Column name
+        #[arg(long)]
+        column: String,
+    },
 }
 
 #[cfg(test)]
@@ -322,6 +506,76 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_profile_option_batch_yes() {
+        let args = vec![
+            "alopex",
+            "--profile",
+            "dev",
+            "--batch",
+            "--yes",
+            "--in-memory",
+            "kv",
+            "list",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert_eq!(cli.profile.as_deref(), Some("dev"));
+        assert!(cli.batch);
+        assert!(cli.yes);
+    }
+
+    #[test]
+    fn test_parse_batch_short_flag() {
+        let args = vec!["alopex", "-b", "--in-memory", "kv", "list"];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(cli.batch);
+    }
+
+    #[test]
+    fn test_parse_profile_create_subcommand() {
+        let args = vec![
+            "alopex",
+            "profile",
+            "create",
+            "dev",
+            "--data-dir",
+            "/path/to/db",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Profile {
+                command: ProfileCommand::Create { name, data_dir }
+            }
+                if name == "dev" && data_dir == "/path/to/db"
+        ));
+    }
+
+    #[test]
+    fn test_parse_completions_bash() {
+        let args = vec!["alopex", "completions", "bash"];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Completions { shell } if shell == Shell::Bash
+        ));
+    }
+
+    #[test]
+    fn test_parse_completions_pwsh() {
+        let args = vec!["alopex", "completions", "pwsh"];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Completions { shell } if shell == Shell::PowerShell
+        ));
+    }
+
+    #[test]
     fn test_parse_kv_put() {
         let args = vec!["alopex", "--in-memory", "kv", "put", "mykey", "myvalue"];
         let cli = Cli::try_parse_from(args).unwrap();
@@ -344,6 +598,41 @@ mod tests {
             Command::Kv {
                 command: KvCommand::Delete { key }
             } if key == "mykey"
+        ));
+    }
+
+    #[test]
+    fn test_parse_kv_txn_begin() {
+        let args = vec!["alopex", "kv", "txn", "begin", "--timeout-secs", "30"];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Kv {
+                command: KvCommand::Txn(KvTxnCommand::Begin {
+                    timeout_secs: Some(30)
+                })
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_kv_txn_get_requires_txn_id() {
+        let args = vec!["alopex", "kv", "txn", "get", "mykey"];
+
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+
+    #[test]
+    fn test_parse_kv_txn_get() {
+        let args = vec!["alopex", "kv", "txn", "get", "mykey", "--txn-id", "txn123"];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Kv {
+                command: KvCommand::Txn(KvTxnCommand::Get { key, txn_id })
+            } if key == "mykey" && txn_id == "txn123"
         ));
     }
 
@@ -535,6 +824,113 @@ mod tests {
             Command::Columnar {
                 command: ColumnarCommand::List
             }
+        ));
+    }
+
+    #[test]
+    fn test_parse_columnar_ingest_defaults() {
+        let args = vec![
+            "alopex",
+            "--in-memory",
+            "columnar",
+            "ingest",
+            "--file",
+            "data.csv",
+            "--table",
+            "events",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Columnar {
+                command: ColumnarCommand::Ingest {
+                    file,
+                    table,
+                    delimiter,
+                    header,
+                    compression,
+                    row_group_size,
+                }
+            } if file == std::path::Path::new("data.csv")
+                && table == "events"
+                && delimiter == ','
+                && header
+                && compression == "lz4"
+                && row_group_size.is_none()
+        ));
+    }
+
+    #[test]
+    fn test_parse_columnar_ingest_custom_options() {
+        let args = vec![
+            "alopex",
+            "--in-memory",
+            "columnar",
+            "ingest",
+            "--file",
+            "data.csv",
+            "--table",
+            "events",
+            "--delimiter",
+            ";",
+            "--header",
+            "false",
+            "--compression",
+            "zstd",
+            "--row-group-size",
+            "500",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Columnar {
+                command: ColumnarCommand::Ingest {
+                    file,
+                    table,
+                    delimiter,
+                    header,
+                    compression,
+                    row_group_size,
+                }
+            } if file == std::path::Path::new("data.csv")
+                && table == "events"
+                && delimiter == ';'
+                && !header
+                && compression == "zstd"
+                && row_group_size == Some(500)
+        ));
+    }
+
+    #[test]
+    fn test_parse_columnar_index_create() {
+        let args = vec![
+            "alopex",
+            "--in-memory",
+            "columnar",
+            "index",
+            "create",
+            "--segment",
+            "123:1",
+            "--column",
+            "col1",
+            "--type",
+            "bloom",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Columnar {
+                command: ColumnarCommand::Index(IndexCommand::Create {
+                    segment,
+                    column,
+                    index_type,
+                })
+            } if segment == "123:1"
+                && column == "col1"
+                && index_type == "bloom"
         ));
     }
 

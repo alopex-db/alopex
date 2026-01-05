@@ -222,7 +222,7 @@ impl<W: Write> StreamingWriter<W> {
     fn trigger_fallback(&mut self) -> Result<()> {
         if !self.quiet {
             eprintln!(
-                "Warning: Result count exceeds {} rows. Switching to jsonl format.",
+                "Warning: Result count exceeds {} rows. Consider --output jsonl. Switching to jsonl format.",
                 self.buffer_limit
             );
         }
@@ -493,5 +493,23 @@ mod tests {
         assert!(result.contains("name"));
         assert!(result.contains("Alice"));
         assert!(result.contains("Bob"));
+    }
+
+    #[test]
+    fn test_streaming_large_row_count_does_not_buffer() {
+        let formatter = Box::new(JsonlFormatter::new());
+        let columns = test_columns();
+
+        let mut writer = StreamingWriter::new(std::io::sink(), formatter, columns, None);
+
+        writer.prepare(None).unwrap();
+        for i in 0..12_000 {
+            writer.write_row(test_row(i, "row")).unwrap();
+        }
+
+        assert_eq!(writer.written_count(), 12_000);
+        assert!(writer.buffer.is_empty());
+
+        writer.finish().unwrap();
     }
 }

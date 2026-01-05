@@ -12,3 +12,4 @@ pub mod hnsw;
 pub mod kv;
 pub mod sql;
 pub mod vector;
+pub mod version;

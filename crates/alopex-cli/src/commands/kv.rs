@@ -3,13 +3,16 @@
 //! Supports: get, put, delete, list
 
 use std::io::Write;
+use std::time::Duration;
 
-use alopex_embedded::{Database, TxnMode};
+use alopex_embedded::{Database, TransactionManager as Transaction, TxnMode};
 
-use crate::cli::KvCommand;
+use crate::cli::{KvCommand, KvTxnCommand};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::streaming::{StreamingWriter, WriteStatus};
+
+const DEFAULT_TXN_TIMEOUT_SECS: u64 = 60;
 
 /// Execute a KV command.
 ///
@@ -28,7 +31,160 @@ pub fn execute<W: Write>(
         KvCommand::Put { key, value } => execute_put(db, &key, &value, writer),
         KvCommand::Delete { key } => execute_delete(db, &key, writer),
         KvCommand::List { prefix } => execute_list(db, prefix.as_deref(), writer),
+        KvCommand::Txn(cmd) => execute_txn_command(db, cmd, writer),
     }
+}
+
+fn map_txn_error(txn_id: &str, err: alopex_embedded::Error) -> CliError {
+    match err {
+        alopex_embedded::Error::InvalidTransactionId(_) => {
+            CliError::InvalidTransactionId(txn_id.to_string())
+        }
+        other => CliError::Database(other),
+    }
+}
+
+fn map_txn_result<T>(
+    txn_id: &str,
+    result: std::result::Result<T, alopex_embedded::Error>,
+) -> Result<T> {
+    result.map_err(|err| map_txn_error(txn_id, err))
+}
+
+fn ensure_txn_not_expired(db: &Database, txn_id: &str) -> Result<()> {
+    let expired = map_txn_result(txn_id, Transaction::is_expired(db, txn_id))?;
+    if expired {
+        let _ = Transaction::rollback(db, txn_id);
+        return Err(CliError::TransactionTimeout(txn_id.to_string()));
+    }
+    Ok(())
+}
+
+fn execute_txn_command<W: Write>(
+    db: &Database,
+    cmd: KvTxnCommand,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    match cmd {
+        KvTxnCommand::Begin { timeout_secs } => execute_txn_begin(db, timeout_secs, writer),
+        KvTxnCommand::Get { key, txn_id } => execute_txn_get(db, &key, &txn_id, writer),
+        KvTxnCommand::Put { key, value, txn_id } => {
+            execute_txn_put(db, &key, &value, &txn_id, writer)
+        }
+        KvTxnCommand::Delete { key, txn_id } => execute_txn_delete(db, &key, &txn_id, writer),
+        KvTxnCommand::Commit { txn_id } => execute_txn_commit(db, &txn_id, writer),
+        KvTxnCommand::Rollback { txn_id } => execute_txn_rollback(db, &txn_id, writer),
+    }
+}
+
+fn execute_txn_begin<W: Write>(
+    db: &Database,
+    timeout_secs: Option<u64>,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TXN_TIMEOUT_SECS));
+    let txn_id = Transaction::begin_with_timeout(db, timeout)?;
+
+    writer.prepare(Some(1))?;
+    let row = Row::new(vec![Value::Text("txn_id".to_string()), Value::Text(txn_id)]);
+    writer.write_row(row)?;
+    writer.finish()?;
+    Ok(())
+}
+
+fn execute_txn_get<W: Write>(
+    db: &Database,
+    key: &str,
+    txn_id: &str,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    ensure_txn_not_expired(db, txn_id)?;
+    let value = map_txn_result(txn_id, Transaction::get(db, txn_id, key.as_bytes()))?;
+    write_kv_value(key, value, writer)
+}
+
+fn execute_txn_put<W: Write>(
+    db: &Database,
+    key: &str,
+    value: &str,
+    txn_id: &str,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    ensure_txn_not_expired(db, txn_id)?;
+    map_txn_result(
+        txn_id,
+        Transaction::put(db, txn_id, key.as_bytes(), value.as_bytes()),
+    )?;
+
+    write_status_if_needed(writer, &format!("Staged key: {}", key))
+}
+
+fn execute_txn_delete<W: Write>(
+    db: &Database,
+    key: &str,
+    txn_id: &str,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    ensure_txn_not_expired(db, txn_id)?;
+    map_txn_result(txn_id, Transaction::delete(db, txn_id, key.as_bytes()))?;
+
+    write_status_if_needed(writer, &format!("Staged delete: {}", key))
+}
+
+fn execute_txn_commit<W: Write>(
+    db: &Database,
+    txn_id: &str,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    ensure_txn_not_expired(db, txn_id)?;
+    map_txn_result(txn_id, Transaction::commit(db, txn_id))?;
+
+    write_status_if_needed(writer, &format!("Committed transaction: {}", txn_id))
+}
+
+fn execute_txn_rollback<W: Write>(
+    db: &Database,
+    txn_id: &str,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    map_txn_result(txn_id, Transaction::rollback(db, txn_id))?;
+
+    write_status_if_needed(writer, &format!("Rolled back transaction: {}", txn_id))
+}
+
+fn write_kv_value<W: Write>(
+    key: &str,
+    value: Option<Vec<u8>>,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    let Some(value) = value else {
+        return Err(CliError::InvalidArgument(format!("Key not found: {}", key)));
+    };
+
+    let value_display = match std::str::from_utf8(&value) {
+        Ok(s) => Value::Text(s.to_string()),
+        Err(_) => Value::Bytes(value),
+    };
+    writer.prepare(Some(1))?;
+    let row = Row::new(vec![Value::Text(key.to_string()), value_display]);
+    writer.write_row(row)?;
+    writer.finish()?;
+    Ok(())
+}
+
+fn write_status_if_needed<W: Write>(writer: &mut StreamingWriter<W>, message: &str) -> Result<()> {
+    if writer.is_quiet() {
+        return Ok(());
+    }
+
+    writer.prepare(Some(1))?;
+    let row = Row::new(vec![
+        Value::Text("OK".to_string()),
+        Value::Text(message.to_string()),
+    ]);
+    writer.write_row(row)?;
+    writer.finish()?;
+    Ok(())
 }
 
 /// Execute a KV get command.

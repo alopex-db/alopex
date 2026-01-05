@@ -8,15 +8,19 @@ pub mod catalog_api;
 pub mod columnar_api;
 pub mod options;
 mod sql_api;
+mod txn_manager;
 
-pub use crate::catalog::Catalog;
+pub use crate::catalog::{CachedTableInfo, Catalog};
 pub use crate::catalog_api::{
     CatalogInfo, ColumnDefinition, ColumnInfo, CreateCatalogRequest, CreateNamespaceRequest,
     CreateTableRequest, IndexInfo, NamespaceInfo, StorageInfo, TableInfo,
 };
-pub use crate::columnar_api::{ColumnarRowIterator, EmbeddedConfig, StorageMode};
+pub use crate::columnar_api::{
+    ColumnarIndexInfo, ColumnarIndexType, ColumnarRowIterator, EmbeddedConfig, StorageMode,
+};
 pub use crate::options::DatabaseOptions;
 pub use crate::sql_api::{SqlStreamingResult, StreamingQueryResult, StreamingRows};
+pub use crate::txn_manager::{TransactionInfo, TransactionManager};
 pub use alopex_sql::{DataSourceFormat, TableType};
 /// `Database::execute_sql()` / `Transaction::execute_sql()` の返却型。
 pub type SqlResult = alopex_sql::SqlResult;
@@ -37,8 +41,9 @@ pub use alopex_sql::executor::QueryRowIterator;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::result;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// A convenience `Result` type for database operations.
@@ -95,6 +100,9 @@ pub enum Error {
     /// トランザクションは read-only です。
     #[error("トランザクションは読み取り専用です")]
     TxnReadOnly,
+    /// Transaction ID is invalid or missing.
+    #[error("invalid transaction id: {0}")]
+    InvalidTransactionId(String),
     /// The operation requires in-memory columnar mode.
     #[error("not in in-memory columnar mode")]
     NotInMemoryMode,
@@ -123,6 +131,10 @@ pub struct Database {
     pub(crate) sql_catalog: Arc<RwLock<alopex_sql::catalog::PersistentCatalog<AnyKV>>>,
     pub(crate) hnsw_cache: RwLock<HashMap<String, Arc<HnswIndex>>>,
     pub(crate) vector_cache: RwLock<Option<HashMap<Key, CachedVector>>>,
+    /// Table info cache for scan/write operations.
+    pub(crate) table_info_cache: RwLock<HashMap<String, CachedTableInfo>>,
+    /// Cache epoch for invalidation (incremented on DDL operations).
+    pub(crate) table_info_cache_epoch: AtomicU64,
     pub(crate) columnar_mode: StorageMode,
     pub(crate) columnar_bridge: ColumnarKvsBridge,
     pub(crate) columnar_memory: Option<InMemorySegmentStore>,
@@ -137,6 +149,63 @@ pub(crate) fn disk_data_dir_path(path: &Path) -> std::path::PathBuf {
     } else {
         path.to_path_buf()
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_file_version_from_storage(path: &Path) -> alopex_core::storage::format::FileVersion {
+    use alopex_core::storage::format::{FileHeader, FileVersion, HEADER_SIZE};
+    use std::io::Read;
+
+    let Some(file_path) = resolve_format_file_path(path) else {
+        return FileVersion::CURRENT;
+    };
+
+    let mut header_bytes = [0u8; HEADER_SIZE];
+    let Ok(mut file) = fs::File::open(file_path) else {
+        return FileVersion::CURRENT;
+    };
+    if file.read_exact(&mut header_bytes).is_err() {
+        return FileVersion::CURRENT;
+    }
+    match FileHeader::from_bytes(&header_bytes) {
+        Ok(header) => header.version,
+        Err(_) => FileVersion::CURRENT,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn read_file_version_from_storage(_path: &Path) -> alopex_core::storage::format::FileVersion {
+    alopex_core::storage::format::FileVersion::CURRENT
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_format_file_path(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+        return Some(path.to_path_buf());
+    }
+
+    if path.is_dir() {
+        if let Some(ext) = path.extension() {
+            if ext == "d" {
+                let candidate = path.with_extension("");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if entry_path.extension().is_some_and(|ext| ext == "alopex") && entry_path.is_file()
+                {
+                    return Some(entry_path);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 impl Database {
@@ -277,6 +346,8 @@ impl Database {
             sql_catalog,
             hnsw_cache: RwLock::new(HashMap::new()),
             vector_cache: RwLock::new(None),
+            table_info_cache: RwLock::new(HashMap::new()),
+            table_info_cache_epoch: AtomicU64::new(0),
             columnar_mode,
             columnar_bridge,
             columnar_memory,
@@ -316,9 +387,67 @@ impl Database {
         cache.remove(name);
     }
 
+    /// Returns the current table info cache epoch.
+    pub fn table_info_cache_epoch(&self) -> u64 {
+        self.table_info_cache_epoch.load(Ordering::Relaxed)
+    }
+
+    /// Retrieves cached table info if available and epoch matches.
+    pub fn get_cached_table_info(
+        &self,
+        catalog_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Option<CachedTableInfo> {
+        let cache = self
+            .table_info_cache
+            .read()
+            .expect("table info cache lock poisoned");
+        let key = format!("{}.{}.{}", catalog_name, namespace_name, table_name);
+        cache.get(&key).cloned()
+    }
+
+    /// Stores table info in the cache.
+    pub fn cache_table_info(
+        &self,
+        catalog_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+        info: CachedTableInfo,
+    ) {
+        let mut cache = self
+            .table_info_cache
+            .write()
+            .expect("table info cache lock poisoned");
+        let key = format!("{}.{}.{}", catalog_name, namespace_name, table_name);
+        cache.insert(key, info);
+    }
+
+    /// Invalidates the table info cache (called on DDL operations).
+    pub fn invalidate_table_info_cache(&self) {
+        self.table_info_cache_epoch.fetch_add(1, Ordering::Relaxed);
+        let mut cache = self
+            .table_info_cache
+            .write()
+            .expect("table info cache lock poisoned");
+        cache.clear();
+    }
+
     /// Flushes the current in-memory data to an SSTable on disk (beta).
     pub fn flush(&self) -> Result<()> {
         self.store.flush().map_err(Error::Core)
+    }
+
+    /// Returns the file format version supported by the embedded engine.
+    pub fn file_format_version(&self) -> alopex_core::storage::format::FileVersion {
+        use alopex_core::storage::format::FileVersion;
+
+        match self.store.as_ref() {
+            AnyKV::Memory(_) => FileVersion::CURRENT,
+            AnyKV::Lsm(kv) => read_file_version_from_storage(&kv.data_dir),
+            #[cfg(feature = "s3")]
+            AnyKV::S3(kv) => read_file_version_from_storage(kv.cache_dir()),
+        }
     }
 
     /// Returns current memory usage statistics (in-memory KV only).
@@ -594,6 +723,7 @@ impl Database {
             vector_cache_updates: HashMap::new(),
             vector_cache_deletes: Vec::new(),
             vector_cache_invalidated: false,
+            catalog_modified: false,
         })
     }
 }
@@ -613,6 +743,8 @@ pub struct Transaction<'a> {
     vector_cache_updates: HashMap<Key, CachedVector>,
     vector_cache_deletes: Vec<Key>,
     vector_cache_invalidated: bool,
+    /// Whether DDL operations were performed in this transaction.
+    pub(crate) catalog_modified: bool,
 }
 
 /// A search result row containing key, metadata, and similarity score.
@@ -1083,8 +1215,15 @@ impl<'a> Transaction<'a> {
         }
 
         // KV commit 成功後のみ、カタログにオーバーレイを適用する。
+        let overlay = std::mem::take(&mut self.overlay);
+        let catalog_modified = self.catalog_modified;
         let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
-        catalog.apply_overlay(std::mem::take(&mut self.overlay));
+        catalog.apply_overlay(overlay);
+        drop(catalog); // Release lock before invalidating cache
+                       // Invalidate table info cache only if DDL operations were performed
+        if catalog_modified {
+            self.db.invalidate_table_info_cache();
+        }
         Ok(())
     }
 
@@ -1505,6 +1644,22 @@ mod tests {
         let mut txn = db.begin(TxnMode::ReadOnly).unwrap();
         let val = txn.get(b"non-existent-key").unwrap();
         assert!(val.is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_file_format_version_reads_alopex_header() {
+        use alopex_core::storage::format::{AlopexFileWriter, FileFlags, FileVersion};
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("format-test.alopex");
+        let expected = FileVersion::new(0, 0, 1);
+
+        let writer = AlopexFileWriter::new(path.clone(), expected, FileFlags(0)).unwrap();
+        writer.finalize().unwrap();
+
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.file_format_version(), expected);
     }
 
     #[test]
