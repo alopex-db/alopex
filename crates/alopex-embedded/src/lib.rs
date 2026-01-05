@@ -10,7 +10,7 @@ pub mod options;
 mod sql_api;
 mod txn_manager;
 
-pub use crate::catalog::Catalog;
+pub use crate::catalog::{CachedTableInfo, Catalog};
 pub use crate::catalog_api::{
     CatalogInfo, ColumnDefinition, ColumnInfo, CreateCatalogRequest, CreateNamespaceRequest,
     CreateTableRequest, IndexInfo, NamespaceInfo, StorageInfo, TableInfo,
@@ -43,6 +43,7 @@ use std::convert::TryInto;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::result;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// A convenience `Result` type for database operations.
@@ -130,6 +131,10 @@ pub struct Database {
     pub(crate) sql_catalog: Arc<RwLock<alopex_sql::catalog::PersistentCatalog<AnyKV>>>,
     pub(crate) hnsw_cache: RwLock<HashMap<String, Arc<HnswIndex>>>,
     pub(crate) vector_cache: RwLock<Option<HashMap<Key, CachedVector>>>,
+    /// Table info cache for scan/write operations.
+    pub(crate) table_info_cache: RwLock<HashMap<String, CachedTableInfo>>,
+    /// Cache epoch for invalidation (incremented on DDL operations).
+    pub(crate) table_info_cache_epoch: AtomicU64,
     pub(crate) columnar_mode: StorageMode,
     pub(crate) columnar_bridge: ColumnarKvsBridge,
     pub(crate) columnar_memory: Option<InMemorySegmentStore>,
@@ -341,6 +346,8 @@ impl Database {
             sql_catalog,
             hnsw_cache: RwLock::new(HashMap::new()),
             vector_cache: RwLock::new(None),
+            table_info_cache: RwLock::new(HashMap::new()),
+            table_info_cache_epoch: AtomicU64::new(0),
             columnar_mode,
             columnar_bridge,
             columnar_memory,
@@ -378,6 +385,52 @@ impl Database {
     fn hnsw_cache_remove(&self, name: &str) {
         let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
         cache.remove(name);
+    }
+
+    /// Returns the current table info cache epoch.
+    pub fn table_info_cache_epoch(&self) -> u64 {
+        self.table_info_cache_epoch.load(Ordering::Relaxed)
+    }
+
+    /// Retrieves cached table info if available and epoch matches.
+    pub fn get_cached_table_info(
+        &self,
+        catalog_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Option<CachedTableInfo> {
+        let cache = self
+            .table_info_cache
+            .read()
+            .expect("table info cache lock poisoned");
+        let key = format!("{}.{}.{}", catalog_name, namespace_name, table_name);
+        cache.get(&key).cloned()
+    }
+
+    /// Stores table info in the cache.
+    pub fn cache_table_info(
+        &self,
+        catalog_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+        info: CachedTableInfo,
+    ) {
+        let mut cache = self
+            .table_info_cache
+            .write()
+            .expect("table info cache lock poisoned");
+        let key = format!("{}.{}.{}", catalog_name, namespace_name, table_name);
+        cache.insert(key, info);
+    }
+
+    /// Invalidates the table info cache (called on DDL operations).
+    pub fn invalidate_table_info_cache(&self) {
+        self.table_info_cache_epoch.fetch_add(1, Ordering::Relaxed);
+        let mut cache = self
+            .table_info_cache
+            .write()
+            .expect("table info cache lock poisoned");
+        cache.clear();
     }
 
     /// Flushes the current in-memory data to an SSTable on disk (beta).
@@ -670,6 +723,7 @@ impl Database {
             vector_cache_updates: HashMap::new(),
             vector_cache_deletes: Vec::new(),
             vector_cache_invalidated: false,
+            catalog_modified: false,
         })
     }
 }
@@ -689,6 +743,8 @@ pub struct Transaction<'a> {
     vector_cache_updates: HashMap<Key, CachedVector>,
     vector_cache_deletes: Vec<Key>,
     vector_cache_invalidated: bool,
+    /// Whether DDL operations were performed in this transaction.
+    pub(crate) catalog_modified: bool,
 }
 
 /// A search result row containing key, metadata, and similarity score.
@@ -1159,8 +1215,15 @@ impl<'a> Transaction<'a> {
         }
 
         // KV commit 成功後のみ、カタログにオーバーレイを適用する。
+        let overlay = std::mem::take(&mut self.overlay);
+        let catalog_modified = self.catalog_modified;
         let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
-        catalog.apply_overlay(std::mem::take(&mut self.overlay));
+        catalog.apply_overlay(overlay);
+        drop(catalog); // Release lock before invalidating cache
+                       // Invalidate table info cache only if DDL operations were performed
+        if catalog_modified {
+            self.db.invalidate_table_info_cache();
+        }
         Ok(())
     }
 

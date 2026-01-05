@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule};
@@ -13,21 +12,10 @@ use crate::catalog::resolve_credentials;
 use crate::error;
 
 thread_local! {
+    /// Cached polars.scan_parquet function (Python-specific optimization)
     static POLARS_SCAN_PARQUET: RefCell<Option<Py<PyAny>>> = const { RefCell::new(None) };
-    static SCAN_TABLE_CACHE: RefCell<Option<ScanTableCacheEntry>> = const { RefCell::new(None) };
+    /// Cached polars availability check (Python-specific optimization)
     static POLARS_AVAILABLE: RefCell<Option<bool>> = const { RefCell::new(None) };
-}
-
-static SCAN_TABLE_CACHE_EPOCH: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Clone)]
-struct ScanTableCacheEntry {
-    catalog: String,
-    namespace: String,
-    table: String,
-    storage_location: String,
-    format_upper: String,
-    epoch: u64,
 }
 
 #[allow(deprecated)]
@@ -46,54 +34,6 @@ fn get_scan_parquet(py: Python<'_>) -> PyResult<Py<PyAny>> {
         *cell.borrow_mut() = Some(func.clone_ref(py));
         Ok(func)
     })
-}
-
-fn load_scan_table_cache(
-    catalog_name: &str,
-    namespace: &str,
-    table_name: &str,
-) -> Option<ScanTableCacheEntry> {
-    let epoch = SCAN_TABLE_CACHE_EPOCH.load(Ordering::Relaxed);
-    SCAN_TABLE_CACHE.with(|cell| {
-        cell.borrow().as_ref().and_then(|entry| {
-            if entry.epoch == epoch
-                && entry.catalog == catalog_name
-                && entry.namespace == namespace
-                && entry.table == table_name
-            {
-                Some(entry.clone())
-            } else {
-                None
-            }
-        })
-    })
-}
-
-fn store_scan_table_cache(
-    catalog_name: &str,
-    namespace: &str,
-    table_name: &str,
-    storage_location: String,
-    format_upper: String,
-) {
-    let epoch = SCAN_TABLE_CACHE_EPOCH.load(Ordering::Relaxed);
-    SCAN_TABLE_CACHE.with(|cell| {
-        *cell.borrow_mut() = Some(ScanTableCacheEntry {
-            catalog: catalog_name.to_string(),
-            namespace: namespace.to_string(),
-            table: table_name.to_string(),
-            storage_location,
-            format_upper,
-            epoch,
-        });
-    });
-}
-
-fn clear_scan_table_cache() {
-    SCAN_TABLE_CACHE_EPOCH.fetch_add(1, Ordering::Relaxed);
-    SCAN_TABLE_CACHE.with(|cell| {
-        *cell.borrow_mut() = None;
-    });
 }
 
 fn credential_provider_is_auto(credential_provider: &Bound<'_, PyAny>) -> PyResult<bool> {
@@ -331,7 +271,7 @@ impl PyCatalog {
     #[staticmethod]
     fn create_catalog(py: Python<'_>, name: &str) -> PyResult<()> {
         validate_identifier(name)?;
-        clear_scan_table_cache();
+        // Cache invalidation is now handled at the embedded layer
         py.allow_threads(|| alopex_embedded::Catalog::create_catalog(name))
             .map_err(error::embedded_err)
     }
@@ -351,7 +291,7 @@ impl PyCatalog {
     #[staticmethod]
     fn delete_catalog(py: Python<'_>, name: &str) -> PyResult<()> {
         validate_identifier(name)?;
-        clear_scan_table_cache();
+        // Cache invalidation is now handled at the embedded layer
         py.allow_threads(|| alopex_embedded::Catalog::delete_catalog(name))
             .map_err(error::embedded_err)
     }
@@ -374,7 +314,7 @@ impl PyCatalog {
     fn create_namespace(py: Python<'_>, catalog_name: &str, namespace: &str) -> PyResult<()> {
         validate_identifier(catalog_name)?;
         validate_identifier(namespace)?;
-        clear_scan_table_cache();
+        // Cache invalidation is now handled at the embedded layer
         py.allow_threads(|| alopex_embedded::Catalog::create_namespace(catalog_name, namespace))
             .map_err(|err| match err {
                 alopex_embedded::Error::CatalogNotFound(name) => {
@@ -401,7 +341,7 @@ impl PyCatalog {
     fn delete_namespace(py: Python<'_>, catalog_name: &str, namespace: &str) -> PyResult<()> {
         validate_identifier(catalog_name)?;
         validate_identifier(namespace)?;
-        clear_scan_table_cache();
+        // Cache invalidation is now handled at the embedded layer
         py.allow_threads(|| alopex_embedded::Catalog::delete_namespace(catalog_name, namespace))
             .map_err(error::embedded_err)
     }
@@ -451,7 +391,7 @@ impl PyCatalog {
         validate_identifier(namespace)?;
         validate_identifier(table_name)?;
         validate_storage_location(&storage_location)?;
-        clear_scan_table_cache();
+        // Cache invalidation is now handled at the embedded layer
 
         let normalized_format = data_source_format.trim().to_ascii_uppercase();
         if normalized_format != "PARQUET" {
@@ -504,7 +444,7 @@ impl PyCatalog {
         validate_identifier(catalog_name)?;
         validate_identifier(namespace)?;
         validate_identifier(table_name)?;
-        clear_scan_table_cache();
+        // Cache invalidation is now handled at the embedded layer
         py.allow_threads(|| {
             alopex_embedded::Catalog::delete_table(catalog_name, namespace, table_name)
         })
@@ -551,32 +491,15 @@ impl PyCatalog {
         validate_identifier(catalog_name)?;
         validate_identifier(namespace)?;
         validate_identifier(table_name)?;
-        let (storage_location, format_upper) =
-            if let Some(entry) = load_scan_table_cache(catalog_name, namespace, table_name) {
-                (entry.storage_location, entry.format_upper)
-            } else {
-                let table_info =
-                    alopex_embedded::Catalog::get_table_info(catalog_name, namespace, table_name)
-                        .map_err(error::embedded_err)?;
-                let storage_location = table_info.storage_location.ok_or_else(|| {
-                    pyo3::PyErr::from(error::AlopexError::StorageLocationRequired)
-                })?;
-                validate_storage_location(&storage_location)?;
-                let format_upper = table_info
-                    .data_source_format
-                    .as_deref()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_ascii_uppercase();
-                store_scan_table_cache(
-                    catalog_name,
-                    namespace,
-                    table_name,
-                    storage_location.clone(),
-                    format_upper.clone(),
-                );
-                (storage_location, format_upper)
-            };
+        // Use the embedded layer's cached table info for performance
+        let cached_info =
+            alopex_embedded::Catalog::get_table_info_cached(catalog_name, namespace, table_name)
+                .map_err(error::embedded_err)?;
+        let storage_location = cached_info
+            .storage_location
+            .ok_or_else(|| pyo3::PyErr::from(error::AlopexError::StorageLocationRequired))?;
+        validate_storage_location(&storage_location)?;
+        let format_upper = cached_info.format;
         if format_upper != "PARQUET" {
             return Err(error::AlopexError::UnsupportedFormat(format_upper).into());
         }
@@ -668,41 +591,35 @@ impl PyCatalog {
         let df_obj = df.unbind();
         let credential_provider = credential_provider.bind(py);
 
-        // Fast path: use cache for overwrite/append on existing table (avoids DB lookup)
+        // Fast path: use embedded cache for overwrite/append on existing table (avoids full DB lookup)
         if matches!(delta_mode, "overwrite" | "append") {
-            if let Some(cached) = load_scan_table_cache(catalog_name, namespace, table_name) {
-                if cached.format_upper != "PARQUET" {
-                    return Err(error::AlopexError::UnsupportedFormat(cached.format_upper).into());
+            if let Ok(cached) =
+                alopex_embedded::Catalog::get_table_info_cached(catalog_name, namespace, table_name)
+            {
+                if cached.format != "PARQUET" {
+                    return Err(error::AlopexError::UnsupportedFormat(cached.format).into());
                 }
-                // Skip credential resolution for local files when using default "auto" provider
-                let resolved = if is_local_storage_location(&cached.storage_location)
-                    && credential_provider_is_auto(credential_provider)?
-                    && storage_options.is_none()
-                {
-                    HashMap::new()
-                } else {
-                    resolve_credentials(
-                        py,
-                        credential_provider,
-                        storage_options.clone(),
-                        &cached.storage_location,
-                    )?
-                };
-                return if delta_mode == "overwrite" {
-                    write_parquet_overwrite(
-                        py,
-                        df_obj.clone_ref(py),
-                        cached.storage_location,
-                        &resolved,
-                    )
-                } else {
-                    write_parquet_append(
-                        py,
-                        df_obj.clone_ref(py),
-                        cached.storage_location,
-                        &resolved,
-                    )
-                };
+                if let Some(storage_loc) = cached.storage_location {
+                    // Skip credential resolution for local files when using default "auto" provider
+                    let resolved = if is_local_storage_location(&storage_loc)
+                        && credential_provider_is_auto(credential_provider)?
+                        && storage_options.is_none()
+                    {
+                        HashMap::new()
+                    } else {
+                        resolve_credentials(
+                            py,
+                            credential_provider,
+                            storage_options.clone(),
+                            &storage_loc,
+                        )?
+                    };
+                    return if delta_mode == "overwrite" {
+                        write_parquet_overwrite(py, df_obj.clone_ref(py), storage_loc, &resolved)
+                    } else {
+                        write_parquet_append(py, df_obj.clone_ref(py), storage_loc, &resolved)
+                    };
+                }
             }
         }
 
@@ -729,14 +646,7 @@ impl PyCatalog {
                 .as_ref()
                 .ok_or(error::AlopexError::StorageLocationRequired)?;
             validate_storage_location(location)?;
-            // Store in cache for subsequent operations
-            store_scan_table_cache(
-                catalog_name,
-                namespace,
-                table_name,
-                location.clone(),
-                normalized_format,
-            );
+            // Caching is now handled at the embedded layer
         }
 
         match (table_info.as_ref(), delta_mode) {
@@ -811,14 +721,7 @@ impl PyCatalog {
                     df_obj.bind(py),
                     storage_location.clone(),
                 )?;
-                // Cache newly created table for subsequent operations
-                store_scan_table_cache(
-                    catalog_name,
-                    namespace,
-                    table_name,
-                    storage_location.clone(),
-                    "PARQUET".to_string(),
-                );
+                // Caching is now handled at the embedded layer
                 let resolved = resolve_credentials(
                     py,
                     credential_provider,
@@ -895,7 +798,7 @@ fn create_table_from_dataframe(
     df: &Bound<'_, PyAny>,
     storage_location: String,
 ) -> PyResult<()> {
-    clear_scan_table_cache();
+    // Cache invalidation is now handled at the embedded layer
     let columns = infer_columns_from_dataframe(df)?;
     let columns = to_embedded_columns(columns);
     let embedded_format = "parquet".to_string();

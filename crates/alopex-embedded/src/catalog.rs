@@ -1,9 +1,39 @@
 //! Unity Catalog-like metadata store for embedded usage.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 
 use crate::{Error, Result};
+
+/// Cached table information for performance optimization.
+/// Contains only the fields needed for scan/write operations.
+#[derive(Debug, Clone)]
+pub struct CachedTableInfo {
+    /// Storage location of the table.
+    pub storage_location: Option<String>,
+    /// Data source format (e.g., "PARQUET").
+    pub format: String,
+}
+
+/// Global cache epoch for invalidation (incremented on DDL operations).
+static TABLE_INFO_CACHE_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Cache entry with epoch for staleness detection.
+#[derive(Clone)]
+struct CacheEntry {
+    info: CachedTableInfo,
+    epoch: u64,
+}
+
+fn table_info_cache() -> &'static RwLock<HashMap<String, CacheEntry>> {
+    static CACHE: OnceLock<RwLock<HashMap<String, CacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn invalidate_cache() {
+    TABLE_INFO_CACHE_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
 
 /// Catalog metadata.
 #[derive(Clone, Debug)]
@@ -154,8 +184,53 @@ impl Catalog {
         })
     }
 
+    /// Get cached table info for scan/write operations.
+    /// Uses an internal cache to avoid repeated catalog lookups.
+    pub fn get_table_info_cached(
+        catalog_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Result<CachedTableInfo> {
+        let cache_key = format!("{}.{}.{}", catalog_name, namespace_name, table_name);
+        let current_epoch = TABLE_INFO_CACHE_EPOCH.load(Ordering::Relaxed);
+
+        // Check cache first
+        if let Ok(cache) = table_info_cache().read() {
+            if let Some(entry) = cache.get(&cache_key) {
+                if entry.epoch == current_epoch {
+                    return Ok(entry.info.clone());
+                }
+            }
+        }
+
+        // Cache miss or stale: fetch from catalog and update cache
+        let info = Self::get_table_info(catalog_name, namespace_name, table_name)?;
+        let cached = CachedTableInfo {
+            storage_location: info.storage_location.clone(),
+            format: info
+                .data_source_format
+                .as_deref()
+                .unwrap_or("PARQUET")
+                .to_ascii_uppercase(),
+        };
+
+        // Update cache
+        if let Ok(mut cache) = table_info_cache().write() {
+            cache.insert(
+                cache_key,
+                CacheEntry {
+                    info: cached.clone(),
+                    epoch: current_epoch,
+                },
+            );
+        }
+
+        Ok(cached)
+    }
+
     /// Create a catalog.
     pub fn create_catalog(name: &str) -> Result<()> {
+        invalidate_cache();
         let mut guard = catalog_store()
             .write()
             .map_err(|_| Error::CatalogLockPoisoned)?;
@@ -178,6 +253,7 @@ impl Catalog {
 
     /// Delete a catalog.
     pub fn delete_catalog(name: &str) -> Result<()> {
+        invalidate_cache();
         let mut guard = catalog_store()
             .write()
             .map_err(|_| Error::CatalogLockPoisoned)?;
@@ -189,6 +265,7 @@ impl Catalog {
 
     /// Create a namespace.
     pub fn create_namespace(catalog_name: &str, namespace_name: &str) -> Result<()> {
+        invalidate_cache();
         let mut guard = catalog_store()
             .write()
             .map_err(|_| Error::CatalogLockPoisoned)?;
@@ -219,6 +296,7 @@ impl Catalog {
 
     /// Delete a namespace.
     pub fn delete_namespace(catalog_name: &str, namespace_name: &str) -> Result<()> {
+        invalidate_cache();
         let mut guard = catalog_store()
             .write()
             .map_err(|_| Error::CatalogLockPoisoned)?;
@@ -244,6 +322,7 @@ impl Catalog {
         storage_location: Option<String>,
         data_source_format: Option<String>,
     ) -> Result<()> {
+        invalidate_cache();
         if let Some(format) = data_source_format.as_deref() {
             if format != "parquet" {
                 return Err(Error::UnsupportedDataSourceFormat(format.to_string()));
@@ -281,6 +360,7 @@ impl Catalog {
 
     /// Delete a table.
     pub fn delete_table(catalog_name: &str, namespace_name: &str, table_name: &str) -> Result<()> {
+        invalidate_cache();
         let mut guard = catalog_store()
             .write()
             .map_err(|_| Error::CatalogLockPoisoned)?;
