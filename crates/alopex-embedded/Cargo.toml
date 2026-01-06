@@ -14,7 +14,7 @@ s3 = ["alopex-core/s3", "tokio", "object_store", "bytes", "futures", "url"]
 
 [dependencies]
 alopex-core.workspace = true
-alopex-sql = { path = "../alopex-sql" }
+alopex-sql.workspace = true
 thiserror = "1.0"
 tokio = { workspace = true, optional = true }
 object_store = { workspace = true, optional = true }
