@@ -127,6 +127,8 @@ dependencies = [
  "arrow",
  "arrow-csv",
  "parquet 53.4.1",
+ "regex",
+ "tempfile",
  "thiserror 1.0.69",
  "tracing",
 ]

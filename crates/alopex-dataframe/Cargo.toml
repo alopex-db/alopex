@@ -12,6 +12,9 @@ categories = ["data-structures"]
 arrow = "53"
 arrow-csv = "53"
 parquet = { version = "53", features = ["arrow"] }
+regex = "1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+tempfile = "3"
