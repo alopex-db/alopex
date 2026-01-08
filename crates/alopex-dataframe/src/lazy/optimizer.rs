@@ -1,5 +1,9 @@
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct Optimizer {
-    _private: (),
+use crate::lazy::LogicalPlan;
+
+pub struct Optimizer;
+
+impl Optimizer {
+    pub fn optimize(plan: &LogicalPlan) -> LogicalPlan {
+        plan.clone()
+    }
 }

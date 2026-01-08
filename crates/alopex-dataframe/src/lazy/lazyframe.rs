@@ -1,68 +1,107 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::{DataFrame, DataFrameError, Expr, Result};
+use crate::lazy::{LogicalPlan, Optimizer, ProjectionKind};
+use crate::{DataFrame, Expr, Result};
 
 #[derive(Debug, Clone)]
 pub struct LazyFrame {
-    _private: (),
+    plan: LogicalPlan,
 }
 
 impl LazyFrame {
-    pub fn from_dataframe(_df: DataFrame) -> Self {
-        Self { _private: () }
+    pub fn from_dataframe(df: DataFrame) -> Self {
+        Self {
+            plan: LogicalPlan::DataFrameScan { df },
+        }
     }
 
     pub fn scan_csv(path: impl AsRef<Path>) -> Result<Self> {
-        let _path: PathBuf = path.as_ref().to_path_buf();
-        Err(DataFrameError::invalid_operation(
-            "LazyFrame::scan_csv is not implemented yet",
-        ))
+        Ok(Self {
+            plan: LogicalPlan::CsvScan {
+                path: path.as_ref().to_path_buf(),
+                predicate: None,
+                projection: None,
+            },
+        })
     }
 
     pub fn scan_parquet(path: impl AsRef<Path>) -> Result<Self> {
-        let _path: PathBuf = path.as_ref().to_path_buf();
-        Err(DataFrameError::invalid_operation(
-            "LazyFrame::scan_parquet is not implemented yet",
-        ))
+        Ok(Self {
+            plan: LogicalPlan::ParquetScan {
+                path: path.as_ref().to_path_buf(),
+                predicate: None,
+                projection: None,
+            },
+        })
     }
 
-    pub fn select(self, _exprs: Vec<Expr>) -> Self {
-        self
+    pub fn select(self, exprs: Vec<Expr>) -> Self {
+        Self {
+            plan: LogicalPlan::Projection {
+                input: Box::new(self.plan),
+                exprs,
+                kind: ProjectionKind::Select,
+            },
+        }
     }
 
-    pub fn filter(self, _predicate: Expr) -> Self {
-        self
+    pub fn filter(self, predicate: Expr) -> Self {
+        Self {
+            plan: LogicalPlan::Filter {
+                input: Box::new(self.plan),
+                predicate,
+            },
+        }
     }
 
-    pub fn with_columns(self, _exprs: Vec<Expr>) -> Self {
-        self
+    pub fn with_columns(self, exprs: Vec<Expr>) -> Self {
+        Self {
+            plan: LogicalPlan::Projection {
+                input: Box::new(self.plan),
+                exprs,
+                kind: ProjectionKind::WithColumns,
+            },
+        }
     }
 
-    pub fn group_by(self, _by: Vec<Expr>) -> LazyGroupBy {
-        LazyGroupBy { lf: self, by: _by }
+    pub fn group_by(self, by: Vec<Expr>) -> LazyGroupBy {
+        LazyGroupBy {
+            plan: self.plan,
+            by,
+        }
     }
 
     pub fn collect(self) -> Result<DataFrame> {
-        Err(DataFrameError::invalid_operation(
-            "LazyFrame::collect is not implemented yet",
-        ))
+        let optimized = Optimizer::optimize(&self.plan);
+        let physical = crate::physical::compile(&optimized)?;
+        let batches = crate::physical::Executor::execute(physical)?;
+        DataFrame::from_batches(batches)
     }
 
-    pub fn explain(self, _optimized: bool) -> String {
-        "LogicalPlan(<unimplemented>)".to_string()
+    pub fn explain(self, optimized: bool) -> String {
+        if optimized {
+            Optimizer::optimize(&self.plan).display()
+        } else {
+            self.plan.display()
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct LazyGroupBy {
-    lf: LazyFrame,
     by: Vec<Expr>,
+    plan: LogicalPlan,
 }
 
 impl LazyGroupBy {
-    pub fn agg(self, _aggs: Vec<Expr>) -> LazyFrame {
-        let _ = self.by;
-        self.lf
+    pub fn agg(self, aggs: Vec<Expr>) -> LazyFrame {
+        LazyFrame {
+            plan: LogicalPlan::Aggregate {
+                input: Box::new(self.plan),
+                group_by: self.by,
+                aggs,
+            },
+        }
     }
 }
 
@@ -77,14 +116,65 @@ impl GroupBy {
         Self { df, by }
     }
 
-    pub fn agg(self, _aggs: Vec<Expr>) -> Result<DataFrame> {
-        let _ = self.by;
-        Err(DataFrameError::invalid_operation(
-            "GroupBy::agg is not implemented yet",
-        ))
+    pub fn agg(self, aggs: Vec<Expr>) -> Result<DataFrame> {
+        self.df.lazy().group_by(self.by).agg(aggs).collect()
     }
 
     pub fn into_df(self) -> DataFrame {
         self.df
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, Int64Array};
+
+    use super::LazyFrame;
+    use crate::expr::{col, lit};
+    use crate::{DataFrame, Series};
+
+    fn df() -> DataFrame {
+        let a: ArrayRef = Arc::new(Int64Array::from(vec![1, 2, 3]));
+        let b: ArrayRef = Arc::new(Int64Array::from(vec![10, 20, 30]));
+        DataFrame::new(vec![
+            Series::from_arrow("a", vec![a]).unwrap(),
+            Series::from_arrow("b", vec![b]).unwrap(),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn explain_builds_plan_without_io() {
+        let lf = LazyFrame::scan_csv("test.csv").unwrap();
+        let s = lf.explain(false);
+        assert!(s.contains("scan[csv"));
+    }
+
+    #[test]
+    fn collect_executes_filter_and_select_on_dataframe_scan() {
+        let lf = LazyFrame::from_dataframe(df())
+            .filter(col("a").gt(lit(1_i64)))
+            .select(vec![col("b").alias("bb")]);
+        let out = lf.collect().unwrap();
+        assert_eq!(out.height(), 2);
+        let bb = out.column("bb").unwrap();
+        assert_eq!(bb.len(), 2);
+    }
+
+    #[test]
+    fn group_by_agg_executes_sum_and_count() {
+        let lf = LazyFrame::from_dataframe(df())
+            .group_by(vec![col("a")])
+            .agg(vec![
+                col("b").sum().alias("sum_b"),
+                col("b").count().alias("cnt_b"),
+            ]);
+        let out = lf.collect().unwrap();
+        assert_eq!(out.width(), 3);
+        assert_eq!(out.column("a").unwrap().len(), 3);
+        assert_eq!(out.column("sum_b").unwrap().len(), 3);
+        assert_eq!(out.column("cnt_b").unwrap().len(), 3);
     }
 }
