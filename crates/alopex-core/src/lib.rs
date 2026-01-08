@@ -2,6 +2,8 @@
 
 #![deny(missing_docs)]
 
+#[cfg(feature = "async")]
+pub mod async_runtime;
 pub mod columnar;
 pub mod compaction;
 pub mod error;
@@ -21,6 +23,10 @@ pub use columnar::segment::{write_segment, ChunkIter, SegmentMeta, SegmentReader
 pub use error::{Error, Result};
 pub use kv::memory::{MemoryKV, MemoryStats, MemoryTransaction, MemoryTxnManager};
 pub use kv::storage::{StorageFactory, StorageMode};
+#[cfg(feature = "async")]
+pub use kv::{AsyncKVStore, AsyncKVTransaction};
+#[cfg(feature = "tokio")]
+pub use kv::{AsyncKVStoreAdapter, AsyncKVTransactionAdapter};
 pub use kv::{KVStore, KVTransaction};
 #[cfg(feature = "s3")]
 pub use kv::{S3Config, S3KV};

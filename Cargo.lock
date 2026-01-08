@@ -97,6 +97,7 @@ dependencies = [
  "crossbeam-skiplist",
  "dhat",
  "futures",
+ "futures-core",
  "getrandom 0.2.16",
  "getrandom 0.3.4",
  "jemalloc-ctl",
