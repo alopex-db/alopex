@@ -2,5 +2,5 @@
 mod expr;
 mod functions;
 
-pub use expr::Expr;
+pub use expr::{AggFunc, Expr, Operator, Scalar, UnaryOperator};
 pub use functions::{all, col, lit};
