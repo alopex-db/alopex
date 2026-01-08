@@ -8,7 +8,44 @@ use arrow::record_batch::RecordBatch;
 use crate::expr::{Expr as E, Scalar};
 use crate::lazy::ProjectionKind;
 use crate::physical::expr_eval::ExprEval;
+use crate::physical::plan::ScanSource;
 use crate::{DataFrame, DataFrameError, Expr, Result};
+
+pub fn scan_source(source: &ScanSource) -> Result<Vec<RecordBatch>> {
+    match source {
+        ScanSource::DataFrame(df) => Ok(scan_dataframe(df)),
+        ScanSource::Csv {
+            path,
+            predicate,
+            projection,
+        } => {
+            let mut opts = crate::io::CsvReadOptions::default();
+            if let Some(cols) = projection {
+                opts = opts.with_projection(cols.clone());
+            }
+            if let Some(pred) = predicate {
+                opts = opts.with_predicate(pred.clone());
+            }
+            let df = crate::io::read_csv_with_options(path, &opts)?;
+            Ok(df.to_arrow())
+        }
+        ScanSource::Parquet {
+            path,
+            predicate,
+            projection,
+        } => {
+            let mut opts = crate::io::ParquetReadOptions::default();
+            if let Some(cols) = projection {
+                opts = opts.with_columns(cols.clone());
+            }
+            if let Some(pred) = predicate {
+                opts = opts.with_predicate(pred.clone());
+            }
+            let df = crate::io::read_parquet_with_options(path, &opts)?;
+            Ok(df.to_arrow())
+        }
+    }
+}
 
 pub fn scan_dataframe(df: &DataFrame) -> Vec<RecordBatch> {
     df.to_arrow()
