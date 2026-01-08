@@ -6,7 +6,7 @@ pub mod io;
 pub mod lazy;
 pub mod physical;
 
-pub use crate::dataframe::{DataFrame, Series};
+pub use crate::dataframe::{DataFrame, GroupBy, Series};
 pub use crate::error::{DataFrameError, Result};
 pub use crate::expr::{all, col, lit, Expr};
 pub use crate::io::{read_csv, read_parquet, write_csv, write_parquet};

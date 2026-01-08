@@ -105,26 +105,6 @@ impl LazyGroupBy {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct GroupBy {
-    df: DataFrame,
-    by: Vec<Expr>,
-}
-
-impl GroupBy {
-    pub(crate) fn new(df: DataFrame, by: Vec<Expr>) -> Self {
-        Self { df, by }
-    }
-
-    pub fn agg(self, aggs: Vec<Expr>) -> Result<DataFrame> {
-        self.df.lazy().group_by(self.by).agg(aggs).collect()
-    }
-
-    pub fn into_df(self) -> DataFrame {
-        self.df
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

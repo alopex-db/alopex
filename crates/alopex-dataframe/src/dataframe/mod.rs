@@ -2,5 +2,5 @@
 mod dataframe;
 mod series;
 
-pub use dataframe::DataFrame;
+pub use dataframe::{DataFrame, GroupBy};
 pub use series::Series;

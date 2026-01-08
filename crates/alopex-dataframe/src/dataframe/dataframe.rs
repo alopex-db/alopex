@@ -155,20 +155,39 @@ impl DataFrame {
         crate::LazyFrame::from_dataframe(self.clone())
     }
 
-    pub fn select(&self, _exprs: Vec<Expr>) -> Result<Self> {
-        self.clone().lazy().select(_exprs).collect()
+    pub fn select(&self, exprs: Vec<Expr>) -> Result<Self> {
+        self.clone().lazy().select(exprs).collect()
     }
 
-    pub fn filter(&self, _predicate: Expr) -> Result<Self> {
-        self.clone().lazy().filter(_predicate).collect()
+    pub fn filter(&self, predicate: Expr) -> Result<Self> {
+        self.clone().lazy().filter(predicate).collect()
     }
 
-    pub fn with_columns(&self, _exprs: Vec<Expr>) -> Result<Self> {
-        self.clone().lazy().with_columns(_exprs).collect()
+    pub fn with_columns(&self, exprs: Vec<Expr>) -> Result<Self> {
+        self.clone().lazy().with_columns(exprs).collect()
     }
 
-    pub fn group_by(&self, _by: Vec<Expr>) -> crate::lazy::GroupBy {
-        crate::lazy::GroupBy::new(self.clone(), _by)
+    pub fn group_by(&self, by: Vec<Expr>) -> GroupBy {
+        GroupBy {
+            df: self.clone(),
+            by,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GroupBy {
+    df: DataFrame,
+    by: Vec<Expr>,
+}
+
+impl GroupBy {
+    pub fn agg(self, aggs: Vec<Expr>) -> Result<DataFrame> {
+        self.df.lazy().group_by(self.by).agg(aggs).collect()
+    }
+
+    pub fn into_df(self) -> DataFrame {
+        self.df
     }
 }
 
