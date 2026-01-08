@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::path::Path;
 
@@ -5,7 +6,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
 
 use crate::io::options::ParquetReadOptions;
-use crate::{DataFrame, DataFrameError, Result};
+use crate::{col, DataFrame, DataFrameError, Expr, Result};
 
 pub fn read_parquet(_path: impl AsRef<Path>) -> Result<DataFrame> {
     read_parquet_with_options(_path, &ParquetReadOptions::default())
@@ -46,7 +47,23 @@ pub(crate) fn read_parquet_with_options(
         builder = builder.with_row_groups(row_groups.to_vec());
     }
 
-    if let Some(columns) = options.columns.as_deref() {
+    let mut projection_columns = options.columns.clone();
+    if let Some(predicate) = &options.predicate {
+        let cols = referenced_columns(predicate);
+        projection_columns = Some(match projection_columns {
+            Some(mut existing) => {
+                for c in cols {
+                    if !existing.iter().any(|v| v == &c) {
+                        existing.push(c);
+                    }
+                }
+                existing
+            }
+            None => cols.into_iter().collect(),
+        });
+    }
+
+    if let Some(columns) = projection_columns.as_deref() {
         let schema = builder.schema();
         let mut indices = Vec::with_capacity(columns.len());
         for name in columns {
@@ -69,7 +86,39 @@ pub(crate) fn read_parquet_with_options(
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|source| DataFrameError::Arrow { source })?;
 
-    DataFrame::from_batches(batches)
+    let mut df = DataFrame::from_batches(batches)?;
+
+    if let Some(predicate) = options.predicate.clone() {
+        df = df.filter(predicate)?;
+        if let Some(columns) = options.columns.as_deref() {
+            df = df.select(columns.iter().map(|name| col(name)).collect())?;
+        }
+    }
+
+    Ok(df)
+}
+
+fn referenced_columns(expr: &Expr) -> HashSet<String> {
+    let mut out = HashSet::new();
+    collect_referenced_columns(expr, &mut out);
+    out
+}
+
+fn collect_referenced_columns(expr: &Expr, out: &mut HashSet<String>) {
+    use crate::expr::Expr as E;
+    match expr {
+        E::Column(name) => {
+            out.insert(name.clone());
+        }
+        E::Alias { expr, .. } => collect_referenced_columns(expr, out),
+        E::UnaryOp { expr, .. } => collect_referenced_columns(expr, out),
+        E::BinaryOp { left, right, .. } => {
+            collect_referenced_columns(left, out);
+            collect_referenced_columns(right, out);
+        }
+        E::Agg { expr, .. } => collect_referenced_columns(expr, out),
+        E::Literal(_) | E::Wildcard => {}
+    }
 }
 
 #[cfg(test)]
