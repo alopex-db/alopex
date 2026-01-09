@@ -12,10 +12,12 @@ use regex::Regex;
 use crate::io::options::CsvReadOptions;
 use crate::{col, DataFrame, DataFrameError, Result};
 
+/// Read a CSV file eagerly into a `DataFrame` using default `CsvReadOptions`.
 pub fn read_csv(_path: impl AsRef<Path>) -> Result<DataFrame> {
     read_csv_with_options(_path, &CsvReadOptions::default())
 }
 
+/// Write a `DataFrame` to a CSV file (currently always includes a header row).
 pub fn write_csv(path: impl AsRef<Path>, df: &DataFrame) -> Result<()> {
     let path = path.as_ref();
     let file = File::create(path).map_err(|source| DataFrameError::io_with_path(source, path))?;
@@ -32,7 +34,8 @@ pub fn write_csv(path: impl AsRef<Path>, df: &DataFrame) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn read_csv_with_options(
+/// Read a CSV file eagerly into a `DataFrame` using the provided options.
+pub fn read_csv_with_options(
     path: impl AsRef<Path>,
     options: &CsvReadOptions,
 ) -> Result<DataFrame> {

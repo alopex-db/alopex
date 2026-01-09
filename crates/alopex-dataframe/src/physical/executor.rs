@@ -4,9 +4,11 @@ use crate::physical::operators;
 use crate::physical::plan::{PhysicalPlan, ScanSource};
 use crate::Result;
 
+/// Executes `PhysicalPlan` trees and returns the resulting `RecordBatch` output.
 pub struct Executor;
 
 impl Executor {
+    /// Execute a physical plan and return the resulting record batches.
     pub fn execute(plan: PhysicalPlan) -> Result<Vec<RecordBatch>> {
         execute_plan(&plan)
     }

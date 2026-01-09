@@ -7,9 +7,11 @@ use arrow::record_batch::RecordBatch;
 use crate::expr::{Expr as E, Scalar};
 use crate::{DataFrameError, Expr, Result};
 
+/// Evaluates `Expr` values over Arrow `RecordBatch` inputs.
 pub struct ExprEval;
 
 impl ExprEval {
+    /// Evaluate `expr` for every row in `batch` and return the resulting Arrow array.
     pub fn evaluate(expr: &Expr, batch: &RecordBatch) -> Result<ArrayRef> {
         eval_expr(expr, batch)
     }

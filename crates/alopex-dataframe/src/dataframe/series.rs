@@ -3,6 +3,7 @@ use arrow::datatypes::DataType;
 
 use crate::{DataFrameError, Result};
 
+/// A named column represented as one or more Arrow `ArrayRef` chunks.
 #[derive(Debug, Clone)]
 pub struct Series {
     name: String,
@@ -10,6 +11,7 @@ pub struct Series {
 }
 
 impl Series {
+    /// Construct a `Series` from Arrow chunks, validating that all chunks share the same dtype.
     pub fn from_arrow(name: &str, chunks: Vec<ArrayRef>) -> Result<Self> {
         if chunks.is_empty() {
             return Ok(Self {
@@ -36,18 +38,22 @@ impl Series {
         })
     }
 
+    /// Convert this series into Arrow chunks.
     pub fn to_arrow(&self) -> Vec<ArrayRef> {
         self.chunks.clone()
     }
 
+    /// Return the series name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Return the logical length of the series.
     pub fn len(&self) -> usize {
         self.chunks.iter().map(|c| c.len()).sum()
     }
 
+    /// Return the Arrow dtype of the series.
     pub fn dtype(&self) -> DataType {
         self.chunks
             .first()
@@ -55,6 +61,7 @@ impl Series {
             .unwrap_or(DataType::Null)
     }
 
+    /// Returns `true` if this series is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

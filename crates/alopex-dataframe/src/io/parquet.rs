@@ -8,10 +8,12 @@ use parquet::arrow::{ArrowWriter, ProjectionMask};
 use crate::io::options::ParquetReadOptions;
 use crate::{col, DataFrame, DataFrameError, Expr, Result};
 
+/// Read a Parquet file eagerly into a `DataFrame` using default `ParquetReadOptions`.
 pub fn read_parquet(_path: impl AsRef<Path>) -> Result<DataFrame> {
     read_parquet_with_options(_path, &ParquetReadOptions::default())
 }
 
+/// Write a `DataFrame` to a Parquet file.
 pub fn write_parquet(path: impl AsRef<Path>, df: &DataFrame) -> Result<()> {
     let path = path.as_ref();
     let file = File::create(path).map_err(|source| DataFrameError::io_with_path(source, path))?;
@@ -32,7 +34,8 @@ pub fn write_parquet(path: impl AsRef<Path>, df: &DataFrame) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn read_parquet_with_options(
+/// Read a Parquet file eagerly into a `DataFrame` using the provided options.
+pub fn read_parquet_with_options(
     path: impl AsRef<Path>,
     options: &ParquetReadOptions,
 ) -> Result<DataFrame> {

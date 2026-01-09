@@ -1,63 +1,89 @@
+/// Expression AST used by `DataFrame` and `LazyFrame`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
+    /// Column reference.
     Column(String),
+    /// Literal scalar value.
     Literal(Scalar),
+    /// Binary operator expression.
     BinaryOp {
         left: Box<Expr>,
         op: Operator,
         right: Box<Expr>,
     },
-    UnaryOp {
-        op: UnaryOperator,
-        expr: Box<Expr>,
-    },
-    Agg {
-        func: AggFunc,
-        expr: Box<Expr>,
-    },
-    Alias {
-        expr: Box<Expr>,
-        name: String,
-    },
+    /// Unary operator expression.
+    UnaryOp { op: UnaryOperator, expr: Box<Expr> },
+    /// Aggregation expression (only valid under `group_by().agg()`).
+    Agg { func: AggFunc, expr: Box<Expr> },
+    /// Expression alias (renames the resulting column).
+    Alias { expr: Box<Expr>, name: String },
+    /// Wildcard (`*`) that expands to all columns in projections.
     Wildcard,
 }
 
+/// Supported binary operators.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Operator {
+    /// Addition.
     Add,
+    /// Subtraction.
     Sub,
+    /// Multiplication.
     Mul,
+    /// Division.
     Div,
+    /// Equality.
     Eq,
+    /// Inequality.
     Neq,
+    /// Greater-than.
     Gt,
+    /// Less-than.
     Lt,
+    /// Greater-than-or-equal.
     Ge,
+    /// Less-than-or-equal.
     Le,
+    /// Boolean AND.
     And,
+    /// Boolean OR.
     Or,
 }
 
+/// Supported unary operators.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum UnaryOperator {
+    /// Boolean NOT.
     Not,
 }
 
+/// Supported aggregation functions.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum AggFunc {
+    /// Sum of non-null values.
     Sum,
+    /// Mean of non-null values.
     Mean,
+    /// Count of non-null values.
     Count,
+    /// Minimum of non-null values.
     Min,
+    /// Maximum of non-null values.
     Max,
 }
 
+/// Scalar literal values.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Scalar {
+    /// Null literal.
     Null,
+    /// Boolean literal.
     Boolean(bool),
+    /// 64-bit integer literal.
     Int64(i64),
+    /// 64-bit float literal.
     Float64(f64),
+    /// UTF-8 string literal.
     Utf8(String),
 }
 
@@ -98,6 +124,7 @@ impl From<&str> for Scalar {
 }
 
 impl Expr {
+    /// Alias this expression (used to name output columns).
     pub fn alias(self, name: impl Into<String>) -> Expr {
         Expr::Alias {
             expr: Box::new(self),
@@ -105,6 +132,7 @@ impl Expr {
         }
     }
 
+    /// Build an addition expression.
     #[allow(clippy::should_implement_trait)]
     pub fn add(self, rhs: Expr) -> Expr {
         Expr::BinaryOp {
@@ -114,6 +142,7 @@ impl Expr {
         }
     }
 
+    /// Build a subtraction expression.
     #[allow(clippy::should_implement_trait)]
     pub fn sub(self, rhs: Expr) -> Expr {
         Expr::BinaryOp {
@@ -123,6 +152,7 @@ impl Expr {
         }
     }
 
+    /// Build a multiplication expression.
     #[allow(clippy::should_implement_trait)]
     pub fn mul(self, rhs: Expr) -> Expr {
         Expr::BinaryOp {
@@ -132,6 +162,7 @@ impl Expr {
         }
     }
 
+    /// Build a division expression.
     #[allow(clippy::should_implement_trait)]
     pub fn div(self, rhs: Expr) -> Expr {
         Expr::BinaryOp {
@@ -141,6 +172,7 @@ impl Expr {
         }
     }
 
+    /// Build an equality predicate.
     pub fn eq(self, rhs: Expr) -> Expr {
         Expr::BinaryOp {
             left: Box::new(self),
@@ -149,6 +181,7 @@ impl Expr {
         }
     }
 
+    /// Build an inequality predicate.
     pub fn neq(self, rhs: Expr) -> Expr {
         Expr::BinaryOp {
             left: Box::new(self),
@@ -157,6 +190,7 @@ impl Expr {
         }
     }
 
+    /// Build a greater-than predicate.
     pub fn gt(self, rhs: Expr) -> Expr {
         Expr::BinaryOp {
             left: Box::new(self),
@@ -165,6 +199,7 @@ impl Expr {
         }
     }
 
+    /// Build a less-than predicate.
     pub fn lt(self, rhs: Expr) -> Expr {
         Expr::BinaryOp {
             left: Box::new(self),
@@ -173,6 +208,7 @@ impl Expr {
         }
     }
 
+    /// Build a greater-than-or-equal predicate.
     pub fn ge(self, rhs: Expr) -> Expr {
         Expr::BinaryOp {
             left: Box::new(self),
@@ -181,6 +217,7 @@ impl Expr {
         }
     }
 
+    /// Build a less-than-or-equal predicate.
     pub fn le(self, rhs: Expr) -> Expr {
         Expr::BinaryOp {
             left: Box::new(self),
@@ -189,6 +226,7 @@ impl Expr {
         }
     }
 
+    /// Build a boolean AND predicate.
     pub fn and_(self, rhs: Expr) -> Expr {
         Expr::BinaryOp {
             left: Box::new(self),
@@ -197,6 +235,7 @@ impl Expr {
         }
     }
 
+    /// Build a boolean OR predicate.
     pub fn or_(self, rhs: Expr) -> Expr {
         Expr::BinaryOp {
             left: Box::new(self),
@@ -205,6 +244,7 @@ impl Expr {
         }
     }
 
+    /// Build a boolean NOT predicate.
     pub fn not_(self) -> Expr {
         Expr::UnaryOp {
             op: UnaryOperator::Not,
@@ -212,6 +252,7 @@ impl Expr {
         }
     }
 
+    /// Build a `sum` aggregation.
     pub fn sum(self) -> Expr {
         Expr::Agg {
             func: AggFunc::Sum,
@@ -219,6 +260,7 @@ impl Expr {
         }
     }
 
+    /// Build a `mean` aggregation.
     pub fn mean(self) -> Expr {
         Expr::Agg {
             func: AggFunc::Mean,
@@ -226,6 +268,7 @@ impl Expr {
         }
     }
 
+    /// Build a `count` aggregation (nulls excluded).
     pub fn count(self) -> Expr {
         Expr::Agg {
             func: AggFunc::Count,
@@ -233,6 +276,7 @@ impl Expr {
         }
     }
 
+    /// Build a `min` aggregation.
     pub fn min(self) -> Expr {
         Expr::Agg {
             func: AggFunc::Min,
@@ -240,6 +284,7 @@ impl Expr {
         }
     }
 
+    /// Build a `max` aggregation.
     pub fn max(self) -> Expr {
         Expr::Agg {
             func: AggFunc::Max,

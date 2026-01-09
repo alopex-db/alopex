@@ -11,6 +11,7 @@ use crate::physical::expr_eval::ExprEval;
 use crate::physical::plan::ScanSource;
 use crate::{DataFrame, DataFrameError, Expr, Result};
 
+/// Scan operator that reads from an in-memory DataFrame, CSV, or Parquet source.
 pub fn scan_source(source: &ScanSource) -> Result<Vec<RecordBatch>> {
     match source {
         ScanSource::DataFrame(df) => Ok(scan_dataframe(df)),
@@ -47,10 +48,12 @@ pub fn scan_source(source: &ScanSource) -> Result<Vec<RecordBatch>> {
     }
 }
 
+/// Scan an in-memory `DataFrame` into Arrow record batches.
 pub fn scan_dataframe(df: &DataFrame) -> Vec<RecordBatch> {
     df.to_arrow()
 }
 
+/// Filter record batches using the provided boolean predicate expression.
 pub fn filter_batches(batches: Vec<RecordBatch>, predicate: &Expr) -> Result<Vec<RecordBatch>> {
     let mut out = Vec::with_capacity(batches.len());
     for batch in batches {
@@ -80,6 +83,7 @@ pub fn filter_batches(batches: Vec<RecordBatch>, predicate: &Expr) -> Result<Vec
     Ok(out)
 }
 
+/// Apply a projection (`select` or `with_columns`) to record batches.
 pub fn project_batches(
     batches: Vec<RecordBatch>,
     exprs: &[Expr],
@@ -163,6 +167,7 @@ fn expand_projection_exprs(exprs: &[Expr], schema: &Schema) -> Result<Vec<(Strin
     Ok(out)
 }
 
+/// Aggregate record batches using group keys and aggregation expressions.
 pub fn aggregate_batches(
     input: Vec<RecordBatch>,
     group_by: &[Expr],

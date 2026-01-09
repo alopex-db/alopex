@@ -3,14 +3,18 @@ use std::path::PathBuf;
 use crate::lazy::{LogicalPlan, ProjectionKind};
 use crate::{DataFrame, Expr, Result};
 
+/// Source for a physical scan operator.
 #[derive(Debug, Clone)]
 pub enum ScanSource {
+    /// In-memory scan of a `DataFrame`.
     DataFrame(DataFrame),
+    /// CSV file scan with optional predicate/projection pushdown.
     Csv {
         path: PathBuf,
         predicate: Option<Expr>,
         projection: Option<Vec<String>>,
     },
+    /// Parquet file scan with optional predicate/projection pushdown.
     Parquet {
         path: PathBuf,
         predicate: Option<Expr>,
@@ -18,20 +22,23 @@ pub enum ScanSource {
     },
 }
 
+/// Physical execution plan produced from a `LogicalPlan`.
 #[derive(Debug, Clone)]
 pub enum PhysicalPlan {
-    ScanExec {
-        source: ScanSource,
-    },
+    /// Scan operator.
+    ScanExec { source: ScanSource },
+    /// Projection operator.
     ProjectionExec {
         input: Box<PhysicalPlan>,
         exprs: Vec<Expr>,
         kind: ProjectionKind,
     },
+    /// Filter operator.
     FilterExec {
         input: Box<PhysicalPlan>,
         predicate: Expr,
     },
+    /// Aggregate operator.
     AggregateExec {
         input: Box<PhysicalPlan>,
         group_by: Vec<Expr>,
@@ -39,6 +46,7 @@ pub enum PhysicalPlan {
     },
 }
 
+/// Compile a `LogicalPlan` into a `PhysicalPlan`.
 pub fn compile(logical: &LogicalPlan) -> Result<PhysicalPlan> {
     let plan = match logical {
         LogicalPlan::DataFrameScan { df } => PhysicalPlan::ScanExec {

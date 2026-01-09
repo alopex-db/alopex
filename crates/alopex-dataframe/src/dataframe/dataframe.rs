@@ -6,6 +6,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::{DataFrameError, Expr, Result, Series};
 
+/// An eager table backed by one or more Arrow `RecordBatch` values.
 #[derive(Debug, Clone)]
 pub struct DataFrame {
     schema: SchemaRef,
@@ -13,6 +14,9 @@ pub struct DataFrame {
 }
 
 impl DataFrame {
+    /// Construct a `DataFrame` from a list of `Series`.
+    ///
+    /// Chunk boundaries do not need to align across series as long as total lengths match.
     pub fn new(columns: Vec<Series>) -> Result<Self> {
         if columns.is_empty() {
             return Ok(Self::empty());
@@ -75,6 +79,7 @@ impl DataFrame {
         })
     }
 
+    /// Construct a `DataFrame` from Arrow record batches (all batches must share the same schema).
     pub fn from_batches(batches: Vec<RecordBatch>) -> Result<Self> {
         if batches.is_empty() {
             return Ok(Self::empty());
@@ -92,10 +97,12 @@ impl DataFrame {
         Ok(Self { schema, batches })
     }
 
+    /// Alias for `DataFrame::new`.
     pub fn from_series(series: Vec<Series>) -> Result<Self> {
         Self::new(series)
     }
 
+    /// Return an empty `DataFrame` (no columns, no rows).
     pub fn empty() -> Self {
         Self {
             schema: Arc::new(Schema::empty()),
@@ -103,18 +110,22 @@ impl DataFrame {
         }
     }
 
+    /// Return the number of rows.
     pub fn height(&self) -> usize {
         self.batches.iter().map(|b| b.num_rows()).sum()
     }
 
+    /// Return the number of columns.
     pub fn width(&self) -> usize {
         self.schema.fields().len()
     }
 
+    /// Return the Arrow schema.
     pub fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
 
+    /// Get a column by name (case-sensitive).
     pub fn column(&self, name: &str) -> Result<Series> {
         let idx = self
             .schema
@@ -131,6 +142,7 @@ impl DataFrame {
         Ok(Series::from_arrow_unchecked(name, chunks))
     }
 
+    /// Return all columns in construction order.
     pub fn columns(&self) -> Vec<Series> {
         self.schema
             .fields()
@@ -147,26 +159,32 @@ impl DataFrame {
             .collect()
     }
 
+    /// Return the underlying Arrow batches.
     pub fn to_arrow(&self) -> Vec<RecordBatch> {
         self.batches.clone()
     }
 
+    /// Convert this eager `DataFrame` to a `LazyFrame` for query planning/execution.
     pub fn lazy(&self) -> crate::LazyFrame {
         crate::LazyFrame::from_dataframe(self.clone())
     }
 
+    /// Eager `select`, implemented by delegating to `LazyFrame`.
     pub fn select(&self, exprs: Vec<Expr>) -> Result<Self> {
         self.clone().lazy().select(exprs).collect()
     }
 
+    /// Eager `filter`, implemented by delegating to `LazyFrame`.
     pub fn filter(&self, predicate: Expr) -> Result<Self> {
         self.clone().lazy().filter(predicate).collect()
     }
 
+    /// Eager `with_columns`, implemented by delegating to `LazyFrame`.
     pub fn with_columns(&self, exprs: Vec<Expr>) -> Result<Self> {
         self.clone().lazy().with_columns(exprs).collect()
     }
 
+    /// Start a group-by aggregation (eager API).
     pub fn group_by(&self, by: Vec<Expr>) -> GroupBy {
         GroupBy {
             df: self.clone(),
@@ -175,6 +193,7 @@ impl DataFrame {
     }
 }
 
+/// Eager group-by handle that delegates execution to `LazyFrame`.
 #[derive(Debug, Clone)]
 pub struct GroupBy {
     df: DataFrame,
@@ -182,10 +201,12 @@ pub struct GroupBy {
 }
 
 impl GroupBy {
+    /// Perform aggregations for this group-by.
     pub fn agg(self, aggs: Vec<Expr>) -> Result<DataFrame> {
         self.df.lazy().group_by(self.by).agg(aggs).collect()
     }
 
+    /// Return the underlying `DataFrame`.
     pub fn into_df(self) -> DataFrame {
         self.df
     }

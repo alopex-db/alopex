@@ -3,7 +3,7 @@ use std::sync::Arc;
 use alopex_dataframe::expr::{col, lit};
 use alopex_dataframe::lazy::{LogicalPlan, Optimizer, ProjectionKind};
 use alopex_dataframe::physical::{compile, Executor};
-use alopex_dataframe::{write_parquet, DataFrame, Series};
+use alopex_dataframe::{write_parquet, DataFrame, LazyFrame, Series};
 use arrow::array::{ArrayRef, Int64Array, StringArray};
 
 fn execute(plan: &LogicalPlan) -> Vec<arrow::record_batch::RecordBatch> {
@@ -17,6 +17,21 @@ fn pushdown_equivalence_csv() {
     let path = dir.path().join("data.csv");
 
     std::fs::write(&path, "a,b,c\n1,x,10\n2,y,20\n3,z,30\n").unwrap();
+
+    let lf = LazyFrame::scan_csv(&path)
+        .unwrap()
+        .filter(col("a").gt(lit(1_i64)))
+        .select(vec![col("b")]);
+
+    let unoptimized_explain = lf.clone().explain(false);
+    assert!(unoptimized_explain.contains("scan[csv"));
+    assert!(!unoptimized_explain.contains("projection="));
+    assert!(!unoptimized_explain.contains("filters=["));
+
+    let optimized_explain = lf.clone().explain(true);
+    assert!(optimized_explain.contains("scan[csv"));
+    assert!(optimized_explain.contains("projection="));
+    assert!(optimized_explain.contains("filters=["));
 
     let plan = LogicalPlan::Projection {
         input: Box::new(LogicalPlan::Filter {
@@ -36,11 +51,6 @@ fn pushdown_equivalence_csv() {
     let optimized = execute(&optimized_plan);
 
     assert_eq!(unoptimized, optimized);
-
-    let explain = optimized_plan.display();
-    assert!(explain.contains("scan[csv"));
-    assert!(explain.contains("projection="));
-    assert!(explain.contains("filters=["));
 }
 
 #[test]
@@ -61,6 +71,21 @@ fn pushdown_equivalence_parquet() {
 
     write_parquet(&path, &df).unwrap();
 
+    let lf = LazyFrame::scan_parquet(&path)
+        .unwrap()
+        .filter(col("c").gt(lit(10_i64)))
+        .select(vec![col("a"), col("b")]);
+
+    let unoptimized_explain = lf.clone().explain(false);
+    assert!(unoptimized_explain.contains("scan[parquet"));
+    assert!(!unoptimized_explain.contains("projection="));
+    assert!(!unoptimized_explain.contains("filters=["));
+
+    let optimized_explain = lf.clone().explain(true);
+    assert!(optimized_explain.contains("scan[parquet"));
+    assert!(optimized_explain.contains("projection="));
+    assert!(optimized_explain.contains("filters=["));
+
     let plan = LogicalPlan::Projection {
         input: Box::new(LogicalPlan::Filter {
             input: Box::new(LogicalPlan::ParquetScan {
@@ -79,9 +104,4 @@ fn pushdown_equivalence_parquet() {
     let optimized = execute(&optimized_plan);
 
     assert_eq!(unoptimized, optimized);
-
-    let explain = optimized_plan.display();
-    assert!(explain.contains("scan[parquet"));
-    assert!(explain.contains("projection="));
-    assert!(explain.contains("filters=["));
 }

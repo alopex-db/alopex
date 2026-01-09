@@ -4,9 +4,11 @@ use crate::expr::{Expr as E, Operator};
 use crate::lazy::{LogicalPlan, ProjectionKind};
 use crate::Expr;
 
+/// Optimizer that rewrites `LogicalPlan` (e.g. predicate/projection pushdown).
 pub struct Optimizer;
 
 impl Optimizer {
+    /// Optimize a `LogicalPlan` and return the rewritten plan.
     pub fn optimize(plan: &LogicalPlan) -> LogicalPlan {
         let plan = predicate_pushdown(plan.clone());
         projection_pushdown(plan)

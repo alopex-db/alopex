@@ -3,18 +3,21 @@ use std::path::Path;
 use crate::lazy::{LogicalPlan, Optimizer, ProjectionKind};
 use crate::{DataFrame, Expr, Result};
 
+/// A lazily-evaluated query backed by a `LogicalPlan`.
 #[derive(Debug, Clone)]
 pub struct LazyFrame {
     plan: LogicalPlan,
 }
 
 impl LazyFrame {
+    /// Create a `LazyFrame` that scans an in-memory `DataFrame`.
     pub fn from_dataframe(df: DataFrame) -> Self {
         Self {
             plan: LogicalPlan::DataFrameScan { df },
         }
     }
 
+    /// Build a CSV scan plan (no file I/O is performed until `collect()`).
     pub fn scan_csv(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
             plan: LogicalPlan::CsvScan {
@@ -25,6 +28,7 @@ impl LazyFrame {
         })
     }
 
+    /// Build a Parquet scan plan (no file I/O is performed until `collect()`).
     pub fn scan_parquet(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
             plan: LogicalPlan::ParquetScan {
@@ -35,6 +39,7 @@ impl LazyFrame {
         })
     }
 
+    /// Add a projection (`select`) node to the logical plan.
     pub fn select(self, exprs: Vec<Expr>) -> Self {
         Self {
             plan: LogicalPlan::Projection {
@@ -45,6 +50,7 @@ impl LazyFrame {
         }
     }
 
+    /// Add a filter node to the logical plan.
     pub fn filter(self, predicate: Expr) -> Self {
         Self {
             plan: LogicalPlan::Filter {
@@ -54,6 +60,7 @@ impl LazyFrame {
         }
     }
 
+    /// Add a projection (`with_columns`) node to the logical plan.
     pub fn with_columns(self, exprs: Vec<Expr>) -> Self {
         Self {
             plan: LogicalPlan::Projection {
@@ -64,6 +71,7 @@ impl LazyFrame {
         }
     }
 
+    /// Start a group-by on this `LazyFrame`.
     pub fn group_by(self, by: Vec<Expr>) -> LazyGroupBy {
         LazyGroupBy {
             plan: self.plan,
@@ -71,6 +79,7 @@ impl LazyFrame {
         }
     }
 
+    /// Optimize, compile, and execute this `LazyFrame` into an eager `DataFrame`.
     pub fn collect(self) -> Result<DataFrame> {
         let optimized = Optimizer::optimize(&self.plan);
         let physical = crate::physical::compile(&optimized)?;
@@ -78,6 +87,9 @@ impl LazyFrame {
         DataFrame::from_batches(batches)
     }
 
+    /// Render the logical plan as a human-readable string.
+    ///
+    /// If `optimized` is `true`, includes optimizer rewrites such as pushdowns.
     pub fn explain(self, optimized: bool) -> String {
         if optimized {
             Optimizer::optimize(&self.plan).display()
@@ -87,6 +99,7 @@ impl LazyFrame {
     }
 }
 
+/// Group-by builder for `LazyFrame`.
 #[derive(Debug, Clone)]
 pub struct LazyGroupBy {
     by: Vec<Expr>,
@@ -94,6 +107,7 @@ pub struct LazyGroupBy {
 }
 
 impl LazyGroupBy {
+    /// Add an aggregate node to the logical plan.
     pub fn agg(self, aggs: Vec<Expr>) -> LazyFrame {
         LazyFrame {
             plan: LogicalPlan::Aggregate {

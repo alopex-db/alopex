@@ -2,36 +2,44 @@ use std::path::PathBuf;
 
 use crate::{DataFrame, Expr};
 
+/// How a projection node should be interpreted.
 #[derive(Debug, Clone)]
 pub enum ProjectionKind {
+    /// Select columns/expressions, producing a new schema.
     Select,
+    /// Add or overwrite columns, preserving existing columns.
     WithColumns,
 }
 
+/// Logical query plan nodes for `LazyFrame`.
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
-    DataFrameScan {
-        df: DataFrame,
-    },
+    /// Scan an in-memory `DataFrame`.
+    DataFrameScan { df: DataFrame },
+    /// Scan a CSV file (predicate/projection may be pushed down).
     CsvScan {
         path: PathBuf,
         predicate: Option<Expr>,
         projection: Option<Vec<String>>,
     },
+    /// Scan a Parquet file (predicate/projection may be pushed down).
     ParquetScan {
         path: PathBuf,
         predicate: Option<Expr>,
         projection: Option<Vec<String>>,
     },
+    /// Projection node (select or with_columns).
     Projection {
         input: Box<LogicalPlan>,
         exprs: Vec<Expr>,
         kind: ProjectionKind,
     },
+    /// Filter node.
     Filter {
         input: Box<LogicalPlan>,
         predicate: Expr,
     },
+    /// Aggregate node (group keys and aggregations).
     Aggregate {
         input: Box<LogicalPlan>,
         group_by: Vec<Expr>,
@@ -40,6 +48,7 @@ pub enum LogicalPlan {
 }
 
 impl LogicalPlan {
+    /// Render this plan as a readable string (used by `explain()` and tests).
     pub fn display(&self) -> String {
         let mut out = String::new();
         self.fmt_into(&mut out, 0);
