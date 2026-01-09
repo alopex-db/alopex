@@ -2,6 +2,7 @@
 
 #![deny(missing_docs)]
 
+pub mod async_util;
 pub mod columnar;
 pub mod compaction;
 pub mod error;
@@ -14,6 +15,7 @@ pub mod txn;
 pub mod types;
 pub mod vector;
 
+pub use async_util::{BoxFuture, BoxStream, MaybeSend};
 pub use columnar::encoding::{
     decode_column, encode_column, Column, Compression, Encoding, LogicalType,
 };

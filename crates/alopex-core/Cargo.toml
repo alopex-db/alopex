@@ -25,6 +25,7 @@ serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 snap = "1.1"
 tracing = { workspace = true }
+futures-core = { workspace = true }
 zstd = { version = "0.13", optional = true }
 lz4 = { version = "1.24", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh64"], optional = true }
