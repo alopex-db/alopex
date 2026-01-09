@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/alopex-core",
+    "crates/alopex-dataframe",
     "crates/alopex-sql",
     "crates/alopex-embedded", "crates/alopex-server", "crates/alopex-cluster", "crates/alopex-cli", "crates/alopex-tools", "crates/alopex-py",
 ]
