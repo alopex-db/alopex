@@ -6,6 +6,7 @@ mod types;
 
 pub(crate) use graph::HnswGraph;
 pub(crate) use storage::HnswStorage;
+#[cfg(feature = "async")]
 pub(crate) use types::HnswMetadata;
 pub use types::{HnswConfig, HnswSearchResult, HnswStats, InsertStats, SearchStats};
 
@@ -114,6 +115,7 @@ impl HnswIndex {
         self.storage.save(txn, &graph)
     }
 
+    #[cfg(feature = "async")]
     pub(crate) fn graph_handle(&self) -> Arc<RwLock<HnswGraph>> {
         Arc::clone(&self.graph)
     }
