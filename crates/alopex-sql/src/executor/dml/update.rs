@@ -9,7 +9,7 @@ use crate::planner::typed_expr::{TypedAssignment, TypedExpr};
 use crate::storage::{SqlTxn, SqlValue, StorageError};
 
 /// Execute UPDATE statements.
-pub fn execute_update<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
+pub fn execute_update<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
     table_name: &str,

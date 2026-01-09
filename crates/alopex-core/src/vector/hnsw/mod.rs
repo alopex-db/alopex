@@ -6,6 +6,7 @@ mod types;
 
 pub(crate) use graph::HnswGraph;
 pub(crate) use storage::HnswStorage;
+pub(crate) use types::HnswMetadata;
 pub use types::{HnswConfig, HnswSearchResult, HnswStats, InsertStats, SearchStats};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -111,6 +112,10 @@ impl HnswIndex {
     pub fn save<'a, T: KVTransaction<'a>>(&self, txn: &mut T) -> Result<()> {
         let graph = self.graph.read().unwrap_or_else(|e| e.into_inner());
         self.storage.save(txn, &graph)
+    }
+
+    pub(crate) fn graph_handle(&self) -> Arc<RwLock<HnswGraph>> {
+        Arc::clone(&self.graph)
     }
 
     /// インデックスデータをストアから削除する。
@@ -232,12 +237,12 @@ impl HnswIndex {
         self.on_insert = Some(Box::new(callback));
     }
 
-    fn from_graph(name: &str, graph: HnswGraph) -> Self {
+    pub(crate) fn from_graph(name: &str, graph: HnswGraph) -> Self {
         let storage = HnswStorage::new(name);
         Self::from_parts(name, storage, graph)
     }
 
-    fn from_parts(name: &str, storage: HnswStorage, graph: HnswGraph) -> Self {
+    pub(crate) fn from_parts(name: &str, storage: HnswStorage, graph: HnswGraph) -> Self {
         let stats_cache = Self::compute_stats(&graph);
         Self {
             name: name.to_string(),

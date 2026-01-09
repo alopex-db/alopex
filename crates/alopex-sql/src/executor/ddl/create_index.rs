@@ -9,7 +9,7 @@ use crate::storage::{SqlTxn, SqlValue, StorageError};
 use super::is_implicit_pk_index;
 
 /// Execute CREATE INDEX.
-pub fn execute_create_index<'txn, S: KVStore + 'txn, C: Catalog>(
+pub fn execute_create_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     txn: &mut impl SqlTxn<'txn, S>,
     catalog: &mut C,
     mut index: IndexMetadata,

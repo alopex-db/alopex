@@ -36,15 +36,19 @@
 //! let result = executor.execute(plan)?;
 //! ```
 
+#[cfg(feature = "tokio")]
+pub mod async_executor;
 pub mod bulk;
-mod ddl;
-mod dml;
+pub(crate) mod ddl;
+pub(crate) mod dml;
 mod error;
 pub mod evaluator;
 mod hnsw_bridge;
 pub mod query;
 mod result;
 
+#[cfg(feature = "tokio")]
+pub use async_executor::AsyncExecutor;
 pub use error::{ConstraintViolation, EvaluationError, ExecutorError, Result};
 pub use query::{RowIterator, ScanIterator, build_streaming_pipeline};
 pub use result::{ColumnInfo, ExecutionResult, QueryResult, QueryRowIterator, Row};

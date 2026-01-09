@@ -164,12 +164,14 @@ dependencies = [
  "arrow-schema",
  "bincode",
  "criterion",
+ "futures",
  "parquet",
  "proptest",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.17",
+ "tokio",
 ]
 
 [[package]]

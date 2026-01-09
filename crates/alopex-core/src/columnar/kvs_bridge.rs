@@ -160,16 +160,24 @@ impl ColumnarKvsBridge {
         segment_id: u64,
         columns: &[usize],
     ) -> Result<Vec<RecordBatch>> {
+        let reader = self.open_segment_reader(table_id, segment_id)?;
+        reader.read_columns(columns)
+    }
+
+    /// セグメント本体を取得する。
+    pub fn read_segment_raw(&self, table_id: u32, segment_id: u64) -> Result<ColumnSegmentV2> {
         let key = key_layout::column_segment_key(table_id, segment_id, 0);
         let mut txn = self.store.begin(TxnMode::ReadOnly)?;
         let bytes = txn.get(&key)?.ok_or(ColumnarError::NotFound)?;
-
-        let segment: ColumnSegmentV2 = bincode_config()
+        bincode_config()
             .deserialize(&bytes)
-            .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
-        let reader =
-            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))?;
-        reader.read_columns(columns)
+            .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))
+    }
+
+    /// セグメントリーダーを開く。
+    pub fn open_segment_reader(&self, table_id: u32, segment_id: u64) -> Result<SegmentReaderV2> {
+        let segment = self.read_segment_raw(table_id, segment_id)?;
+        SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data)))
     }
 
     /// セグメントメタデータのみ取得する（統計用）。
