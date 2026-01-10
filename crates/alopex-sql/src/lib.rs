@@ -27,6 +27,8 @@
 //! ```
 
 pub mod ast;
+#[cfg(feature = "async")]
+pub mod async_api;
 pub mod catalog;
 pub mod columnar;
 pub mod dialect;
@@ -80,6 +82,10 @@ pub use executor::{
     ColumnInfo, ConstraintViolation, EvaluationError, ExecutionResult, Executor, ExecutorError,
     QueryResult, Row,
 };
+
+// Async facade types
+#[cfg(feature = "async")]
+pub use async_api::{AsyncResult, AsyncRowStream, AsyncSqlTransaction, AsyncTxnBridge};
 
 /// `ExecutionResult` の公開 API 名。
 pub type SqlResult = ExecutionResult;
