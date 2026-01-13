@@ -70,12 +70,16 @@ pub use planner::{
 };
 
 // Storage types
+#[cfg(feature = "tokio")]
+pub use storage::{AsyncSqlTransaction, AsyncTxnBridge, ErasedAsyncSqlTransaction};
 pub use storage::{
     IndexScanIterator, IndexStorage, KeyEncoder, RowCodec, SqlTransaction, SqlValue, StorageError,
     TableScanIterator, TableStorage, TxnBridge, TxnContext,
 };
 
 // Executor types
+#[cfg(feature = "tokio")]
+pub use executor::AsyncExecutor;
 pub use executor::{
     ColumnInfo, ConstraintViolation, EvaluationError, ExecutionResult, Executor, ExecutorError,
     QueryResult, Row,

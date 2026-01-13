@@ -68,11 +68,11 @@ pub struct ResolvedColumn {
 /// // Resolve a table reference
 /// let table = resolver.resolve_table("users", span)?;
 /// ```
-pub struct NameResolver<'a, C: Catalog> {
+pub struct NameResolver<'a, C: Catalog + ?Sized> {
     catalog: &'a C,
 }
 
-impl<'a, C: Catalog> NameResolver<'a, C> {
+impl<'a, C: Catalog + ?Sized> NameResolver<'a, C> {
     /// Create a new name resolver with the given catalog.
     pub fn new(catalog: &'a C) -> Self {
         Self { catalog }

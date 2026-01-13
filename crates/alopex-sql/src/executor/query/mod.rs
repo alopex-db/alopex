@@ -30,7 +30,7 @@ pub use scan::create_scan_iterator;
 /// Note: The Scan stage reads all matching rows into memory, but subsequent
 /// operators (Filter, Sort, Limit) process rows through an iterator pipeline.
 /// Sort operations additionally require materializing all input rows.
-pub fn execute_query<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
+pub fn execute_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
     plan: LogicalPlan,
@@ -66,7 +66,7 @@ pub fn execute_query<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
 ///
 /// KNN queries currently fall back to the non-streaming path as they require
 /// specialized handling.
-pub fn execute_query_streaming<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
+pub fn execute_query_streaming<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
     plan: LogicalPlan,
@@ -112,7 +112,7 @@ pub fn execute_query_streaming<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'t
 /// structure. The scan phase reads rows into memory, then subsequent operators
 /// process them through an iterator pipeline enabling streaming execution and
 /// early termination.
-fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
+fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
     plan: LogicalPlan,
@@ -196,7 +196,13 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, 
 /// - Columnar storage still materializes rows (uses VecIterator)
 /// - Sort operations materialize all input rows
 /// - KNN queries are not supported (use `build_iterator_pipeline` instead)
-pub fn build_streaming_pipeline<'a, 'txn: 'a, S: KVStore + 'txn, C: Catalog, T: SqlTxn<'txn, S>>(
+pub fn build_streaming_pipeline<
+    'a,
+    'txn: 'a,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
     txn: &'a mut T,
     catalog: &C,
     plan: LogicalPlan,
@@ -213,7 +219,7 @@ fn build_streaming_pipeline_inner<
     'a,
     'txn: 'a,
     S: KVStore + 'txn,
-    C: Catalog,
+    C: Catalog + ?Sized,
     T: SqlTxn<'txn, S>,
 >(
     txn: &'a mut T,

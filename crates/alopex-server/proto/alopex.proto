@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package alopex.v0;
+
+message SqlRequest {
+  string sql = 1;
+  string session_id = 2;
+}
+
+message DdlRequest {
+  string sql = 1;
+  string session_id = 2;
+}
+
+message DmlRequest {
+  string sql = 1;
+  string session_id = 2;
+}
+
+message DdlResponse {
+  bool success = 1;
+}
+
+message DmlResponse {
+  uint64 affected_rows = 1;
+}
+
+message BeginRequest {}
+
+message TransactionHandle {
+  string session_id = 1;
+  int64 expires_at_ms = 2;
+}
+
+message CommitResponse {
+  bool success = 1;
+}
+
+message RollbackResponse {
+  bool success = 1;
+}
+
+message VectorSearchRequest {
+  string table = 1;
+  repeated float vector = 2;
+  uint32 k = 3;
+  string index = 4;
+  string column = 5;
+}
+
+message VectorSearchResult {
+  uint64 id = 1;
+  float distance = 2;
+  Row row = 3;
+}
+
+message VectorSearchResponse {
+  repeated VectorSearchResult results = 1;
+}
+
+message VectorUpsertRequest {
+  string table = 1;
+  uint64 id = 2;
+  repeated float vector = 3;
+  string column = 4;
+}
+
+message VectorUpsertResponse {
+  bool success = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+}
+
+message Vector {
+  repeated float values = 1;
+}
+
+message Value {
+  oneof kind {
+    int32 int_value = 1;
+    int64 bigint_value = 2;
+    float float_value = 3;
+    double double_value = 4;
+    string text_value = 5;
+    bytes blob_value = 6;
+    bool bool_value = 7;
+    int64 timestamp_value = 8;
+    Vector vector_value = 9;
+  }
+}
+
+message Row {
+  repeated Value values = 1;
+}
+
+service AlopexService {
+  rpc ExecuteSql(SqlRequest) returns (stream Row);
+  rpc ExecuteDdl(DdlRequest) returns (DdlResponse);
+  rpc ExecuteDml(DmlRequest) returns (DmlResponse);
+  rpc BeginTransaction(BeginRequest) returns (TransactionHandle);
+  rpc CommitTransaction(TransactionHandle) returns (CommitResponse);
+  rpc RollbackTransaction(TransactionHandle) returns (RollbackResponse);
+  rpc VectorSearch(VectorSearchRequest) returns (VectorSearchResponse);
+  rpc VectorUpsert(VectorUpsertRequest) returns (VectorUpsertResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}

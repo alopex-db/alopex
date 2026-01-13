@@ -10,7 +10,7 @@ use crate::storage::{KeyEncoder, SqlTxn};
 use super::create_pk_index_name;
 
 /// Execute CREATE TABLE.
-pub fn execute_create_table<'txn, S: KVStore + 'txn, C: Catalog>(
+pub fn execute_create_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     txn: &mut impl SqlTxn<'txn, S>,
     catalog: &mut C,
     mut table: TableMetadata,

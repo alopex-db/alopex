@@ -39,7 +39,7 @@ impl HnswStorage {
     }
 
     /// メタデータキーを生成する（`hnsw:meta:{name}`）。
-    fn meta_key(&self) -> Vec<u8> {
+    pub(crate) fn meta_key(&self) -> Vec<u8> {
         let mut key = Vec::with_capacity(META_PREFIX.len() + self.index_name.len());
         key.extend_from_slice(META_PREFIX);
         key.extend_from_slice(self.index_name.as_bytes());
@@ -47,7 +47,7 @@ impl HnswStorage {
     }
 
     /// ノードキーを生成する（`hnsw:node:{name}:{id}`）。
-    fn node_key(&self, node_id: u32) -> Vec<u8> {
+    pub(crate) fn node_key(&self, node_id: u32) -> Vec<u8> {
         let mut key = Vec::with_capacity(NODE_PREFIX.len() + self.index_name.len() + 12);
         key.extend_from_slice(NODE_PREFIX);
         key.extend_from_slice(self.index_name.as_bytes());
@@ -57,7 +57,7 @@ impl HnswStorage {
     }
 
     /// キーインデックスキーを生成する（`hnsw:key:{name}:{key}`）。
-    fn key_index_key(&self, key_bytes: &[u8]) -> Vec<u8> {
+    pub(crate) fn key_index_key(&self, key_bytes: &[u8]) -> Vec<u8> {
         let mut key = Vec::with_capacity(
             KEY_INDEX_PREFIX.len() + self.index_name.len() + 1 + key_bytes.len(),
         );
@@ -69,7 +69,7 @@ impl HnswStorage {
     }
 
     /// ノードプレフィックス（削除スキャン用）を取得する。
-    fn node_prefix(&self) -> Vec<u8> {
+    pub(crate) fn node_prefix(&self) -> Vec<u8> {
         let mut key = Vec::with_capacity(NODE_PREFIX.len() + self.index_name.len() + 1);
         key.extend_from_slice(NODE_PREFIX);
         key.extend_from_slice(self.index_name.as_bytes());
@@ -78,7 +78,7 @@ impl HnswStorage {
     }
 
     /// キーインデックスプレフィックス（削除スキャン用）を取得する。
-    fn key_index_prefix(&self) -> Vec<u8> {
+    pub(crate) fn key_index_prefix(&self) -> Vec<u8> {
         let mut key = Vec::with_capacity(KEY_INDEX_PREFIX.len() + self.index_name.len() + 1);
         key.extend_from_slice(KEY_INDEX_PREFIX);
         key.extend_from_slice(self.index_name.as_bytes());
@@ -214,6 +214,21 @@ impl HnswStorage {
         let metadata: HnswMetadata =
             bincode::deserialize(&meta_bytes).map_err(|e| Error::InvalidFormat(e.to_string()))?;
 
+        let mut node_bytes = Vec::with_capacity(metadata.next_node_id as usize);
+        for node_id in 0..metadata.next_node_id {
+            let node_key = self.node_key(node_id);
+            node_bytes.push(txn.get(&node_key)?);
+        }
+
+        self.build_graph_from_bytes(metadata, node_bytes)
+    }
+
+    /// 取得済みのメタデータとノードデータからグラフを構築する。
+    pub(crate) fn build_graph_from_bytes(
+        &self,
+        metadata: HnswMetadata,
+        node_bytes: Vec<Option<Vec<u8>>>,
+    ) -> Result<HnswGraph> {
         if metadata.version > HNSW_FORMAT_VERSION {
             return Err(Error::UnsupportedIndexVersion {
                 found: metadata.version,
@@ -226,14 +241,13 @@ impl HnswStorage {
         let mut key_to_node = HashMap::new();
         let mut free_list = Vec::new();
 
-        for node_id in 0..metadata.next_node_id {
-            let node_key = self.node_key(node_id);
-            if let Some(node_bytes) = txn.get(&node_key)? {
+        for (node_id, bytes) in node_bytes.into_iter().enumerate() {
+            if let Some(node_bytes) = bytes {
                 let node_data: HnswNodeData = bincode::deserialize(&node_bytes)
                     .map_err(|e| Error::InvalidFormat(e.to_string()))?;
                 all_node_checksums = hash(&node_bytes).wrapping_add(all_node_checksums);
 
-                key_to_node.insert(node_data.key.clone(), node_id);
+                key_to_node.insert(node_data.key.clone(), node_id as u32);
                 nodes.push(Some(HnswNode {
                     key: node_data.key,
                     vector: node_data.vector,
@@ -243,7 +257,7 @@ impl HnswStorage {
                 }));
             } else {
                 nodes.push(None);
-                free_list.push(node_id);
+                free_list.push(node_id as u32);
             }
         }
 
@@ -274,6 +288,50 @@ impl HnswStorage {
             active_count: metadata.node_count,
             deleted_count: metadata.deleted_count,
         })
+    }
+
+    /// フル保存のための書き込み計画を構築する。
+    pub(crate) fn build_save_plan(&self, graph: &HnswGraph) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut puts = Vec::new();
+
+        let mut metadata = HnswMetadata {
+            version: HNSW_FORMAT_VERSION,
+            config: graph.config.clone(),
+            entry_point: graph.entry_point,
+            max_level: graph.max_level,
+            node_count: graph.active_count,
+            deleted_count: graph.deleted_count,
+            next_node_id: graph.next_node_id(),
+            checksum: 0,
+        };
+
+        let mut all_node_checksums: u32 = 0;
+        for (node_id, node_opt) in graph.nodes.iter().enumerate() {
+            let Some(node) = node_opt else {
+                continue;
+            };
+
+            let node_data = Self::node_to_data(node);
+            let node_bytes =
+                bincode::serialize(&node_data).map_err(|e| Error::InvalidFormat(e.to_string()))?;
+            all_node_checksums = hash(&node_bytes).wrapping_add(all_node_checksums);
+
+            puts.push((self.node_key(node_id as u32), node_bytes));
+            puts.push((
+                self.key_index_key(&node.key),
+                (node_id as u32).to_le_bytes().to_vec(),
+            ));
+        }
+
+        let meta_bytes_for_hash =
+            bincode::serialize(&metadata).map_err(|e| Error::InvalidFormat(e.to_string()))?;
+        metadata.checksum = hash(&meta_bytes_for_hash).wrapping_add(all_node_checksums);
+
+        let final_meta_bytes =
+            bincode::serialize(&metadata).map_err(|e| Error::InvalidFormat(e.to_string()))?;
+        puts.push((self.meta_key(), final_meta_bytes));
+
+        Ok(puts)
     }
 
     /// インデックスに紐づく全データを削除する。

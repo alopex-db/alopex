@@ -11,6 +11,9 @@ categories = ["database-implementations"]
 
 [features]
 default = []
+async = ["dep:futures-core"]
+tokio = ["async", "dep:tokio"]
+wasm = ["async"]
 compression-zstd = ["zstd"]
 compression-lz4 = ["lz4"]
 checksum-xxh64 = ["xxhash-rust/xxh64"]
@@ -35,6 +38,7 @@ object_store = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
+futures-core = { version = "0.3", optional = true }
 url = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

@@ -6,6 +6,12 @@ use crate::types::{Key, TxnId, TxnMode, Value};
 
 /// MemoryKV / LsmKV を 1 つの型として扱うためのラッパー。
 pub mod any;
+/// Async adapter for sync KV stores (requires `tokio` feature).
+#[cfg(feature = "tokio")]
+pub mod async_adapter;
+/// Async KV traits (requires `async` feature).
+#[cfg(feature = "async")]
+pub mod async_kv;
 pub mod memory;
 /// Storage mode selection helpers (disk vs memory).
 pub mod storage;
@@ -15,6 +21,10 @@ pub mod storage;
 pub mod s3;
 
 pub use any::AnyKV;
+#[cfg(feature = "tokio")]
+pub use async_adapter::{AsyncKVStoreAdapter, AsyncKVTransactionAdapter};
+#[cfg(feature = "async")]
+pub use async_kv::{AsyncKVStore, AsyncKVTransaction};
 
 #[cfg(feature = "s3")]
 pub use s3::{S3Config, S3KV};

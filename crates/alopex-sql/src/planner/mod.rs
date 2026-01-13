@@ -68,13 +68,13 @@ use std::collections::HashMap;
 /// // let stmt = parser.parse("SELECT * FROM users")?;
 /// // let plan = planner.plan(&stmt)?;
 /// ```
-pub struct Planner<'a, C: Catalog> {
+pub struct Planner<'a, C: Catalog + ?Sized> {
     catalog: &'a C,
     name_resolver: NameResolver<'a, C>,
     type_checker: TypeChecker<'a, C>,
 }
 
-impl<'a, C: Catalog> Planner<'a, C> {
+impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     /// Create a new planner with the given catalog.
     pub fn new(catalog: &'a C) -> Self {
         Self {

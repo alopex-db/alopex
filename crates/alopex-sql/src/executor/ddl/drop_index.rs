@@ -9,7 +9,7 @@ use crate::storage::{KeyEncoder, SqlTxn};
 use super::is_implicit_pk_index;
 
 /// Execute DROP INDEX.
-pub fn execute_drop_index<'txn, S: KVStore + 'txn, C: Catalog>(
+pub fn execute_drop_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     txn: &mut impl SqlTxn<'txn, S>,
     catalog: &mut C,
     index_name: &str,

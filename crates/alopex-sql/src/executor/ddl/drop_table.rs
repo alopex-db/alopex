@@ -7,7 +7,7 @@ use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::storage::{KeyEncoder, SqlTxn};
 
 /// Execute DROP TABLE.
-pub fn execute_drop_table<'txn, S: KVStore + 'txn, C: Catalog>(
+pub fn execute_drop_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     txn: &mut impl SqlTxn<'txn, S>,
     catalog: &mut C,
     table_name: &str,

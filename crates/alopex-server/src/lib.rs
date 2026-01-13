@@ -1,14 +1,16 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Alopex server implementation (HTTP/gRPC).
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod audit;
+pub mod auth;
+pub mod config;
+pub mod error;
+pub mod grpc;
+pub mod http;
+pub mod metrics;
+pub mod server;
+pub mod session;
+pub mod tls;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use config::ServerConfig;
+pub use error::{Result, ServerError};
+pub use server::Server;

@@ -9,3 +9,33 @@ keywords = ["database", "server"]
 categories = ["database-implementations"]
 
 [dependencies]
+alopex-core = { workspace = true, features = ["async", "tokio"] }
+alopex-sql = { workspace = true, features = ["tokio"] }
+anyhow = { workspace = true }
+axum = "0.6"
+axum-server = { version = "0.5", features = ["tls-rustls"] }
+chrono = { version = "0.4", features = ["serde"] }
+config = "0.14"
+dashmap = "5.5"
+futures = { workspace = true }
+humantime-serde = "1.1"
+prometheus = "0.13"
+prost = "0.12"
+prost-types = "0.12"
+rustls = "0.21"
+rustls-pemfile = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+tonic = { version = "0.10", features = ["tls"] }
+tower = "0.4"
+tower-http = { version = "0.4", features = ["trace", "limit", "request-id"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+[build-dependencies]
+tonic-build = "0.10"
+protoc-bin-vendored = "3.2.0"

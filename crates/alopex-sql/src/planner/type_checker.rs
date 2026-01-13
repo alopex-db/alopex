@@ -26,11 +26,11 @@ use crate::planner::types::ResolvedType;
 /// let catalog = MemoryCatalog::new();
 /// let type_checker = TypeChecker::new(&catalog);
 /// ```
-pub struct TypeChecker<'a, C: Catalog> {
+pub struct TypeChecker<'a, C: Catalog + ?Sized> {
     catalog: &'a C,
 }
 
-impl<'a, C: Catalog> TypeChecker<'a, C> {
+impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     /// Create a new TypeChecker with the given catalog.
     pub fn new(catalog: &'a C) -> Self {
         Self { catalog }

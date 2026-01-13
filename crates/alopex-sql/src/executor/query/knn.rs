@@ -46,7 +46,7 @@ pub fn extract_knn_context(
 
 /// KNN 最適化クエリを実行する。HNSW インデックスが存在しフィルタ無しならインデックス経路、
 /// それ以外はヒープベースの全件スキャンで Top-K を選択する。
-pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog>(
+pub fn execute_knn_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     txn: &mut impl SqlTxn<'txn, S>,
     catalog: &C,
     pattern: &KnnPattern,
@@ -447,7 +447,7 @@ fn value_from_column(
     }
 }
 
-fn find_hnsw_index<C: Catalog>(
+fn find_hnsw_index<C: Catalog + ?Sized>(
     catalog: &C,
     table: &TableMetadata,
     column: &str,
