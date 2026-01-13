@@ -197,6 +197,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls 0.24.1",
  "tokio-stream",
  "tonic",
  "tonic-build",

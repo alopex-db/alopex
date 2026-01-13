@@ -93,30 +93,41 @@ async fn execute_non_streaming(
     let sql = request.sql.as_str();
     let is_ddl = is_ddl(sql);
 
-    let exec_result = if let Some(session_id) = &request.session_id {
-        let session_id = session_id
-            .parse::<SessionId>()
-            .map_err(|_| ServerError::BadRequest("invalid session_id".into()))?;
-        let fut = state.session_manager.execute_in_session(&session_id, sql);
-        tokio::time::timeout(state.config.query_timeout, fut)
-            .await
-            .map_err(|_| ServerError::Timeout("query timeout".into()))??
-    } else {
-        let mut txn = state.begin_sql_txn().await?;
-        let fut = tokio::time::timeout(state.config.query_timeout, txn.async_execute(sql))
-            .await
-            .map_err(|_| ServerError::Timeout("query timeout".into()))?;
-        match fut {
-            Ok(result) => {
-                txn.async_commit()
-                    .await
-                    .map_err(|err| ServerError::Sql(err.into()))?;
-                result
+    let exec_result: Result<alopex_sql::executor::ExecutionResult> = async {
+        if let Some(session_id) = &request.session_id {
+            let session_id = session_id
+                .parse::<SessionId>()
+                .map_err(|_| ServerError::BadRequest("invalid session_id".into()))?;
+            let fut = state.session_manager.execute_in_session(&session_id, sql);
+            let result = tokio::time::timeout(state.config.query_timeout, fut)
+                .await
+                .map_err(|_| ServerError::Timeout("query timeout".into()))??;
+            Ok(result)
+        } else {
+            let mut txn = state.begin_sql_txn().await?;
+            let fut = tokio::time::timeout(state.config.query_timeout, txn.async_execute(sql))
+                .await
+                .map_err(|_| ServerError::Timeout("query timeout".into()))?;
+            match fut {
+                Ok(result) => {
+                    txn.async_commit()
+                        .await
+                        .map_err(|err| ServerError::Sql(err.into()))?;
+                    Ok(result)
+                }
+                Err(err) => {
+                    let _ = txn.async_rollback().await;
+                    Err(ServerError::Sql(err.into()))
+                }
             }
-            Err(err) => {
-                let _ = txn.async_rollback().await;
-                return Err(ServerError::Sql(err.into()));
-            }
+        }
+    }
+    .await;
+    let exec_result = match exec_result {
+        Ok(result) => result,
+        Err(err) => {
+            state.metrics.record_query(start.elapsed(), false);
+            return Err(err);
         }
     };
 

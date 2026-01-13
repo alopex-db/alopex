@@ -13,6 +13,7 @@ use serde::Serialize;
 use tower::ServiceBuilder;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
+use tracing::Span;
 use uuid::Uuid;
 
 use crate::auth::AuthError;
@@ -42,6 +43,23 @@ pub fn router(state: Arc<ServerState>) -> Router {
         .route("/sql", axum::routing::post(sql::handle))
         .route("/vector/search", axum::routing::post(vector::search))
         .route("/vector/upsert", axum::routing::post(vector::upsert))
+        .route("/vector/delete", axum::routing::post(vector::delete))
+        .route(
+            "/vector/index/create",
+            axum::routing::post(vector::index_create),
+        )
+        .route(
+            "/vector/index/update",
+            axum::routing::post(vector::index_update),
+        )
+        .route(
+            "/vector/index/delete",
+            axum::routing::post(vector::index_delete),
+        )
+        .route(
+            "/vector/index/compact",
+            axum::routing::post(vector::index_compact),
+        )
         .route("/session/begin", axum::routing::post(session::begin))
         .route("/session/:id/commit", axum::routing::post(session::commit))
         .route(
@@ -56,14 +74,16 @@ pub fn router(state: Arc<ServerState>) -> Router {
     };
 
     let middleware = middleware::from_fn(context_middleware);
+    let connection_middleware = middleware::from_fn(connection_middleware);
     api.layer(
         ServiceBuilder::new()
             .layer(RequestBodyLimitLayer::new(state.config.max_request_size))
             .layer(tower::limit::ConcurrencyLimitLayer::new(
                 state.config.max_connections,
             ))
-            .layer(TraceLayer::new_for_http())
-            .layer(middleware),
+            .layer(TraceLayer::new_for_http().make_span_with(make_trace_span))
+            .layer(middleware)
+            .layer(connection_middleware),
     )
     .layer(axum::Extension(state))
 }
@@ -110,6 +130,17 @@ pub async fn context_middleware<B>(
     res
 }
 
+pub async fn connection_middleware<B>(
+    axum::extract::Extension(state): axum::extract::Extension<Arc<ServerState>>,
+    req: axum::http::Request<B>,
+    next: middleware::Next<B>,
+) -> Response {
+    state.metrics.record_connection(1);
+    let res = next.run(req).await;
+    state.metrics.record_connection(-1);
+    res
+}
+
 fn auth_error_response(err: AuthError, correlation_id: &str) -> Response {
     let message = err.to_string();
     let body = Json(ErrorResponse {
@@ -131,6 +162,27 @@ pub fn error_response(err: ServerError, ctx: &RequestContext) -> Response {
         },
     });
     (err.status_code(), body).into_response()
+}
+
+fn make_trace_span<B>(request: &axum::http::Request<B>) -> Span {
+    let correlation_id = request
+        .extensions()
+        .get::<RequestContext>()
+        .map(|ctx| ctx.correlation_id.clone())
+        .or_else(|| extract_correlation_id(request.headers()))
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let traceparent = request
+        .headers()
+        .get("traceparent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    tracing::info_span!(
+        "http_request",
+        correlation_id = %correlation_id,
+        traceparent = %traceparent,
+        method = %request.method(),
+        path = %request.uri().path()
+    )
 }
 
 pub fn json_response<T: Serialize>(value: T, max_size: usize, ctx: &RequestContext) -> Response {

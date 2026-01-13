@@ -28,7 +28,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = "0.1"
+tokio-rustls = "0.24"
+tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.10", features = ["tls"] }
 tower = "0.4"
 tower-http = { version = "0.4", features = ["trace", "limit", "request-id"] }

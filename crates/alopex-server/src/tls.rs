@@ -44,7 +44,7 @@ pub fn build_rustls_config(config: &TlsConfig) -> Result<Arc<rustls::ServerConfi
         .with_safe_default_kx_groups()
         .with_protocol_versions(&versions)
         .map_err(|err| ServerError::InvalidConfig(err.to_string()))?;
-    let server_config = if let Some(ca_path) = &config.ca_path {
+    let mut server_config = if let Some(ca_path) = &config.ca_path {
         let mut roots = rustls::RootCertStore::empty();
         let ca_certs = load_certs(ca_path)?;
         for cert in ca_certs {
@@ -63,6 +63,7 @@ pub fn build_rustls_config(config: &TlsConfig) -> Result<Arc<rustls::ServerConfi
             .with_single_cert(certs, key)
             .map_err(|err| ServerError::InvalidConfig(err.to_string()))?
     };
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(Arc::new(server_config))
 }
 
