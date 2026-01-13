@@ -36,6 +36,14 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { version = "1.6", features = ["v4", "serde"] }
 
+[dev-dependencies]
+alopex-core = { path = "../alopex-core" }
+alopex-sql = { path = "../alopex-sql", features = ["tokio"] }
+futures-core = { workspace = true }
+hyper = "0.14"
+tempfile = "3.10"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
 [build-dependencies]
 tonic-build = "0.10"
 protoc-bin-vendored = "3.2.0"
