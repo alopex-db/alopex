@@ -29,7 +29,9 @@ echo -e "${YELLOW}Checking internet connectivity...${NC}"
 if ! curl -s --connect-timeout 5 --max-time 10 -o /dev/null -w "%{http_code}" "https://discord.com/api/v10/gateway" | grep -q "^[23]"; then
     echo -e "${RED}Error: インターネットに接続できません${NC}"
     echo -e "${RED}Discord API (https://discord.com/api/v10/gateway) へのアクセスに失敗しました${NC}"
+    echo ""
     echo "ネットワーク接続を確認してから再度コミットしてください"
+    echo -e "${RED}警告: --no-verify オプションの使用は禁止されています${NC}"
     exit 1
 fi
 echo -e "${GREEN}Internet connectivity OK${NC}"
