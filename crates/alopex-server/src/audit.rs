@@ -22,7 +22,9 @@ pub trait AuditLogSink: Send + Sync + 'static {
 pub enum AuditLogOutput {
     #[default]
     Stdout,
-    File { path: PathBuf },
+    File {
+        path: PathBuf,
+    },
     Custom(Arc<dyn AuditLogSink>),
 }
 
