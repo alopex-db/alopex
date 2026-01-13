@@ -18,17 +18,12 @@ pub struct TlsConfig {
     pub min_version: TlsVersion,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsVersion {
+    #[default]
     Tls12,
     Tls13,
-}
-
-impl Default for TlsVersion {
-    fn default() -> Self {
-        Self::Tls12
-    }
 }
 
 /// Build a rustls server config from TLS settings.

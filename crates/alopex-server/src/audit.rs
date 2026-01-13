@@ -18,8 +18,9 @@ pub trait AuditLogSink: Send + Sync + 'static {
 }
 
 /// Output configuration for audit logs.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum AuditLogOutput {
+    #[default]
     Stdout,
     File { path: PathBuf },
     Custom(Arc<dyn AuditLogSink>),
@@ -32,12 +33,6 @@ impl fmt::Debug for AuditLogOutput {
             AuditLogOutput::File { path } => f.debug_struct("File").field("path", path).finish(),
             AuditLogOutput::Custom(_) => f.debug_tuple("Custom").finish(),
         }
-    }
-}
-
-impl Default for AuditLogOutput {
-    fn default() -> Self {
-        Self::Stdout
     }
 }
 
