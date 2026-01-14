@@ -938,6 +938,13 @@ impl SSTableReader {
         })
     }
 
+    /// Return the overall key range for this SSTable based on index entries.
+    pub fn key_range(&self) -> Option<(Key, Key)> {
+        let first = self.index.first()?.first_key.clone();
+        let last = self.index.last()?.last_key.clone();
+        Some((first, last))
+    }
+
     /// Return the number of entries.
     pub fn entry_count(&self) -> u64 {
         self.header.entry_count

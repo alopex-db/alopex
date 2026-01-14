@@ -337,8 +337,7 @@ impl LsmKV {
         };
         let wal_used_bytes = wal_writer.used_bytes();
         let next_sstable_id = next_sstable_id_from_dir(&sst_dir)?;
-
-        let levels = vec![Vec::new(); config.compaction.max_levels];
+        let levels = load_sstable_levels(&sst_dir, config.compaction.max_levels)?;
 
         let store = Self {
             wal: RwLock::new(wal_writer),
@@ -875,6 +874,50 @@ fn next_sstable_id_from_dir(dir: &Path) -> Result<u64> {
         }
     }
     Ok(max_id.saturating_add(1))
+}
+
+fn load_sstable_levels(dir: &Path, max_levels: usize) -> Result<Vec<Vec<SSTableMeta>>> {
+    let mut levels = vec![Vec::new(); max_levels];
+    if max_levels == 0 || !dir.exists() {
+        return Ok(levels);
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("sst") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(file_id) = stem.parse::<u64>() else {
+            continue;
+        };
+        let reader = match SSTableReader::open(&path) {
+            Ok(reader) => reader,
+            Err(err) => {
+                warn!(error = %err, path = ?path, "Skipping unreadable SSTable");
+                continue;
+            }
+        };
+        let Some((first_key, last_key)) = reader.key_range() else {
+            continue;
+        };
+        let size_bytes = fs::metadata(&path)?.len();
+        let meta = SSTableMeta {
+            id: file_id,
+            level: 0,
+            size_bytes,
+            key_range: KeyRange {
+                first_key,
+                last_key,
+            },
+        };
+        levels[0].push(meta);
+    }
+
+    Ok(levels)
 }
 
 fn apply_wal_replay(mem: &mut MemTable, entries: &[crate::lsm::wal::WalEntry]) -> u64 {
