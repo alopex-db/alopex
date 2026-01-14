@@ -82,7 +82,9 @@ impl From<CoreError> for ColumnarError {
         match err {
             CoreError::ChecksumMismatch => ColumnarError::ChecksumMismatch,
             CoreError::InvalidFormat(reason) => ColumnarError::InvalidFormat(reason),
-            CoreError::CorruptedSegment { reason } => ColumnarError::CorruptedSegment { reason },
+            CoreError::CorruptedSegment { segment_id, reason } => ColumnarError::CorruptedSegment {
+                reason: format!("segment {segment_id}: {reason}"),
+            },
             CoreError::MemoryLimitExceeded { limit, requested } => {
                 ColumnarError::MemoryLimitExceeded { limit, requested }
             }

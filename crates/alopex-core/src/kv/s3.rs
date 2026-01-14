@@ -217,7 +217,10 @@ impl S3KV {
 
         // Open LsmKV on the cache directory
         let inner = match &config.lsm_config {
-            Some(cfg) => LsmKV::open_with_config(&cache_dir, cfg.clone())?,
+            Some(cfg) => {
+                let (store, _recovery) = LsmKV::open_with_config(&cache_dir, cfg.clone())?;
+                store
+            }
             None => LsmKV::open(&cache_dir)?,
         };
 

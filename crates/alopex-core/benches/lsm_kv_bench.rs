@@ -70,7 +70,8 @@ struct LsmHarness {
 impl LsmHarness {
     fn new() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = LsmKV::open_with_config(dir.path(), bench_config()).expect("open lsmkv");
+        let (store, _recovery) =
+            LsmKV::open_with_config(dir.path(), bench_config()).expect("open lsmkv");
         Self { _dir: dir, store }
     }
 }

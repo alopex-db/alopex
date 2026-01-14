@@ -606,7 +606,10 @@ fn read_segment_header(
     file.seek(SeekFrom::Start(off))?;
     let mut bytes = [0u8; WAL_SEGMENT_HEADER_SIZE];
     file.read_exact(&mut bytes)?;
-    WalSegmentHeader::from_bytes(&bytes)
+    WalSegmentHeader::from_bytes(&bytes).map_err(|err| Error::CorruptedSegment {
+        segment_id: segment_index,
+        reason: format!("WAL segment header invalid: {err}"),
+    })
 }
 
 fn write_segment_header(
@@ -1253,9 +1256,14 @@ impl WalWriter {
                 segment_id_base = Some(header.segment_id);
             } else if let Some(base) = segment_id_base {
                 if header.segment_id != base + segment_index {
-                    return Err(Error::InvalidFormat(
-                        "WAL segment_id sequence mismatch".into(),
-                    ));
+                    return Err(Error::CorruptedSegment {
+                        segment_id: header.segment_id,
+                        reason: format!(
+                            "WAL segment_id sequence mismatch: expected {}, got {}",
+                            base + segment_index,
+                            header.segment_id
+                        ),
+                    });
                 }
             }
         }
@@ -1399,6 +1407,16 @@ impl WalWriter {
     pub fn ring_len(&self) -> u64 {
         self.ring_len
     }
+
+    /// Bytes currently used in the WAL ring buffer.
+    pub fn used_bytes(&self) -> u64 {
+        self.used_bytes
+    }
+
+    /// Current end offset in the logical ring.
+    pub fn end_offset(&self) -> u64 {
+        self.section_header.end_offset
+    }
 }
 
 /// Result of WAL replay.
@@ -1487,9 +1505,14 @@ impl WalReader {
                 segment_id_base = Some(header.segment_id);
             } else if let Some(base) = segment_id_base {
                 if header.segment_id != base + segment_index {
-                    return Err(Error::InvalidFormat(
-                        "WAL segment_id sequence mismatch".into(),
-                    ));
+                    return Err(Error::CorruptedSegment {
+                        segment_id: header.segment_id,
+                        reason: format!(
+                            "WAL segment_id sequence mismatch: expected {}, got {}",
+                            base + segment_index,
+                            header.segment_id
+                        ),
+                    });
                 }
             }
         }

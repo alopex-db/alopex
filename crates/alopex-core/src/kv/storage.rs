@@ -42,7 +42,10 @@ impl StorageFactory {
         match mode {
             StorageMode::Disk { path, config } => {
                 let kv = match config {
-                    Some(cfg) => LsmKV::open_with_config(&path, cfg)?,
+                    Some(cfg) => {
+                        let (store, _recovery) = LsmKV::open_with_config(&path, cfg)?;
+                        store
+                    }
                     None => LsmKV::open(&path)?,
                 };
                 Ok(AnyKV::Lsm(Box::new(kv)))

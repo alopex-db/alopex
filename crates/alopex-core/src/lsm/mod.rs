@@ -6,6 +6,7 @@
 //! 仕様: `docs-internal/specs/lsm-tree-file-mode-spec.md`
 
 pub mod buffer_pool;
+pub mod checkpoint;
 pub mod free_space;
 pub mod memtable;
 pub mod metrics;
@@ -18,20 +19,23 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::compaction::leveled::{LeveledCompactionConfig, SSTableMeta};
+use crate::compaction::leveled::{KeyRange, LeveledCompactionConfig, SSTableMeta};
 use crate::error::{Error, Result};
 use crate::kv::{KVStore, KVTransaction};
 use crate::lsm::buffer_pool::{BufferPool, BufferPoolConfig};
+use crate::lsm::checkpoint::{load_checkpoint_meta, save_checkpoint_meta, CheckpointMeta};
 use crate::lsm::memtable::{ImmutableMemTable, MemTable, MemTableConfig};
 use crate::lsm::metrics::{LsmMetrics, LsmMetricsSnapshot};
-use crate::lsm::sstable::{SSTableConfig, SSTableReader};
+use crate::lsm::sstable::{SSTableConfig, SSTableEntry, SSTableReader, SSTableWriter};
 use crate::lsm::wal::{
     SyncMode, WalBatchOp, WalConfig, WalEntry, WalEntryPayload, WalOpType, WalReader, WalWriter,
 };
 use crate::storage::format::WriteThrottleConfig;
 use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, Value};
+use tracing::{info, warn};
 
 /// スレッドアクセスモード。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +51,8 @@ pub enum ThreadMode {
 pub struct LsmKVConfig {
     /// WAL 設定。
     pub wal: WalConfig,
+    /// チェックポイント設定。
+    pub checkpoint: CheckpointConfig,
     /// MemTable 設定。
     pub memtable: MemTableConfig,
     /// SSTable 設定。
@@ -59,6 +65,27 @@ pub struct LsmKVConfig {
     pub thread_mode: ThreadMode,
     /// 書き込みスロットリング設定。
     pub write_throttle: WriteThrottleConfig,
+}
+
+/// チェックポイント設定。
+#[derive(Debug, Clone)]
+pub struct CheckpointConfig {
+    /// WAL サイズ閾値（バイト）。
+    pub wal_size_threshold: u64,
+    /// 最小チェックポイント間隔（ms）。
+    pub min_interval_ms: u64,
+    /// 自動チェックポイントを有効にするか。
+    pub auto_checkpoint: bool,
+}
+
+impl Default for CheckpointConfig {
+    fn default() -> Self {
+        Self {
+            wal_size_threshold: 64 * 1024 * 1024,
+            min_interval_ms: 60_000,
+            auto_checkpoint: true,
+        }
+    }
 }
 
 impl Default for LsmKVConfig {
@@ -82,6 +109,7 @@ impl Default for LsmKVConfig {
 
         Self {
             wal,
+            checkpoint: CheckpointConfig::default(),
             memtable: MemTableConfig::default(),
             sstable,
             compaction: LeveledCompactionConfig::default(),
@@ -90,6 +118,32 @@ impl Default for LsmKVConfig {
             write_throttle: WriteThrottleConfig::default(),
         }
     }
+}
+
+/// WAL リカバリの診断結果。
+#[derive(Debug, Clone)]
+pub struct RecoveryResult {
+    /// リカバリで適用したエントリ数。
+    pub entries_recovered: usize,
+    /// 最後に適用した LSN。
+    pub last_lsn: u64,
+    /// 非致命的な警告メッセージ。
+    pub warnings: Vec<String>,
+    /// リカバリ停止理由（ある場合）。
+    pub stop_reason: Option<String>,
+    /// チェックポイント LSN（利用時のみ）。
+    pub checkpoint_lsn: Option<u64>,
+}
+
+/// チェックポイント実行結果。
+#[derive(Debug, Clone)]
+pub struct CheckpointResult {
+    /// Checkpoint LSN captured during the run.
+    pub checkpoint_lsn: u64,
+    /// WAL bytes reclaimed by advancing the start offset.
+    pub wal_bytes_reclaimed: u64,
+    /// Total checkpoint duration in milliseconds.
+    pub duration_ms: u64,
 }
 
 /// タイムスタンプ生成器（単調増加）。
@@ -109,6 +163,11 @@ impl TimestampOracle {
     /// 新しいタイムスタンプを発行する。
     pub fn next_timestamp(&self) -> u64 {
         self.next.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Latest issued timestamp without incrementing.
+    pub fn current_timestamp(&self) -> u64 {
+        self.next.load(Ordering::Relaxed).saturating_sub(1)
     }
 }
 
@@ -174,6 +233,12 @@ pub struct LsmKV {
     pub txn_manager: LsmTxnManager,
     /// コミットの直列化ロック（OCC の検証ウィンドウを閉じる）。
     pub commit_lock: Mutex<()>,
+    /// 次に割り当てる SSTable ID。
+    pub next_sstable_id: AtomicU64,
+    /// WAL の現在使用量（バイト）。
+    pub wal_used_bytes: AtomicU64,
+    /// 最終チェックポイント時刻（epoch ms）。
+    pub last_checkpoint_ms: AtomicU64,
 }
 
 impl LsmKV {
@@ -181,34 +246,92 @@ impl LsmKV {
     ///
     /// `path` はデータディレクトリとして扱い、内部で WAL ファイルを作成/再利用する。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_with_config(path, LsmKVConfig::default())
+        let (store, _recovery) = Self::open_with_config(path, LsmKVConfig::default())?;
+        Ok(store)
     }
 
     /// 設定付きで LsmKV を開く。
     ///
     /// 既存 WAL がある場合は WAL をリプレイして MemTable を復元する（クラッシュリカバリ）。
-    pub fn open_with_config(path: impl AsRef<Path>, config: LsmKVConfig) -> Result<Self> {
+    pub fn open_with_config(
+        path: impl AsRef<Path>,
+        config: LsmKVConfig,
+    ) -> Result<(Self, RecoveryResult)> {
         let data_dir = path.as_ref().to_path_buf();
         fs::create_dir_all(&data_dir)?;
         let wal_path = data_dir.join("lsm.wal");
         let sst_dir = data_dir.join("sst");
         fs::create_dir_all(&sst_dir)?;
         let metrics = Arc::new(LsmMetrics::default());
+        let checkpoint_path = data_dir.join("checkpoint.meta");
 
-        let (wal_writer, recovered, next_ts) = if wal_path.exists() {
+        let (wal_writer, recovered, next_ts, recovery, last_checkpoint_ms) = if wal_path.exists() {
+            let start = Instant::now();
+            let checkpoint = load_checkpoint_meta(&checkpoint_path)?;
+            let checkpoint_lsn = checkpoint.as_ref().map(|meta| meta.checkpoint_lsn);
+            let last_checkpoint_ms = checkpoint.as_ref().map(|meta| meta.created_at).unwrap_or(0);
             let mut reader = WalReader::open(&wal_path, config.wal.clone())?;
             let replay = reader.replay()?;
             let mut mem = MemTable::new();
-            let last_lsn = apply_wal_replay(&mut mem, &replay.entries);
+            let entries: Vec<_> = if let Some(start_lsn) = checkpoint_lsn {
+                replay
+                    .entries
+                    .into_iter()
+                    .filter(|entry| entry.lsn > start_lsn)
+                    .collect()
+            } else {
+                replay.entries
+            };
+            let mut last_lsn = apply_wal_replay(&mut mem, &entries);
+            if let Some(start_lsn) = checkpoint_lsn {
+                last_lsn = last_lsn.max(start_lsn);
+            }
             let next = last_lsn.saturating_add(1).max(1);
-            (WalWriter::open(&wal_path, config.wal.clone())?, mem, next)
+            for warning in &replay.warnings {
+                warn!(warning = %warning, "WAL recovery warning");
+            }
+            if let Some(reason) = &replay.stop_reason {
+                warn!(stop_reason = %reason, "WAL recovery stopped early");
+            }
+
+            let recovery = RecoveryResult {
+                entries_recovered: entries.len(),
+                last_lsn,
+                warnings: replay.warnings,
+                stop_reason: replay.stop_reason,
+                checkpoint_lsn,
+            };
+            let duration_ms = start.elapsed().as_millis() as u64;
+            info!(
+                entries_recovered = recovery.entries_recovered,
+                checkpoint_lsn = ?recovery.checkpoint_lsn,
+                duration_ms,
+                "WAL recovery completed"
+            );
+            (
+                WalWriter::open(&wal_path, config.wal.clone())?,
+                mem,
+                next,
+                recovery,
+                last_checkpoint_ms,
+            )
         } else {
             (
                 WalWriter::create(&wal_path, config.wal.clone(), 1, 1)?,
                 MemTable::new(),
                 1,
+                RecoveryResult {
+                    entries_recovered: 0,
+                    last_lsn: 0,
+                    warnings: Vec::new(),
+                    stop_reason: None,
+                    checkpoint_lsn: None,
+                },
+                0,
             )
         };
+        let wal_used_bytes = wal_writer.used_bytes();
+        let next_sstable_id = next_sstable_id_from_dir(&sst_dir)?;
 
         let levels = vec![Vec::new(); config.compaction.max_levels];
 
@@ -222,13 +345,16 @@ impl LsmKV {
             ts_oracle: TimestampOracle::new(next_ts),
             txn_manager: LsmTxnManager::default(),
             commit_lock: Mutex::new(()),
+            next_sstable_id: AtomicU64::new(next_sstable_id),
+            wal_used_bytes: AtomicU64::new(wal_used_bytes),
+            last_checkpoint_ms: AtomicU64::new(last_checkpoint_ms),
             data_dir,
             sst_dir,
             wal_path,
             config,
         };
         store.refresh_memtable_size_metrics();
-        Ok(store)
+        Ok((store, recovery))
     }
 
     /// MemTable をフラッシュする（手動）。
@@ -258,6 +384,55 @@ impl LsmKV {
         self.metrics.inc_memtable_flush_count();
         self.refresh_memtable_size_metrics();
         Ok(())
+    }
+
+    /// 明示的にチェックポイントを作成する。
+    pub fn checkpoint(&self) -> Result<CheckpointResult> {
+        let _guard = self.commit_lock.lock().expect("lsm commit_lock poisoned");
+        let start = Instant::now();
+
+        self.flush()?;
+        self.persist_immutable_memtables()?;
+
+        let checkpoint_lsn = self.ts_oracle.current_timestamp();
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let meta = CheckpointMeta::new(checkpoint_lsn, created_at);
+        let checkpoint_path = self.data_dir.join("checkpoint.meta");
+        save_checkpoint_meta(&checkpoint_path, &meta)?;
+
+        let mut wal = self.wal.write().expect("lsm wal lock poisoned");
+        let wal_bytes_reclaimed = wal.used_bytes();
+        let end_offset = wal.end_offset();
+        wal.advance_start(end_offset)?;
+        self.wal_used_bytes
+            .store(wal.used_bytes(), Ordering::Relaxed);
+        self.last_checkpoint_ms.store(created_at, Ordering::Relaxed);
+
+        Ok(CheckpointResult {
+            checkpoint_lsn,
+            wal_bytes_reclaimed,
+            duration_ms: start.elapsed().as_millis() as u64,
+        })
+    }
+
+    /// Determine whether an auto-checkpoint should run based on size and time thresholds.
+    pub fn should_checkpoint(&self) -> bool {
+        if !self.config.checkpoint.auto_checkpoint {
+            return false;
+        }
+        let wal_used = self.wal_used_bytes.load(Ordering::Relaxed);
+        if wal_used <= self.config.checkpoint.wal_size_threshold {
+            return false;
+        }
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let last = self.last_checkpoint_ms.load(Ordering::Relaxed);
+        now_ms.saturating_sub(last) >= self.config.checkpoint.min_interval_ms
     }
 
     /// コンパクションを実行する（手動）。
@@ -307,6 +482,63 @@ impl LsmKV {
 
     fn sstable_path_for(&self, file_id: u64) -> PathBuf {
         self.sst_dir.join(format!("{file_id}.sst"))
+    }
+
+    fn persist_immutable_memtables(&self) -> Result<()> {
+        let immutables = {
+            let mut guard = self
+                .immutable_memtables
+                .write()
+                .expect("lsm immutable_memtables lock poisoned");
+            std::mem::take(&mut *guard)
+        };
+
+        if immutables.is_empty() {
+            return Ok(());
+        }
+
+        let mut levels = self.levels.write().expect("lsm levels lock poisoned");
+        for mem in immutables {
+            let entries = mem.scan_prefix(b"", u64::MAX);
+            if entries.is_empty() {
+                continue;
+            }
+            let file_id = self.next_sstable_id.fetch_add(1, Ordering::Relaxed);
+            let path = self.sstable_path_for(file_id);
+            let mut writer = SSTableWriter::create(&path, self.config.sstable)?;
+
+            let mut first_key: Option<Key> = None;
+            let mut last_key: Option<Key> = None;
+            for (key, entry) in entries {
+                if first_key.is_none() {
+                    first_key = Some(key.clone());
+                }
+                last_key = Some(key.clone());
+                writer.append(SSTableEntry {
+                    key,
+                    value: entry.value,
+                    timestamp: entry.timestamp,
+                    sequence: entry.sequence,
+                })?;
+            }
+            writer.finish()?;
+            let size_bytes = fs::metadata(&path)?.len();
+
+            let key_range = KeyRange {
+                first_key: first_key.unwrap(),
+                last_key: last_key.unwrap(),
+            };
+            let meta = SSTableMeta {
+                id: file_id,
+                level: 0,
+                size_bytes,
+                key_range,
+            };
+            levels[0].push(meta);
+        }
+
+        self.refresh_memtable_size_metrics();
+        Ok(())
     }
 
     fn refresh_memtable_size_metrics(&self) {
@@ -564,6 +796,27 @@ impl LsmKV {
     }
 }
 
+fn next_sstable_id_from_dir(dir: &Path) -> Result<u64> {
+    let mut max_id = 0u64;
+    if dir.exists() {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("sst") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Ok(id) = stem.parse::<u64>() else {
+                continue;
+            };
+            max_id = max_id.max(id);
+        }
+    }
+    Ok(max_id.saturating_add(1))
+}
+
 fn apply_wal_replay(mem: &mut MemTable, entries: &[crate::lsm::wal::WalEntry]) -> u64 {
     let mut last = 0u64;
     for e in entries {
@@ -807,6 +1060,9 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
             self.store
                 .metrics
                 .add_wal_sync_duration_ms(sync_duration_ms);
+            self.store
+                .wal_used_bytes
+                .store(wal.used_bytes(), Ordering::Relaxed);
         }
 
         {
@@ -930,6 +1186,9 @@ mod kv_store {
             ts_oracle: TimestampOracle::new(1),
             txn_manager: LsmTxnManager::default(),
             commit_lock: Mutex::new(()),
+            next_sstable_id: AtomicU64::new(1),
+            wal_used_bytes: AtomicU64::new(0),
+            last_checkpoint_ms: AtomicU64::new(0),
         }
     }
 
@@ -957,6 +1216,9 @@ mod kv_store {
             ts_oracle: TimestampOracle::new(1),
             txn_manager: LsmTxnManager::default(),
             commit_lock: Mutex::new(()),
+            next_sstable_id: AtomicU64::new(1),
+            wal_used_bytes: AtomicU64::new(0),
+            last_checkpoint_ms: AtomicU64::new(0),
         }
     }
 
@@ -1090,6 +1352,9 @@ mod txn {
             ts_oracle: TimestampOracle::new(1),
             txn_manager: LsmTxnManager::default(),
             commit_lock: Mutex::new(()),
+            next_sstable_id: AtomicU64::new(1),
+            wal_used_bytes: AtomicU64::new(0),
+            last_checkpoint_ms: AtomicU64::new(0),
         }
     }
 
@@ -1142,7 +1407,7 @@ mod methods {
     #[test]
     fn open_creates_wal_and_returns_metrics() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+        let (store, _recovery) = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
         let m = store.metrics();
         assert_eq!(m.wal_write_bytes, 0);
         assert_eq!(m.memtable_flush_count, 0);
@@ -1154,7 +1419,8 @@ mod methods {
         let dir = tempfile::tempdir().expect("tempdir");
 
         {
-            let store = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+            let (store, _recovery) =
+                LsmKV::open_with_config(dir.path(), test_config()).expect("open");
             let mut wal = store.wal.write().unwrap();
             wal.append(&crate::lsm::wal::WalEntry::put(
                 10,
@@ -1164,7 +1430,8 @@ mod methods {
             .unwrap();
         }
 
-        let store = LsmKV::open_with_config(dir.path(), test_config()).expect("reopen");
+        let (store, _recovery) =
+            LsmKV::open_with_config(dir.path(), test_config()).expect("reopen");
         let mut tx = store.begin(TxnMode::ReadOnly).unwrap();
         assert_eq!(tx.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
     }
@@ -1172,7 +1439,7 @@ mod methods {
     #[test]
     fn flush_moves_active_to_immutable() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+        let (store, _recovery) = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
 
         let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
         tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
@@ -1211,13 +1478,15 @@ mod write_path {
     fn commit_appends_wal_and_reopen_replays() {
         let dir = tempfile::tempdir().expect("tempdir");
         {
-            let store = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+            let (store, _recovery) =
+                LsmKV::open_with_config(dir.path(), test_config()).expect("open");
             let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
             tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
             tx.commit_self().unwrap();
         }
 
-        let store = LsmKV::open_with_config(dir.path(), test_config()).expect("reopen");
+        let (store, _recovery) =
+            LsmKV::open_with_config(dir.path(), test_config()).expect("reopen");
         let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
         assert_eq!(ro.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
     }
@@ -1225,7 +1494,7 @@ mod write_path {
     #[test]
     fn flush_trigger_moves_to_immutable() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+        let (store, _recovery) = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
 
         let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
         tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
@@ -1237,6 +1506,107 @@ mod write_path {
 
         let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
         assert_eq!(ro.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod recovery_tests {
+    use super::*;
+    use crate::lsm::checkpoint::{save_checkpoint_meta, CheckpointMeta};
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    fn test_config() -> LsmKVConfig {
+        LsmKVConfig {
+            wal: WalConfig {
+                segment_size: 4096,
+                max_segments: 2,
+                sync_mode: SyncMode::NoSync,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn recovery_uses_checkpoint_lsn_when_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (store, _recovery) = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+        let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+        tx.put(b"before".to_vec(), b"1".to_vec()).unwrap();
+        tx.commit_self().unwrap();
+
+        let checkpoint_lsn = store.ts_oracle.current_timestamp();
+        let meta = CheckpointMeta::new(checkpoint_lsn, 0);
+        let checkpoint_path = dir.path().join("checkpoint.meta");
+        save_checkpoint_meta(&checkpoint_path, &meta).unwrap();
+
+        let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+        tx.put(b"after".to_vec(), b"2".to_vec()).unwrap();
+        tx.commit_self().unwrap();
+
+        let (store, recovery) = LsmKV::open_with_config(dir.path(), test_config()).expect("reopen");
+        assert!(recovery.checkpoint_lsn.is_some());
+        assert_eq!(recovery.entries_recovered, 1);
+
+        let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(ro.get(&b"after".to_vec()).unwrap(), Some(b"2".to_vec()));
+    }
+
+    #[test]
+    fn recovery_falls_back_when_checkpoint_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (store, _recovery) = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+        let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+        tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
+        tx.commit_self().unwrap();
+
+        let (store, recovery) = LsmKV::open_with_config(dir.path(), test_config()).expect("reopen");
+        assert!(recovery.checkpoint_lsn.is_none());
+        assert!(recovery.entries_recovered >= 1);
+
+        let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(ro.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
+    }
+
+    #[test]
+    fn recovery_stops_on_corrupted_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("lsm.wal");
+        let wal_cfg = WalConfig {
+            segment_size: 4096,
+            max_segments: 1,
+            sync_mode: SyncMode::NoSync,
+        };
+
+        let mut writer = WalWriter::create(&wal_path, wal_cfg.clone(), 1, 1).unwrap();
+        let e1 = WalEntry::put(1, b"a".to_vec(), b"1".to_vec());
+        let e2 = WalEntry::put(2, b"b".to_vec(), b"2".to_vec());
+        let _off1 = writer.append(&e1).unwrap();
+        let off2 = writer.append(&e2).unwrap();
+        let e2_bytes = e2.encode().unwrap();
+
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&wal_path)
+            .unwrap();
+        let corrupt_offset = off2 + (e2_bytes.len() as u64).saturating_sub(1);
+        file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+        let mut buf = [0u8; 1];
+        file.read_exact(&mut buf).unwrap();
+        buf[0] ^= 0xFF;
+        file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+        file.write_all(&buf).unwrap();
+
+        let cfg = LsmKVConfig {
+            wal: wal_cfg,
+            ..Default::default()
+        };
+        let (store, recovery) = LsmKV::open_with_config(dir.path(), cfg).expect("reopen");
+        assert!(recovery.stop_reason.is_some());
+        assert_eq!(recovery.entries_recovered, 1);
+
+        let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(ro.get(&b"a".to_vec()).unwrap(), Some(b"1".to_vec()));
     }
 }
 
@@ -1261,7 +1631,7 @@ mod read_path {
     #[test]
     fn reads_from_sstable_via_buffer_pool() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+        let (store, _recovery) = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
 
         // SSTable を1つ作成して L0 に登録する。
         let file_id = 1u64;
