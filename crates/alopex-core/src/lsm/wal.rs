@@ -4,33 +4,35 @@
 //! the circular buffer inside a single `.alopex` file. Writer/reader
 //! implementations build on top of these primitives.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::convert::TryFrom;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 
 #[cfg(test)]
-static WAL_SYNC_CALLS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static WAL_SYNC_CALLS: Cell<usize> = const { Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) fn reset_sync_calls() {
-    WAL_SYNC_CALLS.store(0, Ordering::SeqCst);
+    WAL_SYNC_CALLS.with(|counter| counter.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn sync_calls() -> usize {
-    WAL_SYNC_CALLS.load(Ordering::SeqCst)
+    WAL_SYNC_CALLS.with(|counter| counter.get())
 }
 
 fn sync_file(file: &File) -> Result<()> {
     #[cfg(test)]
     {
-        WAL_SYNC_CALLS.fetch_add(1, Ordering::SeqCst);
+        WAL_SYNC_CALLS.with(|counter| counter.set(counter.get() + 1));
     }
     file.sync_data()?;
     Ok(())
@@ -944,14 +946,14 @@ mod tests {
             sync_mode: SyncMode::NoSync,
         };
         let mut writer = WalWriter::create(&path, config, 1, 1).unwrap();
-        WAL_SYNC_CALLS.store(0, Ordering::SeqCst);
+        reset_sync_calls();
 
         let entry = WalEntry::put(1, b"key".to_vec(), b"value".to_vec());
         writer.append(&entry).unwrap();
-        assert_eq!(WAL_SYNC_CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(sync_calls(), 0);
 
         writer.force_sync().unwrap();
-        assert_eq!(WAL_SYNC_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(sync_calls(), 1);
     }
 
     #[test]
