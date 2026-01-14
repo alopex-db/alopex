@@ -30,7 +30,8 @@ use crate::lsm::memtable::{ImmutableMemTable, MemTable, MemTableConfig};
 use crate::lsm::metrics::{LsmMetrics, LsmMetricsSnapshot};
 use crate::lsm::sstable::{SSTableConfig, SSTableEntry, SSTableReader, SSTableWriter};
 use crate::lsm::wal::{
-    SyncMode, WalBatchOp, WalConfig, WalEntry, WalEntryPayload, WalOpType, WalReader, WalWriter,
+    detect_wal_format_version, SyncMode, WalBatchOp, WalConfig, WalEntry, WalEntryPayload,
+    WalOpType, WalReader, WalWriter, WAL_FORMAT_VERSION,
 };
 use crate::storage::format::WriteThrottleConfig;
 use crate::txn::TxnManager;
@@ -266,6 +267,10 @@ impl LsmKV {
         let checkpoint_path = data_dir.join("checkpoint.meta");
 
         let (wal_writer, recovered, next_ts, recovery, last_checkpoint_ms) = if wal_path.exists() {
+            let wal_version = detect_wal_format_version(&wal_path, &config.wal)?;
+            if wal_version < WAL_FORMAT_VERSION {
+                Self::migrate_legacy_wal(&wal_path, &checkpoint_path, &config.wal)?;
+            }
             let start = Instant::now();
             let checkpoint = load_checkpoint_meta(&checkpoint_path)?;
             let checkpoint_lsn = checkpoint.as_ref().map(|meta| meta.checkpoint_lsn);
@@ -355,6 +360,61 @@ impl LsmKV {
         };
         store.refresh_memtable_size_metrics();
         Ok((store, recovery))
+    }
+
+    fn migrate_legacy_wal(
+        wal_path: &Path,
+        checkpoint_path: &Path,
+        config: &WalConfig,
+    ) -> Result<()> {
+        let mut reader = WalReader::open_allow_legacy(wal_path, config.clone())?;
+        let replay = reader.replay()?;
+        for warning in &replay.warnings {
+            warn!(warning = %warning, "Legacy WAL replay warning during migration");
+        }
+        if let Some(reason) = &replay.stop_reason {
+            warn!(
+                stop_reason = %reason,
+                "Legacy WAL replay stopped early during migration"
+            );
+        }
+
+        let entries = replay.entries;
+        let first_lsn = entries.first().map(|entry| entry.lsn).unwrap_or(1);
+        let temp_path = wal_path.with_extension("wal.migrate");
+        let backup_path = wal_path.with_extension("wal.bak");
+
+        if temp_path.exists() {
+            fs::remove_file(&temp_path)?;
+        }
+
+        let mut writer = WalWriter::create(&temp_path, config.clone(), 1, first_lsn)?;
+        for entry in &entries {
+            writer.append(entry)?;
+        }
+        writer.force_sync()?;
+        drop(writer);
+
+        if backup_path.exists() {
+            fs::remove_file(&backup_path)?;
+        }
+        fs::rename(wal_path, &backup_path)?;
+        fs::rename(&temp_path, wal_path)?;
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let meta = CheckpointMeta::new(0, created_at);
+        save_checkpoint_meta(checkpoint_path, &meta)?;
+
+        info!(
+            entries_migrated = entries.len(),
+            backup = ?backup_path,
+            "Legacy WAL migration completed"
+        );
+
+        Ok(())
     }
 
     /// MemTable をフラッシュする（手動）。

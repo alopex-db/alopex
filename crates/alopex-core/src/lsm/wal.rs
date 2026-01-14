@@ -38,8 +38,12 @@ fn sync_file(file: &File) -> Result<()> {
 
 /// WAL file magic ("AWAL").
 pub const WAL_MAGIC: [u8; 4] = *b"AWAL";
-/// WAL format version (uint16).
-pub const WAL_VERSION: u16 = 1;
+/// WAL format version (v0.4.x).
+pub const WAL_FORMAT_VERSION_V04: u16 = 1;
+/// WAL format version (v0.5.0).
+pub const WAL_FORMAT_VERSION: u16 = 2;
+/// WAL format version used by this binary (uint16).
+pub const WAL_VERSION: u16 = WAL_FORMAT_VERSION;
 /// Fixed segment header size (bytes).
 pub const WAL_SEGMENT_HEADER_SIZE: usize = 28;
 /// WAL section header size (bytes) for circular buffer start/end offsets.
@@ -217,8 +221,47 @@ impl WalSegmentHeader {
         Ok(header)
     }
 
+    /// Deserialize and validate a header, allowing legacy format versions.
+    pub fn from_bytes_allow_legacy(bytes: &[u8; WAL_SEGMENT_HEADER_SIZE]) -> Result<Self> {
+        if bytes[0..4] != WAL_MAGIC {
+            return Err(Error::InvalidFormat("WAL magic mismatch".into()));
+        }
+
+        let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+        if version > WAL_FORMAT_VERSION {
+            return Err(Error::InvalidFormat(format!(
+                "unsupported WAL version: {version}"
+            )));
+        }
+
+        let segment_id = u64::from_le_bytes(bytes[6..14].try_into().expect("fixed slice length"));
+        let first_lsn = u64::from_le_bytes(bytes[14..22].try_into().expect("fixed slice length"));
+        let stored_crc = u32::from_le_bytes(bytes[22..26].try_into().expect("fixed slice length"));
+        let reserved = u16::from_le_bytes(bytes[26..28].try_into().expect("fixed slice length"));
+
+        let header = Self {
+            version,
+            segment_id,
+            first_lsn,
+            crc32: stored_crc,
+            reserved,
+        };
+
+        let computed = header.compute_crc();
+        if computed != stored_crc {
+            return Err(Error::ChecksumMismatch);
+        }
+
+        Ok(header)
+    }
+
     fn compute_crc(&self) -> u32 {
         compute_crc(self.version, self.segment_id, self.first_lsn)
+    }
+
+    /// Returns true if the header version is older than current WAL format.
+    pub fn is_legacy_format(&self) -> bool {
+        self.version < WAL_FORMAT_VERSION
     }
 }
 
@@ -610,6 +653,29 @@ fn read_segment_header(
         segment_id: segment_index,
         reason: format!("WAL segment header invalid: {err}"),
     })
+}
+
+fn read_segment_header_allow_legacy(
+    file: &mut File,
+    segment_size: u64,
+    segment_index: u64,
+) -> Result<WalSegmentHeader> {
+    let off = segment_header_offset(segment_size, segment_index);
+    file.seek(SeekFrom::Start(off))?;
+    let mut bytes = [0u8; WAL_SEGMENT_HEADER_SIZE];
+    file.read_exact(&mut bytes)?;
+    WalSegmentHeader::from_bytes_allow_legacy(&bytes).map_err(|err| Error::CorruptedSegment {
+        segment_id: segment_index,
+        reason: format!("WAL segment header invalid: {err}"),
+    })
+}
+
+/// Detect the WAL format version from the first segment header.
+pub fn detect_wal_format_version(path: &Path, config: &WalConfig) -> Result<u16> {
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    let (segment_size, _segment_data_len, _max_segments, _ring_len) = compute_ring_layout(config)?;
+    let header = read_segment_header_allow_legacy(&mut file, segment_size, 0)?;
+    Ok(header.version)
 }
 
 fn write_segment_header(
@@ -1501,6 +1567,86 @@ impl WalReader {
         let mut segment_id_base: Option<u64> = None;
         for segment_index in 0..max_segments {
             let header = read_segment_header(&mut file, segment_size, segment_index)?;
+            if segment_index == 0 {
+                segment_id_base = Some(header.segment_id);
+            } else if let Some(base) = segment_id_base {
+                if header.segment_id != base + segment_index {
+                    return Err(Error::CorruptedSegment {
+                        segment_id: header.segment_id,
+                        reason: format!(
+                            "WAL segment_id sequence mismatch: expected {}, got {}",
+                            base + segment_index,
+                            header.segment_id
+                        ),
+                    });
+                }
+            }
+        }
+
+        Ok(Self {
+            file,
+            config,
+            section_header,
+            segment_id_base: segment_id_base.unwrap_or(0),
+            segment_size,
+            segment_data_len,
+            ring_len,
+            used_bytes,
+        })
+    }
+
+    /// Open an existing WAL section for replay, allowing legacy format versions.
+    pub(crate) fn open_allow_legacy(path: &Path, config: WalConfig) -> Result<Self> {
+        let mut file = OpenOptions::new().read(true).open(path)?;
+
+        let (segment_size, segment_data_len, max_segments, ring_len) =
+            compute_ring_layout(&config)?;
+        let wal_section_size = (WAL_SECTION_HEADER_SIZE as u64)
+            .checked_add(
+                segment_size
+                    .checked_mul(max_segments)
+                    .ok_or_else(|| Error::InvalidFormat("WAL section size overflow".into()))?,
+            )
+            .ok_or_else(|| Error::InvalidFormat("WAL section size overflow".into()))?;
+
+        let file_len = file.metadata()?.len();
+        if file_len < wal_section_size {
+            return Err(Error::InvalidFormat(
+                "WAL file is smaller than configured section size".into(),
+            ));
+        }
+
+        let section_header = load_section_header(&mut file, 0)?;
+        if section_header.start_offset >= ring_len {
+            return Err(Error::InvalidFormat(
+                "WAL start offset exceeds ring length".into(),
+            ));
+        }
+        if section_header.end_offset >= ring_len {
+            return Err(Error::InvalidFormat(
+                "WAL end offset exceeds ring length".into(),
+            ));
+        }
+        if section_header.is_full && section_header.start_offset != section_header.end_offset {
+            return Err(Error::InvalidFormat(
+                "WAL section header inconsistent: is_full=true but start_offset != end_offset"
+                    .into(),
+            ));
+        }
+
+        let used_bytes = if section_header.is_full {
+            ring_len
+        } else {
+            ring_distance(
+                section_header.start_offset,
+                section_header.end_offset,
+                ring_len,
+            )
+        };
+
+        let mut segment_id_base: Option<u64> = None;
+        for segment_index in 0..max_segments {
+            let header = read_segment_header_allow_legacy(&mut file, segment_size, segment_index)?;
             if segment_index == 0 {
                 segment_id_base = Some(header.segment_id);
             } else if let Some(base) = segment_id_base {
