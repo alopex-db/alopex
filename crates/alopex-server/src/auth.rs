@@ -3,19 +3,14 @@ use serde::{Deserialize, Serialize};
 use tonic::metadata::MetadataMap;
 
 /// Authentication mode for the server.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthMode {
     /// No authentication.
+    #[default]
     None,
     /// Dev API key authentication.
     Dev { api_key: String },
-}
-
-impl Default for AuthMode {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Authentication error for HTTP/gRPC.

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/alopex-core",
+    "crates/alopex-dataframe",
     "crates/alopex-sql",
     "crates/alopex-embedded", "crates/alopex-server", "crates/alopex-cluster", "crates/alopex-cli", "crates/alopex-tools", "crates/alopex-py",
 ]
@@ -36,6 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 object_store = { version = "0.11", features = ["aws"] }
 bytes = "1.5"
 futures = "0.3"
+futures-core = "0.3"
 url = "2.5"
 
 # Testing

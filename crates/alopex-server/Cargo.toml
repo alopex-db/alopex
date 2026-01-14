@@ -19,7 +19,7 @@ config = "0.14"
 dashmap = "5.5"
 futures = { workspace = true }
 humantime-serde = "1.1"
-prometheus = "0.13"
+prometheus = "0.14"
 prost = "0.12"
 prost-types = "0.12"
 rustls = "0.21"
@@ -28,13 +28,22 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = "0.1"
+tokio-rustls = "0.24"
+tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.10", features = ["tls"] }
 tower = "0.4"
 tower-http = { version = "0.4", features = ["trace", "limit", "request-id"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { version = "1.6", features = ["v4", "serde"] }
+
+[dev-dependencies]
+alopex-core = { path = "../alopex-core" }
+alopex-sql = { path = "../alopex-sql", features = ["tokio"] }
+futures-core = { workspace = true }
+hyper = "0.14"
+tempfile = "3.10"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [build-dependencies]
 tonic-build = "0.10"

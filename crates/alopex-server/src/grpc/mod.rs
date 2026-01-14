@@ -1,21 +1,25 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use alopex_core::kv::async_adapter::AsyncKVTransactionAdapter;
 use alopex_sql::storage::AsyncSqlTransaction;
-use futures::StreamExt;
+use futures::{future::BoxFuture, StreamExt};
 use prost::Message;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::{Certificate, Identity, ServerTlsConfig};
+use tokio_rustls::TlsAcceptor;
+use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::{async_trait, Request, Response, Status};
+use tower::{Layer, Service};
 use uuid::Uuid;
 
 use crate::error::{Result, ServerError};
+use crate::metrics::Metrics;
 use crate::server::ServerState;
 use crate::session::{SessionId, TxnHandle};
+use crate::tls;
 
 pub mod proto {
     tonic::include_proto!("alopex.v0");
@@ -27,6 +31,60 @@ use proto::alopex_service_server::{AlopexService, AlopexServiceServer};
 struct GrpcContext {
     correlation_id: String,
     actor: Option<String>,
+    span: tracing::Span,
+}
+
+#[derive(Clone)]
+struct ConnectionMetricsLayer {
+    metrics: Metrics,
+}
+
+impl ConnectionMetricsLayer {
+    fn new(metrics: Metrics) -> Self {
+        Self { metrics }
+    }
+}
+
+#[derive(Clone)]
+struct ConnectionMetricsService<S> {
+    inner: S,
+    metrics: Metrics,
+}
+
+impl<S> Layer<S> for ConnectionMetricsLayer {
+    type Service = ConnectionMetricsService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        ConnectionMetricsService {
+            inner,
+            metrics: self.metrics.clone(),
+        }
+    }
+}
+
+impl<S, Req> Service<Req> for ConnectionMetricsService<S>
+where
+    S: Service<Req> + Send + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = BoxFuture<'static, std::result::Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Req) -> Self::Future {
+        self.metrics.record_connection(1);
+        let metrics = self.metrics.clone();
+        let fut = self.inner.call(req);
+        Box::pin(async move {
+            let result = fut.await;
+            metrics.record_connection(-1);
+            result
+        })
+    }
 }
 
 pub async fn serve(
@@ -41,41 +99,64 @@ pub async fn serve(
     let interceptor = move |mut req: Request<()>| {
         let correlation_id =
             extract_correlation_id(req.metadata()).unwrap_or_else(|| Uuid::new_v4().to_string());
+        let traceparent = extract_traceparent(req.metadata());
         let actor = auth
             .validate_grpc(req.metadata())
             .map_err(|_| Status::unauthenticated("unauthorized"))?;
+        let span = tracing::info_span!(
+            "grpc_request",
+            correlation_id = %correlation_id,
+            traceparent = %traceparent.as_deref().unwrap_or("")
+        );
         req.extensions_mut().insert(GrpcContext {
             correlation_id,
             actor,
+            span,
         });
         Ok(req)
     };
 
-    let mut server = tonic::transport::Server::builder();
-    if let Some(tls) = &state.config.tls {
-        let cert = std::fs::read(&tls.cert_path).map_err(ServerError::Io)?;
-        let key = std::fs::read(&tls.key_path).map_err(ServerError::Io)?;
-        let mut tls_config = ServerTlsConfig::new().identity(Identity::from_pem(cert, key));
-        if let Some(ca_path) = &tls.ca_path {
-            let ca = std::fs::read(ca_path).map_err(ServerError::Io)?;
-            tls_config = tls_config.client_ca_root(Certificate::from_pem(ca));
-        }
-        server = server
-            .tls_config(tls_config)
-            .map_err(|err| ServerError::InvalidConfig(err.to_string()))?;
-    }
-
+    let mut server = tonic::transport::Server::builder()
+        .layer(ConnectionMetricsLayer::new(state.metrics.clone()));
     let shutdown_signal = async move {
         let _ = shutdown.recv().await;
     };
 
-    server
-        .add_service(AlopexServiceServer::with_interceptor(svc, interceptor))
-        .serve_with_shutdown(addr, shutdown_signal)
-        .await
-        .map_err(|err| ServerError::Internal(err.to_string()))?;
+    let service = AlopexServiceServer::with_interceptor(svc, interceptor);
+    if let Some(tls) = &state.config.tls {
+        let rustls_config = tls::build_rustls_config(tls)?;
+        let acceptor = TlsAcceptor::from(rustls_config);
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(ServerError::Io)?;
+        let incoming = TcpListenerStream::new(listener).then(move |conn| {
+            let acceptor = acceptor.clone();
+            async move {
+                let stream = conn?;
+                acceptor.accept(stream).await.map_err(std::io::Error::other)
+            }
+        });
+        server
+            .add_service(service)
+            .serve_with_incoming_shutdown(incoming, shutdown_signal)
+            .await
+            .map_err(|err| ServerError::Internal(err.to_string()))?;
+    } else {
+        server
+            .add_service(service)
+            .serve_with_shutdown(addr, shutdown_signal)
+            .await
+            .map_err(|err| ServerError::Internal(err.to_string()))?;
+    }
 
     Ok(())
+}
+
+pub fn service(state: Arc<ServerState>) -> AlopexServiceServer<impl AlopexService> {
+    let svc = AlopexServiceImpl {
+        state: state.clone(),
+    };
+    AlopexServiceServer::new(svc)
 }
 
 #[derive(Clone)]
@@ -100,6 +181,8 @@ impl AlopexService for AlopexServiceImpl {
         request: Request<proto::SqlRequest>,
     ) -> std::result::Result<Response<Self::ExecuteSqlStream>, Status> {
         let ctx = read_context(&request);
+        let span = ctx.span.clone();
+        let _enter = span.enter();
         let req = request.into_inner();
         if req.sql.trim().is_empty() {
             return Err(Status::invalid_argument("sql must not be empty"));
@@ -118,7 +201,9 @@ impl AlopexService for AlopexServiceImpl {
         };
         let state = self.state.clone();
         let correlation_id = ctx.correlation_id.clone();
+        let span = ctx.span.clone();
         tokio::spawn(async move {
+            let _enter = span.enter();
             let start = Instant::now();
             let deadline = start + state.config.query_timeout;
             let mut bytes_sent = 0usize;
@@ -241,47 +326,70 @@ impl AlopexService for AlopexServiceImpl {
         request: Request<proto::DdlRequest>,
     ) -> std::result::Result<Response<proto::DdlResponse>, Status> {
         let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
         let req = request.into_inner();
         if req.sql.trim().is_empty() {
             return Err(Status::invalid_argument("sql must not be empty"));
         }
         let start = Instant::now();
         let exec_result = if !req.session_id.is_empty() {
-            let session_id = req
-                .session_id
-                .parse::<SessionId>()
-                .map_err(|_| Status::invalid_argument("invalid session_id"))?;
+            let session_id = match req.session_id.parse::<SessionId>() {
+                Ok(id) => id,
+                Err(_) => {
+                    self.state.metrics.record_query(start.elapsed(), false);
+                    return Err(Status::invalid_argument("invalid session_id"));
+                }
+            };
             let fut = self
                 .state
                 .session_manager
                 .execute_in_session(&session_id, &req.sql);
-            tokio::time::timeout(self.state.config.query_timeout, fut)
-                .await
-                .map_err(|_| Status::deadline_exceeded("query timeout"))?
-                .map_err(|err| map_status(err, &ctx.correlation_id))?
+            let exec_result = match tokio::time::timeout(self.state.config.query_timeout, fut).await
+            {
+                Ok(result) => result.map_err(|err| map_status(err, &ctx.correlation_id)),
+                Err(_) => Err(Status::deadline_exceeded("query timeout")),
+            };
+            match exec_result {
+                Ok(result) => result,
+                Err(err) => {
+                    self.state.metrics.record_query(start.elapsed(), false);
+                    return Err(err);
+                }
+            }
         } else {
-            let mut txn = self
-                .state
-                .begin_sql_txn()
-                .await
-                .map_err(|err| map_status(err, &ctx.correlation_id))?;
+            let mut txn = match self.state.begin_sql_txn().await {
+                Ok(txn) => txn,
+                Err(err) => {
+                    let status = map_status(err, &ctx.correlation_id);
+                    self.state.metrics.record_query(start.elapsed(), false);
+                    return Err(status);
+                }
+            };
             let exec_result =
                 tokio::time::timeout(self.state.config.query_timeout, txn.async_execute(&req.sql))
-                    .await
-                    .map_err(|_| Status::deadline_exceeded("query timeout"))?;
+                    .await;
             let exec_result = match exec_result {
-                Ok(result) => {
-                    txn.async_commit().await.map_err(|err| {
-                        map_status(ServerError::Sql(err.into()), &ctx.correlation_id)
-                    })?;
-                    result
-                }
-                Err(err) => {
+                Ok(result) => match result {
+                    Ok(result) => {
+                        if let Err(err) = txn.async_commit().await {
+                            let status =
+                                map_status(ServerError::Sql(err.into()), &ctx.correlation_id);
+                            self.state.metrics.record_query(start.elapsed(), false);
+                            return Err(status);
+                        }
+                        result
+                    }
+                    Err(err) => {
+                        let _ = txn.async_rollback().await;
+                        let status = map_status(ServerError::Sql(err.into()), &ctx.correlation_id);
+                        self.state.metrics.record_query(start.elapsed(), false);
+                        return Err(status);
+                    }
+                },
+                Err(_) => {
                     let _ = txn.async_rollback().await;
-                    return Err(map_status(
-                        ServerError::Sql(err.into()),
-                        &ctx.correlation_id,
-                    ));
+                    self.state.metrics.record_query(start.elapsed(), false);
+                    return Err(Status::deadline_exceeded("query timeout"));
                 }
             };
             exec_result
@@ -306,47 +414,70 @@ impl AlopexService for AlopexServiceImpl {
         request: Request<proto::DmlRequest>,
     ) -> std::result::Result<Response<proto::DmlResponse>, Status> {
         let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
         let req = request.into_inner();
         if req.sql.trim().is_empty() {
             return Err(Status::invalid_argument("sql must not be empty"));
         }
         let start = Instant::now();
         let exec_result = if !req.session_id.is_empty() {
-            let session_id = req
-                .session_id
-                .parse::<SessionId>()
-                .map_err(|_| Status::invalid_argument("invalid session_id"))?;
+            let session_id = match req.session_id.parse::<SessionId>() {
+                Ok(id) => id,
+                Err(_) => {
+                    self.state.metrics.record_query(start.elapsed(), false);
+                    return Err(Status::invalid_argument("invalid session_id"));
+                }
+            };
             let fut = self
                 .state
                 .session_manager
                 .execute_in_session(&session_id, &req.sql);
-            tokio::time::timeout(self.state.config.query_timeout, fut)
-                .await
-                .map_err(|_| Status::deadline_exceeded("query timeout"))?
-                .map_err(|err| map_status(err, &ctx.correlation_id))?
+            let exec_result = match tokio::time::timeout(self.state.config.query_timeout, fut).await
+            {
+                Ok(result) => result.map_err(|err| map_status(err, &ctx.correlation_id)),
+                Err(_) => Err(Status::deadline_exceeded("query timeout")),
+            };
+            match exec_result {
+                Ok(result) => result,
+                Err(err) => {
+                    self.state.metrics.record_query(start.elapsed(), false);
+                    return Err(err);
+                }
+            }
         } else {
-            let mut txn = self
-                .state
-                .begin_sql_txn()
-                .await
-                .map_err(|err| map_status(err, &ctx.correlation_id))?;
+            let mut txn = match self.state.begin_sql_txn().await {
+                Ok(txn) => txn,
+                Err(err) => {
+                    let status = map_status(err, &ctx.correlation_id);
+                    self.state.metrics.record_query(start.elapsed(), false);
+                    return Err(status);
+                }
+            };
             let exec_result =
                 tokio::time::timeout(self.state.config.query_timeout, txn.async_execute(&req.sql))
-                    .await
-                    .map_err(|_| Status::deadline_exceeded("query timeout"))?;
+                    .await;
             let exec_result = match exec_result {
-                Ok(result) => {
-                    txn.async_commit().await.map_err(|err| {
-                        map_status(ServerError::Sql(err.into()), &ctx.correlation_id)
-                    })?;
-                    result
-                }
-                Err(err) => {
+                Ok(result) => match result {
+                    Ok(result) => {
+                        if let Err(err) = txn.async_commit().await {
+                            let status =
+                                map_status(ServerError::Sql(err.into()), &ctx.correlation_id);
+                            self.state.metrics.record_query(start.elapsed(), false);
+                            return Err(status);
+                        }
+                        result
+                    }
+                    Err(err) => {
+                        let _ = txn.async_rollback().await;
+                        let status = map_status(ServerError::Sql(err.into()), &ctx.correlation_id);
+                        self.state.metrics.record_query(start.elapsed(), false);
+                        return Err(status);
+                    }
+                },
+                Err(_) => {
                     let _ = txn.async_rollback().await;
-                    return Err(map_status(
-                        ServerError::Sql(err.into()),
-                        &ctx.correlation_id,
-                    ));
+                    self.state.metrics.record_query(start.elapsed(), false);
+                    return Err(Status::deadline_exceeded("query timeout"));
                 }
             };
             exec_result
@@ -368,6 +499,7 @@ impl AlopexService for AlopexServiceImpl {
         request: Request<proto::BeginRequest>,
     ) -> std::result::Result<Response<proto::TransactionHandle>, Status> {
         let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
         let session_id = self
             .state
             .session_manager
@@ -401,6 +533,7 @@ impl AlopexService for AlopexServiceImpl {
         request: Request<proto::TransactionHandle>,
     ) -> std::result::Result<Response<proto::CommitResponse>, Status> {
         let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
         let session_id = request
             .into_inner()
             .session_id
@@ -419,6 +552,7 @@ impl AlopexService for AlopexServiceImpl {
         request: Request<proto::TransactionHandle>,
     ) -> std::result::Result<Response<proto::RollbackResponse>, Status> {
         let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
         let session_id = request
             .into_inner()
             .session_id
@@ -437,6 +571,7 @@ impl AlopexService for AlopexServiceImpl {
         request: Request<proto::VectorSearchRequest>,
     ) -> std::result::Result<Response<proto::VectorSearchResponse>, Status> {
         let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
         let req = request.into_inner();
         let search_request = crate::http::vector::VectorSearchRequest {
             table: req.table,
@@ -477,6 +612,7 @@ impl AlopexService for AlopexServiceImpl {
         request: Request<proto::VectorUpsertRequest>,
     ) -> std::result::Result<Response<proto::VectorUpsertResponse>, Status> {
         let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
         let req = request.into_inner();
         let upsert_request = crate::http::vector::VectorUpsertRequest {
             table: req.table,
@@ -492,6 +628,118 @@ impl AlopexService for AlopexServiceImpl {
             .await
             .map_err(|err| map_status(err, &ctx.correlation_id))?;
         Ok(Response::new(proto::VectorUpsertResponse { success: true }))
+    }
+
+    async fn vector_delete(
+        &self,
+        request: Request<proto::VectorDeleteRequest>,
+    ) -> std::result::Result<Response<proto::VectorDeleteResponse>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        let req = request.into_inner();
+        let delete_request = crate::http::vector::VectorDeleteRequest {
+            table: req.table,
+            id: req.id,
+            column: if req.column.is_empty() {
+                None
+            } else {
+                Some(req.column)
+            },
+        };
+        let response = crate::http::vector::delete_impl(self.state.clone(), delete_request)
+            .await
+            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        Ok(Response::new(proto::VectorDeleteResponse {
+            success: response.success,
+        }))
+    }
+
+    async fn vector_index_create(
+        &self,
+        request: Request<proto::VectorIndexCreateRequest>,
+    ) -> std::result::Result<Response<proto::VectorIndexResponse>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        let req = request.into_inner();
+        let create_request = crate::http::vector::VectorIndexCreateRequest {
+            name: req.name,
+            table: req.table,
+            column: req.column,
+            method: if req.method.is_empty() {
+                None
+            } else {
+                Some(req.method)
+            },
+            options: req.options,
+            if_not_exists: req.if_not_exists,
+        };
+        let response = crate::http::vector::index_create_impl(self.state.clone(), create_request)
+            .await
+            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        Ok(Response::new(proto::VectorIndexResponse {
+            success: response.success,
+        }))
+    }
+
+    async fn vector_index_update(
+        &self,
+        request: Request<proto::VectorIndexUpdateRequest>,
+    ) -> std::result::Result<Response<proto::VectorIndexResponse>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        let req = request.into_inner();
+        let update_request = crate::http::vector::VectorIndexUpdateRequest {
+            name: req.name,
+            table: req.table,
+            column: req.column,
+            method: if req.method.is_empty() {
+                None
+            } else {
+                Some(req.method)
+            },
+            options: req.options,
+        };
+        let response = crate::http::vector::index_update_impl(self.state.clone(), update_request)
+            .await
+            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        Ok(Response::new(proto::VectorIndexResponse {
+            success: response.success,
+        }))
+    }
+
+    async fn vector_index_delete(
+        &self,
+        request: Request<proto::VectorIndexDeleteRequest>,
+    ) -> std::result::Result<Response<proto::VectorIndexResponse>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        let req = request.into_inner();
+        let delete_request = crate::http::vector::VectorIndexDeleteRequest {
+            name: req.name,
+            if_exists: req.if_exists,
+        };
+        let response = crate::http::vector::index_delete_impl(self.state.clone(), delete_request)
+            .await
+            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        Ok(Response::new(proto::VectorIndexResponse {
+            success: response.success,
+        }))
+    }
+
+    async fn vector_index_compact(
+        &self,
+        request: Request<proto::VectorIndexCompactRequest>,
+    ) -> std::result::Result<Response<proto::VectorIndexResponse>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        let req = request.into_inner();
+        let compact_request = crate::http::vector::VectorIndexCompactRequest { name: req.name };
+        let response = crate::http::vector::index_compact_impl(self.state.clone(), compact_request)
+            .await
+            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        Ok(Response::new(proto::VectorIndexResponse {
+            success: response.success,
+        }))
     }
 
     async fn health(
@@ -528,9 +776,17 @@ fn read_context<T>(request: &Request<T>) -> GrpcContext {
         .extensions()
         .get::<GrpcContext>()
         .cloned()
-        .unwrap_or_else(|| GrpcContext {
-            correlation_id: Uuid::new_v4().to_string(),
-            actor: None,
+        .unwrap_or_else(|| {
+            let correlation_id = Uuid::new_v4().to_string();
+            GrpcContext {
+                correlation_id: correlation_id.clone(),
+                actor: None,
+                span: tracing::info_span!(
+                    "grpc_request",
+                    correlation_id = %correlation_id,
+                    traceparent = ""
+                ),
+            }
         })
 }
 
@@ -545,6 +801,13 @@ fn extract_correlation_id(metadata: &tonic::metadata::MetadataMap) -> Option<Str
                 .and_then(|v| v.to_str().ok())
                 .map(|v| v.to_string())
         })
+}
+
+fn extract_traceparent(metadata: &tonic::metadata::MetadataMap) -> Option<String> {
+    metadata
+        .get("traceparent")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_string())
 }
 
 fn map_status(err: ServerError, correlation_id: &str) -> Status {

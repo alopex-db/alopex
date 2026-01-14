@@ -69,6 +69,46 @@ message VectorUpsertResponse {
   bool success = 1;
 }
 
+message VectorDeleteRequest {
+  string table = 1;
+  uint64 id = 2;
+  string column = 3;
+}
+
+message VectorDeleteResponse {
+  bool success = 1;
+}
+
+message VectorIndexCreateRequest {
+  string name = 1;
+  string table = 2;
+  string column = 3;
+  string method = 4;
+  map<string, string> options = 5;
+  bool if_not_exists = 6;
+}
+
+message VectorIndexUpdateRequest {
+  string name = 1;
+  string table = 2;
+  string column = 3;
+  string method = 4;
+  map<string, string> options = 5;
+}
+
+message VectorIndexDeleteRequest {
+  string name = 1;
+  bool if_exists = 2;
+}
+
+message VectorIndexCompactRequest {
+  string name = 1;
+}
+
+message VectorIndexResponse {
+  bool success = 1;
+}
+
 message HealthRequest {}
 
 message HealthResponse {
@@ -106,5 +146,10 @@ service AlopexService {
   rpc RollbackTransaction(TransactionHandle) returns (RollbackResponse);
   rpc VectorSearch(VectorSearchRequest) returns (VectorSearchResponse);
   rpc VectorUpsert(VectorUpsertRequest) returns (VectorUpsertResponse);
+  rpc VectorDelete(VectorDeleteRequest) returns (VectorDeleteResponse);
+  rpc VectorIndexCreate(VectorIndexCreateRequest) returns (VectorIndexResponse);
+  rpc VectorIndexUpdate(VectorIndexUpdateRequest) returns (VectorIndexResponse);
+  rpc VectorIndexDelete(VectorIndexDeleteRequest) returns (VectorIndexResponse);
+  rpc VectorIndexCompact(VectorIndexCompactRequest) returns (VectorIndexResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
 }

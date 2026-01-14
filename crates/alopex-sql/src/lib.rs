@@ -27,6 +27,8 @@
 //! ```
 
 pub mod ast;
+#[cfg(feature = "async")]
+pub mod async_api;
 pub mod catalog;
 pub mod columnar;
 pub mod dialect;
@@ -36,6 +38,8 @@ pub mod parser;
 pub mod planner;
 pub mod storage;
 pub mod tokenizer;
+#[cfg(all(feature = "tokio", not(target_arch = "wasm32")))]
+pub mod tokio_adapter;
 pub mod unified_error;
 
 // AST types
@@ -71,7 +75,7 @@ pub use planner::{
 
 // Storage types
 #[cfg(feature = "tokio")]
-pub use storage::{AsyncSqlTransaction, AsyncTxnBridge, ErasedAsyncSqlTransaction};
+pub use storage::ErasedAsyncSqlTransaction;
 pub use storage::{
     IndexScanIterator, IndexStorage, KeyEncoder, RowCodec, SqlTransaction, SqlValue, StorageError,
     TableScanIterator, TableStorage, TxnBridge, TxnContext,
@@ -84,6 +88,12 @@ pub use executor::{
     ColumnInfo, ConstraintViolation, EvaluationError, ExecutionResult, Executor, ExecutorError,
     QueryResult, Row,
 };
+
+// Async facade types
+#[cfg(feature = "async")]
+pub use async_api::{AsyncResult, AsyncRowStream, AsyncSqlTransaction, AsyncTxnBridge};
+#[cfg(all(feature = "tokio", not(target_arch = "wasm32")))]
+pub use tokio_adapter::{TokioAsyncSqlTransaction, TokioAsyncTxnBridge};
 
 /// `ExecutionResult` の公開 API 名。
 pub type SqlResult = ExecutionResult;

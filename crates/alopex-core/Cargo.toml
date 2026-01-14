@@ -11,7 +11,7 @@ categories = ["database-implementations"]
 
 [features]
 default = []
-async = ["dep:futures-core"]
+async = []
 tokio = ["async", "dep:tokio"]
 wasm = ["async"]
 compression-zstd = ["zstd"]
@@ -28,6 +28,7 @@ serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 snap = "1.1"
 tracing = { workspace = true }
+futures-core = { workspace = true }
 zstd = { version = "0.13", optional = true }
 lz4 = { version = "1.24", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh64"], optional = true }
@@ -38,7 +39,6 @@ object_store = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
-futures-core = { version = "0.3", optional = true }
 url = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -59,6 +59,7 @@ jemalloc-ctl = { version = "0.5", optional = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = { version = "0.3", optional = true }
 web-sys = { version = "0.3", optional = true }
+getrandom = { version = "0.2", features = ["js"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
