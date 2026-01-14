@@ -797,9 +797,16 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
             let mut wal = self.store.wal.write().expect("lsm wal lock poisoned");
             let stats = wal.append_with_stats(&entry)?;
             self.store.metrics.add_wal_write_bytes(stats.bytes_written);
+            let sync_duration_ms = if stats.sync_duration_ms == 0
+                && !matches!(self.store.config.wal.sync_mode, SyncMode::EveryWrite)
+            {
+                wal.force_sync()?
+            } else {
+                stats.sync_duration_ms
+            };
             self.store
                 .metrics
-                .add_wal_sync_duration_ms(stats.sync_duration_ms);
+                .add_wal_sync_duration_ms(sync_duration_ms);
         }
 
         {
@@ -923,6 +930,59 @@ mod kv_store {
             ts_oracle: TimestampOracle::new(1),
             txn_manager: LsmTxnManager::default(),
             commit_lock: Mutex::new(()),
+        }
+    }
+
+    fn new_test_store_with_sync(sync_mode: SyncMode) -> LsmKV {
+        let mut cfg = test_config();
+        cfg.wal.sync_mode = sync_mode;
+        let data_dir = tempfile::tempdir().expect("tempdir").keep();
+        let sst_dir = data_dir.join("sst");
+        fs::create_dir_all(&sst_dir).expect("create sst dir");
+        let wal_path = data_dir.join("lsm.wal");
+        let wal = WalWriter::create(&wal_path, cfg.wal.clone(), 1, 1).expect("wal create");
+
+        let levels = vec![Vec::new(); cfg.compaction.max_levels];
+        LsmKV {
+            config: cfg,
+            data_dir,
+            sst_dir,
+            wal_path,
+            wal: RwLock::new(wal),
+            active_memtable: RwLock::new(MemTable::new()),
+            immutable_memtables: RwLock::new(VecDeque::new()),
+            levels: RwLock::new(levels),
+            buffer_pool: BufferPool::new(BufferPoolConfig::default()),
+            metrics: Arc::new(LsmMetrics::default()),
+            ts_oracle: TimestampOracle::new(1),
+            txn_manager: LsmTxnManager::default(),
+            commit_lock: Mutex::new(()),
+        }
+    }
+
+    #[test]
+    fn commit_forces_fsync_across_sync_modes() {
+        let modes = [
+            SyncMode::EveryWrite,
+            SyncMode::BatchSync {
+                max_batch_size: 1024 * 1024,
+                max_wait_ms: 60_000,
+            },
+            SyncMode::NoSync,
+        ];
+
+        for mode in modes {
+            let store = new_test_store_with_sync(mode);
+            crate::lsm::wal::reset_sync_calls();
+
+            let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+            tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
+            tx.commit_self().unwrap();
+
+            assert!(
+                crate::lsm::wal::sync_calls() >= 1,
+                "expected fsync during commit for sync mode"
+            );
         }
     }
 

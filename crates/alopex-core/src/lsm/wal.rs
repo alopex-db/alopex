@@ -8,9 +8,33 @@ use std::convert::TryFrom;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
+
+#[cfg(test)]
+static WAL_SYNC_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_sync_calls() {
+    WAL_SYNC_CALLS.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn sync_calls() -> usize {
+    WAL_SYNC_CALLS.load(Ordering::SeqCst)
+}
+
+fn sync_file(file: &File) -> Result<()> {
+    #[cfg(test)]
+    {
+        WAL_SYNC_CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+    file.sync_data()?;
+    Ok(())
+}
 
 /// WAL file magic ("AWAL").
 pub const WAL_MAGIC: [u8; 4] = *b"AWAL";
@@ -842,6 +866,26 @@ mod tests {
     }
 
     #[test]
+    fn wal_writer_force_sync_calls_fsync() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_force_sync");
+        let config = WalConfig {
+            segment_size: 4096,
+            max_segments: 1,
+            sync_mode: SyncMode::NoSync,
+        };
+        let mut writer = WalWriter::create(&path, config, 1, 1).unwrap();
+        WAL_SYNC_CALLS.store(0, Ordering::SeqCst);
+
+        let entry = WalEntry::put(1, b"key".to_vec(), b"value".to_vec());
+        writer.append(&entry).unwrap();
+        assert_eq!(WAL_SYNC_CALLS.load(Ordering::SeqCst), 0);
+
+        writer.force_sync().unwrap();
+        assert_eq!(WAL_SYNC_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn wal_writer_wraps_when_full() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("wal_wrap");
@@ -1154,7 +1198,7 @@ impl WalWriter {
             let header = WalSegmentHeader::new(segment_id_base + segment_index, header_first_lsn);
             write_segment_header(&mut file, segment_size, segment_index, &header)?;
         }
-        file.sync_data()?;
+        sync_file(&file)?;
 
         Ok(Self {
             file,
@@ -1310,7 +1354,7 @@ impl WalWriter {
         match self.config.sync_mode {
             SyncMode::EveryWrite => {
                 let start = Instant::now();
-                self.file.sync_data()?;
+                sync_file(&self.file)?;
                 let ms = start.elapsed().as_millis() as u64;
                 self.pending_sync = 0;
                 self.last_sync = Instant::now();
@@ -1326,7 +1370,7 @@ impl WalWriter {
                     || elapsed >= Duration::from_millis(max_wait_ms);
                 if should_sync {
                     let start = Instant::now();
-                    self.file.sync_data()?;
+                    sync_file(&self.file)?;
                     let ms = start.elapsed().as_millis() as u64;
                     self.pending_sync = 0;
                     self.last_sync = Instant::now();
@@ -1339,6 +1383,16 @@ impl WalWriter {
                 Ok(0)
             }
         }
+    }
+
+    /// Force fsync regardless of configured SyncMode.
+    pub fn force_sync(&mut self) -> Result<u64> {
+        let start = Instant::now();
+        sync_file(&self.file)?;
+        let ms = start.elapsed().as_millis() as u64;
+        self.pending_sync = 0;
+        self.last_sync = Instant::now();
+        Ok(ms)
     }
 
     /// Total logical ring length in bytes.
