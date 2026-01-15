@@ -7,7 +7,7 @@ use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::{create_formatter, Formatter};
 
-use super::config::{Profile, ProfileManager};
+use super::config::{ConnectionType, LocalConfig, Profile, ProfileManager};
 
 #[derive(Debug, Serialize)]
 pub struct ProfileListOutput {
@@ -32,7 +32,17 @@ pub fn execute_profile_command(cmd: ProfileCommand, output: OutputFormat) -> Res
     match cmd {
         ProfileCommand::Create { name, data_dir } => {
             let mut manager = ProfileManager::load()?;
-            manager.create(&name, Profile { data_dir })?;
+            manager.create(
+                &name,
+                Profile {
+                    connection_type: ConnectionType::Local,
+                    local: Some(LocalConfig {
+                        path: data_dir.clone(),
+                    }),
+                    server: None,
+                    data_dir: Some(data_dir),
+                },
+            )?;
             manager.save()
         }
         ProfileCommand::List => {
@@ -66,7 +76,7 @@ fn build_list_items(manager: &ProfileManager) -> Vec<ProfileListItem> {
         .filter_map(|name| {
             manager.get(name).map(|profile| ProfileListItem {
                 name: name.to_string(),
-                data_dir: profile.data_dir.clone(),
+                data_dir: profile.local_path().unwrap_or_else(|| "-".to_string()),
                 is_default: default_name == Some(name),
             })
         })
@@ -77,9 +87,10 @@ fn build_show_output(manager: &ProfileManager, name: &str) -> Result<ProfileShow
     let profile = manager
         .get(name)
         .ok_or_else(|| CliError::ProfileNotFound(name.to_string()))?;
+    let data_dir = profile.local_path().unwrap_or_else(|| "-".to_string());
     Ok(ProfileShowOutput {
         name: name.to_string(),
-        data_dir: profile.data_dir.clone(),
+        data_dir,
         is_default: manager.default_profile() == Some(name),
     })
 }

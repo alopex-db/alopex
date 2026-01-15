@@ -5,6 +5,7 @@
 
 mod batch;
 mod cli;
+mod client;
 mod commands;
 mod config;
 mod error;
@@ -25,10 +26,12 @@ use tracing_subscriber::EnvFilter;
 
 use batch::BatchMode;
 use cli::{Cli, Command};
+use client::http::HttpClient;
 use config::{setup_signal_handler, validate_thread_mode, EXIT_CODE_INTERRUPTED};
 use error::{handle_error, CliError, Result};
 use models::Column;
 use output::create_formatter;
+use profile::config::{ConnectionType, ServerConfig};
 use profile::{execute_profile_command, ProfileManager, ResolvedConfig};
 use streaming::StreamingWriter;
 use uri::{validate_s3_credentials, StorageUri};
@@ -102,6 +105,9 @@ fn resolve_config(cli: &Cli) -> Result<ResolvedConfig> {
             data_dir: None,
             in_memory: true,
             profile_name: None,
+            connection_type: ConnectionType::Local,
+            server: None,
+            fallback_local: None,
         });
     }
 
@@ -114,6 +120,9 @@ fn resolve_config(cli: &Cli) -> Result<ResolvedConfig> {
             data_dir: Some(data_dir.clone()),
             in_memory: false,
             profile_name: None,
+            connection_type: ConnectionType::Local,
+            server: None,
+            fallback_local: None,
         });
     }
 
@@ -138,21 +147,54 @@ fn run(cli: Cli) -> Result<()> {
 
     // Open the database
     let resolved = resolve_config(&cli)?;
+    let batch_mode = BatchMode::detect(&cli);
+    let command = cli.command;
+
+    if resolved.connection_type == ConnectionType::Server {
+        if let Some(server_config) = resolved.server.as_ref() {
+            match execute_server_command(
+                &command,
+                server_config,
+                &batch_mode,
+                cli.output,
+                cli.limit,
+                cli.quiet,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    if matches!(err, CliError::ServerConnection(_)) {
+                        if let Some(fallback) = resolved.fallback_local.clone() {
+                            eprintln!(
+                                "Warning: Failed to connect to server, falling back to local mode"
+                            );
+                            let mut fallback_resolved = resolved.clone();
+                            fallback_resolved.connection_type = ConnectionType::Local;
+                            fallback_resolved.server = None;
+                            fallback_resolved.data_dir = Some(fallback);
+                            fallback_resolved.fallback_local = None;
+                            return execute_local_command(
+                                &fallback_resolved,
+                                command,
+                                &batch_mode,
+                                cli.output,
+                                cli.limit,
+                                cli.quiet,
+                            );
+                        }
+                    }
+                    return Err(err);
+                }
+            }
+        }
+    }
+
     let db = open_database_with_check(&resolved)?;
 
     // Check if this is a write command before executing
-    let is_write = is_write_command(&cli.command);
+    let is_write = is_write_command(&command);
 
-    let batch_mode = BatchMode::detect(&cli);
     // Execute the command
-    execute_command(
-        &db,
-        cli.command,
-        &batch_mode,
-        cli.output,
-        cli.limit,
-        cli.quiet,
-    )?;
+    execute_command(&db, command, &batch_mode, cli.output, cli.limit, cli.quiet)?;
 
     // Flush only for write commands to ensure S3 sync errors are propagated
     // Read-only commands should work even with S3 read-only permissions
@@ -285,6 +327,107 @@ fn open_database(config: &ResolvedConfig) -> Result<alopex_embedded::Database> {
             "Either --in-memory, --data-dir, or --profile must be specified".to_string(),
         ))
     }
+}
+
+fn execute_server_command(
+    command: &Command,
+    server_config: &ServerConfig,
+    batch_mode: &BatchMode,
+    output_format: cli::OutputFormat,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new().map_err(|err| {
+        CliError::InvalidArgument(format!("Failed to start async runtime: {err}"))
+    })?;
+    let client = HttpClient::new(server_config)
+        .map_err(|err| CliError::ServerConnection(err.to_string()))?;
+
+    match command {
+        Command::Kv { command: kv_cmd } => {
+            let formatter = create_formatter(output_format);
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            runtime.block_on(commands::kv::execute_remote_with_formatter(
+                &client,
+                kv_cmd,
+                &mut handle,
+                formatter,
+                limit,
+                quiet,
+            ))
+        }
+        Command::Sql(sql_cmd) => {
+            let formatter = create_formatter(output_format);
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            runtime.block_on(commands::sql::execute_remote_with_formatter(
+                &client,
+                sql_cmd,
+                batch_mode,
+                &mut handle,
+                formatter,
+                limit,
+                quiet,
+            ))
+        }
+        Command::Vector { command: vec_cmd } => {
+            let formatter = create_formatter(output_format);
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            runtime.block_on(commands::vector::execute_remote_with_formatter(
+                &client,
+                vec_cmd,
+                batch_mode,
+                &mut handle,
+                formatter,
+                limit,
+                quiet,
+            ))
+        }
+        Command::Hnsw { command: hnsw_cmd } => {
+            let formatter = create_formatter(output_format);
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            runtime.block_on(commands::hnsw::execute_remote_with_formatter(
+                &client,
+                hnsw_cmd,
+                &mut handle,
+                formatter,
+                limit,
+                quiet,
+            ))
+        }
+        Command::Columnar { command: col_cmd } => {
+            let formatter = create_formatter(output_format);
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            runtime.block_on(commands::columnar::execute_remote_with_formatter(
+                &client,
+                col_cmd,
+                batch_mode,
+                &mut handle,
+                formatter,
+                limit,
+                quiet,
+            ))
+        }
+        Command::Profile { .. } | Command::Version | Command::Completions { .. } => Err(
+            CliError::InvalidArgument("Command is not available in server mode".to_string()),
+        ),
+    }
+}
+
+fn execute_local_command(
+    resolved: &ResolvedConfig,
+    command: Command,
+    batch_mode: &BatchMode,
+    output_format: cli::OutputFormat,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    let db = open_database_with_check(resolved)?;
+    execute_command(&db, command, batch_mode, output_format, limit, quiet)
 }
 
 /// Execute the command and write output.

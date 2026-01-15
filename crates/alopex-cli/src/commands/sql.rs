@@ -9,6 +9,7 @@ use alopex_embedded::Database;
 
 use crate::batch::BatchMode;
 use crate::cli::SqlCommand;
+use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
@@ -39,6 +40,61 @@ pub fn execute_with_formatter<W: Write>(
     let sql = cmd.resolve_query(batch_mode)?;
 
     execute_sql_with_formatter(db, &sql, writer, formatter, limit, quiet)
+}
+
+/// Execute a SQL command against a remote server using HttpClient.
+pub async fn execute_remote_with_formatter<W: Write>(
+    client: &HttpClient,
+    cmd: &SqlCommand,
+    batch_mode: &BatchMode,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    let sql = cmd.resolve_query(batch_mode)?;
+    let request = RemoteSqlRequest {
+        sql,
+        streaming: false,
+    };
+    let response: RemoteSqlResponse = client
+        .post_json("api/sql/query", &request)
+        .await
+        .map_err(map_client_error)?;
+
+    if response.columns.is_empty() {
+        if quiet {
+            return Ok(());
+        }
+        let message = match response.affected_rows {
+            Some(count) => format!("{count} row(s) affected"),
+            None => "Operation completed successfully".to_string(),
+        };
+        let columns = sql_status_columns();
+        let mut streaming_writer =
+            StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+        streaming_writer.prepare(Some(1))?;
+        let row = Row::new(vec![Value::Text("OK".to_string()), Value::Text(message)]);
+        streaming_writer.write_row(row)?;
+        return streaming_writer.finish();
+    }
+
+    let columns: Vec<Column> = response
+        .columns
+        .iter()
+        .map(|col| Column::new(&col.name, data_type_from_string(&col.data_type)))
+        .collect();
+    let mut streaming_writer =
+        StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+    streaming_writer.prepare(Some(response.rows.len()))?;
+    for row in response.rows {
+        let values = row.into_iter().map(remote_value_to_value).collect();
+        match streaming_writer.write_row(Row::new(values))? {
+            WriteStatus::LimitReached => break,
+            WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+        }
+    }
+    streaming_writer.finish()
 }
 
 /// Legacy execute function for backward compatibility with tests.
@@ -226,6 +282,40 @@ fn execute_sql_select_streaming<W: Write>(
     }
 }
 
+#[derive(serde::Serialize)]
+struct RemoteSqlRequest {
+    sql: String,
+    #[serde(default)]
+    streaming: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct RemoteColumnInfo {
+    name: String,
+    data_type: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RemoteSqlResponse {
+    columns: Vec<RemoteColumnInfo>,
+    rows: Vec<Vec<alopex_sql::storage::SqlValue>>,
+    affected_rows: Option<u64>,
+}
+
+fn map_client_error(err: ClientError) -> CliError {
+    match err {
+        ClientError::Request { source, .. } => {
+            CliError::ServerConnection(format!("request failed: {source}"))
+        }
+        ClientError::InvalidUrl(message) => CliError::InvalidArgument(message),
+        ClientError::Build(message) => CliError::InvalidArgument(message),
+        ClientError::Auth(err) => CliError::InvalidArgument(err.to_string()),
+        ClientError::HttpStatus { status, body } => {
+            CliError::InvalidArgument(format!("Server error: HTTP {} - {}", status.as_u16(), body))
+        }
+    }
+}
+
 /// Execute DDL/DML query (non-SELECT statements).
 ///
 /// This function handles CREATE, DROP, INSERT, UPDATE, DELETE and other
@@ -313,6 +403,40 @@ fn sql_value_to_value(sql_value: alopex_sql::SqlValue) -> Value {
             Value::Text(format!("{}", ts))
         }
         SqlValue::Vector(v) => Value::Vector(v),
+    }
+}
+
+fn remote_value_to_value(sql_value: alopex_sql::storage::SqlValue) -> Value {
+    use alopex_sql::storage::SqlValue;
+
+    match sql_value {
+        SqlValue::Null => Value::Null,
+        SqlValue::Integer(i) => Value::Int(i as i64),
+        SqlValue::BigInt(i) => Value::Int(i),
+        SqlValue::Float(f) => Value::Float(f as f64),
+        SqlValue::Double(f) => Value::Float(f),
+        SqlValue::Text(s) => Value::Text(s),
+        SqlValue::Blob(b) => Value::Bytes(b),
+        SqlValue::Boolean(b) => Value::Bool(b),
+        SqlValue::Timestamp(ts) => Value::Text(ts.to_string()),
+        SqlValue::Vector(v) => Value::Vector(v),
+    }
+}
+
+fn data_type_from_string(value: &str) -> DataType {
+    let upper = value.to_ascii_uppercase();
+    if upper.starts_with("INT") || upper.starts_with("BIGINT") {
+        DataType::Int
+    } else if upper.starts_with("FLOAT") || upper.starts_with("DOUBLE") {
+        DataType::Float
+    } else if upper.starts_with("BLOB") {
+        DataType::Bytes
+    } else if upper.starts_with("BOOLEAN") {
+        DataType::Bool
+    } else if upper.starts_with("VECTOR") {
+        DataType::Vector
+    } else {
+        DataType::Text
     }
 }
 

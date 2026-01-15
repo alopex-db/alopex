@@ -5,13 +5,54 @@
 use std::io::Write;
 
 use alopex_embedded::{Database, TxnMode};
+use serde::{Deserialize, Serialize};
 
 use crate::batch::BatchMode;
 use crate::cli::VectorCommand;
+use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
+use crate::output::formatter::Formatter;
 use crate::progress::ProgressIndicator;
 use crate::streaming::{StreamingWriter, WriteStatus};
+
+#[derive(Debug, Serialize)]
+struct RemoteVectorSearchRequest {
+    index: String,
+    query: Vec<f32>,
+    k: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteVectorUpsertRequest {
+    index: String,
+    key: Vec<u8>,
+    vector: Vec<f32>,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteVectorDeleteRequest {
+    index: String,
+    key: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteVectorSearchResult {
+    key: Vec<u8>,
+    distance: f32,
+    #[allow(dead_code)]
+    metadata: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteVectorSearchResponse {
+    results: Vec<RemoteVectorSearchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteVectorStatusResponse {
+    success: bool,
+}
 
 /// Execute a Vector command.
 ///
@@ -37,6 +78,186 @@ pub fn execute<W: Write>(
             execute_upsert(db, &index, &key, &vector, writer)
         }
         VectorCommand::Delete { index, key } => execute_delete(db, &index, &key, writer),
+    }
+}
+
+/// Execute a Vector command against a remote server.
+pub async fn execute_remote_with_formatter<W: Write>(
+    client: &HttpClient,
+    cmd: &VectorCommand,
+    batch_mode: &BatchMode,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    match cmd {
+        VectorCommand::Search {
+            index,
+            query,
+            k,
+            progress,
+        } => {
+            execute_remote_search(
+                client, index, query, *k, *progress, batch_mode, writer, formatter, limit, quiet,
+            )
+            .await
+        }
+        VectorCommand::Upsert { index, key, vector } => {
+            execute_remote_upsert(client, index, key, vector, writer, formatter, limit, quiet).await
+        }
+        VectorCommand::Delete { index, key } => {
+            execute_remote_delete(client, index, key, writer, formatter, limit, quiet).await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_remote_search<W: Write>(
+    client: &HttpClient,
+    index: &str,
+    query_json: &str,
+    k: usize,
+    progress: bool,
+    batch_mode: &BatchMode,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    let query_vector: Vec<f32> = serde_json::from_str(query_json)
+        .map_err(|e| CliError::InvalidArgument(format!("Invalid vector JSON: {}", e)))?;
+
+    let mut progress_indicator = ProgressIndicator::new(
+        batch_mode,
+        progress,
+        quiet,
+        format!("Searching index '{}' for {} nearest neighbors...", index, k),
+    );
+
+    let request = RemoteVectorSearchRequest {
+        index: index.to_string(),
+        query: query_vector,
+        k,
+    };
+    let response: RemoteVectorSearchResponse = client
+        .post_json("hnsw/search", &request)
+        .await
+        .map_err(map_client_error)?;
+
+    progress_indicator.finish_with_message(format!("found {} results.", response.results.len()));
+
+    let columns = vector_search_columns();
+    let mut streaming_writer =
+        StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+    streaming_writer.prepare(Some(response.results.len()))?;
+    for result in response.results {
+        let key_display = match std::str::from_utf8(&result.key) {
+            Ok(s) => Value::Text(s.to_string()),
+            Err(_) => Value::Bytes(result.key),
+        };
+        let row = Row::new(vec![key_display, Value::Float(result.distance as f64)]);
+        match streaming_writer.write_row(row)? {
+            WriteStatus::LimitReached => break,
+            WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+        }
+    }
+    streaming_writer.finish()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_remote_upsert<W: Write>(
+    client: &HttpClient,
+    index: &str,
+    key: &str,
+    vector_json: &str,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    let vector: Vec<f32> = serde_json::from_str(vector_json)
+        .map_err(|e| CliError::InvalidArgument(format!("Invalid vector JSON: {}", e)))?;
+    let request = RemoteVectorUpsertRequest {
+        index: index.to_string(),
+        key: key.as_bytes().to_vec(),
+        vector,
+    };
+    let response: RemoteVectorStatusResponse = client
+        .post_json("hnsw/upsert", &request)
+        .await
+        .map_err(map_client_error)?;
+    if response.success {
+        if quiet {
+            return Ok(());
+        }
+        let columns = vector_status_columns();
+        let mut streaming_writer =
+            StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+        streaming_writer.prepare(Some(1))?;
+        let row = Row::new(vec![
+            Value::Text("OK".to_string()),
+            Value::Text(format!("Vector '{}' upserted", key)),
+        ]);
+        streaming_writer.write_row(row)?;
+        streaming_writer.finish()
+    } else {
+        Err(CliError::InvalidArgument(
+            "Failed to upsert vector".to_string(),
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_remote_delete<W: Write>(
+    client: &HttpClient,
+    index: &str,
+    key: &str,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    let request = RemoteVectorDeleteRequest {
+        index: index.to_string(),
+        key: key.as_bytes().to_vec(),
+    };
+    let response: RemoteVectorStatusResponse = client
+        .post_json("hnsw/delete", &request)
+        .await
+        .map_err(map_client_error)?;
+    if response.success {
+        if quiet {
+            return Ok(());
+        }
+        let columns = vector_status_columns();
+        let mut streaming_writer =
+            StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+        streaming_writer.prepare(Some(1))?;
+        let row = Row::new(vec![
+            Value::Text("OK".to_string()),
+            Value::Text(format!("Vector '{}' deleted", key)),
+        ]);
+        streaming_writer.write_row(row)?;
+        streaming_writer.finish()
+    } else {
+        Err(CliError::InvalidArgument(
+            "Failed to delete vector".to_string(),
+        ))
+    }
+}
+
+fn map_client_error(err: ClientError) -> CliError {
+    match err {
+        ClientError::Request { source, .. } => {
+            CliError::ServerConnection(format!("request failed: {source}"))
+        }
+        ClientError::InvalidUrl(message) => CliError::InvalidArgument(message),
+        ClientError::Build(message) => CliError::InvalidArgument(message),
+        ClientError::Auth(err) => CliError::InvalidArgument(err.to_string()),
+        ClientError::HttpStatus { status, body } => {
+            CliError::InvalidArgument(format!("Server error: HTTP {} - {}", status.as_u16(), body))
+        }
     }
 }
 

@@ -84,6 +84,16 @@ pub enum CliError {
     /// A JSON serialization/deserialization error occurred.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// A server connection error occurred.
+    #[error("Server connection error: {0}")]
+    #[allow(dead_code)]
+    ServerConnection(String),
+
+    /// A server does not support the requested command.
+    #[error("Server does not support this command: {0}")]
+    #[allow(dead_code)]
+    ServerUnsupported(String),
 }
 
 /// Type alias for CLI results.

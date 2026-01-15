@@ -25,6 +25,7 @@ alopex-sql.workspace = true
 # Output
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+bincode = "1.3"
 arrow-array = "52"
 arrow-schema = "52"
 parquet = { version = "52", features = ["arrow"] }
@@ -32,6 +33,8 @@ comfy-table = "7"
 csv = "1.3"
 dirs = "5.0"
 toml = "0.8"
+reqwest = { version = "0.11", features = ["json", "stream", "rustls-tls"] }
+tokio = { workspace = true }
 
 # Signal handling (sync mode)
 ctrlc = "3.4"
@@ -52,4 +55,8 @@ default = ["s3"]
 s3 = ["alopex-embedded/s3"]
 
 [dev-dependencies]
+alopex-server = { path = "../alopex-server" }
+axum = "0.6"
+hyper = "0.14"
+tower = "0.4"
 tempfile = "3.8"

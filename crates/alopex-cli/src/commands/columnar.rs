@@ -8,24 +8,106 @@ use std::path::Path;
 use std::time::Instant;
 
 use alopex_core::columnar::encoding::{Column as ColumnData, LogicalType};
-use alopex_core::columnar::segment_v2::{ColumnSchema, RecordBatch, Schema, SegmentConfigV2};
+use alopex_core::columnar::segment_v2::{
+    ColumnSchema, RecordBatch, Schema, SegmentConfigV2, SegmentWriterV2,
+};
 use alopex_core::storage::compression::CompressionV2;
+use alopex_core::storage::format::bincode_config;
 use alopex_embedded::{ColumnarIndexType, Database};
 use arrow_array::{
     Array, BinaryArray, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
     LargeBinaryArray, LargeStringArray, StringArray,
 };
 use arrow_schema::DataType as ArrowDataType;
+use bincode::config::Options;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::batch::BatchMode;
 use crate::cli::{ColumnarCommand, IndexCommand};
+use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
 use crate::progress::ProgressIndicator;
 use crate::streaming::{StreamingWriter, WriteStatus};
+
+#[derive(Debug, Serialize)]
+struct RemoteColumnarScanRequest {
+    segment_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteColumnarStatsRequest {
+    segment_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteColumnarIndexCreateRequest {
+    segment_id: String,
+    column: String,
+    index_type: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteColumnarIndexListRequest {
+    segment_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteColumnarIndexDropRequest {
+    segment_id: String,
+    column: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteColumnarIngestRequest {
+    table: String,
+    compression: String,
+    segment: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteColumnarScanResponse {
+    rows: Vec<Vec<alopex_sql::SqlValue>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteColumnarStatsResponse {
+    row_count: usize,
+    column_count: usize,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteColumnarListResponse {
+    segments: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteColumnarIndexInfo {
+    column: String,
+    index_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteColumnarIndexListResponse {
+    indexes: Vec<RemoteColumnarIndexInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteColumnarIngestResponse {
+    row_count: u64,
+    segment_id: String,
+    size_bytes: u64,
+    compression: String,
+    elapsed_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteColumnarStatusResponse {
+    success: bool,
+}
 
 /// Execute a Columnar command with segment-based operations.
 ///
@@ -96,6 +178,315 @@ pub fn execute_with_formatter<W: Write>(
             let mut streaming_writer =
                 StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
             execute_index_command(db, command, &mut streaming_writer)
+        }
+    }
+}
+
+async fn execute_remote_ingest<W: Write>(
+    client: &HttpClient,
+    options: IngestOptions<'_>,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    let extension = options
+        .file
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let batch = match extension.as_str() {
+        "csv" => parse_csv(options.file, options.delimiter, options.header)?,
+        "parquet" | "pq" => parse_parquet(options.file)?,
+        _ => {
+            return Err(CliError::InvalidArgument(format!(
+                "Unsupported file format: {}",
+                options.file.display()
+            )))
+        }
+    };
+
+    let compression_type = parse_compression_arg(options.compression)?;
+    let mut config = SegmentConfigV2::default();
+    if let Some(size) = options.row_group_size {
+        config.row_group_size = size as u64;
+    }
+    config.compression = map_compression(compression_type);
+
+    let mut segment_writer = SegmentWriterV2::new(config);
+    segment_writer
+        .write_batch(batch)
+        .map_err(|err| CliError::InvalidArgument(err.to_string()))?;
+    let segment = segment_writer
+        .finish()
+        .map_err(|err| CliError::InvalidArgument(err.to_string()))?;
+    let segment_bytes = bincode_config()
+        .serialize(&segment)
+        .map_err(|err| CliError::InvalidArgument(err.to_string()))?;
+
+    let request = RemoteColumnarIngestRequest {
+        table: options.table.to_string(),
+        compression: compression_as_str(compression_type).to_string(),
+        segment: segment_bytes,
+    };
+    let response: RemoteColumnarIngestResponse = client
+        .post_json("columnar/ingest", &request)
+        .await
+        .map_err(map_client_error)?;
+
+    writer.prepare(Some(1))?;
+    let row = Row::new(vec![
+        Value::Int(response.row_count as i64),
+        Value::Text(response.segment_id),
+        Value::Int(response.size_bytes as i64),
+        Value::Text(response.compression),
+        Value::Int(response.elapsed_ms as i64),
+    ]);
+    writer.write_row(row)?;
+    writer.finish()?;
+    Ok(())
+}
+
+/// Execute a Columnar command against a remote server.
+pub async fn execute_remote_with_formatter<W: Write>(
+    client: &HttpClient,
+    cmd: &ColumnarCommand,
+    batch_mode: &BatchMode,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    match cmd {
+        ColumnarCommand::Scan { segment, progress } => {
+            let columns = columnar_scan_columns();
+            let mut streaming_writer =
+                StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+            execute_remote_scan(
+                client,
+                segment,
+                *progress,
+                batch_mode,
+                &mut streaming_writer,
+            )
+            .await
+        }
+        ColumnarCommand::Stats { segment } => {
+            let columns = columnar_stats_columns();
+            let mut streaming_writer =
+                StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+            execute_remote_stats(client, segment, &mut streaming_writer).await
+        }
+        ColumnarCommand::List => {
+            let columns = columnar_list_columns();
+            let mut streaming_writer =
+                StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+            execute_remote_list(client, &mut streaming_writer).await
+        }
+        ColumnarCommand::Ingest {
+            file,
+            table,
+            delimiter,
+            header,
+            compression,
+            row_group_size,
+        } => {
+            let columns = columnar_ingest_columns();
+            let mut streaming_writer =
+                StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+            let options = IngestOptions {
+                file,
+                table,
+                delimiter: *delimiter,
+                header: *header,
+                compression: compression.as_str(),
+                row_group_size: *row_group_size,
+            };
+            execute_remote_ingest(client, options, &mut streaming_writer).await
+        }
+        ColumnarCommand::Index(command) => {
+            let columns = match &command {
+                IndexCommand::List { .. } => columnar_index_list_columns(),
+                IndexCommand::Create { .. } | IndexCommand::Drop { .. } => {
+                    columnar_status_columns()
+                }
+            };
+            let mut streaming_writer =
+                StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+            execute_remote_index_command(client, command, &mut streaming_writer).await
+        }
+    }
+}
+
+async fn execute_remote_scan<W: Write>(
+    client: &HttpClient,
+    segment_id: &str,
+    progress: bool,
+    batch_mode: &BatchMode,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    let mut progress_indicator = ProgressIndicator::new(
+        batch_mode,
+        progress,
+        writer.is_quiet(),
+        format!("Scanning segment '{}'...", segment_id),
+    );
+    let request = RemoteColumnarScanRequest {
+        segment_id: segment_id.to_string(),
+    };
+    let response: RemoteColumnarScanResponse = client
+        .post_json("columnar/scan", &request)
+        .await
+        .map_err(map_client_error)?;
+    writer.prepare(Some(response.rows.len()))?;
+    let mut row_count = 0usize;
+    for row in response.rows {
+        let values: Vec<Value> = row.into_iter().map(sql_value_to_value).collect();
+        let row = Row::new(values);
+        match writer.write_row(row)? {
+            WriteStatus::LimitReached => break,
+            WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+        }
+        row_count += 1;
+    }
+    writer.finish()?;
+    progress_indicator.finish_with_message(format!("done ({} rows).", row_count));
+    Ok(())
+}
+
+async fn execute_remote_stats<W: Write>(
+    client: &HttpClient,
+    segment_id: &str,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    let request = RemoteColumnarStatsRequest {
+        segment_id: segment_id.to_string(),
+    };
+    let response: RemoteColumnarStatsResponse = client
+        .post_json("columnar/stats", &request)
+        .await
+        .map_err(map_client_error)?;
+    writer.prepare(Some(4))?;
+    let stats_rows = vec![
+        ("segment_id", Value::Text(segment_id.to_string())),
+        ("row_count", Value::Int(response.row_count as i64)),
+        ("column_count", Value::Int(response.column_count as i64)),
+        ("size_bytes", Value::Int(response.size_bytes as i64)),
+    ];
+    for (key, value) in stats_rows {
+        let row = Row::new(vec![Value::Text(key.to_string()), value]);
+        writer.write_row(row)?;
+    }
+    writer.finish()?;
+    Ok(())
+}
+
+async fn execute_remote_list<W: Write>(
+    client: &HttpClient,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    let response: RemoteColumnarListResponse = client
+        .post_json("columnar/list", &serde_json::json!({}))
+        .await
+        .map_err(map_client_error)?;
+    writer.prepare(Some(response.segments.len()))?;
+    for segment_id in response.segments {
+        let row = Row::new(vec![Value::Text(segment_id)]);
+        match writer.write_row(row)? {
+            WriteStatus::LimitReached => break,
+            WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+        }
+    }
+    writer.finish()?;
+    Ok(())
+}
+
+async fn execute_remote_index_command<W: Write>(
+    client: &HttpClient,
+    command: &IndexCommand,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    match command {
+        IndexCommand::Create {
+            segment,
+            column,
+            index_type,
+        } => {
+            let parsed = parse_index_type_arg(index_type)?;
+            let request = RemoteColumnarIndexCreateRequest {
+                segment_id: segment.clone(),
+                column: column.clone(),
+                index_type: parsed.as_str().to_string(),
+            };
+            let response: RemoteColumnarStatusResponse = client
+                .post_json("columnar/index/create", &request)
+                .await
+                .map_err(map_client_error)?;
+            if response.success {
+                write_status_if_needed(
+                    writer,
+                    &format!("Created columnar index: {}:{}", segment, column),
+                )
+            } else {
+                Err(CliError::InvalidArgument(
+                    "Failed to create columnar index".to_string(),
+                ))
+            }
+        }
+        IndexCommand::List { segment } => {
+            let request = RemoteColumnarIndexListRequest {
+                segment_id: segment.clone(),
+            };
+            let response: RemoteColumnarIndexListResponse = client
+                .post_json("columnar/index/list", &request)
+                .await
+                .map_err(map_client_error)?;
+            writer.prepare(Some(response.indexes.len()))?;
+            for entry in response.indexes {
+                let row = Row::new(vec![
+                    Value::Text(entry.column),
+                    Value::Text(entry.index_type),
+                ]);
+                match writer.write_row(row)? {
+                    WriteStatus::LimitReached => break,
+                    WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+                }
+            }
+            writer.finish()?;
+            Ok(())
+        }
+        IndexCommand::Drop { segment, column } => {
+            let request = RemoteColumnarIndexDropRequest {
+                segment_id: segment.clone(),
+                column: column.clone(),
+            };
+            let response: RemoteColumnarStatusResponse = client
+                .post_json("columnar/index/drop", &request)
+                .await
+                .map_err(map_client_error)?;
+            if response.success {
+                write_status_if_needed(
+                    writer,
+                    &format!("Dropped columnar index: {}:{}", segment, column),
+                )
+            } else {
+                Err(CliError::InvalidArgument(
+                    "Failed to drop columnar index".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+fn map_client_error(err: ClientError) -> CliError {
+    match err {
+        ClientError::Request { source, .. } => {
+            CliError::ServerConnection(format!("request failed: {source}"))
+        }
+        ClientError::InvalidUrl(message) => CliError::InvalidArgument(message),
+        ClientError::Build(message) => CliError::InvalidArgument(message),
+        ClientError::Auth(err) => CliError::InvalidArgument(err.to_string()),
+        ClientError::HttpStatus { status, body } => {
+            CliError::InvalidArgument(format!("Server error: HTTP {} - {}", status.as_u16(), body))
         }
     }
 }
