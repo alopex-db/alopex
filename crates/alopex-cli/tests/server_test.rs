@@ -5,13 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alopex_cli::client::http::{ClientError, HttpClient};
+use alopex_cli::commands::server::execute_remote as execute_server_remote;
 use alopex_cli::commands::sql::execute_remote_with_formatter_control;
 use alopex_cli::commands::sql::SqlExecutionOptions;
 use alopex_cli::error::CliError;
 use alopex_cli::output::formatter::create_formatter;
 use alopex_cli::profile::config::ServerConfig as CliServerConfig;
 use alopex_cli::streaming::{CancelSignal, Deadline};
-use alopex_cli::{batch::BatchMode, cli::SqlCommand};
+use alopex_cli::{batch::BatchMode, cli::CompactionCommand, cli::ServerCommand, cli::SqlCommand};
 use alopex_cli::{batch::BatchModeSource, cli::OutputFormat};
 use alopex_core::columnar::encoding::LogicalType;
 use alopex_core::columnar::segment_v2::{ColumnSchema, RecordBatch, Schema, SegmentWriterV2};
@@ -23,7 +24,7 @@ use axum::body::{boxed, Body, Bytes};
 use axum::extract::{Json, State};
 use axum::http::{header, Request, StatusCode};
 use axum::response::Response;
-use axum::routing::post;
+use axum::routing::{get, post};
 use bincode::config::Options;
 use futures_util::stream;
 use serde_json::{json, Value};
@@ -199,6 +200,43 @@ async fn start_streaming_server(
 
     let (base_url, shutdown, dir) = spawn_tls_server(router).await;
     (base_url, shutdown, state, dir)
+}
+
+async fn start_admin_server() -> (String, oneshot::Sender<()>, tempfile::TempDir) {
+    let router = axum::Router::new()
+        .route(
+            "/api/admin/status",
+            get(|| async {
+                Json(json!({
+                    "version": "0.4.1",
+                    "uptime_secs": 42,
+                    "connections": 3,
+                    "queries_per_second": 9.3
+                }))
+            }),
+        )
+        .route(
+            "/api/admin/metrics",
+            get(|| async {
+                Json(json!({
+                    "qps": 12.5,
+                    "avg_latency_ms": 4.2,
+                    "p99_latency_ms": 9.7,
+                    "memory_usage_mb": 512,
+                    "active_connections": 7
+                }))
+            }),
+        )
+        .route(
+            "/api/admin/health",
+            get(|| async { Json(json!({ "status": "ok", "message": "ready" })) }),
+        )
+        .route(
+            "/api/admin/compaction",
+            post(|| async { Json(json!({ "success": true, "message": "started" })) }),
+        );
+
+    spawn_tls_server(router).await
 }
 
 async fn execute_streaming_request(
@@ -768,4 +806,112 @@ async fn server_sql_streaming_cancel_sends_cancel_endpoint() {
     assert!(state.cancel_count.load(Ordering::SeqCst) >= 1);
 
     let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn server_admin_commands_success() {
+    let (base_url, shutdown, _dir) = start_admin_server().await;
+    let client = build_test_client(&base_url);
+    let mut output = Vec::new();
+
+    execute_server_remote(&client, &ServerCommand::Status, &mut output, false)
+        .await
+        .unwrap();
+    let text = String::from_utf8(std::mem::take(&mut output)).unwrap();
+    assert!(text.contains("Version"));
+    assert!(text.contains("0.4.1"));
+    assert!(text.contains("Uptime"));
+    assert!(text.contains("42"));
+    assert!(text.contains("Connections"));
+    assert!(text.contains("3"));
+    assert!(text.contains("QPS"));
+    assert!(text.contains("9.30"));
+
+    execute_server_remote(&client, &ServerCommand::Metrics, &mut output, false)
+        .await
+        .unwrap();
+    let text = String::from_utf8(std::mem::take(&mut output)).unwrap();
+    assert!(text.contains("QPS"));
+    assert!(text.contains("12.50"));
+    assert!(text.contains("Avg Latency"));
+    assert!(text.contains("4.20"));
+    assert!(text.contains("P99 Latency"));
+    assert!(text.contains("9.70"));
+    assert!(text.contains("Memory"));
+    assert!(text.contains("512"));
+    assert!(text.contains("Active Connections"));
+    assert!(text.contains("7"));
+
+    execute_server_remote(&client, &ServerCommand::Health, &mut output, false)
+        .await
+        .unwrap();
+    let text = String::from_utf8(std::mem::take(&mut output)).unwrap();
+    assert!(text.contains("Status"));
+    assert!(text.contains("ok"));
+    assert!(text.contains("ready"));
+
+    execute_server_remote(
+        &client,
+        &ServerCommand::Compaction {
+            command: CompactionCommand::Trigger,
+        },
+        &mut output,
+        false,
+    )
+    .await
+    .unwrap();
+    let text = String::from_utf8(std::mem::take(&mut output)).unwrap();
+    assert!(text.contains("Result"));
+    assert!(text.contains("OK"));
+    assert!(text.contains("started"));
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn server_admin_http_error() {
+    let router = axum::Router::new()
+        .route(
+            "/api/admin/status",
+            get(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+        )
+        .route(
+            "/api/admin/metrics",
+            get(|| async { (StatusCode::OK, Json(json!({ "qps": 0.0 }))) }),
+        )
+        .route(
+            "/api/admin/health",
+            get(|| async { (StatusCode::OK, Json(json!({ "status": "ok" }))) }),
+        )
+        .route(
+            "/api/admin/compaction",
+            post(|| async { (StatusCode::OK, Json(json!({ "success": true }))) }),
+        );
+
+    let (base_url, shutdown, _dir) = spawn_tls_server(router).await;
+    let client = build_test_client(&base_url);
+    let mut output = Vec::new();
+
+    let err = execute_server_remote(&client, &ServerCommand::Status, &mut output, false)
+        .await
+        .unwrap_err();
+    match err {
+        CliError::InvalidArgument(message) => {
+            assert!(message.contains("HTTP 500"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn server_admin_connection_error() {
+    let client = build_test_client("https://127.0.0.1:1");
+    let mut output = Vec::new();
+
+    let err = execute_server_remote(&client, &ServerCommand::Status, &mut output, false)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CliError::ServerConnection(_)));
 }

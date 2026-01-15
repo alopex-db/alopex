@@ -132,6 +132,11 @@ pub enum Command {
         #[command(subcommand)]
         command: ColumnarCommand,
     },
+    /// Server management commands
+    Server {
+        #[command(subcommand)]
+        command: ServerCommand,
+    },
     /// Show CLI and file format version information
     Version,
     /// Generate shell completion scripts
@@ -442,6 +447,29 @@ pub enum IndexCommand {
     },
 }
 
+/// Server management subcommands
+#[derive(Subcommand, Debug)]
+pub enum ServerCommand {
+    /// Show server status
+    Status,
+    /// Show server metrics
+    Metrics,
+    /// Show server health check results
+    Health,
+    /// Server compaction management
+    Compaction {
+        #[command(subcommand)]
+        command: CompactionCommand,
+    },
+}
+
+/// Server compaction subcommands
+#[derive(Subcommand, Debug)]
+pub enum CompactionCommand {
+    /// Trigger server compaction
+    Trigger,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +563,34 @@ mod tests {
             }
             _ => panic!("expected sql command"),
         }
+    }
+
+    #[test]
+    fn test_parse_server_status() {
+        let args = vec!["alopex", "server", "status"];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Server {
+                command: ServerCommand::Status
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_server_compaction_trigger() {
+        let args = vec!["alopex", "server", "compaction", "trigger"];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Server {
+                command: ServerCommand::Compaction {
+                    command: CompactionCommand::Trigger
+                }
+            }
+        ));
     }
 
     #[test]

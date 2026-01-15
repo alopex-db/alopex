@@ -244,7 +244,10 @@ fn is_write_command(command: &Command) -> bool {
             ColumnarCommand::Ingest { .. }
                 | ColumnarCommand::Index(IndexCommand::Create { .. } | IndexCommand::Drop { .. })
         ),
-        Command::Profile { .. } | Command::Version | Command::Completions { .. } => false,
+        Command::Server { .. }
+        | Command::Profile { .. }
+        | Command::Version
+        | Command::Completions { .. } => false,
     }
 }
 
@@ -413,6 +416,18 @@ fn execute_server_command(
                 quiet,
             ))
         }
+        Command::Server {
+            command: server_cmd,
+        } => {
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            runtime.block_on(commands::server::execute_remote(
+                &client,
+                server_cmd,
+                &mut handle,
+                quiet,
+            ))
+        }
         Command::Profile { .. } | Command::Version | Command::Completions { .. } => Err(
             CliError::InvalidArgument("Command is not available in server mode".to_string()),
         ),
@@ -490,6 +505,9 @@ fn execute_command(
                 quiet,
             )
         }
+        Command::Server { .. } => Err(CliError::InvalidArgument(
+            "Server commands require a server profile".to_string(),
+        )),
         Command::Version => commands::version::execute_version(output_format),
         Command::Completions { shell } => generate_completions(shell),
         Command::Profile { command } => execute_profile_command(command, output_format),

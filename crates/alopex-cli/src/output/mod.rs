@@ -11,6 +11,7 @@ pub mod csv;
 pub mod formatter;
 pub mod json;
 pub mod jsonl;
+pub mod server;
 pub mod table;
 pub mod tsv;
 
