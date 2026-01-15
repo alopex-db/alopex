@@ -12,6 +12,10 @@ categories = ["database-implementations", "command-line-utilities"]
 name = "alopex"
 path = "src/main.rs"
 
+[[bench]]
+name = "streaming_bench"
+harness = false
+
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -68,3 +72,4 @@ hyper = "0.14"
 rcgen = "0.12"
 tower = "0.4"
 tempfile = "3.8"
+criterion = { workspace = true }

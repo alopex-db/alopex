@@ -16,6 +16,19 @@ All notable changes to this project will be documented in this file.
 ### Breaking Changes
 - None.
 
+## [0.4.1]
+
+### Added
+- Streaming SQL over HTTP with JSON array output and backpressure-aware buffering.
+- Server connection profiles with HTTPS enforcement and authentication (token/basic/mTLS).
+- TUI status bar showing connection, row count, and processing status; improved keybindings.
+- Server admin commands for status/metrics/health/compaction trigger with updated schema fields.
+
+### Changed
+- SQL server endpoint updated to `/api/sql/query`.
+- Output formats aligned to table/json/csv/tsv/quiet (jsonl removed from documented support).
+- TUI paging behavior now uses half-screen paging for Ctrl+U/Ctrl+D.
+
 ## [0.3.4]
 
 ### Added
