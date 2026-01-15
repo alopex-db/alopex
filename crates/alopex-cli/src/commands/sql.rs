@@ -107,7 +107,6 @@ pub async fn execute_remote_with_formatter<W: Write>(
     limit: Option<usize>,
     quiet: bool,
 ) -> Result<()> {
-    let sql = cmd.resolve_query(batch_mode)?;
     let effective_limit = merge_limit(limit, cmd.max_rows);
     let deadline = Deadline::new(parse_deadline(cmd.deadline.as_deref())?);
     let cancel = CancelSignal::new();
@@ -118,6 +117,19 @@ pub async fn execute_remote_with_formatter<W: Write>(
         deadline: &deadline,
     };
 
+    execute_remote_with_formatter_control(client, cmd, batch_mode, writer, formatter, options).await
+}
+
+#[doc(hidden)]
+pub async fn execute_remote_with_formatter_control<W: Write>(
+    client: &HttpClient,
+    cmd: &SqlCommand,
+    batch_mode: &BatchMode,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    options: SqlExecutionOptions<'_>,
+) -> Result<()> {
+    let sql = cmd.resolve_query(batch_mode)?;
     if is_select_query(&sql)? && formatter.supports_streaming() {
         return execute_remote_streaming(
             client,
@@ -157,7 +169,7 @@ pub async fn execute_remote_with_formatter<W: Write>(
     };
 
     if response.columns.is_empty() {
-        if quiet {
+        if options.quiet {
             return Ok(());
         }
         let message = match response.affected_rows {
@@ -165,8 +177,8 @@ pub async fn execute_remote_with_formatter<W: Write>(
             None => "Operation completed successfully".to_string(),
         };
         let columns = sql_status_columns();
-        let mut streaming_writer =
-            StreamingWriter::new(writer, formatter, columns, options.limit).with_quiet(quiet);
+        let mut streaming_writer = StreamingWriter::new(writer, formatter, columns, options.limit)
+            .with_quiet(options.quiet);
         streaming_writer.prepare(Some(1))?;
         let row = Row::new(vec![Value::Text("OK".to_string()), Value::Text(message)]);
         streaming_writer.write_row(row)?;
@@ -179,7 +191,7 @@ pub async fn execute_remote_with_formatter<W: Write>(
         .map(|col| Column::new(&col.name, data_type_from_string(&col.data_type)))
         .collect();
     let mut streaming_writer =
-        StreamingWriter::new(writer, formatter, columns, options.limit).with_quiet(quiet);
+        StreamingWriter::new(writer, formatter, columns, options.limit).with_quiet(options.quiet);
     streaming_writer.prepare(Some(response.rows.len()))?;
     for row in response.rows {
         if options.cancel.is_cancelled() {

@@ -85,6 +85,25 @@ impl HttpClient {
         })
     }
 
+    #[allow(dead_code)]
+    pub fn new_with_client(config: &ServerConfig, client: Client) -> ClientResult<Self> {
+        let base_url =
+            Url::parse(&config.url).map_err(|err| ClientError::InvalidUrl(err.to_string()))?;
+        if base_url.scheme() != "https" {
+            return Err(ClientError::InvalidUrl(
+                "server url must use https scheme".to_string(),
+            ));
+        }
+        let auth = AuthConfig::from_server_config(config)?;
+
+        Ok(Self {
+            base_url,
+            auth,
+            client,
+            retry_policy: RetryPolicy::default(),
+        })
+    }
+
     fn request(&self, method: Method, path: &str) -> ClientResult<RequestBuilder> {
         let url = self
             .base_url

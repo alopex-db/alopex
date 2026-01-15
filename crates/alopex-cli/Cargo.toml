@@ -59,6 +59,8 @@ s3 = ["alopex-embedded/s3"]
 [dev-dependencies]
 alopex-server = { path = "../alopex-server" }
 axum = "0.6"
+axum-server = { version = "0.5", features = ["tls-rustls"] }
 hyper = "0.14"
+rcgen = "0.12"
 tower = "0.4"
 tempfile = "3.8"
