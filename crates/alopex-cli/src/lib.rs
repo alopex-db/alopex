@@ -9,6 +9,7 @@ pub mod output;
 pub mod profile;
 pub mod progress;
 pub mod streaming;
+pub mod tui;
 pub mod version;
 
 #[cfg(test)]

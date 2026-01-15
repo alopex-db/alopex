@@ -14,6 +14,7 @@ mod output;
 mod profile;
 mod progress;
 mod streaming;
+mod tui;
 mod uri;
 mod version;
 

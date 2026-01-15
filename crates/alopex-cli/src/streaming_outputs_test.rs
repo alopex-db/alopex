@@ -68,6 +68,7 @@ fn run_sql_with_formatter(db: &Database, formatter: Box<dyn Formatter>) -> Strin
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        tui: false,
     };
     let mut output = Vec::new();
     sql::execute_with_formatter(

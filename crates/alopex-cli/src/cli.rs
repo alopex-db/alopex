@@ -274,6 +274,10 @@ pub struct SqlCommand {
     /// Deadline for query execution (e.g. 60s, 5m)
     #[arg(long)]
     pub deadline: Option<String>,
+
+    /// Launch interactive TUI preview
+    #[arg(long)]
+    pub tui: bool,
 }
 
 /// Vector subcommands
@@ -513,6 +517,21 @@ mod tests {
                 assert_eq!(cmd.fetch_size, Some(500));
                 assert_eq!(cmd.max_rows, Some(250));
                 assert_eq!(cmd.deadline.as_deref(), Some("30s"));
+                assert!(!cmd.tui);
+            }
+            _ => panic!("expected sql command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_sql_tui_flag() {
+        let args = vec!["alopex", "sql", "--tui", "SELECT 1"];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        match cli.command {
+            Command::Sql(cmd) => {
+                assert!(cmd.tui);
+                assert_eq!(cmd.query.as_deref(), Some("SELECT 1"));
             }
             _ => panic!("expected sql command"),
         }

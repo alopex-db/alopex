@@ -535,6 +535,7 @@ async fn server_sql_streaming_json_array_success() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        tui: false,
     };
     let cancel = CancelSignal::new();
     let deadline = Deadline::new(Duration::from_secs(5));
@@ -570,6 +571,7 @@ async fn server_sql_streaming_empty_array_outputs_json() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        tui: false,
     };
     let cancel = CancelSignal::new();
     let deadline = Deadline::new(Duration::from_secs(5));
@@ -602,6 +604,7 @@ async fn server_sql_streaming_invalid_rows_error() {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            tui: false,
         };
         let cancel = CancelSignal::new();
         let deadline = Deadline::new(Duration::from_secs(5));
@@ -623,6 +626,7 @@ async fn server_sql_streaming_csv_output() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        tui: false,
     };
     let cancel = CancelSignal::new();
     let deadline = Deadline::new(Duration::from_secs(5));
@@ -647,6 +651,7 @@ async fn server_sql_streaming_tsv_output() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        tui: false,
     };
     let cancel = CancelSignal::new();
     let deadline = Deadline::new(Duration::from_secs(5));
@@ -671,6 +676,7 @@ async fn server_sql_streaming_non_array_error() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        tui: false,
     };
     let cancel = CancelSignal::new();
     let deadline = Deadline::new(Duration::from_secs(5));
@@ -691,6 +697,7 @@ async fn server_sql_streaming_sends_fetch_size_and_max_rows() {
         fetch_size: Some(10),
         max_rows: Some(25),
         deadline: None,
+        tui: false,
     };
     let cancel = CancelSignal::new();
     let deadline = Deadline::new(Duration::from_secs(5));
@@ -719,6 +726,7 @@ async fn server_sql_streaming_deadline_sends_cancel() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        tui: false,
     };
     let cancel = CancelSignal::new();
     let deadline = Deadline::new(Duration::from_millis(10));
@@ -742,6 +750,7 @@ async fn server_sql_streaming_cancel_sends_cancel_endpoint() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        tui: false,
     };
     let cancel = CancelSignal::new();
     let deadline = Deadline::new(Duration::from_secs(5));

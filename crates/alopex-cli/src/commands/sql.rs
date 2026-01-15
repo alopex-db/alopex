@@ -16,6 +16,7 @@ use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
 use crate::streaming::timeout::parse_deadline;
 use crate::streaming::{CancelSignal, Deadline, StreamingWriter, WriteStatus};
+use crate::tui::{is_tty, TuiApp};
 use futures_util::StreamExt;
 
 #[doc(hidden)]
@@ -82,6 +83,10 @@ pub fn execute_with_formatter_control<W: Write>(
         ..options
     };
 
+    if cmd.tui {
+        return execute_tui_local_or_fallback(db, &sql, writer, formatter, options);
+    }
+
     execute_sql_with_formatter(db, &sql, writer, formatter, &options)
 }
 
@@ -130,13 +135,27 @@ pub async fn execute_remote_with_formatter_control<W: Write>(
     options: SqlExecutionOptions<'_>,
 ) -> Result<()> {
     let sql = cmd.resolve_query(batch_mode)?;
-    if is_select_query(&sql)? && formatter.supports_streaming() {
+    if cmd.tui {
+        return execute_tui_remote_or_fallback(client, &sql, cmd, writer, formatter, options).await;
+    }
+    execute_remote_with_formatter_impl(client, &sql, cmd, writer, formatter, &options).await
+}
+
+async fn execute_remote_with_formatter_impl<W: Write>(
+    client: &HttpClient,
+    sql: &str,
+    cmd: &SqlCommand,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    options: &SqlExecutionOptions<'_>,
+) -> Result<()> {
+    if is_select_query(sql)? && formatter.supports_streaming() {
         return execute_remote_streaming(
             client,
-            &sql,
+            sql,
             writer,
             formatter,
-            &options,
+            options,
             cmd.fetch_size,
             cmd.max_rows,
         )
@@ -144,7 +163,7 @@ pub async fn execute_remote_with_formatter_control<W: Write>(
     }
 
     let request = RemoteSqlRequest {
-        sql,
+        sql: sql.to_string(),
         streaming: false,
         fetch_size: cmd.fetch_size,
         max_rows: cmd.max_rows,
@@ -206,6 +225,437 @@ pub async fn execute_remote_with_formatter_control<W: Write>(
         }
     }
     streaming_writer.finish()
+}
+
+fn execute_tui_local_or_fallback<W: Write>(
+    db: &Database,
+    sql: &str,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    options: SqlExecutionOptions<'_>,
+) -> Result<()> {
+    if !is_tty() {
+        if !options.quiet {
+            eprintln!("Warning: --tui requires a TTY, falling back to batch output.");
+        }
+        return execute_sql_with_formatter(db, sql, writer, formatter, &options);
+    }
+
+    match execute_tui_local(db, sql, &options) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if !options.quiet {
+                eprintln!("Warning: TUI failed ({err}); falling back to batch output.");
+            }
+            execute_sql_with_formatter(db, sql, writer, formatter, &options)
+        }
+    }
+}
+
+fn execute_tui_local(db: &Database, sql: &str, options: &SqlExecutionOptions<'_>) -> Result<()> {
+    use alopex_sql::ExecutionResult;
+
+    options.deadline.check()?;
+    let result = db.execute_sql(sql)?;
+    options.deadline.check()?;
+
+    let (columns, rows) = match result {
+        ExecutionResult::Success => {
+            let columns = sql_status_columns();
+            let row = Row::new(vec![
+                Value::Text("OK".to_string()),
+                Value::Text("Operation completed successfully".to_string()),
+            ]);
+            (columns, vec![row])
+        }
+        ExecutionResult::RowsAffected(count) => {
+            let columns = sql_status_columns();
+            let row = Row::new(vec![
+                Value::Text("OK".to_string()),
+                Value::Text(format!("{count} row(s) affected")),
+            ]);
+            (columns, vec![row])
+        }
+        ExecutionResult::Query(query_result) => {
+            let columns = query_result
+                .columns
+                .iter()
+                .map(|col| Column::new(&col.name, DataType::Text))
+                .collect::<Vec<_>>();
+            let mut rows = Vec::with_capacity(query_result.rows.len());
+            for sql_row in query_result.rows {
+                let values = sql_row.into_iter().map(sql_value_to_value).collect();
+                rows.push(Row::new(values));
+            }
+            if let Some(limit) = options.limit {
+                rows.truncate(limit);
+            }
+            (columns, rows)
+        }
+    };
+
+    let app = TuiApp::new(columns, rows, "local", false);
+    app.run()
+}
+
+async fn execute_tui_remote_or_fallback<W: Write>(
+    client: &HttpClient,
+    sql: &str,
+    cmd: &SqlCommand,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    options: SqlExecutionOptions<'_>,
+) -> Result<()> {
+    if !is_tty() {
+        if !options.quiet {
+            eprintln!("Warning: --tui requires a TTY, falling back to batch output.");
+        }
+        return execute_remote_with_formatter_impl(client, sql, cmd, writer, formatter, &options)
+            .await;
+    }
+
+    match execute_tui_remote(client, sql, cmd, &options).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if !options.quiet {
+                eprintln!("Warning: TUI failed ({err}); falling back to batch output.");
+            }
+            execute_remote_with_formatter_impl(client, sql, cmd, writer, formatter, &options).await
+        }
+    }
+}
+
+async fn execute_tui_remote(
+    client: &HttpClient,
+    sql: &str,
+    cmd: &SqlCommand,
+    options: &SqlExecutionOptions<'_>,
+) -> Result<()> {
+    if is_select_query(sql)? {
+        let (columns, rows) =
+            collect_remote_streaming_rows(client, sql, options, cmd.fetch_size, cmd.max_rows)
+                .await?;
+        let app = TuiApp::new(columns, rows, "server", false);
+        return app.run();
+    }
+
+    let request = RemoteSqlRequest {
+        sql: sql.to_string(),
+        streaming: false,
+        fetch_size: cmd.fetch_size,
+        max_rows: cmd.max_rows,
+    };
+
+    let response: RemoteSqlResponse = tokio::select! {
+        result = tokio::time::timeout(options.deadline.remaining(), client.post_json("api/sql/query", &request)) => {
+            match result {
+                Ok(value) => value.map_err(map_client_error)?,
+                Err(_) => {
+                    let _ = send_cancel_request(client).await;
+                    return Err(CliError::Timeout(format!(
+                        "deadline exceeded after {}",
+                        humantime::format_duration(options.deadline.duration())
+                    )));
+                }
+            }
+        }
+        _ = options.cancel.wait() => {
+            let _ = send_cancel_request(client).await;
+            return Err(CliError::Cancelled);
+        }
+    };
+
+    let (columns, rows) = if response.columns.is_empty() {
+        let columns = sql_status_columns();
+        let message = match response.affected_rows {
+            Some(count) => format!("{count} row(s) affected"),
+            None => "Operation completed successfully".to_string(),
+        };
+        let row = Row::new(vec![Value::Text("OK".to_string()), Value::Text(message)]);
+        (columns, vec![row])
+    } else {
+        let columns: Vec<Column> = response
+            .columns
+            .iter()
+            .map(|col| Column::new(&col.name, data_type_from_string(&col.data_type)))
+            .collect();
+        let mut rows = response
+            .rows
+            .into_iter()
+            .map(|row| Row::new(row.into_iter().map(remote_value_to_value).collect()))
+            .collect::<Vec<_>>();
+        if let Some(limit) = options.limit {
+            rows.truncate(limit);
+        }
+        (columns, rows)
+    };
+
+    let app = TuiApp::new(columns, rows, "server", false);
+    app.run()
+}
+
+async fn collect_remote_streaming_rows(
+    client: &HttpClient,
+    sql: &str,
+    options: &SqlExecutionOptions<'_>,
+    fetch_size: Option<usize>,
+    max_rows: Option<usize>,
+) -> Result<(Vec<Column>, Vec<Row>)> {
+    let request = RemoteSqlRequest {
+        sql: sql.to_string(),
+        streaming: true,
+        fetch_size,
+        max_rows,
+    };
+
+    let response = tokio::select! {
+        result = tokio::time::timeout(options.deadline.remaining(), client.post_json_stream("api/sql/query", &request)) => {
+            match result {
+                Ok(value) => value.map_err(map_client_error)?,
+                Err(_) => {
+                    let _ = send_cancel_request(client).await;
+                    return Err(CliError::Timeout(format!(
+                        "deadline exceeded after {}",
+                        humantime::format_duration(options.deadline.duration())
+                    )));
+                }
+            }
+        }
+        _ = options.cancel.wait() => {
+            let _ = send_cancel_request(client).await;
+            return Err(CliError::Cancelled);
+        }
+    };
+
+    let mut stream = response.bytes_stream();
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut pos: usize = 0;
+    let mut done = false;
+    let mut saw_array_start = false;
+    let mut columns: Option<Vec<String>> = None;
+    let mut column_set: Option<HashSet<String>> = None;
+    let mut rows: Vec<Row> = Vec::new();
+
+    while !done {
+        if options.cancel.is_cancelled() {
+            let _ = send_cancel_request(client).await;
+            return Err(CliError::Cancelled);
+        }
+        if let Err(err) = options.deadline.check() {
+            let _ = send_cancel_request(client).await;
+            return Err(err);
+        }
+
+        let next = tokio::select! {
+            _ = options.cancel.wait() => {
+                let _ = send_cancel_request(client).await;
+                return Err(CliError::Cancelled);
+            }
+            result = tokio::time::timeout(options.deadline.remaining(), stream.next()) => {
+                match result {
+                    Ok(value) => value,
+                    Err(_) => {
+                        let _ = send_cancel_request(client).await;
+                        return Err(CliError::Timeout(format!(
+                            "deadline exceeded after {}",
+                            humantime::format_duration(options.deadline.duration())
+                        )));
+                    }
+                }
+            }
+        };
+
+        let chunk = match next {
+            Some(chunk) => chunk,
+            None => break,
+        };
+
+        let bytes = match chunk {
+            Ok(bytes) => bytes,
+            Err(err) => return Err(CliError::ServerConnection(format!("request failed: {err}"))),
+        };
+
+        buffer.extend_from_slice(&bytes);
+
+        loop {
+            skip_whitespace(&buffer, &mut pos);
+            if pos >= buffer.len() {
+                break;
+            }
+
+            if !saw_array_start {
+                if buffer[pos] != b'[' {
+                    return Err(CliError::InvalidArgument(
+                        "Invalid streaming response: expected JSON array".into(),
+                    ));
+                }
+                pos += 1;
+                saw_array_start = true;
+                continue;
+            }
+
+            skip_whitespace(&buffer, &mut pos);
+            if pos >= buffer.len() {
+                break;
+            }
+
+            if buffer[pos] == b']' {
+                pos += 1;
+                done = true;
+                break;
+            }
+
+            let slice = &buffer[pos..];
+            let mut stream =
+                serde_json::Deserializer::from_slice(slice).into_iter::<serde_json::Value>();
+            let value = match stream.next() {
+                Some(Ok(value)) => value,
+                Some(Err(err)) if err.is_eof() => break,
+                Some(Err(err)) => return Err(CliError::Json(err)),
+                None => break,
+            };
+            pos = pos.saturating_add(stream.byte_offset());
+
+            let object = value.as_object().ok_or_else(|| {
+                CliError::InvalidArgument("Invalid streaming row: expected JSON object".into())
+            })?;
+
+            if columns.is_none() {
+                let names: Vec<String> = object.keys().cloned().collect();
+                let set: HashSet<String> = names.iter().cloned().collect();
+                if names.is_empty() {
+                    return Err(CliError::InvalidArgument(
+                        "Invalid streaming row: empty object".into(),
+                    ));
+                }
+                columns = Some(names);
+                column_set = Some(set);
+            }
+
+            let names = columns
+                .as_ref()
+                .ok_or_else(|| CliError::InvalidArgument("Missing columns".into()))?;
+            let set = column_set
+                .as_ref()
+                .ok_or_else(|| CliError::InvalidArgument("Missing column set".into()))?;
+
+            if object.len() != names.len() || !object.keys().all(|key| set.contains(key)) {
+                return Err(CliError::InvalidArgument(
+                    "Invalid streaming row: column mismatch".into(),
+                ));
+            }
+
+            let values = names
+                .iter()
+                .map(|name| {
+                    object.get(name).ok_or_else(|| {
+                        CliError::InvalidArgument(format!(
+                            "Invalid streaming row: missing column '{name}'"
+                        ))
+                    })
+                })
+                .map(|value| value.and_then(json_value_to_value))
+                .collect::<Result<Vec<_>>>()?;
+            rows.push(Row::new(values));
+
+            if let Some(limit) = options.limit {
+                if rows.len() >= limit {
+                    let _ = send_cancel_request(client).await;
+                    done = true;
+                    break;
+                }
+            }
+
+            skip_whitespace(&buffer, &mut pos);
+            if pos >= buffer.len() {
+                break;
+            }
+            match buffer[pos] {
+                b',' => {
+                    pos += 1;
+                }
+                b']' => {
+                    pos += 1;
+                    done = true;
+                    break;
+                }
+                _ => {
+                    return Err(CliError::InvalidArgument(
+                        "Invalid streaming response: expected ',' or ']'".into(),
+                    ))
+                }
+            }
+        }
+
+        if pos > 0 {
+            buffer.drain(..pos);
+            pos = 0;
+        }
+    }
+
+    if done {
+        if has_non_whitespace(&buffer) {
+            return Err(CliError::InvalidArgument(
+                "Invalid streaming response: unexpected trailing data".into(),
+            ));
+        }
+        buffer.clear();
+        loop {
+            let next = tokio::select! {
+                _ = options.cancel.wait() => {
+                    let _ = send_cancel_request(client).await;
+                    return Err(CliError::Cancelled);
+                }
+                result = tokio::time::timeout(options.deadline.remaining(), stream.next()) => {
+                    match result {
+                        Ok(value) => value,
+                        Err(_) => {
+                            let _ = send_cancel_request(client).await;
+                            return Err(CliError::Timeout(format!(
+                                "deadline exceeded after {}",
+                                humantime::format_duration(options.deadline.duration())
+                            )));
+                        }
+                    }
+                }
+            };
+
+            let chunk = match next {
+                Some(chunk) => chunk,
+                None => break,
+            };
+
+            let bytes = match chunk {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    return Err(CliError::ServerConnection(format!("request failed: {err}")))
+                }
+            };
+
+            if has_non_whitespace(&bytes) {
+                return Err(CliError::InvalidArgument(
+                    "Invalid streaming response: unexpected trailing data".into(),
+                ));
+            }
+        }
+    } else {
+        skip_whitespace(&buffer, &mut pos);
+        if pos < buffer.len() {
+            return Err(CliError::InvalidArgument(
+                "Invalid streaming response: unexpected trailing data".into(),
+            ));
+        }
+        return Err(CliError::InvalidArgument(
+            "Invalid streaming response: unexpected end of stream".into(),
+        ));
+    }
+
+    let columns = columns
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| Column::new(name, DataType::Text))
+        .collect();
+    Ok((columns, rows))
 }
 
 async fn execute_remote_streaming<W: Write>(
@@ -1162,6 +1612,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            tui: false,
         };
 
         let sql = cmd.resolve_query(&default_batch_mode()).unwrap();
@@ -1179,6 +1630,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            tui: false,
         };
 
         let sql = cmd.resolve_query(&default_batch_mode()).unwrap();
@@ -1193,6 +1645,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            tui: false,
         };
 
         let err = cmd.resolve_query(&default_batch_mode()).unwrap_err();
@@ -1207,6 +1660,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            tui: false,
         };
 
         let err = cmd.resolve_query(&default_batch_mode()).unwrap_err();
