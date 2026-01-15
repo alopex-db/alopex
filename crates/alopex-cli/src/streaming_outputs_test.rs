@@ -65,6 +65,9 @@ fn run_sql_with_formatter(db: &Database, formatter: Box<dyn Formatter>) -> Strin
     let cmd = SqlCommand {
         query: Some("SELECT * FROM stream_test;".to_string()),
         file: None,
+        fetch_size: None,
+        max_rows: None,
+        deadline: None,
     };
     let mut output = Vec::new();
     sql::execute_with_formatter(

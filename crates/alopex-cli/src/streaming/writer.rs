@@ -1,17 +1,14 @@
 //! StreamingWriter - Streaming output controller
 //!
-//! Manages streaming output with automatic fallback to JSONL
-//! when buffer limits are exceeded for non-streaming formats.
+//! Manages streaming output with buffer limits for non-streaming formats.
 
 use std::io::Write;
 
 use crate::error::{CliError, Result};
 use crate::models::{Column, Row};
 use crate::output::formatter::Formatter;
-use crate::output::jsonl::JsonlFormatter;
-
-/// Default buffer limit for non-streaming formats (table, json).
-pub const DEFAULT_BUFFER_LIMIT: usize = 10_000;
+/// Default buffer limit for non-streaming formats (table).
+pub const DEFAULT_BUFFER_LIMIT: usize = 10 * 1024 * 1024;
 
 /// Status returned by write operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,22 +17,18 @@ pub enum WriteStatus {
     Continue,
     /// Limit reached, no more rows will be written.
     LimitReached,
-    /// Fallback to JSONL was triggered.
-    FallbackTriggered,
 }
 
 /// Streaming writer for output.
 ///
 /// Controls streaming output with the following behaviors:
-/// - **Streaming formats** (jsonl, csv, tsv): Output rows immediately.
-/// - **Non-streaming formats** (table, json): Buffer rows up to `buffer_limit`.
-///   If exceeded before output starts, fallback to JSONL format.
+/// - **Streaming formats** (json, jsonl, csv, tsv): Output rows immediately.
+/// - **Non-streaming formats** (table): Buffer rows up to `buffer_limit`.
 ///
 /// # Output Boundary
 ///
 /// - **Output started**: When `output_started == true` (header has been written).
-/// - **Fallback possible**: Only when `output_started == false`.
-/// - **Fallback impossible**: When `output_started == true`, buffer overflow causes error.
+/// - **Buffer overflow**: Returns an error prompting `--output json|csv|tsv` or `--limit`.
 pub struct StreamingWriter<W> {
     /// The underlying writer.
     writer: W,
@@ -47,14 +40,14 @@ pub struct StreamingWriter<W> {
     limit: Option<usize>,
     /// Buffer limit for non-streaming formats.
     buffer_limit: usize,
-    /// Buffer for non-streaming formats (table, json).
+    /// Buffer for non-streaming formats (table).
     buffer: Vec<Row>,
+    /// Approximate buffered size in bytes.
+    buffer_bytes: usize,
     /// Number of rows written (for limit checking).
     written_count: usize,
     /// Whether header has been output (output started).
     output_started: bool,
-    /// Whether fallback to JSONL was triggered.
-    fallback_triggered: bool,
     /// Whether quiet mode is enabled (suppress warnings).
     quiet: bool,
 }
@@ -81,9 +74,9 @@ impl<W: Write> StreamingWriter<W> {
             limit,
             buffer_limit: DEFAULT_BUFFER_LIMIT,
             buffer: Vec::new(),
+            buffer_bytes: 0,
             written_count: 0,
             output_started: false,
-            fallback_triggered: false,
             quiet: false,
         }
     }
@@ -110,22 +103,14 @@ impl<W: Write> StreamingWriter<W> {
 
     /// Prepare the writer for output.
     ///
-    /// For streaming formats (jsonl, csv, tsv), immediately outputs the header.
-    /// For non-streaming formats (table, json), defers header output.
-    ///
-    /// If `row_count_hint` is provided and exceeds the buffer limit for
-    /// non-streaming formats, triggers fallback to JSONL before any output.
+    /// For streaming formats (json, jsonl, csv, tsv), immediately outputs the header.
+    /// For non-streaming formats (table), defers header output.
     ///
     /// # Arguments
     ///
-    /// * `row_count_hint` - Optional estimated row count (e.g., from EXPLAIN or k value).
+    /// * `row_count_hint` - Optional estimated row count (unused for buffer sizing).
     pub fn prepare(&mut self, row_count_hint: Option<usize>) -> Result<()> {
-        // Pre-emptive fallback based on row count hint
-        if let Some(count) = row_count_hint {
-            if count > self.buffer_limit && !self.formatter.supports_streaming() {
-                self.trigger_fallback()?;
-            }
-        }
+        let _ = row_count_hint;
 
         // For streaming formats, output header immediately
         if self.formatter.supports_streaming() {
@@ -146,7 +131,6 @@ impl<W: Write> StreamingWriter<W> {
     ///
     /// * `WriteStatus::Continue` - Row was written, continue writing.
     /// * `WriteStatus::LimitReached` - Row limit reached, stop writing.
-    /// * `WriteStatus::FallbackTriggered` - Fallback to JSONL occurred.
     ///
     /// # Note
     ///
@@ -159,39 +143,22 @@ impl<W: Write> StreamingWriter<W> {
             }
         }
 
-        let fallback_just_triggered = self.fallback_triggered;
-
         if self.formatter.supports_streaming() {
             // Streaming format: output immediately
             self.formatter.write_row(&mut self.writer, &row)?;
             self.written_count += 1;
-
-            if fallback_just_triggered && self.written_count == 1 {
-                return Ok(WriteStatus::FallbackTriggered);
-            }
         } else {
             // Non-streaming format: buffer the row
-            self.buffer.push(row);
-
-            // Check buffer overflow
-            if self.buffer.len() > self.buffer_limit {
-                if self.output_started {
-                    // Already started output, cannot fallback
-                    return Err(CliError::InvalidArgument(
-                        "Buffer limit exceeded after output started. \
-                         Use --limit or --output jsonl to avoid this error."
-                            .into(),
-                    ));
-                }
-
-                // Trigger fallback and flush buffer
-                self.trigger_fallback()?;
-                self.flush_buffer()?;
-                self.written_count += 1;
-
-                return Ok(WriteStatus::FallbackTriggered);
+            let row_bytes = estimate_row_bytes(&row);
+            self.buffer_bytes = self.buffer_bytes.saturating_add(row_bytes);
+            if self.buffer_bytes > self.buffer_limit {
+                return Err(CliError::InvalidArgument(
+                    "Buffer limit exceeded (~10MB). \
+                     Use --output json|csv|tsv or --limit to reduce results."
+                        .into(),
+                ));
             }
-
+            self.buffer.push(row);
             self.written_count += 1;
         }
 
@@ -218,40 +185,6 @@ impl<W: Write> StreamingWriter<W> {
         Ok(())
     }
 
-    /// Trigger fallback to JSONL format.
-    fn trigger_fallback(&mut self) -> Result<()> {
-        if !self.quiet {
-            eprintln!(
-                "Warning: Result count exceeds {} rows. Consider --output jsonl. Switching to jsonl format.",
-                self.buffer_limit
-            );
-        }
-        self.formatter = Box::new(JsonlFormatter::new());
-        self.fallback_triggered = true;
-        Ok(())
-    }
-
-    /// Flush the buffer (after fallback to JSONL).
-    fn flush_buffer(&mut self) -> Result<()> {
-        // Output header
-        self.formatter
-            .write_header(&mut self.writer, &self.columns)?;
-        self.output_started = true;
-
-        // Output buffered rows
-        for row in self.buffer.drain(..) {
-            self.formatter.write_row(&mut self.writer, &row)?;
-        }
-
-        Ok(())
-    }
-
-    /// Returns whether fallback was triggered.
-    #[allow(dead_code)]
-    pub fn is_fallback_triggered(&self) -> bool {
-        self.fallback_triggered
-    }
-
     /// Returns the number of rows written.
     #[allow(dead_code)]
     pub fn written_count(&self) -> usize {
@@ -263,14 +196,42 @@ impl<W: Write> StreamingWriter<W> {
     pub fn output_started(&self) -> bool {
         self.output_started
     }
+
+    /// Returns approximate buffered bytes.
+    #[allow(dead_code)]
+    pub fn buffered_bytes(&self) -> usize {
+        self.buffer_bytes
+    }
+}
+
+fn estimate_row_bytes(row: &Row) -> usize {
+    row.columns
+        .iter()
+        .map(estimate_value_bytes)
+        .sum::<usize>()
+        .saturating_add(row.columns.len() * 8)
+}
+
+fn estimate_value_bytes(value: &crate::models::Value) -> usize {
+    match value {
+        crate::models::Value::Null => 4,
+        crate::models::Value::Bool(_) => 1,
+        crate::models::Value::Int(_) => 8,
+        crate::models::Value::Float(_) => 8,
+        crate::models::Value::Text(text) => text.len(),
+        crate::models::Value::Bytes(bytes) => bytes.len(),
+        crate::models::Value::Vector(values) => values.len() * 4,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::CliError;
     use crate::models::{DataType, Value};
     use crate::output::csv::CsvFormatter;
     use crate::output::json::JsonFormatter;
+    use crate::output::jsonl::JsonlFormatter;
     use crate::output::table::TableFormatter;
 
     fn test_columns() -> Vec<Column> {
@@ -309,7 +270,7 @@ mod tests {
     #[test]
     fn test_non_streaming_format_buffered_output() {
         let mut output = Vec::new();
-        let formatter = Box::new(JsonFormatter::new());
+        let formatter = Box::new(TableFormatter::new());
         let columns = test_columns();
 
         let mut writer = StreamingWriter::new(&mut output, formatter, columns, None);
@@ -325,8 +286,8 @@ mod tests {
         assert!(writer.output_started()); // Now output started
 
         let result = String::from_utf8(output).unwrap();
-        assert!(result.contains("\"id\": 1"));
-        assert!(result.contains("\"name\": \"Alice\""));
+        assert!(result.contains("id"));
+        assert!(result.contains("Alice"));
     }
 
     #[test]
@@ -358,38 +319,13 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_on_prepare_with_hint() {
+    fn test_buffer_overflow_errors() {
         let mut output = Vec::new();
         let formatter = Box::new(TableFormatter::new());
         let columns = test_columns();
 
         let mut writer =
-            StreamingWriter::new(&mut output, formatter, columns, None).with_buffer_limit(10); // Small buffer for testing
-
-        // Hint exceeds buffer limit
-        writer.prepare(Some(100)).unwrap();
-
-        assert!(writer.is_fallback_triggered());
-        assert!(writer.output_started()); // Header output after fallback to streaming
-
-        let status = writer.write_row(test_row(1, "Alice")).unwrap();
-        assert_eq!(status, WriteStatus::FallbackTriggered);
-
-        writer.finish().unwrap();
-
-        let result = String::from_utf8(output).unwrap();
-        // Output should be in jsonl format
-        assert!(result.contains("\"id\":1"));
-    }
-
-    #[test]
-    fn test_fallback_on_buffer_overflow() {
-        let mut output = Vec::new();
-        let formatter = Box::new(JsonFormatter::new());
-        let columns = test_columns();
-
-        let mut writer =
-            StreamingWriter::new(&mut output, formatter, columns, None).with_buffer_limit(2); // Very small buffer
+            StreamingWriter::new(&mut output, formatter, columns, None).with_buffer_limit(40); // Very small buffer
 
         writer.prepare(None).unwrap();
         assert!(!writer.output_started());
@@ -399,22 +335,8 @@ mod tests {
             writer.write_row(test_row(1, "Alice")).unwrap(),
             WriteStatus::Continue
         );
-        assert_eq!(
-            writer.write_row(test_row(2, "Bob")).unwrap(),
-            WriteStatus::Continue
-        );
-
-        // This should trigger fallback
-        let status = writer.write_row(test_row(3, "Charlie")).unwrap();
-        assert_eq!(status, WriteStatus::FallbackTriggered);
-        assert!(writer.is_fallback_triggered());
-
-        writer.finish().unwrap();
-
-        let result = String::from_utf8(output).unwrap();
-        // Output should be in jsonl format (one object per line)
-        let lines: Vec<&str> = result.lines().collect();
-        assert!(lines.len() >= 3); // At least 3 rows
+        let err = writer.write_row(test_row(2, "Bob")).unwrap_err();
+        assert!(matches!(err, CliError::InvalidArgument(_)));
     }
 
     #[test]

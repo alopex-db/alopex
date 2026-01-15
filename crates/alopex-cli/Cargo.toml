@@ -24,8 +24,9 @@ alopex-sql.workspace = true
 
 # Output
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 bincode = "1.3"
+humantime = "2.1"
 arrow-array = "52"
 arrow-schema = "52"
 parquet = { version = "52", features = ["arrow"] }
@@ -35,6 +36,7 @@ dirs = "5.0"
 toml = "0.8"
 reqwest = { version = "0.11", features = ["json", "stream", "rustls-tls"] }
 tokio = { workspace = true }
+futures-util = "0.3"
 
 # Signal handling (sync mode)
 ctrlc = "3.4"

@@ -47,6 +47,16 @@ pub enum CliError {
     #[allow(dead_code)]
     TransactionTimeout(String),
 
+    /// A query exceeded its deadline.
+    #[error("Query timeout: {0}. Suggestion: Use --deadline 120s to increase timeout.")]
+    #[allow(dead_code)]
+    Timeout(String),
+
+    /// A query was cancelled by the user.
+    #[error("Query cancelled by user.")]
+    #[allow(dead_code)]
+    Cancelled,
+
     /// No SQL query was provided.
     #[error("SQL クエリを指定してください。引数、-f オプション、または標準入力から入力できます。")]
     #[allow(dead_code)]

@@ -216,7 +216,7 @@ pub async fn execute_remote_with_formatter<W: Write>(
                 let row = Row::new(vec![bytes_to_value(entry.key), bytes_to_value(entry.value)]);
                 match streaming_writer.write_row(row)? {
                     WriteStatus::LimitReached => break,
-                    WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+                    WriteStatus::Continue => {}
                 }
             }
             streaming_writer.finish()
@@ -650,7 +650,7 @@ fn execute_list<W: Write>(
         let row = Row::new(vec![key_display, value_display]);
         match writer.write_row(row)? {
             WriteStatus::LimitReached => break,
-            WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+            WriteStatus::Continue => {}
         }
     }
 

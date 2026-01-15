@@ -344,7 +344,7 @@ async fn execute_remote_scan<W: Write>(
         let row = Row::new(values);
         match writer.write_row(row)? {
             WriteStatus::LimitReached => break,
-            WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+            WriteStatus::Continue => {}
         }
         row_count += 1;
     }
@@ -393,7 +393,7 @@ async fn execute_remote_list<W: Write>(
         let row = Row::new(vec![Value::Text(segment_id)]);
         match writer.write_row(row)? {
             WriteStatus::LimitReached => break,
-            WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+            WriteStatus::Continue => {}
         }
     }
     writer.finish()?;
@@ -448,7 +448,7 @@ async fn execute_remote_index_command<W: Write>(
                 ]);
                 match writer.write_row(row)? {
                     WriteStatus::LimitReached => break,
-                    WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+                    WriteStatus::Continue => {}
                 }
             }
             writer.finish()?;
@@ -523,7 +523,7 @@ fn execute_scan<W: Write>(
 
         match writer.write_row(row)? {
             WriteStatus::LimitReached => break,
-            WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+            WriteStatus::Continue => {}
         }
         row_count += 1;
     }
@@ -575,7 +575,7 @@ fn execute_list<W: Write>(db: &Database, writer: &mut StreamingWriter<W>) -> Res
 
         match writer.write_row(row)? {
             WriteStatus::LimitReached => break,
-            WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+            WriteStatus::Continue => {}
         }
     }
 
@@ -871,7 +871,7 @@ fn execute_index_command<W: Write>(
                 ]);
                 match writer.write_row(row)? {
                     WriteStatus::LimitReached => break,
-                    WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+                    WriteStatus::Continue => {}
                 }
             }
             writer.finish()?;

@@ -178,7 +178,7 @@ fn handle_sql_response(
         let values = row.into_iter().map(sql_value_to_value).collect();
         match writer.write_row(Row::new(values))? {
             WriteStatus::LimitReached => break,
-            WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+            WriteStatus::Continue => {}
         }
     }
     writer.finish()
@@ -235,7 +235,7 @@ fn handle_streaming_response(
             if let Some(writer) = writer.as_mut() {
                 match writer.write_row(Row::new(values))? {
                     WriteStatus::LimitReached => break,
-                    WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+                    WriteStatus::Continue => {}
                 }
             }
         }

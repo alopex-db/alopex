@@ -159,7 +159,7 @@ async fn execute_remote_search<W: Write>(
         let row = Row::new(vec![key_display, Value::Float(result.distance as f64)]);
         match streaming_writer.write_row(row)? {
             WriteStatus::LimitReached => break,
-            WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+            WriteStatus::Continue => {}
         }
     }
     streaming_writer.finish()
@@ -301,7 +301,7 @@ fn execute_search<W: Write>(
 
         match writer.write_row(row)? {
             WriteStatus::LimitReached => break,
-            WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+            WriteStatus::Continue => {}
         }
     }
 

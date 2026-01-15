@@ -177,4 +177,13 @@ impl HttpClient {
                 source: err,
             })
     }
+
+    pub async fn post_json_stream<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> ClientResult<Response> {
+        self.send_and_check(|| self.request(Method::POST, path).map(|req| req.json(body)))
+            .await
+    }
 }

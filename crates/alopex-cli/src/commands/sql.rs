@@ -2,6 +2,7 @@
 //!
 //! Supports: query execution, file-based queries
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read, Write};
 
@@ -13,7 +14,17 @@ use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
-use crate::streaming::{StreamingWriter, WriteStatus};
+use crate::streaming::timeout::parse_deadline;
+use crate::streaming::{CancelSignal, Deadline, StreamingWriter, WriteStatus};
+use futures_util::StreamExt;
+
+#[doc(hidden)]
+pub struct SqlExecutionOptions<'a> {
+    pub limit: Option<usize>,
+    pub quiet: bool,
+    pub cancel: &'a CancelSignal,
+    pub deadline: &'a Deadline,
+}
 
 /// Execute a SQL command with dynamic column detection.
 ///
@@ -37,9 +48,53 @@ pub fn execute_with_formatter<W: Write>(
     limit: Option<usize>,
     quiet: bool,
 ) -> Result<()> {
-    let sql = cmd.resolve_query(batch_mode)?;
+    let deadline = Deadline::new(parse_deadline(cmd.deadline.as_deref())?);
+    let cancel = CancelSignal::new();
 
-    execute_sql_with_formatter(db, &sql, writer, formatter, limit, quiet)
+    execute_with_formatter_control(
+        db,
+        cmd,
+        batch_mode,
+        writer,
+        formatter,
+        SqlExecutionOptions {
+            limit,
+            quiet,
+            cancel: &cancel,
+            deadline: &deadline,
+        },
+    )
+}
+
+#[doc(hidden)]
+pub fn execute_with_formatter_control<W: Write>(
+    db: &Database,
+    cmd: SqlCommand,
+    batch_mode: &BatchMode,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    options: SqlExecutionOptions<'_>,
+) -> Result<()> {
+    let sql = cmd.resolve_query(batch_mode)?;
+    let effective_limit = merge_limit(options.limit, cmd.max_rows);
+    let options = SqlExecutionOptions {
+        limit: effective_limit,
+        ..options
+    };
+
+    execute_sql_with_formatter(db, &sql, writer, formatter, &options)
+}
+
+fn is_select_query(sql: &str) -> Result<bool> {
+    use alopex_sql::{AlopexDialect, Parser, StatementKind};
+
+    let dialect = AlopexDialect;
+    let stmts = Parser::parse_sql(&dialect, sql).map_err(|e| CliError::Parse(format!("{}", e)))?;
+    Ok(stmts.len() == 1
+        && matches!(
+            stmts.first().map(|s| &s.kind),
+            Some(StatementKind::Select(_))
+        ))
 }
 
 /// Execute a SQL command against a remote server using HttpClient.
@@ -53,14 +108,53 @@ pub async fn execute_remote_with_formatter<W: Write>(
     quiet: bool,
 ) -> Result<()> {
     let sql = cmd.resolve_query(batch_mode)?;
+    let effective_limit = merge_limit(limit, cmd.max_rows);
+    let deadline = Deadline::new(parse_deadline(cmd.deadline.as_deref())?);
+    let cancel = CancelSignal::new();
+    let options = SqlExecutionOptions {
+        limit: effective_limit,
+        quiet,
+        cancel: &cancel,
+        deadline: &deadline,
+    };
+
+    if is_select_query(&sql)? && formatter.supports_streaming() {
+        return execute_remote_streaming(
+            client,
+            &sql,
+            writer,
+            formatter,
+            &options,
+            cmd.fetch_size,
+            cmd.max_rows,
+        )
+        .await;
+    }
+
     let request = RemoteSqlRequest {
         sql,
         streaming: false,
+        fetch_size: cmd.fetch_size,
+        max_rows: cmd.max_rows,
     };
-    let response: RemoteSqlResponse = client
-        .post_json("api/sql/query", &request)
-        .await
-        .map_err(map_client_error)?;
+    let response: RemoteSqlResponse = tokio::select! {
+        result = tokio::time::timeout(options.deadline.remaining(), client.post_json("api/sql/query", &request)) => {
+            match result {
+                Ok(value) => value.map_err(map_client_error)?,
+                Err(_) => {
+                    let _ = send_cancel_request(client).await;
+                    return Err(CliError::Timeout(format!(
+                        "deadline exceeded after {}",
+                        humantime::format_duration(options.deadline.duration())
+                    )));
+                }
+            }
+        }
+        _ = options.cancel.wait() => {
+            let _ = send_cancel_request(client).await;
+            return Err(CliError::Cancelled);
+        }
+    };
 
     if response.columns.is_empty() {
         if quiet {
@@ -72,7 +166,7 @@ pub async fn execute_remote_with_formatter<W: Write>(
         };
         let columns = sql_status_columns();
         let mut streaming_writer =
-            StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+            StreamingWriter::new(writer, formatter, columns, options.limit).with_quiet(quiet);
         streaming_writer.prepare(Some(1))?;
         let row = Row::new(vec![Value::Text("OK".to_string()), Value::Text(message)]);
         streaming_writer.write_row(row)?;
@@ -85,16 +179,356 @@ pub async fn execute_remote_with_formatter<W: Write>(
         .map(|col| Column::new(&col.name, data_type_from_string(&col.data_type)))
         .collect();
     let mut streaming_writer =
-        StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+        StreamingWriter::new(writer, formatter, columns, options.limit).with_quiet(quiet);
     streaming_writer.prepare(Some(response.rows.len()))?;
     for row in response.rows {
+        if options.cancel.is_cancelled() {
+            let _ = send_cancel_request(client).await;
+            return Err(CliError::Cancelled);
+        }
+        options.deadline.check()?;
         let values = row.into_iter().map(remote_value_to_value).collect();
         match streaming_writer.write_row(Row::new(values))? {
             WriteStatus::LimitReached => break,
-            WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+            WriteStatus::Continue => {}
         }
     }
     streaming_writer.finish()
+}
+
+async fn execute_remote_streaming<W: Write>(
+    client: &HttpClient,
+    sql: &str,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    options: &SqlExecutionOptions<'_>,
+    fetch_size: Option<usize>,
+    max_rows: Option<usize>,
+) -> Result<()> {
+    let request = RemoteSqlRequest {
+        sql: sql.to_string(),
+        streaming: true,
+        fetch_size,
+        max_rows,
+    };
+
+    let response = tokio::select! {
+        result = tokio::time::timeout(options.deadline.remaining(), client.post_json_stream("api/sql/query", &request)) => {
+            match result {
+                Ok(value) => value.map_err(map_client_error)?,
+                Err(_) => {
+                    let _ = send_cancel_request(client).await;
+                    return Err(CliError::Timeout(format!(
+                        "deadline exceeded after {}",
+                        humantime::format_duration(options.deadline.duration())
+                    )));
+                }
+            }
+        }
+        _ = options.cancel.wait() => {
+            let _ = send_cancel_request(client).await;
+            return Err(CliError::Cancelled);
+        }
+    };
+
+    let mut stream = response.bytes_stream();
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut pos: usize = 0;
+    let mut streaming_writer: Option<StreamingWriter<&mut W>> = None;
+    let mut formatter = Some(formatter);
+    let mut columns: Option<Vec<String>> = None;
+    let mut column_set: Option<HashSet<String>> = None;
+    let mut done = false;
+    let mut saw_array_start = false;
+
+    while !done {
+        if options.cancel.is_cancelled() {
+            let _ = send_cancel_request(client).await;
+            return Err(CliError::Cancelled);
+        }
+        if let Err(err) = options.deadline.check() {
+            let _ = send_cancel_request(client).await;
+            return Err(err);
+        }
+
+        let next = tokio::select! {
+            _ = options.cancel.wait() => {
+                let _ = send_cancel_request(client).await;
+                return Err(CliError::Cancelled);
+            }
+            result = tokio::time::timeout(options.deadline.remaining(), stream.next()) => {
+                match result {
+                    Ok(value) => value,
+                    Err(_) => {
+                        let _ = send_cancel_request(client).await;
+                        return Err(CliError::Timeout(format!(
+                            "deadline exceeded after {}",
+                            humantime::format_duration(options.deadline.duration())
+                        )));
+                    }
+                }
+            }
+        };
+
+        let chunk = match next {
+            Some(chunk) => chunk,
+            None => break,
+        };
+
+        let bytes = match chunk {
+            Ok(bytes) => bytes,
+            Err(err) => return Err(CliError::ServerConnection(format!("request failed: {err}"))),
+        };
+
+        buffer.extend_from_slice(&bytes);
+
+        loop {
+            skip_whitespace(&buffer, &mut pos);
+            if pos >= buffer.len() {
+                break;
+            }
+
+            if !saw_array_start {
+                if buffer[pos] != b'[' {
+                    return Err(CliError::InvalidArgument(
+                        "Invalid streaming response: expected JSON array".into(),
+                    ));
+                }
+                pos += 1;
+                saw_array_start = true;
+                continue;
+            }
+
+            skip_whitespace(&buffer, &mut pos);
+            if pos >= buffer.len() {
+                break;
+            }
+
+            if buffer[pos] == b']' {
+                pos += 1;
+                done = true;
+                break;
+            }
+
+            let slice = &buffer[pos..];
+            let mut stream =
+                serde_json::Deserializer::from_slice(slice).into_iter::<serde_json::Value>();
+            let value = match stream.next() {
+                Some(Ok(value)) => value,
+                Some(Err(err)) if err.is_eof() => break,
+                Some(Err(err)) => return Err(CliError::Json(err)),
+                None => break,
+            };
+            pos = pos.saturating_add(stream.byte_offset());
+
+            let object = value.as_object().ok_or_else(|| {
+                CliError::InvalidArgument("Invalid streaming row: expected JSON object".into())
+            })?;
+
+            if columns.is_none() {
+                let names: Vec<String> = object.keys().cloned().collect();
+                let set: HashSet<String> = names.iter().cloned().collect();
+                if names.is_empty() {
+                    return Err(CliError::InvalidArgument(
+                        "Invalid streaming row: empty object".into(),
+                    ));
+                }
+                let cols = names
+                    .iter()
+                    .map(|name| Column::new(name, DataType::Text))
+                    .collect::<Vec<_>>();
+                let formatter = formatter
+                    .take()
+                    .ok_or_else(|| CliError::InvalidArgument("Missing formatter".into()))?;
+                let mut writer = StreamingWriter::new(&mut *writer, formatter, cols, options.limit)
+                    .with_quiet(options.quiet);
+                writer.prepare(None)?;
+                streaming_writer = Some(writer);
+                columns = Some(names);
+                column_set = Some(set);
+            }
+
+            let names = columns
+                .as_ref()
+                .ok_or_else(|| CliError::InvalidArgument("Missing columns".into()))?;
+            let set = column_set
+                .as_ref()
+                .ok_or_else(|| CliError::InvalidArgument("Missing column set".into()))?;
+
+            if object.len() != names.len() || !object.keys().all(|key| set.contains(key)) {
+                return Err(CliError::InvalidArgument(
+                    "Invalid streaming row: column mismatch".into(),
+                ));
+            }
+
+            let values = names
+                .iter()
+                .map(|name| {
+                    object.get(name).ok_or_else(|| {
+                        CliError::InvalidArgument(format!(
+                            "Invalid streaming row: missing column '{name}'"
+                        ))
+                    })
+                })
+                .map(|value| value.and_then(json_value_to_value))
+                .collect::<Result<Vec<_>>>()?;
+
+            if let Some(writer) = streaming_writer.as_mut() {
+                match writer.write_row(Row::new(values))? {
+                    WriteStatus::LimitReached => {
+                        let _ = send_cancel_request(client).await;
+                        return writer.finish();
+                    }
+                    WriteStatus::Continue => {}
+                }
+            }
+
+            skip_whitespace(&buffer, &mut pos);
+            if pos >= buffer.len() {
+                break;
+            }
+            match buffer[pos] {
+                b',' => {
+                    pos += 1;
+                }
+                b']' => {
+                    pos += 1;
+                    done = true;
+                    break;
+                }
+                _ => {
+                    return Err(CliError::InvalidArgument(
+                        "Invalid streaming response: expected ',' or ']'".into(),
+                    ))
+                }
+            }
+        }
+
+        if pos > 0 {
+            buffer.drain(..pos);
+            pos = 0;
+        }
+    }
+
+    if done {
+        if has_non_whitespace(&buffer) {
+            return Err(CliError::InvalidArgument(
+                "Invalid streaming response: unexpected trailing data".into(),
+            ));
+        }
+        buffer.clear();
+        loop {
+            let next = tokio::select! {
+                _ = options.cancel.wait() => {
+                    let _ = send_cancel_request(client).await;
+                    return Err(CliError::Cancelled);
+                }
+                result = tokio::time::timeout(options.deadline.remaining(), stream.next()) => {
+                    match result {
+                        Ok(value) => value,
+                        Err(_) => {
+                            let _ = send_cancel_request(client).await;
+                            return Err(CliError::Timeout(format!(
+                                "deadline exceeded after {}",
+                                humantime::format_duration(options.deadline.duration())
+                            )));
+                        }
+                    }
+                }
+            };
+
+            let chunk = match next {
+                Some(chunk) => chunk,
+                None => break,
+            };
+
+            let bytes = match chunk {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    return Err(CliError::ServerConnection(format!("request failed: {err}")))
+                }
+            };
+
+            if has_non_whitespace(&bytes) {
+                return Err(CliError::InvalidArgument(
+                    "Invalid streaming response: unexpected trailing data".into(),
+                ));
+            }
+        }
+    } else {
+        skip_whitespace(&buffer, &mut pos);
+        if pos < buffer.len() {
+            return Err(CliError::InvalidArgument(
+                "Invalid streaming response: unexpected trailing data".into(),
+            ));
+        }
+        return Err(CliError::InvalidArgument(
+            "Invalid streaming response: unexpected end of stream".into(),
+        ));
+    }
+
+    if let Some(mut writer) = streaming_writer {
+        return writer.finish();
+    }
+
+    if done && saw_array_start {
+        if let Some(formatter) = formatter.take() {
+            let mut writer =
+                StreamingWriter::new(&mut *writer, formatter, Vec::new(), options.limit)
+                    .with_quiet(options.quiet);
+            writer.prepare(None)?;
+            return writer.finish();
+        }
+    }
+
+    Ok(())
+}
+
+fn skip_whitespace(buffer: &[u8], pos: &mut usize) {
+    while *pos < buffer.len() {
+        match buffer[*pos] {
+            b' ' | b'\n' | b'\r' | b'\t' => *pos += 1,
+            _ => break,
+        }
+    }
+}
+
+fn has_non_whitespace(buffer: &[u8]) -> bool {
+    buffer
+        .iter()
+        .any(|byte| !matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+}
+
+fn json_value_to_value(value: &serde_json::Value) -> Result<Value> {
+    match value {
+        serde_json::Value::Null => Ok(Value::Null),
+        serde_json::Value::Bool(value) => Ok(Value::Bool(*value)),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(Value::Int(value))
+            } else if let Some(value) = value.as_f64() {
+                Ok(Value::Float(value))
+            } else {
+                Err(CliError::InvalidArgument(
+                    "Invalid numeric value in streaming row".into(),
+                ))
+            }
+        }
+        serde_json::Value::String(value) => Ok(Value::Text(value.clone())),
+        serde_json::Value::Array(values) => {
+            let mut vector = Vec::with_capacity(values.len());
+            for entry in values {
+                let number = entry.as_f64().ok_or_else(|| {
+                    CliError::InvalidArgument("Invalid vector value in streaming row".into())
+                })?;
+                vector.push(number as f32);
+            }
+            Ok(Value::Vector(vector))
+        }
+        serde_json::Value::Object(_) => Err(CliError::InvalidArgument(
+            "Invalid streaming row: nested objects are not supported".into(),
+        )),
+    }
 }
 
 /// Legacy execute function for backward compatibility with tests.
@@ -169,7 +603,7 @@ fn execute_sql<W: Write>(db: &Database, sql: &str, writer: &mut StreamingWriter<
 
                 match writer.write_row(row)? {
                     WriteStatus::LimitReached => break,
-                    WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+                    WriteStatus::Continue => {}
                 }
             }
 
@@ -196,8 +630,7 @@ fn execute_sql_with_formatter<W: Write>(
     sql: &str,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
-    limit: Option<usize>,
-    quiet: bool,
+    options: &SqlExecutionOptions<'_>,
 ) -> Result<()> {
     use alopex_sql::{AlopexDialect, Parser, StatementKind};
 
@@ -214,10 +647,10 @@ fn execute_sql_with_formatter<W: Write>(
 
     if is_select {
         // SELECT: use streaming path (FR-7)
-        execute_sql_select_streaming(db, sql, writer, formatter, limit, quiet)
+        execute_sql_select_streaming(db, sql, writer, formatter, options)
     } else {
         // DDL/DML: use standard path
-        execute_sql_ddl_dml(db, sql, writer, formatter, limit, quiet)
+        execute_sql_ddl_dml(db, sql, writer, formatter, options)
     }
 }
 
@@ -231,10 +664,11 @@ fn execute_sql_select_streaming<W: Write>(
     sql: &str,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
-    limit: Option<usize>,
-    quiet: bool,
+    options: &SqlExecutionOptions<'_>,
 ) -> Result<()> {
     use alopex_embedded::StreamingQueryResult;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     // Helper to convert CliError to alopex_embedded::Error for callback
     fn cli_err_to_embedded(e: crate::error::CliError) -> alopex_embedded::Error {
@@ -244,19 +678,37 @@ fn execute_sql_select_streaming<W: Write>(
         })
     }
 
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let cancel_flag = cancelled.clone();
+    let timeout_flag = timed_out.clone();
+
     let result = db.execute_sql_with_rows(sql, |mut rows| {
         // FR-7: SELECT result - stream rows directly from iterator while transaction is alive
         let columns = columns_from_streaming_rows(&rows);
-        let mut streaming_writer =
-            StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+        let mut streaming_writer = StreamingWriter::new(writer, formatter, columns, options.limit)
+            .with_quiet(options.quiet);
 
         // FR-7: Use None for row count hint to support true streaming output
         streaming_writer
             .prepare(None)
             .map_err(cli_err_to_embedded)?;
 
+        if let Err(err) = options.deadline.check() {
+            timeout_flag.store(true, Ordering::SeqCst);
+            return Err(cli_err_to_embedded(err));
+        }
+
         // Consume iterator row by row for true streaming
         while let Ok(Some(sql_row)) = rows.next_row() {
+            if options.cancel.is_cancelled() {
+                cancel_flag.store(true, Ordering::SeqCst);
+                return Err(cli_err_to_embedded(CliError::Cancelled));
+            }
+            if let Err(err) = options.deadline.check() {
+                timeout_flag.store(true, Ordering::SeqCst);
+                return Err(cli_err_to_embedded(err));
+            }
             let values: Vec<Value> = sql_row.into_iter().map(sql_value_to_value).collect();
             let row = Row::new(values);
 
@@ -265,13 +717,29 @@ fn execute_sql_select_streaming<W: Write>(
                 .map_err(cli_err_to_embedded)?
             {
                 WriteStatus::LimitReached => break,
-                WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+                WriteStatus::Continue => {}
             }
         }
 
         streaming_writer.finish().map_err(cli_err_to_embedded)?;
         Ok(())
-    })?;
+    });
+
+    let result = match result {
+        Ok(value) => value,
+        Err(err) => {
+            if cancelled.load(Ordering::SeqCst) {
+                return Err(CliError::Cancelled);
+            }
+            if timed_out.load(Ordering::SeqCst) {
+                return Err(CliError::Timeout(format!(
+                    "deadline exceeded after {}",
+                    humantime::format_duration(options.deadline.duration())
+                )));
+            }
+            return Err(CliError::Database(err));
+        }
+    };
 
     match result {
         StreamingQueryResult::QueryProcessed(()) => Ok(()),
@@ -287,6 +755,10 @@ struct RemoteSqlRequest {
     sql: String,
     #[serde(default)]
     streaming: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fetch_size: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_rows: Option<usize>,
 }
 
 #[derive(serde::Deserialize)]
@@ -316,6 +788,26 @@ fn map_client_error(err: ClientError) -> CliError {
     }
 }
 
+async fn send_cancel_request(client: &HttpClient) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct CancelRequest {}
+
+    let request = CancelRequest {};
+    let _: serde_json::Value = client
+        .post_json("api/sql/cancel", &request)
+        .await
+        .map_err(map_client_error)?;
+    Ok(())
+}
+
+fn merge_limit(limit: Option<usize>, max_rows: Option<usize>) -> Option<usize> {
+    match (limit, max_rows) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
 /// Execute DDL/DML query (non-SELECT statements).
 ///
 /// This function handles CREATE, DROP, INSERT, UPDATE, DELETE and other
@@ -325,20 +817,22 @@ fn execute_sql_ddl_dml<W: Write>(
     sql: &str,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
-    limit: Option<usize>,
-    quiet: bool,
+    options: &SqlExecutionOptions<'_>,
 ) -> Result<()> {
     use alopex_sql::ExecutionResult;
 
+    options.deadline.check()?;
     let result = db.execute_sql(sql)?;
+    options.deadline.check()?;
 
     match result {
         ExecutionResult::Success => {
             // DDL success - suppress status output in quiet mode
-            if !quiet {
+            if !options.quiet {
                 let columns = sql_status_columns();
                 let mut streaming_writer =
-                    StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+                    StreamingWriter::new(writer, formatter, columns, options.limit)
+                        .with_quiet(options.quiet);
                 streaming_writer.prepare(Some(1))?;
                 let row = Row::new(vec![
                     Value::Text("OK".to_string()),
@@ -350,10 +844,11 @@ fn execute_sql_ddl_dml<W: Write>(
         }
         ExecutionResult::RowsAffected(count) => {
             // DML success - suppress status output in quiet mode
-            if !quiet {
+            if !options.quiet {
                 let columns = sql_status_columns();
                 let mut streaming_writer =
-                    StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+                    StreamingWriter::new(writer, formatter, columns, options.limit)
+                        .with_quiet(options.quiet);
                 streaming_writer.prepare(Some(1))?;
                 let row = Row::new(vec![
                     Value::Text("OK".to_string()),
@@ -368,14 +863,15 @@ fn execute_sql_ddl_dml<W: Write>(
             // But handle it gracefully by outputting the result
             let columns = columns_from_query_result(&query_result);
             let mut streaming_writer =
-                StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+                StreamingWriter::new(writer, formatter, columns, options.limit)
+                    .with_quiet(options.quiet);
             streaming_writer.prepare(Some(query_result.rows.len()))?;
             for sql_row in query_result.rows {
                 let values: Vec<Value> = sql_row.into_iter().map(sql_value_to_value).collect();
                 let row = Row::new(values);
                 match streaming_writer.write_row(row)? {
                     WriteStatus::LimitReached => break,
-                    WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+                    WriteStatus::Continue => {}
                 }
             }
             streaming_writer.finish()?;
@@ -651,6 +1147,9 @@ mod tests {
         let cmd = SqlCommand {
             query: Some("SELECT 1".to_string()),
             file: None,
+            fetch_size: None,
+            max_rows: None,
+            deadline: None,
         };
 
         let sql = cmd.resolve_query(&default_batch_mode()).unwrap();
@@ -665,6 +1164,9 @@ mod tests {
         let cmd = SqlCommand {
             query: None,
             file: Some(file.path().display().to_string()),
+            fetch_size: None,
+            max_rows: None,
+            deadline: None,
         };
 
         let sql = cmd.resolve_query(&default_batch_mode()).unwrap();
@@ -676,6 +1178,9 @@ mod tests {
         let cmd = SqlCommand {
             query: None,
             file: None,
+            fetch_size: None,
+            max_rows: None,
+            deadline: None,
         };
 
         let err = cmd.resolve_query(&default_batch_mode()).unwrap_err();
@@ -687,6 +1192,9 @@ mod tests {
         let cmd = SqlCommand {
             query: Some("SELECT 1".to_string()),
             file: Some("query.sql".into()),
+            fetch_size: None,
+            max_rows: None,
+            deadline: None,
         };
 
         let err = cmd.resolve_query(&default_batch_mode()).unwrap_err();

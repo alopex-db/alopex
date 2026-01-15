@@ -89,7 +89,7 @@ impl OutputFormat {
     /// Returns true if this format supports streaming output.
     #[allow(dead_code)]
     pub fn supports_streaming(&self) -> bool {
-        matches!(self, Self::Jsonl | Self::Csv | Self::Tsv)
+        matches!(self, Self::Json | Self::Jsonl | Self::Csv | Self::Tsv)
     }
 }
 
@@ -262,6 +262,18 @@ pub struct SqlCommand {
     /// File containing SQL query
     #[arg(long, short = 'f')]
     pub file: Option<String>,
+
+    /// Fetch size for server streaming
+    #[arg(long)]
+    pub fetch_size: Option<usize>,
+
+    /// Max rows to return before stopping
+    #[arg(long)]
+    pub max_rows: Option<usize>,
+
+    /// Deadline for query execution (e.g. 60s, 5m)
+    #[arg(long)]
+    pub deadline: Option<String>,
 }
 
 /// Vector subcommands
@@ -461,7 +473,7 @@ mod tests {
         assert_eq!(cli.data_dir, Some("/path/to/db".to_string()));
         assert!(matches!(
             cli.command,
-            Command::Sql(SqlCommand { query: Some(q), file: None }) if q == "SELECT * FROM users"
+            Command::Sql(SqlCommand { query: Some(q), file: None, .. }) if q == "SELECT * FROM users"
         ));
     }
 
@@ -479,6 +491,31 @@ mod tests {
         let cli = Cli::try_parse_from(args).unwrap();
 
         assert_eq!(cli.limit, Some(100));
+    }
+
+    #[test]
+    fn test_parse_sql_streaming_options() {
+        let args = vec![
+            "alopex",
+            "sql",
+            "--fetch-size",
+            "500",
+            "--max-rows",
+            "250",
+            "--deadline",
+            "30s",
+            "SELECT 1",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        match cli.command {
+            Command::Sql(cmd) => {
+                assert_eq!(cmd.fetch_size, Some(500));
+                assert_eq!(cmd.max_rows, Some(250));
+                assert_eq!(cmd.deadline.as_deref(), Some("30s"));
+            }
+            _ => panic!("expected sql command"),
+        }
     }
 
     #[test]
@@ -656,7 +693,7 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Sql(SqlCommand { query: None, file: Some(f) }) if f == "query.sql"
+            Command::Sql(SqlCommand { query: None, file: Some(f), .. }) if f == "query.sql"
         ));
     }
 
@@ -937,7 +974,7 @@ mod tests {
     #[test]
     fn test_output_format_supports_streaming() {
         assert!(!OutputFormat::Table.supports_streaming());
-        assert!(!OutputFormat::Json.supports_streaming());
+        assert!(OutputFormat::Json.supports_streaming());
         assert!(OutputFormat::Jsonl.supports_streaming());
         assert!(OutputFormat::Csv.supports_streaming());
         assert!(OutputFormat::Tsv.supports_streaming());

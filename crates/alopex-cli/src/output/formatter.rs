@@ -20,8 +20,8 @@ use super::tsv::TsvFormatter;
 pub trait Formatter: Send + Sync {
     /// Write the header (column names) to the output.
     ///
-    /// For streaming formats (jsonl, csv, tsv), this is called immediately.
-    /// For buffered formats (table, json), this is called after buffer evaluation.
+    /// For streaming formats (json, jsonl, csv, tsv), this is called immediately.
+    /// For buffered formats (table), this is called after buffer evaluation.
     fn write_header(&mut self, writer: &mut dyn Write, columns: &[Column]) -> Result<()>;
 
     /// Write a single row to the output.
@@ -34,8 +34,8 @@ pub trait Formatter: Send + Sync {
 
     /// Returns true if this formatter supports streaming output.
     ///
-    /// Streaming formats (jsonl, csv, tsv) write rows immediately.
-    /// Non-streaming formats (table, json) buffer rows before output.
+    /// Streaming formats (json, jsonl, csv, tsv) write rows immediately.
+    /// Non-streaming formats (table) buffer rows before output.
     fn supports_streaming(&self) -> bool;
 }
 
@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn test_create_formatter_json() {
         let formatter = create_formatter(OutputFormat::Json);
-        assert!(!formatter.supports_streaming());
+        assert!(formatter.supports_streaming());
     }
 
     #[test]
