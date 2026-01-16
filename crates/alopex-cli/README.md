@@ -24,6 +24,7 @@ Use `--output` to control formatting:
 
 - `table` (default)
 - `json`
+- `jsonl`
 - `csv`
 - `tsv`
 
@@ -31,7 +32,7 @@ Use `--output` to control formatting:
 
 For SELECT queries, streaming output supports:
 
-- `--fetch-size <n>`: server batch size
+- `--fetch-size <n>`: server batch size (server profiles only)
 - `--max-rows <n>`: stop after N rows
 - `--deadline <duration>`: timeout (examples: `60s`, `5m`, `1h`)
 
@@ -63,6 +64,7 @@ Keybindings (TUI):
 
 Note: `--tui` requires a TTY. When running in non-interactive mode, the CLI
 falls back to batch output and preserves `--output` formatting.
+Use `--max-rows` (or `--limit`) to cap memory usage for large result sets.
 
 ## Profiles and server connections
 
@@ -94,6 +96,16 @@ Set a default profile:
 
 ```toml
 default_profile = "prod"
+```
+
+Profile management commands (local profiles only):
+
+```bash
+alopex profile create dev --data-dir ./data
+alopex profile list
+alopex profile show dev
+alopex profile delete dev
+alopex profile set-default dev
 ```
 
 ## Authentication

@@ -176,20 +176,30 @@ See `crates/alopex-server/proto/alopex.proto` for message definitions.
 - `GET /status` - runtime status
 - `GET /metrics` - Prometheus metrics
 
-## CLI connect mode
+## CLI access
 
-You can connect to a running server using the CLI:
+Use profiles to connect to a running server:
 
-```bash
-alopex connect http://127.0.0.1:8080
+```toml
+[profiles.prod]
+connection_type = "server"
+
+[profiles.prod.server]
+url = "https://127.0.0.1:8080"
+auth = "token"
+token = "secret"
 ```
 
-Interactive commands:
-- Type SQL statements and press Enter
-- `exit`, `quit`, or `\q` to leave
+```bash
+alopex --profile prod sql "SELECT 1"
+alopex --profile prod sql --tui "SELECT * FROM items"
+```
 
-If authentication is enabled:
+Server management commands:
 
 ```bash
-alopex connect http://127.0.0.1:8080 --api-key secret
+alopex --profile prod server status
+alopex --profile prod server metrics
+alopex --profile prod server health
+alopex --profile prod server compaction trigger
 ```

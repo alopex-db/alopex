@@ -11,6 +11,12 @@ Run a SELECT query with `--tui`:
 alopex sql --tui "SELECT id, name, created_at FROM users"
 ```
 
+Use a server profile:
+
+```bash
+alopex --profile prod sql --tui "SELECT id, name FROM users"
+```
+
 If the terminal is not a TTY (for example, piping output), the CLI falls back to
 batch output while preserving `--output` formatting.
 
@@ -85,5 +91,5 @@ View JSON/YAML detail:
 - "TUI requires a TTY": run without `--tui` or use a real terminal.
 - Rows not visible: increase the terminal height or shrink columns by selecting
   fewer fields.
-- Large result sets: use `--max-rows` or filter with `WHERE` to limit data.
+- Large result sets: use `--max-rows`/`--limit` or filter with `WHERE` to limit data.
 - Search slow: narrow the dataset or reduce text-heavy columns.
