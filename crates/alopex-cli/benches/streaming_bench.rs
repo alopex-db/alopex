@@ -160,6 +160,7 @@ fn connection_overhead(c: &mut Criterion) {
                 let (base_url, shutdown) = spawn_tls_server(router).await;
                 let config = CliServerConfig {
                     url: base_url,
+                    insecure: false,
                     auth: None,
                     token: None,
                     username: None,

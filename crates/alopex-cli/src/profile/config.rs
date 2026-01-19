@@ -49,6 +49,8 @@ pub struct LocalConfig {
 pub struct ServerConfig {
     pub url: String,
     #[serde(default)]
+    pub insecure: bool,
+    #[serde(default)]
     pub auth: Option<AuthType>,
     #[serde(default)]
     pub token: Option<String>,
@@ -228,7 +230,9 @@ impl ProfileManager {
                 .get(profile_name)
                 .ok_or_else(|| CliError::ProfileNotFound(profile_name.to_string()))?
                 .normalized();
-            return resolve_profile(profile, Some(profile_name.to_string()));
+            let mut resolved = resolve_profile(profile, Some(profile_name.to_string()))?;
+            apply_cli_overrides(cli, &mut resolved);
+            return Ok(resolved);
         }
 
         if let Some(data_dir) = cli.data_dir.as_ref() {
@@ -248,7 +252,9 @@ impl ProfileManager {
                 .get(default_name)
                 .ok_or_else(|| CliError::ProfileNotFound(default_name.to_string()))?
                 .normalized();
-            return resolve_profile(profile, Some(default_name.to_string()));
+            let mut resolved = resolve_profile(profile, Some(default_name.to_string()))?;
+            apply_cli_overrides(cli, &mut resolved);
+            return Ok(resolved);
         }
 
         Ok(ResolvedConfig {
@@ -259,6 +265,14 @@ impl ProfileManager {
             server: None,
             fallback_local: None,
         })
+    }
+}
+
+fn apply_cli_overrides(cli: &Cli, resolved: &mut ResolvedConfig) {
+    if cli.insecure {
+        if let Some(server) = resolved.server.as_mut() {
+            server.insecure = true;
+        }
     }
 }
 

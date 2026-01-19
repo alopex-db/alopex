@@ -53,6 +53,10 @@ pub struct Cli {
     #[arg(long)]
     pub verbose: bool,
 
+    /// Allow insecure HTTP connections for server profiles
+    #[arg(long)]
+    pub insecure: bool,
+
     /// Thread mode (multi or single)
     #[arg(long, value_enum, default_value = "multi")]
     pub thread_mode: ThreadMode,

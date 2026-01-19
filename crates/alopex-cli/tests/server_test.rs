@@ -76,6 +76,7 @@ fn batch_mode() -> BatchMode {
 fn build_test_client(base_url: &str) -> HttpClient {
     let config = CliServerConfig {
         url: base_url.to_string(),
+        insecure: false,
         auth: None,
         token: None,
         username: None,
@@ -547,6 +548,7 @@ async fn server_sql_success_and_http_error() {
 async fn server_sql_connection_error() {
     let config = CliServerConfig {
         url: "https://127.0.0.1:1/".to_string(),
+        insecure: false,
         auth: None,
         token: None,
         username: None,
