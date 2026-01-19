@@ -29,8 +29,10 @@ use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
+use crate::output::RowCollector;
 use crate::progress::ProgressIndicator;
 use crate::streaming::{StreamingWriter, WriteStatus};
+use crate::tui::renderer::render_output;
 
 #[derive(Debug, Serialize)]
 struct RemoteColumnarScanRequest {
@@ -182,6 +184,36 @@ pub fn execute_with_formatter<W: Write>(
     }
 }
 
+pub fn columnar_command_columns(cmd: &ColumnarCommand) -> Vec<Column> {
+    match cmd {
+        ColumnarCommand::Scan { .. } => columnar_scan_columns(),
+        ColumnarCommand::Stats { .. } => columnar_stats_columns(),
+        ColumnarCommand::List => columnar_list_columns(),
+        ColumnarCommand::Ingest { .. } => columnar_ingest_columns(),
+        ColumnarCommand::Index(command) => match command {
+            IndexCommand::List { .. } => columnar_index_list_columns(),
+            IndexCommand::Create { .. } | IndexCommand::Drop { .. } => columnar_status_columns(),
+        },
+    }
+}
+
+pub fn execute_tui(
+    db: &Database,
+    cmd: ColumnarCommand,
+    batch_mode: &BatchMode,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+) -> Result<()> {
+    let columns = columnar_command_columns(&cmd);
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    execute_with_formatter(db, cmd, batch_mode, &mut sink, formatter, limit, quiet)?;
+    let warning = collector.truncation_warning();
+    render_output(columns, collector.rows(), connection_label, true, warning)
+}
+
 async fn execute_remote_ingest<W: Write>(
     client: &HttpClient,
     options: IngestOptions<'_>,
@@ -315,6 +347,24 @@ pub async fn execute_remote_with_formatter<W: Write>(
             execute_remote_index_command(client, command, &mut streaming_writer).await
         }
     }
+}
+
+pub async fn execute_remote_tui(
+    client: &HttpClient,
+    cmd: &ColumnarCommand,
+    batch_mode: &BatchMode,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+) -> Result<()> {
+    let columns = columnar_command_columns(cmd);
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    execute_remote_with_formatter(client, cmd, batch_mode, &mut sink, formatter, limit, quiet)
+        .await?;
+    let warning = collector.truncation_warning();
+    render_output(columns, collector.rows(), connection_label, true, warning)
 }
 
 async fn execute_remote_scan<W: Write>(

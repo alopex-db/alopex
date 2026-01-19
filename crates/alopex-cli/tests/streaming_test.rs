@@ -6,6 +6,7 @@ use alopex_cli::commands::sql::{execute_with_formatter_control, SqlExecutionOpti
 use alopex_cli::error::CliError;
 use alopex_cli::output::formatter::create_formatter;
 use alopex_cli::streaming::{CancelSignal, Deadline};
+use alopex_cli::ui::mode::UiMode;
 use alopex_embedded::Database;
 
 fn batch_mode() -> BatchMode {
@@ -47,6 +48,7 @@ fn streaming_max_rows_limits_output() {
         &db,
         cmd,
         &batch_mode(),
+        UiMode::Batch,
         &mut output,
         formatter,
         SqlExecutionOptions {
@@ -84,6 +86,7 @@ fn streaming_deadline_exceeded() {
         &db,
         cmd,
         &batch_mode(),
+        UiMode::Batch,
         &mut output,
         formatter,
         SqlExecutionOptions {
@@ -119,6 +122,7 @@ fn streaming_cancelled() {
         &db,
         cmd,
         &batch_mode(),
+        UiMode::Batch,
         &mut output,
         formatter,
         SqlExecutionOptions {

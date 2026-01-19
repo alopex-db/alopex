@@ -17,6 +17,7 @@ use crate::output::formatter::Formatter;
 use crate::streaming::timeout::parse_deadline;
 use crate::streaming::{CancelSignal, Deadline, StreamingWriter, WriteStatus};
 use crate::tui::{is_tty, TuiApp};
+use crate::ui::mode::UiMode;
 use futures_util::StreamExt;
 
 #[doc(hidden)]
@@ -40,10 +41,12 @@ pub struct SqlExecutionOptions<'a> {
 /// * `formatter` - The formatter to use.
 /// * `limit` - Optional row limit.
 /// * `quiet` - Whether to suppress warnings.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_with_formatter<W: Write>(
     db: &Database,
     cmd: SqlCommand,
     batch_mode: &BatchMode,
+    ui_mode: UiMode,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
     limit: Option<usize>,
@@ -56,6 +59,7 @@ pub fn execute_with_formatter<W: Write>(
         db,
         cmd,
         batch_mode,
+        ui_mode,
         writer,
         formatter,
         SqlExecutionOptions {
@@ -72,6 +76,7 @@ pub fn execute_with_formatter_control<W: Write>(
     db: &Database,
     cmd: SqlCommand,
     batch_mode: &BatchMode,
+    ui_mode: UiMode,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
     options: SqlExecutionOptions<'_>,
@@ -83,7 +88,7 @@ pub fn execute_with_formatter_control<W: Write>(
         ..options
     };
 
-    if cmd.tui {
+    if ui_mode == UiMode::Tui {
         return execute_tui_local_or_fallback(db, &sql, writer, formatter, options);
     }
 
@@ -103,10 +108,12 @@ fn is_select_query(sql: &str) -> Result<bool> {
 }
 
 /// Execute a SQL command against a remote server using HttpClient.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_remote_with_formatter<W: Write>(
     client: &HttpClient,
     cmd: &SqlCommand,
     batch_mode: &BatchMode,
+    ui_mode: UiMode,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
     limit: Option<usize>,
@@ -122,7 +129,10 @@ pub async fn execute_remote_with_formatter<W: Write>(
         deadline: &deadline,
     };
 
-    execute_remote_with_formatter_control(client, cmd, batch_mode, writer, formatter, options).await
+    execute_remote_with_formatter_control(
+        client, cmd, batch_mode, ui_mode, writer, formatter, options,
+    )
+    .await
 }
 
 #[doc(hidden)]
@@ -130,12 +140,13 @@ pub async fn execute_remote_with_formatter_control<W: Write>(
     client: &HttpClient,
     cmd: &SqlCommand,
     batch_mode: &BatchMode,
+    ui_mode: UiMode,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
     options: SqlExecutionOptions<'_>,
 ) -> Result<()> {
     let sql = cmd.resolve_query(batch_mode)?;
-    if cmd.tui {
+    if ui_mode == UiMode::Tui {
         return execute_tui_remote_or_fallback(client, &sql, cmd, writer, formatter, options).await;
     }
     execute_remote_with_formatter_impl(client, &sql, cmd, writer, formatter, &options).await

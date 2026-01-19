@@ -7,6 +7,7 @@ use alopex_cli::models::{Column, DataType, Row, Value};
 use alopex_cli::output::formatter::create_formatter;
 use alopex_cli::streaming::{CancelSignal, Deadline};
 use alopex_cli::tui::{is_tty, TuiApp};
+use alopex_cli::ui::mode::UiMode;
 use alopex_embedded::Database;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
@@ -120,6 +121,7 @@ fn tui_falls_back_in_non_tty() {
         &db,
         cmd,
         &batch_mode(),
+        UiMode::Batch,
         &mut output,
         formatter,
         SqlExecutionOptions {

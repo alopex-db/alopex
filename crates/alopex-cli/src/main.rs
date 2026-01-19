@@ -15,6 +15,7 @@ mod profile;
 mod progress;
 mod streaming;
 mod tui;
+mod ui;
 mod uri;
 mod version;
 
@@ -33,8 +34,9 @@ use error::{handle_error, CliError, Result};
 use models::Column;
 use output::create_formatter;
 use profile::config::{ConnectionType, ServerConfig};
-use profile::{execute_profile_command, ProfileManager, ResolvedConfig};
+use profile::{execute_profile_command, execute_profile_tui, ProfileManager, ResolvedConfig};
 use streaming::StreamingWriter;
+use ui::mode::{resolve_ui_mode, UiMode};
 use uri::{validate_s3_credentials, StorageUri};
 
 fn main() -> ExitCode {
@@ -133,22 +135,40 @@ fn resolve_config(cli: &Cli) -> Result<ResolvedConfig> {
 
 /// Main entry point logic.
 fn run(cli: Cli) -> Result<()> {
+    let batch_mode = BatchMode::detect(&cli);
+    let ui_resolution = resolve_ui_mode(&cli, &cli.command, &batch_mode);
+    for warning in &ui_resolution.warnings {
+        eprintln!("{}", warning.message());
+    }
+    let ui_mode = ui_resolution.mode;
+    let output_format = cli.output_format();
+
     match &cli.command {
         Command::Profile { command } => {
-            return execute_profile_command(command.clone(), cli.output);
+            if ui_mode == UiMode::Tui {
+                if let Some(command) = command.clone() {
+                    return execute_profile_tui(command, "local");
+                }
+                return tui::admin::run_admin_ui("local");
+            }
+            let Some(command) = command.clone() else {
+                return Err(CliError::InvalidArgument(
+                    "Missing profile subcommand".to_string(),
+                ));
+            };
+            return execute_profile_command(command, output_format);
         }
         Command::Completions { shell } => {
             return generate_completions(*shell);
         }
         Command::Version => {
-            return commands::version::execute_version(cli.output);
+            return commands::version::execute_version(output_format);
         }
         _ => {}
     }
 
     // Open the database
     let resolved = resolve_config(&cli)?;
-    let batch_mode = BatchMode::detect(&cli);
     let command = cli.command;
 
     if resolved.connection_type == ConnectionType::Server {
@@ -157,7 +177,8 @@ fn run(cli: Cli) -> Result<()> {
                 &command,
                 server_config,
                 &batch_mode,
-                cli.output,
+                ui_mode,
+                output_format,
                 cli.limit,
                 cli.quiet,
             ) {
@@ -177,7 +198,8 @@ fn run(cli: Cli) -> Result<()> {
                                 &fallback_resolved,
                                 command,
                                 &batch_mode,
-                                cli.output,
+                                ui_mode,
+                                output_format,
                                 cli.limit,
                                 cli.quiet,
                             );
@@ -195,7 +217,15 @@ fn run(cli: Cli) -> Result<()> {
     let is_write = is_write_command(&command);
 
     // Execute the command
-    execute_command(&db, command, &batch_mode, cli.output, cli.limit, cli.quiet)?;
+    execute_command(
+        &db,
+        command,
+        &batch_mode,
+        ui_mode,
+        output_format,
+        cli.limit,
+        cli.quiet,
+    )?;
 
     // Flush only for write commands to ensure S3 sync errors are propagated
     // Read-only commands should work even with S3 read-only permissions
@@ -216,33 +246,39 @@ fn is_write_command(command: &Command) -> bool {
     match command {
         Command::Kv { command: kv_cmd } => matches!(
             kv_cmd,
-            KvCommand::Put { .. }
-                | KvCommand::Delete { .. }
-                | KvCommand::Txn(
-                    KvTxnCommand::Begin { .. }
-                        | KvTxnCommand::Put { .. }
-                        | KvTxnCommand::Delete { .. }
-                        | KvTxnCommand::Commit { .. }
-                        | KvTxnCommand::Rollback { .. }
-                )
+            Some(
+                KvCommand::Put { .. }
+                    | KvCommand::Delete { .. }
+                    | KvCommand::Txn(
+                        KvTxnCommand::Begin { .. }
+                            | KvTxnCommand::Put { .. }
+                            | KvTxnCommand::Delete { .. }
+                            | KvTxnCommand::Commit { .. }
+                            | KvTxnCommand::Rollback { .. }
+                    )
+            )
         ),
         Command::Sql(sql_cmd) => is_write_sql(sql_cmd),
         Command::Vector { command: vec_cmd } => {
             matches!(
                 vec_cmd,
-                VectorCommand::Upsert { .. } | VectorCommand::Delete { .. }
+                Some(VectorCommand::Upsert { .. } | VectorCommand::Delete { .. })
             )
         }
         Command::Hnsw { command: hnsw_cmd } => {
             matches!(
                 hnsw_cmd,
-                HnswCommand::Create { .. } | HnswCommand::Drop { .. }
+                Some(HnswCommand::Create { .. } | HnswCommand::Drop { .. })
             )
         }
         Command::Columnar { command: col_cmd } => matches!(
             col_cmd,
-            ColumnarCommand::Ingest { .. }
-                | ColumnarCommand::Index(IndexCommand::Create { .. } | IndexCommand::Drop { .. })
+            Some(
+                ColumnarCommand::Ingest { .. }
+                    | ColumnarCommand::Index(
+                        IndexCommand::Create { .. } | IndexCommand::Drop { .. }
+                    )
+            )
         ),
         Command::Server { .. }
         | Command::Profile { .. }
@@ -337,6 +373,7 @@ fn execute_server_command(
     command: &Command,
     server_config: &ServerConfig,
     batch_mode: &BatchMode,
+    ui_mode: UiMode,
     output_format: cli::OutputFormat,
     limit: Option<usize>,
     quiet: bool,
@@ -349,6 +386,20 @@ fn execute_server_command(
 
     match command {
         Command::Kv { command: kv_cmd } => {
+            let Some(kv_cmd) = kv_cmd else {
+                if ui_mode == UiMode::Tui {
+                    return tui::admin::run_admin_ui("server");
+                }
+                return Err(CliError::InvalidArgument(
+                    "Missing KV subcommand".to_string(),
+                ));
+            };
+            let columns = get_kv_columns(kv_cmd);
+            if ui_mode == UiMode::Tui {
+                return runtime.block_on(commands::kv::execute_remote_tui(
+                    &client, kv_cmd, columns, limit, quiet, "server",
+                ));
+            }
             let formatter = create_formatter(output_format);
             let stdout = io::stdout();
             let mut handle = stdout.lock();
@@ -369,6 +420,7 @@ fn execute_server_command(
                 &client,
                 sql_cmd,
                 batch_mode,
+                ui_mode,
                 &mut handle,
                 formatter,
                 limit,
@@ -376,6 +428,20 @@ fn execute_server_command(
             ))
         }
         Command::Vector { command: vec_cmd } => {
+            let Some(vec_cmd) = vec_cmd else {
+                if ui_mode == UiMode::Tui {
+                    return tui::admin::run_admin_ui("server");
+                }
+                return Err(CliError::InvalidArgument(
+                    "Missing vector subcommand".to_string(),
+                ));
+            };
+            let columns = get_vector_columns(vec_cmd);
+            if ui_mode == UiMode::Tui {
+                return runtime.block_on(commands::vector::execute_remote_tui(
+                    &client, vec_cmd, batch_mode, columns, limit, quiet, "server",
+                ));
+            }
             let formatter = create_formatter(output_format);
             let stdout = io::stdout();
             let mut handle = stdout.lock();
@@ -390,6 +456,20 @@ fn execute_server_command(
             ))
         }
         Command::Hnsw { command: hnsw_cmd } => {
+            let Some(hnsw_cmd) = hnsw_cmd else {
+                if ui_mode == UiMode::Tui {
+                    return tui::admin::run_admin_ui("server");
+                }
+                return Err(CliError::InvalidArgument(
+                    "Missing HNSW subcommand".to_string(),
+                ));
+            };
+            let columns = get_hnsw_columns(hnsw_cmd);
+            if ui_mode == UiMode::Tui {
+                return runtime.block_on(commands::hnsw::execute_remote_tui(
+                    &client, hnsw_cmd, columns, limit, quiet, "server",
+                ));
+            }
             let formatter = create_formatter(output_format);
             let stdout = io::stdout();
             let mut handle = stdout.lock();
@@ -403,6 +483,19 @@ fn execute_server_command(
             ))
         }
         Command::Columnar { command: col_cmd } => {
+            let Some(col_cmd) = col_cmd else {
+                if ui_mode == UiMode::Tui {
+                    return tui::admin::run_admin_ui("server");
+                }
+                return Err(CliError::InvalidArgument(
+                    "Missing columnar subcommand".to_string(),
+                ));
+            };
+            if ui_mode == UiMode::Tui {
+                return runtime.block_on(commands::columnar::execute_remote_tui(
+                    &client, col_cmd, batch_mode, limit, quiet, "server",
+                ));
+            }
             let formatter = create_formatter(output_format);
             let stdout = io::stdout();
             let mut handle = stdout.lock();
@@ -419,6 +512,19 @@ fn execute_server_command(
         Command::Server {
             command: server_cmd,
         } => {
+            let Some(server_cmd) = server_cmd else {
+                if ui_mode == UiMode::Tui {
+                    return tui::admin::run_admin_ui("server");
+                }
+                return Err(CliError::InvalidArgument(
+                    "Missing server subcommand".to_string(),
+                ));
+            };
+            if ui_mode == UiMode::Tui {
+                return runtime.block_on(commands::server::execute_remote_tui(
+                    &client, server_cmd, quiet, "server",
+                ));
+            }
             let stdout = io::stdout();
             let mut handle = stdout.lock();
             runtime.block_on(commands::server::execute_remote(
@@ -438,12 +544,21 @@ fn execute_local_command(
     resolved: &ResolvedConfig,
     command: Command,
     batch_mode: &BatchMode,
+    ui_mode: UiMode,
     output_format: cli::OutputFormat,
     limit: Option<usize>,
     quiet: bool,
 ) -> Result<()> {
     let db = open_database_with_check(resolved)?;
-    execute_command(&db, command, batch_mode, output_format, limit, quiet)
+    execute_command(
+        &db,
+        command,
+        batch_mode,
+        ui_mode,
+        output_format,
+        limit,
+        quiet,
+    )
 }
 
 /// Execute the command and write output.
@@ -451,6 +566,7 @@ fn execute_command(
     db: &alopex_embedded::Database,
     command: Command,
     batch_mode: &BatchMode,
+    ui_mode: UiMode,
     output_format: cli::OutputFormat,
     limit: Option<usize>,
     quiet: bool,
@@ -461,7 +577,18 @@ fn execute_command(
     // Get columns and execute command based on type
     match command {
         Command::Kv { command: kv_cmd } => {
+            let Some(kv_cmd) = kv_cmd else {
+                if ui_mode == UiMode::Tui {
+                    return tui::admin::run_admin_ui("local");
+                }
+                return Err(CliError::InvalidArgument(
+                    "Missing KV subcommand".to_string(),
+                ));
+            };
             let columns = get_kv_columns(&kv_cmd);
+            if ui_mode == UiMode::Tui {
+                return commands::kv::execute_tui(db, kv_cmd, columns, limit, quiet, "local");
+            }
             let formatter = create_formatter(output_format);
             let mut writer =
                 StreamingWriter::new(&mut handle, formatter, columns, limit).with_quiet(quiet);
@@ -473,6 +600,7 @@ fn execute_command(
                 db,
                 sql_cmd,
                 batch_mode,
+                ui_mode,
                 &mut handle,
                 formatter,
                 limit,
@@ -480,20 +608,57 @@ fn execute_command(
             )
         }
         Command::Vector { command: vec_cmd } => {
+            let Some(vec_cmd) = vec_cmd else {
+                if ui_mode == UiMode::Tui {
+                    return tui::admin::run_admin_ui("local");
+                }
+                return Err(CliError::InvalidArgument(
+                    "Missing vector subcommand".to_string(),
+                ));
+            };
             let columns = get_vector_columns(&vec_cmd);
+            if ui_mode == UiMode::Tui {
+                return commands::vector::execute_tui(
+                    db, vec_cmd, batch_mode, columns, limit, quiet, "local",
+                );
+            }
             let formatter = create_formatter(output_format);
             let mut writer =
                 StreamingWriter::new(&mut handle, formatter, columns, limit).with_quiet(quiet);
             commands::vector::execute(db, vec_cmd, batch_mode, &mut writer)
         }
         Command::Hnsw { command: hnsw_cmd } => {
+            let Some(hnsw_cmd) = hnsw_cmd else {
+                if ui_mode == UiMode::Tui {
+                    return tui::admin::run_admin_ui("local");
+                }
+                return Err(CliError::InvalidArgument(
+                    "Missing HNSW subcommand".to_string(),
+                ));
+            };
             let columns = get_hnsw_columns(&hnsw_cmd);
+            if ui_mode == UiMode::Tui {
+                return commands::hnsw::execute_tui(db, hnsw_cmd, columns, limit, quiet, "local");
+            }
             let formatter = create_formatter(output_format);
             let mut writer =
                 StreamingWriter::new(&mut handle, formatter, columns, limit).with_quiet(quiet);
             commands::hnsw::execute(db, hnsw_cmd, &mut writer)
         }
         Command::Columnar { command: col_cmd } => {
+            let Some(col_cmd) = col_cmd else {
+                if ui_mode == UiMode::Tui {
+                    return tui::admin::run_admin_ui("local");
+                }
+                return Err(CliError::InvalidArgument(
+                    "Missing columnar subcommand".to_string(),
+                ));
+            };
+            if ui_mode == UiMode::Tui {
+                return commands::columnar::execute_tui(
+                    db, col_cmd, batch_mode, limit, quiet, "local",
+                );
+            }
             let formatter = create_formatter(output_format);
             commands::columnar::execute_with_formatter(
                 db,
@@ -510,7 +675,14 @@ fn execute_command(
         )),
         Command::Version => commands::version::execute_version(output_format),
         Command::Completions { shell } => generate_completions(shell),
-        Command::Profile { command } => execute_profile_command(command, output_format),
+        Command::Profile { command } => {
+            let Some(command) = command else {
+                return Err(CliError::InvalidArgument(
+                    "Missing profile subcommand".to_string(),
+                ));
+            };
+            execute_profile_command(command, output_format)
+        }
     }
 }
 

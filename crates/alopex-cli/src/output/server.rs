@@ -67,7 +67,7 @@ pub fn health_row(status: Option<&str>, message: Option<&str>) -> Row {
 
 pub fn compaction_columns() -> Vec<Column> {
     vec![
-        Column::new("Result", DataType::Text),
+        Column::new("Status", DataType::Text),
         Column::new("Message", DataType::Text),
     ]
 }

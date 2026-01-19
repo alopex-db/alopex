@@ -1,7 +1,9 @@
 //! TUI application module.
 
+pub mod admin;
 pub mod detail;
 pub mod keymap;
+pub mod renderer;
 pub mod search;
 pub mod table;
 
@@ -36,6 +38,7 @@ pub struct TuiApp {
     connection_label: String,
     row_count: usize,
     processing: bool,
+    status_message: Option<String>,
 }
 
 /// Result of handling an input event.
@@ -64,7 +67,13 @@ impl TuiApp {
             connection_label: connection_label.into(),
             row_count,
             processing,
+            status_message: None,
         }
+    }
+
+    pub fn with_status_message(mut self, message: impl Into<String>) -> Self {
+        self.status_message = Some(message.into());
+        self
     }
 
     pub fn run(mut self) -> Result<()> {
@@ -84,8 +93,14 @@ impl TuiApp {
         let tick_rate = Duration::from_millis(16);
         let mut last_tick = Instant::now();
 
+        let mut processing_cleared = false;
         loop {
             terminal.draw(|frame| self.draw(frame))?;
+
+            if self.processing && !processing_cleared {
+                self.processing = false;
+                processing_cleared = true;
+            }
 
             let timeout = tick_rate
                 .checked_sub(last_tick.elapsed())
@@ -131,6 +146,7 @@ impl TuiApp {
             &self.connection_label,
             self.row_count,
             self.processing,
+            self.status_message.as_deref(),
         );
 
         if self.show_help {
@@ -234,6 +250,7 @@ fn split_layout(area: Rect, show_detail: bool) -> (Rect, Rect, Rect) {
     (chunks[0], chunks[1], chunks[2])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_status(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -242,11 +259,12 @@ fn render_status(
     connection_label: &str,
     row_count: usize,
     processing: bool,
+    status_message: Option<&str>,
 ) {
     let state_label = if processing { "processing" } else { "ready" };
     let base_status =
         format!("Connection: {connection_label} | Rows: {row_count} | Status: {state_label}");
-    let status_text = if show_help {
+    let mut status_text = if show_help {
         format!("{base_status} | Help: press ? to close")
     } else if search.is_active() {
         format!("{base_status} | /{}", search.query())
@@ -255,6 +273,9 @@ fn render_status(
     } else {
         format!("{base_status} | q/Esc: quit | ?: help | /: search | Enter: detail")
     };
+    if let Some(message) = status_message {
+        status_text = format!("{status_text} | {message}");
+    }
 
     let paragraph = Paragraph::new(status_text)
         .block(Block::default().borders(Borders::ALL).title("Status"))

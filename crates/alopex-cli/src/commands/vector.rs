@@ -13,8 +13,10 @@ use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
+use crate::output::RowCollector;
 use crate::progress::ProgressIndicator;
 use crate::streaming::{StreamingWriter, WriteStatus};
+use crate::tui::renderer::render_output;
 
 #[derive(Debug, Serialize)]
 struct RemoteVectorSearchRequest {
@@ -81,6 +83,25 @@ pub fn execute<W: Write>(
     }
 }
 
+pub fn execute_tui(
+    db: &Database,
+    cmd: VectorCommand,
+    batch_mode: &BatchMode,
+    columns: Vec<Column>,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+) -> Result<()> {
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    let mut writer =
+        StreamingWriter::new(&mut sink, formatter, columns.clone(), limit).with_quiet(quiet);
+    execute(db, cmd, batch_mode, &mut writer)?;
+    let warning = collector.truncation_warning();
+    render_output(columns, collector.rows(), connection_label, true, warning)
+}
+
 /// Execute a Vector command against a remote server.
 pub async fn execute_remote_with_formatter<W: Write>(
     client: &HttpClient,
@@ -110,6 +131,24 @@ pub async fn execute_remote_with_formatter<W: Write>(
             execute_remote_delete(client, index, key, writer, formatter, limit, quiet).await
         }
     }
+}
+
+pub async fn execute_remote_tui(
+    client: &HttpClient,
+    cmd: &VectorCommand,
+    batch_mode: &BatchMode,
+    columns: Vec<Column>,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+) -> Result<()> {
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    execute_remote_with_formatter(client, cmd, batch_mode, &mut sink, formatter, limit, quiet)
+        .await?;
+    let warning = collector.truncation_warning();
+    render_output(columns, collector.rows(), connection_label, true, warning)
 }
 
 #[allow(clippy::too_many_arguments)]

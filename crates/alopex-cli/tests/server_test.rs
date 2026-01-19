@@ -12,6 +12,7 @@ use alopex_cli::error::CliError;
 use alopex_cli::output::formatter::create_formatter;
 use alopex_cli::profile::config::ServerConfig as CliServerConfig;
 use alopex_cli::streaming::{CancelSignal, Deadline};
+use alopex_cli::ui::mode::UiMode;
 use alopex_cli::{batch::BatchMode, cli::CompactionCommand, cli::ServerCommand, cli::SqlCommand};
 use alopex_cli::{batch::BatchModeSource, cli::OutputFormat};
 use alopex_core::columnar::encoding::LogicalType;
@@ -253,6 +254,7 @@ async fn execute_streaming_request(
         &client,
         &cmd,
         &batch_mode(),
+        UiMode::Batch,
         &mut output,
         formatter,
         SqlExecutionOptions {
@@ -861,7 +863,7 @@ async fn server_admin_commands_success() {
     .await
     .unwrap();
     let text = String::from_utf8(std::mem::take(&mut output)).unwrap();
-    assert!(text.contains("Result"));
+    assert!(text.contains("Status"));
     assert!(text.contains("OK"));
     assert!(text.contains("started"));
 
