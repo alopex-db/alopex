@@ -24,7 +24,14 @@ use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::{create_formatter, Formatter};
 use crate::ui::mode::UiMode;
-use crate::{batch::BatchMode, cli::OutputFormat, client::http::HttpClient};
+use crate::{
+    batch::BatchMode,
+    cli::{
+        ColumnarCommand, DistanceMetric, HnswCommand, IndexCommand, KvCommand, OutputFormat,
+        SqlCommand, VectorCommand,
+    },
+    client::http::HttpClient,
+};
 
 use self::actions::{
     all_actions, execute_local_action, execute_remote_action, AdminAction, AdminCommand,
@@ -91,6 +98,9 @@ struct AdminApp<'a> {
     connection_label: String,
     backend: AdminBackend<'a>,
     last_result: Option<AdminResult>,
+    target: AdminTarget,
+    params: String,
+    editing_params: bool,
 }
 
 impl<'a> AdminApp<'a> {
@@ -110,6 +120,9 @@ impl<'a> AdminApp<'a> {
             connection_label: connection_label.into(),
             backend,
             last_result: None,
+            target: AdminTarget::Sql,
+            params: String::new(),
+            editing_params: false,
         }
     }
 
@@ -215,6 +228,23 @@ impl<'a> AdminApp<'a> {
             lines.push(Line::from(""));
             lines.push(Line::from(item.description));
             lines.push(Line::from(""));
+            lines.push(Line::from(format!(
+                "Target: {} (press t to change)",
+                self.target.label()
+            )));
+            if self.editing_params {
+                lines.push(Line::from("Params: editing (Enter to finish)"));
+            } else if self.params.is_empty() {
+                lines.push(Line::from(
+                    "Params: <empty> (press e to edit, key=value ...)",
+                ));
+            } else {
+                lines.push(Line::from(format!("Params: {}", self.params)));
+            }
+            if let Some(example) = self.target.example_for(item.action) {
+                lines.push(Line::from(format!("Example: {example}")));
+            }
+            lines.push(Line::from(""));
             if !item.enabled {
                 lines.push(Line::from(Span::styled(
                     "Disabled: your current authorization does not allow this action.",
@@ -253,9 +283,14 @@ impl<'a> AdminApp<'a> {
                 "Connection: {} | Action: {} | Help: press ? to close",
                 self.connection_label, action
             )
+        } else if self.editing_params {
+            format!(
+                "Connection: {} | Action: {} | Editing params | Enter: done | Esc: cancel",
+                self.connection_label, action
+            )
         } else {
             format!(
-                "Connection: {} | Action: {} | Up/Down: navigate | Enter: select | ?: help | q: quit",
+                "Connection: {} | Action: {} | Up/Down: navigate | Enter: execute | t: target | e: edit params | ?: help | q: quit",
                 self.connection_label, action
             )
         };
@@ -268,10 +303,35 @@ impl<'a> AdminApp<'a> {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if self.editing_params {
+            match key.code {
+                KeyCode::Esc => {
+                    self.editing_params = false;
+                }
+                KeyCode::Enter => {
+                    self.editing_params = false;
+                }
+                KeyCode::Backspace => {
+                    self.params.pop();
+                }
+                KeyCode::Char(ch) => {
+                    self.params.push(ch);
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
             KeyCode::Char('?') => {
                 self.show_help = !self.show_help;
+            }
+            KeyCode::Char('t') => {
+                self.target = self.target.next();
+            }
+            KeyCode::Char('e') => {
+                self.editing_params = true;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.selected > 0 {
@@ -303,7 +363,20 @@ impl<'a> AdminApp<'a> {
             return Ok(());
         }
 
-        let command = default_command_for(item.action);
+        let params = parse_params(&self.params);
+        let command = match build_command_for(item.action, self.target, &params) {
+            Ok(Some(command)) => command,
+            Ok(None) => {
+                self.last_result = Some(AdminResult::status(
+                    "Select target/params to execute".to_string(),
+                ));
+                return Ok(());
+            }
+            Err(err) => {
+                self.last_result = Some(AdminResult::status(err.to_string()));
+                return Ok(());
+            }
+        };
         let request = AdminRequest {
             action: item.action,
             command,
@@ -351,6 +424,69 @@ impl<'a> AdminApp<'a> {
 
         self.last_result = Some(result_state);
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdminTarget {
+    Sql,
+    Kv,
+    Vector,
+    Hnsw,
+    Columnar,
+}
+
+impl AdminTarget {
+    const ORDER: [AdminTarget; 5] = [
+        AdminTarget::Sql,
+        AdminTarget::Kv,
+        AdminTarget::Vector,
+        AdminTarget::Hnsw,
+        AdminTarget::Columnar,
+    ];
+
+    fn next(self) -> Self {
+        let index = Self::ORDER
+            .iter()
+            .position(|target| *target == self)
+            .unwrap_or(0);
+        let next = (index + 1) % Self::ORDER.len();
+        Self::ORDER[next]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            AdminTarget::Sql => "SQL",
+            AdminTarget::Kv => "KV",
+            AdminTarget::Vector => "Vector",
+            AdminTarget::Hnsw => "HNSW",
+            AdminTarget::Columnar => "Columnar",
+        }
+    }
+
+    fn example_for(self, action: AdminAction) -> Option<&'static str> {
+        match (self, action) {
+            (AdminTarget::Sql, _) => Some("query=\"SELECT * FROM table\""),
+            (AdminTarget::Kv, AdminAction::Read) => Some("key=mykey OR prefix=app/"),
+            (AdminTarget::Kv, AdminAction::Create | AdminAction::Update) => {
+                Some("key=mykey value=hello")
+            }
+            (AdminTarget::Kv, AdminAction::Delete) => Some("key=mykey"),
+            (AdminTarget::Vector, AdminAction::Read) => {
+                Some("index=myindex query=\"[0.1, 0.2]\" k=10")
+            }
+            (AdminTarget::Vector, AdminAction::Create | AdminAction::Update) => {
+                Some("index=myindex key=item1 vector=\"[0.1, 0.2]\"")
+            }
+            (AdminTarget::Vector, AdminAction::Delete) => Some("index=myindex key=item1"),
+            (AdminTarget::Hnsw, AdminAction::Read) => Some("name=myindex"),
+            (AdminTarget::Hnsw, AdminAction::Create) => Some("name=myindex dim=128 metric=cosine"),
+            (AdminTarget::Hnsw, AdminAction::Delete) => Some("name=myindex"),
+            (AdminTarget::Columnar, AdminAction::Read) => Some("mode=list"),
+            (AdminTarget::Columnar, AdminAction::Create) => Some("file=data.csv table=mytable"),
+            (AdminTarget::Columnar, AdminAction::Delete) => Some("segment=seg1 column=col1"),
+            _ => None,
+        }
     }
 }
 
@@ -402,7 +538,8 @@ pub struct AdminContext<'a> {
 
 pub fn run_admin_ui(context: AdminContext<'_>) -> Result<()> {
     if !is_tty() {
-        let mut formatter = create_formatter(OutputFormat::Table);
+        let output_format = context.backend.output_format();
+        let mut formatter = create_formatter(output_format);
         let mut writer = io::stdout().lock();
         let columns = vec![
             Column::new("Status", DataType::Text),
@@ -484,20 +621,345 @@ fn is_not_implemented(action: AdminAction) -> bool {
     )
 }
 
-fn default_command_for(action: AdminAction) -> AdminCommand {
-    let sql = if matches!(action, AdminAction::Read) {
-        Some("SELECT 1".to_string())
-    } else {
-        None
-    };
-    AdminCommand::Sql(crate::cli::SqlCommand {
-        query: sql,
+fn parse_params(input: &str) -> std::collections::HashMap<String, String> {
+    let mut params = std::collections::HashMap::new();
+    let mut token = String::new();
+    let mut in_quotes: Option<char> = None;
+    for ch in input.chars() {
+        if let Some(quote) = in_quotes {
+            if ch == quote {
+                in_quotes = None;
+            } else {
+                token.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => {
+                in_quotes = Some(ch);
+            }
+            ' ' | '\t' | '\n' | '\r' => {
+                push_param_token(&mut params, &token);
+                token.clear();
+            }
+            _ => token.push(ch),
+        }
+    }
+    push_param_token(&mut params, &token);
+    params
+}
+
+fn push_param_token(params: &mut std::collections::HashMap<String, String>, token: &str) {
+    if let Some((key, value)) = token.split_once('=') {
+        if !key.is_empty() && !value.is_empty() {
+            params.insert(key.to_lowercase(), value.to_string());
+        }
+    }
+}
+
+fn build_command_for(
+    action: AdminAction,
+    target: AdminTarget,
+    params: &std::collections::HashMap<String, String>,
+) -> Result<Option<AdminCommand>> {
+    match target {
+        AdminTarget::Sql => build_sql_command(params),
+        AdminTarget::Kv => build_kv_command(action, params),
+        AdminTarget::Vector => build_vector_command(action, params),
+        AdminTarget::Hnsw => build_hnsw_command(action, params),
+        AdminTarget::Columnar => build_columnar_command(action, params),
+    }
+}
+
+fn build_sql_command(
+    params: &std::collections::HashMap<String, String>,
+) -> Result<Option<AdminCommand>> {
+    let query = params.get("query").cloned();
+    if query.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(AdminCommand::Sql(SqlCommand {
+        query,
         file: None,
         fetch_size: None,
         max_rows: None,
         deadline: None,
         tui: false,
-    })
+    })))
+}
+
+fn build_kv_command(
+    action: AdminAction,
+    params: &std::collections::HashMap<String, String>,
+) -> Result<Option<AdminCommand>> {
+    match action {
+        AdminAction::Read => {
+            if let Some(key) = params.get("key") {
+                return Ok(Some(AdminCommand::Kv(KvCommand::Get { key: key.clone() })));
+            }
+            let prefix = params.get("prefix").cloned();
+            Ok(Some(AdminCommand::Kv(KvCommand::List { prefix })))
+        }
+        AdminAction::Create | AdminAction::Update => {
+            let key = params.get("key").cloned();
+            let value = params.get("value").cloned();
+            match (key, value) {
+                (Some(key), Some(value)) => {
+                    Ok(Some(AdminCommand::Kv(KvCommand::Put { key, value })))
+                }
+                _ => Ok(None),
+            }
+        }
+        AdminAction::Delete => {
+            let key = params.get("key").cloned();
+            match key {
+                Some(key) => Ok(Some(AdminCommand::Kv(KvCommand::Delete { key }))),
+                None => Ok(None),
+            }
+        }
+        AdminAction::Archive | AdminAction::Restore | AdminAction::Backup | AdminAction::Export => {
+            Err(CliError::InvalidArgument(format!(
+                "Admin action '{}' is not implemented yet.",
+                action_label(action)
+            )))
+        }
+    }
+}
+
+fn build_vector_command(
+    action: AdminAction,
+    params: &std::collections::HashMap<String, String>,
+) -> Result<Option<AdminCommand>> {
+    let index = params.get("index").cloned();
+    match action {
+        AdminAction::Read => {
+            let query = params.get("query").cloned();
+            let index = match index {
+                Some(index) => index,
+                None => return Ok(None),
+            };
+            let query = match query {
+                Some(query) => query,
+                None => return Ok(None),
+            };
+            let k = params
+                .get("k")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(10);
+            Ok(Some(AdminCommand::Vector(VectorCommand::Search {
+                index,
+                query,
+                k,
+                progress: false,
+            })))
+        }
+        AdminAction::Create | AdminAction::Update => {
+            let key = params.get("key").cloned();
+            let vector = params.get("vector").cloned();
+            match (index, key, vector) {
+                (Some(index), Some(key), Some(vector)) => {
+                    Ok(Some(AdminCommand::Vector(VectorCommand::Upsert {
+                        index,
+                        key,
+                        vector,
+                    })))
+                }
+                _ => Ok(None),
+            }
+        }
+        AdminAction::Delete => {
+            let key = params.get("key").cloned();
+            match (index, key) {
+                (Some(index), Some(key)) => Ok(Some(AdminCommand::Vector(VectorCommand::Delete {
+                    index,
+                    key,
+                }))),
+                _ => Ok(None),
+            }
+        }
+        AdminAction::Archive | AdminAction::Restore | AdminAction::Backup | AdminAction::Export => {
+            Err(CliError::InvalidArgument(format!(
+                "Admin action '{}' is not implemented yet.",
+                action_label(action)
+            )))
+        }
+    }
+}
+
+fn build_hnsw_command(
+    action: AdminAction,
+    params: &std::collections::HashMap<String, String>,
+) -> Result<Option<AdminCommand>> {
+    match action {
+        AdminAction::Read => {
+            let name = match params.get("name").cloned() {
+                Some(name) => name,
+                None => return Ok(None),
+            };
+            Ok(Some(AdminCommand::Hnsw(HnswCommand::Stats { name })))
+        }
+        AdminAction::Create => {
+            let name = match params.get("name").cloned() {
+                Some(name) => name,
+                None => return Ok(None),
+            };
+            let dim = match params
+                .get("dim")
+                .and_then(|value| value.parse::<usize>().ok())
+            {
+                Some(dim) => dim,
+                None => return Ok(None),
+            };
+            let metric = if let Some(value) = params.get("metric") {
+                parse_metric(value).ok_or_else(|| {
+                    CliError::InvalidArgument(
+                        "Invalid metric. Use metric=cosine|l2|ip.".to_string(),
+                    )
+                })?
+            } else {
+                DistanceMetric::Cosine
+            };
+            Ok(Some(AdminCommand::Hnsw(HnswCommand::Create {
+                name,
+                dim,
+                metric,
+            })))
+        }
+        AdminAction::Delete => {
+            let name = match params.get("name").cloned() {
+                Some(name) => name,
+                None => return Ok(None),
+            };
+            Ok(Some(AdminCommand::Hnsw(HnswCommand::Drop { name })))
+        }
+        AdminAction::Update => Err(CliError::InvalidArgument(
+            "Update is not supported for HNSW targets.".to_string(),
+        )),
+        AdminAction::Archive | AdminAction::Restore | AdminAction::Backup | AdminAction::Export => {
+            Err(CliError::InvalidArgument(format!(
+                "Admin action '{}' is not implemented yet.",
+                action_label(action)
+            )))
+        }
+    }
+}
+
+fn build_columnar_command(
+    action: AdminAction,
+    params: &std::collections::HashMap<String, String>,
+) -> Result<Option<AdminCommand>> {
+    match action {
+        AdminAction::Read => {
+            let mode = params
+                .get("mode")
+                .map(|value| value.as_str())
+                .unwrap_or("list");
+            match mode {
+                "scan" => {
+                    let segment = match params.get("segment").cloned() {
+                        Some(segment) => segment,
+                        None => return Ok(None),
+                    };
+                    Ok(Some(AdminCommand::Columnar(ColumnarCommand::Scan {
+                        segment,
+                        progress: false,
+                    })))
+                }
+                "stats" => {
+                    let segment = match params.get("segment").cloned() {
+                        Some(segment) => segment,
+                        None => return Ok(None),
+                    };
+                    Ok(Some(AdminCommand::Columnar(ColumnarCommand::Stats {
+                        segment,
+                    })))
+                }
+                "index_list" => {
+                    let segment = match params.get("segment").cloned() {
+                        Some(segment) => segment,
+                        None => return Ok(None),
+                    };
+                    Ok(Some(AdminCommand::Columnar(ColumnarCommand::Index(
+                        IndexCommand::List { segment },
+                    ))))
+                }
+                "list" => Ok(Some(AdminCommand::Columnar(ColumnarCommand::List))),
+                _ => Err(CliError::InvalidArgument(
+                    "Unknown columnar mode. Use mode=list|scan|stats|index_list.".to_string(),
+                )),
+            }
+        }
+        AdminAction::Create => {
+            if let (Some(file), Some(table)) =
+                (params.get("file").cloned(), params.get("table").cloned())
+            {
+                return Ok(Some(AdminCommand::Columnar(ColumnarCommand::Ingest {
+                    file: std::path::PathBuf::from(file),
+                    table,
+                    delimiter: ',',
+                    header: true,
+                    compression: "lz4".to_string(),
+                    row_group_size: None,
+                })));
+            }
+            if let (Some(segment), Some(column), Some(index_type)) = (
+                params.get("segment").cloned(),
+                params.get("column").cloned(),
+                params.get("index_type").cloned(),
+            ) {
+                return Ok(Some(AdminCommand::Columnar(ColumnarCommand::Index(
+                    IndexCommand::Create {
+                        segment,
+                        column,
+                        index_type,
+                    },
+                ))));
+            }
+            Ok(None)
+        }
+        AdminAction::Delete => {
+            if let (Some(segment), Some(column)) = (
+                params.get("segment").cloned(),
+                params.get("column").cloned(),
+            ) {
+                return Ok(Some(AdminCommand::Columnar(ColumnarCommand::Index(
+                    IndexCommand::Drop { segment, column },
+                ))));
+            }
+            Ok(None)
+        }
+        AdminAction::Update => Err(CliError::InvalidArgument(
+            "Update is not supported for columnar targets.".to_string(),
+        )),
+        AdminAction::Archive | AdminAction::Restore | AdminAction::Backup | AdminAction::Export => {
+            Err(CliError::InvalidArgument(format!(
+                "Admin action '{}' is not implemented yet.",
+                action_label(action)
+            )))
+        }
+    }
+}
+
+fn parse_metric(value: &str) -> Option<DistanceMetric> {
+    match value.to_lowercase().as_str() {
+        "cosine" => Some(DistanceMetric::Cosine),
+        "l2" => Some(DistanceMetric::L2),
+        "ip" => Some(DistanceMetric::Ip),
+        _ => None,
+    }
+}
+
+fn action_label(action: AdminAction) -> &'static str {
+    match action {
+        AdminAction::Read => "read",
+        AdminAction::Create => "create",
+        AdminAction::Update => "update",
+        AdminAction::Delete => "delete",
+        AdminAction::Archive => "archive",
+        AdminAction::Restore => "restore",
+        AdminAction::Backup => "backup",
+        AdminAction::Export => "export",
+    }
 }
 
 fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
@@ -513,6 +975,8 @@ fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
     let lines = [
         "Up/Down or k/j: navigate",
         "Enter: execute action",
+        "t: change target",
+        "e: edit params",
         "?: toggle help",
         "q/Esc: quit",
     ]

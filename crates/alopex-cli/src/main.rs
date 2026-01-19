@@ -150,6 +150,8 @@ fn run(cli: Cli) -> Result<()> {
                 if let Some(command) = command.clone() {
                     return execute_profile_tui(command, "local");
                 }
+            }
+            if command.is_none() && (ui_mode == UiMode::Tui || !batch_mode.is_tty) {
                 let resolved = resolve_config(&cli)?;
                 let db = open_database_with_check(&resolved)?;
                 return tui::admin::run_admin_ui(AdminContext {
@@ -402,7 +404,7 @@ fn execute_server_command(
     match command {
         Command::Kv { command: kv_cmd } => {
             let Some(kv_cmd) = kv_cmd else {
-                if ui_mode == UiMode::Tui {
+                if ui_mode == UiMode::Tui || !batch_mode.is_tty {
                     return tui::admin::run_admin_ui(AdminContext {
                         connection_label: "server".to_string(),
                         auth: auth.clone(),
@@ -454,7 +456,7 @@ fn execute_server_command(
         }
         Command::Vector { command: vec_cmd } => {
             let Some(vec_cmd) = vec_cmd else {
-                if ui_mode == UiMode::Tui {
+                if ui_mode == UiMode::Tui || !batch_mode.is_tty {
                     return tui::admin::run_admin_ui(AdminContext {
                         connection_label: "server".to_string(),
                         auth: auth.clone(),
@@ -492,7 +494,7 @@ fn execute_server_command(
         }
         Command::Hnsw { command: hnsw_cmd } => {
             let Some(hnsw_cmd) = hnsw_cmd else {
-                if ui_mode == UiMode::Tui {
+                if ui_mode == UiMode::Tui || !batch_mode.is_tty {
                     return tui::admin::run_admin_ui(AdminContext {
                         connection_label: "server".to_string(),
                         auth: auth.clone(),
@@ -529,7 +531,7 @@ fn execute_server_command(
         }
         Command::Columnar { command: col_cmd } => {
             let Some(col_cmd) = col_cmd else {
-                if ui_mode == UiMode::Tui {
+                if ui_mode == UiMode::Tui || !batch_mode.is_tty {
                     return tui::admin::run_admin_ui(AdminContext {
                         connection_label: "server".to_string(),
                         auth: auth.clone(),
@@ -568,7 +570,7 @@ fn execute_server_command(
             command: server_cmd,
         } => {
             let Some(server_cmd) = server_cmd else {
-                if ui_mode == UiMode::Tui {
+                if ui_mode == UiMode::Tui || !batch_mode.is_tty {
                     return tui::admin::run_admin_ui(AdminContext {
                         connection_label: "server".to_string(),
                         auth: auth.clone(),
@@ -601,7 +603,7 @@ fn execute_server_command(
         }
         Command::Lifecycle { command } => {
             let Some(command) = command else {
-                if ui_mode == UiMode::Tui {
+                if ui_mode == UiMode::Tui || !batch_mode.is_tty {
                     return tui::admin::run_admin_ui(AdminContext {
                         connection_label: "server".to_string(),
                         auth: auth.clone(),
@@ -673,7 +675,7 @@ fn execute_command(
     match command {
         Command::Kv { command: kv_cmd } => {
             let Some(kv_cmd) = kv_cmd else {
-                if ui_mode == UiMode::Tui {
+                if ui_mode == UiMode::Tui || !batch_mode.is_tty {
                     return tui::admin::run_admin_ui(AdminContext {
                         connection_label: "local".to_string(),
                         auth: AuthCapabilities::full(),
@@ -714,7 +716,7 @@ fn execute_command(
         }
         Command::Vector { command: vec_cmd } => {
             let Some(vec_cmd) = vec_cmd else {
-                if ui_mode == UiMode::Tui {
+                if ui_mode == UiMode::Tui || !batch_mode.is_tty {
                     return tui::admin::run_admin_ui(AdminContext {
                         connection_label: "local".to_string(),
                         auth: AuthCapabilities::full(),
@@ -744,7 +746,7 @@ fn execute_command(
         }
         Command::Hnsw { command: hnsw_cmd } => {
             let Some(hnsw_cmd) = hnsw_cmd else {
-                if ui_mode == UiMode::Tui {
+                if ui_mode == UiMode::Tui || !batch_mode.is_tty {
                     return tui::admin::run_admin_ui(AdminContext {
                         connection_label: "local".to_string(),
                         auth: AuthCapabilities::full(),
@@ -772,7 +774,7 @@ fn execute_command(
         }
         Command::Columnar { command: col_cmd } => {
             let Some(col_cmd) = col_cmd else {
-                if ui_mode == UiMode::Tui {
+                if ui_mode == UiMode::Tui || !batch_mode.is_tty {
                     return tui::admin::run_admin_ui(AdminContext {
                         connection_label: "local".to_string(),
                         auth: AuthCapabilities::full(),
@@ -820,7 +822,7 @@ fn execute_command(
         }
         Command::Lifecycle { command } => {
             let Some(command) = command else {
-                if ui_mode == UiMode::Tui {
+                if ui_mode == UiMode::Tui || !batch_mode.is_tty {
                     return tui::admin::run_admin_ui(AdminContext {
                         connection_label: "local".to_string(),
                         auth: AuthCapabilities::full(),
