@@ -13,6 +13,8 @@ pub struct Select {
     pub span: Span,
 }
 
+pub const LITERAL_TABLE: &str = "__literal__";
+
 #[derive(Debug, Clone)]
 pub enum SelectItem {
     Wildcard {

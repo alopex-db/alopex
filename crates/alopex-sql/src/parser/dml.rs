@@ -1,6 +1,8 @@
 use crate::ast::span::Spanned;
-use crate::ast::{Assignment, Delete, Insert, OrderByExpr, Select, SelectItem, TableRef, Update};
-use crate::error::Result;
+use crate::ast::{
+    Assignment, Delete, Insert, LITERAL_TABLE, OrderByExpr, Select, SelectItem, TableRef, Update,
+};
+use crate::error::{ParserError, Result};
 use crate::tokenizer::keyword::Keyword;
 use crate::tokenizer::token::{Token, Word};
 
@@ -12,10 +14,23 @@ impl<'a> Parser<'a> {
         let distinct = self.consume_keyword(Keyword::DISTINCT);
 
         let projection = self.parse_projection_list()?;
+        let mut end_span = projection
+            .last()
+            .map(|item| item.span())
+            .unwrap_or(start_span);
 
-        self.expect_keyword("FROM", Keyword::FROM)?;
-        let from = self.parse_table_ref()?;
-        let mut end_span = from.span;
+        let from = if self.consume_keyword(Keyword::FROM) {
+            let from = self.parse_table_ref()?;
+            end_span = from.span;
+            from
+        } else {
+            validate_literal_projection(&projection)?;
+            TableRef {
+                name: LITERAL_TABLE.to_string(),
+                alias: None,
+                span: end_span,
+            }
+        };
 
         let selection = if self.consume_keyword(Keyword::WHERE) {
             let expr = self.parse_expr()?;
@@ -318,5 +333,67 @@ impl<'a> Parser<'a> {
             selection,
             span,
         })
+    }
+}
+
+fn validate_literal_projection(items: &[SelectItem]) -> Result<()> {
+    for item in items {
+        match item {
+            SelectItem::Wildcard { span } => {
+                return Err(ParserError::UnexpectedToken {
+                    line: span.start.line,
+                    column: span.start.column,
+                    expected: "literal expression".to_string(),
+                    found: "*".to_string(),
+                });
+            }
+            SelectItem::Expr { expr, .. } => {
+                if expr_contains_column_ref(expr) {
+                    return Err(ParserError::UnexpectedToken {
+                        line: expr.span.start.line,
+                        column: expr.span.start.column,
+                        expected: "literal expression".to_string(),
+                        found: "column reference".to_string(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn expr_contains_column_ref(expr: &crate::ast::Expr) -> bool {
+    use crate::ast::expr::ExprKind;
+    match &expr.kind {
+        ExprKind::ColumnRef { .. } => true,
+        ExprKind::BinaryOp { left, right, .. } => {
+            expr_contains_column_ref(left) || expr_contains_column_ref(right)
+        }
+        ExprKind::UnaryOp { operand, .. } => expr_contains_column_ref(operand),
+        ExprKind::FunctionCall { args, .. } => args.iter().any(expr_contains_column_ref),
+        ExprKind::Between {
+            expr, low, high, ..
+        } => {
+            expr_contains_column_ref(expr)
+                || expr_contains_column_ref(low)
+                || expr_contains_column_ref(high)
+        }
+        ExprKind::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_column_ref(expr)
+                || expr_contains_column_ref(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_column_ref(expr))
+        }
+        ExprKind::InList { expr, list, .. } => {
+            expr_contains_column_ref(expr) || list.iter().any(expr_contains_column_ref)
+        }
+        ExprKind::IsNull { expr, .. } => expr_contains_column_ref(expr),
+        ExprKind::Literal(_) | ExprKind::VectorLiteral(_) => false,
     }
 }
