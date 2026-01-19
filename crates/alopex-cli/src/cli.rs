@@ -147,6 +147,11 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<ServerCommand>,
     },
+    /// Data lifecycle management commands
+    Lifecycle {
+        #[command(subcommand)]
+        command: Option<LifecycleCommand>,
+    },
     /// Show CLI and file format version information
     Version,
     /// Generate shell completion scripts
@@ -471,6 +476,19 @@ pub enum ServerCommand {
         #[command(subcommand)]
         command: CompactionCommand,
     },
+}
+
+/// Lifecycle subcommands
+#[derive(Subcommand, Debug)]
+pub enum LifecycleCommand {
+    /// Archive data (placeholder)
+    Archive,
+    /// Restore archived data (placeholder)
+    Restore,
+    /// Backup data (placeholder)
+    Backup,
+    /// Export data (placeholder)
+    Export,
 }
 
 /// Server compaction subcommands

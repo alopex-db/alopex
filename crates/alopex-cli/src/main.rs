@@ -33,9 +33,10 @@ use config::{setup_signal_handler, validate_thread_mode, EXIT_CODE_INTERRUPTED};
 use error::{handle_error, CliError, Result};
 use models::Column;
 use output::create_formatter;
-use profile::config::{ConnectionType, ServerConfig};
+use profile::config::{AuthType, ConnectionType, ServerConfig};
 use profile::{execute_profile_command, execute_profile_tui, ProfileManager, ResolvedConfig};
 use streaming::StreamingWriter;
+use tui::admin::{AdminBackend, AdminContext, AuthCapabilities};
 use ui::mode::{resolve_ui_mode, UiMode};
 use uri::{validate_s3_credentials, StorageUri};
 
@@ -149,7 +150,19 @@ fn run(cli: Cli) -> Result<()> {
                 if let Some(command) = command.clone() {
                     return execute_profile_tui(command, "local");
                 }
-                return tui::admin::run_admin_ui("local");
+                let resolved = resolve_config(&cli)?;
+                let db = open_database_with_check(&resolved)?;
+                return tui::admin::run_admin_ui(AdminContext {
+                    connection_label: "local".to_string(),
+                    auth: AuthCapabilities::full(),
+                    backend: AdminBackend::Local {
+                        db: &db,
+                        batch_mode: &batch_mode,
+                        output_format,
+                        limit: cli.limit,
+                        quiet: cli.quiet,
+                    },
+                });
             }
             let Some(command) = command.clone() else {
                 return Err(CliError::InvalidArgument(
@@ -281,6 +294,7 @@ fn is_write_command(command: &Command) -> bool {
             )
         ),
         Command::Server { .. }
+        | Command::Lifecycle { .. }
         | Command::Profile { .. }
         | Command::Version
         | Command::Completions { .. } => false,
@@ -383,12 +397,23 @@ fn execute_server_command(
     })?;
     let client = HttpClient::new(server_config)
         .map_err(|err| CliError::ServerConnection(err.to_string()))?;
+    let auth = auth_capabilities_from_server(server_config);
 
     match command {
         Command::Kv { command: kv_cmd } => {
             let Some(kv_cmd) = kv_cmd else {
                 if ui_mode == UiMode::Tui {
-                    return tui::admin::run_admin_ui("server");
+                    return tui::admin::run_admin_ui(AdminContext {
+                        connection_label: "server".to_string(),
+                        auth: auth.clone(),
+                        backend: AdminBackend::Remote {
+                            client: &client,
+                            batch_mode,
+                            output_format,
+                            limit,
+                            quiet,
+                        },
+                    });
                 }
                 return Err(CliError::InvalidArgument(
                     "Missing KV subcommand".to_string(),
@@ -430,7 +455,17 @@ fn execute_server_command(
         Command::Vector { command: vec_cmd } => {
             let Some(vec_cmd) = vec_cmd else {
                 if ui_mode == UiMode::Tui {
-                    return tui::admin::run_admin_ui("server");
+                    return tui::admin::run_admin_ui(AdminContext {
+                        connection_label: "server".to_string(),
+                        auth: auth.clone(),
+                        backend: AdminBackend::Remote {
+                            client: &client,
+                            batch_mode,
+                            output_format,
+                            limit,
+                            quiet,
+                        },
+                    });
                 }
                 return Err(CliError::InvalidArgument(
                     "Missing vector subcommand".to_string(),
@@ -458,7 +493,17 @@ fn execute_server_command(
         Command::Hnsw { command: hnsw_cmd } => {
             let Some(hnsw_cmd) = hnsw_cmd else {
                 if ui_mode == UiMode::Tui {
-                    return tui::admin::run_admin_ui("server");
+                    return tui::admin::run_admin_ui(AdminContext {
+                        connection_label: "server".to_string(),
+                        auth: auth.clone(),
+                        backend: AdminBackend::Remote {
+                            client: &client,
+                            batch_mode,
+                            output_format,
+                            limit,
+                            quiet,
+                        },
+                    });
                 }
                 return Err(CliError::InvalidArgument(
                     "Missing HNSW subcommand".to_string(),
@@ -485,7 +530,17 @@ fn execute_server_command(
         Command::Columnar { command: col_cmd } => {
             let Some(col_cmd) = col_cmd else {
                 if ui_mode == UiMode::Tui {
-                    return tui::admin::run_admin_ui("server");
+                    return tui::admin::run_admin_ui(AdminContext {
+                        connection_label: "server".to_string(),
+                        auth: auth.clone(),
+                        backend: AdminBackend::Remote {
+                            client: &client,
+                            batch_mode,
+                            output_format,
+                            limit,
+                            quiet,
+                        },
+                    });
                 }
                 return Err(CliError::InvalidArgument(
                     "Missing columnar subcommand".to_string(),
@@ -514,7 +569,17 @@ fn execute_server_command(
         } => {
             let Some(server_cmd) = server_cmd else {
                 if ui_mode == UiMode::Tui {
-                    return tui::admin::run_admin_ui("server");
+                    return tui::admin::run_admin_ui(AdminContext {
+                        connection_label: "server".to_string(),
+                        auth: auth.clone(),
+                        backend: AdminBackend::Remote {
+                            client: &client,
+                            batch_mode,
+                            output_format,
+                            limit,
+                            quiet,
+                        },
+                    });
                 }
                 return Err(CliError::InvalidArgument(
                     "Missing server subcommand".to_string(),
@@ -534,9 +599,39 @@ fn execute_server_command(
                 quiet,
             ))
         }
+        Command::Lifecycle { command } => {
+            let Some(command) = command else {
+                if ui_mode == UiMode::Tui {
+                    return tui::admin::run_admin_ui(AdminContext {
+                        connection_label: "server".to_string(),
+                        auth: auth.clone(),
+                        backend: AdminBackend::Remote {
+                            client: &client,
+                            batch_mode,
+                            output_format,
+                            limit,
+                            quiet,
+                        },
+                    });
+                }
+                return Err(CliError::InvalidArgument(
+                    "Missing lifecycle subcommand".to_string(),
+                ));
+            };
+            commands::lifecycle::execute(command)
+        }
         Command::Profile { .. } | Command::Version | Command::Completions { .. } => Err(
             CliError::InvalidArgument("Command is not available in server mode".to_string()),
         ),
+    }
+}
+
+fn auth_capabilities_from_server(server_config: &ServerConfig) -> AuthCapabilities {
+    let auth_type = server_config.auth.unwrap_or(AuthType::None);
+    if auth_type == AuthType::None {
+        AuthCapabilities::full()
+    } else {
+        AuthCapabilities::restricted_all()
     }
 }
 
@@ -579,7 +674,17 @@ fn execute_command(
         Command::Kv { command: kv_cmd } => {
             let Some(kv_cmd) = kv_cmd else {
                 if ui_mode == UiMode::Tui {
-                    return tui::admin::run_admin_ui("local");
+                    return tui::admin::run_admin_ui(AdminContext {
+                        connection_label: "local".to_string(),
+                        auth: AuthCapabilities::full(),
+                        backend: AdminBackend::Local {
+                            db,
+                            batch_mode,
+                            output_format,
+                            limit,
+                            quiet,
+                        },
+                    });
                 }
                 return Err(CliError::InvalidArgument(
                     "Missing KV subcommand".to_string(),
@@ -610,7 +715,17 @@ fn execute_command(
         Command::Vector { command: vec_cmd } => {
             let Some(vec_cmd) = vec_cmd else {
                 if ui_mode == UiMode::Tui {
-                    return tui::admin::run_admin_ui("local");
+                    return tui::admin::run_admin_ui(AdminContext {
+                        connection_label: "local".to_string(),
+                        auth: AuthCapabilities::full(),
+                        backend: AdminBackend::Local {
+                            db,
+                            batch_mode,
+                            output_format,
+                            limit,
+                            quiet,
+                        },
+                    });
                 }
                 return Err(CliError::InvalidArgument(
                     "Missing vector subcommand".to_string(),
@@ -630,7 +745,17 @@ fn execute_command(
         Command::Hnsw { command: hnsw_cmd } => {
             let Some(hnsw_cmd) = hnsw_cmd else {
                 if ui_mode == UiMode::Tui {
-                    return tui::admin::run_admin_ui("local");
+                    return tui::admin::run_admin_ui(AdminContext {
+                        connection_label: "local".to_string(),
+                        auth: AuthCapabilities::full(),
+                        backend: AdminBackend::Local {
+                            db,
+                            batch_mode,
+                            output_format,
+                            limit,
+                            quiet,
+                        },
+                    });
                 }
                 return Err(CliError::InvalidArgument(
                     "Missing HNSW subcommand".to_string(),
@@ -648,7 +773,17 @@ fn execute_command(
         Command::Columnar { command: col_cmd } => {
             let Some(col_cmd) = col_cmd else {
                 if ui_mode == UiMode::Tui {
-                    return tui::admin::run_admin_ui("local");
+                    return tui::admin::run_admin_ui(AdminContext {
+                        connection_label: "local".to_string(),
+                        auth: AuthCapabilities::full(),
+                        backend: AdminBackend::Local {
+                            db,
+                            batch_mode,
+                            output_format,
+                            limit,
+                            quiet,
+                        },
+                    });
                 }
                 return Err(CliError::InvalidArgument(
                     "Missing columnar subcommand".to_string(),
@@ -682,6 +817,27 @@ fn execute_command(
                 ));
             };
             execute_profile_command(command, output_format)
+        }
+        Command::Lifecycle { command } => {
+            let Some(command) = command else {
+                if ui_mode == UiMode::Tui {
+                    return tui::admin::run_admin_ui(AdminContext {
+                        connection_label: "local".to_string(),
+                        auth: AuthCapabilities::full(),
+                        backend: AdminBackend::Local {
+                            db,
+                            batch_mode,
+                            output_format,
+                            limit,
+                            quiet,
+                        },
+                    });
+                }
+                return Err(CliError::InvalidArgument(
+                    "Missing lifecycle subcommand".to_string(),
+                ));
+            };
+            commands::lifecycle::execute(&command)
         }
     }
 }
