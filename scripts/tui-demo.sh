@@ -20,7 +20,7 @@ cargo run -p alopex-cli -- --data-dir "$DATA_DIR" sql "SELECT id, name FROM item
 
 echo
 echo "2) Default TUI for non-SQL (KV list)"
-cargo run -p alopex-cli -- --data-dir "$DATA_DIR" kv list
+cargo run -p alopex-cli -- --data-dir "$DATA_DIR" kv list --prefix demo:
 
 echo
 echo "3) Vector + HNSW (non-SQL TUI)"
@@ -39,7 +39,7 @@ id,name
 3,gamma
 CSV
 
-cargo run -p alopex-cli -- --data-dir "$DATA_DIR" columnar ingest --file "$COLUMNAR_FILE" --table demo_columnar
+cargo run -p alopex-cli -- --data-dir "$DATA_DIR" columnar ingest --file "$COLUMNAR_FILE" --table demo_columnar --compression zstd
 cargo run -p alopex-cli -- --data-dir "$DATA_DIR" columnar list
 
 segment_id=""
@@ -55,14 +55,55 @@ fi
 
 if [[ -n "$segment_id" ]]; then
   cargo run -p alopex-cli -- --data-dir "$DATA_DIR" columnar stats --segment "$segment_id"
+echo "   Decoding scan output for display:"
+scan_json="$DATA_DIR/columnar-scan.json"
+cargo run -p alopex-cli -- --data-dir "$DATA_DIR" --output json columnar scan --segment "$segment_id" > "$scan_json"
+if command -v python3 >/dev/null 2>&1; then
+  python3 - <<'PY' "$scan_json"
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    rows = json.load(fh)
+def decode(value):
+    if isinstance(value, list):
+        try:
+            return bytes(value).decode("utf-8")
+        except Exception:
+            return value
+    return value
+print("id\tname")
+for row in rows:
+    values = list(row.values())
+    if len(values) >= 2:
+        print(f"{decode(values[0])}\t{decode(values[1])}")
+PY
+elif command -v python >/dev/null 2>&1; then
+  python - <<'PY' "$scan_json"
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    rows = json.load(fh)
+def decode(value):
+    if isinstance(value, list):
+        try:
+            return bytes(value).decode("utf-8")
+        except Exception:
+            return value
+    return value
+print("id\tname")
+for row in rows:
+    values = list(row.values())
+    if len(values) >= 2:
+        print(f"{decode(values[0])}\t{decode(values[1])}")
+PY
+else
   cargo run -p alopex-cli -- --data-dir "$DATA_DIR" columnar scan --segment "$segment_id"
+fi
   cargo run -p alopex-cli -- --data-dir "$DATA_DIR" columnar index create --segment "$segment_id" --column name --type minmax
   cargo run -p alopex-cli -- --data-dir "$DATA_DIR" columnar index list --segment "$segment_id"
 fi
 
 echo
 echo "5) Batch override via --output (no TUI)"
-cargo run -p alopex-cli -- --data-dir "$DATA_DIR" --output json kv list
+cargo run -p alopex-cli -- --data-dir "$DATA_DIR" --output json kv list --prefix demo:
 
 echo
 echo "6) Admin console (Lifecycle panel)"
