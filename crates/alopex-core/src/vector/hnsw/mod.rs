@@ -206,8 +206,12 @@ impl HnswIndex {
     ) -> Result<()> {
         let (modified, inserted, deleted_keys) = state.prepare_for_commit();
         let graph = self.graph.read().unwrap_or_else(|e| e.into_inner());
-        self.storage
-            .save_incremental(txn, &graph, &modified, &inserted, &deleted_keys)?;
+        if inserted.is_empty() {
+            self.storage
+                .save_incremental(txn, &graph, &modified, &inserted, &deleted_keys)?;
+        } else {
+            self.storage.save(txn, &graph)?;
+        }
         state.clear();
         Ok(())
     }
