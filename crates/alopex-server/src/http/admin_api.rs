@@ -16,6 +16,29 @@ struct AdminCapabilitiesResponse {
     allowed_actions: Vec<&'static str>,
 }
 
+#[derive(Serialize)]
+struct AdminStatusResponse {
+    version: Option<String>,
+    uptime_secs: Option<u64>,
+    connections: Option<u64>,
+    queries_per_second: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct AdminMetricsResponse {
+    qps: Option<f64>,
+    avg_latency_ms: Option<f64>,
+    p99_latency_ms: Option<f64>,
+    memory_usage_mb: Option<u64>,
+    active_connections: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct AdminHealthResponse {
+    status: &'static str,
+    message: &'static str,
+}
+
 #[derive(Deserialize)]
 pub struct AdminLifecycleRequest {
     action: String,
@@ -27,11 +50,51 @@ struct AdminLifecycleResponse {
     message: String,
 }
 
+#[derive(Serialize)]
+struct AdminCompactionResponse {
+    success: bool,
+    message: String,
+}
+
 pub async fn capabilities(Extension(state): Extension<Arc<ServerState>>) -> impl IntoResponse {
     let (scope, allowed_actions) = capabilities_for_auth(&state.auth);
     Json(AdminCapabilitiesResponse {
         scope,
         allowed_actions,
+    })
+}
+
+pub async fn status(Extension(state): Extension<Arc<ServerState>>) -> impl IntoResponse {
+    let uptime = state.start_time.elapsed().as_secs();
+    Json(AdminStatusResponse {
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        uptime_secs: Some(uptime),
+        connections: None,
+        queries_per_second: None,
+    })
+}
+
+pub async fn metrics(Extension(_state): Extension<Arc<ServerState>>) -> impl IntoResponse {
+    Json(AdminMetricsResponse {
+        qps: None,
+        avg_latency_ms: None,
+        p99_latency_ms: None,
+        memory_usage_mb: None,
+        active_connections: None,
+    })
+}
+
+pub async fn health() -> impl IntoResponse {
+    Json(AdminHealthResponse {
+        status: "ok",
+        message: "ready",
+    })
+}
+
+pub async fn compaction() -> impl IntoResponse {
+    Json(AdminCompactionResponse {
+        success: false,
+        message: "Compaction is not available on this server build.".to_string(),
     })
 }
 
