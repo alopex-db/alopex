@@ -129,13 +129,17 @@ impl<'a> AdminApp<'a> {
             .map(|action| build_form_fields(target, action))
             .unwrap_or_default();
         let resources = ResourceTree::new(&backend);
+        let last_result = resources
+            .last_error
+            .as_ref()
+            .map(|err| AdminResult::status(format!("Resource load failed: {err}")));
         Self {
             items,
             selected: 0,
             show_help: false,
             connection_label: connection_label.into(),
             backend,
-            last_result: None,
+            last_result,
             target,
             params: String::new(),
             form_fields,
@@ -651,6 +655,10 @@ impl<'a> AdminApp<'a> {
                     }
                     KeyCode::Char('R') => {
                         self.resources.reload(&self.backend);
+                        if let Some(err) = self.resources.last_error.clone() {
+                            self.last_result =
+                                Some(AdminResult::status(format!("Resource load failed: {err}")));
+                        }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         self.resources.move_up();
@@ -1046,23 +1054,21 @@ struct ResourceTree {
     selected: usize,
     search: Option<String>,
     search_focused: bool,
+    last_error: Option<String>,
 }
 
 impl ResourceTree {
     fn new(backend: &AdminBackend<'_>) -> Self {
-        let entries = load_resource_entries(backend).unwrap_or_else(|err| {
-            vec![ResourceEntry {
-                label: format!("Error: {err}"),
-                kind: ResourceKind::Info,
-                depth: 0,
-                selectable: false,
-            }]
-        });
+        let (entries, last_error) = match load_resource_entries(backend) {
+            Ok(entries) => (entries, None),
+            Err(err) => (Vec::new(), Some(err.to_string())),
+        };
         Self {
             entries,
             selected: 0,
             search: None,
             search_focused: false,
+            last_error,
         }
     }
 
@@ -1071,15 +1077,12 @@ impl ResourceTree {
             Ok(entries) => {
                 self.entries = entries;
                 self.selected = 0;
+                self.last_error = None;
             }
             Err(err) => {
-                self.entries = vec![ResourceEntry {
-                    label: format!("Error: {err}"),
-                    kind: ResourceKind::Info,
-                    depth: 0,
-                    selectable: false,
-                }];
+                self.entries.clear();
                 self.selected = 0;
+                self.last_error = Some(err.to_string());
             }
         }
     }
@@ -1561,7 +1564,20 @@ fn load_sql_resources(backend: &AdminBackend<'_>) -> Result<Vec<ResourceEntry>> 
         });
         return Ok(entries);
     };
-    let mut tables = db.list_tables_simple()?;
+    let mut tables = match db.list_tables_simple() {
+        Ok(tables) => tables,
+        Err(alopex_embedded::Error::CatalogNotFound(_))
+        | Err(alopex_embedded::Error::NamespaceNotFound(_, _)) => {
+            entries.push(ResourceEntry {
+                label: "No SQL catalog found yet. Run a SQL statement to initialize.".to_string(),
+                kind: ResourceKind::Info,
+                depth: 1,
+                selectable: false,
+            });
+            return Ok(entries);
+        }
+        Err(err) => return Err(err.into()),
+    };
     tables.sort_by(|a, b| a.name.cmp(&b.name));
     for table in tables.into_iter().take(RESOURCE_LIMIT) {
         entries.push(ResourceEntry {
@@ -2716,6 +2732,7 @@ mod tests {
             selected: 0,
             search: Some("email".to_string()),
             search_focused: false,
+            last_error: None,
         };
         let indices = tree.filtered_indices();
         assert_eq!(indices, vec![0, 1, 2]);
@@ -2736,6 +2753,7 @@ mod tests {
             selected: 0,
             search: None,
             search_focused: false,
+            last_error: None,
         };
         tree.page_down();
         assert_eq!(tree.selected, 5);
@@ -2799,6 +2817,7 @@ mod tests {
             selected: 1,
             search: None,
             search_focused: false,
+            last_error: None,
         };
         app.apply_resource_selection().expect("select table");
         assert_eq!(app.target, AdminTarget::Sql);
@@ -2821,6 +2840,7 @@ mod tests {
             selected: 0,
             search: None,
             search_focused: false,
+            last_error: None,
         };
         app.apply_resource_selection().expect("select key");
         assert_eq!(app.target, AdminTarget::Kv);
