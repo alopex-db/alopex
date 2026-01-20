@@ -263,6 +263,7 @@ async fn execute_streaming_request(
             quiet: false,
             cancel,
             deadline,
+            admin_launcher: None,
         },
     )
     .await?;

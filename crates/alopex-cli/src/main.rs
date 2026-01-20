@@ -20,6 +20,7 @@ mod uri;
 mod version;
 
 use std::io;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
@@ -31,7 +32,7 @@ use cli::{Cli, Command};
 use client::http::HttpClient;
 use config::{setup_signal_handler, validate_thread_mode, EXIT_CODE_INTERRUPTED};
 use error::{handle_error, CliError, Result};
-use models::Column;
+use models::{Column, DataType, Row, Value};
 use output::create_formatter;
 use profile::config::{AuthType, ConnectionType, ServerConfig};
 use profile::{execute_profile_command, execute_profile_tui, ProfileManager, ResolvedConfig};
@@ -137,7 +138,7 @@ fn resolve_config(cli: &Cli) -> Result<ResolvedConfig> {
 /// Main entry point logic.
 fn run(cli: Cli) -> Result<()> {
     let batch_mode = BatchMode::detect(&cli);
-    let ui_resolution = resolve_ui_mode(&cli, &cli.command, &batch_mode);
+    let ui_resolution = resolve_ui_mode(&cli, cli.command.as_ref(), &batch_mode);
     for warning in &ui_resolution.warnings {
         eprintln!("{}", warning.message());
     }
@@ -145,15 +146,64 @@ fn run(cli: Cli) -> Result<()> {
     let output_format = cli.output_format();
 
     match &cli.command {
-        Command::Profile { command } => {
+        Some(Command::Profile { command }) => {
             if ui_mode == UiMode::Tui {
                 if let Some(command) = command.clone() {
-                    return execute_profile_tui(command, "local");
+                    let admin_launcher = resolve_config(&cli).ok().map(|resolved| {
+                        let limit = cli.limit;
+                        let quiet = cli.quiet;
+                        Box::new(move || {
+                            let data_dir = resolved.data_dir.as_ref().map(PathBuf::from);
+                            match resolved.connection_type {
+                                ConnectionType::Server => {
+                                    let server_config =
+                                        resolved.server.as_ref().ok_or_else(|| {
+                                            CliError::InvalidArgument(
+                                                "Missing server config".to_string(),
+                                            )
+                                        })?;
+                                    let auth = auth_capabilities_from_server(server_config);
+                                    let client = HttpClient::new(server_config).map_err(|err| {
+                                        CliError::ServerConnection(err.to_string())
+                                    })?;
+                                    tui::admin::run_admin_ui(AdminContext {
+                                        connection_label: "server".to_string(),
+                                        auth,
+                                        backend: AdminBackend::Remote {
+                                            client: &client,
+                                            batch_mode: &batch_mode,
+                                            output_format,
+                                            limit,
+                                            quiet,
+                                            data_dir,
+                                        },
+                                    })
+                                }
+                                ConnectionType::Local => {
+                                    let db = open_database_with_check(&resolved)?;
+                                    tui::admin::run_admin_ui(AdminContext {
+                                        connection_label: "local".to_string(),
+                                        auth: AuthCapabilities::full(),
+                                        backend: AdminBackend::Local {
+                                            db: &db,
+                                            batch_mode: &batch_mode,
+                                            output_format,
+                                            limit,
+                                            quiet,
+                                            data_dir,
+                                        },
+                                    })
+                                }
+                            }
+                        }) as Box<dyn FnOnce() -> Result<()>>
+                    });
+                    return execute_profile_tui(command, "local", admin_launcher);
                 }
             }
             if command.is_none() && (ui_mode == UiMode::Tui || !batch_mode.is_tty) {
                 let resolved = resolve_config(&cli)?;
                 let db = open_database_with_check(&resolved)?;
+                let data_dir = resolved.data_dir.as_ref().map(PathBuf::from);
                 return tui::admin::run_admin_ui(AdminContext {
                     connection_label: "local".to_string(),
                     auth: AuthCapabilities::full(),
@@ -163,6 +213,7 @@ fn run(cli: Cli) -> Result<()> {
                         output_format,
                         limit: cli.limit,
                         quiet: cli.quiet,
+                        data_dir,
                     },
                 });
             }
@@ -173,24 +224,114 @@ fn run(cli: Cli) -> Result<()> {
             };
             return execute_profile_command(command, output_format);
         }
-        Command::Completions { shell } => {
+        Some(Command::Completions { shell }) => {
             return generate_completions(*shell);
         }
-        Command::Version => {
+        Some(Command::Version) => {
             return commands::version::execute_version(output_format);
         }
         _ => {}
     }
 
+    if cli.command.is_none() {
+        let resolved = resolve_config(&cli)?;
+        let data_dir = resolved.data_dir.as_ref().map(PathBuf::from);
+        return match resolved.connection_type {
+            ConnectionType::Server => {
+                let server_config = resolved.server.as_ref().ok_or_else(|| {
+                    CliError::InvalidArgument("Missing server config".to_string())
+                })?;
+                let auth = auth_capabilities_from_server(server_config);
+                let client = HttpClient::new(server_config)
+                    .map_err(|err| CliError::ServerConnection(err.to_string()))?;
+                let context = AdminContext {
+                    connection_label: "server".to_string(),
+                    auth,
+                    backend: AdminBackend::Remote {
+                        client: &client,
+                        batch_mode: &batch_mode,
+                        output_format,
+                        limit: cli.limit,
+                        quiet: cli.quiet,
+                        data_dir,
+                    },
+                };
+                if ui_mode != UiMode::Tui {
+                    if !batch_mode.is_tty {
+                        return tui::admin::run_admin_ui(context);
+                    }
+                    let mut formatter = create_formatter(output_format);
+                    let mut writer = io::stdout().lock();
+                    let columns = vec![
+                        Column::new("Status", DataType::Text),
+                        Column::new("Message", DataType::Text),
+                    ];
+                    let rows = vec![Row::new(vec![
+                        Value::Text("Error".to_string()),
+                        Value::Text("Admin UI is unavailable in batch mode.".to_string()),
+                    ])];
+                    formatter.write_header(&mut writer, &columns)?;
+                    for row in &rows {
+                        formatter.write_row(&mut writer, row)?;
+                    }
+                    formatter.write_footer(&mut writer)?;
+                    return Ok(());
+                }
+                tui::admin::run_admin_ui(context)
+            }
+            ConnectionType::Local => {
+                let db = open_database_with_check(&resolved)?;
+                let context = AdminContext {
+                    connection_label: "local".to_string(),
+                    auth: AuthCapabilities::full(),
+                    backend: AdminBackend::Local {
+                        db: &db,
+                        batch_mode: &batch_mode,
+                        output_format,
+                        limit: cli.limit,
+                        quiet: cli.quiet,
+                        data_dir,
+                    },
+                };
+                if ui_mode != UiMode::Tui {
+                    if !batch_mode.is_tty {
+                        return tui::admin::run_admin_ui(context);
+                    }
+                    let mut formatter = create_formatter(output_format);
+                    let mut writer = io::stdout().lock();
+                    let columns = vec![
+                        Column::new("Status", DataType::Text),
+                        Column::new("Message", DataType::Text),
+                    ];
+                    let rows = vec![Row::new(vec![
+                        Value::Text("Error".to_string()),
+                        Value::Text("Admin UI is unavailable in batch mode.".to_string()),
+                    ])];
+                    formatter.write_header(&mut writer, &columns)?;
+                    for row in &rows {
+                        formatter.write_row(&mut writer, row)?;
+                    }
+                    formatter.write_footer(&mut writer)?;
+                    return Ok(());
+                }
+                tui::admin::run_admin_ui(context)
+            }
+        };
+    }
+
     // Open the database
     let resolved = resolve_config(&cli)?;
-    let command = cli.command;
+    let command = cli
+        .command
+        .ok_or_else(|| CliError::InvalidArgument("Missing subcommand".to_string()))?;
 
     if resolved.connection_type == ConnectionType::Server {
+        let data_dir = resolved.data_dir.as_deref().map(Path::new);
         if let Some(server_config) = resolved.server.as_ref() {
             match execute_server_command(
                 &command,
                 server_config,
+                data_dir,
                 &batch_mode,
                 ui_mode,
                 output_format,
@@ -227,6 +368,7 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     let db = open_database_with_check(&resolved)?;
+    let data_dir = resolved.data_dir.as_deref().map(Path::new);
 
     // Check if this is a write command before executing
     let is_write = is_write_command(&command);
@@ -235,6 +377,7 @@ fn run(cli: Cli) -> Result<()> {
     execute_command(
         &db,
         command,
+        data_dir,
         &batch_mode,
         ui_mode,
         output_format,
@@ -385,9 +528,11 @@ fn open_database(config: &ResolvedConfig) -> Result<alopex_embedded::Database> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_server_command(
     command: &Command,
     server_config: &ServerConfig,
+    data_dir: Option<&Path>,
     batch_mode: &BatchMode,
     ui_mode: UiMode,
     output_format: cli::OutputFormat,
@@ -414,6 +559,7 @@ fn execute_server_command(
                             output_format,
                             limit,
                             quiet,
+                            data_dir: data_dir.map(PathBuf::from),
                         },
                     });
                 }
@@ -423,8 +569,33 @@ fn execute_server_command(
             };
             let columns = get_kv_columns(kv_cmd);
             if ui_mode == UiMode::Tui {
+                let admin_label = "server".to_string();
+                let admin_auth = auth.clone();
+                let admin_data_dir = data_dir.map(PathBuf::from);
+                let client_ref = &client;
+                let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> =
+                    Some(Box::new(move || {
+                        tui::admin::run_admin_ui(AdminContext {
+                            connection_label: admin_label,
+                            auth: admin_auth,
+                            backend: AdminBackend::Remote {
+                                client: client_ref,
+                                batch_mode,
+                                output_format,
+                                limit,
+                                quiet,
+                                data_dir: admin_data_dir,
+                            },
+                        })
+                    }));
                 return runtime.block_on(commands::kv::execute_remote_tui(
-                    &client, kv_cmd, columns, limit, quiet, "server",
+                    &client,
+                    kv_cmd,
+                    columns,
+                    limit,
+                    quiet,
+                    "server",
+                    admin_launcher,
                 ));
             }
             let formatter = create_formatter(output_format);
@@ -443,6 +614,29 @@ fn execute_server_command(
             let formatter = create_formatter(output_format);
             let stdout = io::stdout();
             let mut handle = stdout.lock();
+            let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> =
+                if ui_mode == UiMode::Tui {
+                    let client_ref = &client;
+                    let admin_label = "server".to_string();
+                    let admin_auth = auth.clone();
+                    let admin_data_dir = data_dir.map(PathBuf::from);
+                    Some(Box::new(move || {
+                        tui::admin::run_admin_ui(AdminContext {
+                            connection_label: admin_label,
+                            auth: admin_auth,
+                            backend: AdminBackend::Remote {
+                                client: client_ref,
+                                batch_mode,
+                                output_format,
+                                limit,
+                                quiet,
+                                data_dir: admin_data_dir,
+                            },
+                        })
+                    }))
+                } else {
+                    None
+                };
             runtime.block_on(commands::sql::execute_remote_with_formatter(
                 &client,
                 sql_cmd,
@@ -450,6 +644,7 @@ fn execute_server_command(
                 ui_mode,
                 &mut handle,
                 formatter,
+                admin_launcher,
                 limit,
                 quiet,
             ))
@@ -466,6 +661,7 @@ fn execute_server_command(
                             output_format,
                             limit,
                             quiet,
+                            data_dir: data_dir.map(PathBuf::from),
                         },
                     });
                 }
@@ -475,8 +671,34 @@ fn execute_server_command(
             };
             let columns = get_vector_columns(vec_cmd);
             if ui_mode == UiMode::Tui {
+                let admin_label = "server".to_string();
+                let admin_auth = auth.clone();
+                let admin_data_dir = data_dir.map(PathBuf::from);
+                let client_ref = &client;
+                let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> =
+                    Some(Box::new(move || {
+                        tui::admin::run_admin_ui(AdminContext {
+                            connection_label: admin_label,
+                            auth: admin_auth,
+                            backend: AdminBackend::Remote {
+                                client: client_ref,
+                                batch_mode,
+                                output_format,
+                                limit,
+                                quiet,
+                                data_dir: admin_data_dir,
+                            },
+                        })
+                    }));
                 return runtime.block_on(commands::vector::execute_remote_tui(
-                    &client, vec_cmd, batch_mode, columns, limit, quiet, "server",
+                    &client,
+                    vec_cmd,
+                    batch_mode,
+                    columns,
+                    limit,
+                    quiet,
+                    "server",
+                    admin_launcher,
                 ));
             }
             let formatter = create_formatter(output_format);
@@ -504,6 +726,7 @@ fn execute_server_command(
                             output_format,
                             limit,
                             quiet,
+                            data_dir: data_dir.map(PathBuf::from),
                         },
                     });
                 }
@@ -513,8 +736,33 @@ fn execute_server_command(
             };
             let columns = get_hnsw_columns(hnsw_cmd);
             if ui_mode == UiMode::Tui {
+                let admin_label = "server".to_string();
+                let admin_auth = auth.clone();
+                let admin_data_dir = data_dir.map(PathBuf::from);
+                let client_ref = &client;
+                let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> =
+                    Some(Box::new(move || {
+                        tui::admin::run_admin_ui(AdminContext {
+                            connection_label: admin_label,
+                            auth: admin_auth,
+                            backend: AdminBackend::Remote {
+                                client: client_ref,
+                                batch_mode,
+                                output_format,
+                                limit,
+                                quiet,
+                                data_dir: admin_data_dir,
+                            },
+                        })
+                    }));
                 return runtime.block_on(commands::hnsw::execute_remote_tui(
-                    &client, hnsw_cmd, columns, limit, quiet, "server",
+                    &client,
+                    hnsw_cmd,
+                    columns,
+                    limit,
+                    quiet,
+                    "server",
+                    admin_launcher,
                 ));
             }
             let formatter = create_formatter(output_format);
@@ -541,6 +789,7 @@ fn execute_server_command(
                             output_format,
                             limit,
                             quiet,
+                            data_dir: data_dir.map(PathBuf::from),
                         },
                     });
                 }
@@ -549,8 +798,33 @@ fn execute_server_command(
                 ));
             };
             if ui_mode == UiMode::Tui {
+                let admin_label = "server".to_string();
+                let admin_auth = auth.clone();
+                let admin_data_dir = data_dir.map(PathBuf::from);
+                let client_ref = &client;
+                let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> =
+                    Some(Box::new(move || {
+                        tui::admin::run_admin_ui(AdminContext {
+                            connection_label: admin_label,
+                            auth: admin_auth,
+                            backend: AdminBackend::Remote {
+                                client: client_ref,
+                                batch_mode,
+                                output_format,
+                                limit,
+                                quiet,
+                                data_dir: admin_data_dir,
+                            },
+                        })
+                    }));
                 return runtime.block_on(commands::columnar::execute_remote_tui(
-                    &client, col_cmd, batch_mode, limit, quiet, "server",
+                    &client,
+                    col_cmd,
+                    batch_mode,
+                    limit,
+                    quiet,
+                    "server",
+                    admin_launcher,
                 ));
             }
             let formatter = create_formatter(output_format);
@@ -580,6 +854,7 @@ fn execute_server_command(
                             output_format,
                             limit,
                             quiet,
+                            data_dir: data_dir.map(PathBuf::from),
                         },
                     });
                 }
@@ -588,8 +863,31 @@ fn execute_server_command(
                 ));
             };
             if ui_mode == UiMode::Tui {
+                let admin_label = "server".to_string();
+                let admin_auth = auth.clone();
+                let admin_data_dir = data_dir.map(PathBuf::from);
+                let client_ref = &client;
+                let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> =
+                    Some(Box::new(move || {
+                        tui::admin::run_admin_ui(AdminContext {
+                            connection_label: admin_label,
+                            auth: admin_auth,
+                            backend: AdminBackend::Remote {
+                                client: client_ref,
+                                batch_mode,
+                                output_format,
+                                limit,
+                                quiet,
+                                data_dir: admin_data_dir,
+                            },
+                        })
+                    }));
                 return runtime.block_on(commands::server::execute_remote_tui(
-                    &client, server_cmd, quiet, "server",
+                    &client,
+                    server_cmd,
+                    quiet,
+                    "server",
+                    admin_launcher,
                 ));
             }
             let stdout = io::stdout();
@@ -613,6 +911,7 @@ fn execute_server_command(
                             output_format,
                             limit,
                             quiet,
+                            data_dir: data_dir.map(PathBuf::from),
                         },
                     });
                 }
@@ -620,7 +919,9 @@ fn execute_server_command(
                     "Missing lifecycle subcommand".to_string(),
                 ));
             };
-            commands::lifecycle::execute(command)
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            commands::lifecycle::execute(command, data_dir, &mut handle, output_format)
         }
         Command::Profile { .. } | Command::Version | Command::Completions { .. } => Err(
             CliError::InvalidArgument("Command is not available in server mode".to_string()),
@@ -647,9 +948,11 @@ fn execute_local_command(
     quiet: bool,
 ) -> Result<()> {
     let db = open_database_with_check(resolved)?;
+    let data_dir = resolved.data_dir.as_ref().map(PathBuf::from);
     execute_command(
         &db,
         command,
+        data_dir.as_deref(),
         batch_mode,
         ui_mode,
         output_format,
@@ -659,9 +962,11 @@ fn execute_local_command(
 }
 
 /// Execute the command and write output.
+#[allow(clippy::too_many_arguments)]
 fn execute_command(
     db: &alopex_embedded::Database,
     command: Command,
+    data_dir: Option<&Path>,
     batch_mode: &BatchMode,
     ui_mode: UiMode,
     output_format: cli::OutputFormat,
@@ -685,6 +990,7 @@ fn execute_command(
                             output_format,
                             limit,
                             quiet,
+                            data_dir: data_dir.map(PathBuf::from),
                         },
                     });
                 }
@@ -694,7 +1000,17 @@ fn execute_command(
             };
             let columns = get_kv_columns(&kv_cmd);
             if ui_mode == UiMode::Tui {
-                return commands::kv::execute_tui(db, kv_cmd, columns, limit, quiet, "local");
+                return commands::kv::execute_tui(
+                    db,
+                    kv_cmd,
+                    batch_mode,
+                    output_format,
+                    columns,
+                    limit,
+                    quiet,
+                    "local",
+                    data_dir.map(PathBuf::from),
+                );
             }
             let formatter = create_formatter(output_format);
             let mut writer =
@@ -703,6 +1019,27 @@ fn execute_command(
         }
         Command::Sql(sql_cmd) => {
             let formatter = create_formatter(output_format);
+            let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> =
+                if ui_mode == UiMode::Tui {
+                    let admin_label = "local".to_string();
+                    let admin_data_dir = data_dir.map(PathBuf::from);
+                    Some(Box::new(move || {
+                        tui::admin::run_admin_ui(AdminContext {
+                            connection_label: admin_label,
+                            auth: AuthCapabilities::full(),
+                            backend: AdminBackend::Local {
+                                db,
+                                batch_mode,
+                                output_format,
+                                limit,
+                                quiet,
+                                data_dir: admin_data_dir,
+                            },
+                        })
+                    }))
+                } else {
+                    None
+                };
             commands::sql::execute_with_formatter(
                 db,
                 sql_cmd,
@@ -710,6 +1047,7 @@ fn execute_command(
                 ui_mode,
                 &mut handle,
                 formatter,
+                admin_launcher,
                 limit,
                 quiet,
             )
@@ -726,6 +1064,7 @@ fn execute_command(
                             output_format,
                             limit,
                             quiet,
+                            data_dir: data_dir.map(PathBuf::from),
                         },
                     });
                 }
@@ -736,7 +1075,15 @@ fn execute_command(
             let columns = get_vector_columns(&vec_cmd);
             if ui_mode == UiMode::Tui {
                 return commands::vector::execute_tui(
-                    db, vec_cmd, batch_mode, columns, limit, quiet, "local",
+                    db,
+                    vec_cmd,
+                    batch_mode,
+                    output_format,
+                    columns,
+                    limit,
+                    quiet,
+                    "local",
+                    data_dir.map(PathBuf::from),
                 );
             }
             let formatter = create_formatter(output_format);
@@ -756,6 +1103,7 @@ fn execute_command(
                             output_format,
                             limit,
                             quiet,
+                            data_dir: data_dir.map(PathBuf::from),
                         },
                     });
                 }
@@ -765,7 +1113,17 @@ fn execute_command(
             };
             let columns = get_hnsw_columns(&hnsw_cmd);
             if ui_mode == UiMode::Tui {
-                return commands::hnsw::execute_tui(db, hnsw_cmd, columns, limit, quiet, "local");
+                return commands::hnsw::execute_tui(
+                    db,
+                    hnsw_cmd,
+                    batch_mode,
+                    output_format,
+                    columns,
+                    limit,
+                    quiet,
+                    "local",
+                    data_dir.map(PathBuf::from),
+                );
             }
             let formatter = create_formatter(output_format);
             let mut writer =
@@ -784,6 +1142,7 @@ fn execute_command(
                             output_format,
                             limit,
                             quiet,
+                            data_dir: data_dir.map(PathBuf::from),
                         },
                     });
                 }
@@ -793,7 +1152,14 @@ fn execute_command(
             };
             if ui_mode == UiMode::Tui {
                 return commands::columnar::execute_tui(
-                    db, col_cmd, batch_mode, limit, quiet, "local",
+                    db,
+                    col_cmd,
+                    batch_mode,
+                    output_format,
+                    limit,
+                    quiet,
+                    "local",
+                    data_dir.map(PathBuf::from),
                 );
             }
             let formatter = create_formatter(output_format);
@@ -832,6 +1198,7 @@ fn execute_command(
                             output_format,
                             limit,
                             quiet,
+                            data_dir: data_dir.map(PathBuf::from),
                         },
                     });
                 }
@@ -839,7 +1206,7 @@ fn execute_command(
                     "Missing lifecycle subcommand".to_string(),
                 ));
             };
-            commands::lifecycle::execute(&command)
+            commands::lifecycle::execute(&command, data_dir, &mut handle, output_format)
         }
     }
 }

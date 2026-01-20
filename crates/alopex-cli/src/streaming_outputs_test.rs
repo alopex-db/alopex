@@ -80,6 +80,7 @@ fn run_sql_with_formatter(db: &Database, formatter: Box<dyn Formatter>) -> Strin
         &mut output,
         formatter,
         None,
+        None,
         true,
     )
     .unwrap();

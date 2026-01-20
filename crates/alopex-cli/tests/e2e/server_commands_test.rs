@@ -45,6 +45,7 @@ async fn spawn_tls_server(router: axum::Router) -> (String, oneshot::Sender<()>)
 fn build_client(base_url: &str) -> HttpClient {
     let config = CliServerConfig {
         url: base_url.to_string(),
+        insecure: false,
         auth: None,
         token: None,
         username: None,

@@ -3,18 +3,21 @@
 //! Supports: get, put, delete, list
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use alopex_embedded::{Database, TransactionManager as Transaction, TxnMode};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{KvCommand, KvTxnCommand};
+use crate::batch::BatchMode;
+use crate::cli::{KvCommand, KvTxnCommand, OutputFormat};
 use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
 use crate::output::RowCollector;
 use crate::streaming::{StreamingWriter, WriteStatus};
+use crate::tui::admin::{AdminBackend, AdminContext, AuthCapabilities};
 use crate::tui::renderer::render_output;
 
 const DEFAULT_TXN_TIMEOUT_SECS: u64 = 60;
@@ -121,14 +124,35 @@ pub fn execute<W: Write>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_tui(
     db: &Database,
     cmd: KvCommand,
+    batch_mode: &BatchMode,
+    output_format: OutputFormat,
     columns: Vec<Column>,
     limit: Option<usize>,
     quiet: bool,
     connection_label: impl Into<String>,
+    data_dir: Option<PathBuf>,
 ) -> Result<()> {
+    let connection_label = connection_label.into();
+    let admin_label = connection_label.clone();
+    let admin_data_dir = data_dir.clone();
+    let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> = Some(Box::new(move || {
+        crate::tui::admin::run_admin_ui(AdminContext {
+            connection_label: admin_label,
+            auth: AuthCapabilities::full(),
+            backend: AdminBackend::Local {
+                db,
+                batch_mode,
+                output_format,
+                limit,
+                quiet,
+                data_dir: admin_data_dir,
+            },
+        })
+    }));
     let collector = RowCollector::new();
     let formatter = Box::new(collector.formatter());
     let mut sink = std::io::sink();
@@ -136,7 +160,14 @@ pub fn execute_tui(
         StreamingWriter::new(&mut sink, formatter, columns.clone(), limit).with_quiet(quiet);
     execute(db, cmd, &mut writer)?;
     let warning = collector.truncation_warning();
-    render_output(columns, collector.rows(), connection_label, true, warning)
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        true,
+        warning,
+        admin_launcher,
+    )
 }
 
 /// Execute a KV command against a remote server.
@@ -247,20 +278,28 @@ pub async fn execute_remote_with_formatter<W: Write>(
     }
 }
 
-pub async fn execute_remote_tui(
+pub async fn execute_remote_tui<'a>(
     client: &HttpClient,
     cmd: &KvCommand,
     columns: Vec<Column>,
     limit: Option<usize>,
     quiet: bool,
     connection_label: impl Into<String>,
+    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
 ) -> Result<()> {
     let collector = RowCollector::new();
     let formatter = Box::new(collector.formatter());
     let mut sink = std::io::sink();
     execute_remote_with_formatter(client, cmd, &mut sink, formatter, limit, quiet).await?;
     let warning = collector.truncation_warning();
-    render_output(columns, collector.rows(), connection_label, true, warning)
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        true,
+        warning,
+        admin_launcher,
+    )
 }
 
 async fn execute_remote_txn_command<W: Write>(

@@ -134,6 +134,7 @@ pub async fn execute_remote_tui(
     cmd: &ServerCommand,
     quiet: bool,
     connection_label: impl Into<String>,
+    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>>,
 ) -> Result<()> {
     match cmd {
         ServerCommand::Status => {
@@ -155,6 +156,7 @@ pub async fn execute_remote_tui(
                 connection_label,
                 true,
                 None,
+                admin_launcher,
             )
         }
         ServerCommand::Metrics => {
@@ -177,6 +179,7 @@ pub async fn execute_remote_tui(
                 connection_label,
                 true,
                 None,
+                admin_launcher,
             )
         }
         ServerCommand::Health => {
@@ -196,6 +199,7 @@ pub async fn execute_remote_tui(
                 connection_label,
                 true,
                 None,
+                admin_launcher,
             )
         }
         ServerCommand::Compaction { command } => match command {
@@ -217,6 +221,7 @@ pub async fn execute_remote_tui(
                     connection_label,
                     true,
                     None,
+                    admin_launcher,
                 )
             }
         },

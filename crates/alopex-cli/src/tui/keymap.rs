@@ -23,6 +23,7 @@ pub enum Action {
     CancelSearch,
     DetailUp,
     DetailDown,
+    OpenAdmin,
     Quit,
 }
 
@@ -59,6 +60,7 @@ pub fn action_for_key(event: KeyEvent, search_active: bool) -> Option<Action> {
         (KeyCode::PageUp, _) => Some(Action::PageUp),
         (KeyCode::Char('J'), _) => Some(Action::DetailDown),
         (KeyCode::Char('K'), _) => Some(Action::DetailUp),
+        (KeyCode::Char('a'), _) => Some(Action::OpenAdmin),
         _ => None,
     }
 }
@@ -75,5 +77,6 @@ pub fn help_items() -> Vec<(&'static str, &'static str)> {
         ("Ctrl+d/u", "Page down/up"),
         ("Enter", "Toggle detail"),
         ("J/K", "Scroll detail"),
+        ("a", "Admin console"),
     ]
 }

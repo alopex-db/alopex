@@ -8,6 +8,7 @@ use alopex_cli::cli::{OutputFormat, SqlCommand};
 use alopex_cli::commands::sql::{execute_remote_with_formatter_control, SqlExecutionOptions};
 use alopex_cli::output::formatter::create_formatter;
 use alopex_cli::profile::config::ServerConfig as CliServerConfig;
+use alopex_cli::ui::mode::UiMode;
 use alopex_cli::streaming::{CancelSignal, Deadline};
 use axum::body::{boxed, Body, Bytes};
 use axum::extract::State;
@@ -61,6 +62,7 @@ async fn spawn_tls_server(router: Router) -> (String, oneshot::Sender<()>) {
 fn build_client(base_url: &str) -> HttpClient {
     let config = CliServerConfig {
         url: base_url.to_string(),
+        insecure: false,
         auth: None,
         token: None,
         username: None,
@@ -106,12 +108,9 @@ async fn e2e_streaming_large_dataset() {
             "/api/sql/query",
             post(
                 |State(chunks): State<Arc<Vec<Bytes>>>| async move {
-                    let stream = stream::iter(
-                        chunks
-                            .iter()
-                            .cloned()
-                            .map(Ok::<Bytes, Infallible>),
-                    );
+                    let items = (*chunks).clone();
+                    let stream =
+                        stream::iter(items.into_iter().map(Ok::<Bytes, Infallible>));
                     let body = boxed(Body::wrap_stream(stream));
                     let mut response = axum::response::Response::new(body);
                     *response.status_mut() = axum::http::StatusCode::OK;
@@ -142,6 +141,7 @@ async fn e2e_streaming_large_dataset() {
         &client,
         &cmd,
         &batch_mode(),
+        UiMode::Batch,
         &mut output,
         formatter,
         SqlExecutionOptions {
@@ -149,6 +149,7 @@ async fn e2e_streaming_large_dataset() {
             quiet: false,
             cancel: &cancel,
             deadline: &deadline,
+            admin_launcher: None,
         },
     )
     .await

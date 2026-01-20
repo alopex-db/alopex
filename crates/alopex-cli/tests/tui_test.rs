@@ -129,6 +129,7 @@ fn tui_falls_back_in_non_tty() {
             quiet: true,
             cancel: &cancel,
             deadline: &deadline,
+            admin_launcher: None,
         },
     )
     .expect("fallback");

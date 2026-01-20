@@ -1,24 +1,31 @@
 # Alopex CLI TUI Guide
 
-The TUI provides an interactive preview of SELECT results. It is optimized for
-keyboard navigation and fast search.
+The TUI provides interactive results for SQL and non-SQL commands. It is optimized
+for keyboard navigation and fast search.
 
 ## Getting started
 
-Run a SELECT query with `--tui`:
+Run a SELECT query (TUI opens automatically on TTY terminals):
 
 ```bash
-alopex sql --tui "SELECT id, name, created_at FROM users"
+alopex sql "SELECT id, name, created_at FROM users"
 ```
 
 Use a server profile:
 
 ```bash
-alopex --profile prod sql --tui "SELECT id, name FROM users"
+alopex --profile prod sql "SELECT id, name FROM users"
+```
+
+Non-SQL commands that return rows also use the TUI by default:
+
+```bash
+alopex kv list
 ```
 
 If the terminal is not a TTY (for example, piping output), the CLI falls back to
-batch output while preserving `--output` formatting.
+batch output while preserving `--output` formatting. Use `--batch` or `--output`
+to force batch output even on a TTY.
 
 ## Layout overview
 
@@ -72,6 +79,18 @@ Detail panel:
 - `Enter`: toggle detail panel
 - `J` / `K`: scroll detail panel down/up
 
+## Admin console
+
+Run the CLI without a subcommand to open the admin console:
+
+```bash
+alopex
+```
+
+Use arrow keys to select targets and actions, `Enter` to execute, `t` to switch
+targets, and `e` to edit parameters. Lifecycle actions (archive/restore/backup/export)
+live in the Lifecycle panel and require server permissions.
+
 ## Examples
 
 Search for a name:
@@ -88,7 +107,7 @@ View JSON/YAML detail:
 
 ## Troubleshooting
 
-- "TUI requires a TTY": run without `--tui` or use a real terminal.
+- "TUI requires a TTY": use a real terminal or force batch with `--batch`/`--output`.
 - Rows not visible: increase the terminal height or shrink columns by selecting
   fewer fields.
 - Large result sets: use `--max-rows`/`--limit` or filter with `WHERE` to limit data.

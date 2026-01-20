@@ -3,12 +3,13 @@
 //! Supports: search, upsert, delete (single key/vector operations)
 
 use std::io::Write;
+use std::path::PathBuf;
 
 use alopex_embedded::{Database, TxnMode};
 use serde::{Deserialize, Serialize};
 
 use crate::batch::BatchMode;
-use crate::cli::VectorCommand;
+use crate::cli::{OutputFormat, VectorCommand};
 use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
@@ -16,6 +17,7 @@ use crate::output::formatter::Formatter;
 use crate::output::RowCollector;
 use crate::progress::ProgressIndicator;
 use crate::streaming::{StreamingWriter, WriteStatus};
+use crate::tui::admin::{AdminBackend, AdminContext, AuthCapabilities};
 use crate::tui::renderer::render_output;
 
 #[derive(Debug, Serialize)]
@@ -83,15 +85,35 @@ pub fn execute<W: Write>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_tui(
     db: &Database,
     cmd: VectorCommand,
     batch_mode: &BatchMode,
+    output_format: OutputFormat,
     columns: Vec<Column>,
     limit: Option<usize>,
     quiet: bool,
     connection_label: impl Into<String>,
+    data_dir: Option<PathBuf>,
 ) -> Result<()> {
+    let connection_label = connection_label.into();
+    let admin_label = connection_label.clone();
+    let admin_data_dir = data_dir.clone();
+    let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> = Some(Box::new(move || {
+        crate::tui::admin::run_admin_ui(AdminContext {
+            connection_label: admin_label,
+            auth: AuthCapabilities::full(),
+            backend: AdminBackend::Local {
+                db,
+                batch_mode,
+                output_format,
+                limit,
+                quiet,
+                data_dir: admin_data_dir,
+            },
+        })
+    }));
     let collector = RowCollector::new();
     let formatter = Box::new(collector.formatter());
     let mut sink = std::io::sink();
@@ -99,7 +121,14 @@ pub fn execute_tui(
         StreamingWriter::new(&mut sink, formatter, columns.clone(), limit).with_quiet(quiet);
     execute(db, cmd, batch_mode, &mut writer)?;
     let warning = collector.truncation_warning();
-    render_output(columns, collector.rows(), connection_label, true, warning)
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        true,
+        warning,
+        admin_launcher,
+    )
 }
 
 /// Execute a Vector command against a remote server.
@@ -133,7 +162,8 @@ pub async fn execute_remote_with_formatter<W: Write>(
     }
 }
 
-pub async fn execute_remote_tui(
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_remote_tui<'a>(
     client: &HttpClient,
     cmd: &VectorCommand,
     batch_mode: &BatchMode,
@@ -141,6 +171,7 @@ pub async fn execute_remote_tui(
     limit: Option<usize>,
     quiet: bool,
     connection_label: impl Into<String>,
+    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
 ) -> Result<()> {
     let collector = RowCollector::new();
     let formatter = Box::new(collector.formatter());
@@ -148,7 +179,14 @@ pub async fn execute_remote_tui(
     execute_remote_with_formatter(client, cmd, batch_mode, &mut sink, formatter, limit, quiet)
         .await?;
     let warning = collector.truncation_warning();
-    render_output(columns, collector.rows(), connection_label, true, warning)
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        true,
+        warning,
+        admin_launcher,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

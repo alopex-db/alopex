@@ -56,6 +56,7 @@ fn streaming_max_rows_limits_output() {
             quiet: false,
             cancel: &cancel,
             deadline: &deadline,
+            admin_launcher: None,
         },
     )
     .expect("execute sql");
@@ -94,6 +95,7 @@ fn streaming_deadline_exceeded() {
             quiet: false,
             cancel: &cancel,
             deadline: &deadline,
+            admin_launcher: None,
         },
     )
     .unwrap_err();
@@ -130,6 +132,7 @@ fn streaming_cancelled() {
             quiet: false,
             cancel: &cancel,
             deadline: &deadline,
+            admin_launcher: None,
         },
     )
     .unwrap_err();

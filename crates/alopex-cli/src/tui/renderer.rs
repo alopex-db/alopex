@@ -7,12 +7,13 @@ use crate::output::formatter::create_formatter;
 
 use super::TuiApp;
 
-pub fn render_output(
+pub fn render_output<'a>(
     columns: Vec<Column>,
     rows: Vec<Row>,
     connection_label: impl Into<String>,
     processing: bool,
     status_message: Option<String>,
+    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
 ) -> Result<()> {
     let fallback_columns = columns.clone();
     let fallback_rows = rows.clone();
@@ -23,7 +24,8 @@ pub fn render_output(
     } else {
         rows
     };
-    let mut app = TuiApp::new(columns, rows, connection_label, processing);
+    let mut app = TuiApp::new(columns, rows, connection_label, processing)
+        .with_admin_launcher(admin_launcher);
     if let Some(message) = status_message {
         app = app.with_status_message(message);
     }

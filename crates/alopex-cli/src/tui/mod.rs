@@ -30,7 +30,7 @@ use self::search::SearchState;
 use self::table::TableView;
 
 /// TUI application state.
-pub struct TuiApp {
+pub struct TuiApp<'a> {
     table: TableView,
     search: SearchState,
     detail: DetailPanel,
@@ -39,6 +39,8 @@ pub struct TuiApp {
     row_count: usize,
     processing: bool,
     status_message: Option<String>,
+    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+    admin_requested: bool,
 }
 
 /// Result of handling an input event.
@@ -48,7 +50,7 @@ pub enum EventResult {
     Exit,
 }
 
-impl TuiApp {
+impl<'a> TuiApp<'a> {
     pub fn new(
         columns: Vec<Column>,
         rows: Vec<Row>,
@@ -68,7 +70,17 @@ impl TuiApp {
             row_count,
             processing,
             status_message: None,
+            admin_launcher: None,
+            admin_requested: false,
         }
+    }
+
+    pub fn with_admin_launcher(
+        mut self,
+        launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+    ) -> Self {
+        self.admin_launcher = launcher;
+        self
     }
 
     pub fn with_status_message(mut self, message: impl Into<String>) -> Self {
@@ -120,7 +132,15 @@ impl TuiApp {
             }
         }
 
-        cleanup_terminal(terminal)
+        cleanup_terminal(terminal)?;
+
+        if self.admin_requested {
+            if let Some(launcher) = self.admin_launcher.take() {
+                launcher()?;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn draw(&mut self, frame: &mut ratatui::Frame<'_>) {
@@ -200,6 +220,12 @@ impl TuiApp {
             Action::CancelSearch => self.search.cancel(),
             Action::DetailUp => self.detail.scroll_up(),
             Action::DetailDown => self.detail.scroll_down(),
+            Action::OpenAdmin => {
+                if self.admin_launcher.is_some() {
+                    self.admin_requested = true;
+                    return Ok(EventResult::Exit);
+                }
+            }
         }
         Ok(EventResult::Continue)
     }
@@ -223,6 +249,16 @@ impl TuiApp {
     #[allow(dead_code)]
     pub fn is_help_visible(&self) -> bool {
         self.show_help
+    }
+
+    #[allow(dead_code)]
+    pub fn take_admin_launcher(&mut self) -> Option<Box<dyn FnOnce() -> Result<()> + 'a>> {
+        self.admin_launcher.take()
+    }
+
+    #[allow(dead_code)]
+    pub fn admin_requested(&self) -> bool {
+        self.admin_requested
     }
 }
 
@@ -271,7 +307,7 @@ fn render_status(
     } else if search.has_query() {
         format!("{base_status} | /{} (n/N)", search.query())
     } else {
-        format!("{base_status} | q/Esc: quit | ?: help | /: search | Enter: detail")
+        format!("{base_status} | q/Esc: quit | ?: help | /: search | Enter: detail | a: admin")
     };
     if let Some(message) = status_message {
         status_text = format!("{status_text} | {message}");

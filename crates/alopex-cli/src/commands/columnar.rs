@@ -4,7 +4,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use alopex_core::columnar::encoding::{Column as ColumnData, LogicalType};
@@ -24,7 +24,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
 
 use crate::batch::BatchMode;
-use crate::cli::{ColumnarCommand, IndexCommand};
+use crate::cli::{ColumnarCommand, IndexCommand, OutputFormat};
 use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
@@ -32,6 +32,7 @@ use crate::output::formatter::Formatter;
 use crate::output::RowCollector;
 use crate::progress::ProgressIndicator;
 use crate::streaming::{StreamingWriter, WriteStatus};
+use crate::tui::admin::{AdminBackend, AdminContext, AuthCapabilities};
 use crate::tui::renderer::render_output;
 
 #[derive(Debug, Serialize)]
@@ -197,21 +198,48 @@ pub fn columnar_command_columns(cmd: &ColumnarCommand) -> Vec<Column> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_tui(
     db: &Database,
     cmd: ColumnarCommand,
     batch_mode: &BatchMode,
+    output_format: OutputFormat,
     limit: Option<usize>,
     quiet: bool,
     connection_label: impl Into<String>,
+    data_dir: Option<PathBuf>,
 ) -> Result<()> {
+    let connection_label = connection_label.into();
+    let admin_label = connection_label.clone();
+    let admin_data_dir = data_dir.clone();
+    let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> = Some(Box::new(move || {
+        crate::tui::admin::run_admin_ui(AdminContext {
+            connection_label: admin_label,
+            auth: AuthCapabilities::full(),
+            backend: AdminBackend::Local {
+                db,
+                batch_mode,
+                output_format,
+                limit,
+                quiet,
+                data_dir: admin_data_dir,
+            },
+        })
+    }));
     let columns = columnar_command_columns(&cmd);
     let collector = RowCollector::new();
     let formatter = Box::new(collector.formatter());
     let mut sink = std::io::sink();
     execute_with_formatter(db, cmd, batch_mode, &mut sink, formatter, limit, quiet)?;
     let warning = collector.truncation_warning();
-    render_output(columns, collector.rows(), connection_label, true, warning)
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        true,
+        warning,
+        admin_launcher,
+    )
 }
 
 async fn execute_remote_ingest<W: Write>(
@@ -356,6 +384,7 @@ pub async fn execute_remote_tui(
     limit: Option<usize>,
     quiet: bool,
     connection_label: impl Into<String>,
+    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>>,
 ) -> Result<()> {
     let columns = columnar_command_columns(cmd);
     let collector = RowCollector::new();
@@ -364,7 +393,14 @@ pub async fn execute_remote_tui(
     execute_remote_with_formatter(client, cmd, batch_mode, &mut sink, formatter, limit, quiet)
         .await?;
     let warning = collector.truncation_warning();
-    render_output(columns, collector.rows(), connection_label, true, warning)
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        true,
+        warning,
+        admin_launcher,
+    )
 }
 
 async fn execute_remote_scan<W: Write>(

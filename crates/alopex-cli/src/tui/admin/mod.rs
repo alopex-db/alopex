@@ -3,7 +3,8 @@
 pub mod actions;
 
 use std::collections::HashSet;
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -27,8 +28,8 @@ use crate::ui::mode::UiMode;
 use crate::{
     batch::BatchMode,
     cli::{
-        ColumnarCommand, DistanceMetric, HnswCommand, IndexCommand, KvCommand, OutputFormat,
-        SqlCommand, VectorCommand,
+        ColumnarCommand, DistanceMetric, HnswCommand, IndexCommand, KvCommand, LifecycleCommand,
+        OutputFormat, SqlCommand, VectorCommand,
     },
     client::http::HttpClient,
 };
@@ -385,6 +386,7 @@ impl<'a> AdminApp<'a> {
             ui_mode: UiMode::Batch,
             connection_label: self.connection_label.clone(),
             output: self.backend.output_format(),
+            data_dir: self.backend.data_dir().map(PathBuf::from),
         };
 
         let (formatter, state) = CaptureFormatter::new();
@@ -497,6 +499,7 @@ pub enum AdminBackend<'a> {
         output_format: OutputFormat,
         limit: Option<usize>,
         quiet: bool,
+        data_dir: Option<PathBuf>,
     },
     Remote {
         client: &'a HttpClient,
@@ -504,6 +507,7 @@ pub enum AdminBackend<'a> {
         output_format: OutputFormat,
         limit: Option<usize>,
         quiet: bool,
+        data_dir: Option<PathBuf>,
     },
 }
 
@@ -512,6 +516,13 @@ impl AdminBackend<'_> {
         match self {
             AdminBackend::Local { output_format, .. } => *output_format,
             AdminBackend::Remote { output_format, .. } => *output_format,
+        }
+    }
+
+    fn data_dir(&self) -> Option<&Path> {
+        match self {
+            AdminBackend::Local { data_dir, .. } => data_dir.as_deref(),
+            AdminBackend::Remote { data_dir, .. } => data_dir.as_deref(),
         }
     }
 
@@ -538,27 +549,29 @@ pub struct AdminContext<'a> {
 
 pub fn run_admin_ui(context: AdminContext<'_>) -> Result<()> {
     if !is_tty() {
-        let output_format = context.backend.output_format();
-        let mut formatter = create_formatter(output_format);
         let mut writer = io::stdout().lock();
-        let columns = vec![
-            Column::new("Status", DataType::Text),
-            Column::new("Message", DataType::Text),
-        ];
-        let rows = vec![Row::new(vec![
-            Value::Text("Error".to_string()),
-            Value::Text("Admin UI is unavailable without a TTY.".to_string()),
-        ])];
-        formatter.write_header(&mut writer, &columns)?;
-        for row in &rows {
-            formatter.write_row(&mut writer, row)?;
-        }
-        formatter.write_footer(&mut writer)?;
-        return Ok(());
+        return write_non_tty_fallback(&mut writer, context.backend.output_format());
     }
 
     let app = AdminApp::new(context.connection_label, context.auth, context.backend);
     app.run()
+}
+
+pub fn write_non_tty_fallback<W: Write>(writer: &mut W, output_format: OutputFormat) -> Result<()> {
+    let mut formatter = create_formatter(output_format);
+    let columns = vec![
+        Column::new("Status", DataType::Text),
+        Column::new("Message", DataType::Text),
+    ];
+    let rows = vec![Row::new(vec![
+        Value::Text("Error".to_string()),
+        Value::Text("Admin UI is unavailable without a TTY.".to_string()),
+    ])];
+    formatter.write_header(writer, &columns)?;
+    for row in &rows {
+        formatter.write_row(writer, row)?;
+    }
+    formatter.write_footer(writer)
 }
 
 fn default_items() -> Vec<AdminItem> {
@@ -615,10 +628,8 @@ fn default_items() -> Vec<AdminItem> {
 }
 
 fn is_not_implemented(action: AdminAction) -> bool {
-    matches!(
-        action,
-        AdminAction::Archive | AdminAction::Restore | AdminAction::Backup | AdminAction::Export
-    )
+    let _ = action;
+    false
 }
 
 fn parse_params(input: &str) -> std::collections::HashMap<String, String> {
@@ -662,6 +673,19 @@ fn build_command_for(
     target: AdminTarget,
     params: &std::collections::HashMap<String, String>,
 ) -> Result<Option<AdminCommand>> {
+    if matches!(
+        action,
+        AdminAction::Archive | AdminAction::Restore | AdminAction::Backup | AdminAction::Export
+    ) {
+        let command = match action {
+            AdminAction::Archive => LifecycleCommand::Archive,
+            AdminAction::Restore => LifecycleCommand::Restore,
+            AdminAction::Backup => LifecycleCommand::Backup,
+            AdminAction::Export => LifecycleCommand::Export,
+            _ => return Ok(None),
+        };
+        return Ok(Some(AdminCommand::Lifecycle(command)));
+    }
     match target {
         AdminTarget::Sql => build_sql_command(params),
         AdminTarget::Kv => build_kv_command(action, params),
@@ -718,10 +742,7 @@ fn build_kv_command(
             }
         }
         AdminAction::Archive | AdminAction::Restore | AdminAction::Backup | AdminAction::Export => {
-            Err(CliError::InvalidArgument(format!(
-                "Admin action '{}' is not implemented yet.",
-                action_label(action)
-            )))
+            Ok(None)
         }
     }
 }
@@ -778,10 +799,7 @@ fn build_vector_command(
             }
         }
         AdminAction::Archive | AdminAction::Restore | AdminAction::Backup | AdminAction::Export => {
-            Err(CliError::InvalidArgument(format!(
-                "Admin action '{}' is not implemented yet.",
-                action_label(action)
-            )))
+            Ok(None)
         }
     }
 }
@@ -836,10 +854,7 @@ fn build_hnsw_command(
             "Update is not supported for HNSW targets.".to_string(),
         )),
         AdminAction::Archive | AdminAction::Restore | AdminAction::Backup | AdminAction::Export => {
-            Err(CliError::InvalidArgument(format!(
-                "Admin action '{}' is not implemented yet.",
-                action_label(action)
-            )))
+            Ok(None)
         }
     }
 }
@@ -932,10 +947,7 @@ fn build_columnar_command(
             "Update is not supported for columnar targets.".to_string(),
         )),
         AdminAction::Archive | AdminAction::Restore | AdminAction::Backup | AdminAction::Export => {
-            Err(CliError::InvalidArgument(format!(
-                "Admin action '{}' is not implemented yet.",
-                action_label(action)
-            )))
+            Ok(None)
         }
     }
 }
@@ -946,19 +958,6 @@ fn parse_metric(value: &str) -> Option<DistanceMetric> {
         "l2" => Some(DistanceMetric::L2),
         "ip" => Some(DistanceMetric::Ip),
         _ => None,
-    }
-}
-
-fn action_label(action: AdminAction) -> &'static str {
-    match action {
-        AdminAction::Read => "read",
-        AdminAction::Create => "create",
-        AdminAction::Update => "update",
-        AdminAction::Delete => "delete",
-        AdminAction::Archive => "archive",
-        AdminAction::Restore => "restore",
-        AdminAction::Backup => "backup",
-        AdminAction::Export => "export",
     }
 }
 

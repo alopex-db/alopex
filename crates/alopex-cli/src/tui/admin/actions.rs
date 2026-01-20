@@ -3,15 +3,17 @@
 
 use std::collections::HashSet;
 use std::io::Write;
+use std::path::PathBuf;
 
 use alopex_embedded::Database;
 
 use crate::batch::BatchMode;
 use crate::cli::{
-    ColumnarCommand, HnswCommand, IndexCommand, KvCommand, OutputFormat, SqlCommand, VectorCommand,
+    ColumnarCommand, HnswCommand, IndexCommand, KvCommand, LifecycleCommand, OutputFormat,
+    SqlCommand, VectorCommand,
 };
 use crate::client::http::HttpClient;
-use crate::commands::{columnar, hnsw, kv, sql, vector};
+use crate::commands::{columnar, hnsw, kv, lifecycle, sql, vector};
 use crate::error::{CliError, Result};
 use crate::output::formatter::Formatter;
 use crate::streaming::writer::StreamingWriter;
@@ -51,6 +53,7 @@ pub enum AdminCommand {
     Vector(VectorCommand),
     Hnsw(HnswCommand),
     Columnar(ColumnarCommand),
+    Lifecycle(LifecycleCommand),
 }
 
 pub struct AdminRequest {
@@ -61,6 +64,7 @@ pub struct AdminRequest {
     pub ui_mode: UiMode,
     pub connection_label: String,
     pub output: OutputFormat,
+    pub data_dir: Option<PathBuf>,
 }
 
 pub fn execute_local_action<W: Write>(
@@ -83,6 +87,7 @@ pub fn execute_local_action<W: Write>(
                     request.ui_mode,
                     writer,
                     formatter,
+                    None,
                     request.limit,
                     request.quiet,
                 )
@@ -94,6 +99,7 @@ pub fn execute_local_action<W: Write>(
                     UiMode::Batch,
                     writer,
                     formatter,
+                    None,
                     request.limit,
                     request.quiet,
                 )
@@ -105,10 +111,13 @@ pub fn execute_local_action<W: Write>(
                 kv::execute_tui(
                     db,
                     cmd,
+                    batch_mode,
+                    request.output,
                     columns,
                     request.limit,
                     request.quiet,
                     request.connection_label,
+                    request.data_dir.clone(),
                 )
             } else {
                 let columns = kv_columns_for(&cmd);
@@ -124,10 +133,12 @@ pub fn execute_local_action<W: Write>(
                     db,
                     cmd,
                     batch_mode,
+                    request.output,
                     columns,
                     request.limit,
                     request.quiet,
                     request.connection_label,
+                    request.data_dir.clone(),
                 )
             } else {
                 let columns = vector_columns_for(&cmd);
@@ -142,10 +153,13 @@ pub fn execute_local_action<W: Write>(
                 hnsw::execute_tui(
                     db,
                     cmd,
+                    batch_mode,
+                    request.output,
                     columns,
                     request.limit,
                     request.quiet,
                     request.connection_label,
+                    request.data_dir.clone(),
                 )
             } else {
                 let columns = hnsw_columns_for(&cmd);
@@ -160,9 +174,11 @@ pub fn execute_local_action<W: Write>(
                     db,
                     cmd,
                     batch_mode,
+                    request.output,
                     request.limit,
                     request.quiet,
                     request.connection_label,
+                    request.data_dir.clone(),
                 )
             } else {
                 columnar::execute_with_formatter(
@@ -175,6 +191,9 @@ pub fn execute_local_action<W: Write>(
                     request.quiet,
                 )
             }
+        }
+        AdminCommand::Lifecycle(cmd) => {
+            lifecycle::execute_with_formatter(&cmd, request.data_dir.as_deref(), writer, formatter)
         }
     }
 }
@@ -198,6 +217,7 @@ pub async fn execute_remote_action<W: Write>(
                 request.ui_mode,
                 writer,
                 formatter,
+                None,
                 request.limit,
                 request.quiet,
             )
@@ -213,6 +233,7 @@ pub async fn execute_remote_action<W: Write>(
                     request.limit,
                     request.quiet,
                     request.connection_label,
+                    None,
                 )
                 .await
             } else {
@@ -238,6 +259,7 @@ pub async fn execute_remote_action<W: Write>(
                     request.limit,
                     request.quiet,
                     request.connection_label,
+                    None,
                 )
                 .await
             } else {
@@ -263,6 +285,7 @@ pub async fn execute_remote_action<W: Write>(
                     request.limit,
                     request.quiet,
                     request.connection_label,
+                    None,
                 )
                 .await
             } else {
@@ -286,6 +309,7 @@ pub async fn execute_remote_action<W: Write>(
                     request.limit,
                     request.quiet,
                     request.connection_label,
+                    None,
                 )
                 .await
             } else {
@@ -301,19 +325,14 @@ pub async fn execute_remote_action<W: Write>(
                 .await
             }
         }
+        AdminCommand::Lifecycle(cmd) => {
+            lifecycle::execute_with_formatter(&cmd, request.data_dir.as_deref(), writer, formatter)
+        }
     }
 }
 
 fn ensure_action_supported(action: AdminAction) -> Result<()> {
-    if matches!(
-        action,
-        AdminAction::Archive | AdminAction::Restore | AdminAction::Backup | AdminAction::Export
-    ) {
-        return Err(CliError::InvalidArgument(format!(
-            "Admin action '{}' is not implemented yet.",
-            action_label(action)
-        )));
-    }
+    let _ = action;
     Ok(())
 }
 
@@ -327,6 +346,7 @@ fn ensure_action_matches_command(action: AdminAction, command: &AdminCommand) ->
         AdminCommand::Vector(cmd) => matches_vector_action(action, cmd),
         AdminCommand::Hnsw(cmd) => matches_hnsw_action(action, cmd),
         AdminCommand::Columnar(cmd) => matches_columnar_action(action, cmd),
+        AdminCommand::Lifecycle(cmd) => lifecycle_action_for(cmd) == action,
     };
 
     if ok {
@@ -336,6 +356,15 @@ fn ensure_action_matches_command(action: AdminAction, command: &AdminCommand) ->
             "Admin action '{}' does not match the selected command.",
             action_label(action)
         )))
+    }
+}
+
+fn lifecycle_action_for(command: &LifecycleCommand) -> AdminAction {
+    match command {
+        LifecycleCommand::Archive => AdminAction::Archive,
+        LifecycleCommand::Restore => AdminAction::Restore,
+        LifecycleCommand::Backup => AdminAction::Backup,
+        LifecycleCommand::Export => AdminAction::Export,
     }
 }
 

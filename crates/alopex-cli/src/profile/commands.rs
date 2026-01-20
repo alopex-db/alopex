@@ -79,7 +79,12 @@ pub fn execute_profile_command(cmd: ProfileCommand, output: OutputFormat) -> Res
     }
 }
 
-pub fn execute_profile_tui(cmd: ProfileCommand, connection_label: impl Into<String>) -> Result<()> {
+pub fn execute_profile_tui<'a>(
+    cmd: ProfileCommand,
+    connection_label: impl Into<String>,
+    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+) -> Result<()> {
+    let mut admin_launcher = admin_launcher;
     match cmd {
         ProfileCommand::Create { name, data_dir } => {
             let mut manager = ProfileManager::load()?;
@@ -96,26 +101,54 @@ pub fn execute_profile_tui(cmd: ProfileCommand, connection_label: impl Into<Stri
             )?;
             manager.save()?;
             let (columns, rows) = status_columns_rows("OK", format!("Created profile '{name}'."));
-            render_output(columns, rows, connection_label, true, None)
+            render_output(
+                columns,
+                rows,
+                connection_label,
+                true,
+                None,
+                admin_launcher.take(),
+            )
         }
         ProfileCommand::List => {
             let manager = ProfileManager::load()?;
             let items = build_list_items(&manager);
             let (columns, rows) = list_columns_rows(&items);
-            render_output(columns, rows, connection_label, true, None)
+            render_output(
+                columns,
+                rows,
+                connection_label,
+                true,
+                None,
+                admin_launcher.take(),
+            )
         }
         ProfileCommand::Show { name } => {
             let manager = ProfileManager::load()?;
             let show = build_show_output(&manager, &name)?;
             let (columns, rows) = show_columns_rows(&show);
-            render_output(columns, rows, connection_label, true, None)
+            render_output(
+                columns,
+                rows,
+                connection_label,
+                true,
+                None,
+                admin_launcher.take(),
+            )
         }
         ProfileCommand::Delete { name } => {
             let mut manager = ProfileManager::load()?;
             manager.delete(&name)?;
             manager.save()?;
             let (columns, rows) = status_columns_rows("OK", format!("Deleted profile '{name}'."));
-            render_output(columns, rows, connection_label, true, None)
+            render_output(
+                columns,
+                rows,
+                connection_label,
+                true,
+                None,
+                admin_launcher.take(),
+            )
         }
         ProfileCommand::SetDefault { name } => {
             let mut manager = ProfileManager::load()?;
@@ -123,7 +156,14 @@ pub fn execute_profile_tui(cmd: ProfileCommand, connection_label: impl Into<Stri
             manager.save()?;
             let (columns, rows) =
                 status_columns_rows("OK", format!("Set default profile to '{name}'."));
-            render_output(columns, rows, connection_label, true, None)
+            render_output(
+                columns,
+                rows,
+                connection_label,
+                true,
+                None,
+                admin_launcher.take(),
+            )
         }
     }
 }

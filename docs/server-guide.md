@@ -192,7 +192,7 @@ token = "secret"
 
 ```bash
 alopex --profile prod sql "SELECT 1"
-alopex --profile prod sql --tui "SELECT * FROM items"
+alopex --profile prod sql "SELECT * FROM items"
 ```
 
 Server management commands:
@@ -203,3 +203,7 @@ alopex --profile prod server metrics
 alopex --profile prod server health
 alopex --profile prod server compaction trigger
 ```
+
+On TTY terminals, the CLI defaults to the TUI for interactive output. Use
+`--batch` or `--output` to force batch output, and run `alopex server` (no
+subcommand) to open the admin console for lifecycle actions.
