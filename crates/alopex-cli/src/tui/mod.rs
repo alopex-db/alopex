@@ -39,7 +39,8 @@ pub struct TuiApp<'a> {
     row_count: usize,
     processing: bool,
     status_message: Option<String>,
-    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+    context_message: Option<String>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
     admin_requested: bool,
 }
 
@@ -70,6 +71,7 @@ impl<'a> TuiApp<'a> {
             row_count,
             processing,
             status_message: None,
+            context_message: None,
             admin_launcher: None,
             admin_requested: false,
         }
@@ -77,7 +79,7 @@ impl<'a> TuiApp<'a> {
 
     pub fn with_admin_launcher(
         mut self,
-        launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+        launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
     ) -> Self {
         self.admin_launcher = launcher;
         self
@@ -88,64 +90,98 @@ impl<'a> TuiApp<'a> {
         self
     }
 
+    pub fn with_context_message(mut self, message: Option<String>) -> Self {
+        self.context_message = message;
+        self
+    }
+
     pub fn run(mut self) -> Result<()> {
         if !is_tty() {
             return Err(CliError::InvalidArgument(
                 "TUI requires a TTY. Run without --tui in batch mode.".to_string(),
             ));
         }
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
-
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-        terminal.clear()?;
-
-        let tick_rate = Duration::from_millis(16);
-        let mut last_tick = Instant::now();
-
-        let mut processing_cleared = false;
         loop {
-            terminal.draw(|frame| self.draw(frame))?;
+            enable_raw_mode()?;
+            let mut stdout = io::stdout();
+            execute!(stdout, EnterAlternateScreen)?;
 
-            if self.processing && !processing_cleared {
-                self.processing = false;
-                processing_cleared = true;
-            }
+            let backend = CrosstermBackend::new(stdout);
+            let mut terminal = Terminal::new(backend)?;
+            terminal.clear()?;
 
-            let timeout = tick_rate
-                .checked_sub(last_tick.elapsed())
-                .unwrap_or_else(|| Duration::from_secs(0));
+            let tick_rate = Duration::from_millis(16);
+            let mut last_tick = Instant::now();
+            let mut processing_cleared = false;
 
-            if event::poll(timeout)? {
-                if let Event::Key(key) = event::read()? {
-                    match self.handle_key(key)? {
-                        EventResult::Exit => break,
-                        EventResult::Continue => {}
+            loop {
+                terminal.draw(|frame| self.draw(frame))?;
+
+                if self.processing && !processing_cleared {
+                    self.processing = false;
+                    processing_cleared = true;
+                }
+
+                let timeout = tick_rate
+                    .checked_sub(last_tick.elapsed())
+                    .unwrap_or_else(|| Duration::from_secs(0));
+
+                if event::poll(timeout)? {
+                    if let Event::Key(key) = event::read()? {
+                        match self.handle_key(key)? {
+                            EventResult::Exit => break,
+                            EventResult::Continue => {}
+                        }
                     }
+                }
+
+                if last_tick.elapsed() >= tick_rate {
+                    last_tick = Instant::now();
                 }
             }
 
-            if last_tick.elapsed() >= tick_rate {
-                last_tick = Instant::now();
+            cleanup_terminal(terminal)?;
+
+            if self.admin_requested {
+                self.admin_requested = false;
+                if let Some(launcher) = self.admin_launcher.as_mut() {
+                    launcher()?;
+                    continue;
+                }
             }
+
+            return Ok(());
         }
-
-        cleanup_terminal(terminal)?;
-
-        if self.admin_requested {
-            if let Some(launcher) = self.admin_launcher.take() {
-                launcher()?;
-            }
-        }
-
-        Ok(())
     }
 
     pub fn draw(&mut self, frame: &mut ratatui::Frame<'_>) {
         let area = frame.size();
-        let (table_area, detail_area, status_area) = split_layout(area, self.detail.is_visible());
+        let mut constraints = Vec::new();
+        if self.context_message.is_some() {
+            constraints.push(Constraint::Length(3));
+        }
+        constraints.push(Constraint::Min(5));
+        if self.detail.is_visible() {
+            constraints.push(Constraint::Length(8));
+        } else {
+            constraints.push(Constraint::Length(0));
+        }
+        constraints.push(Constraint::Length(3));
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+        let mut idx = 0;
+        if let Some(context) = self.context_message.as_ref() {
+            let header = Paragraph::new(context.clone())
+                .block(Block::default().borders(Borders::ALL).title("Command"))
+                .wrap(Wrap { trim: true });
+            frame.render_widget(header, chunks[idx]);
+            idx += 1;
+        }
+        let table_area = chunks[idx];
+        let detail_area = chunks[idx + 1];
+        let status_area = chunks[idx + 2];
 
         self.table.render(frame, table_area, &self.search);
 
@@ -158,6 +194,7 @@ impl<'a> TuiApp<'a> {
             }
         }
 
+        let admin_available = self.admin_launcher.is_some();
         render_status(
             frame,
             status_area,
@@ -167,10 +204,11 @@ impl<'a> TuiApp<'a> {
             self.row_count,
             self.processing,
             self.status_message.as_deref(),
+            admin_available,
         );
 
         if self.show_help {
-            render_help(frame, area);
+            render_help(frame, area, admin_available);
         }
     }
 
@@ -252,7 +290,7 @@ impl<'a> TuiApp<'a> {
     }
 
     #[allow(dead_code)]
-    pub fn take_admin_launcher(&mut self) -> Option<Box<dyn FnOnce() -> Result<()> + 'a>> {
+    pub fn take_admin_launcher(&mut self) -> Option<Box<dyn FnMut() -> Result<()> + 'a>> {
         self.admin_launcher.take()
     }
 
@@ -260,30 +298,6 @@ impl<'a> TuiApp<'a> {
     pub fn admin_requested(&self) -> bool {
         self.admin_requested
     }
-}
-
-fn split_layout(area: Rect, show_detail: bool) -> (Rect, Rect, Rect) {
-    let chunks = if show_detail {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(5),
-                Constraint::Length(8),
-                Constraint::Length(3),
-            ])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(5),
-                Constraint::Length(0),
-                Constraint::Length(3),
-            ])
-            .split(area)
-    };
-
-    (chunks[0], chunks[1], chunks[2])
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -296,6 +310,7 @@ fn render_status(
     row_count: usize,
     processing: bool,
     status_message: Option<&str>,
+    admin_available: bool,
 ) {
     let state_label = if processing { "processing" } else { "ready" };
     let base_status =
@@ -307,7 +322,11 @@ fn render_status(
     } else if search.has_query() {
         format!("{base_status} | /{} (n/N)", search.query())
     } else {
-        format!("{base_status} | q/Esc: quit | ?: help | /: search | Enter: detail | a: admin")
+        let mut text = format!("{base_status} | q/Esc: quit | ?: help | /: search | Enter: detail");
+        if admin_available {
+            text.push_str(" | a: admin/back");
+        }
+        text
     };
     if let Some(message) = status_message {
         status_text = format!("{status_text} | {message}");
@@ -320,7 +339,7 @@ fn render_status(
     frame.render_widget(paragraph, area);
 }
 
-fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
+fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect, admin_available: bool) {
     let help_width = area.width.saturating_sub(4).min(60);
     let help_height = area.height.saturating_sub(4).min(18);
     let rect = Rect::new(
@@ -330,7 +349,7 @@ fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
         help_height,
     );
 
-    let lines = help_items()
+    let lines = help_items(admin_available)
         .iter()
         .map(|(key, desc)| format!("{key:<8} {desc}"))
         .collect::<Vec<_>>()

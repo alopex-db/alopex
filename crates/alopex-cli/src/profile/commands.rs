@@ -82,9 +82,11 @@ pub fn execute_profile_command(cmd: ProfileCommand, output: OutputFormat) -> Res
 pub fn execute_profile_tui<'a>(
     cmd: ProfileCommand,
     connection_label: impl Into<String>,
-    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+    output_format: OutputFormat,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
 ) -> Result<()> {
     let mut admin_launcher = admin_launcher;
+    let context_message = Some(profile_command_context(&cmd));
     match cmd {
         ProfileCommand::Create { name, data_dir } => {
             let mut manager = ProfileManager::load()?;
@@ -105,8 +107,10 @@ pub fn execute_profile_tui<'a>(
                 columns,
                 rows,
                 connection_label,
+                context_message,
                 true,
                 None,
+                output_format,
                 admin_launcher.take(),
             )
         }
@@ -118,8 +122,10 @@ pub fn execute_profile_tui<'a>(
                 columns,
                 rows,
                 connection_label,
+                context_message,
                 true,
                 None,
+                output_format,
                 admin_launcher.take(),
             )
         }
@@ -131,8 +137,10 @@ pub fn execute_profile_tui<'a>(
                 columns,
                 rows,
                 connection_label,
+                context_message,
                 true,
                 None,
+                output_format,
                 admin_launcher.take(),
             )
         }
@@ -145,8 +153,10 @@ pub fn execute_profile_tui<'a>(
                 columns,
                 rows,
                 connection_label,
+                context_message,
                 true,
                 None,
+                output_format,
                 admin_launcher.take(),
             )
         }
@@ -160,8 +170,10 @@ pub fn execute_profile_tui<'a>(
                 columns,
                 rows,
                 connection_label,
+                context_message,
                 true,
                 None,
+                output_format,
                 admin_launcher.take(),
             )
         }
@@ -214,6 +226,16 @@ fn output_profile_show(show: &ProfileShowOutput, output: OutputFormat) -> Result
             "Unsupported output format for profile show: {:?}",
             output
         ))),
+    }
+}
+
+fn profile_command_context(cmd: &ProfileCommand) -> String {
+    match cmd {
+        ProfileCommand::Create { name, .. } => format!("profile create {name}"),
+        ProfileCommand::List => "profile list".to_string(),
+        ProfileCommand::Show { name } => format!("profile show {name}"),
+        ProfileCommand::Delete { name } => format!("profile delete {name}"),
+        ProfileCommand::SetDefault { name } => format!("profile set-default {name}"),
     }
 }
 

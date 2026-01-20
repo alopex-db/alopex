@@ -7,13 +7,16 @@ use crate::output::formatter::create_formatter;
 
 use super::TuiApp;
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_output<'a>(
     columns: Vec<Column>,
     rows: Vec<Row>,
     connection_label: impl Into<String>,
+    context_message: Option<String>,
     processing: bool,
     status_message: Option<String>,
-    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+    output_format: OutputFormat,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
 ) -> Result<()> {
     let fallback_columns = columns.clone();
     let fallback_rows = rows.clone();
@@ -25,12 +28,13 @@ pub fn render_output<'a>(
         rows
     };
     let mut app = TuiApp::new(columns, rows, connection_label, processing)
+        .with_context_message(context_message)
         .with_admin_launcher(admin_launcher);
     if let Some(message) = status_message {
         app = app.with_status_message(message);
     }
     if app.run().is_err() {
-        let mut formatter = create_formatter(OutputFormat::Table);
+        let mut formatter = create_formatter(output_format);
         let mut writer = std::io::stdout().lock();
         formatter.write_header(&mut writer, &fallback_columns)?;
         for row in &fallback_rows {

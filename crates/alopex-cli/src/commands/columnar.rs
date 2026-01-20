@@ -210,11 +210,14 @@ pub fn execute_tui(
     data_dir: Option<PathBuf>,
 ) -> Result<()> {
     let connection_label = connection_label.into();
+    let context_message = Some(columnar_command_context(&cmd));
     let admin_label = connection_label.clone();
     let admin_data_dir = data_dir.clone();
-    let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> = Some(Box::new(move || {
+    let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> = Some(Box::new(move || {
+        let connection_label = admin_label.clone();
+        let data_dir = admin_data_dir.clone();
         crate::tui::admin::run_admin_ui(AdminContext {
-            connection_label: admin_label,
+            connection_label,
             auth: AuthCapabilities::full(),
             backend: AdminBackend::Local {
                 db,
@@ -222,7 +225,7 @@ pub fn execute_tui(
                 output_format,
                 limit,
                 quiet,
-                data_dir: admin_data_dir,
+                data_dir,
             },
             initial_target: Some(AdminTarget::Columnar),
         })
@@ -237,8 +240,10 @@ pub fn execute_tui(
         columns,
         collector.rows(),
         connection_label,
+        context_message,
         true,
         warning,
+        output_format,
         admin_launcher,
     )
 }
@@ -378,14 +383,16 @@ pub async fn execute_remote_with_formatter<W: Write>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_remote_tui(
     client: &HttpClient,
     cmd: &ColumnarCommand,
     batch_mode: &BatchMode,
+    output_format: OutputFormat,
     limit: Option<usize>,
     quiet: bool,
     connection_label: impl Into<String>,
-    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>>,
 ) -> Result<()> {
     let columns = columnar_command_columns(cmd);
     let collector = RowCollector::new();
@@ -398,8 +405,10 @@ pub async fn execute_remote_tui(
         columns,
         collector.rows(),
         connection_label,
+        Some(columnar_command_context(cmd)),
         true,
         warning,
+        output_format,
         admin_launcher,
     )
 }
@@ -575,6 +584,32 @@ fn map_client_error(err: ClientError) -> CliError {
         ClientError::HttpStatus { status, body } => {
             CliError::InvalidArgument(format!("Server error: HTTP {} - {}", status.as_u16(), body))
         }
+    }
+}
+
+fn columnar_command_context(cmd: &ColumnarCommand) -> String {
+    match cmd {
+        ColumnarCommand::Scan { segment, .. } => format!("columnar scan --segment {segment}"),
+        ColumnarCommand::Stats { segment } => format!("columnar stats --segment {segment}"),
+        ColumnarCommand::List => "columnar list".to_string(),
+        ColumnarCommand::Ingest { table, file, .. } => {
+            format!("columnar ingest --table {table} --file {}", file.display())
+        }
+        ColumnarCommand::Index(command) => match command {
+            IndexCommand::Create {
+                segment,
+                column,
+                index_type,
+            } => format!(
+                "columnar index create --segment {segment} --column {column} --type {index_type}"
+            ),
+            IndexCommand::List { segment } => {
+                format!("columnar index list --segment {segment}")
+            }
+            IndexCommand::Drop { segment, column } => {
+                format!("columnar index drop --segment {segment} --column {column}")
+            }
+        },
     }
 }
 

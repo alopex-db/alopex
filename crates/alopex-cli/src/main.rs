@@ -210,9 +210,9 @@ fn run(cli: Cli) -> Result<()> {
                                     })
                                 }
                             }
-                        }) as Box<dyn FnOnce() -> Result<()>>
+                        }) as Box<dyn FnMut() -> Result<()>>
                     });
-                    return execute_profile_tui(command, "local", admin_launcher);
+                    return execute_profile_tui(command, "local", output_format, admin_launcher);
                 }
             }
             if command.is_none() && (ui_mode == UiMode::Tui || !batch_mode.is_tty) {
@@ -595,18 +595,21 @@ fn execute_server_command(
                 let admin_auth = auth.clone();
                 let admin_data_dir = data_dir.map(PathBuf::from);
                 let client_ref = &client;
-                let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> =
+                let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> =
                     Some(Box::new(move || {
+                        let connection_label = admin_label.clone();
+                        let auth = admin_auth.clone();
+                        let data_dir = admin_data_dir.clone();
                         tui::admin::run_admin_ui(AdminContext {
-                            connection_label: admin_label,
-                            auth: admin_auth,
+                            connection_label,
+                            auth,
                             backend: AdminBackend::Remote {
                                 client: client_ref,
                                 batch_mode,
                                 output_format,
                                 limit,
                                 quiet,
-                                data_dir: admin_data_dir,
+                                data_dir,
                             },
                             initial_target: Some(AdminTarget::Kv),
                         })
@@ -615,6 +618,7 @@ fn execute_server_command(
                     &client,
                     kv_cmd,
                     columns,
+                    output_format,
                     limit,
                     quiet,
                     "server",
@@ -637,23 +641,26 @@ fn execute_server_command(
             let formatter = create_formatter(output_format);
             let stdout = io::stdout();
             let mut handle = stdout.lock();
-            let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> =
+            let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> =
                 if ui_mode == UiMode::Tui {
                     let client_ref = &client;
                     let admin_label = "server".to_string();
                     let admin_auth = auth.clone();
                     let admin_data_dir = data_dir.map(PathBuf::from);
                     Some(Box::new(move || {
+                        let connection_label = admin_label.clone();
+                        let auth = admin_auth.clone();
+                        let data_dir = admin_data_dir.clone();
                         tui::admin::run_admin_ui(AdminContext {
-                            connection_label: admin_label,
-                            auth: admin_auth,
+                            connection_label,
+                            auth,
                             backend: AdminBackend::Remote {
                                 client: client_ref,
                                 batch_mode,
                                 output_format,
                                 limit,
                                 quiet,
-                                data_dir: admin_data_dir,
+                                data_dir,
                             },
                             initial_target: Some(AdminTarget::Sql),
                         })
@@ -700,18 +707,21 @@ fn execute_server_command(
                 let admin_auth = auth.clone();
                 let admin_data_dir = data_dir.map(PathBuf::from);
                 let client_ref = &client;
-                let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> =
+                let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> =
                     Some(Box::new(move || {
+                        let connection_label = admin_label.clone();
+                        let auth = admin_auth.clone();
+                        let data_dir = admin_data_dir.clone();
                         tui::admin::run_admin_ui(AdminContext {
-                            connection_label: admin_label,
-                            auth: admin_auth,
+                            connection_label,
+                            auth,
                             backend: AdminBackend::Remote {
                                 client: client_ref,
                                 batch_mode,
                                 output_format,
                                 limit,
                                 quiet,
-                                data_dir: admin_data_dir,
+                                data_dir,
                             },
                             initial_target: Some(AdminTarget::Vector),
                         })
@@ -721,6 +731,7 @@ fn execute_server_command(
                     vec_cmd,
                     batch_mode,
                     columns,
+                    output_format,
                     limit,
                     quiet,
                     "server",
@@ -767,18 +778,21 @@ fn execute_server_command(
                 let admin_auth = auth.clone();
                 let admin_data_dir = data_dir.map(PathBuf::from);
                 let client_ref = &client;
-                let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> =
+                let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> =
                     Some(Box::new(move || {
+                        let connection_label = admin_label.clone();
+                        let auth = admin_auth.clone();
+                        let data_dir = admin_data_dir.clone();
                         tui::admin::run_admin_ui(AdminContext {
-                            connection_label: admin_label,
-                            auth: admin_auth,
+                            connection_label,
+                            auth,
                             backend: AdminBackend::Remote {
                                 client: client_ref,
                                 batch_mode,
                                 output_format,
                                 limit,
                                 quiet,
-                                data_dir: admin_data_dir,
+                                data_dir,
                             },
                             initial_target: Some(AdminTarget::Hnsw),
                         })
@@ -787,6 +801,7 @@ fn execute_server_command(
                     &client,
                     hnsw_cmd,
                     columns,
+                    output_format,
                     limit,
                     quiet,
                     "server",
@@ -831,18 +846,21 @@ fn execute_server_command(
                 let admin_auth = auth.clone();
                 let admin_data_dir = data_dir.map(PathBuf::from);
                 let client_ref = &client;
-                let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> =
+                let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> =
                     Some(Box::new(move || {
+                        let connection_label = admin_label.clone();
+                        let auth = admin_auth.clone();
+                        let data_dir = admin_data_dir.clone();
                         tui::admin::run_admin_ui(AdminContext {
-                            connection_label: admin_label,
-                            auth: admin_auth,
+                            connection_label,
+                            auth,
                             backend: AdminBackend::Remote {
                                 client: client_ref,
                                 batch_mode,
                                 output_format,
                                 limit,
                                 quiet,
-                                data_dir: admin_data_dir,
+                                data_dir,
                             },
                             initial_target: Some(AdminTarget::Columnar),
                         })
@@ -851,6 +869,7 @@ fn execute_server_command(
                     &client,
                     col_cmd,
                     batch_mode,
+                    output_format,
                     limit,
                     quiet,
                     "server",
@@ -898,18 +917,21 @@ fn execute_server_command(
                 let admin_auth = auth.clone();
                 let admin_data_dir = data_dir.map(PathBuf::from);
                 let client_ref = &client;
-                let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> =
+                let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> =
                     Some(Box::new(move || {
+                        let connection_label = admin_label.clone();
+                        let auth = admin_auth.clone();
+                        let data_dir = admin_data_dir.clone();
                         tui::admin::run_admin_ui(AdminContext {
-                            connection_label: admin_label,
-                            auth: admin_auth,
+                            connection_label,
+                            auth,
                             backend: AdminBackend::Remote {
                                 client: client_ref,
                                 batch_mode,
                                 output_format,
                                 limit,
                                 quiet,
-                                data_dir: admin_data_dir,
+                                data_dir,
                             },
                             initial_target: None,
                         })
@@ -919,6 +941,7 @@ fn execute_server_command(
                     server_cmd,
                     quiet,
                     "server",
+                    output_format,
                     admin_launcher,
                 ));
             }
@@ -1126,13 +1149,15 @@ fn execute_command(
         }
         Command::Sql(sql_cmd) => {
             let formatter = create_formatter(output_format);
-            let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> =
+            let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> =
                 if ui_mode == UiMode::Tui {
                     let admin_label = "local".to_string();
                     let admin_data_dir = data_dir.map(PathBuf::from);
                     Some(Box::new(move || {
+                        let connection_label = admin_label.clone();
+                        let data_dir = admin_data_dir.clone();
                         tui::admin::run_admin_ui(AdminContext {
-                            connection_label: admin_label,
+                            connection_label,
                             auth: AuthCapabilities::full(),
                             backend: AdminBackend::Local {
                                 db,
@@ -1140,7 +1165,7 @@ fn execute_command(
                                 output_format,
                                 limit,
                                 quiet,
-                                data_dir: admin_data_dir,
+                                data_dir,
                             },
                             initial_target: Some(AdminTarget::Sql),
                         })

@@ -21,6 +21,8 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use ratatui::Terminal;
 use tokio::runtime::Runtime;
 
+use alopex_embedded::{CreateCatalogRequest, CreateNamespaceRequest};
+
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::{create_formatter, Formatter};
@@ -276,12 +278,16 @@ impl<'a> AdminApp<'a> {
                 Style::default().add_modifier(Modifier::BOLD),
             )]));
             lines.push(Line::from(""));
-            lines.push(Line::from(item.description));
-            lines.push(Line::from(""));
-            lines.push(Line::from(format!(
-                "Target: {} (press t to change)",
-                self.target.label()
-            )));
+            lines.push(Line::from(format!("Target: {}", self.target.label())));
+            match self.input_mode {
+                AdminInputMode::EditingField => {
+                    lines.push(Line::from("Mode: editing field (Enter/Esc to finish)"));
+                }
+                AdminInputMode::EditingRaw => {
+                    lines.push(Line::from("Mode: editing raw params (Enter/Esc to finish)"));
+                }
+                AdminInputMode::Normal => {}
+            }
             if self.use_raw_params {
                 lines.push(Line::from("Input: raw parameters (press r to switch)"));
                 let line = if self.params.is_empty() {
@@ -325,6 +331,8 @@ impl<'a> AdminApp<'a> {
                     ]));
                 }
             }
+            lines.push(Line::from(""));
+            lines.push(Line::from(item.description));
             lines.push(Line::from(""));
             if !item.enabled {
                 lines.push(Line::from(Span::styled(
@@ -515,15 +523,15 @@ impl<'a> AdminApp<'a> {
         } else {
             match self.focus {
                 AdminFocus::Table => format!(
-                    "Connection: {} | Action: {} | Focus: {} | j/k: move | g/G: top/bottom | Ctrl+d/u: page | /: search | Enter: select | l: focus right | R: refresh | ?: help | q: quit",
+                    "Connection: {} | Action: {} | Focus: {} | j/k: move | g/G: top/bottom | Ctrl+d/u: page | /: search | e: edit | r: raw | Enter: select | l: focus right | R: refresh | ?: help | a: back | q: quit",
                     self.connection_label, action, focus_label
                 ),
                 AdminFocus::Detail => format!(
-                    "Connection: {} | Action: {} | Focus: {} | Up/Down: action | Tab: field | e: edit | o: list | r: raw | Enter: execute | h: left | l: right | ?: help | q: quit",
+                    "Connection: {} | Action: {} | Focus: {} | Up/Down: action | Tab: field | e: edit | o: list | r: raw | Enter: execute | h: left | l: right | ?: help | a: back | q: quit",
                     self.connection_label, action, focus_label
                 ),
                 AdminFocus::Status => format!(
-                    "Connection: {} | Action: {} | Focus: {} | j/k: scroll | g/G: top/bottom | Ctrl+d/u: page | h: left | ?: help | q: quit",
+                    "Connection: {} | Action: {} | Focus: {} | j/k: scroll | g/G: top/bottom | Ctrl+d/u: page | h: left | ?: help | a: back | q: quit",
                     self.connection_label, action, focus_label
                 ),
             }
@@ -618,7 +626,7 @@ impl<'a> AdminApp<'a> {
         }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
+            KeyCode::Char('q') | KeyCode::Char('a') | KeyCode::Esc => return Ok(true),
             KeyCode::Char('?') => {
                 self.show_help = !self.show_help;
                 return Ok(false);
@@ -647,6 +655,23 @@ impl<'a> AdminApp<'a> {
                     return Ok(false);
                 }
                 match key.code {
+                    KeyCode::Char('e') => {
+                        self.focus = AdminFocus::Detail;
+                        self.input_mode = if self.use_raw_params {
+                            AdminInputMode::EditingRaw
+                        } else {
+                            AdminInputMode::EditingField
+                        };
+                    }
+                    KeyCode::Char('r') => {
+                        self.use_raw_params = !self.use_raw_params;
+                        self.focus = AdminFocus::Detail;
+                        self.input_mode = if self.use_raw_params {
+                            AdminInputMode::EditingRaw
+                        } else {
+                            AdminInputMode::Normal
+                        };
+                    }
                     KeyCode::Char('/') => {
                         self.resources.search_focused = true;
                         if self.resources.search.is_none() {
@@ -662,21 +687,27 @@ impl<'a> AdminApp<'a> {
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         self.resources.move_up();
+                        self.sync_target_from_resource();
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
                         self.resources.move_down();
+                        self.sync_target_from_resource();
                     }
                     KeyCode::Char('g') => {
                         self.resources.move_top();
+                        self.sync_target_from_resource();
                     }
                     KeyCode::Char('G') => {
                         self.resources.move_bottom();
+                        self.sync_target_from_resource();
                     }
                     KeyCode::Char('d') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                         self.resources.page_down();
+                        self.sync_target_from_resource();
                     }
                     KeyCode::Char('u') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                         self.resources.page_up();
+                        self.sync_target_from_resource();
                     }
                     KeyCode::Enter => {
                         self.apply_resource_selection()?;
@@ -685,10 +716,6 @@ impl<'a> AdminApp<'a> {
                 }
             }
             AdminFocus::Detail => match key.code {
-                KeyCode::Char('t') => {
-                    self.target = self.target.next();
-                    self.reset_form();
-                }
                 KeyCode::Char('e') => {
                     self.input_mode = if self.use_raw_params {
                         AdminInputMode::EditingRaw
@@ -890,9 +917,17 @@ impl<'a> AdminApp<'a> {
             return Ok(());
         };
         if !entry.selectable {
+            if let Some(target) = target_for_resource(&entry) {
+                self.ensure_target(target);
+            }
             return Ok(());
         }
         match entry.kind {
+            ResourceKind::Section(section) => {
+                if let Some(target) = section.target() {
+                    self.ensure_target(target);
+                }
+            }
             ResourceKind::Table { name } => {
                 self.ensure_target(AdminTarget::Sql);
                 if self.set_field_value("table", &name, false).is_none() {
@@ -938,9 +973,18 @@ impl<'a> AdminApp<'a> {
                     ));
                 }
             }
-            ResourceKind::Section | ResourceKind::Info => {}
+            ResourceKind::Info => {}
         }
         Ok(())
+    }
+
+    fn sync_target_from_resource(&mut self) {
+        let Some(entry) = self.resources.selected_entry() else {
+            return;
+        };
+        if let Some(target) = target_for_resource(&entry) {
+            self.ensure_target(target);
+        }
     }
 
     fn ensure_target(&mut self, target: AdminTarget) {
@@ -1040,7 +1084,7 @@ struct ResourceEntry {
 
 #[derive(Debug, Clone)]
 enum ResourceKind {
-    Section,
+    Section(ResourceSection),
     Table { name: String },
     Column { table: String, name: String },
     KvKey { key: String },
@@ -1055,6 +1099,35 @@ struct ResourceTree {
     search: Option<String>,
     search_focused: bool,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ResourceSection {
+    SqlTables,
+    ColumnarSegments,
+    KvKeys,
+}
+
+impl ResourceSection {
+    fn target(self) -> Option<AdminTarget> {
+        match self {
+            ResourceSection::SqlTables => Some(AdminTarget::Sql),
+            ResourceSection::ColumnarSegments => Some(AdminTarget::Columnar),
+            ResourceSection::KvKeys => Some(AdminTarget::Kv),
+        }
+    }
+}
+
+fn target_for_resource(entry: &ResourceEntry) -> Option<AdminTarget> {
+    match entry.kind {
+        ResourceKind::Section(section) => section.target(),
+        ResourceKind::Table { .. } | ResourceKind::Column { .. } => Some(AdminTarget::Sql),
+        ResourceKind::KvKey { .. } => Some(AdminTarget::Kv),
+        ResourceKind::ColumnarSegment { .. } | ResourceKind::ColumnarColumn { .. } => {
+            Some(AdminTarget::Columnar)
+        }
+        ResourceKind::Info => None,
+    }
 }
 
 impl ResourceTree {
@@ -1551,7 +1624,7 @@ fn load_sql_resources(backend: &AdminBackend<'_>) -> Result<Vec<ResourceEntry>> 
     let mut entries = Vec::new();
     entries.push(ResourceEntry {
         label: "SQL Tables".to_string(),
-        kind: ResourceKind::Section,
+        kind: ResourceKind::Section(ResourceSection::SqlTables),
         depth: 0,
         selectable: false,
     });
@@ -1568,13 +1641,20 @@ fn load_sql_resources(backend: &AdminBackend<'_>) -> Result<Vec<ResourceEntry>> 
         Ok(tables) => tables,
         Err(alopex_embedded::Error::CatalogNotFound(_))
         | Err(alopex_embedded::Error::NamespaceNotFound(_, _)) => {
-            entries.push(ResourceEntry {
-                label: "No SQL catalog found yet. Run a SQL statement to initialize.".to_string(),
-                kind: ResourceKind::Info,
-                depth: 1,
-                selectable: false,
-            });
-            return Ok(entries);
+            let _ = db.create_catalog(CreateCatalogRequest::new("default"));
+            let _ = db.create_namespace(CreateNamespaceRequest::new("default", "default"));
+            match db.list_tables_simple() {
+                Ok(tables) => tables,
+                Err(err) => {
+                    entries.push(ResourceEntry {
+                        label: format!("SQL catalog unavailable: {err}"),
+                        kind: ResourceKind::Info,
+                        depth: 1,
+                        selectable: false,
+                    });
+                    return Ok(entries);
+                }
+            }
         }
         Err(err) => return Err(err.into()),
     };
@@ -1607,7 +1687,7 @@ fn load_columnar_resources(backend: &AdminBackend<'_>) -> Result<Vec<ResourceEnt
     let mut entries = Vec::new();
     entries.push(ResourceEntry {
         label: "Columnar Segments".to_string(),
-        kind: ResourceKind::Section,
+        kind: ResourceKind::Section(ResourceSection::ColumnarSegments),
         depth: 0,
         selectable: false,
     });
@@ -1656,14 +1736,26 @@ fn load_kv_resources(backend: &AdminBackend<'_>) -> Result<Vec<ResourceEntry>> {
     let mut entries = Vec::new();
     entries.push(ResourceEntry {
         label: "KV Keys".to_string(),
-        kind: ResourceKind::Section,
+        kind: ResourceKind::Section(ResourceSection::KvKeys),
         depth: 0,
         selectable: false,
     });
+    let system_prefixes = [
+        "__catalog__/",
+        "hnsw:",
+        "__alopex_",
+        "__alopex:",
+        "vector:",
+        "columnar:",
+    ];
     let command = AdminCommand::Kv(KvCommand::List { prefix: None });
     let capture = capture_admin_command(backend, command, Some(RESOURCE_LIMIT))?;
     let keys = extract_column_values(&capture.columns, &capture.rows, "key");
-    for key in keys {
+    for key in keys.into_iter().filter(|key| {
+        !system_prefixes.iter().any(|prefix| key.starts_with(prefix))
+            && !key.trim().is_empty()
+            && !key.chars().any(|ch| ch.is_control())
+    }) {
         entries.push(ResourceEntry {
             label: key.clone(),
             kind: ResourceKind::KvKey { key },
@@ -1779,23 +1871,6 @@ pub enum AdminTarget {
 }
 
 impl AdminTarget {
-    const ORDER: [AdminTarget; 5] = [
-        AdminTarget::Sql,
-        AdminTarget::Kv,
-        AdminTarget::Vector,
-        AdminTarget::Hnsw,
-        AdminTarget::Columnar,
-    ];
-
-    fn next(self) -> Self {
-        let index = Self::ORDER
-            .iter()
-            .position(|target| *target == self)
-            .unwrap_or(0);
-        let next = (index + 1) % Self::ORDER.len();
-        Self::ORDER[next]
-    }
-
     fn label(self) -> &'static str {
         match self {
             AdminTarget::Sql => "SQL",
@@ -2343,11 +2418,10 @@ fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
 
     let lines = [
         "h/l or Left/Right: move focus",
-        "Menu: j/k move, / search, Enter select, R refresh",
-        "Input: Up/Down action, Tab field, e edit, o list, Enter execute",
+        "Menu: j/k move, / search, e edit, r raw, Enter select, R refresh",
+        "Input: Up/Down action, Tab field, e edit, o list, r raw, Enter execute",
         "Data: j/k scroll",
-        "t: change target",
-        "r: toggle raw params",
+        "a: back",
         "?: toggle help",
         "q/Esc: quit",
     ]
@@ -2705,7 +2779,7 @@ mod tests {
         let entries = vec![
             ResourceEntry {
                 label: "SQL Tables".to_string(),
-                kind: ResourceKind::Section,
+                kind: ResourceKind::Section(ResourceSection::SqlTables),
                 depth: 0,
                 selectable: false,
             },
@@ -2801,7 +2875,7 @@ mod tests {
             entries: vec![
                 ResourceEntry {
                     label: "SQL Tables".to_string(),
-                    kind: ResourceKind::Section,
+                    kind: ResourceKind::Section(ResourceSection::SqlTables),
                     depth: 0,
                     selectable: false,
                 },

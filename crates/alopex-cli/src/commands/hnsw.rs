@@ -91,11 +91,14 @@ pub fn execute_tui(
     data_dir: Option<PathBuf>,
 ) -> Result<()> {
     let connection_label = connection_label.into();
+    let context_message = Some(hnsw_command_context(&cmd));
     let admin_label = connection_label.clone();
     let admin_data_dir = data_dir.clone();
-    let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> = Some(Box::new(move || {
+    let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> = Some(Box::new(move || {
+        let connection_label = admin_label.clone();
+        let data_dir = admin_data_dir.clone();
         crate::tui::admin::run_admin_ui(AdminContext {
-            connection_label: admin_label,
+            connection_label,
             auth: AuthCapabilities::full(),
             backend: AdminBackend::Local {
                 db,
@@ -103,7 +106,7 @@ pub fn execute_tui(
                 output_format,
                 limit,
                 quiet,
-                data_dir: admin_data_dir,
+                data_dir,
             },
             initial_target: Some(AdminTarget::Hnsw),
         })
@@ -119,8 +122,10 @@ pub fn execute_tui(
         columns,
         collector.rows(),
         connection_label,
+        context_message,
         true,
         warning,
+        output_format,
         admin_launcher,
     )
 }
@@ -148,14 +153,16 @@ pub async fn execute_remote_with_formatter<W: Write>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_remote_tui<'a>(
     client: &HttpClient,
     cmd: &HnswCommand,
     columns: Vec<Column>,
+    output_format: OutputFormat,
     limit: Option<usize>,
     quiet: bool,
     connection_label: impl Into<String>,
-    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
 ) -> Result<()> {
     let collector = RowCollector::new();
     let formatter = Box::new(collector.formatter());
@@ -166,8 +173,10 @@ pub async fn execute_remote_tui<'a>(
         columns,
         collector.rows(),
         connection_label,
+        Some(hnsw_command_context(cmd)),
         true,
         warning,
+        output_format,
         admin_launcher,
     )
 }
@@ -312,6 +321,17 @@ fn map_client_error(err: ClientError) -> crate::error::CliError {
         ClientError::HttpStatus { status, body } => crate::error::CliError::InvalidArgument(
             format!("Server error: HTTP {} - {}", status.as_u16(), body),
         ),
+    }
+}
+
+fn hnsw_command_context(cmd: &HnswCommand) -> String {
+    match cmd {
+        HnswCommand::Create { name, dim, metric } => format!(
+            "hnsw create {name} --dim {dim} --metric {}",
+            metric_to_string(*metric)
+        ),
+        HnswCommand::Stats { name } => format!("hnsw stats {name}"),
+        HnswCommand::Drop { name } => format!("hnsw drop {name}"),
     }
 }
 

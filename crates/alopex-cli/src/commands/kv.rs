@@ -137,11 +137,14 @@ pub fn execute_tui(
     data_dir: Option<PathBuf>,
 ) -> Result<()> {
     let connection_label = connection_label.into();
+    let context_message = Some(kv_command_context(&cmd));
     let admin_label = connection_label.clone();
     let admin_data_dir = data_dir.clone();
-    let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> = Some(Box::new(move || {
+    let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> = Some(Box::new(move || {
+        let connection_label = admin_label.clone();
+        let data_dir = admin_data_dir.clone();
         crate::tui::admin::run_admin_ui(AdminContext {
-            connection_label: admin_label,
+            connection_label,
             auth: AuthCapabilities::full(),
             backend: AdminBackend::Local {
                 db,
@@ -149,7 +152,7 @@ pub fn execute_tui(
                 output_format,
                 limit,
                 quiet,
-                data_dir: admin_data_dir,
+                data_dir,
             },
             initial_target: Some(AdminTarget::Kv),
         })
@@ -165,8 +168,10 @@ pub fn execute_tui(
         columns,
         collector.rows(),
         connection_label,
+        context_message,
         true,
         warning,
+        output_format,
         admin_launcher,
     )
 }
@@ -279,14 +284,16 @@ pub async fn execute_remote_with_formatter<W: Write>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_remote_tui<'a>(
     client: &HttpClient,
     cmd: &KvCommand,
     columns: Vec<Column>,
+    output_format: OutputFormat,
     limit: Option<usize>,
     quiet: bool,
     connection_label: impl Into<String>,
-    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
 ) -> Result<()> {
     let collector = RowCollector::new();
     let formatter = Box::new(collector.formatter());
@@ -297,8 +304,10 @@ pub async fn execute_remote_tui<'a>(
         columns,
         collector.rows(),
         connection_label,
+        Some(kv_command_context(cmd)),
         true,
         warning,
+        output_format,
         admin_launcher,
     )
 }
@@ -448,6 +457,35 @@ fn map_client_error(err: ClientError) -> CliError {
         ClientError::HttpStatus { status, body } => {
             CliError::InvalidArgument(format!("Server error: HTTP {} - {}", status.as_u16(), body))
         }
+    }
+}
+
+fn kv_command_context(cmd: &KvCommand) -> String {
+    match cmd {
+        KvCommand::Get { key } => format!("kv get {key}"),
+        KvCommand::Put { key, .. } => format!("kv put {key}"),
+        KvCommand::Delete { key } => format!("kv delete {key}"),
+        KvCommand::List { prefix } => match prefix {
+            Some(prefix) => format!("kv list --prefix {prefix}"),
+            None => "kv list".to_string(),
+        },
+        KvCommand::Txn(command) => match command {
+            KvTxnCommand::Begin { timeout_secs } => match timeout_secs {
+                Some(secs) => format!("kv txn begin --timeout-secs {secs}"),
+                None => "kv txn begin".to_string(),
+            },
+            KvTxnCommand::Get { key, txn_id } => {
+                format!("kv txn get {key} --txn-id {txn_id}")
+            }
+            KvTxnCommand::Put { key, txn_id, .. } => {
+                format!("kv txn put {key} --txn-id {txn_id}")
+            }
+            KvTxnCommand::Delete { key, txn_id } => {
+                format!("kv txn delete {key} --txn-id {txn_id}")
+            }
+            KvTxnCommand::Commit { txn_id } => format!("kv txn commit --txn-id {txn_id}"),
+            KvTxnCommand::Rollback { txn_id } => format!("kv txn rollback --txn-id {txn_id}"),
+        },
     }
 }
 

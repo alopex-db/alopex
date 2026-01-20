@@ -98,11 +98,14 @@ pub fn execute_tui(
     data_dir: Option<PathBuf>,
 ) -> Result<()> {
     let connection_label = connection_label.into();
+    let context_message = Some(vector_command_context(&cmd));
     let admin_label = connection_label.clone();
     let admin_data_dir = data_dir.clone();
-    let admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>> = Some(Box::new(move || {
+    let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> = Some(Box::new(move || {
+        let connection_label = admin_label.clone();
+        let data_dir = admin_data_dir.clone();
         crate::tui::admin::run_admin_ui(AdminContext {
-            connection_label: admin_label,
+            connection_label,
             auth: AuthCapabilities::full(),
             backend: AdminBackend::Local {
                 db,
@@ -110,7 +113,7 @@ pub fn execute_tui(
                 output_format,
                 limit,
                 quiet,
-                data_dir: admin_data_dir,
+                data_dir,
             },
             initial_target: Some(AdminTarget::Vector),
         })
@@ -126,8 +129,10 @@ pub fn execute_tui(
         columns,
         collector.rows(),
         connection_label,
+        context_message,
         true,
         warning,
+        output_format,
         admin_launcher,
     )
 }
@@ -169,10 +174,11 @@ pub async fn execute_remote_tui<'a>(
     cmd: &VectorCommand,
     batch_mode: &BatchMode,
     columns: Vec<Column>,
+    output_format: OutputFormat,
     limit: Option<usize>,
     quiet: bool,
     connection_label: impl Into<String>,
-    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
 ) -> Result<()> {
     let collector = RowCollector::new();
     let formatter = Box::new(collector.formatter());
@@ -184,8 +190,10 @@ pub async fn execute_remote_tui<'a>(
         columns,
         collector.rows(),
         connection_label,
+        Some(vector_command_context(cmd)),
         true,
         warning,
+        output_format,
         admin_launcher,
     )
 }
@@ -335,6 +343,18 @@ fn map_client_error(err: ClientError) -> CliError {
         ClientError::Auth(err) => CliError::InvalidArgument(err.to_string()),
         ClientError::HttpStatus { status, body } => {
             CliError::InvalidArgument(format!("Server error: HTTP {} - {}", status.as_u16(), body))
+        }
+    }
+}
+
+fn vector_command_context(cmd: &VectorCommand) -> String {
+    match cmd {
+        VectorCommand::Search { index, k, .. } => format!("vector search --index {index} -k {k}"),
+        VectorCommand::Upsert { index, key, .. } => {
+            format!("vector upsert --index {index} --key {key}")
+        }
+        VectorCommand::Delete { index, key } => {
+            format!("vector delete --index {index} --key {key}")
         }
     }
 }

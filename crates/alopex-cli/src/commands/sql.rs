@@ -26,7 +26,7 @@ pub struct SqlExecutionOptions<'a> {
     pub quiet: bool,
     pub cancel: &'a CancelSignal,
     pub deadline: &'a Deadline,
-    pub admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+    pub admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
 }
 
 /// Execute a SQL command with dynamic column detection.
@@ -50,7 +50,7 @@ pub fn execute_with_formatter<'a, W: Write>(
     ui_mode: UiMode,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
-    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
     limit: Option<usize>,
     quiet: bool,
 ) -> Result<()> {
@@ -116,7 +116,7 @@ pub async fn execute_remote_with_formatter<'a, W: Write>(
     ui_mode: UiMode,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
-    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
     limit: Option<usize>,
     quiet: bool,
 ) -> Result<()> {
@@ -135,6 +135,17 @@ pub async fn execute_remote_with_formatter<'a, W: Write>(
         client, cmd, batch_mode, ui_mode, writer, formatter, options,
     )
     .await
+}
+
+fn sql_context_message(sql: &str) -> String {
+    let condensed = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let max_len = 200;
+    if condensed.chars().count() > max_len {
+        let truncated: String = condensed.chars().take(max_len).collect();
+        format!("SQL: {truncated}...")
+    } else {
+        format!("SQL: {condensed}")
+    }
 }
 
 #[doc(hidden)]
@@ -270,7 +281,7 @@ fn execute_tui_local<'a>(
     db: &Database,
     sql: &str,
     options: &SqlExecutionOptions<'a>,
-    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
 ) -> Result<()> {
     use alopex_sql::ExecutionResult;
 
@@ -313,7 +324,9 @@ fn execute_tui_local<'a>(
         }
     };
 
-    let app = TuiApp::new(columns, rows, "local", false).with_admin_launcher(admin_launcher);
+    let app = TuiApp::new(columns, rows, "local", false)
+        .with_context_message(Some(sql_context_message(sql)))
+        .with_admin_launcher(admin_launcher);
     app.run()
 }
 
@@ -350,13 +363,15 @@ async fn execute_tui_remote<'a>(
     sql: &str,
     cmd: &SqlCommand,
     options: &SqlExecutionOptions<'a>,
-    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
 ) -> Result<()> {
     if is_select_query(sql)? {
         let (columns, rows) =
             collect_remote_streaming_rows(client, sql, options, cmd.fetch_size, cmd.max_rows)
                 .await?;
-        let app = TuiApp::new(columns, rows, "server", false).with_admin_launcher(admin_launcher);
+        let app = TuiApp::new(columns, rows, "server", false)
+            .with_context_message(Some(sql_context_message(sql)))
+            .with_admin_launcher(admin_launcher);
         return app.run();
     }
 
@@ -411,7 +426,9 @@ async fn execute_tui_remote<'a>(
         (columns, rows)
     };
 
-    let app = TuiApp::new(columns, rows, "server", false).with_admin_launcher(admin_launcher);
+    let app = TuiApp::new(columns, rows, "server", false)
+        .with_context_message(Some(sql_context_message(sql)))
+        .with_admin_launcher(admin_launcher);
     app.run()
 }
 

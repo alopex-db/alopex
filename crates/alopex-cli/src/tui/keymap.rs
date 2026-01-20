@@ -65,8 +65,8 @@ pub fn action_for_key(event: KeyEvent, search_active: bool) -> Option<Action> {
     }
 }
 
-pub fn help_items() -> Vec<(&'static str, &'static str)> {
-    vec![
+pub fn help_items(admin_available: bool) -> Vec<(&'static str, &'static str)> {
+    let mut items = vec![
         ("q", "Quit"),
         ("Esc", "Quit"),
         ("?", "Toggle help"),
@@ -77,6 +77,9 @@ pub fn help_items() -> Vec<(&'static str, &'static str)> {
         ("Ctrl+d/u", "Page down/up"),
         ("Enter", "Toggle detail"),
         ("J/K", "Scroll detail"),
-        ("a", "Admin console"),
-    ]
+    ];
+    if admin_available {
+        items.push(("a", "Admin console (toggle)"));
+    }
+    items
 }

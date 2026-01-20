@@ -4,7 +4,7 @@ use std::io::Write;
 
 use serde::Deserialize;
 
-use crate::cli::{CompactionCommand, ServerCommand};
+use crate::cli::{CompactionCommand, OutputFormat, ServerCommand};
 use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, Row};
@@ -134,7 +134,8 @@ pub async fn execute_remote_tui(
     cmd: &ServerCommand,
     quiet: bool,
     connection_label: impl Into<String>,
-    admin_launcher: Option<Box<dyn FnOnce() -> Result<()> + '_>>,
+    output_format: OutputFormat,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>>,
 ) -> Result<()> {
     match cmd {
         ServerCommand::Status => {
@@ -154,8 +155,10 @@ pub async fn execute_remote_tui(
                     response.queries_per_second,
                 )],
                 connection_label,
+                Some(server_command_context(cmd)),
                 true,
                 None,
+                output_format,
                 admin_launcher,
             )
         }
@@ -177,8 +180,10 @@ pub async fn execute_remote_tui(
                     response.active_connections,
                 )],
                 connection_label,
+                Some(server_command_context(cmd)),
                 true,
                 None,
+                output_format,
                 admin_launcher,
             )
         }
@@ -197,8 +202,10 @@ pub async fn execute_remote_tui(
                     response.message.as_deref(),
                 )],
                 connection_label,
+                Some(server_command_context(cmd)),
                 true,
                 None,
+                output_format,
                 admin_launcher,
             )
         }
@@ -219,12 +226,23 @@ pub async fn execute_remote_tui(
                         response.message.as_deref(),
                     )],
                     connection_label,
+                    Some(server_command_context(cmd)),
                     true,
                     None,
+                    output_format,
                     admin_launcher,
                 )
             }
         },
+    }
+}
+
+fn server_command_context(cmd: &ServerCommand) -> String {
+    match cmd {
+        ServerCommand::Status => "server status".to_string(),
+        ServerCommand::Metrics => "server metrics".to_string(),
+        ServerCommand::Health => "server health".to_string(),
+        ServerCommand::Compaction { .. } => "server compaction trigger".to_string(),
     }
 }
 
