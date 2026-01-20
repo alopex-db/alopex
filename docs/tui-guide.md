@@ -87,9 +87,21 @@ Run the CLI without a subcommand to open the admin console:
 alopex
 ```
 
-Use arrow keys to select targets and actions, `Enter` to execute, `t` to switch
-targets, and `e` to edit parameters. Lifecycle actions (archive/restore/backup/export)
-live in the Lifecycle panel and require server permissions.
+The admin console uses a rainfrog-style layout:
+
+- Left: resource tree + search
+- Right top: detail/input (actions + parameters)
+- Right bottom: status/preview
+
+Focus and keybindings:
+
+- `h` / `l` or ←/→: move focus between Table/Detail/Status
+- Table: `j`/`k` move, `/` search, `g`/`G` top/bottom, `Ctrl+d`/`Ctrl+u` page, `Enter` select
+- Detail: `Tab` field, `e` edit, `o` list options, `Enter` execute
+- Status: `j`/`k` scroll, `g`/`G` top/bottom, `Ctrl+d`/`Ctrl+u` page
+
+Lifecycle actions (archive/restore/backup/export) appear in the Actions list and
+respect server permissions.
 
 ## Examples
 

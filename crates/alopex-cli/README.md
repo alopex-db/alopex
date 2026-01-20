@@ -92,9 +92,21 @@ You can also open the admin console scoped to a target by omitting its subcomman
 alopex server
 ```
 
-Use arrow keys to choose a target/action, `Enter` to execute, `t` to change target,
-and `e` to edit parameters. Lifecycle actions (archive/restore/backup/export) are
-available in the Lifecycle panel when permitted by server auth.
+The admin console uses a three-pane layout inspired by rainfrog:
+
+- Left: resource tree with search (tables, columns, segments, KV keys)
+- Right top: detail/input panel (actions + parameters)
+- Right bottom: status/preview panel
+
+Focus controls:
+
+- `h` / `l` or ←/→: move focus between Table/Detail/Status
+- Table: `j`/`k` move, `/` search, `g`/`G` top/bottom, `Ctrl+d`/`Ctrl+u` page, `Enter` select
+- Detail: `Tab` field, `e` edit, `o` list options, `Enter` execute
+- Status: `j`/`k` scroll, `g`/`G` top/bottom, `Ctrl+d`/`Ctrl+u` page
+
+Lifecycle actions (archive/restore/backup/export) live in the Actions list and
+respect server auth capabilities.
 
 ## Profiles and server connections
 
