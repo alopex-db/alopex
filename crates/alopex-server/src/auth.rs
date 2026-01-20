@@ -67,6 +67,10 @@ impl AuthMiddleware {
             }
         }
     }
+
+    pub fn mode(&self) -> &AuthMode {
+        &self.mode
+    }
 }
 
 fn extract_api_key(headers: &HeaderMap) -> Option<String> {

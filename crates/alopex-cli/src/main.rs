@@ -19,12 +19,14 @@ mod ui;
 mod uri;
 mod version;
 
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
 use clap_complete::{generate, Shell};
+use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 
 use batch::BatchMode;
@@ -37,6 +39,7 @@ use output::create_formatter;
 use profile::config::{AuthType, ConnectionType, ServerConfig};
 use profile::{execute_profile_command, execute_profile_tui, ProfileManager, ResolvedConfig};
 use streaming::StreamingWriter;
+use tui::admin::actions::AdminAction;
 use tui::admin::{AdminBackend, AdminContext, AuthCapabilities};
 use ui::mode::{resolve_ui_mode, UiMode};
 use uri::{validate_s3_credentials, StorageUri};
@@ -162,10 +165,20 @@ fn run(cli: Cli) -> Result<()> {
                                                 "Missing server config".to_string(),
                                             )
                                         })?;
-                                    let auth = auth_capabilities_from_server(server_config);
                                     let client = HttpClient::new(server_config).map_err(|err| {
                                         CliError::ServerConnection(err.to_string())
                                     })?;
+                                    let runtime =
+                                        tokio::runtime::Runtime::new().map_err(|err| {
+                                            CliError::InvalidArgument(format!(
+                                                "Failed to start async runtime: {err}"
+                                            ))
+                                        })?;
+                                    let auth = auth_capabilities_from_server(
+                                        &client,
+                                        server_config,
+                                        &runtime,
+                                    );
                                     tui::admin::run_admin_ui(AdminContext {
                                         connection_label: "server".to_string(),
                                         auth,
@@ -241,9 +254,12 @@ fn run(cli: Cli) -> Result<()> {
                 let server_config = resolved.server.as_ref().ok_or_else(|| {
                     CliError::InvalidArgument("Missing server config".to_string())
                 })?;
-                let auth = auth_capabilities_from_server(server_config);
                 let client = HttpClient::new(server_config)
                     .map_err(|err| CliError::ServerConnection(err.to_string()))?;
+                let runtime = tokio::runtime::Runtime::new().map_err(|err| {
+                    CliError::InvalidArgument(format!("Failed to start async runtime: {err}"))
+                })?;
+                let auth = auth_capabilities_from_server(&client, server_config, &runtime);
                 let context = AdminContext {
                     connection_label: "server".to_string(),
                     auth,
@@ -544,7 +560,7 @@ fn execute_server_command(
     })?;
     let client = HttpClient::new(server_config)
         .map_err(|err| CliError::ServerConnection(err.to_string()))?;
-    let auth = auth_capabilities_from_server(server_config);
+    let auth = auth_capabilities_from_server(&client, server_config, &runtime);
 
     match command {
         Command::Kv { command: kv_cmd } => {
@@ -921,7 +937,13 @@ fn execute_server_command(
             };
             let stdout = io::stdout();
             let mut handle = stdout.lock();
-            commands::lifecycle::execute(command, data_dir, &mut handle, output_format)
+            let formatter = create_formatter(output_format);
+            runtime.block_on(commands::lifecycle::execute_remote_with_formatter(
+                &client,
+                command,
+                &mut handle,
+                formatter,
+            ))
         }
         Command::Profile { .. } | Command::Version | Command::Completions { .. } => Err(
             CliError::InvalidArgument("Command is not available in server mode".to_string()),
@@ -929,12 +951,79 @@ fn execute_server_command(
     }
 }
 
-fn auth_capabilities_from_server(server_config: &ServerConfig) -> AuthCapabilities {
+#[derive(Deserialize)]
+struct AdminCapabilitiesResponse {
+    scope: String,
+    allowed_actions: Vec<String>,
+}
+
+fn auth_capabilities_from_server(
+    client: &HttpClient,
+    server_config: &ServerConfig,
+    runtime: &tokio::runtime::Runtime,
+) -> AuthCapabilities {
+    runtime
+        .block_on(fetch_auth_capabilities(client))
+        .unwrap_or_else(|_| auth_capabilities_from_config(server_config))
+}
+
+fn auth_capabilities_from_config(server_config: &ServerConfig) -> AuthCapabilities {
     let auth_type = server_config.auth.unwrap_or(AuthType::None);
     if auth_type == AuthType::None {
         AuthCapabilities::full()
     } else {
         AuthCapabilities::restricted_all()
+    }
+}
+
+async fn fetch_auth_capabilities(client: &HttpClient) -> Result<AuthCapabilities> {
+    let response: AdminCapabilitiesResponse = client
+        .get_json("api/admin/capabilities")
+        .await
+        .map_err(map_client_error)?;
+
+    if response.scope == "full" {
+        return Ok(AuthCapabilities::full());
+    }
+
+    let mut allowed_actions = HashSet::new();
+    for action in response.allowed_actions {
+        if let Some(action) = admin_action_from_str(&action) {
+            allowed_actions.insert(action);
+        }
+    }
+    if allowed_actions.is_empty() {
+        return Ok(AuthCapabilities::restricted_all());
+    }
+    Ok(AuthCapabilities::restricted(allowed_actions))
+}
+
+fn admin_action_from_str(action: &str) -> Option<AdminAction> {
+    match action.to_lowercase().as_str() {
+        "read" => Some(AdminAction::Read),
+        "create" => Some(AdminAction::Create),
+        "update" => Some(AdminAction::Update),
+        "delete" => Some(AdminAction::Delete),
+        "archive" => Some(AdminAction::Archive),
+        "restore" => Some(AdminAction::Restore),
+        "backup" => Some(AdminAction::Backup),
+        "export" => Some(AdminAction::Export),
+        _ => None,
+    }
+}
+
+fn map_client_error(err: client::http::ClientError) -> CliError {
+    use client::http::ClientError;
+    match err {
+        ClientError::Request { source, .. } => {
+            CliError::ServerConnection(format!("request failed: {source}"))
+        }
+        ClientError::InvalidUrl(message) => CliError::InvalidArgument(message),
+        ClientError::Build(message) => CliError::InvalidArgument(message),
+        ClientError::Auth(err) => CliError::InvalidArgument(err.to_string()),
+        ClientError::HttpStatus { status, body } => {
+            CliError::ServerConnection(format!("server error {status}: {body}"))
+        }
     }
 }
 

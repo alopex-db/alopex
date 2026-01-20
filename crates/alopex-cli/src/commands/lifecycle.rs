@@ -6,9 +6,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::{LifecycleCommand, OutputFormat};
+use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::{create_formatter, Formatter};
+use serde::{Deserialize, Serialize};
 
 pub fn execute_with_formatter<W: Write>(
     command: &LifecycleCommand,
@@ -32,6 +34,46 @@ pub fn execute_with_formatter<W: Write>(
     formatter.write_footer(writer)
 }
 
+#[derive(Serialize)]
+struct RemoteLifecycleRequest {
+    action: String,
+}
+
+#[derive(Deserialize)]
+struct RemoteLifecycleResponse {
+    status: String,
+    message: String,
+}
+
+pub async fn execute_remote_with_formatter<W: Write>(
+    client: &HttpClient,
+    command: &LifecycleCommand,
+    writer: &mut W,
+    mut formatter: Box<dyn Formatter>,
+) -> Result<()> {
+    let request = RemoteLifecycleRequest {
+        action: command_label(command).to_string(),
+    };
+    let response: RemoteLifecycleResponse = client
+        .post_json("api/admin/lifecycle", &request)
+        .await
+        .map_err(map_client_error)?;
+
+    let columns = vec![
+        Column::new("Status", DataType::Text),
+        Column::new("Message", DataType::Text),
+    ];
+    let rows = vec![Row::new(vec![
+        Value::Text(response.status),
+        Value::Text(response.message),
+    ])];
+    formatter.write_header(writer, &columns)?;
+    for row in &rows {
+        formatter.write_row(writer, row)?;
+    }
+    formatter.write_footer(writer)
+}
+
 pub fn execute<W: Write>(
     command: &LifecycleCommand,
     data_dir: Option<&Path>,
@@ -40,6 +82,29 @@ pub fn execute<W: Write>(
 ) -> Result<()> {
     let formatter = create_formatter(output);
     execute_with_formatter(command, data_dir, writer, formatter)
+}
+
+fn command_label(command: &LifecycleCommand) -> &'static str {
+    match command {
+        LifecycleCommand::Archive => "archive",
+        LifecycleCommand::Restore => "restore",
+        LifecycleCommand::Backup => "backup",
+        LifecycleCommand::Export => "export",
+    }
+}
+
+fn map_client_error(err: ClientError) -> CliError {
+    match err {
+        ClientError::Request { source, .. } => {
+            CliError::ServerConnection(format!("request failed: {source}"))
+        }
+        ClientError::InvalidUrl(message) => CliError::InvalidArgument(message),
+        ClientError::Build(message) => CliError::InvalidArgument(message),
+        ClientError::Auth(err) => CliError::InvalidArgument(err.to_string()),
+        ClientError::HttpStatus { status, body } => {
+            CliError::ServerConnection(format!("server error {status}: {body}"))
+        }
+    }
 }
 
 fn perform_lifecycle_action(command: &LifecycleCommand, data_dir: Option<&Path>) -> Result<String> {

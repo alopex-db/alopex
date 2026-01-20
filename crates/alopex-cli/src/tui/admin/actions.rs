@@ -326,7 +326,7 @@ pub async fn execute_remote_action<W: Write>(
             }
         }
         AdminCommand::Lifecycle(cmd) => {
-            lifecycle::execute_with_formatter(&cmd, request.data_dir.as_deref(), writer, formatter)
+            lifecycle::execute_remote_with_formatter(client, &cmd, writer, formatter).await
         }
     }
 }
