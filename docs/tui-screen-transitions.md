@@ -63,6 +63,8 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
+│ Command (optional)                                                  │
+├─────────────────────────────────────────────────────────────────────┤
 │                          Results                                    │
 ├─────────────────────────────────────────────────────────────────────┤
 │  #  │ id  │ name    │ created_at           │ status   │ ...        │
@@ -165,8 +167,8 @@ Search Mode 遷移:
 │ │                      │  │ Browse or query data across databases,       │ │
 │ └──────────────────────┘  │ tables, and indexes.                         │ │
 │                           │                                              │ │
-│                           │ Target: SQL (press t to change)              │ │
-│                           │ Input: guided fields (Tab to move, e to edit)│ │
+│                           │ Target: SQL                                   │ │
+│                           │ Input: guided fields (Tab to move, e edit, o list, r raw)│ │
 │                           │ > Query *: SELECT * FROM users               │ │
 │                           │   Table: users                               │ │
 │                           │   Columns: id,name,email                     │ │
@@ -206,10 +208,12 @@ Search Mode 遷移:
               ┌───────────┐       ┌───────────┐     ┌───────────┐
               │ j/k: 移動 │       │ j/k: action│     │ j/k: scroll│
               │ /: 検索   │       │ Tab: field │     │ g/G: top/  │
-              │ Enter:選択│       │ e: edit    │     │     bottom │
-              │ R: refresh│       │ o: list    │     │ Ctrl+d/u:  │
-              │ g/G: 先頭/│       │ t: target  │     │     page   │
-              │     末尾  │       │ Enter: exec│     │            │
+              │ e: edit   │       │ e: edit    │     │     bottom │
+              │ r: raw    │       │ o: list    │     │ Ctrl+d/u:  │
+              │ Enter:選択│       │ r: raw     │     │     page   │
+              │ R: refresh│       │ Enter: exec│     │            │
+              │ g/G: 先頭/│       │            │     │     page   │
+              │     末尾  │       │            │     │            │
               └───────────┘       └───────────┘     └───────────┘
 ```
 
@@ -223,7 +227,7 @@ Search Mode 遷移:
                                     │
           ┌─────────────────────────┼─────────────────────────┐
           │                         │                         │
-          │ e (raw mode)            │ e (guided mode)         │ o
+          │ r (raw mode)            │ e (edit field)          │ o
           ▼                         ▼                         ▼
 ┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
 │  EditingRaw     │       │  EditingField   │       │ Selection       │
@@ -241,32 +245,14 @@ Search Mode 遷移:
                            └─────────────────┘
 ```
 
-### ターゲット切り替え
+### ターゲット同期
+
+Resources の選択に応じてターゲットが自動で切り替わります。
 
 ```
-                    ┌───────────┐
-            ┌──────►│    SQL    │◄─────┐
-            │       └─────┬─────┘      │
-            │             │ t          │
-            │             ▼            │
-            │       ┌───────────┐      │
-            │       │    KV     │      │
-            │       └─────┬─────┘      │
-            │             │ t          │
-    t (cycle)             ▼            │ t (cycle)
-            │       ┌───────────┐      │
-            │       │  Vector   │      │
-            │       └─────┬─────┘      │
-            │             │ t          │
-            │             ▼            │
-            │       ┌───────────┐      │
-            │       │   HNSW    │      │
-            │       └─────┬─────┘      │
-            │             │ t          │
-            │             ▼            │
-            │       ┌───────────┐      │
-            └───────│ Columnar  │──────┘
-                    └───────────┘
+SQL Tables/Columns  -> Target: SQL
+KV Keys             -> Target: KV
+Columnar Segments   -> Target: Columnar
 ```
 
 ## Results TUI から Admin TUI への遷移
