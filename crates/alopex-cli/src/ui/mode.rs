@@ -60,10 +60,6 @@ pub fn resolve_ui_mode(
     let mut warnings = Vec::new();
     let explicit_tui = command_requests_tui(command);
 
-    if explicit_tui && !batch_mode.is_tty {
-        warnings.push(UiModeWarning::TuiRequiresTty);
-    }
-
     if cli.output_is_explicit() {
         if explicit_tui {
             warnings.push(UiModeWarning::TuiDisabledByOutput);
@@ -78,6 +74,9 @@ pub fn resolve_ui_mode(
     if batch_mode.is_batch {
         if explicit_tui {
             warnings.push(UiModeWarning::TuiDisabledByBatch);
+            if !batch_mode.is_tty {
+                warnings.push(UiModeWarning::TuiRequiresTty);
+            }
         } else if !batch_mode.is_tty {
             warnings.push(UiModeWarning::TuiDisabledByNonTty);
         }
@@ -89,6 +88,14 @@ pub fn resolve_ui_mode(
     }
 
     if explicit_tui {
+        if !batch_mode.is_tty {
+            warnings.push(UiModeWarning::TuiRequiresTty);
+            return UiModeResolution {
+                mode: UiMode::Batch,
+                source: UiModeSource::BatchMode,
+                warnings,
+            };
+        }
         return UiModeResolution {
             mode: UiMode::Tui,
             source: UiModeSource::Explicit,
@@ -131,29 +138,25 @@ mod tests {
     }
 
     #[test]
-    fn output_format_forces_batch() {
-        let cli = parse_cli(&["alopex", "--output", "json", "sql", "--tui", "SELECT 1"]);
+    fn output_format_forces_batch_without_explicit_tui() {
+        let cli = parse_cli(&["alopex", "--output", "json", "kv", "list"]);
         let batch_mode = BatchMode::detect_with(&cli, true, None);
         let resolution = resolve_ui_mode(&cli, cli.command.as_ref(), &batch_mode);
 
         assert_eq!(resolution.mode, UiMode::Batch);
         assert_eq!(resolution.source, UiModeSource::OutputFormat);
-        assert!(resolution
-            .warnings
-            .contains(&UiModeWarning::TuiDisabledByOutput));
+        assert!(resolution.warnings.is_empty());
     }
 
     #[test]
-    fn batch_forces_batch_with_tui_warning() {
-        let cli = parse_cli(&["alopex", "--batch", "sql", "--tui", "SELECT 1"]);
+    fn batch_forces_batch() {
+        let cli = parse_cli(&["alopex", "--batch", "sql", "SELECT 1"]);
         let batch_mode = BatchMode::detect_with(&cli, true, None);
         let resolution = resolve_ui_mode(&cli, cli.command.as_ref(), &batch_mode);
 
         assert_eq!(resolution.mode, UiMode::Batch);
         assert_eq!(resolution.source, UiModeSource::BatchMode);
-        assert!(resolution
-            .warnings
-            .contains(&UiModeWarning::TuiDisabledByBatch));
+        assert!(resolution.warnings.is_empty());
     }
 
     #[test]
@@ -165,6 +168,19 @@ mod tests {
         assert_eq!(resolution.mode, UiMode::Batch);
         assert_eq!(resolution.source, UiModeSource::BatchMode);
         assert!(resolution.warnings.contains(&UiModeWarning::TuiRequiresTty));
+    }
+
+    #[test]
+    fn output_explicit_overrides_tui() {
+        let cli = parse_cli(&["alopex", "--output", "json", "sql", "--tui", "SELECT 1"]);
+        let batch_mode = BatchMode::detect_with(&cli, true, None);
+        let resolution = resolve_ui_mode(&cli, cli.command.as_ref(), &batch_mode);
+
+        assert_eq!(resolution.mode, UiMode::Batch);
+        assert_eq!(resolution.source, UiModeSource::OutputFormat);
+        assert!(resolution
+            .warnings
+            .contains(&UiModeWarning::TuiDisabledByOutput));
     }
 
     #[test]
