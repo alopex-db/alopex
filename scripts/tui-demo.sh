@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/home/roomtv/works/alopex-db/alopex"
+ROOT="$(pwd)"
 DATA_DIR="$(mktemp -d)"
 COLUMNAR_FILE="$DATA_DIR/columnar.csv"
 trap 'rm -rf "$DATA_DIR"' EXIT
