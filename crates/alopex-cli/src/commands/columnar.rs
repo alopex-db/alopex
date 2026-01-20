@@ -32,7 +32,7 @@ use crate::output::formatter::Formatter;
 use crate::output::RowCollector;
 use crate::progress::ProgressIndicator;
 use crate::streaming::{StreamingWriter, WriteStatus};
-use crate::tui::admin::{AdminBackend, AdminContext, AuthCapabilities};
+use crate::tui::admin::{AdminBackend, AdminContext, AdminTarget, AuthCapabilities};
 use crate::tui::renderer::render_output;
 
 #[derive(Debug, Serialize)]
@@ -224,6 +224,7 @@ pub fn execute_tui(
                 quiet,
                 data_dir: admin_data_dir,
             },
+            initial_target: Some(AdminTarget::Columnar),
         })
     }));
     let columns = columnar_command_columns(&cmd);

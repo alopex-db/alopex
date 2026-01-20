@@ -16,7 +16,7 @@ use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
 use crate::output::RowCollector;
 use crate::streaming::StreamingWriter;
-use crate::tui::admin::{AdminBackend, AdminContext, AuthCapabilities};
+use crate::tui::admin::{AdminBackend, AdminContext, AdminTarget, AuthCapabilities};
 use crate::tui::renderer::render_output;
 
 /// Default M parameter (max connections per node)
@@ -105,6 +105,7 @@ pub fn execute_tui(
                 quiet,
                 data_dir: admin_data_dir,
             },
+            initial_target: Some(AdminTarget::Hnsw),
         })
     }));
     let collector = RowCollector::new();

@@ -17,7 +17,7 @@ use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
 use crate::output::RowCollector;
 use crate::streaming::{StreamingWriter, WriteStatus};
-use crate::tui::admin::{AdminBackend, AdminContext, AuthCapabilities};
+use crate::tui::admin::{AdminBackend, AdminContext, AdminTarget, AuthCapabilities};
 use crate::tui::renderer::render_output;
 
 const DEFAULT_TXN_TIMEOUT_SECS: u64 = 60;
@@ -151,6 +151,7 @@ pub fn execute_tui(
                 quiet,
                 data_dir: admin_data_dir,
             },
+            initial_target: Some(AdminTarget::Kv),
         })
     }));
     let collector = RowCollector::new();

@@ -101,7 +101,15 @@ struct AdminApp<'a> {
     last_result: Option<AdminResult>,
     target: AdminTarget,
     params: String,
-    editing_params: bool,
+    form_fields: Vec<AdminFormField>,
+    active_field: usize,
+    use_raw_params: bool,
+    input_mode: AdminInputMode,
+    last_action: Option<AdminAction>,
+    selection: Option<SelectionOverlay>,
+    focus: AdminFocus,
+    resources: ResourceTree,
+    preview_scroll: usize,
 }
 
 impl<'a> AdminApp<'a> {
@@ -109,11 +117,18 @@ impl<'a> AdminApp<'a> {
         connection_label: impl Into<String>,
         auth: AuthCapabilities,
         backend: AdminBackend<'a>,
+        initial_target: Option<AdminTarget>,
     ) -> Self {
         let mut items = default_items();
         for item in &mut items {
             item.enabled = auth.allows(item.action);
         }
+        let target = initial_target.unwrap_or(AdminTarget::Sql);
+        let selected_action = items.first().map(|item| item.action);
+        let form_fields = selected_action
+            .map(|action| build_form_fields(target, action))
+            .unwrap_or_default();
+        let resources = ResourceTree::new(&backend);
         Self {
             items,
             selected: 0,
@@ -121,9 +136,17 @@ impl<'a> AdminApp<'a> {
             connection_label: connection_label.into(),
             backend,
             last_result: None,
-            target: AdminTarget::Sql,
+            target,
             params: String::new(),
-            editing_params: false,
+            form_fields,
+            active_field: 0,
+            use_raw_params: false,
+            input_mode: AdminInputMode::Normal,
+            last_action: selected_action,
+            selection: None,
+            focus: AdminFocus::Table,
+            resources,
+            preview_scroll: 0,
         }
     }
 
@@ -174,21 +197,30 @@ impl<'a> AdminApp<'a> {
             .constraints([Constraint::Min(5), Constraint::Length(3)])
             .split(area);
 
-        let main_chunks = Layout::default()
+        let root_layout = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(26), Constraint::Min(10)])
+            .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
             .split(chunks[0]);
 
-        self.render_nav(frame, main_chunks[0]);
-        self.render_detail(frame, main_chunks[1]);
+        let right_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(root_layout[1]);
+
+        self.render_resources(frame, root_layout[0]);
+        self.render_input(frame, right_layout[0]);
+        self.render_preview(frame, right_layout[1]);
         self.render_status(frame, chunks[1]);
 
         if self.show_help {
             render_help(frame, area);
         }
+        if let Some(selection) = &self.selection {
+            render_selection_overlay(frame, area, selection);
+        }
     }
 
-    fn render_nav(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+    fn render_action_list(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
         let items = self
             .items
             .iter()
@@ -206,7 +238,12 @@ impl<'a> AdminApp<'a> {
         state.select(Some(self.selected));
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("Lifecycle"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Actions")
+                    .border_style(self.focus_style(AdminFocus::Detail)),
+            )
             .highlight_style(
                 Style::default()
                     .bg(Color::Blue)
@@ -218,7 +255,15 @@ impl<'a> AdminApp<'a> {
         frame.render_stateful_widget(list, area, &mut state);
     }
 
-    fn render_detail(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+    fn render_input(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(10), Constraint::Min(6)])
+            .split(area);
+
+        self.render_action_list(frame, layout[0]);
+
+        let detail_area = layout[1];
         let selected = self.items.get(self.selected);
         let mut lines = Vec::new();
         if let Some(item) = selected {
@@ -233,17 +278,48 @@ impl<'a> AdminApp<'a> {
                 "Target: {} (press t to change)",
                 self.target.label()
             )));
-            if self.editing_params {
-                lines.push(Line::from("Params: editing (Enter to finish)"));
-            } else if self.params.is_empty() {
-                lines.push(Line::from(
-                    "Params: <empty> (press e to edit, key=value ...)",
-                ));
+            if self.use_raw_params {
+                lines.push(Line::from("Input: raw parameters (press r to switch)"));
+                let line = if self.params.is_empty() {
+                    "Params: <empty> (press e to edit)".to_string()
+                } else {
+                    format!("Params: {}", self.params)
+                };
+                lines.push(Line::from(line));
+                if let Some(example) = self.target.example_for(item.action) {
+                    lines.push(Line::from(format!("Example: {example}")));
+                }
             } else {
-                lines.push(Line::from(format!("Params: {}", self.params)));
-            }
-            if let Some(example) = self.target.example_for(item.action) {
-                lines.push(Line::from(format!("Example: {example}")));
+                lines.push(Line::from(
+                    "Input: guided fields (Tab to move, e to edit, o to list)",
+                ));
+                for (idx, field) in self.form_fields.iter().enumerate() {
+                    let marker = if idx == self.active_field { ">" } else { " " };
+                    let value = if field.value.is_empty() {
+                        Span::styled(
+                            field.placeholder.to_string(),
+                            Style::default().fg(Color::DarkGray),
+                        )
+                    } else {
+                        Span::raw(field.value.clone())
+                    };
+                    let required = if field.required { " *" } else { "" };
+                    let list_hint = if field.list_source.is_some() {
+                        Span::styled(" (o)", Style::default().fg(Color::Blue))
+                    } else {
+                        Span::raw("")
+                    };
+                    lines.push(Line::from(vec![
+                        Span::raw(format!("{marker} ")),
+                        Span::styled(
+                            format!("{}{}", field.label, required),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(": "),
+                        value,
+                        list_hint,
+                    ]));
+                }
             }
             lines.push(Line::from(""));
             if !item.enabled {
@@ -263,12 +339,140 @@ impl<'a> AdminApp<'a> {
                 )));
             }
         }
+        let paragraph = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Detail")
+                    .border_style(self.focus_style(AdminFocus::Detail)),
+            )
+            .wrap(Wrap { trim: true });
+        frame.render_widget(paragraph, detail_area);
+    }
+
+    fn focus_style(&self, focus: AdminFocus) -> Style {
+        if self.focus == focus {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default()
+        }
+    }
+
+    fn preview_line_count(&self) -> usize {
+        let mut lines = Vec::new();
         if let Some(result) = &self.last_result {
             append_result_lines(&mut lines, result);
+        } else {
+            lines.push(Line::from("No results yet."));
+        }
+        lines.len()
+    }
+
+    fn render_resources(&mut self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+        self.resources.ensure_selection_in_range();
+        let layout = if self.resources.search.is_some() {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(3)])
+                .split(area)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3)])
+                .split(area)
+        };
+
+        if let Some(search) = self.resources.search.as_ref() {
+            let search_text = format!("/ {search}");
+            let style = if self.resources.search_focused {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            frame.render_widget(
+                Paragraph::new(search_text)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Resources")
+                            .border_style(self.focus_style(AdminFocus::Table)),
+                    )
+                    .style(style),
+                layout[0],
+            );
         }
 
-        let paragraph = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title("Action"))
+        let list_area = if layout.len() == 1 {
+            layout[0]
+        } else {
+            layout[1]
+        };
+        let entries = self.resources.filtered_entries();
+        let items = if entries.is_empty() {
+            vec![ListItem::new(Line::from("No resources found."))]
+        } else {
+            entries
+                .iter()
+                .map(|entry| {
+                    let indent = "  ".repeat(entry.depth);
+                    let mut line = format!("{indent}{}", entry.label);
+                    if !entry.selectable {
+                        line = line.to_string();
+                    }
+                    let style = if entry.selectable {
+                        Style::default()
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    ListItem::new(Line::from(Span::styled(line, style)))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut state = ListState::default();
+        state.select(Some(self.resources.selected));
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(if self.resources.search.is_some() {
+                        ""
+                    } else {
+                        "Resources"
+                    })
+                    .border_style(self.focus_style(AdminFocus::Table)),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Blue)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("> ");
+
+        frame.render_stateful_widget(list, list_area, &mut state);
+    }
+
+    fn render_preview(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+        let mut lines = Vec::new();
+        if let Some(result) = &self.last_result {
+            append_result_lines(&mut lines, result);
+        } else {
+            lines.push(Line::from("No results yet."));
+        }
+
+        let height = area.height.saturating_sub(2) as usize;
+        let start = self.preview_scroll.min(lines.len());
+        let end = (start + height).min(lines.len());
+        let view = lines[start..end].to_vec();
+
+        let paragraph = Paragraph::new(view)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Status")
+                    .border_style(self.focus_style(AdminFocus::Status)),
+            )
             .wrap(Wrap { trim: true });
         frame.render_widget(paragraph, area);
     }
@@ -279,21 +483,46 @@ impl<'a> AdminApp<'a> {
             .get(self.selected)
             .map(|item| item.title)
             .unwrap_or("-");
+        let focus_label = match self.focus {
+            AdminFocus::Table => "Table",
+            AdminFocus::Detail => "Detail",
+            AdminFocus::Status => "Status",
+        };
         let status_text = if self.show_help {
             format!(
-                "Connection: {} | Action: {} | Help: press ? to close",
-                self.connection_label, action
+                "Connection: {} | Action: {} | Focus: {} | Help: press ? to close",
+                self.connection_label, action, focus_label
             )
-        } else if self.editing_params {
+        } else if self.selection.is_some() {
             format!(
-                "Connection: {} | Action: {} | Editing params | Enter: done | Esc: cancel",
-                self.connection_label, action
+                "Connection: {} | Action: {} | Focus: {} | Selecting option | Enter: choose | /: search | Esc: cancel",
+                self.connection_label, action, focus_label
+            )
+        } else if self.input_mode == AdminInputMode::EditingField {
+            format!(
+                "Connection: {} | Action: {} | Focus: {} | Editing field | Enter: done | Esc: cancel",
+                self.connection_label, action, focus_label
+            )
+        } else if self.input_mode == AdminInputMode::EditingRaw {
+            format!(
+                "Connection: {} | Action: {} | Focus: {} | Editing raw params | Enter: done | Esc: cancel",
+                self.connection_label, action, focus_label
             )
         } else {
-            format!(
-                "Connection: {} | Action: {} | Up/Down: navigate | Enter: execute | t: target | e: edit params | ?: help | q: quit",
-                self.connection_label, action
-            )
+            match self.focus {
+                AdminFocus::Table => format!(
+                    "Connection: {} | Action: {} | Focus: {} | j/k: move | g/G: top/bottom | Ctrl+d/u: page | /: search | Enter: select | l: focus right | R: refresh | ?: help | q: quit",
+                    self.connection_label, action, focus_label
+                ),
+                AdminFocus::Detail => format!(
+                    "Connection: {} | Action: {} | Focus: {} | Up/Down: action | Tab: field | e: edit | o: list | r: raw | Enter: execute | h: left | l: right | ?: help | q: quit",
+                    self.connection_label, action, focus_label
+                ),
+                AdminFocus::Status => format!(
+                    "Connection: {} | Action: {} | Focus: {} | j/k: scroll | g/G: top/bottom | Ctrl+d/u: page | h: left | ?: help | q: quit",
+                    self.connection_label, action, focus_label
+                ),
+            }
         };
 
         let paragraph = Paragraph::new(status_text)
@@ -304,50 +533,226 @@ impl<'a> AdminApp<'a> {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
-        if self.editing_params {
+        if let Some(selection) = &mut self.selection {
+            if selection.search_focused {
+                match key.code {
+                    KeyCode::Esc => selection.reset_search(),
+                    KeyCode::Enter => selection.search_focused = false,
+                    KeyCode::Backspace => selection.pop_search(),
+                    KeyCode::Char(ch) => selection.push_search(ch),
+                    _ => {}
+                }
+                return Ok(false);
+            }
             match key.code {
                 KeyCode::Esc => {
-                    self.editing_params = false;
+                    self.selection = None;
                 }
                 KeyCode::Enter => {
-                    self.editing_params = false;
+                    if let Some(value) = selection.selected_value() {
+                        if let Some(field) = self.form_fields.get_mut(selection.field_index) {
+                            field.value = value;
+                        }
+                    }
+                    self.selection = None;
                 }
-                KeyCode::Backspace => {
-                    self.params.pop();
+                KeyCode::Char('/') => {
+                    selection.search_focused = true;
                 }
-                KeyCode::Char(ch) => {
-                    self.params.push(ch);
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selection.move_up();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    selection.move_down();
+                }
+                KeyCode::Char('g') => {
+                    selection.move_top();
+                }
+                KeyCode::Char('G') => {
+                    selection.move_bottom();
                 }
                 _ => {}
             }
             return Ok(false);
+        }
+        match self.input_mode {
+            AdminInputMode::EditingField => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter => {
+                        self.input_mode = AdminInputMode::Normal;
+                    }
+                    KeyCode::Backspace => {
+                        if let Some(field) = self.form_fields.get_mut(self.active_field) {
+                            field.value.pop();
+                        }
+                    }
+                    KeyCode::Char(ch) => {
+                        if let Some(field) = self.form_fields.get_mut(self.active_field) {
+                            field.value.push(ch);
+                        }
+                    }
+                    _ => {}
+                }
+                return Ok(false);
+            }
+            AdminInputMode::EditingRaw => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter => {
+                        self.input_mode = AdminInputMode::Normal;
+                    }
+                    KeyCode::Backspace => {
+                        self.params.pop();
+                    }
+                    KeyCode::Char(ch) => {
+                        self.params.push(ch);
+                    }
+                    _ => {}
+                }
+                return Ok(false);
+            }
+            AdminInputMode::Normal => {}
         }
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
             KeyCode::Char('?') => {
                 self.show_help = !self.show_help;
+                return Ok(false);
             }
-            KeyCode::Char('t') => {
-                self.target = self.target.next();
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.focus = self.focus_left();
+                return Ok(false);
             }
-            KeyCode::Char('e') => {
-                self.editing_params = true;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.selected + 1 < self.items.len() {
-                    self.selected += 1;
-                }
-            }
-            KeyCode::Enter => {
-                self.execute_selected_action()?;
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.focus = self.focus_right();
+                return Ok(false);
             }
             _ => {}
+        }
+
+        match self.focus {
+            AdminFocus::Table => {
+                if self.resources.search_focused {
+                    match key.code {
+                        KeyCode::Esc => self.resources.reset_search(),
+                        KeyCode::Enter => self.resources.search_focused = false,
+                        KeyCode::Backspace => self.resources.pop_search(),
+                        KeyCode::Char(ch) => self.resources.push_search(ch),
+                        _ => {}
+                    }
+                    return Ok(false);
+                }
+                match key.code {
+                    KeyCode::Char('/') => {
+                        self.resources.search_focused = true;
+                        if self.resources.search.is_none() {
+                            self.resources.search = Some(String::new());
+                        }
+                    }
+                    KeyCode::Char('R') => {
+                        self.resources.reload(&self.backend);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.resources.move_up();
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.resources.move_down();
+                    }
+                    KeyCode::Char('g') => {
+                        self.resources.move_top();
+                    }
+                    KeyCode::Char('G') => {
+                        self.resources.move_bottom();
+                    }
+                    KeyCode::Char('d') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                        self.resources.page_down();
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                        self.resources.page_up();
+                    }
+                    KeyCode::Enter => {
+                        self.apply_resource_selection()?;
+                    }
+                    _ => {}
+                }
+            }
+            AdminFocus::Detail => match key.code {
+                KeyCode::Char('t') => {
+                    self.target = self.target.next();
+                    self.reset_form();
+                }
+                KeyCode::Char('e') => {
+                    self.input_mode = if self.use_raw_params {
+                        AdminInputMode::EditingRaw
+                    } else {
+                        AdminInputMode::EditingField
+                    };
+                }
+                KeyCode::Char('r') => {
+                    self.use_raw_params = !self.use_raw_params;
+                    self.input_mode = if self.use_raw_params {
+                        AdminInputMode::EditingRaw
+                    } else {
+                        AdminInputMode::Normal
+                    };
+                }
+                KeyCode::Char('o') => {
+                    self.open_selection_for_active_field()?;
+                }
+                KeyCode::Tab => {
+                    if !self.use_raw_params && !self.form_fields.is_empty() {
+                        self.active_field = (self.active_field + 1) % self.form_fields.len();
+                    }
+                }
+                KeyCode::BackTab => {
+                    if !self.use_raw_params && !self.form_fields.is_empty() {
+                        if self.active_field == 0 {
+                            self.active_field = self.form_fields.len() - 1;
+                        } else {
+                            self.active_field -= 1;
+                        }
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.selected > 0 {
+                        self.selected -= 1;
+                        self.refresh_form_for_selection();
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.selected + 1 < self.items.len() {
+                        self.selected += 1;
+                        self.refresh_form_for_selection();
+                    }
+                }
+                KeyCode::Enter => {
+                    self.execute_selected_action()?;
+                }
+                _ => {}
+            },
+            AdminFocus::Status => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.preview_scroll = self.preview_scroll.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let max = self.preview_line_count().saturating_sub(1);
+                    self.preview_scroll = (self.preview_scroll + 1).min(max);
+                }
+                KeyCode::Char('g') => {
+                    self.preview_scroll = 0;
+                }
+                KeyCode::Char('G') => {
+                    self.preview_scroll = self.preview_line_count().saturating_sub(1);
+                }
+                KeyCode::Char('d') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                    self.preview_scroll =
+                        (self.preview_scroll + 5).min(self.preview_line_count().saturating_sub(1));
+                }
+                KeyCode::Char('u') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                    self.preview_scroll = self.preview_scroll.saturating_sub(5);
+                }
+                _ => {}
+            },
         }
         Ok(false)
     }
@@ -364,7 +769,15 @@ impl<'a> AdminApp<'a> {
             return Ok(());
         }
 
-        let params = parse_params(&self.params);
+        let params = if self.use_raw_params {
+            parse_params(&self.params)
+        } else {
+            build_params_from_fields(&self.form_fields)
+        };
+        if let Err(message) = validate_params(item.action, self.target, &params) {
+            self.last_result = Some(AdminResult::status(message));
+            return Ok(());
+        }
         let command = match build_command_for(item.action, self.target, &params) {
             Ok(Some(command)) => command,
             Ok(None) => {
@@ -425,12 +838,923 @@ impl<'a> AdminApp<'a> {
         }
 
         self.last_result = Some(result_state);
+        self.preview_scroll = 0;
+        Ok(())
+    }
+
+    fn refresh_form_for_selection(&mut self) {
+        let action = self.items.get(self.selected).map(|item| item.action);
+        if action != self.last_action {
+            self.last_action = action;
+            self.reset_form();
+        }
+    }
+
+    fn reset_form(&mut self) {
+        if let Some(action) = self.items.get(self.selected).map(|item| item.action) {
+            self.form_fields = build_form_fields(self.target, action);
+            self.active_field = 0;
+            self.input_mode = AdminInputMode::Normal;
+            self.use_raw_params = false;
+            self.last_action = Some(action);
+            self.selection = None;
+        }
+    }
+
+    fn focus_left(&self) -> AdminFocus {
+        match self.focus {
+            AdminFocus::Table => AdminFocus::Table,
+            AdminFocus::Detail => AdminFocus::Table,
+            AdminFocus::Status => AdminFocus::Detail,
+        }
+    }
+
+    fn focus_right(&self) -> AdminFocus {
+        match self.focus {
+            AdminFocus::Table => AdminFocus::Detail,
+            AdminFocus::Detail => AdminFocus::Status,
+            AdminFocus::Status => AdminFocus::Status,
+        }
+    }
+
+    fn apply_resource_selection(&mut self) -> Result<()> {
+        let Some(entry) = self.resources.selected_entry() else {
+            return Ok(());
+        };
+        if !entry.selectable {
+            return Ok(());
+        }
+        match entry.kind {
+            ResourceKind::Table { name } => {
+                self.ensure_target(AdminTarget::Sql);
+                if self.set_field_value("table", &name, false).is_none() {
+                    let query = format!("SELECT * FROM {name}");
+                    if self.set_field_value("query", &query, false).is_none() {
+                        self.last_result = Some(AdminResult::status(
+                            "No matching field for table.".to_string(),
+                        ));
+                    }
+                }
+            }
+            ResourceKind::Column { table, name } => {
+                self.ensure_target(AdminTarget::Sql);
+                let _ = self.set_field_value("table", &table, false);
+                if self.set_field_value("columns", &name, true).is_none() {
+                    self.last_result = Some(AdminResult::status(
+                        "No matching field for column.".to_string(),
+                    ));
+                }
+            }
+            ResourceKind::KvKey { key } => {
+                self.ensure_target(AdminTarget::Kv);
+                if self.set_field_value("key", &key, false).is_none() {
+                    self.last_result = Some(AdminResult::status(
+                        "No matching field for key.".to_string(),
+                    ));
+                }
+            }
+            ResourceKind::ColumnarSegment { id } => {
+                self.ensure_target(AdminTarget::Columnar);
+                if self.set_field_value("segment", &id, false).is_none() {
+                    self.last_result = Some(AdminResult::status(
+                        "No matching field for segment.".to_string(),
+                    ));
+                }
+            }
+            ResourceKind::ColumnarColumn { segment_id, name } => {
+                self.ensure_target(AdminTarget::Columnar);
+                let _ = self.set_field_value("segment", &segment_id, false);
+                if self.set_field_value("column", &name, false).is_none() {
+                    self.last_result = Some(AdminResult::status(
+                        "No matching field for column.".to_string(),
+                    ));
+                }
+            }
+            ResourceKind::Section | ResourceKind::Info => {}
+        }
+        Ok(())
+    }
+
+    fn ensure_target(&mut self, target: AdminTarget) {
+        if self.target != target {
+            self.target = target;
+            self.reset_form();
+        }
+    }
+
+    fn set_field_value(&mut self, key: &str, value: &str, append: bool) -> Option<()> {
+        for (idx, field) in self.form_fields.iter_mut().enumerate() {
+            if field.key.eq_ignore_ascii_case(key) {
+                if append && !field.value.trim().is_empty() {
+                    field.value = format!("{},{}", field.value.trim(), value);
+                } else {
+                    field.value = value.to_string();
+                }
+                self.active_field = idx;
+                return Some(());
+            }
+        }
+        None
+    }
+
+    fn open_selection_for_active_field(&mut self) -> Result<()> {
+        if self.use_raw_params {
+            self.last_result = Some(AdminResult::status(
+                "List selection is unavailable while using raw params.".to_string(),
+            ));
+            return Ok(());
+        }
+        let Some(field) = self.form_fields.get(self.active_field) else {
+            return Ok(());
+        };
+        let Some(source) = field.list_source else {
+            self.last_result = Some(AdminResult::status(
+                "No list is available for this field.".to_string(),
+            ));
+            return Ok(());
+        };
+        let items = load_list_options(&self.backend, &self.form_fields, source)?;
+        if items.is_empty() {
+            self.last_result = Some(AdminResult::status(
+                "No matching resources were found.".to_string(),
+            ));
+            return Ok(());
+        }
+        self.selection = Some(SelectionOverlay::new(
+            format!("Select {}", field.label),
+            items,
+            self.active_field,
+        ));
         Ok(())
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AdminTarget {
+enum AdminInputMode {
+    Normal,
+    EditingField,
+    EditingRaw,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdminFocus {
+    Table,
+    Detail,
+    Status,
+}
+
+#[derive(Debug, Clone)]
+struct AdminFormField {
+    key: &'static str,
+    label: &'static str,
+    value: String,
+    placeholder: &'static str,
+    required: bool,
+    list_source: Option<ListSource>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ListSource {
+    KvKeys,
+    SqlTables,
+    SqlColumns,
+    ColumnarSegments,
+    ColumnarColumns,
+}
+
+#[derive(Debug, Clone)]
+struct ResourceEntry {
+    label: String,
+    kind: ResourceKind,
+    depth: usize,
+    selectable: bool,
+}
+
+#[derive(Debug, Clone)]
+enum ResourceKind {
+    Section,
+    Table { name: String },
+    Column { table: String, name: String },
+    KvKey { key: String },
+    ColumnarSegment { id: String },
+    ColumnarColumn { segment_id: String, name: String },
+    Info,
+}
+
+struct ResourceTree {
+    entries: Vec<ResourceEntry>,
+    selected: usize,
+    search: Option<String>,
+    search_focused: bool,
+}
+
+impl ResourceTree {
+    fn new(backend: &AdminBackend<'_>) -> Self {
+        let entries = load_resource_entries(backend).unwrap_or_else(|err| {
+            vec![ResourceEntry {
+                label: format!("Error: {err}"),
+                kind: ResourceKind::Info,
+                depth: 0,
+                selectable: false,
+            }]
+        });
+        Self {
+            entries,
+            selected: 0,
+            search: None,
+            search_focused: false,
+        }
+    }
+
+    fn reload(&mut self, backend: &AdminBackend<'_>) {
+        match load_resource_entries(backend) {
+            Ok(entries) => {
+                self.entries = entries;
+                self.selected = 0;
+            }
+            Err(err) => {
+                self.entries = vec![ResourceEntry {
+                    label: format!("Error: {err}"),
+                    kind: ResourceKind::Info,
+                    depth: 0,
+                    selectable: false,
+                }];
+                self.selected = 0;
+            }
+        }
+    }
+
+    fn search_term(&self) -> Option<&str> {
+        self.search
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    fn filtered_indices(&self) -> Vec<usize> {
+        let Some(term) = self.search_term() else {
+            return (0..self.entries.len()).collect();
+        };
+        let term = term.to_lowercase();
+        let mut include = vec![false; self.entries.len()];
+        for (idx, entry) in self.entries.iter().enumerate() {
+            if entry.label.to_lowercase().contains(&term) {
+                include[idx] = true;
+                let mut depth = entry.depth;
+                if depth == 0 {
+                    continue;
+                }
+                for parent_idx in (0..idx).rev() {
+                    let parent = &self.entries[parent_idx];
+                    if parent.depth < depth {
+                        include[parent_idx] = true;
+                        depth = parent.depth;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        include
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, keep)| if *keep { Some(idx) } else { None })
+            .collect()
+    }
+
+    fn filtered_entries(&self) -> Vec<ResourceEntry> {
+        let indices = self.filtered_indices();
+        indices
+            .iter()
+            .filter_map(|idx| self.entries.get(*idx))
+            .cloned()
+            .collect()
+    }
+
+    fn selected_entry(&self) -> Option<ResourceEntry> {
+        let indices = self.filtered_indices();
+        let idx = indices.get(self.selected).copied()?;
+        self.entries.get(idx).cloned()
+    }
+
+    fn ensure_selection_in_range(&mut self) {
+        let len = self.filtered_indices().len();
+        if len == 0 {
+            self.selected = 0;
+        } else if self.selected >= len {
+            self.selected = len - 1;
+        }
+    }
+
+    fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+
+    fn move_down(&mut self) {
+        let len = self.filtered_indices().len();
+        if self.selected + 1 < len {
+            self.selected += 1;
+        }
+    }
+
+    fn move_top(&mut self) {
+        self.selected = 0;
+    }
+
+    fn move_bottom(&mut self) {
+        let len = self.filtered_indices().len();
+        if len > 0 {
+            self.selected = len - 1;
+        }
+    }
+
+    fn page_down(&mut self) {
+        let len = self.filtered_indices().len();
+        if len == 0 {
+            return;
+        }
+        self.selected = (self.selected + 5).min(len - 1);
+    }
+
+    fn page_up(&mut self) {
+        self.selected = self.selected.saturating_sub(5);
+    }
+
+    fn push_search(&mut self, ch: char) {
+        let search = self.search.get_or_insert_with(String::new);
+        search.push(ch);
+        self.ensure_selection_in_range();
+    }
+
+    fn pop_search(&mut self) {
+        if let Some(search) = self.search.as_mut() {
+            if !search.is_empty() {
+                search.pop();
+            } else {
+                self.reset_search();
+            }
+        }
+        self.ensure_selection_in_range();
+    }
+
+    fn reset_search(&mut self) {
+        self.search = None;
+        self.search_focused = false;
+        self.selected = 0;
+    }
+}
+
+fn build_form_fields(target: AdminTarget, action: AdminAction) -> Vec<AdminFormField> {
+    match (target, action) {
+        (AdminTarget::Sql, AdminAction::Read) => vec![
+            form_field("query", "Query", "", "SELECT * FROM table", false),
+            form_field_with_list(
+                "table",
+                "Table",
+                "",
+                "mytable",
+                false,
+                Some(ListSource::SqlTables),
+            ),
+            form_field_with_list(
+                "columns",
+                "Columns",
+                "",
+                "col1,col2",
+                false,
+                Some(ListSource::SqlColumns),
+            ),
+        ],
+        (AdminTarget::Sql, _) => vec![form_field(
+            "query",
+            "Query",
+            "",
+            "SELECT * FROM table",
+            true,
+        )],
+        (AdminTarget::Kv, AdminAction::Read) => vec![
+            form_field_with_list("key", "Key", "", "mykey", false, Some(ListSource::KvKeys)),
+            form_field("prefix", "Prefix", "", "app/", false),
+        ],
+        (AdminTarget::Kv, AdminAction::Create | AdminAction::Update) => vec![
+            form_field_with_list("key", "Key", "", "mykey", true, Some(ListSource::KvKeys)),
+            form_field("value", "Value", "", "hello", true),
+        ],
+        (AdminTarget::Kv, AdminAction::Delete) => vec![form_field_with_list(
+            "key",
+            "Key",
+            "",
+            "mykey",
+            true,
+            Some(ListSource::KvKeys),
+        )],
+        (AdminTarget::Vector, AdminAction::Read) => vec![
+            form_field("index", "Index", "", "myindex", true),
+            form_field("query", "Query", "", "[0.1, 0.2]", true),
+            form_field("k", "Top K", "10", "10", false),
+        ],
+        (AdminTarget::Vector, AdminAction::Create | AdminAction::Update) => vec![
+            form_field("index", "Index", "", "myindex", true),
+            form_field("key", "Key", "", "item1", true),
+            form_field("vector", "Vector", "", "[0.1, 0.2]", true),
+        ],
+        (AdminTarget::Vector, AdminAction::Delete) => vec![
+            form_field("index", "Index", "", "myindex", true),
+            form_field("key", "Key", "", "item1", true),
+        ],
+        (AdminTarget::Hnsw, AdminAction::Read) => {
+            vec![form_field("name", "Index", "", "myindex", true)]
+        }
+        (AdminTarget::Hnsw, AdminAction::Create) => vec![
+            form_field("name", "Index", "", "myindex", true),
+            form_field("dim", "Dimensions", "", "128", true),
+            form_field("metric", "Metric", "cosine", "cosine", false),
+        ],
+        (AdminTarget::Hnsw, AdminAction::Delete) => {
+            vec![form_field("name", "Index", "", "myindex", true)]
+        }
+        (AdminTarget::Columnar, AdminAction::Read) => vec![
+            form_field("mode", "Mode", "list", "list|scan|stats|index_list", true),
+            form_field_with_list(
+                "segment",
+                "Segment",
+                "",
+                "segment_id",
+                false,
+                Some(ListSource::ColumnarSegments),
+            ),
+        ],
+        (AdminTarget::Columnar, AdminAction::Create) => vec![
+            form_field("file", "File", "", "data.csv", false),
+            form_field_with_list(
+                "table",
+                "Table",
+                "",
+                "mytable",
+                false,
+                Some(ListSource::SqlTables),
+            ),
+            form_field_with_list(
+                "segment",
+                "Segment",
+                "",
+                "segment_id",
+                false,
+                Some(ListSource::ColumnarSegments),
+            ),
+            form_field_with_list(
+                "column",
+                "Column",
+                "",
+                "column_name",
+                false,
+                Some(ListSource::ColumnarColumns),
+            ),
+            form_field("index_type", "Index Type", "", "minmax", false),
+        ],
+        (AdminTarget::Columnar, AdminAction::Delete) => vec![
+            form_field_with_list(
+                "segment",
+                "Segment",
+                "",
+                "segment_id",
+                true,
+                Some(ListSource::ColumnarSegments),
+            ),
+            form_field_with_list(
+                "column",
+                "Column",
+                "",
+                "column_name",
+                true,
+                Some(ListSource::ColumnarColumns),
+            ),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn form_field(
+    key: &'static str,
+    label: &'static str,
+    value: &str,
+    placeholder: &'static str,
+    required: bool,
+) -> AdminFormField {
+    form_field_with_list(key, label, value, placeholder, required, None)
+}
+
+fn form_field_with_list(
+    key: &'static str,
+    label: &'static str,
+    value: &str,
+    placeholder: &'static str,
+    required: bool,
+    list_source: Option<ListSource>,
+) -> AdminFormField {
+    AdminFormField {
+        key,
+        label,
+        value: value.to_string(),
+        placeholder,
+        required,
+        list_source,
+    }
+}
+
+fn load_list_options(
+    backend: &AdminBackend<'_>,
+    fields: &[AdminFormField],
+    source: ListSource,
+) -> Result<Vec<String>> {
+    match source {
+        ListSource::KvKeys => {
+            let prefix = field_value(fields, "prefix");
+            let command = AdminCommand::Kv(KvCommand::List { prefix });
+            let capture = capture_admin_command(backend, command, Some(50))?;
+            Ok(extract_column_values(
+                &capture.columns,
+                &capture.rows,
+                "key",
+            ))
+        }
+        ListSource::ColumnarSegments => {
+            let command = AdminCommand::Columnar(ColumnarCommand::List);
+            let capture = capture_admin_command(backend, command, Some(50))?;
+            Ok(extract_column_values(
+                &capture.columns,
+                &capture.rows,
+                "segment_id",
+            ))
+        }
+        ListSource::SqlTables => {
+            let Some(db) = backend.local_db() else {
+                return Err(CliError::InvalidArgument(
+                    "Table listing is only available for local admin sessions.".to_string(),
+                ));
+            };
+            let mut tables = db
+                .list_tables_simple()?
+                .into_iter()
+                .map(|table| table.name)
+                .collect::<Vec<_>>();
+            tables.sort();
+            tables.dedup();
+            Ok(tables)
+        }
+        ListSource::SqlColumns => {
+            let table = field_value(fields, "table")
+                .ok_or_else(|| CliError::InvalidArgument("Select a table first.".to_string()))?;
+            let Some(db) = backend.local_db() else {
+                return Err(CliError::InvalidArgument(
+                    "Column listing is only available for local admin sessions.".to_string(),
+                ));
+            };
+            let mut columns = db
+                .get_table_info_simple(&table)?
+                .columns
+                .into_iter()
+                .map(|column| column.name)
+                .collect::<Vec<_>>();
+            columns.sort();
+            columns.dedup();
+            Ok(columns)
+        }
+        ListSource::ColumnarColumns => {
+            let segment = field_value(fields, "segment")
+                .ok_or_else(|| CliError::InvalidArgument("Select a segment first.".to_string()))?;
+            let Some(db) = backend.local_db() else {
+                return Err(CliError::InvalidArgument(
+                    "Column listing is only available for local admin sessions.".to_string(),
+                ));
+            };
+            let mut columns = list_columnar_columns_from_segment(db, &segment)?;
+            columns.sort();
+            columns.dedup();
+            Ok(columns)
+        }
+    }
+}
+
+fn field_value(fields: &[AdminFormField], key: &str) -> Option<String> {
+    fields
+        .iter()
+        .find(|field| field.key.eq_ignore_ascii_case(key))
+        .map(|field| field.value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn capture_admin_command(
+    backend: &AdminBackend<'_>,
+    command: AdminCommand,
+    limit: Option<usize>,
+) -> Result<CaptureState> {
+    let request = AdminRequest {
+        action: AdminAction::Read,
+        command,
+        limit,
+        quiet: true,
+        ui_mode: UiMode::Batch,
+        connection_label: String::new(),
+        output: backend.output_format(),
+        data_dir: backend.data_dir().map(PathBuf::from),
+    };
+    let (formatter, state) = CaptureFormatter::new();
+    let mut sink = io::sink();
+    let result = match backend {
+        AdminBackend::Local { db, batch_mode, .. } => {
+            execute_local_action(db, batch_mode, request, &mut sink, Box::new(formatter))
+        }
+        AdminBackend::Remote {
+            client, batch_mode, ..
+        } => {
+            let runtime = Runtime::new().map_err(|err| {
+                CliError::InvalidArgument(format!("Failed to start async runtime: {err}"))
+            })?;
+            runtime.block_on(execute_remote_action(
+                client,
+                batch_mode,
+                request,
+                &mut sink,
+                Box::new(formatter),
+            ))
+        }
+    };
+    result?;
+    let capture = state.lock().expect("admin capture lock").clone();
+    Ok(capture)
+}
+
+fn extract_column_values(columns: &[Column], rows: &[Row], column_name: &str) -> Vec<String> {
+    let index = columns
+        .iter()
+        .position(|column| column.name.eq_ignore_ascii_case(column_name))
+        .unwrap_or(0);
+    rows.iter()
+        .filter_map(|row| row.columns.get(index))
+        .map(value_to_string)
+        .collect()
+}
+
+fn list_columnar_columns_from_segment(
+    db: &alopex_embedded::Database,
+    segment_id: &str,
+) -> Result<Vec<String>> {
+    let (table_id, segment_id) = parse_segment_id(segment_id).ok_or_else(|| {
+        CliError::InvalidArgument(
+            "Invalid segment id. Expected format: table_id:segment_id.".to_string(),
+        )
+    })?;
+    let tables = db.list_tables_simple()?;
+    let table = tables
+        .into_iter()
+        .find(|table| table.table_id == table_id)
+        .ok_or_else(|| {
+            CliError::InvalidArgument("Unable to resolve table for segment.".to_string())
+        })?;
+    let batches = db.read_columnar_segment(&table.name, segment_id, None)?;
+    let batch = batches
+        .first()
+        .ok_or_else(|| CliError::InvalidArgument("Columnar segment is empty.".to_string()))?;
+    Ok(batch
+        .schema
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect())
+}
+
+fn parse_segment_id(segment_id: &str) -> Option<(u32, u64)> {
+    let (table_id, segment_id) = segment_id.split_once(':')?;
+    let table_id = table_id.parse::<u32>().ok()?;
+    let segment_id = segment_id.parse::<u64>().ok()?;
+    Some((table_id, segment_id))
+}
+
+const RESOURCE_LIMIT: usize = 50;
+const COLUMNAR_COLUMN_LIMIT: usize = 20;
+
+fn load_resource_entries(backend: &AdminBackend<'_>) -> Result<Vec<ResourceEntry>> {
+    let mut entries = Vec::new();
+    entries.extend(load_sql_resources(backend)?);
+    entries.extend(load_columnar_resources(backend)?);
+    entries.extend(load_kv_resources(backend)?);
+    Ok(entries)
+}
+
+fn load_sql_resources(backend: &AdminBackend<'_>) -> Result<Vec<ResourceEntry>> {
+    let mut entries = Vec::new();
+    entries.push(ResourceEntry {
+        label: "SQL Tables".to_string(),
+        kind: ResourceKind::Section,
+        depth: 0,
+        selectable: false,
+    });
+    let Some(db) = backend.local_db() else {
+        entries.push(ResourceEntry {
+            label: "Remote listing unavailable".to_string(),
+            kind: ResourceKind::Info,
+            depth: 1,
+            selectable: false,
+        });
+        return Ok(entries);
+    };
+    let mut tables = db.list_tables_simple()?;
+    tables.sort_by(|a, b| a.name.cmp(&b.name));
+    for table in tables.into_iter().take(RESOURCE_LIMIT) {
+        entries.push(ResourceEntry {
+            label: table.name.clone(),
+            kind: ResourceKind::Table {
+                name: table.name.clone(),
+            },
+            depth: 1,
+            selectable: true,
+        });
+        for column in table.columns {
+            entries.push(ResourceEntry {
+                label: column.name.clone(),
+                kind: ResourceKind::Column {
+                    table: table.name.clone(),
+                    name: column.name,
+                },
+                depth: 2,
+                selectable: true,
+            });
+        }
+    }
+    Ok(entries)
+}
+
+fn load_columnar_resources(backend: &AdminBackend<'_>) -> Result<Vec<ResourceEntry>> {
+    let mut entries = Vec::new();
+    entries.push(ResourceEntry {
+        label: "Columnar Segments".to_string(),
+        kind: ResourceKind::Section,
+        depth: 0,
+        selectable: false,
+    });
+    let Some(db) = backend.local_db() else {
+        entries.push(ResourceEntry {
+            label: "Remote listing unavailable".to_string(),
+            kind: ResourceKind::Info,
+            depth: 1,
+            selectable: false,
+        });
+        return Ok(entries);
+    };
+    let mut segments = db.list_columnar_segments()?;
+    segments.sort();
+    let mut expanded = 0;
+    for segment in segments.into_iter().take(RESOURCE_LIMIT) {
+        entries.push(ResourceEntry {
+            label: segment.clone(),
+            kind: ResourceKind::ColumnarSegment {
+                id: segment.clone(),
+            },
+            depth: 1,
+            selectable: true,
+        });
+        if expanded < COLUMNAR_COLUMN_LIMIT {
+            if let Ok(columns) = list_columnar_columns_from_segment(db, &segment) {
+                for column in columns {
+                    entries.push(ResourceEntry {
+                        label: column.clone(),
+                        kind: ResourceKind::ColumnarColumn {
+                            segment_id: segment.clone(),
+                            name: column,
+                        },
+                        depth: 2,
+                        selectable: true,
+                    });
+                }
+            }
+            expanded += 1;
+        }
+    }
+    Ok(entries)
+}
+
+fn load_kv_resources(backend: &AdminBackend<'_>) -> Result<Vec<ResourceEntry>> {
+    let mut entries = Vec::new();
+    entries.push(ResourceEntry {
+        label: "KV Keys".to_string(),
+        kind: ResourceKind::Section,
+        depth: 0,
+        selectable: false,
+    });
+    let command = AdminCommand::Kv(KvCommand::List { prefix: None });
+    let capture = capture_admin_command(backend, command, Some(RESOURCE_LIMIT))?;
+    let keys = extract_column_values(&capture.columns, &capture.rows, "key");
+    for key in keys {
+        entries.push(ResourceEntry {
+            label: key.clone(),
+            kind: ResourceKind::KvKey { key },
+            depth: 1,
+            selectable: true,
+        });
+    }
+    Ok(entries)
+}
+
+fn build_params_from_fields(
+    fields: &[AdminFormField],
+) -> std::collections::HashMap<String, String> {
+    let mut params = std::collections::HashMap::new();
+    for field in fields {
+        if !field.value.trim().is_empty() {
+            params.insert(field.key.to_lowercase(), field.value.trim().to_string());
+        }
+    }
+    params
+}
+
+fn validate_params(
+    action: AdminAction,
+    target: AdminTarget,
+    params: &std::collections::HashMap<String, String>,
+) -> std::result::Result<(), String> {
+    match (target, action) {
+        (AdminTarget::Sql, AdminAction::Read) => {
+            if params.contains_key("query") {
+                return Ok(());
+            }
+            if let Some(columns) = params.get("columns") {
+                if !params.contains_key("table") {
+                    return Err("Provide table to use columns.".to_string());
+                }
+                if columns.trim().is_empty() {
+                    return Err("Columns cannot be empty when provided.".to_string());
+                }
+            }
+            if params.contains_key("table") {
+                Ok(())
+            } else {
+                Err("Provide query or table.".to_string())
+            }
+        }
+        (AdminTarget::Kv, AdminAction::Read) => {
+            if params.contains_key("key") || params.contains_key("prefix") {
+                Ok(())
+            } else {
+                Err("Provide either key or prefix.".to_string())
+            }
+        }
+        (AdminTarget::Columnar, AdminAction::Read) => {
+            let mode = params.get("mode").map(|v| v.as_str()).unwrap_or("list");
+            if matches!(mode, "scan" | "stats" | "index_list") && !params.contains_key("segment") {
+                Err("Provide segment for scan/stats/index_list.".to_string())
+            } else {
+                Ok(())
+            }
+        }
+        (AdminTarget::Columnar, AdminAction::Create) => {
+            let has_ingest = params.contains_key("file") && params.contains_key("table");
+            let has_index = params.contains_key("segment")
+                && params.contains_key("column")
+                && params.contains_key("index_type");
+            if has_ingest || has_index {
+                Ok(())
+            } else {
+                Err("Provide file+table or segment+column+index_type.".to_string())
+            }
+        }
+        _ => {
+            let missing = required_keys_for(target, action)
+                .into_iter()
+                .filter(|key| !params.contains_key(*key))
+                .collect::<Vec<_>>();
+            if missing.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("Missing: {}", missing.join(", ")))
+            }
+        }
+    }
+}
+
+fn required_keys_for(target: AdminTarget, action: AdminAction) -> Vec<&'static str> {
+    match (target, action) {
+        (AdminTarget::Sql, AdminAction::Read) => Vec::new(),
+        (AdminTarget::Sql, _) => vec!["query"],
+        (AdminTarget::Kv, AdminAction::Create | AdminAction::Update) => vec!["key", "value"],
+        (AdminTarget::Kv, AdminAction::Delete) => vec!["key"],
+        (AdminTarget::Vector, AdminAction::Read) => vec!["index", "query"],
+        (AdminTarget::Vector, AdminAction::Create | AdminAction::Update) => {
+            vec!["index", "key", "vector"]
+        }
+        (AdminTarget::Vector, AdminAction::Delete) => vec!["index", "key"],
+        (AdminTarget::Hnsw, AdminAction::Read) => vec!["name"],
+        (AdminTarget::Hnsw, AdminAction::Create) => vec!["name", "dim"],
+        (AdminTarget::Hnsw, AdminAction::Delete) => vec!["name"],
+        (AdminTarget::Columnar, AdminAction::Delete) => vec!["segment", "column"],
+        _ => Vec::new(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminTarget {
     Sql,
     Kv,
     Vector,
@@ -512,6 +1836,13 @@ pub enum AdminBackend<'a> {
 }
 
 impl AdminBackend<'_> {
+    fn local_db(&self) -> Option<&alopex_embedded::Database> {
+        match self {
+            AdminBackend::Local { db, .. } => Some(*db),
+            AdminBackend::Remote { .. } => None,
+        }
+    }
+
     fn output_format(&self) -> OutputFormat {
         match self {
             AdminBackend::Local { output_format, .. } => *output_format,
@@ -545,6 +1876,7 @@ pub struct AdminContext<'a> {
     pub connection_label: String,
     pub auth: AuthCapabilities,
     pub backend: AdminBackend<'a>,
+    pub initial_target: Option<AdminTarget>,
 }
 
 pub fn run_admin_ui(context: AdminContext<'_>) -> Result<()> {
@@ -553,7 +1885,12 @@ pub fn run_admin_ui(context: AdminContext<'_>) -> Result<()> {
         return write_non_tty_fallback(&mut writer, context.backend.output_format());
     }
 
-    let app = AdminApp::new(context.connection_label, context.auth, context.backend);
+    let app = AdminApp::new(
+        context.connection_label,
+        context.auth,
+        context.backend,
+        context.initial_target,
+    );
     app.run()
 }
 
@@ -687,7 +2024,7 @@ fn build_command_for(
         return Ok(Some(AdminCommand::Lifecycle(command)));
     }
     match target {
-        AdminTarget::Sql => build_sql_command(params),
+        AdminTarget::Sql => build_sql_command(action, params),
         AdminTarget::Kv => build_kv_command(action, params),
         AdminTarget::Vector => build_vector_command(action, params),
         AdminTarget::Hnsw => build_hnsw_command(action, params),
@@ -696,9 +2033,26 @@ fn build_command_for(
 }
 
 fn build_sql_command(
+    action: AdminAction,
     params: &std::collections::HashMap<String, String>,
 ) -> Result<Option<AdminCommand>> {
-    let query = params.get("query").cloned();
+    let query = if let Some(query) = params.get("query").cloned() {
+        Some(query)
+    } else if action == AdminAction::Read {
+        let table = params.get("table").cloned();
+        let columns = params.get("columns").cloned();
+        match table {
+            Some(table) => {
+                let columns = columns
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "*".to_string());
+                Some(format!("SELECT {} FROM {}", columns, table))
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
     if query.is_none() {
         return Ok(None);
     }
@@ -972,10 +2326,12 @@ fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
     );
 
     let lines = [
-        "Up/Down or k/j: navigate",
-        "Enter: execute action",
+        "h/l or Left/Right: move focus",
+        "Menu: j/k move, / search, Enter select, R refresh",
+        "Input: Up/Down action, Tab field, e edit, o list, Enter execute",
+        "Data: j/k scroll",
         "t: change target",
-        "e: edit params",
+        "r: toggle raw params",
         "?: toggle help",
         "q/Esc: quit",
     ]
@@ -985,6 +2341,189 @@ fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
         .block(Block::default().borders(Borders::ALL).title("Help"))
         .wrap(Wrap { trim: true });
     frame.render_widget(help, rect);
+}
+
+#[derive(Debug, Clone)]
+struct SelectionOverlay {
+    title: String,
+    items: Vec<String>,
+    selected: usize,
+    field_index: usize,
+    search: Option<String>,
+    search_focused: bool,
+}
+
+impl SelectionOverlay {
+    fn new(title: String, items: Vec<String>, field_index: usize) -> Self {
+        Self {
+            title,
+            items,
+            selected: 0,
+            field_index,
+            search: None,
+            search_focused: false,
+        }
+    }
+
+    fn search_term(&self) -> Option<&str> {
+        self.search
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    fn filtered_indices(&self) -> Vec<usize> {
+        let Some(term) = self.search_term() else {
+            return (0..self.items.len()).collect();
+        };
+        let term = term.to_lowercase();
+        self.items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| {
+                if item.to_lowercase().contains(&term) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn selected_value(&self) -> Option<String> {
+        let indices = self.filtered_indices();
+        let idx = indices.get(self.selected).copied()?;
+        self.items.get(idx).cloned()
+    }
+
+    fn ensure_selection_in_range(&mut self) {
+        let len = self.filtered_indices().len();
+        if len == 0 {
+            self.selected = 0;
+        } else if self.selected >= len {
+            self.selected = len - 1;
+        }
+    }
+
+    fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+
+    fn move_down(&mut self) {
+        let len = self.filtered_indices().len();
+        if self.selected + 1 < len {
+            self.selected += 1;
+        }
+    }
+
+    fn move_top(&mut self) {
+        self.selected = 0;
+    }
+
+    fn move_bottom(&mut self) {
+        let len = self.filtered_indices().len();
+        if len > 0 {
+            self.selected = len - 1;
+        }
+    }
+
+    fn push_search(&mut self, ch: char) {
+        let search = self.search.get_or_insert_with(String::new);
+        search.push(ch);
+        self.ensure_selection_in_range();
+    }
+
+    fn pop_search(&mut self) {
+        if let Some(search) = self.search.as_mut() {
+            if !search.is_empty() {
+                search.pop();
+            } else {
+                self.reset_search();
+            }
+        }
+        self.ensure_selection_in_range();
+    }
+
+    fn reset_search(&mut self) {
+        self.search = None;
+        self.search_focused = false;
+        self.selected = 0;
+    }
+}
+
+fn render_selection_overlay(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    selection: &SelectionOverlay,
+) {
+    let overlay_width = area.width.saturating_sub(6).min(60);
+    let overlay_height = area.height.saturating_sub(6).min(16);
+    let rect = Rect::new(
+        area.x + (area.width.saturating_sub(overlay_width)) / 2,
+        area.y + (area.height.saturating_sub(overlay_height)) / 2,
+        overlay_width,
+        overlay_height,
+    );
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(3),
+        ])
+        .split(rect);
+
+    let search = selection
+        .search
+        .as_ref()
+        .map(|value| format!("/ {value}"))
+        .unwrap_or_else(|| "/".to_string());
+    let search_style = if selection.search_focused {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    frame.render_widget(
+        Paragraph::new(search)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(selection.title.as_str()),
+            )
+            .style(search_style),
+        layout[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new("Enter: choose  Esc: close  /: search  g/G: top/bottom  j/k: move")
+            .style(Style::default().fg(Color::DarkGray)),
+        layout[1],
+    );
+
+    let indices = selection.filtered_indices();
+    let items = if indices.is_empty() {
+        vec![ListItem::new(Line::from("No options available."))]
+    } else {
+        indices
+            .iter()
+            .filter_map(|idx| selection.items.get(*idx))
+            .map(|item| ListItem::new(Line::from(item.clone())))
+            .collect::<Vec<_>>()
+    };
+    let mut state = ListState::default();
+    state.select(Some(selection.selected));
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL))
+        .highlight_style(
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+    frame.render_stateful_widget(list, layout[2], &mut state);
 }
 
 fn cleanup_terminal(mut terminal: Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
@@ -1011,7 +2550,7 @@ impl AdminResult {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct CaptureState {
     columns: Vec<Column>,
     rows: Vec<Row>,
@@ -1107,5 +2646,184 @@ fn value_to_string(value: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batch::{BatchMode, BatchModeSource};
+    use alopex_embedded::Database;
+
+    fn make_app<'a>(db: &'a Database) -> AdminApp<'a> {
+        let batch_mode = Box::leak(Box::new(BatchMode {
+            is_batch: true,
+            is_tty: true,
+            source: BatchModeSource::Explicit,
+        }));
+        let backend = AdminBackend::Local {
+            db,
+            batch_mode,
+            output_format: OutputFormat::Table,
+            limit: None,
+            quiet: true,
+            data_dir: None,
+        };
+        AdminApp::new(
+            "local",
+            AuthCapabilities::full(),
+            backend,
+            Some(AdminTarget::Kv),
+        )
+    }
+
+    fn field_value(app: &AdminApp<'_>, key: &str) -> Option<String> {
+        app.form_fields
+            .iter()
+            .find(|field| field.key.eq_ignore_ascii_case(key))
+            .map(|field| field.value.clone())
+    }
+
+    #[test]
+    fn resource_tree_filters_keep_parents() {
+        let entries = vec![
+            ResourceEntry {
+                label: "SQL Tables".to_string(),
+                kind: ResourceKind::Section,
+                depth: 0,
+                selectable: false,
+            },
+            ResourceEntry {
+                label: "users".to_string(),
+                kind: ResourceKind::Table {
+                    name: "users".to_string(),
+                },
+                depth: 1,
+                selectable: true,
+            },
+            ResourceEntry {
+                label: "email".to_string(),
+                kind: ResourceKind::Column {
+                    table: "users".to_string(),
+                    name: "email".to_string(),
+                },
+                depth: 2,
+                selectable: true,
+            },
+        ];
+        let tree = ResourceTree {
+            entries,
+            selected: 0,
+            search: Some("email".to_string()),
+            search_focused: false,
+        };
+        let indices = tree.filtered_indices();
+        assert_eq!(indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn resource_tree_paging_clamps() {
+        let entries = (0..12)
+            .map(|idx| ResourceEntry {
+                label: format!("item-{idx}"),
+                kind: ResourceKind::Info,
+                depth: 0,
+                selectable: true,
+            })
+            .collect::<Vec<_>>();
+        let mut tree = ResourceTree {
+            entries,
+            selected: 0,
+            search: None,
+            search_focused: false,
+        };
+        tree.page_down();
+        assert_eq!(tree.selected, 5);
+        tree.page_down();
+        assert_eq!(tree.selected, 10);
+        tree.page_down();
+        assert_eq!(tree.selected, 11);
+        tree.page_up();
+        assert_eq!(tree.selected, 6);
+    }
+
+    #[test]
+    fn selection_overlay_filters_values() {
+        let mut overlay = SelectionOverlay::new(
+            "Select".to_string(),
+            vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
+            0,
+        );
+        overlay.search = Some("et".to_string());
+        overlay.ensure_selection_in_range();
+        assert_eq!(overlay.selected_value(), Some("beta".to_string()));
+        overlay.move_down();
+        assert_eq!(overlay.selected_value(), Some("beta".to_string()));
+    }
+
+    #[test]
+    fn focus_transitions_follow_table_detail_status() {
+        let db = Database::open_in_memory().expect("db");
+        let mut app = make_app(&db);
+        app.focus = AdminFocus::Table;
+        assert_eq!(app.focus_right(), AdminFocus::Detail);
+        app.focus = AdminFocus::Detail;
+        assert_eq!(app.focus_left(), AdminFocus::Table);
+        assert_eq!(app.focus_right(), AdminFocus::Status);
+        app.focus = AdminFocus::Status;
+        assert_eq!(app.focus_left(), AdminFocus::Detail);
+        assert_eq!(app.focus_right(), AdminFocus::Status);
+    }
+
+    #[test]
+    fn resource_selection_sets_sql_fields() {
+        let db = Database::open_in_memory().expect("db");
+        let mut app = make_app(&db);
+        app.resources = ResourceTree {
+            entries: vec![
+                ResourceEntry {
+                    label: "SQL Tables".to_string(),
+                    kind: ResourceKind::Section,
+                    depth: 0,
+                    selectable: false,
+                },
+                ResourceEntry {
+                    label: "users".to_string(),
+                    kind: ResourceKind::Table {
+                        name: "users".to_string(),
+                    },
+                    depth: 1,
+                    selectable: true,
+                },
+            ],
+            selected: 1,
+            search: None,
+            search_focused: false,
+        };
+        app.apply_resource_selection().expect("select table");
+        assert_eq!(app.target, AdminTarget::Sql);
+        assert_eq!(field_value(&app, "table"), Some("users".to_string()));
+    }
+
+    #[test]
+    fn resource_selection_sets_kv_key() {
+        let db = Database::open_in_memory().expect("db");
+        let mut app = make_app(&db);
+        app.resources = ResourceTree {
+            entries: vec![ResourceEntry {
+                label: "mykey".to_string(),
+                kind: ResourceKind::KvKey {
+                    key: "mykey".to_string(),
+                },
+                depth: 1,
+                selectable: true,
+            }],
+            selected: 0,
+            search: None,
+            search_focused: false,
+        };
+        app.apply_resource_selection().expect("select key");
+        assert_eq!(app.target, AdminTarget::Kv);
+        assert_eq!(field_value(&app, "key"), Some("mykey".to_string()));
     }
 }

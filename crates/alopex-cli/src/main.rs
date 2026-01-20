@@ -40,7 +40,7 @@ use profile::config::{AuthType, ConnectionType, ServerConfig};
 use profile::{execute_profile_command, execute_profile_tui, ProfileManager, ResolvedConfig};
 use streaming::StreamingWriter;
 use tui::admin::actions::AdminAction;
-use tui::admin::{AdminBackend, AdminContext, AuthCapabilities};
+use tui::admin::{AdminBackend, AdminContext, AdminTarget, AuthCapabilities};
 use ui::mode::{resolve_ui_mode, UiMode};
 use uri::{validate_s3_credentials, StorageUri};
 
@@ -190,6 +190,7 @@ fn run(cli: Cli) -> Result<()> {
                                             quiet,
                                             data_dir,
                                         },
+                                        initial_target: None,
                                     })
                                 }
                                 ConnectionType::Local => {
@@ -205,6 +206,7 @@ fn run(cli: Cli) -> Result<()> {
                                             quiet,
                                             data_dir,
                                         },
+                                        initial_target: None,
                                     })
                                 }
                             }
@@ -228,6 +230,7 @@ fn run(cli: Cli) -> Result<()> {
                         quiet: cli.quiet,
                         data_dir,
                     },
+                    initial_target: None,
                 });
             }
             let Some(command) = command.clone() else {
@@ -271,6 +274,7 @@ fn run(cli: Cli) -> Result<()> {
                         quiet: cli.quiet,
                         data_dir,
                     },
+                    initial_target: None,
                 };
                 if ui_mode != UiMode::Tui {
                     if !batch_mode.is_tty {
@@ -308,6 +312,7 @@ fn run(cli: Cli) -> Result<()> {
                         quiet: cli.quiet,
                         data_dir,
                     },
+                    initial_target: None,
                 };
                 if ui_mode != UiMode::Tui {
                     if !batch_mode.is_tty {
@@ -577,6 +582,7 @@ fn execute_server_command(
                             quiet,
                             data_dir: data_dir.map(PathBuf::from),
                         },
+                        initial_target: None,
                     });
                 }
                 return Err(CliError::InvalidArgument(
@@ -602,6 +608,7 @@ fn execute_server_command(
                                 quiet,
                                 data_dir: admin_data_dir,
                             },
+                            initial_target: Some(AdminTarget::Kv),
                         })
                     }));
                 return runtime.block_on(commands::kv::execute_remote_tui(
@@ -648,6 +655,7 @@ fn execute_server_command(
                                 quiet,
                                 data_dir: admin_data_dir,
                             },
+                            initial_target: Some(AdminTarget::Sql),
                         })
                     }))
                 } else {
@@ -679,6 +687,7 @@ fn execute_server_command(
                             quiet,
                             data_dir: data_dir.map(PathBuf::from),
                         },
+                        initial_target: None,
                     });
                 }
                 return Err(CliError::InvalidArgument(
@@ -704,6 +713,7 @@ fn execute_server_command(
                                 quiet,
                                 data_dir: admin_data_dir,
                             },
+                            initial_target: Some(AdminTarget::Vector),
                         })
                     }));
                 return runtime.block_on(commands::vector::execute_remote_tui(
@@ -744,6 +754,7 @@ fn execute_server_command(
                             quiet,
                             data_dir: data_dir.map(PathBuf::from),
                         },
+                        initial_target: None,
                     });
                 }
                 return Err(CliError::InvalidArgument(
@@ -769,6 +780,7 @@ fn execute_server_command(
                                 quiet,
                                 data_dir: admin_data_dir,
                             },
+                            initial_target: Some(AdminTarget::Hnsw),
                         })
                     }));
                 return runtime.block_on(commands::hnsw::execute_remote_tui(
@@ -807,6 +819,7 @@ fn execute_server_command(
                             quiet,
                             data_dir: data_dir.map(PathBuf::from),
                         },
+                        initial_target: None,
                     });
                 }
                 return Err(CliError::InvalidArgument(
@@ -831,6 +844,7 @@ fn execute_server_command(
                                 quiet,
                                 data_dir: admin_data_dir,
                             },
+                            initial_target: Some(AdminTarget::Columnar),
                         })
                     }));
                 return runtime.block_on(commands::columnar::execute_remote_tui(
@@ -872,6 +886,7 @@ fn execute_server_command(
                             quiet,
                             data_dir: data_dir.map(PathBuf::from),
                         },
+                        initial_target: None,
                     });
                 }
                 return Err(CliError::InvalidArgument(
@@ -896,6 +911,7 @@ fn execute_server_command(
                                 quiet,
                                 data_dir: admin_data_dir,
                             },
+                            initial_target: None,
                         })
                     }));
                 return runtime.block_on(commands::server::execute_remote_tui(
@@ -929,6 +945,7 @@ fn execute_server_command(
                             quiet,
                             data_dir: data_dir.map(PathBuf::from),
                         },
+                        initial_target: None,
                     });
                 }
                 return Err(CliError::InvalidArgument(
@@ -1081,6 +1098,7 @@ fn execute_command(
                             quiet,
                             data_dir: data_dir.map(PathBuf::from),
                         },
+                        initial_target: None,
                     });
                 }
                 return Err(CliError::InvalidArgument(
@@ -1124,6 +1142,7 @@ fn execute_command(
                                 quiet,
                                 data_dir: admin_data_dir,
                             },
+                            initial_target: Some(AdminTarget::Sql),
                         })
                     }))
                 } else {
@@ -1155,6 +1174,7 @@ fn execute_command(
                             quiet,
                             data_dir: data_dir.map(PathBuf::from),
                         },
+                        initial_target: None,
                     });
                 }
                 return Err(CliError::InvalidArgument(
@@ -1194,6 +1214,7 @@ fn execute_command(
                             quiet,
                             data_dir: data_dir.map(PathBuf::from),
                         },
+                        initial_target: None,
                     });
                 }
                 return Err(CliError::InvalidArgument(
@@ -1233,6 +1254,7 @@ fn execute_command(
                             quiet,
                             data_dir: data_dir.map(PathBuf::from),
                         },
+                        initial_target: None,
                     });
                 }
                 return Err(CliError::InvalidArgument(
@@ -1289,6 +1311,7 @@ fn execute_command(
                             quiet,
                             data_dir: data_dir.map(PathBuf::from),
                         },
+                        initial_target: None,
                     });
                 }
                 return Err(CliError::InvalidArgument(
