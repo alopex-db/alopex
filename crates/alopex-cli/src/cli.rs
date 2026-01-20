@@ -423,7 +423,7 @@ pub enum ColumnarCommand {
         )]
         header: bool,
         /// Compression type (lz4, zstd, none)
-        #[arg(long, default_value = "lz4")]
+        #[arg(long, default_value = "zstd")]
         compression: String,
         /// Row group size (rows per group)
         #[arg(long)]
@@ -1001,7 +1001,7 @@ mod tests {
                 && table == "events"
                 && delimiter == ','
                 && header
-                && compression == "lz4"
+                && compression == "zstd"
                 && row_group_size.is_none()
         ));
     }

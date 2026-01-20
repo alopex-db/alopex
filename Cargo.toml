@@ -15,7 +15,7 @@ edition = "2021"
 
 [workspace.dependencies]
 # Internal crates
-alopex-core = { version = "0.4.1", path = "crates/alopex-core" }
+alopex-core = { version = "0.4.1", path = "crates/alopex-core", features = ["compression-zstd"] }
 alopex-sql = { version = "0.4.1", path = "crates/alopex-sql" }
 alopex-embedded = { version = "0.4.1", path = "crates/alopex-embedded" }
 # Async runtime
