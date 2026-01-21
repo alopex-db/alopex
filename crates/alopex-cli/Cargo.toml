@@ -76,3 +76,5 @@ rcgen = "0.12"
 tower = "0.4"
 tempfile = "3.8"
 criterion = { workspace = true }
+portable-pty = "0.8"
+ratatui-testlib = { version = "0.1", features = ["mvp"] }

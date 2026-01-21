@@ -22,7 +22,10 @@ pub enum BatchModeSource {
 
 impl BatchMode {
     pub fn detect(cli: &Cli) -> Self {
-        let is_tty = io::stdin().is_terminal();
+        let forced = std::env::var("ALOPEX_TEST_TTY")
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+            .unwrap_or(false);
+        let is_tty = forced || io::stdin().is_terminal();
         let env_mode = std::env::var("ALOPEX_MODE").ok();
 
         Self::detect_with(cli, is_tty, env_mode.as_deref())

@@ -625,6 +625,14 @@ impl<'a> AdminApp<'a> {
             AdminInputMode::Normal => {}
         }
 
+        if matches!(self.focus, AdminFocus::Table)
+            && self.resources.search_focused
+            && key.code == KeyCode::Esc
+        {
+            self.resources.reset_search();
+            return Ok(false);
+        }
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('a') | KeyCode::Esc => return Ok(true),
             KeyCode::Char('?') => {
@@ -1025,7 +1033,11 @@ impl<'a> AdminApp<'a> {
             ));
             return Ok(());
         };
-        let items = load_list_options(&self.backend, &self.form_fields, source)?;
+        let mut items = load_list_options(&self.backend, &self.form_fields, source)?;
+        if items.is_empty() {
+            items = self.list_options_from_resources(source);
+        }
+        items.retain(|item| !item.trim().is_empty());
         if items.is_empty() {
             self.last_result = Some(AdminResult::status(
                 "No matching resources were found.".to_string(),
@@ -1038,6 +1050,60 @@ impl<'a> AdminApp<'a> {
             self.active_field,
         ));
         Ok(())
+    }
+
+    fn list_options_from_resources(&self, source: ListSource) -> Vec<String> {
+        let mut items = Vec::new();
+        match source {
+            ListSource::KvKeys => {
+                for entry in &self.resources.entries {
+                    if let ResourceKind::KvKey { key } = &entry.kind {
+                        items.push(key.clone());
+                    }
+                }
+            }
+            ListSource::SqlTables => {
+                for entry in &self.resources.entries {
+                    if let ResourceKind::Table { name } = &entry.kind {
+                        items.push(name.clone());
+                    }
+                }
+            }
+            ListSource::SqlColumns => {
+                let Some(table) = field_value(&self.form_fields, "table") else {
+                    return items;
+                };
+                for entry in &self.resources.entries {
+                    if let ResourceKind::Column { table: entry_table, name } = &entry.kind {
+                        if entry_table == &table {
+                            items.push(name.clone());
+                        }
+                    }
+                }
+            }
+            ListSource::ColumnarSegments => {
+                for entry in &self.resources.entries {
+                    if let ResourceKind::ColumnarSegment { id } = &entry.kind {
+                        items.push(id.clone());
+                    }
+                }
+            }
+            ListSource::ColumnarColumns => {
+                let Some(segment) = field_value(&self.form_fields, "segment") else {
+                    return items;
+                };
+                for entry in &self.resources.entries {
+                    if let ResourceKind::ColumnarColumn { segment_id, name } = &entry.kind {
+                        if segment_id == &segment {
+                            items.push(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        items.sort();
+        items.dedup();
+        items
     }
 }
 

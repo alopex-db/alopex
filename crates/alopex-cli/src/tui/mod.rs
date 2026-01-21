@@ -10,7 +10,7 @@ pub mod table;
 use std::io::{self, IsTerminal, Stdout};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyEvent};
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -213,6 +213,10 @@ impl<'a> TuiApp<'a> {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<EventResult> {
+        if self.show_help && key.code == KeyCode::Esc {
+            self.show_help = false;
+            return Ok(EventResult::Continue);
+        }
         if let Some(action) = action_for_key(key, self.search.is_active()) {
             return self.handle_action(action);
         }
@@ -221,7 +225,13 @@ impl<'a> TuiApp<'a> {
 
     fn handle_action(&mut self, action: Action) -> Result<EventResult> {
         match action {
-            Action::Quit => return Ok(EventResult::Exit),
+            Action::Quit => {
+                if self.show_help {
+                    self.show_help = false;
+                    return Ok(EventResult::Continue);
+                }
+                return Ok(EventResult::Exit);
+            }
             Action::ToggleHelp => {
                 self.show_help = !self.show_help;
             }
@@ -369,5 +379,8 @@ fn cleanup_terminal(mut terminal: Terminal<CrosstermBackend<Stdout>>) -> Result<
 }
 
 pub fn is_tty() -> bool {
-    std::io::stdout().is_terminal() && std::io::stdin().is_terminal()
+    let forced = std::env::var("ALOPEX_TEST_TTY")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+        .unwrap_or(false);
+    forced || (std::io::stdout().is_terminal() && std::io::stdin().is_terminal())
 }

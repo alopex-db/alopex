@@ -54,3 +54,6 @@ opt-level = 0
 
 [profile.test]
 opt-level = 1
+
+[patch.crates-io]
+ratatui-testlib = { path = "vendor/ratatui-testlib" }
