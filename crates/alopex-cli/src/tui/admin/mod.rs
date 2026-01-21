@@ -1074,7 +1074,11 @@ impl<'a> AdminApp<'a> {
                     return items;
                 };
                 for entry in &self.resources.entries {
-                    if let ResourceKind::Column { table: entry_table, name } = &entry.kind {
+                    if let ResourceKind::Column {
+                        table: entry_table,
+                        name,
+                    } = &entry.kind
+                    {
                         if entry_table == &table {
                             items.push(name.clone());
                         }

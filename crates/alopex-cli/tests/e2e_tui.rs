@@ -84,10 +84,9 @@ fn ensure_active_field(harness: &mut TuiTestHarness, label: &str, attempts: usiz
         }
     }
     let snapshot = harness.screen_contents();
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("Failed to focus field '{label}'. Screen snapshot:\n{snapshot}"),
-    )
+    Err(std::io::Error::other(format!(
+        "Failed to focus field '{label}'. Screen snapshot:\n{snapshot}"
+    ))
     .into())
 }
 
@@ -100,10 +99,9 @@ fn ensure_focus_table(harness: &mut TuiTestHarness) -> Result<()> {
         return Ok(());
     }
     let snapshot = harness.screen_contents();
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("Failed to find Focus: Table. Screen snapshot:\n{snapshot}"),
-    )
+    Err(std::io::Error::other(format!(
+        "Failed to find Focus: Table. Screen snapshot:\n{snapshot}"
+    ))
     .into())
 }
 
@@ -126,10 +124,9 @@ fn open_selection_overlay_for(
         return Ok(());
     }
     let snapshot = harness.screen_contents();
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("Failed to open {title} overlay. Screen snapshot:\n{snapshot}"),
-    )
+    Err(std::io::Error::other(format!(
+        "Failed to open {title} overlay. Screen snapshot:\n{snapshot}"
+    ))
     .into())
 }
 
@@ -313,7 +310,6 @@ fn confirm_selection_overlay(
     wait_for_absent(harness, title, timeout)
 }
 
-
 fn execute_admin_action(harness: &mut TuiTestHarness) -> Result<()> {
     harness.send_key(KeyCode::Enter)?;
     harness.send_text("\r")?;
@@ -434,7 +430,6 @@ fn edit_guided_field(harness: &mut TuiTestHarness, value: &str) -> Result<()> {
         Duration::from_secs(5),
     )
 }
-
 
 fn exit_editing_with_enter(harness: &mut TuiTestHarness, mode_text: &str) -> Result<()> {
     harness.send_key(KeyCode::Enter)?;
@@ -712,10 +707,9 @@ fn e2e_admin_select_key_overlay() -> Result<()> {
     open_selection_overlay_for(&mut harness, "Table", "Select Table", 6)?;
     if harness.screen_contents().contains("No options available.") {
         let snapshot = harness.screen_contents();
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Selection overlay is empty. Screen snapshot:\n{snapshot}"),
-        )
+        return Err(std::io::Error::other(format!(
+            "Selection overlay is empty. Screen snapshot:\n{snapshot}"
+        ))
         .into());
     }
     harness.send_key(KeyCode::Char('g'))?;
@@ -725,10 +719,9 @@ fn e2e_admin_select_key_overlay() -> Result<()> {
     confirm_selection_overlay(&mut harness, "Select Table", Duration::from_secs(5))?;
     if wait_for_contains(&mut harness, "Table: e2e_users", Duration::from_secs(5)).is_err() {
         let snapshot = harness.screen_contents();
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to confirm table selection. Screen snapshot:\n{snapshot}"),
-        )
+        return Err(std::io::Error::other(format!(
+            "Failed to confirm table selection. Screen snapshot:\n{snapshot}"
+        ))
         .into());
     }
 
