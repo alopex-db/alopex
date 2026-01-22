@@ -101,12 +101,8 @@
 //! - Text input and cursor position verification
 //! - Async Tokio runtime compatibility
 
-#![warn(
-    missing_docs,
-    missing_debug_implementations,
-    rust_2018_idioms,
-    unreachable_pub
-)]
+#![warn(missing_docs, rust_2018_idioms, unreachable_pub)]
+#![allow(dead_code, unused_imports, missing_debug_implementations)]
 #![deny(unsafe_code)]
 
 mod error;
