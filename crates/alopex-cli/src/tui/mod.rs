@@ -17,7 +17,8 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 
@@ -323,26 +324,77 @@ fn render_status(
     admin_available: bool,
 ) {
     let state_label = if processing { "processing" } else { "ready" };
-    let base_status =
-        format!("Connection: {connection_label} | Rows: {row_count} | Status: {state_label}");
-    let mut status_text = if show_help {
-        format!("{base_status} | Help: press ? to close")
-    } else if search.is_active() {
-        format!("{base_status} | /{}", search.query())
-    } else if search.has_query() {
-        format!("{base_status} | /{} (n/N)", search.query())
+    let focus_label = if show_help {
+        "Help"
+    } else if search.is_active() || search.has_query() {
+        "Search"
     } else {
-        let mut text = format!("{base_status} | q/Esc: quit | ?: help | /: search | Enter: detail");
-        if admin_available {
-            text.push_str(" | a: admin/back");
-        }
-        text
+        "Table"
     };
-    if let Some(message) = status_message {
-        status_text = format!("{status_text} | {message}");
+    let action_label = if show_help {
+        "help"
+    } else if search.is_active() || search.has_query() {
+        "search"
+    } else {
+        "browse"
+    };
+    let highlight = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    let mut spans = Vec::new();
+    let push_sep = |spans: &mut Vec<Span<'_>>| {
+        spans.push(Span::raw(" | "));
+    };
+
+    spans.push(Span::raw("Connection: "));
+    spans.push(Span::styled(connection_label.to_string(), highlight));
+    push_sep(&mut spans);
+    spans.push(Span::raw("Focus: "));
+    spans.push(Span::styled(focus_label.to_string(), highlight));
+    push_sep(&mut spans);
+    spans.push(Span::raw("Action: "));
+    spans.push(Span::styled(action_label.to_string(), highlight));
+    spans.push(Span::raw(format!(
+        " (Rows: {row_count}, Status: {state_label})"
+    )));
+    if search.is_active() || search.has_query() {
+        push_sep(&mut spans);
+        spans.push(Span::raw(format!("Query: /{}", search.query())));
+    }
+    push_sep(&mut spans);
+
+    let (ops_text, move_text) = if show_help {
+        ("?: close".to_string(), "-".to_string())
+    } else if search.is_active() {
+        (
+            "Enter: confirm, Esc: cancel".to_string(),
+            "n/N: next/prev".to_string(),
+        )
+    } else if search.has_query() {
+        ("/: search".to_string(), "n/N: next/prev".to_string())
+    } else {
+        let mut ops = vec!["Enter: detail", "/: search", "?: help", "q/Esc: quit"];
+        if admin_available {
+            ops.insert(2, "a: admin/back");
+        }
+        (ops.join(", "), "j/k, h/l, g/G, Ctrl+d/u".to_string())
+    };
+
+    spans.push(Span::styled(format!("Ops: {ops_text}"), highlight));
+    push_sep(&mut spans);
+    if move_text == "-" {
+        spans.push(Span::raw("Move: -"));
+    } else {
+        spans.push(Span::raw(format!("Move: {move_text}")));
     }
 
-    let paragraph = Paragraph::new(status_text)
+    if let Some(message) = status_message {
+        push_sep(&mut spans);
+        spans.push(Span::raw(message.to_string()));
+    }
+
+    let paragraph = Paragraph::new(Line::from(spans))
         .block(Block::default().borders(Borders::ALL).title("Status"))
         .style(Style::default().fg(Color::Gray))
         .wrap(Wrap { trim: true });

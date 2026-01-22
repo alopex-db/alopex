@@ -149,13 +149,24 @@ Results TUI は 3〜4 つの領域で構成されています:
 ### ステータスバーの読み方
 
 ```
-Connection: local | Rows: 100 | Status: ready | q: quit | ?: help | /: search
+Connection: local | Focus: Table | Action: browse (Rows: 100, Status: ready) | Ops: Enter: detail, /: search, a: admin/back, ?: help, q/Esc: quit | Move: j/k, h/l, g/G, Ctrl+d/u
 ```
 
-- **Connection**: 接続先（`local` または プロファイル名）
+表示項目は画面によって前後しますが、読み方は以下の順で把握すると分かりやすいです。
+
+1. **Connection**: 接続先（`local` または プロファイル名）
+2. **Focus**: 現在のフォーカス領域（表示される場合）
+3. **Action**: 選択中のアクション（表示される場合）
+4. **Ops**: 代表的な操作（`Enter` → `/` → `a` → `?` → `q/Esc` の順）
+5. **Move**: カーソル/フォーカス移動のキー
+
+強調表示の対象:
+- **Connection / Focus / Action の値**
+- **Ops**
+
+補足:
 - **Rows**: 表示中の行数
 - **Status**: 現在の状態（`ready`, `processing`）
-- 操作ヒント: 利用可能なキーバインド
 
 ---
 
@@ -371,6 +382,87 @@ Example: query="SELECT * FROM table"
 5. `Enter` で検索確定、`Esc` でキャンセル
 
 ---
+
+## scripts/tui-demo.sh を Admin モードだけで再現する手順
+
+このセクションは `scripts/tui-demo.sh` の動作を **Admin TUI の操作だけ**で再現する手順です。  
+Results TUI の代わりに Admin の Status パネルで結果を確認します。
+
+### 事前準備（シェルで 1 回だけ）
+
+```bash
+DATA_DIR="$(mktemp -d)"
+cat > "$DATA_DIR/columnar.csv" <<'CSV'
+id,name
+1,alpha
+2,beta
+3,gamma
+CSV
+```
+
+### 1) SQL / KV / Columnar を Admin TUI で実行
+
+```bash
+cargo run -p alopex-cli -- --data-dir "$DATA_DIR"
+```
+
+**SQL: create / insert / select**
+1. Table フォーカスで `SQL Tables` を選び `Enter`（Target を SQL に）
+2. Detail フォーカスへ移動（`l`）
+3. Action を `Create` にして `Query` を編集  
+   - `CREATE TABLE items (id INT, name TEXT)`
+4. `Enter` で実行（Status に成功が表示される）
+5. もう一度 `Create` で `Query` を編集  
+   - `INSERT INTO items VALUES (1,'alice'),(2,'bob'),(3,'carol')`
+6. `Read / List` に戻して `Query` を編集  
+   - `SELECT id, name FROM items ORDER BY id`
+7. `Enter` で実行（Status に結果行が表示される）
+
+**KV: put / list**
+1. Table フォーカスで `KV Keys` を選び `Enter`（Target を KV に）
+2. Detail で `Create` を選択し、Key/Value を入力  
+   - `demo:1` / `alice`  
+   - `demo:2` / `bob`
+3. `Read / List` にして `Prefix` を `demo:` に設定して実行
+
+**Columnar: ingest / list / stats / scan / index**
+1. Table フォーカスで `Columnar Segments` を選び `Enter`（Target を Columnar に）
+2. Detail の `Create` で `File` と `Table` を入力  
+   - `File`: `$DATA_DIR/columnar.csv`  
+   - `Table`: `demo_columnar`
+3. `Read / List` で `Mode` を `list` にして実行  
+   - Status に `segment_id` が出るので控える
+4. `Read / List` で `Mode=stats`、`Segment=<segment_id>` を指定して実行
+5. `Read / List` で `Mode=scan`、`Segment=<segment_id>` を指定して実行
+6. `Create` で `Segment=<segment_id>`、`Column=name`、`Index Type=minmax` を入力して実行
+7. `Read / List` で `Mode=index_list`、`Segment=<segment_id>` を指定して実行
+
+### 2) Vector / HNSW を Admin TUI で実行
+
+Vector / HNSW は Admin の Target を Vector/HNSW に切り替える必要があるため、  
+**一度 Results TUI を起点に Admin を開き、Admin 内で操作**します。
+
+**HNSW: create / stats**
+```bash
+cargo run -p alopex-cli -- --data-dir "$DATA_DIR" hnsw create demo_hnsw --dim 2 --metric cosine
+```
+1. Results TUI で `a` を押して Admin に移動（Target: HNSW）
+2. `Read / List` で `name=demo_hnsw` を指定し `Enter`（stats を確認）
+
+**Vector: upsert / search**
+```bash
+cargo run -p alopex-cli -- --data-dir "$DATA_DIR" vector upsert --index demo_hnsw --key item1 --vector "[0.1, 0.2]"
+cargo run -p alopex-cli -- --data-dir "$DATA_DIR" vector upsert --index demo_hnsw --key item2 --vector "[0.2, 0.1]"
+cargo run -p alopex-cli -- --data-dir "$DATA_DIR" vector search --index demo_hnsw --query "[0.1, 0.2]" -k 2
+```
+1. いずれかの Results TUI で `a` を押して Admin に移動（Target: Vector）
+2. `Read / List` で `index=demo_hnsw`、`query=[0.1, 0.2]`、`k=2` を指定して実行
+
+### 3) `--output` による batch テストについて
+
+`--output` による batch 出力は Admin TUI では再現できません。  
+必要な場合は `scripts/tui-demo.sh` と同じ CLI コマンドを単独で実行してください。
+
 
 ## キーバインド一覧
 

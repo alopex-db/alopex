@@ -500,44 +500,81 @@ impl<'a> AdminApp<'a> {
             AdminFocus::Detail => "Detail",
             AdminFocus::Status => "Status",
         };
-        let status_text = if self.show_help {
-            format!(
-                "Connection: {} | Action: {} | Focus: {} | Help: press ? to close",
-                self.connection_label, action, focus_label
-            )
+        let highlight = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+
+        let mut spans = Vec::new();
+        let push_sep = |spans: &mut Vec<Span<'_>>| {
+            spans.push(Span::raw(" | "));
+        };
+
+        spans.push(Span::raw("Connection: "));
+        spans.push(Span::styled(self.connection_label.to_string(), highlight));
+        push_sep(&mut spans);
+        spans.push(Span::raw("Focus: "));
+        spans.push(Span::styled(focus_label.to_string(), highlight));
+        push_sep(&mut spans);
+        spans.push(Span::raw("Action: "));
+        spans.push(Span::styled(action.to_string(), highlight));
+
+        let mut mode_label = None;
+        if self.show_help {
+            mode_label = Some("Help");
         } else if self.selection.is_some() {
-            format!(
-                "Connection: {} | Action: {} | Focus: {} | Selecting option | Enter: choose | /: search | Esc: cancel",
-                self.connection_label, action, focus_label
-            )
+            mode_label = Some("Selecting option");
         } else if self.input_mode == AdminInputMode::EditingField {
-            format!(
-                "Connection: {} | Action: {} | Focus: {} | Editing field | Enter: done | Esc: cancel",
-                self.connection_label, action, focus_label
-            )
+            mode_label = Some("Editing field");
         } else if self.input_mode == AdminInputMode::EditingRaw {
-            format!(
-                "Connection: {} | Action: {} | Focus: {} | Editing raw params | Enter: done | Esc: cancel",
-                self.connection_label, action, focus_label
+            mode_label = Some("Editing raw params");
+        }
+
+        if let Some(mode) = mode_label {
+            push_sep(&mut spans);
+            spans.push(Span::raw(format!("Mode: {mode}")));
+        }
+
+        let (ops_text, move_text) = if self.show_help {
+            ("?: close".to_string(), "-".to_string())
+        } else if self.selection.is_some() {
+            (
+                "Enter: choose, /: search, Esc: cancel".to_string(),
+                "j/k, g/G, Ctrl+d/u".to_string(),
             )
+        } else if matches!(
+            self.input_mode,
+            AdminInputMode::EditingField | AdminInputMode::EditingRaw
+        ) {
+            ("Enter: done, Esc: cancel".to_string(), "-".to_string())
         } else {
             match self.focus {
-                AdminFocus::Table => format!(
-                    "Connection: {} | Action: {} | Focus: {} | j/k: move | g/G: top/bottom | Ctrl+d/u: page | /: search | e: edit | r: raw | Enter: select | l: focus right | R: refresh | ?: help | a: back | q: quit",
-                    self.connection_label, action, focus_label
+                AdminFocus::Table => (
+                    "Enter: select, e: edit, r: raw, R: refresh, a: back, ?: help, q: quit"
+                        .to_string(),
+                    "j/k, g/G, Ctrl+d/u, h/l".to_string(),
                 ),
-                AdminFocus::Detail => format!(
-                    "Connection: {} | Action: {} | Focus: {} | Up/Down: action | Tab: field | e: edit | o: list | r: raw | Enter: execute | h: left | l: right | ?: help | a: back | q: quit",
-                    self.connection_label, action, focus_label
+                AdminFocus::Detail => (
+                    "Enter: execute, e: edit, o: list, r: raw, a: back, ?: help, q: quit"
+                        .to_string(),
+                    "Up/Down, Tab, h/l".to_string(),
                 ),
-                AdminFocus::Status => format!(
-                    "Connection: {} | Action: {} | Focus: {} | j/k: scroll | g/G: top/bottom | Ctrl+d/u: page | h: left | ?: help | a: back | q: quit",
-                    self.connection_label, action, focus_label
+                AdminFocus::Status => (
+                    "a: back, ?: help, q: quit".to_string(),
+                    "j/k, g/G, Ctrl+d/u, h".to_string(),
                 ),
             }
         };
 
-        let paragraph = Paragraph::new(status_text)
+        push_sep(&mut spans);
+        spans.push(Span::styled(format!("Ops: {ops_text}"), highlight));
+        push_sep(&mut spans);
+        if move_text == "-" {
+            spans.push(Span::raw("Move: -"));
+        } else {
+            spans.push(Span::raw(format!("Move: {move_text}")));
+        }
+
+        let paragraph = Paragraph::new(Line::from(spans))
             .block(Block::default().borders(Borders::ALL).title("Status"))
             .style(Style::default().fg(Color::Gray))
             .wrap(Wrap { trim: true });

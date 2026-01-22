@@ -494,15 +494,11 @@ fn e2e_results_to_admin_flow() -> Result<()> {
     wait_for_contains(&mut harness, "Connection: local", Duration::from_secs(10))?;
 
     harness.send_text("?")?;
-    wait_for_contains(
-        &mut harness,
-        "Help: press ? to close",
-        Duration::from_secs(5),
-    )?;
+    wait_for_contains(&mut harness, "Ops: ?: close", Duration::from_secs(5))?;
     harness.send_text("?")?;
     let start = Instant::now();
     harness.wait_for(|state| {
-        if !state.contains("Help: press ? to close") {
+        if !state.contains("Ops: ?: close") {
             true
         } else {
             start.elapsed() >= Duration::from_secs(5)
@@ -513,7 +509,7 @@ fn e2e_results_to_admin_flow() -> Result<()> {
     harness.send_text("1")?;
     wait_for_contains(&mut harness, "/1", Duration::from_secs(5))?;
     harness.send_key(KeyCode::Esc)?;
-    wait_for_contains(&mut harness, "q/Esc: quit", Duration::from_secs(5))?;
+    wait_for_contains(&mut harness, "Ops: Enter: detail", Duration::from_secs(5))?;
 
     wait_for_contains(&mut harness, "Rows: 1", Duration::from_secs(5))?;
 
@@ -649,21 +645,13 @@ fn e2e_results_help_and_detail_toggle() -> Result<()> {
 
     wait_for_contains(&mut harness, "Connection: local", Duration::from_secs(10))?;
     harness.send_text("?")?;
-    wait_for_contains(
-        &mut harness,
-        "Help: press ? to close",
-        Duration::from_secs(5),
-    )?;
+    wait_for_contains(&mut harness, "Ops: ?: close", Duration::from_secs(5))?;
     harness.send_key(KeyCode::Esc)?;
-    wait_for_contains(&mut harness, "q/Esc: quit", Duration::from_secs(5))?;
+    wait_for_contains(&mut harness, "Ops: Enter: detail", Duration::from_secs(5))?;
     harness.send_text("?")?;
-    wait_for_contains(
-        &mut harness,
-        "Help: press ? to close",
-        Duration::from_secs(5),
-    )?;
+    wait_for_contains(&mut harness, "Ops: ?: close", Duration::from_secs(5))?;
     harness.send_text("?")?;
-    wait_for_contains(&mut harness, "q/Esc: quit", Duration::from_secs(5))?;
+    wait_for_contains(&mut harness, "Ops: Enter: detail", Duration::from_secs(5))?;
 
     toggle_detail(&mut harness)?;
     wait_for_absent(&mut harness, "TAIL_MARKER", Duration::from_secs(2)).ok();
@@ -1047,7 +1035,7 @@ fn e2e_results_search_confirm_and_navigation() -> Result<()> {
 
     harness.send_text("/")?;
     harness.send_key(KeyCode::Esc)?;
-    wait_for_contains(&mut harness, "q/Esc: quit", Duration::from_secs(5))?;
+    wait_for_contains(&mut harness, "Ops: Enter: detail", Duration::from_secs(5))?;
 
     harness.send_text("q")?;
     Ok(())
