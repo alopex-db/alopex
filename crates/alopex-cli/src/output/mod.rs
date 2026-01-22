@@ -7,6 +7,7 @@
 //! - csv: CSV format (RFC 4180)
 //! - tsv: TSV format
 
+pub mod collector;
 pub mod csv;
 pub mod formatter;
 pub mod json;
@@ -15,6 +16,7 @@ pub mod server;
 pub mod table;
 pub mod tsv;
 
+pub use collector::RowCollector;
 pub use formatter::create_formatter;
 
 // Re-export for public API (may be used by external consumers)

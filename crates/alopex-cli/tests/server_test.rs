@@ -12,6 +12,7 @@ use alopex_cli::error::CliError;
 use alopex_cli::output::formatter::create_formatter;
 use alopex_cli::profile::config::ServerConfig as CliServerConfig;
 use alopex_cli::streaming::{CancelSignal, Deadline};
+use alopex_cli::ui::mode::UiMode;
 use alopex_cli::{batch::BatchMode, cli::CompactionCommand, cli::ServerCommand, cli::SqlCommand};
 use alopex_cli::{batch::BatchModeSource, cli::OutputFormat};
 use alopex_core::columnar::encoding::LogicalType;
@@ -75,6 +76,7 @@ fn batch_mode() -> BatchMode {
 fn build_test_client(base_url: &str) -> HttpClient {
     let config = CliServerConfig {
         url: base_url.to_string(),
+        insecure: false,
         auth: None,
         token: None,
         username: None,
@@ -253,6 +255,7 @@ async fn execute_streaming_request(
         &client,
         &cmd,
         &batch_mode(),
+        UiMode::Batch,
         &mut output,
         formatter,
         SqlExecutionOptions {
@@ -260,6 +263,7 @@ async fn execute_streaming_request(
             quiet: false,
             cancel,
             deadline,
+            admin_launcher: None,
         },
     )
     .await?;
@@ -545,6 +549,7 @@ async fn server_sql_success_and_http_error() {
 async fn server_sql_connection_error() {
     let config = CliServerConfig {
         url: "https://127.0.0.1:1/".to_string(),
+        insecure: false,
         auth: None,
         token: None,
         username: None,
@@ -861,7 +866,7 @@ async fn server_admin_commands_success() {
     .await
     .unwrap();
     let text = String::from_utf8(std::mem::take(&mut output)).unwrap();
-    assert!(text.contains("Result"));
+    assert!(text.contains("Status"));
     assert!(text.contains("OK"));
     assert!(text.contains("started"));
 

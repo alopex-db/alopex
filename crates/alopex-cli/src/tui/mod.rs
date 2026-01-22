@@ -1,21 +1,24 @@
 //! TUI application module.
 
+pub mod admin;
 pub mod detail;
 pub mod keymap;
+pub mod renderer;
 pub mod search;
 pub mod table;
 
 use std::io::{self, IsTerminal, Stdout};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyEvent};
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 
@@ -28,7 +31,7 @@ use self::search::SearchState;
 use self::table::TableView;
 
 /// TUI application state.
-pub struct TuiApp {
+pub struct TuiApp<'a> {
     table: TableView,
     search: SearchState,
     detail: DetailPanel,
@@ -36,6 +39,10 @@ pub struct TuiApp {
     connection_label: String,
     row_count: usize,
     processing: bool,
+    status_message: Option<String>,
+    context_message: Option<String>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
+    admin_requested: bool,
 }
 
 /// Result of handling an input event.
@@ -45,7 +52,7 @@ pub enum EventResult {
     Exit,
 }
 
-impl TuiApp {
+impl<'a> TuiApp<'a> {
     pub fn new(
         columns: Vec<Column>,
         rows: Vec<Row>,
@@ -64,7 +71,29 @@ impl TuiApp {
             connection_label: connection_label.into(),
             row_count,
             processing,
+            status_message: None,
+            context_message: None,
+            admin_launcher: None,
+            admin_requested: false,
         }
+    }
+
+    pub fn with_admin_launcher(
+        mut self,
+        launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
+    ) -> Self {
+        self.admin_launcher = launcher;
+        self
+    }
+
+    pub fn with_status_message(mut self, message: impl Into<String>) -> Self {
+        self.status_message = Some(message.into());
+        self
+    }
+
+    pub fn with_context_message(mut self, message: Option<String>) -> Self {
+        self.context_message = message;
+        self
     }
 
     pub fn run(mut self) -> Result<()> {
@@ -73,44 +102,87 @@ impl TuiApp {
                 "TUI requires a TTY. Run without --tui in batch mode.".to_string(),
             ));
         }
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
-
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-        terminal.clear()?;
-
-        let tick_rate = Duration::from_millis(16);
-        let mut last_tick = Instant::now();
-
         loop {
-            terminal.draw(|frame| self.draw(frame))?;
+            enable_raw_mode()?;
+            let mut stdout = io::stdout();
+            execute!(stdout, EnterAlternateScreen)?;
 
-            let timeout = tick_rate
-                .checked_sub(last_tick.elapsed())
-                .unwrap_or_else(|| Duration::from_secs(0));
+            let backend = CrosstermBackend::new(stdout);
+            let mut terminal = Terminal::new(backend)?;
+            terminal.clear()?;
 
-            if event::poll(timeout)? {
-                if let Event::Key(key) = event::read()? {
-                    match self.handle_key(key)? {
-                        EventResult::Exit => break,
-                        EventResult::Continue => {}
+            let tick_rate = Duration::from_millis(16);
+            let mut last_tick = Instant::now();
+            let mut processing_cleared = false;
+
+            loop {
+                terminal.draw(|frame| self.draw(frame))?;
+
+                if self.processing && !processing_cleared {
+                    self.processing = false;
+                    processing_cleared = true;
+                }
+
+                let timeout = tick_rate
+                    .checked_sub(last_tick.elapsed())
+                    .unwrap_or_else(|| Duration::from_secs(0));
+
+                if event::poll(timeout)? {
+                    if let Event::Key(key) = event::read()? {
+                        match self.handle_key(key)? {
+                            EventResult::Exit => break,
+                            EventResult::Continue => {}
+                        }
                     }
+                }
+
+                if last_tick.elapsed() >= tick_rate {
+                    last_tick = Instant::now();
                 }
             }
 
-            if last_tick.elapsed() >= tick_rate {
-                last_tick = Instant::now();
-            }
-        }
+            cleanup_terminal(terminal)?;
 
-        cleanup_terminal(terminal)
+            if self.admin_requested {
+                self.admin_requested = false;
+                if let Some(launcher) = self.admin_launcher.as_mut() {
+                    launcher()?;
+                    continue;
+                }
+            }
+
+            return Ok(());
+        }
     }
 
     pub fn draw(&mut self, frame: &mut ratatui::Frame<'_>) {
         let area = frame.size();
-        let (table_area, detail_area, status_area) = split_layout(area, self.detail.is_visible());
+        let mut constraints = Vec::new();
+        if self.context_message.is_some() {
+            constraints.push(Constraint::Length(3));
+        }
+        constraints.push(Constraint::Min(5));
+        if self.detail.is_visible() {
+            constraints.push(Constraint::Length(8));
+        } else {
+            constraints.push(Constraint::Length(0));
+        }
+        constraints.push(Constraint::Length(3));
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+        let mut idx = 0;
+        if let Some(context) = self.context_message.as_ref() {
+            let header = Paragraph::new(context.clone())
+                .block(Block::default().borders(Borders::ALL).title("Command"))
+                .wrap(Wrap { trim: true });
+            frame.render_widget(header, chunks[idx]);
+            idx += 1;
+        }
+        let table_area = chunks[idx];
+        let detail_area = chunks[idx + 1];
+        let status_area = chunks[idx + 2];
 
         self.table.render(frame, table_area, &self.search);
 
@@ -123,6 +195,7 @@ impl TuiApp {
             }
         }
 
+        let admin_available = self.admin_launcher.is_some();
         render_status(
             frame,
             status_area,
@@ -131,14 +204,20 @@ impl TuiApp {
             &self.connection_label,
             self.row_count,
             self.processing,
+            self.status_message.as_deref(),
+            admin_available,
         );
 
         if self.show_help {
-            render_help(frame, area);
+            render_help(frame, area, admin_available);
         }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<EventResult> {
+        if self.show_help && key.code == KeyCode::Esc {
+            self.show_help = false;
+            return Ok(EventResult::Continue);
+        }
         if let Some(action) = action_for_key(key, self.search.is_active()) {
             return self.handle_action(action);
         }
@@ -147,7 +226,13 @@ impl TuiApp {
 
     fn handle_action(&mut self, action: Action) -> Result<EventResult> {
         match action {
-            Action::Quit => return Ok(EventResult::Exit),
+            Action::Quit => {
+                if self.show_help {
+                    self.show_help = false;
+                    return Ok(EventResult::Continue);
+                }
+                return Ok(EventResult::Exit);
+            }
             Action::ToggleHelp => {
                 self.show_help = !self.show_help;
             }
@@ -184,6 +269,12 @@ impl TuiApp {
             Action::CancelSearch => self.search.cancel(),
             Action::DetailUp => self.detail.scroll_up(),
             Action::DetailDown => self.detail.scroll_down(),
+            Action::OpenAdmin => {
+                if self.admin_launcher.is_some() {
+                    self.admin_requested = true;
+                    return Ok(EventResult::Exit);
+                }
+            }
         }
         Ok(EventResult::Continue)
     }
@@ -208,32 +299,19 @@ impl TuiApp {
     pub fn is_help_visible(&self) -> bool {
         self.show_help
     }
+
+    #[allow(dead_code)]
+    pub fn take_admin_launcher(&mut self) -> Option<Box<dyn FnMut() -> Result<()> + 'a>> {
+        self.admin_launcher.take()
+    }
+
+    #[allow(dead_code)]
+    pub fn admin_requested(&self) -> bool {
+        self.admin_requested
+    }
 }
 
-fn split_layout(area: Rect, show_detail: bool) -> (Rect, Rect, Rect) {
-    let chunks = if show_detail {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(5),
-                Constraint::Length(8),
-                Constraint::Length(3),
-            ])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(5),
-                Constraint::Length(0),
-                Constraint::Length(3),
-            ])
-            .split(area)
-    };
-
-    (chunks[0], chunks[1], chunks[2])
-}
-
+#[allow(clippy::too_many_arguments)]
 fn render_status(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -242,28 +320,88 @@ fn render_status(
     connection_label: &str,
     row_count: usize,
     processing: bool,
+    status_message: Option<&str>,
+    admin_available: bool,
 ) {
     let state_label = if processing { "processing" } else { "ready" };
-    let base_status =
-        format!("Connection: {connection_label} | Rows: {row_count} | Status: {state_label}");
-    let status_text = if show_help {
-        format!("{base_status} | Help: press ? to close")
-    } else if search.is_active() {
-        format!("{base_status} | /{}", search.query())
-    } else if search.has_query() {
-        format!("{base_status} | /{} (n/N)", search.query())
+    let focus_label = if show_help {
+        "Help"
+    } else if search.is_active() || search.has_query() {
+        "Search"
     } else {
-        format!("{base_status} | q/Esc: quit | ?: help | /: search | Enter: detail")
+        "Table"
+    };
+    let action_label = if show_help {
+        "help"
+    } else if search.is_active() || search.has_query() {
+        "search"
+    } else {
+        "browse"
+    };
+    let highlight = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    let mut spans = Vec::new();
+    let push_sep = |spans: &mut Vec<Span<'_>>| {
+        spans.push(Span::raw(" | "));
     };
 
-    let paragraph = Paragraph::new(status_text)
+    spans.push(Span::raw("Connection: "));
+    spans.push(Span::styled(connection_label.to_string(), highlight));
+    push_sep(&mut spans);
+    spans.push(Span::raw("Focus: "));
+    spans.push(Span::styled(focus_label.to_string(), highlight));
+    push_sep(&mut spans);
+    spans.push(Span::raw("Action: "));
+    spans.push(Span::styled(action_label.to_string(), highlight));
+    spans.push(Span::raw(format!(
+        " (Rows: {row_count}, Status: {state_label})"
+    )));
+    if search.is_active() || search.has_query() {
+        push_sep(&mut spans);
+        spans.push(Span::raw(format!("Query: /{}", search.query())));
+    }
+    push_sep(&mut spans);
+
+    let (ops_text, move_text) = if show_help {
+        ("?: close".to_string(), "-".to_string())
+    } else if search.is_active() {
+        (
+            "Enter: confirm, Esc: cancel".to_string(),
+            "n/N: next/prev".to_string(),
+        )
+    } else if search.has_query() {
+        ("/: search".to_string(), "n/N: next/prev".to_string())
+    } else {
+        let mut ops = vec!["Enter: detail", "/: search", "?: help", "q/Esc: quit"];
+        if admin_available {
+            ops.insert(2, "a: admin/back");
+        }
+        (ops.join(", "), "j/k, h/l, g/G, Ctrl+d/u".to_string())
+    };
+
+    spans.push(Span::styled(format!("Ops: {ops_text}"), highlight));
+    push_sep(&mut spans);
+    if move_text == "-" {
+        spans.push(Span::raw("Move: -"));
+    } else {
+        spans.push(Span::raw(format!("Move: {move_text}")));
+    }
+
+    if let Some(message) = status_message {
+        push_sep(&mut spans);
+        spans.push(Span::raw(message.to_string()));
+    }
+
+    let paragraph = Paragraph::new(Line::from(spans))
         .block(Block::default().borders(Borders::ALL).title("Status"))
         .style(Style::default().fg(Color::Gray))
         .wrap(Wrap { trim: true });
     frame.render_widget(paragraph, area);
 }
 
-fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
+fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect, admin_available: bool) {
     let help_width = area.width.saturating_sub(4).min(60);
     let help_height = area.height.saturating_sub(4).min(18);
     let rect = Rect::new(
@@ -273,7 +411,7 @@ fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
         help_height,
     );
 
-    let lines = help_items()
+    let lines = help_items(admin_available)
         .iter()
         .map(|(key, desc)| format!("{key:<8} {desc}"))
         .collect::<Vec<_>>()
@@ -293,5 +431,8 @@ fn cleanup_terminal(mut terminal: Terminal<CrosstermBackend<Stdout>>) -> Result<
 }
 
 pub fn is_tty() -> bool {
-    std::io::stdout().is_terminal() && std::io::stdin().is_terminal()
+    let forced = std::env::var("ALOPEX_TEST_TTY")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+        .unwrap_or(false);
+    forced || (std::io::stdout().is_terminal() && std::io::stdin().is_terminal())
 }

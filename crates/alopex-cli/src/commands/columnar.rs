@@ -4,7 +4,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use alopex_core::columnar::encoding::{Column as ColumnData, LogicalType};
@@ -24,13 +24,16 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
 
 use crate::batch::BatchMode;
-use crate::cli::{ColumnarCommand, IndexCommand};
+use crate::cli::{ColumnarCommand, IndexCommand, OutputFormat};
 use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
+use crate::output::RowCollector;
 use crate::progress::ProgressIndicator;
 use crate::streaming::{StreamingWriter, WriteStatus};
+use crate::tui::admin::{AdminBackend, AdminContext, AdminTarget, AuthCapabilities};
+use crate::tui::renderer::render_output;
 
 #[derive(Debug, Serialize)]
 struct RemoteColumnarScanRequest {
@@ -182,6 +185,69 @@ pub fn execute_with_formatter<W: Write>(
     }
 }
 
+pub fn columnar_command_columns(cmd: &ColumnarCommand) -> Vec<Column> {
+    match cmd {
+        ColumnarCommand::Scan { .. } => columnar_scan_columns(),
+        ColumnarCommand::Stats { .. } => columnar_stats_columns(),
+        ColumnarCommand::List => columnar_list_columns(),
+        ColumnarCommand::Ingest { .. } => columnar_ingest_columns(),
+        ColumnarCommand::Index(command) => match command {
+            IndexCommand::List { .. } => columnar_index_list_columns(),
+            IndexCommand::Create { .. } | IndexCommand::Drop { .. } => columnar_status_columns(),
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_tui(
+    db: &Database,
+    cmd: ColumnarCommand,
+    batch_mode: &BatchMode,
+    output_format: OutputFormat,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+    data_dir: Option<PathBuf>,
+) -> Result<()> {
+    let connection_label = connection_label.into();
+    let context_message = Some(columnar_command_context(&cmd));
+    let admin_label = connection_label.clone();
+    let admin_data_dir = data_dir.clone();
+    let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> = Some(Box::new(move || {
+        let connection_label = admin_label.clone();
+        let data_dir = admin_data_dir.clone();
+        crate::tui::admin::run_admin_ui(AdminContext {
+            connection_label,
+            auth: AuthCapabilities::full(),
+            backend: AdminBackend::Local {
+                db,
+                batch_mode,
+                output_format,
+                limit,
+                quiet,
+                data_dir,
+            },
+            initial_target: Some(AdminTarget::Columnar),
+        })
+    }));
+    let columns = columnar_command_columns(&cmd);
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    execute_with_formatter(db, cmd, batch_mode, &mut sink, formatter, limit, quiet)?;
+    let warning = collector.truncation_warning();
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        context_message,
+        true,
+        warning,
+        output_format,
+        admin_launcher,
+    )
+}
+
 async fn execute_remote_ingest<W: Write>(
     client: &HttpClient,
     options: IngestOptions<'_>,
@@ -315,6 +381,36 @@ pub async fn execute_remote_with_formatter<W: Write>(
             execute_remote_index_command(client, command, &mut streaming_writer).await
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_remote_tui(
+    client: &HttpClient,
+    cmd: &ColumnarCommand,
+    batch_mode: &BatchMode,
+    output_format: OutputFormat,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>>,
+) -> Result<()> {
+    let columns = columnar_command_columns(cmd);
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    execute_remote_with_formatter(client, cmd, batch_mode, &mut sink, formatter, limit, quiet)
+        .await?;
+    let warning = collector.truncation_warning();
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        Some(columnar_command_context(cmd)),
+        true,
+        warning,
+        output_format,
+        admin_launcher,
+    )
 }
 
 async fn execute_remote_scan<W: Write>(
@@ -488,6 +584,32 @@ fn map_client_error(err: ClientError) -> CliError {
         ClientError::HttpStatus { status, body } => {
             CliError::InvalidArgument(format!("Server error: HTTP {} - {}", status.as_u16(), body))
         }
+    }
+}
+
+fn columnar_command_context(cmd: &ColumnarCommand) -> String {
+    match cmd {
+        ColumnarCommand::Scan { segment, .. } => format!("columnar scan --segment {segment}"),
+        ColumnarCommand::Stats { segment } => format!("columnar stats --segment {segment}"),
+        ColumnarCommand::List => "columnar list".to_string(),
+        ColumnarCommand::Ingest { table, file, .. } => {
+            format!("columnar ingest --table {table} --file {}", file.display())
+        }
+        ColumnarCommand::Index(command) => match command {
+            IndexCommand::Create {
+                segment,
+                column,
+                index_type,
+            } => format!(
+                "columnar index create --segment {segment} --column {column} --type {index_type}"
+            ),
+            IndexCommand::List { segment } => {
+                format!("columnar index list --segment {segment}")
+            }
+            IndexCommand::Drop { segment, column } => {
+                format!("columnar index drop --segment {segment} --column {column}")
+            }
+        },
     }
 }
 

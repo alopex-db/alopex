@@ -16,6 +16,27 @@ All notable changes to this project will be documented in this file.
 ### Breaking Changes
 - None.
 
+## [0.4.2]
+
+### Added
+- TUI as default mode for interactive terminals; automatically activates in TTY without `--tui`.
+- TUI support for all non-SQL commands (KV, Vector, HNSW, Columnar, Server, Profile).
+- Unified TUI renderer for consistent Column/Row display across commands.
+- Admin TUI navigation with data lifecycle operations (create/update/delete/archive/restore/backup/export).
+- Lifecycle subcommands (`archive`, `restore`, `backup`, `export`) with placeholder implementations.
+- mTLS certificate validation: expiration and CN/SAN host matching enforcement.
+- `--insecure` flag for explicit HTTP opt-in with warning.
+- SELECT literal-only queries support (e.g., `SELECT 1`, `SELECT 1, 'ok'`) without FROM clause.
+
+### Changed
+- Default UI mode is now TUI in TTY; `--batch` or `--output` forces batch mode.
+- Non-TTY environments fall back to batch output with warning message.
+- Admin TUI uses rainfrog-inspired layout with left navigation and main panel.
+
+### Fixed
+- HNSW persistence after inserts.
+- Columnar compression defaults to zstd.
+
 ## [0.4.1]
 
 ### Added

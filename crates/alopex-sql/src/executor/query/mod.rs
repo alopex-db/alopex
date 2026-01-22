@@ -1,5 +1,6 @@
 use alopex_core::kv::KVStore;
 
+use crate::ast::LITERAL_TABLE;
 use crate::catalog::{Catalog, StorageType};
 use crate::executor::evaluator::EvalContext;
 use crate::executor::{ExecutionResult, ExecutorError, QueryRowIterator, Result};
@@ -123,6 +124,12 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
 )> {
     match plan {
         LogicalPlan::Scan { table, projection } => {
+            if table == LITERAL_TABLE {
+                let schema = Vec::new();
+                let rows = vec![Row::new(0, Vec::new())];
+                let iter = iterator::VecIterator::new(rows, schema.clone());
+                return Ok((Box::new(iter), projection, schema));
+            }
             let table_meta = catalog
                 .get_table(&table)
                 .cloned()
@@ -232,6 +239,12 @@ fn build_streaming_pipeline_inner<
 )> {
     match plan {
         LogicalPlan::Scan { table, projection } => {
+            if table == LITERAL_TABLE {
+                let schema = Vec::new();
+                let rows = vec![Row::new(0, Vec::new())];
+                let iter = iterator::VecIterator::new(rows, schema.clone());
+                return Ok((Box::new(iter), projection, schema));
+            }
             let table_meta = catalog
                 .get_table(&table)
                 .cloned()

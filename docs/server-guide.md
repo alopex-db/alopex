@@ -175,6 +175,12 @@ See `crates/alopex-server/proto/alopex.proto` for message definitions.
 - `GET /healthz` - health check
 - `GET /status` - runtime status
 - `GET /metrics` - Prometheus metrics
+- `GET /api/admin/status` - status summary for CLI server commands
+- `GET /api/admin/metrics` - metrics summary for CLI server commands
+- `GET /api/admin/health` - health summary for CLI server commands
+- `POST /api/admin/compaction` - trigger compaction (if supported)
+- `GET /api/admin/capabilities` - admin capability scope and allowed actions
+- `POST /api/admin/lifecycle` - lifecycle actions (archive/restore/backup/export)
 
 ## CLI access
 
@@ -192,7 +198,7 @@ token = "secret"
 
 ```bash
 alopex --profile prod sql "SELECT 1"
-alopex --profile prod sql --tui "SELECT * FROM items"
+alopex --profile prod sql "SELECT * FROM items"
 ```
 
 Server management commands:
@@ -203,3 +209,9 @@ alopex --profile prod server metrics
 alopex --profile prod server health
 alopex --profile prod server compaction trigger
 ```
+
+On TTY terminals, the CLI defaults to the TUI for interactive output. Use
+`--batch` or `--output` to force batch output, and run `alopex server` (no
+subcommand) to open the admin console for lifecycle actions. The admin console
+uses a rainfrog-style layout (left resource tree, right detail, right-bottom
+status/preview) with `h/l` focus switching.

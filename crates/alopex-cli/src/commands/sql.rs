@@ -17,6 +17,7 @@ use crate::output::formatter::Formatter;
 use crate::streaming::timeout::parse_deadline;
 use crate::streaming::{CancelSignal, Deadline, StreamingWriter, WriteStatus};
 use crate::tui::{is_tty, TuiApp};
+use crate::ui::mode::UiMode;
 use futures_util::StreamExt;
 
 #[doc(hidden)]
@@ -25,6 +26,7 @@ pub struct SqlExecutionOptions<'a> {
     pub quiet: bool,
     pub cancel: &'a CancelSignal,
     pub deadline: &'a Deadline,
+    pub admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
 }
 
 /// Execute a SQL command with dynamic column detection.
@@ -40,12 +42,15 @@ pub struct SqlExecutionOptions<'a> {
 /// * `formatter` - The formatter to use.
 /// * `limit` - Optional row limit.
 /// * `quiet` - Whether to suppress warnings.
-pub fn execute_with_formatter<W: Write>(
+#[allow(clippy::too_many_arguments)]
+pub fn execute_with_formatter<'a, W: Write>(
     db: &Database,
     cmd: SqlCommand,
     batch_mode: &BatchMode,
+    ui_mode: UiMode,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
     limit: Option<usize>,
     quiet: bool,
 ) -> Result<()> {
@@ -56,6 +61,7 @@ pub fn execute_with_formatter<W: Write>(
         db,
         cmd,
         batch_mode,
+        ui_mode,
         writer,
         formatter,
         SqlExecutionOptions {
@@ -63,6 +69,7 @@ pub fn execute_with_formatter<W: Write>(
             quiet,
             cancel: &cancel,
             deadline: &deadline,
+            admin_launcher,
         },
     )
 }
@@ -72,18 +79,16 @@ pub fn execute_with_formatter_control<W: Write>(
     db: &Database,
     cmd: SqlCommand,
     batch_mode: &BatchMode,
+    ui_mode: UiMode,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
-    options: SqlExecutionOptions<'_>,
+    mut options: SqlExecutionOptions<'_>,
 ) -> Result<()> {
     let sql = cmd.resolve_query(batch_mode)?;
     let effective_limit = merge_limit(options.limit, cmd.max_rows);
-    let options = SqlExecutionOptions {
-        limit: effective_limit,
-        ..options
-    };
+    options.limit = effective_limit;
 
-    if cmd.tui {
+    if ui_mode == UiMode::Tui {
         return execute_tui_local_or_fallback(db, &sql, writer, formatter, options);
     }
 
@@ -103,12 +108,15 @@ fn is_select_query(sql: &str) -> Result<bool> {
 }
 
 /// Execute a SQL command against a remote server using HttpClient.
-pub async fn execute_remote_with_formatter<W: Write>(
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_remote_with_formatter<'a, W: Write>(
     client: &HttpClient,
     cmd: &SqlCommand,
     batch_mode: &BatchMode,
+    ui_mode: UiMode,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
     limit: Option<usize>,
     quiet: bool,
 ) -> Result<()> {
@@ -120,9 +128,24 @@ pub async fn execute_remote_with_formatter<W: Write>(
         quiet,
         cancel: &cancel,
         deadline: &deadline,
+        admin_launcher,
     };
 
-    execute_remote_with_formatter_control(client, cmd, batch_mode, writer, formatter, options).await
+    execute_remote_with_formatter_control(
+        client, cmd, batch_mode, ui_mode, writer, formatter, options,
+    )
+    .await
+}
+
+fn sql_context_message(sql: &str) -> String {
+    let condensed = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let max_len = 200;
+    if condensed.chars().count() > max_len {
+        let truncated: String = condensed.chars().take(max_len).collect();
+        format!("SQL: {truncated}...")
+    } else {
+        format!("SQL: {condensed}")
+    }
 }
 
 #[doc(hidden)]
@@ -130,12 +153,13 @@ pub async fn execute_remote_with_formatter_control<W: Write>(
     client: &HttpClient,
     cmd: &SqlCommand,
     batch_mode: &BatchMode,
+    ui_mode: UiMode,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
     options: SqlExecutionOptions<'_>,
 ) -> Result<()> {
     let sql = cmd.resolve_query(batch_mode)?;
-    if cmd.tui {
+    if ui_mode == UiMode::Tui {
         return execute_tui_remote_or_fallback(client, &sql, cmd, writer, formatter, options).await;
     }
     execute_remote_with_formatter_impl(client, &sql, cmd, writer, formatter, &options).await
@@ -227,12 +251,12 @@ async fn execute_remote_with_formatter_impl<W: Write>(
     streaming_writer.finish()
 }
 
-fn execute_tui_local_or_fallback<W: Write>(
+fn execute_tui_local_or_fallback<'a, W: Write>(
     db: &Database,
     sql: &str,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
-    options: SqlExecutionOptions<'_>,
+    mut options: SqlExecutionOptions<'a>,
 ) -> Result<()> {
     if !is_tty() {
         if !options.quiet {
@@ -241,7 +265,8 @@ fn execute_tui_local_or_fallback<W: Write>(
         return execute_sql_with_formatter(db, sql, writer, formatter, &options);
     }
 
-    match execute_tui_local(db, sql, &options) {
+    let admin_launcher = options.admin_launcher.take();
+    match execute_tui_local(db, sql, &options, admin_launcher) {
         Ok(()) => Ok(()),
         Err(err) => {
             if !options.quiet {
@@ -252,7 +277,12 @@ fn execute_tui_local_or_fallback<W: Write>(
     }
 }
 
-fn execute_tui_local(db: &Database, sql: &str, options: &SqlExecutionOptions<'_>) -> Result<()> {
+fn execute_tui_local<'a>(
+    db: &Database,
+    sql: &str,
+    options: &SqlExecutionOptions<'a>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
+) -> Result<()> {
     use alopex_sql::ExecutionResult;
 
     options.deadline.check()?;
@@ -294,17 +324,19 @@ fn execute_tui_local(db: &Database, sql: &str, options: &SqlExecutionOptions<'_>
         }
     };
 
-    let app = TuiApp::new(columns, rows, "local", false);
+    let app = TuiApp::new(columns, rows, "local", false)
+        .with_context_message(Some(sql_context_message(sql)))
+        .with_admin_launcher(admin_launcher);
     app.run()
 }
 
-async fn execute_tui_remote_or_fallback<W: Write>(
+async fn execute_tui_remote_or_fallback<'a, W: Write>(
     client: &HttpClient,
     sql: &str,
     cmd: &SqlCommand,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
-    options: SqlExecutionOptions<'_>,
+    mut options: SqlExecutionOptions<'a>,
 ) -> Result<()> {
     if !is_tty() {
         if !options.quiet {
@@ -314,7 +346,8 @@ async fn execute_tui_remote_or_fallback<W: Write>(
             .await;
     }
 
-    match execute_tui_remote(client, sql, cmd, &options).await {
+    let admin_launcher = options.admin_launcher.take();
+    match execute_tui_remote(client, sql, cmd, &options, admin_launcher).await {
         Ok(()) => Ok(()),
         Err(err) => {
             if !options.quiet {
@@ -325,17 +358,20 @@ async fn execute_tui_remote_or_fallback<W: Write>(
     }
 }
 
-async fn execute_tui_remote(
+async fn execute_tui_remote<'a>(
     client: &HttpClient,
     sql: &str,
     cmd: &SqlCommand,
-    options: &SqlExecutionOptions<'_>,
+    options: &SqlExecutionOptions<'a>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
 ) -> Result<()> {
     if is_select_query(sql)? {
         let (columns, rows) =
             collect_remote_streaming_rows(client, sql, options, cmd.fetch_size, cmd.max_rows)
                 .await?;
-        let app = TuiApp::new(columns, rows, "server", false);
+        let app = TuiApp::new(columns, rows, "server", false)
+            .with_context_message(Some(sql_context_message(sql)))
+            .with_admin_launcher(admin_launcher);
         return app.run();
     }
 
@@ -390,7 +426,9 @@ async fn execute_tui_remote(
         (columns, rows)
     };
 
-    let app = TuiApp::new(columns, rows, "server", false);
+    let app = TuiApp::new(columns, rows, "server", false)
+        .with_context_message(Some(sql_context_message(sql)))
+        .with_admin_launcher(admin_launcher);
     app.run()
 }
 

@@ -3,17 +3,22 @@
 //! Supports: get, put, delete, list
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use alopex_embedded::{Database, TransactionManager as Transaction, TxnMode};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{KvCommand, KvTxnCommand};
+use crate::batch::BatchMode;
+use crate::cli::{KvCommand, KvTxnCommand, OutputFormat};
 use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
+use crate::output::RowCollector;
 use crate::streaming::{StreamingWriter, WriteStatus};
+use crate::tui::admin::{AdminBackend, AdminContext, AdminTarget, AuthCapabilities};
+use crate::tui::renderer::render_output;
 
 const DEFAULT_TXN_TIMEOUT_SECS: u64 = 60;
 
@@ -117,6 +122,58 @@ pub fn execute<W: Write>(
         KvCommand::List { prefix } => execute_list(db, prefix.as_deref(), writer),
         KvCommand::Txn(cmd) => execute_txn_command(db, cmd, writer),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_tui(
+    db: &Database,
+    cmd: KvCommand,
+    batch_mode: &BatchMode,
+    output_format: OutputFormat,
+    columns: Vec<Column>,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+    data_dir: Option<PathBuf>,
+) -> Result<()> {
+    let connection_label = connection_label.into();
+    let context_message = Some(kv_command_context(&cmd));
+    let admin_label = connection_label.clone();
+    let admin_data_dir = data_dir.clone();
+    let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> = Some(Box::new(move || {
+        let connection_label = admin_label.clone();
+        let data_dir = admin_data_dir.clone();
+        crate::tui::admin::run_admin_ui(AdminContext {
+            connection_label,
+            auth: AuthCapabilities::full(),
+            backend: AdminBackend::Local {
+                db,
+                batch_mode,
+                output_format,
+                limit,
+                quiet,
+                data_dir,
+            },
+            initial_target: Some(AdminTarget::Kv),
+        })
+    }));
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    let mut writer =
+        StreamingWriter::new(&mut sink, formatter, columns.clone(), limit).with_quiet(quiet);
+    execute(db, cmd, &mut writer)?;
+    let warning = collector.truncation_warning();
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        context_message,
+        true,
+        warning,
+        output_format,
+        admin_launcher,
+    )
 }
 
 /// Execute a KV command against a remote server.
@@ -225,6 +282,34 @@ pub async fn execute_remote_with_formatter<W: Write>(
             execute_remote_txn_command(client, txn_cmd, writer, formatter, limit, quiet).await
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_remote_tui<'a>(
+    client: &HttpClient,
+    cmd: &KvCommand,
+    columns: Vec<Column>,
+    output_format: OutputFormat,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
+) -> Result<()> {
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    execute_remote_with_formatter(client, cmd, &mut sink, formatter, limit, quiet).await?;
+    let warning = collector.truncation_warning();
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        Some(kv_command_context(cmd)),
+        true,
+        warning,
+        output_format,
+        admin_launcher,
+    )
 }
 
 async fn execute_remote_txn_command<W: Write>(
@@ -372,6 +457,35 @@ fn map_client_error(err: ClientError) -> CliError {
         ClientError::HttpStatus { status, body } => {
             CliError::InvalidArgument(format!("Server error: HTTP {} - {}", status.as_u16(), body))
         }
+    }
+}
+
+fn kv_command_context(cmd: &KvCommand) -> String {
+    match cmd {
+        KvCommand::Get { key } => format!("kv get {key}"),
+        KvCommand::Put { key, .. } => format!("kv put {key}"),
+        KvCommand::Delete { key } => format!("kv delete {key}"),
+        KvCommand::List { prefix } => match prefix {
+            Some(prefix) => format!("kv list --prefix {prefix}"),
+            None => "kv list".to_string(),
+        },
+        KvCommand::Txn(command) => match command {
+            KvTxnCommand::Begin { timeout_secs } => match timeout_secs {
+                Some(secs) => format!("kv txn begin --timeout-secs {secs}"),
+                None => "kv txn begin".to_string(),
+            },
+            KvTxnCommand::Get { key, txn_id } => {
+                format!("kv txn get {key} --txn-id {txn_id}")
+            }
+            KvTxnCommand::Put { key, txn_id, .. } => {
+                format!("kv txn put {key} --txn-id {txn_id}")
+            }
+            KvTxnCommand::Delete { key, txn_id } => {
+                format!("kv txn delete {key} --txn-id {txn_id}")
+            }
+            KvTxnCommand::Commit { txn_id } => format!("kv txn commit --txn-id {txn_id}"),
+            KvTxnCommand::Rollback { txn_id } => format!("kv txn rollback --txn-id {txn_id}"),
+        },
     }
 }
 

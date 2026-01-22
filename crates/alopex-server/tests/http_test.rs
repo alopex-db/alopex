@@ -77,6 +77,46 @@ async fn send_empty(
 }
 
 #[tokio::test]
+async fn admin_api_endpoints_return_expected_payloads() {
+    let (state, _temp) = build_state(AuthMode::None, Duration::from_secs(5)).await;
+    let router = http::router(state.clone());
+
+    let (status, _, body) = send_empty(router.clone(), Method::GET, "/api/admin/status").await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("status json");
+    assert!(value.get("version").and_then(|v| v.as_str()).is_some());
+    assert!(value.get("uptime_secs").and_then(|v| v.as_u64()).is_some());
+
+    let (status, _, body) = send_empty(router.clone(), Method::GET, "/api/admin/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("metrics json");
+    assert!(value.get("qps").is_some());
+    assert!(value.get("avg_latency_ms").is_some());
+    assert!(value.get("p99_latency_ms").is_some());
+    assert!(value.get("memory_usage_mb").is_some());
+    assert!(value.get("active_connections").is_some());
+
+    let (status, _, body) = send_empty(router.clone(), Method::GET, "/api/admin/health").await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("health json");
+    assert_eq!(value.get("status").and_then(|v| v.as_str()), Some("ok"));
+    assert_eq!(value.get("message").and_then(|v| v.as_str()), Some("ready"));
+
+    let (status, _, body) = send_json(
+        router.clone(),
+        Method::POST,
+        "/api/admin/compaction",
+        json!({}),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("compaction json");
+    assert_eq!(value.get("success").and_then(|v| v.as_bool()), Some(false));
+    assert!(value.get("message").and_then(|v| v.as_str()).is_some());
+}
+
+#[tokio::test]
 async fn http_sql_vector_session_flow() {
     let (state, _temp) = build_state(AuthMode::None, Duration::from_secs(5)).await;
     let router = http::router(state.clone());

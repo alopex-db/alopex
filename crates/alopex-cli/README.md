@@ -2,7 +2,7 @@
 
 Alopex CLI provides access to embedded and server-backed Alopex DB features.
 It supports SQL, KV, Vector, and Columnar workflows with streaming output and
-an optional TUI preview for SELECT queries.
+an interactive TUI by default on TTY terminals.
 
 ## Quick start
 
@@ -42,12 +42,24 @@ Example:
 alopex sql "SELECT * FROM events" --fetch-size 1000 --max-rows 10000 --deadline 90s --output json
 ```
 
-## TUI preview
+## TUI mode
 
-Launch the TUI for SELECT results:
+The CLI launches the TUI automatically on TTY terminals. For SQL, just run:
 
 ```bash
-alopex sql --tui "SELECT id, name FROM items"
+alopex sql "SELECT id, name FROM items"
+```
+
+Non-SQL commands that return rows also default to the TUI:
+
+```bash
+alopex kv list
+```
+
+Force batch output with `--batch` or any explicit `--output` format:
+
+```bash
+alopex sql "SELECT * FROM events" --output json
 ```
 
 Keybindings (TUI):
@@ -62,9 +74,39 @@ Keybindings (TUI):
 - `Enter`: toggle detail panel
 - `J` / `K`: scroll detail panel
 
-Note: `--tui` requires a TTY. When running in non-interactive mode, the CLI
+Note: the TUI requires a TTY. When running in non-interactive mode, the CLI
 falls back to batch output and preserves `--output` formatting.
 Use `--max-rows` (or `--limit`) to cap memory usage for large result sets.
+
+## Admin console
+
+Run the CLI without a subcommand to open the admin console:
+
+```bash
+alopex
+```
+
+You can also open the admin console scoped to a target by omitting its subcommand:
+
+```bash
+alopex server
+```
+
+The admin console uses a three-pane layout inspired by rainfrog:
+
+- Left: resource tree with search (tables, columns, segments, KV keys)
+- Right top: detail/input panel (actions + parameters)
+- Right bottom: status/preview panel
+
+Focus controls:
+
+- `h` / `l` or ←/→: move focus between Table/Detail/Status
+- Table: `j`/`k` move, `/` search, `g`/`G` top/bottom, `Ctrl+d`/`Ctrl+u` page, `Enter` select
+- Detail: `Tab` field, `e` edit, `o` list options, `Enter` execute
+- Status: `j`/`k` scroll, `g`/`G` top/bottom, `Ctrl+d`/`Ctrl+u` page
+
+Lifecycle actions (archive/restore/backup/export) live in the Actions list and
+respect server auth capabilities.
 
 ## Profiles and server connections
 

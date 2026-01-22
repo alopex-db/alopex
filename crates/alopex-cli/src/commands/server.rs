@@ -4,13 +4,14 @@ use std::io::Write;
 
 use serde::Deserialize;
 
-use crate::cli::{CompactionCommand, ServerCommand};
+use crate::cli::{CompactionCommand, OutputFormat, ServerCommand};
 use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, Row};
 use crate::output::server as server_output;
 use crate::output::table::TableFormatter;
 use crate::output::Formatter;
+use crate::tui::renderer::render_output;
 
 #[derive(Debug, Deserialize)]
 struct ServerStatusResponse {
@@ -125,6 +126,123 @@ pub async fn execute_remote<W: Write>(
                 )
             }
         },
+    }
+}
+
+pub async fn execute_remote_tui(
+    client: &HttpClient,
+    cmd: &ServerCommand,
+    quiet: bool,
+    connection_label: impl Into<String>,
+    output_format: OutputFormat,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>>,
+) -> Result<()> {
+    match cmd {
+        ServerCommand::Status => {
+            let response: ServerStatusResponse = client
+                .get_json("api/admin/status")
+                .await
+                .map_err(map_client_error)?;
+            if quiet {
+                return Ok(());
+            }
+            render_output(
+                server_output::status_columns(),
+                vec![server_output::status_row(
+                    response.version.as_deref(),
+                    response.uptime_secs,
+                    response.connections,
+                    response.queries_per_second,
+                )],
+                connection_label,
+                Some(server_command_context(cmd)),
+                true,
+                None,
+                output_format,
+                admin_launcher,
+            )
+        }
+        ServerCommand::Metrics => {
+            let response: ServerMetricsResponse = client
+                .get_json("api/admin/metrics")
+                .await
+                .map_err(map_client_error)?;
+            if quiet {
+                return Ok(());
+            }
+            render_output(
+                server_output::metrics_columns(),
+                vec![server_output::metrics_row(
+                    response.qps,
+                    response.avg_latency_ms,
+                    response.p99_latency_ms,
+                    response.memory_usage_mb,
+                    response.active_connections,
+                )],
+                connection_label,
+                Some(server_command_context(cmd)),
+                true,
+                None,
+                output_format,
+                admin_launcher,
+            )
+        }
+        ServerCommand::Health => {
+            let response: ServerHealthResponse = client
+                .get_json("api/admin/health")
+                .await
+                .map_err(map_client_error)?;
+            if quiet {
+                return Ok(());
+            }
+            render_output(
+                server_output::health_columns(),
+                vec![server_output::health_row(
+                    response.status.as_deref(),
+                    response.message.as_deref(),
+                )],
+                connection_label,
+                Some(server_command_context(cmd)),
+                true,
+                None,
+                output_format,
+                admin_launcher,
+            )
+        }
+        ServerCommand::Compaction { command } => match command {
+            CompactionCommand::Trigger => {
+                let request = serde_json::json!({});
+                let response: ServerCompactionResponse = client
+                    .post_json("api/admin/compaction", &request)
+                    .await
+                    .map_err(map_client_error)?;
+                if quiet {
+                    return Ok(());
+                }
+                render_output(
+                    server_output::compaction_columns(),
+                    vec![server_output::compaction_row(
+                        response.success,
+                        response.message.as_deref(),
+                    )],
+                    connection_label,
+                    Some(server_command_context(cmd)),
+                    true,
+                    None,
+                    output_format,
+                    admin_launcher,
+                )
+            }
+        },
+    }
+}
+
+fn server_command_context(cmd: &ServerCommand) -> String {
+    match cmd {
+        ServerCommand::Status => "server status".to_string(),
+        ServerCommand::Metrics => "server metrics".to_string(),
+        ServerCommand::Health => "server health".to_string(),
+        ServerCommand::Compaction { .. } => "server compaction trigger".to_string(),
     }
 }
 

@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod admin_api;
 pub mod columnar;
 pub mod hnsw;
 pub mod kv;
@@ -95,6 +96,21 @@ pub fn router(state: Arc<ServerState>) -> Router {
         .route(
             "/vector/index/compact",
             axum::routing::post(vector::index_compact),
+        )
+        .route(
+            "/api/admin/capabilities",
+            axum::routing::get(admin_api::capabilities),
+        )
+        .route("/api/admin/status", axum::routing::get(admin_api::status))
+        .route("/api/admin/metrics", axum::routing::get(admin_api::metrics))
+        .route("/api/admin/health", axum::routing::get(admin_api::health))
+        .route(
+            "/api/admin/lifecycle",
+            axum::routing::post(admin_api::lifecycle),
+        )
+        .route(
+            "/api/admin/compaction",
+            axum::routing::post(admin_api::compaction),
         )
         .route("/session/begin", axum::routing::post(session::begin))
         .route("/session/:id/commit", axum::routing::post(session::commit))

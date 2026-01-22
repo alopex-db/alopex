@@ -35,7 +35,7 @@ pub use types::ResolvedType;
 use crate::ast::ddl::{
     ColumnConstraint, ColumnDef, CreateIndex, CreateTable, DropIndex, DropTable,
 };
-use crate::ast::dml::{Delete, Insert, OrderByExpr, Select, SelectItem, Update};
+use crate::ast::dml::{Delete, Insert, LITERAL_TABLE, OrderByExpr, Select, SelectItem, Update};
 use crate::ast::expr::Literal;
 use crate::ast::{Statement, StatementKind};
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
@@ -336,16 +336,21 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     /// Each layer is optional and only added if the corresponding clause is present.
     fn plan_select(&self, stmt: &Select) -> Result<LogicalPlan, PlannerError> {
         // 1. Resolve the FROM table
-        let table = self
-            .name_resolver
-            .resolve_table(&stmt.from.name, stmt.from.span)?;
+        let literal_table;
+        let table = if stmt.from.name == LITERAL_TABLE {
+            literal_table = TableMetadata::new(LITERAL_TABLE, Vec::new());
+            &literal_table
+        } else {
+            self.name_resolver
+                .resolve_table(&stmt.from.name, stmt.from.span)?
+        };
 
         // 2. Build the projection
         let projection = self.build_projection(&stmt.projection, table)?;
 
         // 3. Create the base Scan plan
         let mut plan = LogicalPlan::Scan {
-            table: table.name.clone(),
+            table: stmt.from.name.clone(),
             projection,
         };
 

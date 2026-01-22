@@ -36,6 +36,7 @@ fn server_profile(url: &str, auth: AuthType) -> Profile {
         local: None,
         server: Some(ServerConfig {
             url: url.to_string(),
+            insecure: false,
             auth: Some(auth),
             token: None,
             username: None,

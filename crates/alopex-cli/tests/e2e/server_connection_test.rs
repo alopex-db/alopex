@@ -20,11 +20,11 @@ struct AuthExpectation {
 async fn auth_status_handler(
     State(expectation): State<Arc<AuthExpectation>>,
     headers: HeaderMap,
-) -> impl IntoResponse {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     if let Some(expected) = &expectation.exact {
         match headers.get(header::AUTHORIZATION) {
             Some(value) if value == expected => {}
-            _ => return StatusCode::UNAUTHORIZED,
+            _ => return Err(StatusCode::UNAUTHORIZED),
         }
     }
     if let Some(prefix) = expectation.prefix {
@@ -32,14 +32,14 @@ async fn auth_status_handler(
             Some(value) => {
                 let value = value.to_str().unwrap_or_default();
                 if !value.starts_with(prefix) {
-                    return StatusCode::UNAUTHORIZED;
+                    return Err(StatusCode::UNAUTHORIZED);
                 }
             }
-            None => return StatusCode::UNAUTHORIZED,
+            None => return Err(StatusCode::UNAUTHORIZED),
         }
     }
 
-    Json(json!({"ok": true}))
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn spawn_tls_server(router: axum::Router) -> (String, oneshot::Sender<()>) {
@@ -124,6 +124,7 @@ async fn e2e_server_connection_token() {
 
     let config = ServerConfig {
         url: base_url,
+        insecure: false,
         auth: Some(AuthType::Token),
         token: Some("test-token".to_string()),
         username: None,
@@ -154,6 +155,7 @@ async fn e2e_server_connection_basic() {
 
     let config = ServerConfig {
         url: base_url,
+        insecure: false,
         auth: Some(AuthType::Basic),
         token: None,
         username: Some("alice".to_string()),
@@ -185,6 +187,7 @@ async fn e2e_server_connection_mtls() {
     let (identity, _dir, cert_path, key_path) = build_identity();
     let config = ServerConfig {
         url: base_url,
+        insecure: false,
         auth: Some(AuthType::MTls),
         token: None,
         username: None,

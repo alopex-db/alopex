@@ -63,11 +63,7 @@ impl HttpClient {
     pub fn new(config: &ServerConfig) -> ClientResult<Self> {
         let base_url =
             Url::parse(&config.url).map_err(|err| ClientError::InvalidUrl(err.to_string()))?;
-        if base_url.scheme() != "https" {
-            return Err(ClientError::InvalidUrl(
-                "server url must use https scheme".to_string(),
-            ));
-        }
+        validate_base_url(&base_url, config.insecure)?;
         let auth = AuthConfig::from_server_config(config)?;
         let builder = Client::builder()
             .pool_idle_timeout(Duration::from_secs(90))
@@ -89,11 +85,7 @@ impl HttpClient {
     pub fn new_with_client(config: &ServerConfig, client: Client) -> ClientResult<Self> {
         let base_url =
             Url::parse(&config.url).map_err(|err| ClientError::InvalidUrl(err.to_string()))?;
-        if base_url.scheme() != "https" {
-            return Err(ClientError::InvalidUrl(
-                "server url must use https scheme".to_string(),
-            ));
-        }
+        validate_base_url(&base_url, config.insecure)?;
         let auth = AuthConfig::from_server_config(config)?;
 
         Ok(Self {
@@ -204,5 +196,24 @@ impl HttpClient {
     ) -> ClientResult<Response> {
         self.send_and_check(|| self.request(Method::POST, path).map(|req| req.json(body)))
             .await
+    }
+}
+
+fn validate_base_url(base_url: &Url, insecure: bool) -> ClientResult<()> {
+    match base_url.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            if insecure {
+                eprintln!("Warning: using insecure HTTP connection to {}", base_url);
+                Ok(())
+            } else {
+                Err(ClientError::InvalidUrl(
+                    "server url must use https scheme (use --insecure to allow http)".to_string(),
+                ))
+            }
+        }
+        _ => Err(ClientError::InvalidUrl(
+            "server url must use http or https scheme".to_string(),
+        )),
     }
 }

@@ -3,18 +3,22 @@
 //! Supports: search, upsert, delete (single key/vector operations)
 
 use std::io::Write;
+use std::path::PathBuf;
 
 use alopex_embedded::{Database, TxnMode};
 use serde::{Deserialize, Serialize};
 
 use crate::batch::BatchMode;
-use crate::cli::VectorCommand;
+use crate::cli::{OutputFormat, VectorCommand};
 use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
+use crate::output::RowCollector;
 use crate::progress::ProgressIndicator;
 use crate::streaming::{StreamingWriter, WriteStatus};
+use crate::tui::admin::{AdminBackend, AdminContext, AdminTarget, AuthCapabilities};
+use crate::tui::renderer::render_output;
 
 #[derive(Debug, Serialize)]
 struct RemoteVectorSearchRequest {
@@ -81,6 +85,58 @@ pub fn execute<W: Write>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn execute_tui(
+    db: &Database,
+    cmd: VectorCommand,
+    batch_mode: &BatchMode,
+    output_format: OutputFormat,
+    columns: Vec<Column>,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+    data_dir: Option<PathBuf>,
+) -> Result<()> {
+    let connection_label = connection_label.into();
+    let context_message = Some(vector_command_context(&cmd));
+    let admin_label = connection_label.clone();
+    let admin_data_dir = data_dir.clone();
+    let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> = Some(Box::new(move || {
+        let connection_label = admin_label.clone();
+        let data_dir = admin_data_dir.clone();
+        crate::tui::admin::run_admin_ui(AdminContext {
+            connection_label,
+            auth: AuthCapabilities::full(),
+            backend: AdminBackend::Local {
+                db,
+                batch_mode,
+                output_format,
+                limit,
+                quiet,
+                data_dir,
+            },
+            initial_target: Some(AdminTarget::Vector),
+        })
+    }));
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    let mut writer =
+        StreamingWriter::new(&mut sink, formatter, columns.clone(), limit).with_quiet(quiet);
+    execute(db, cmd, batch_mode, &mut writer)?;
+    let warning = collector.truncation_warning();
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        context_message,
+        true,
+        warning,
+        output_format,
+        admin_launcher,
+    )
+}
+
 /// Execute a Vector command against a remote server.
 pub async fn execute_remote_with_formatter<W: Write>(
     client: &HttpClient,
@@ -110,6 +166,36 @@ pub async fn execute_remote_with_formatter<W: Write>(
             execute_remote_delete(client, index, key, writer, formatter, limit, quiet).await
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_remote_tui<'a>(
+    client: &HttpClient,
+    cmd: &VectorCommand,
+    batch_mode: &BatchMode,
+    columns: Vec<Column>,
+    output_format: OutputFormat,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
+) -> Result<()> {
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    execute_remote_with_formatter(client, cmd, batch_mode, &mut sink, formatter, limit, quiet)
+        .await?;
+    let warning = collector.truncation_warning();
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        Some(vector_command_context(cmd)),
+        true,
+        warning,
+        output_format,
+        admin_launcher,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -257,6 +343,18 @@ fn map_client_error(err: ClientError) -> CliError {
         ClientError::Auth(err) => CliError::InvalidArgument(err.to_string()),
         ClientError::HttpStatus { status, body } => {
             CliError::InvalidArgument(format!("Server error: HTTP {} - {}", status.as_u16(), body))
+        }
+    }
+}
+
+fn vector_command_context(cmd: &VectorCommand) -> String {
+    match cmd {
+        VectorCommand::Search { index, k, .. } => format!("vector search --index {index} -k {k}"),
+        VectorCommand::Upsert { index, key, .. } => {
+            format!("vector upsert --index {index} --key {key}")
+        }
+        VectorCommand::Delete { index, key } => {
+            format!("vector delete --index {index} --key {key}")
         }
     }
 }

@@ -38,8 +38,8 @@ pub struct Cli {
     pub in_memory: bool,
 
     /// Output format
-    #[arg(long, value_enum, default_value = "table")]
-    pub output: OutputFormat,
+    #[arg(long, value_enum)]
+    pub output: Option<OutputFormat>,
 
     /// Limit the number of output rows
     #[arg(long)]
@@ -52,6 +52,10 @@ pub struct Cli {
     /// Enable verbose output (includes stack traces for errors)
     #[arg(long)]
     pub verbose: bool,
+
+    /// Allow insecure HTTP connections for server profiles
+    #[arg(long)]
+    pub insecure: bool,
 
     /// Thread mode (multi or single)
     #[arg(long, value_enum, default_value = "multi")]
@@ -67,7 +71,7 @@ pub struct Cli {
 
     /// Subcommand to execute
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 /// Output format for query results
@@ -93,6 +97,16 @@ impl OutputFormat {
     }
 }
 
+impl Cli {
+    pub fn output_format(&self) -> OutputFormat {
+        self.output.unwrap_or(OutputFormat::Table)
+    }
+
+    pub fn output_is_explicit(&self) -> bool {
+        self.output.is_some()
+    }
+}
+
 /// Thread mode for database operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ThreadMode {
@@ -108,34 +122,39 @@ pub enum Command {
     /// Profile management
     Profile {
         #[command(subcommand)]
-        command: ProfileCommand,
+        command: Option<ProfileCommand>,
     },
     /// Key-Value operations
     Kv {
         #[command(subcommand)]
-        command: KvCommand,
+        command: Option<KvCommand>,
     },
     /// SQL query execution
     Sql(SqlCommand),
     /// Vector operations
     Vector {
         #[command(subcommand)]
-        command: VectorCommand,
+        command: Option<VectorCommand>,
     },
     /// HNSW index management
     Hnsw {
         #[command(subcommand)]
-        command: HnswCommand,
+        command: Option<HnswCommand>,
     },
     /// Columnar segment operations
     Columnar {
         #[command(subcommand)]
-        command: ColumnarCommand,
+        command: Option<ColumnarCommand>,
     },
     /// Server management commands
     Server {
         #[command(subcommand)]
-        command: ServerCommand,
+        command: Option<ServerCommand>,
+    },
+    /// Data lifecycle management commands
+    Lifecycle {
+        #[command(subcommand)]
+        command: Option<LifecycleCommand>,
     },
     /// Show CLI and file format version information
     Version,
@@ -404,7 +423,7 @@ pub enum ColumnarCommand {
         )]
         header: bool,
         /// Compression type (lz4, zstd, none)
-        #[arg(long, default_value = "lz4")]
+        #[arg(long, default_value = "zstd")]
         compression: String,
         /// Row group size (rows per group)
         #[arg(long)]
@@ -463,6 +482,19 @@ pub enum ServerCommand {
     },
 }
 
+/// Lifecycle subcommands
+#[derive(Subcommand, Debug)]
+pub enum LifecycleCommand {
+    /// Archive data (placeholder)
+    Archive,
+    /// Restore archived data (placeholder)
+    Restore,
+    /// Backup data (placeholder)
+    Backup,
+    /// Export data (placeholder)
+    Export,
+}
+
 /// Server compaction subcommands
 #[derive(Subcommand, Debug)]
 pub enum CompactionCommand {
@@ -481,12 +513,12 @@ mod tests {
 
         assert!(cli.in_memory);
         assert!(cli.data_dir.is_none());
-        assert_eq!(cli.output, OutputFormat::Table);
+        assert_eq!(cli.output_format(), OutputFormat::Table);
         assert!(matches!(
             cli.command,
-            Command::Kv {
-                command: KvCommand::Get { key }
-            } if key == "mykey"
+            Some(Command::Kv {
+                command: Some(KvCommand::Get { key })
+            }) if key == "mykey"
         ));
     }
 
@@ -505,7 +537,7 @@ mod tests {
         assert_eq!(cli.data_dir, Some("/path/to/db".to_string()));
         assert!(matches!(
             cli.command,
-            Command::Sql(SqlCommand { query: Some(q), file: None, .. }) if q == "SELECT * FROM users"
+            Some(Command::Sql(SqlCommand { query: Some(q), file: None, .. })) if q == "SELECT * FROM users"
         ));
     }
 
@@ -514,7 +546,8 @@ mod tests {
         let args = vec!["alopex", "--in-memory", "--output", "jsonl", "kv", "list"];
         let cli = Cli::try_parse_from(args).unwrap();
 
-        assert_eq!(cli.output, OutputFormat::Jsonl);
+        assert_eq!(cli.output_format(), OutputFormat::Jsonl);
+        assert!(cli.output_is_explicit());
     }
 
     #[test]
@@ -541,7 +574,7 @@ mod tests {
         let cli = Cli::try_parse_from(args).unwrap();
 
         match cli.command {
-            Command::Sql(cmd) => {
+            Some(Command::Sql(cmd)) => {
                 assert_eq!(cmd.fetch_size, Some(500));
                 assert_eq!(cmd.max_rows, Some(250));
                 assert_eq!(cmd.deadline.as_deref(), Some("30s"));
@@ -557,7 +590,7 @@ mod tests {
         let cli = Cli::try_parse_from(args).unwrap();
 
         match cli.command {
-            Command::Sql(cmd) => {
+            Some(Command::Sql(cmd)) => {
                 assert!(cmd.tui);
                 assert_eq!(cmd.query.as_deref(), Some("SELECT 1"));
             }
@@ -572,9 +605,9 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Server {
-                command: ServerCommand::Status
-            }
+            Some(Command::Server {
+                command: Some(ServerCommand::Status)
+            })
         ));
     }
 
@@ -585,11 +618,11 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Server {
-                command: ServerCommand::Compaction {
+            Some(Command::Server {
+                command: Some(ServerCommand::Compaction {
                     command: CompactionCommand::Trigger
-                }
-            }
+                })
+            })
         ));
     }
 
@@ -658,9 +691,9 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Profile {
-                command: ProfileCommand::Create { name, data_dir }
-            }
+            Some(Command::Profile {
+                command: Some(ProfileCommand::Create { name, data_dir })
+            })
                 if name == "dev" && data_dir == "/path/to/db"
         ));
     }
@@ -672,7 +705,7 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Completions { shell } if shell == Shell::Bash
+            Some(Command::Completions { shell }) if shell == Shell::Bash
         ));
     }
 
@@ -683,7 +716,7 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Completions { shell } if shell == Shell::PowerShell
+            Some(Command::Completions { shell }) if shell == Shell::PowerShell
         ));
     }
 
@@ -694,9 +727,9 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Kv {
-                command: KvCommand::Put { key, value }
-            } if key == "mykey" && value == "myvalue"
+            Some(Command::Kv {
+                command: Some(KvCommand::Put { key, value })
+            }) if key == "mykey" && value == "myvalue"
         ));
     }
 
@@ -707,9 +740,9 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Kv {
-                command: KvCommand::Delete { key }
-            } if key == "mykey"
+            Some(Command::Kv {
+                command: Some(KvCommand::Delete { key })
+            }) if key == "mykey"
         ));
     }
 
@@ -720,11 +753,11 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Kv {
-                command: KvCommand::Txn(KvTxnCommand::Begin {
+            Some(Command::Kv {
+                command: Some(KvCommand::Txn(KvTxnCommand::Begin {
                     timeout_secs: Some(30)
-                })
-            }
+                }))
+            })
         ));
     }
 
@@ -742,9 +775,9 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Kv {
-                command: KvCommand::Txn(KvTxnCommand::Get { key, txn_id })
-            } if key == "mykey" && txn_id == "txn123"
+            Some(Command::Kv {
+                command: Some(KvCommand::Txn(KvTxnCommand::Get { key, txn_id }))
+            }) if key == "mykey" && txn_id == "txn123"
         ));
     }
 
@@ -755,9 +788,9 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Kv {
-                command: KvCommand::List { prefix: Some(p) }
-            } if p == "user:"
+            Some(Command::Kv {
+                command: Some(KvCommand::List { prefix: Some(p) })
+            }) if p == "user:"
         ));
     }
 
@@ -768,7 +801,7 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Sql(SqlCommand { query: None, file: Some(f), .. }) if f == "query.sql"
+            Some(Command::Sql(SqlCommand { query: None, file: Some(f), .. })) if f == "query.sql"
         ));
     }
 
@@ -790,9 +823,9 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Vector {
-                command: VectorCommand::Search { index, query, k, progress }
-            } if index == "my_index" && query == "[1.0,2.0,3.0]" && k == 5 && !progress
+            Some(Command::Vector {
+                command: Some(VectorCommand::Search { index, query, k, progress })
+            }) if index == "my_index" && query == "[1.0,2.0,3.0]" && k == 5 && !progress
         ));
     }
 
@@ -814,9 +847,9 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Vector {
-                command: VectorCommand::Upsert { index, key, vector }
-            } if index == "my_index" && key == "vec1" && vector == "[1.0,2.0,3.0]"
+            Some(Command::Vector {
+                command: Some(VectorCommand::Upsert { index, key, vector })
+            }) if index == "my_index" && key == "vec1" && vector == "[1.0,2.0,3.0]"
         ));
     }
 
@@ -836,9 +869,9 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Vector {
-                command: VectorCommand::Delete { index, key }
-            } if index == "my_index" && key == "vec1"
+            Some(Command::Vector {
+                command: Some(VectorCommand::Delete { index, key })
+            }) if index == "my_index" && key == "vec1"
         ));
     }
 
@@ -859,9 +892,9 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Hnsw {
-                command: HnswCommand::Create { name, dim, metric }
-            } if name == "my_index" && dim == 128 && metric == DistanceMetric::L2
+            Some(Command::Hnsw {
+                command: Some(HnswCommand::Create { name, dim, metric })
+            }) if name == "my_index" && dim == 128 && metric == DistanceMetric::L2
         ));
     }
 
@@ -880,9 +913,9 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Hnsw {
-                command: HnswCommand::Create { name, dim, metric }
-            } if name == "my_index" && dim == 128 && metric == DistanceMetric::Cosine
+            Some(Command::Hnsw {
+                command: Some(HnswCommand::Create { name, dim, metric })
+            }) if name == "my_index" && dim == 128 && metric == DistanceMetric::Cosine
         ));
     }
 
@@ -900,9 +933,9 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Columnar {
-                command: ColumnarCommand::Scan { segment, progress }
-            } if segment == "seg_001" && !progress
+            Some(Command::Columnar {
+                command: Some(ColumnarCommand::Scan { segment, progress })
+            }) if segment == "seg_001" && !progress
         ));
     }
 
@@ -920,9 +953,9 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Columnar {
-                command: ColumnarCommand::Stats { segment }
-            } if segment == "seg_001"
+            Some(Command::Columnar {
+                command: Some(ColumnarCommand::Stats { segment })
+            }) if segment == "seg_001"
         ));
     }
 
@@ -933,9 +966,9 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Columnar {
-                command: ColumnarCommand::List
-            }
+            Some(Command::Columnar {
+                command: Some(ColumnarCommand::List)
+            })
         ));
     }
 
@@ -955,20 +988,20 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Columnar {
-                command: ColumnarCommand::Ingest {
+            Some(Command::Columnar {
+                command: Some(ColumnarCommand::Ingest {
                     file,
                     table,
                     delimiter,
                     header,
                     compression,
                     row_group_size,
-                }
-            } if file == std::path::Path::new("data.csv")
+                })
+            }) if file == std::path::Path::new("data.csv")
                 && table == "events"
                 && delimiter == ','
                 && header
-                && compression == "lz4"
+                && compression == "zstd"
                 && row_group_size.is_none()
         ));
     }
@@ -997,16 +1030,16 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Columnar {
-                command: ColumnarCommand::Ingest {
+            Some(Command::Columnar {
+                command: Some(ColumnarCommand::Ingest {
                     file,
                     table,
                     delimiter,
                     header,
                     compression,
                     row_group_size,
-                }
-            } if file == std::path::Path::new("data.csv")
+                })
+            }) if file == std::path::Path::new("data.csv")
                 && table == "events"
                 && delimiter == ';'
                 && !header
@@ -1034,13 +1067,13 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Columnar {
-                command: ColumnarCommand::Index(IndexCommand::Create {
+            Some(Command::Columnar {
+                command: Some(ColumnarCommand::Index(IndexCommand::Create {
                     segment,
                     column,
                     index_type,
-                })
-            } if segment == "123:1"
+                }))
+            }) if segment == "123:1"
                 && column == "col1"
                 && index_type == "bloom"
         ));
@@ -1060,7 +1093,8 @@ mod tests {
         let args = vec!["alopex", "--in-memory", "kv", "list"];
         let cli = Cli::try_parse_from(args).unwrap();
 
-        assert_eq!(cli.output, OutputFormat::Table);
+        assert_eq!(cli.output_format(), OutputFormat::Table);
+        assert!(!cli.output_is_explicit());
         assert_eq!(cli.thread_mode, ThreadMode::Multi);
         assert!(cli.limit.is_none());
         assert!(!cli.quiet);

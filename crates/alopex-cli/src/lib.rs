@@ -10,6 +10,7 @@ pub mod profile;
 pub mod progress;
 pub mod streaming;
 pub mod tui;
+pub mod ui;
 pub mod version;
 
 #[cfg(test)]

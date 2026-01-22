@@ -3,16 +3,21 @@
 //! Supports: create, stats, drop
 
 use std::io::Write;
+use std::path::PathBuf;
 
 use alopex_embedded::{Database, HnswConfig, Metric};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{DistanceMetric, HnswCommand};
+use crate::batch::BatchMode;
+use crate::cli::{DistanceMetric, HnswCommand, OutputFormat};
 use crate::client::http::{ClientError, HttpClient};
 use crate::error::Result;
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::Formatter;
+use crate::output::RowCollector;
 use crate::streaming::StreamingWriter;
+use crate::tui::admin::{AdminBackend, AdminContext, AdminTarget, AuthCapabilities};
+use crate::tui::renderer::render_output;
 
 /// Default M parameter (max connections per node)
 const DEFAULT_M: usize = 16;
@@ -73,6 +78,58 @@ pub fn execute<W: Write>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn execute_tui(
+    db: &Database,
+    cmd: HnswCommand,
+    batch_mode: &BatchMode,
+    output_format: OutputFormat,
+    columns: Vec<Column>,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+    data_dir: Option<PathBuf>,
+) -> Result<()> {
+    let connection_label = connection_label.into();
+    let context_message = Some(hnsw_command_context(&cmd));
+    let admin_label = connection_label.clone();
+    let admin_data_dir = data_dir.clone();
+    let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> = Some(Box::new(move || {
+        let connection_label = admin_label.clone();
+        let data_dir = admin_data_dir.clone();
+        crate::tui::admin::run_admin_ui(AdminContext {
+            connection_label,
+            auth: AuthCapabilities::full(),
+            backend: AdminBackend::Local {
+                db,
+                batch_mode,
+                output_format,
+                limit,
+                quiet,
+                data_dir,
+            },
+            initial_target: Some(AdminTarget::Hnsw),
+        })
+    }));
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    let mut writer =
+        StreamingWriter::new(&mut sink, formatter, columns.clone(), limit).with_quiet(quiet);
+    execute(db, cmd, &mut writer)?;
+    let warning = collector.truncation_warning();
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        context_message,
+        true,
+        warning,
+        output_format,
+        admin_launcher,
+    )
+}
+
 /// Execute an HNSW command against a remote server.
 pub async fn execute_remote_with_formatter<W: Write>(
     client: &HttpClient,
@@ -94,6 +151,34 @@ pub async fn execute_remote_with_formatter<W: Write>(
             execute_remote_drop(client, name, writer, formatter, limit, quiet).await
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_remote_tui<'a>(
+    client: &HttpClient,
+    cmd: &HnswCommand,
+    columns: Vec<Column>,
+    output_format: OutputFormat,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
+) -> Result<()> {
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    execute_remote_with_formatter(client, cmd, &mut sink, formatter, limit, quiet).await?;
+    let warning = collector.truncation_warning();
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        Some(hnsw_command_context(cmd)),
+        true,
+        warning,
+        output_format,
+        admin_launcher,
+    )
 }
 
 /// Convert CLI distance metric to embedded Metric.
@@ -236,6 +321,17 @@ fn map_client_error(err: ClientError) -> crate::error::CliError {
         ClientError::HttpStatus { status, body } => crate::error::CliError::InvalidArgument(
             format!("Server error: HTTP {} - {}", status.as_u16(), body),
         ),
+    }
+}
+
+fn hnsw_command_context(cmd: &HnswCommand) -> String {
+    match cmd {
+        HnswCommand::Create { name, dim, metric } => format!(
+            "hnsw create {name} --dim {dim} --metric {}",
+            metric_to_string(*metric)
+        ),
+        HnswCommand::Stats { name } => format!("hnsw stats {name}"),
+        HnswCommand::Drop { name } => format!("hnsw drop {name}"),
     }
 }
 
