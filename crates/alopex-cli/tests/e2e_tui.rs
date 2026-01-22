@@ -348,6 +348,7 @@ fn move_selection_to(harness: &mut TuiTestHarness, label: &str, max_steps: usize
             return Ok(());
         }
         harness.send_text("j")?;
+        std::thread::sleep(Duration::from_millis(50));
         harness.update_state()?;
     }
     for _ in 0..max_steps {
@@ -355,6 +356,7 @@ fn move_selection_to(harness: &mut TuiTestHarness, label: &str, max_steps: usize
             return Ok(());
         }
         harness.send_text("k")?;
+        std::thread::sleep(Duration::from_millis(50));
         harness.update_state()?;
     }
     let snapshot = harness.screen_contents();
