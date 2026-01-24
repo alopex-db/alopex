@@ -89,6 +89,47 @@ fn predicate_pushdown(plan: LogicalPlan) -> LogicalPlan {
             group_by,
             aggs,
         },
+        LogicalPlan::Join {
+            left,
+            right,
+            keys,
+            how,
+        } => LogicalPlan::Join {
+            left: Box::new(predicate_pushdown(*left)),
+            right: Box::new(predicate_pushdown(*right)),
+            keys,
+            how,
+        },
+        LogicalPlan::Sort { input, options } => LogicalPlan::Sort {
+            input: Box::new(predicate_pushdown(*input)),
+            options,
+        },
+        LogicalPlan::Slice {
+            input,
+            offset,
+            len,
+            from_end,
+        } => LogicalPlan::Slice {
+            input: Box::new(predicate_pushdown(*input)),
+            offset,
+            len,
+            from_end,
+        },
+        LogicalPlan::Unique { input, subset } => LogicalPlan::Unique {
+            input: Box::new(predicate_pushdown(*input)),
+            subset,
+        },
+        LogicalPlan::FillNull { input, fill } => LogicalPlan::FillNull {
+            input: Box::new(predicate_pushdown(*input)),
+            fill,
+        },
+        LogicalPlan::DropNulls { input, subset } => LogicalPlan::DropNulls {
+            input: Box::new(predicate_pushdown(*input)),
+            subset,
+        },
+        LogicalPlan::NullCount { input } => LogicalPlan::NullCount {
+            input: Box::new(predicate_pushdown(*input)),
+        },
         other => other,
     }
 }
@@ -304,6 +345,90 @@ fn projection_pushdown_inner(
                     aggs,
                 },
                 required,
+            )
+        }
+        LogicalPlan::Join {
+            left,
+            right,
+            keys,
+            how,
+        } => {
+            let (new_left, _) = projection_pushdown_inner(*left, RequiredColumns::All);
+            let (new_right, _) = projection_pushdown_inner(*right, RequiredColumns::All);
+            (
+                LogicalPlan::Join {
+                    left: Box::new(new_left),
+                    right: Box::new(new_right),
+                    keys,
+                    how,
+                },
+                required,
+            )
+        }
+        LogicalPlan::Sort { input, options } => {
+            let (new_input, _) = projection_pushdown_inner(*input, required.clone());
+            (
+                LogicalPlan::Sort {
+                    input: Box::new(new_input),
+                    options,
+                },
+                required,
+            )
+        }
+        LogicalPlan::Slice {
+            input,
+            offset,
+            len,
+            from_end,
+        } => {
+            let (new_input, _) = projection_pushdown_inner(*input, required.clone());
+            (
+                LogicalPlan::Slice {
+                    input: Box::new(new_input),
+                    offset,
+                    len,
+                    from_end,
+                },
+                required,
+            )
+        }
+        LogicalPlan::Unique { input, subset } => {
+            let (new_input, _) = projection_pushdown_inner(*input, required.clone());
+            (
+                LogicalPlan::Unique {
+                    input: Box::new(new_input),
+                    subset,
+                },
+                required,
+            )
+        }
+        LogicalPlan::FillNull { input, fill } => {
+            let (new_input, _) = projection_pushdown_inner(*input, required.clone());
+            (
+                LogicalPlan::FillNull {
+                    input: Box::new(new_input),
+                    fill,
+                },
+                required,
+            )
+        }
+        LogicalPlan::DropNulls { input, subset } => {
+            let (new_input, _) = projection_pushdown_inner(*input, required.clone());
+            (
+                LogicalPlan::DropNulls {
+                    input: Box::new(new_input),
+                    subset,
+                },
+                required,
+            )
+        }
+        LogicalPlan::NullCount { input } => {
+            let (new_input, _) = projection_pushdown_inner(*input, RequiredColumns::All);
+            (
+                LogicalPlan::NullCount {
+                    input: Box::new(new_input),
+                },
+                RequiredColumns::All,
             )
         }
         LogicalPlan::CsvScan {

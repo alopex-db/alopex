@@ -7,6 +7,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::expr::{Expr as E, Scalar};
 use crate::lazy::ProjectionKind;
+use crate::ops::{FillNull, JoinKeys, JoinType, SortOptions};
 use crate::physical::expr_eval::ExprEval;
 use crate::physical::plan::ScanSource;
 use crate::{DataFrame, DataFrameError, Expr, Result};
@@ -220,6 +221,71 @@ pub fn aggregate_batches(
 
     let batch = build_grouped_batch(groups, &group_specs, &agg_specs)?;
     Ok(vec![batch])
+}
+
+/// Join two record batch streams (stubbed for P1 wiring).
+pub fn join_batches(
+    _left: Vec<RecordBatch>,
+    _right: Vec<RecordBatch>,
+    _keys: &JoinKeys,
+    _how: &JoinType,
+) -> Result<Vec<RecordBatch>> {
+    Err(DataFrameError::invalid_operation(
+        "join execution not implemented yet",
+    ))
+}
+
+/// Sort record batches (stubbed for P1 wiring).
+pub fn sort_batches(_input: Vec<RecordBatch>, _options: &SortOptions) -> Result<Vec<RecordBatch>> {
+    Err(DataFrameError::invalid_operation(
+        "sort execution not implemented yet",
+    ))
+}
+
+/// Slice record batches (stubbed for P1 wiring).
+pub fn slice_batches(
+    _input: Vec<RecordBatch>,
+    _offset: usize,
+    _len: usize,
+    _from_end: bool,
+) -> Result<Vec<RecordBatch>> {
+    Err(DataFrameError::invalid_operation(
+        "slice execution not implemented yet",
+    ))
+}
+
+/// Remove duplicate rows (stubbed for P1 wiring).
+pub fn unique_batches(
+    _input: Vec<RecordBatch>,
+    _subset: Option<&[String]>,
+) -> Result<Vec<RecordBatch>> {
+    Err(DataFrameError::invalid_operation(
+        "unique execution not implemented yet",
+    ))
+}
+
+/// Fill null values (stubbed for P1 wiring).
+pub fn fill_null_batches(_input: Vec<RecordBatch>, _fill: &FillNull) -> Result<Vec<RecordBatch>> {
+    Err(DataFrameError::invalid_operation(
+        "fill_null execution not implemented yet",
+    ))
+}
+
+/// Drop rows containing nulls (stubbed for P1 wiring).
+pub fn drop_nulls_batches(
+    _input: Vec<RecordBatch>,
+    _subset: Option<&[String]>,
+) -> Result<Vec<RecordBatch>> {
+    Err(DataFrameError::invalid_operation(
+        "drop_nulls execution not implemented yet",
+    ))
+}
+
+/// Count null values per column (stubbed for P1 wiring).
+pub fn null_count_batches(_input: Vec<RecordBatch>) -> Result<Vec<RecordBatch>> {
+    Err(DataFrameError::invalid_operation(
+        "null_count execution not implemented yet",
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

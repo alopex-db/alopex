@@ -4,6 +4,7 @@ use std::sync::Arc;
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 
+use crate::ops::{FillNull, JoinKeys, JoinType, SortOptions};
 use crate::{DataFrameError, Expr, Result, Series};
 
 /// An eager table backed by one or more Arrow `RecordBatch` values.
@@ -190,6 +191,60 @@ impl DataFrame {
             df: self.clone(),
             by,
         }
+    }
+
+    /// Join with another `DataFrame` using provided join keys.
+    pub fn join<K: Into<JoinKeys>>(
+        &self,
+        other: &DataFrame,
+        keys: K,
+        how: JoinType,
+    ) -> Result<Self> {
+        self.clone()
+            .lazy()
+            .join(other.clone().lazy(), keys, how)
+            .collect()
+    }
+
+    /// Sort by one or more columns.
+    pub fn sort(&self, by: Vec<String>, descending: Vec<bool>) -> Result<Self> {
+        let options = SortOptions {
+            by,
+            descending,
+            nulls_last: true,
+            stable: true,
+        };
+        self.clone().lazy().sort(options).collect()
+    }
+
+    /// Return the first `n` rows.
+    pub fn head(&self, n: usize) -> Result<Self> {
+        self.clone().lazy().head(n).collect()
+    }
+
+    /// Return the last `n` rows.
+    pub fn tail(&self, n: usize) -> Result<Self> {
+        self.clone().lazy().tail(n).collect()
+    }
+
+    /// Remove duplicate rows.
+    pub fn unique(&self, subset: Option<Vec<String>>) -> Result<Self> {
+        self.clone().lazy().unique(subset).collect()
+    }
+
+    /// Fill null values using a scalar or strategy.
+    pub fn fill_null<T: Into<FillNull>>(&self, fill: T) -> Result<Self> {
+        self.clone().lazy().fill_null(fill).collect()
+    }
+
+    /// Drop rows containing null values.
+    pub fn drop_nulls(&self, subset: Option<Vec<String>>) -> Result<Self> {
+        self.clone().lazy().drop_nulls(subset).collect()
+    }
+
+    /// Count null values per column.
+    pub fn null_count(&self) -> Result<Self> {
+        self.clone().lazy().null_count().collect()
     }
 }
 
