@@ -1,5 +1,10 @@
 //! Operation-specific types and helpers for P1 DataFrame features.
 
+pub mod join;
+pub mod nulls;
+pub mod sort;
+pub mod unique;
+
 /// Supported join types for `DataFrame::join`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinType {
