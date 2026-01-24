@@ -120,6 +120,22 @@ What it does:
 - Runs a flat search benchmark (`search_flat`) on 10k×128 vectors (cosine / L2) to show baseline performance.
 - Executes embedded API E2E tests: vector upsert/search with filters and checksum corruption detection.
 
+## 🧰 CLI (cargo)
+
+Run the CLI from source (local/embedded):
+
+```bash
+cd alopex
+cargo run -p alopex-cli -- --data-dir ./data sql "SELECT 1"
+```
+
+Use a server profile:
+
+```bash
+cd alopex
+cargo run -p alopex-cli -- --profile prod sql "SELECT * FROM users"
+```
+
 -----
 
 ## 🛣 Roadmap

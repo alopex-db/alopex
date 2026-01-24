@@ -1,4 +1,8 @@
 pub mod admin;
+pub mod admin_api;
+pub mod columnar;
+pub mod hnsw;
+pub mod kv;
 pub mod session;
 pub mod sql;
 pub mod vector;
@@ -40,7 +44,40 @@ struct ErrorResponse {
 
 pub fn router(state: Arc<ServerState>) -> Router {
     let api = Router::new()
+        .route("/kv/get", axum::routing::post(kv::get))
+        .route("/kv/put", axum::routing::post(kv::put))
+        .route("/kv/delete", axum::routing::post(kv::delete))
+        .route("/kv/list", axum::routing::post(kv::list))
+        .route("/kv/txn/begin", axum::routing::post(kv::txn_begin))
+        .route("/kv/txn/get", axum::routing::post(kv::txn_get))
+        .route("/kv/txn/put", axum::routing::post(kv::txn_put))
+        .route("/kv/txn/delete", axum::routing::post(kv::txn_delete))
+        .route("/kv/txn/commit", axum::routing::post(kv::txn_commit))
+        .route("/kv/txn/rollback", axum::routing::post(kv::txn_rollback))
+        .route("/columnar/scan", axum::routing::post(columnar::scan))
+        .route("/columnar/stats", axum::routing::post(columnar::stats))
+        .route("/columnar/list", axum::routing::post(columnar::list))
+        .route("/columnar/ingest", axum::routing::post(columnar::ingest))
+        .route(
+            "/columnar/index/create",
+            axum::routing::post(columnar::index_create),
+        )
+        .route(
+            "/columnar/index/list",
+            axum::routing::post(columnar::index_list),
+        )
+        .route(
+            "/columnar/index/drop",
+            axum::routing::post(columnar::index_drop),
+        )
+        .route("/hnsw/search", axum::routing::post(hnsw::search))
+        .route("/hnsw/upsert", axum::routing::post(hnsw::upsert))
+        .route("/hnsw/delete", axum::routing::post(hnsw::delete))
+        .route("/hnsw/create", axum::routing::post(hnsw::create))
+        .route("/hnsw/drop", axum::routing::post(hnsw::drop))
+        .route("/hnsw/stats", axum::routing::post(hnsw::stats))
         .route("/sql", axum::routing::post(sql::handle))
+        .route("/api/sql/query", axum::routing::post(sql::handle))
         .route("/vector/search", axum::routing::post(vector::search))
         .route("/vector/upsert", axum::routing::post(vector::upsert))
         .route("/vector/delete", axum::routing::post(vector::delete))
@@ -59,6 +96,21 @@ pub fn router(state: Arc<ServerState>) -> Router {
         .route(
             "/vector/index/compact",
             axum::routing::post(vector::index_compact),
+        )
+        .route(
+            "/api/admin/capabilities",
+            axum::routing::get(admin_api::capabilities),
+        )
+        .route("/api/admin/status", axum::routing::get(admin_api::status))
+        .route("/api/admin/metrics", axum::routing::get(admin_api::metrics))
+        .route("/api/admin/health", axum::routing::get(admin_api::health))
+        .route(
+            "/api/admin/lifecycle",
+            axum::routing::post(admin_api::lifecycle),
+        )
+        .route(
+            "/api/admin/compaction",
+            axum::routing::post(admin_api::compaction),
         )
         .route("/session/begin", axum::routing::post(session::begin))
         .route("/session/:id/commit", axum::routing::post(session::commit))

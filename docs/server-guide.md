@@ -175,21 +175,43 @@ See `crates/alopex-server/proto/alopex.proto` for message definitions.
 - `GET /healthz` - health check
 - `GET /status` - runtime status
 - `GET /metrics` - Prometheus metrics
+- `GET /api/admin/status` - status summary for CLI server commands
+- `GET /api/admin/metrics` - metrics summary for CLI server commands
+- `GET /api/admin/health` - health summary for CLI server commands
+- `POST /api/admin/compaction` - trigger compaction (if supported)
+- `GET /api/admin/capabilities` - admin capability scope and allowed actions
+- `POST /api/admin/lifecycle` - lifecycle actions (archive/restore/backup/export)
 
-## CLI connect mode
+## CLI access
 
-You can connect to a running server using the CLI:
+Use profiles to connect to a running server:
 
-```bash
-alopex connect http://127.0.0.1:8080
+```toml
+[profiles.prod]
+connection_type = "server"
+
+[profiles.prod.server]
+url = "https://127.0.0.1:8080"
+auth = "token"
+token = "secret"
 ```
 
-Interactive commands:
-- Type SQL statements and press Enter
-- `exit`, `quit`, or `\q` to leave
+```bash
+alopex --profile prod sql "SELECT 1"
+alopex --profile prod sql "SELECT * FROM items"
+```
 
-If authentication is enabled:
+Server management commands:
 
 ```bash
-alopex connect http://127.0.0.1:8080 --api-key secret
+alopex --profile prod server status
+alopex --profile prod server metrics
+alopex --profile prod server health
+alopex --profile prod server compaction trigger
 ```
+
+On TTY terminals, the CLI defaults to the TUI for interactive output. Use
+`--batch` or `--output` to force batch output, and run `alopex server` (no
+subcommand) to open the admin console for lifecycle actions. The admin console
+uses a rainfrog-style layout (left resource tree, right detail, right-bottom
+status/preview) with `h/l` focus switching.

@@ -6,8 +6,9 @@ use crate::cli::{OutputFormat, ProfileCommand};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::{create_formatter, Formatter};
+use crate::tui::renderer::render_output;
 
-use super::config::{Profile, ProfileManager};
+use super::config::{ConnectionType, LocalConfig, Profile, ProfileManager};
 
 #[derive(Debug, Serialize)]
 pub struct ProfileListOutput {
@@ -32,8 +33,21 @@ pub fn execute_profile_command(cmd: ProfileCommand, output: OutputFormat) -> Res
     match cmd {
         ProfileCommand::Create { name, data_dir } => {
             let mut manager = ProfileManager::load()?;
-            manager.create(&name, Profile { data_dir })?;
-            manager.save()
+            manager.create(
+                &name,
+                Profile {
+                    connection_type: ConnectionType::Local,
+                    local: Some(LocalConfig {
+                        path: data_dir.clone(),
+                    }),
+                    server: None,
+                    data_dir: Some(data_dir),
+                },
+            )?;
+            manager.save()?;
+            let (columns, rows) = status_columns_rows("OK", format!("Created profile '{name}'."));
+            let mut writer = io::stdout().lock();
+            write_rows_with_formatter_to(&mut writer, output, &columns, &rows)
         }
         ProfileCommand::List => {
             let manager = ProfileManager::load()?;
@@ -48,12 +62,120 @@ pub fn execute_profile_command(cmd: ProfileCommand, output: OutputFormat) -> Res
         ProfileCommand::Delete { name } => {
             let mut manager = ProfileManager::load()?;
             manager.delete(&name)?;
-            manager.save()
+            manager.save()?;
+            let (columns, rows) = status_columns_rows("OK", format!("Deleted profile '{name}'."));
+            let mut writer = io::stdout().lock();
+            write_rows_with_formatter_to(&mut writer, output, &columns, &rows)
         }
         ProfileCommand::SetDefault { name } => {
             let mut manager = ProfileManager::load()?;
             manager.set_default(&name)?;
-            manager.save()
+            manager.save()?;
+            let (columns, rows) =
+                status_columns_rows("OK", format!("Set default profile to '{name}'."));
+            let mut writer = io::stdout().lock();
+            write_rows_with_formatter_to(&mut writer, output, &columns, &rows)
+        }
+    }
+}
+
+pub fn execute_profile_tui<'a>(
+    cmd: ProfileCommand,
+    connection_label: impl Into<String>,
+    output_format: OutputFormat,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
+) -> Result<()> {
+    let mut admin_launcher = admin_launcher;
+    let context_message = Some(profile_command_context(&cmd));
+    match cmd {
+        ProfileCommand::Create { name, data_dir } => {
+            let mut manager = ProfileManager::load()?;
+            manager.create(
+                &name,
+                Profile {
+                    connection_type: ConnectionType::Local,
+                    local: Some(LocalConfig {
+                        path: data_dir.clone(),
+                    }),
+                    server: None,
+                    data_dir: Some(data_dir),
+                },
+            )?;
+            manager.save()?;
+            let (columns, rows) = status_columns_rows("OK", format!("Created profile '{name}'."));
+            render_output(
+                columns,
+                rows,
+                connection_label,
+                context_message,
+                true,
+                None,
+                output_format,
+                admin_launcher.take(),
+            )
+        }
+        ProfileCommand::List => {
+            let manager = ProfileManager::load()?;
+            let items = build_list_items(&manager);
+            let (columns, rows) = list_columns_rows(&items);
+            render_output(
+                columns,
+                rows,
+                connection_label,
+                context_message,
+                true,
+                None,
+                output_format,
+                admin_launcher.take(),
+            )
+        }
+        ProfileCommand::Show { name } => {
+            let manager = ProfileManager::load()?;
+            let show = build_show_output(&manager, &name)?;
+            let (columns, rows) = show_columns_rows(&show);
+            render_output(
+                columns,
+                rows,
+                connection_label,
+                context_message,
+                true,
+                None,
+                output_format,
+                admin_launcher.take(),
+            )
+        }
+        ProfileCommand::Delete { name } => {
+            let mut manager = ProfileManager::load()?;
+            manager.delete(&name)?;
+            manager.save()?;
+            let (columns, rows) = status_columns_rows("OK", format!("Deleted profile '{name}'."));
+            render_output(
+                columns,
+                rows,
+                connection_label,
+                context_message,
+                true,
+                None,
+                output_format,
+                admin_launcher.take(),
+            )
+        }
+        ProfileCommand::SetDefault { name } => {
+            let mut manager = ProfileManager::load()?;
+            manager.set_default(&name)?;
+            manager.save()?;
+            let (columns, rows) =
+                status_columns_rows("OK", format!("Set default profile to '{name}'."));
+            render_output(
+                columns,
+                rows,
+                connection_label,
+                context_message,
+                true,
+                None,
+                output_format,
+                admin_launcher.take(),
+            )
         }
     }
 }
@@ -66,7 +188,7 @@ fn build_list_items(manager: &ProfileManager) -> Vec<ProfileListItem> {
         .filter_map(|name| {
             manager.get(name).map(|profile| ProfileListItem {
                 name: name.to_string(),
-                data_dir: profile.data_dir.clone(),
+                data_dir: profile.local_path().unwrap_or_else(|| "-".to_string()),
                 is_default: default_name == Some(name),
             })
         })
@@ -77,9 +199,10 @@ fn build_show_output(manager: &ProfileManager, name: &str) -> Result<ProfileShow
     let profile = manager
         .get(name)
         .ok_or_else(|| CliError::ProfileNotFound(name.to_string()))?;
+    let data_dir = profile.local_path().unwrap_or_else(|| "-".to_string());
     Ok(ProfileShowOutput {
         name: name.to_string(),
-        data_dir: profile.data_dir.clone(),
+        data_dir,
         is_default: manager.default_profile() == Some(name),
     })
 }
@@ -106,27 +229,23 @@ fn output_profile_show(show: &ProfileShowOutput, output: OutputFormat) -> Result
     }
 }
 
+fn profile_command_context(cmd: &ProfileCommand) -> String {
+    match cmd {
+        ProfileCommand::Create { name, .. } => format!("profile create {name}"),
+        ProfileCommand::List => "profile list".to_string(),
+        ProfileCommand::Show { name } => format!("profile show {name}"),
+        ProfileCommand::Delete { name } => format!("profile delete {name}"),
+        ProfileCommand::SetDefault { name } => format!("profile set-default {name}"),
+    }
+}
+
 fn write_list_table(items: &[ProfileListItem]) -> Result<()> {
     let mut writer = io::stdout().lock();
     write_list_table_to(&mut writer, items)
 }
 
 fn write_list_table_to(writer: &mut dyn Write, items: &[ProfileListItem]) -> Result<()> {
-    let columns = vec![
-        Column::new("Name", DataType::Text),
-        Column::new("Data Dir", DataType::Text),
-        Column::new("Default", DataType::Text),
-    ];
-    let rows: Vec<Row> = items
-        .iter()
-        .map(|item| {
-            Row::new(vec![
-                Value::Text(item.name.clone()),
-                Value::Text(item.data_dir.clone()),
-                Value::Text(if item.is_default { "*" } else { "" }.to_string()),
-            ])
-        })
-        .collect();
+    let (columns, rows) = list_columns_rows(items);
     write_rows_with_formatter_to(writer, OutputFormat::Table, &columns, &rows)
 }
 
@@ -149,16 +268,7 @@ fn write_show_table(show: &ProfileShowOutput) -> Result<()> {
 }
 
 fn write_show_table_to(writer: &mut dyn Write, show: &ProfileShowOutput) -> Result<()> {
-    let columns = vec![
-        Column::new("Name", DataType::Text),
-        Column::new("Data Dir", DataType::Text),
-        Column::new("Default", DataType::Text),
-    ];
-    let rows = vec![Row::new(vec![
-        Value::Text(show.name.clone()),
-        Value::Text(show.data_dir.clone()),
-        Value::Text(if show.is_default { "Yes" } else { "No" }.to_string()),
-    ])];
+    let (columns, rows) = show_columns_rows(show);
     let mut formatter = KeyValueFormatter::new();
     formatter.write_header(writer, &columns)?;
     for row in &rows {
@@ -190,6 +300,51 @@ fn write_show_json_to(writer: &mut dyn Write, show: &ProfileShowOutput) -> Resul
         .cloned()
         .unwrap_or(serde_json::Value::Null);
     write_json_value_to(writer, &obj)
+}
+
+fn list_columns_rows(items: &[ProfileListItem]) -> (Vec<Column>, Vec<Row>) {
+    let columns = vec![
+        Column::new("Name", DataType::Text),
+        Column::new("Data Dir", DataType::Text),
+        Column::new("Default", DataType::Text),
+    ];
+    let rows = items
+        .iter()
+        .map(|item| {
+            Row::new(vec![
+                Value::Text(item.name.clone()),
+                Value::Text(item.data_dir.clone()),
+                Value::Text(if item.is_default { "*" } else { "" }.to_string()),
+            ])
+        })
+        .collect();
+    (columns, rows)
+}
+
+fn show_columns_rows(show: &ProfileShowOutput) -> (Vec<Column>, Vec<Row>) {
+    let columns = vec![
+        Column::new("Name", DataType::Text),
+        Column::new("Data Dir", DataType::Text),
+        Column::new("Default", DataType::Text),
+    ];
+    let rows = vec![Row::new(vec![
+        Value::Text(show.name.clone()),
+        Value::Text(show.data_dir.clone()),
+        Value::Text(if show.is_default { "Yes" } else { "No" }.to_string()),
+    ])];
+    (columns, rows)
+}
+
+fn status_columns_rows(status: &str, message: String) -> (Vec<Column>, Vec<Row>) {
+    let columns = vec![
+        Column::new("Status", DataType::Text),
+        Column::new("Message", DataType::Text),
+    ];
+    let rows = vec![Row::new(vec![
+        Value::Text(status.to_string()),
+        Value::Text(message),
+    ])];
+    (columns, rows)
 }
 
 fn write_rows_with_formatter_to(

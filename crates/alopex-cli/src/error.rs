@@ -47,6 +47,16 @@ pub enum CliError {
     #[allow(dead_code)]
     TransactionTimeout(String),
 
+    /// A query exceeded its deadline.
+    #[error("Query timeout: {0}. Suggestion: Use --deadline 120s to increase timeout.")]
+    #[allow(dead_code)]
+    Timeout(String),
+
+    /// A query was cancelled by the user.
+    #[error("Query cancelled by user.")]
+    #[allow(dead_code)]
+    Cancelled,
+
     /// No SQL query was provided.
     #[error("SQL クエリを指定してください。引数、-f オプション、または標準入力から入力できます。")]
     #[allow(dead_code)]
@@ -84,6 +94,16 @@ pub enum CliError {
     /// A JSON serialization/deserialization error occurred.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// A server connection error occurred.
+    #[error("Server connection error: {0}")]
+    #[allow(dead_code)]
+    ServerConnection(String),
+
+    /// A server does not support the requested command.
+    #[error("Server does not support this command: {0}")]
+    #[allow(dead_code)]
+    ServerUnsupported(String),
 }
 
 /// Type alias for CLI results.

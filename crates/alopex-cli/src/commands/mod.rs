@@ -10,6 +10,8 @@
 pub mod columnar;
 pub mod hnsw;
 pub mod kv;
+pub mod lifecycle;
+pub mod server;
 pub mod sql;
 pub mod vector;
 pub mod version;

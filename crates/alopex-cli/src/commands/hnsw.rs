@@ -3,18 +3,61 @@
 //! Supports: create, stats, drop
 
 use std::io::Write;
+use std::path::PathBuf;
 
 use alopex_embedded::{Database, HnswConfig, Metric};
+use serde::{Deserialize, Serialize};
 
-use crate::cli::{DistanceMetric, HnswCommand};
+use crate::batch::BatchMode;
+use crate::cli::{DistanceMetric, HnswCommand, OutputFormat};
+use crate::client::http::{ClientError, HttpClient};
 use crate::error::Result;
 use crate::models::{Column, DataType, Row, Value};
+use crate::output::formatter::Formatter;
+use crate::output::RowCollector;
 use crate::streaming::StreamingWriter;
+use crate::tui::admin::{AdminBackend, AdminContext, AdminTarget, AuthCapabilities};
+use crate::tui::renderer::render_output;
 
 /// Default M parameter (max connections per node)
 const DEFAULT_M: usize = 16;
 /// Default ef_construction parameter
 const DEFAULT_EF_CONSTRUCTION: usize = 200;
+
+#[derive(Debug, Serialize)]
+struct RemoteHnswCreateRequest {
+    index: String,
+    dim: usize,
+    metric: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteHnswDropRequest {
+    index: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteHnswStatsRequest {
+    index: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteHnswStatsResponse {
+    stats: RemoteHnswStats,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteHnswStats {
+    node_count: u64,
+    deleted_count: u64,
+    memory_bytes: u64,
+    avg_edges_per_node: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteHnswStatusResponse {
+    success: bool,
+}
 
 /// Execute an HNSW command.
 ///
@@ -35,12 +78,260 @@ pub fn execute<W: Write>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn execute_tui(
+    db: &Database,
+    cmd: HnswCommand,
+    batch_mode: &BatchMode,
+    output_format: OutputFormat,
+    columns: Vec<Column>,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+    data_dir: Option<PathBuf>,
+) -> Result<()> {
+    let connection_label = connection_label.into();
+    let context_message = Some(hnsw_command_context(&cmd));
+    let admin_label = connection_label.clone();
+    let admin_data_dir = data_dir.clone();
+    let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> = Some(Box::new(move || {
+        let connection_label = admin_label.clone();
+        let data_dir = admin_data_dir.clone();
+        crate::tui::admin::run_admin_ui(AdminContext {
+            connection_label,
+            auth: AuthCapabilities::full(),
+            backend: AdminBackend::Local {
+                db,
+                batch_mode,
+                output_format,
+                limit,
+                quiet,
+                data_dir,
+            },
+            initial_target: Some(AdminTarget::Hnsw),
+        })
+    }));
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    let mut writer =
+        StreamingWriter::new(&mut sink, formatter, columns.clone(), limit).with_quiet(quiet);
+    execute(db, cmd, &mut writer)?;
+    let warning = collector.truncation_warning();
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        context_message,
+        true,
+        warning,
+        output_format,
+        admin_launcher,
+    )
+}
+
+/// Execute an HNSW command against a remote server.
+pub async fn execute_remote_with_formatter<W: Write>(
+    client: &HttpClient,
+    cmd: &HnswCommand,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    match cmd {
+        HnswCommand::Create { name, dim, metric } => {
+            execute_remote_create(client, name, *dim, *metric, writer, formatter, limit, quiet)
+                .await
+        }
+        HnswCommand::Stats { name } => {
+            execute_remote_stats(client, name, writer, formatter, limit, quiet).await
+        }
+        HnswCommand::Drop { name } => {
+            execute_remote_drop(client, name, writer, formatter, limit, quiet).await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_remote_tui<'a>(
+    client: &HttpClient,
+    cmd: &HnswCommand,
+    columns: Vec<Column>,
+    output_format: OutputFormat,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
+) -> Result<()> {
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    execute_remote_with_formatter(client, cmd, &mut sink, formatter, limit, quiet).await?;
+    let warning = collector.truncation_warning();
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        Some(hnsw_command_context(cmd)),
+        true,
+        warning,
+        output_format,
+        admin_launcher,
+    )
+}
+
 /// Convert CLI distance metric to embedded Metric.
 fn to_embedded_metric(metric: DistanceMetric) -> Metric {
     match metric {
         DistanceMetric::Cosine => Metric::Cosine,
         DistanceMetric::L2 => Metric::L2,
         DistanceMetric::Ip => Metric::InnerProduct,
+    }
+}
+
+fn metric_to_string(metric: DistanceMetric) -> String {
+    match metric {
+        DistanceMetric::Cosine => "cosine".to_string(),
+        DistanceMetric::L2 => "l2".to_string(),
+        DistanceMetric::Ip => "ip".to_string(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_remote_create<W: Write>(
+    client: &HttpClient,
+    name: &str,
+    dim: usize,
+    metric: DistanceMetric,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    let request = RemoteHnswCreateRequest {
+        index: name.to_string(),
+        dim,
+        metric: metric_to_string(metric),
+    };
+    let response: RemoteHnswStatusResponse = client
+        .post_json("hnsw/create", &request)
+        .await
+        .map_err(map_client_error)?;
+    if response.success {
+        if quiet {
+            return Ok(());
+        }
+        let columns = hnsw_status_columns();
+        let mut streaming_writer =
+            StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+        streaming_writer.prepare(Some(1))?;
+        let row = Row::new(vec![
+            Value::Text("OK".to_string()),
+            Value::Text(format!("Created HNSW index: {}", name)),
+        ]);
+        streaming_writer.write_row(row)?;
+        streaming_writer.finish()
+    } else {
+        Err(crate::error::CliError::InvalidArgument(
+            "Failed to create HNSW index".to_string(),
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_remote_stats<W: Write>(
+    client: &HttpClient,
+    name: &str,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    let request = RemoteHnswStatsRequest {
+        index: name.to_string(),
+    };
+    let response: RemoteHnswStatsResponse = client
+        .post_json("hnsw/stats", &request)
+        .await
+        .map_err(map_client_error)?;
+    let stats = response.stats;
+    let columns = hnsw_stats_columns();
+    let mut streaming_writer =
+        StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+    streaming_writer.prepare(Some(4))?;
+    let stats_rows = vec![
+        ("node_count", Value::Int(stats.node_count as i64)),
+        ("deleted_count", Value::Int(stats.deleted_count as i64)),
+        ("memory_bytes", Value::Int(stats.memory_bytes as i64)),
+        ("avg_edges_per_node", Value::Float(stats.avg_edges_per_node)),
+    ];
+    for (key, value) in stats_rows {
+        let row = Row::new(vec![Value::Text(key.to_string()), value]);
+        streaming_writer.write_row(row)?;
+    }
+    streaming_writer.finish()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_remote_drop<W: Write>(
+    client: &HttpClient,
+    name: &str,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    let request = RemoteHnswDropRequest {
+        index: name.to_string(),
+    };
+    let response: RemoteHnswStatusResponse = client
+        .post_json("hnsw/drop", &request)
+        .await
+        .map_err(map_client_error)?;
+    if response.success {
+        if quiet {
+            return Ok(());
+        }
+        let columns = hnsw_status_columns();
+        let mut streaming_writer =
+            StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+        streaming_writer.prepare(Some(1))?;
+        let row = Row::new(vec![
+            Value::Text("OK".to_string()),
+            Value::Text(format!("Dropped HNSW index: {}", name)),
+        ]);
+        streaming_writer.write_row(row)?;
+        streaming_writer.finish()
+    } else {
+        Err(crate::error::CliError::InvalidArgument(
+            "Failed to drop HNSW index".to_string(),
+        ))
+    }
+}
+
+fn map_client_error(err: ClientError) -> crate::error::CliError {
+    match err {
+        ClientError::Request { source, .. } => {
+            crate::error::CliError::ServerConnection(format!("request failed: {source}"))
+        }
+        ClientError::InvalidUrl(message) => crate::error::CliError::InvalidArgument(message),
+        ClientError::Build(message) => crate::error::CliError::InvalidArgument(message),
+        ClientError::Auth(err) => crate::error::CliError::InvalidArgument(err.to_string()),
+        ClientError::HttpStatus { status, body } => crate::error::CliError::InvalidArgument(
+            format!("Server error: HTTP {} - {}", status.as_u16(), body),
+        ),
+    }
+}
+
+fn hnsw_command_context(cmd: &HnswCommand) -> String {
+    match cmd {
+        HnswCommand::Create { name, dim, metric } => format!(
+            "hnsw create {name} --dim {dim} --metric {}",
+            metric_to_string(*metric)
+        ),
+        HnswCommand::Stats { name } => format!("hnsw stats {name}"),
+        HnswCommand::Drop { name } => format!("hnsw drop {name}"),
     }
 }
 

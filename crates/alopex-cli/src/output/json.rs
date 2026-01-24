@@ -1,6 +1,6 @@
 //! JSON array formatter
 //!
-//! Outputs data as a JSON array. Does not support streaming.
+//! Outputs data as a JSON array. Supports streaming output.
 
 use std::io::Write;
 
@@ -12,7 +12,7 @@ use super::formatter::Formatter;
 /// JSON array formatter.
 ///
 /// Outputs data as a JSON array of objects.
-/// Does not support streaming (requires buffering).
+/// Supports streaming by writing array elements incrementally.
 pub struct JsonFormatter {
     /// Column names (set on write_header)
     columns: Vec<String>,
@@ -88,7 +88,7 @@ impl Formatter for JsonFormatter {
     }
 
     fn supports_streaming(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -210,8 +210,8 @@ mod tests {
     }
 
     #[test]
-    fn test_json_does_not_support_streaming() {
+    fn test_json_supports_streaming() {
         let formatter = JsonFormatter::new();
-        assert!(!formatter.supports_streaming());
+        assert!(formatter.supports_streaming());
     }
 }

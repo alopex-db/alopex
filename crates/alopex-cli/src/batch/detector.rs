@@ -22,7 +22,10 @@ pub enum BatchModeSource {
 
 impl BatchMode {
     pub fn detect(cli: &Cli) -> Self {
-        let is_tty = io::stdin().is_terminal();
+        let forced = std::env::var("ALOPEX_TEST_TTY")
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+            .unwrap_or(false);
+        let is_tty = forced || io::stdin().is_terminal();
         let env_mode = std::env::var("ALOPEX_MODE").ok();
 
         Self::detect_with(cli, is_tty, env_mode.as_deref())
@@ -81,16 +84,16 @@ pub fn is_destructive_command(command: &Command) -> bool {
     match command {
         Command::Kv { command: kv_cmd } => matches!(
             kv_cmd,
-            KvCommand::Delete { .. } | KvCommand::Txn(KvTxnCommand::Delete { .. })
+            Some(KvCommand::Delete { .. } | KvCommand::Txn(KvTxnCommand::Delete { .. }))
         ),
         Command::Hnsw {
-            command: HnswCommand::Drop { .. },
+            command: Some(HnswCommand::Drop { .. }),
         } => true,
         Command::Profile {
-            command: ProfileCommand::Delete { .. },
+            command: Some(ProfileCommand::Delete { .. }),
         } => true,
         Command::Columnar {
-            command: ColumnarCommand::Index(IndexCommand::Drop { .. }),
+            command: Some(ColumnarCommand::Index(IndexCommand::Drop { .. })),
         } => true,
         _ => false,
     }
@@ -198,16 +201,16 @@ mod tests {
     #[test]
     fn destructive_command_detection() {
         let kv_delete = Command::Kv {
-            command: KvCommand::Delete { key: "key".into() },
+            command: Some(KvCommand::Delete { key: "key".into() }),
         };
         let kv_list = Command::Kv {
-            command: KvCommand::List { prefix: None },
+            command: Some(KvCommand::List { prefix: None }),
         };
         let profile_delete = Command::Profile {
-            command: ProfileCommand::Delete { name: "dev".into() },
+            command: Some(ProfileCommand::Delete { name: "dev".into() }),
         };
         let hnsw_drop = Command::Hnsw {
-            command: HnswCommand::Drop { name: "idx".into() },
+            command: Some(HnswCommand::Drop { name: "idx".into() }),
         };
 
         assert!(is_destructive_command(&kv_delete));
@@ -216,16 +219,16 @@ mod tests {
         assert!(is_destructive_command(&hnsw_drop));
 
         let kv_txn_delete = Command::Kv {
-            command: KvCommand::Txn(KvTxnCommand::Delete {
+            command: Some(KvCommand::Txn(KvTxnCommand::Delete {
                 key: "key".into(),
                 txn_id: "txn".into(),
-            }),
+            })),
         };
         let columnar_index_drop = Command::Columnar {
-            command: ColumnarCommand::Index(IndexCommand::Drop {
+            command: Some(ColumnarCommand::Index(IndexCommand::Drop {
                 segment: "seg".into(),
                 column: "col".into(),
-            }),
+            })),
         };
 
         assert!(is_destructive_command(&kv_txn_delete));

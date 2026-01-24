@@ -3,16 +3,105 @@
 //! Supports: get, put, delete, list
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use alopex_embedded::{Database, TransactionManager as Transaction, TxnMode};
+use serde::{Deserialize, Serialize};
 
-use crate::cli::{KvCommand, KvTxnCommand};
+use crate::batch::BatchMode;
+use crate::cli::{KvCommand, KvTxnCommand, OutputFormat};
+use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
+use crate::output::formatter::Formatter;
+use crate::output::RowCollector;
 use crate::streaming::{StreamingWriter, WriteStatus};
+use crate::tui::admin::{AdminBackend, AdminContext, AdminTarget, AuthCapabilities};
+use crate::tui::renderer::render_output;
 
 const DEFAULT_TXN_TIMEOUT_SECS: u64 = 60;
+
+#[derive(Debug, Serialize)]
+struct RemoteKvGetRequest {
+    key: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteKvPutRequest {
+    key: String,
+    value: Vec<u8>,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteKvDeleteRequest {
+    key: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteKvListRequest {
+    prefix: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteKvTxnBeginRequest {
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteKvTxnGetRequest {
+    txn_id: String,
+    key: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteKvTxnPutRequest {
+    txn_id: String,
+    key: String,
+    value: Vec<u8>,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteKvTxnDeleteRequest {
+    txn_id: String,
+    key: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteKvTxnCommitRequest {
+    txn_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteKvTxnRollbackRequest {
+    txn_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteKvGetResponse {
+    value: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteKvListEntry {
+    key: Vec<u8>,
+    value: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteKvListResponse {
+    entries: Vec<RemoteKvListEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteKvStatusResponse {
+    success: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteKvTxnBeginResponse {
+    txn_id: String,
+}
 
 /// Execute a KV command.
 ///
@@ -32,6 +121,378 @@ pub fn execute<W: Write>(
         KvCommand::Delete { key } => execute_delete(db, &key, writer),
         KvCommand::List { prefix } => execute_list(db, prefix.as_deref(), writer),
         KvCommand::Txn(cmd) => execute_txn_command(db, cmd, writer),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_tui(
+    db: &Database,
+    cmd: KvCommand,
+    batch_mode: &BatchMode,
+    output_format: OutputFormat,
+    columns: Vec<Column>,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+    data_dir: Option<PathBuf>,
+) -> Result<()> {
+    let connection_label = connection_label.into();
+    let context_message = Some(kv_command_context(&cmd));
+    let admin_label = connection_label.clone();
+    let admin_data_dir = data_dir.clone();
+    let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> = Some(Box::new(move || {
+        let connection_label = admin_label.clone();
+        let data_dir = admin_data_dir.clone();
+        crate::tui::admin::run_admin_ui(AdminContext {
+            connection_label,
+            auth: AuthCapabilities::full(),
+            backend: AdminBackend::Local {
+                db,
+                batch_mode,
+                output_format,
+                limit,
+                quiet,
+                data_dir,
+            },
+            initial_target: Some(AdminTarget::Kv),
+        })
+    }));
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    let mut writer =
+        StreamingWriter::new(&mut sink, formatter, columns.clone(), limit).with_quiet(quiet);
+    execute(db, cmd, &mut writer)?;
+    let warning = collector.truncation_warning();
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        context_message,
+        true,
+        warning,
+        output_format,
+        admin_launcher,
+    )
+}
+
+/// Execute a KV command against a remote server.
+pub async fn execute_remote_with_formatter<W: Write>(
+    client: &HttpClient,
+    cmd: &KvCommand,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    match cmd {
+        KvCommand::Get { key } => {
+            let request = RemoteKvGetRequest { key: key.clone() };
+            let response: RemoteKvGetResponse = client
+                .post_json("kv/get", &request)
+                .await
+                .map_err(map_client_error)?;
+            let Some(value) = response.value else {
+                return Err(CliError::InvalidArgument(format!("Key not found: {}", key)));
+            };
+
+            let columns = kv_columns();
+            let mut streaming_writer =
+                StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+            streaming_writer.prepare(Some(1))?;
+            let row = Row::new(vec![Value::Text(key.clone()), bytes_to_value(value)]);
+            streaming_writer.write_row(row)?;
+            streaming_writer.finish()
+        }
+        KvCommand::Put { key, value } => {
+            let request = RemoteKvPutRequest {
+                key: key.clone(),
+                value: value.as_bytes().to_vec(),
+            };
+            let response: RemoteKvStatusResponse = client
+                .post_json("kv/put", &request)
+                .await
+                .map_err(map_client_error)?;
+            if response.success {
+                if quiet {
+                    return Ok(());
+                }
+                let columns = kv_status_columns();
+                let mut streaming_writer =
+                    StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+                streaming_writer.prepare(Some(1))?;
+                let row = Row::new(vec![
+                    Value::Text("OK".to_string()),
+                    Value::Text(format!("Set key: {}", key)),
+                ]);
+                streaming_writer.write_row(row)?;
+                streaming_writer.finish()
+            } else {
+                Err(CliError::InvalidArgument("Failed to set key".to_string()))
+            }
+        }
+        KvCommand::Delete { key } => {
+            let request = RemoteKvDeleteRequest { key: key.clone() };
+            let response: RemoteKvStatusResponse = client
+                .post_json("kv/delete", &request)
+                .await
+                .map_err(map_client_error)?;
+            if response.success {
+                if quiet {
+                    return Ok(());
+                }
+                let columns = kv_status_columns();
+                let mut streaming_writer =
+                    StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+                streaming_writer.prepare(Some(1))?;
+                let row = Row::new(vec![
+                    Value::Text("OK".to_string()),
+                    Value::Text(format!("Deleted key: {}", key)),
+                ]);
+                streaming_writer.write_row(row)?;
+                streaming_writer.finish()
+            } else {
+                Err(CliError::InvalidArgument(
+                    "Failed to delete key".to_string(),
+                ))
+            }
+        }
+        KvCommand::List { prefix } => {
+            let request = RemoteKvListRequest {
+                prefix: prefix.clone(),
+            };
+            let response: RemoteKvListResponse = client
+                .post_json("kv/list", &request)
+                .await
+                .map_err(map_client_error)?;
+            let columns = kv_columns();
+            let mut streaming_writer =
+                StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+            streaming_writer.prepare(Some(response.entries.len()))?;
+            for entry in response.entries {
+                let row = Row::new(vec![bytes_to_value(entry.key), bytes_to_value(entry.value)]);
+                match streaming_writer.write_row(row)? {
+                    WriteStatus::LimitReached => break,
+                    WriteStatus::Continue => {}
+                }
+            }
+            streaming_writer.finish()
+        }
+        KvCommand::Txn(txn_cmd) => {
+            execute_remote_txn_command(client, txn_cmd, writer, formatter, limit, quiet).await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_remote_tui<'a>(
+    client: &HttpClient,
+    cmd: &KvCommand,
+    columns: Vec<Column>,
+    output_format: OutputFormat,
+    limit: Option<usize>,
+    quiet: bool,
+    connection_label: impl Into<String>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
+) -> Result<()> {
+    let collector = RowCollector::new();
+    let formatter = Box::new(collector.formatter());
+    let mut sink = std::io::sink();
+    execute_remote_with_formatter(client, cmd, &mut sink, formatter, limit, quiet).await?;
+    let warning = collector.truncation_warning();
+    render_output(
+        columns,
+        collector.rows(),
+        connection_label,
+        Some(kv_command_context(cmd)),
+        true,
+        warning,
+        output_format,
+        admin_launcher,
+    )
+}
+
+async fn execute_remote_txn_command<W: Write>(
+    client: &HttpClient,
+    cmd: &KvTxnCommand,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    match cmd {
+        KvTxnCommand::Begin { timeout_secs } => {
+            let request = RemoteKvTxnBeginRequest {
+                timeout_secs: *timeout_secs,
+            };
+            let response: RemoteKvTxnBeginResponse = client
+                .post_json("kv/txn/begin", &request)
+                .await
+                .map_err(map_client_error)?;
+            let columns = kv_columns();
+            let mut streaming_writer =
+                StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+            streaming_writer.prepare(Some(1))?;
+            let row = Row::new(vec![
+                Value::Text("txn_id".to_string()),
+                Value::Text(response.txn_id),
+            ]);
+            streaming_writer.write_row(row)?;
+            streaming_writer.finish()
+        }
+        KvTxnCommand::Get { key, txn_id } => {
+            let request = RemoteKvTxnGetRequest {
+                txn_id: txn_id.clone(),
+                key: key.clone(),
+            };
+            let response: RemoteKvGetResponse = client
+                .post_json("kv/txn/get", &request)
+                .await
+                .map_err(map_client_error)?;
+            let Some(value) = response.value else {
+                return Err(CliError::InvalidArgument(format!("Key not found: {}", key)));
+            };
+            let columns = kv_columns();
+            let mut streaming_writer =
+                StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+            streaming_writer.prepare(Some(1))?;
+            let row = Row::new(vec![Value::Text(key.clone()), bytes_to_value(value)]);
+            streaming_writer.write_row(row)?;
+            streaming_writer.finish()
+        }
+        KvTxnCommand::Put { key, value, txn_id } => {
+            let request = RemoteKvTxnPutRequest {
+                txn_id: txn_id.clone(),
+                key: key.clone(),
+                value: value.as_bytes().to_vec(),
+            };
+            let response: RemoteKvStatusResponse = client
+                .post_json("kv/txn/put", &request)
+                .await
+                .map_err(map_client_error)?;
+            if response.success {
+                let columns = kv_status_columns();
+                let mut streaming_writer =
+                    StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+                write_status_if_needed(&mut streaming_writer, &format!("Staged key: {}", key))
+            } else {
+                Err(CliError::InvalidArgument("Failed to stage key".to_string()))
+            }
+        }
+        KvTxnCommand::Delete { key, txn_id } => {
+            let request = RemoteKvTxnDeleteRequest {
+                txn_id: txn_id.clone(),
+                key: key.clone(),
+            };
+            let response: RemoteKvStatusResponse = client
+                .post_json("kv/txn/delete", &request)
+                .await
+                .map_err(map_client_error)?;
+            if response.success {
+                let columns = kv_status_columns();
+                let mut streaming_writer =
+                    StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+                write_status_if_needed(&mut streaming_writer, &format!("Staged delete: {}", key))
+            } else {
+                Err(CliError::InvalidArgument(
+                    "Failed to stage delete".to_string(),
+                ))
+            }
+        }
+        KvTxnCommand::Commit { txn_id } => {
+            let request = RemoteKvTxnCommitRequest {
+                txn_id: txn_id.clone(),
+            };
+            let response: RemoteKvStatusResponse = client
+                .post_json("kv/txn/commit", &request)
+                .await
+                .map_err(map_client_error)?;
+            if response.success {
+                let columns = kv_status_columns();
+                let mut streaming_writer =
+                    StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+                write_status_if_needed(
+                    &mut streaming_writer,
+                    &format!("Committed transaction: {}", txn_id),
+                )
+            } else {
+                Err(CliError::InvalidArgument(
+                    "Failed to commit transaction".to_string(),
+                ))
+            }
+        }
+        KvTxnCommand::Rollback { txn_id } => {
+            let request = RemoteKvTxnRollbackRequest {
+                txn_id: txn_id.clone(),
+            };
+            let response: RemoteKvStatusResponse = client
+                .post_json("kv/txn/rollback", &request)
+                .await
+                .map_err(map_client_error)?;
+            if response.success {
+                let columns = kv_status_columns();
+                let mut streaming_writer =
+                    StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+                write_status_if_needed(
+                    &mut streaming_writer,
+                    &format!("Rolled back transaction: {}", txn_id),
+                )
+            } else {
+                Err(CliError::InvalidArgument(
+                    "Failed to rollback transaction".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+fn map_client_error(err: ClientError) -> CliError {
+    match err {
+        ClientError::Request { source, .. } => {
+            CliError::ServerConnection(format!("request failed: {source}"))
+        }
+        ClientError::InvalidUrl(message) => CliError::InvalidArgument(message),
+        ClientError::Build(message) => CliError::InvalidArgument(message),
+        ClientError::Auth(err) => CliError::InvalidArgument(err.to_string()),
+        ClientError::HttpStatus { status, body } => {
+            CliError::InvalidArgument(format!("Server error: HTTP {} - {}", status.as_u16(), body))
+        }
+    }
+}
+
+fn kv_command_context(cmd: &KvCommand) -> String {
+    match cmd {
+        KvCommand::Get { key } => format!("kv get {key}"),
+        KvCommand::Put { key, .. } => format!("kv put {key}"),
+        KvCommand::Delete { key } => format!("kv delete {key}"),
+        KvCommand::List { prefix } => match prefix {
+            Some(prefix) => format!("kv list --prefix {prefix}"),
+            None => "kv list".to_string(),
+        },
+        KvCommand::Txn(command) => match command {
+            KvTxnCommand::Begin { timeout_secs } => match timeout_secs {
+                Some(secs) => format!("kv txn begin --timeout-secs {secs}"),
+                None => "kv txn begin".to_string(),
+            },
+            KvTxnCommand::Get { key, txn_id } => {
+                format!("kv txn get {key} --txn-id {txn_id}")
+            }
+            KvTxnCommand::Put { key, txn_id, .. } => {
+                format!("kv txn put {key} --txn-id {txn_id}")
+            }
+            KvTxnCommand::Delete { key, txn_id } => {
+                format!("kv txn delete {key} --txn-id {txn_id}")
+            }
+            KvTxnCommand::Commit { txn_id } => format!("kv txn commit --txn-id {txn_id}"),
+            KvTxnCommand::Rollback { txn_id } => format!("kv txn rollback --txn-id {txn_id}"),
+        },
+    }
+}
+
+fn bytes_to_value(bytes: Vec<u8>) -> Value {
+    match std::str::from_utf8(&bytes) {
+        Ok(s) => Value::Text(s.to_string()),
+        Err(_) => Value::Bytes(bytes),
     }
 }
 
@@ -303,7 +764,7 @@ fn execute_list<W: Write>(
         let row = Row::new(vec![key_display, value_display]);
         match writer.write_row(row)? {
             WriteStatus::LimitReached => break,
-            WriteStatus::Continue | WriteStatus::FallbackTriggered => {}
+            WriteStatus::Continue => {}
         }
     }
 

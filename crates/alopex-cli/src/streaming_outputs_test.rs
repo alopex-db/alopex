@@ -6,6 +6,7 @@ use crate::output::formatter::Formatter;
 use crate::output::jsonl::JsonlFormatter;
 use crate::output::tsv::TsvFormatter;
 use crate::streaming::StreamingWriter;
+use crate::ui::mode::UiMode;
 use alopex_core::columnar::encoding::{Column as ColumnData, LogicalType};
 use alopex_core::columnar::segment_v2::{ColumnSchema, RecordBatch, Schema};
 use alopex_core::HnswConfig;
@@ -65,14 +66,20 @@ fn run_sql_with_formatter(db: &Database, formatter: Box<dyn Formatter>) -> Strin
     let cmd = SqlCommand {
         query: Some("SELECT * FROM stream_test;".to_string()),
         file: None,
+        fetch_size: None,
+        max_rows: None,
+        deadline: None,
+        tui: false,
     };
     let mut output = Vec::new();
     sql::execute_with_formatter(
         db,
         cmd,
         &default_batch_mode(),
+        UiMode::Batch,
         &mut output,
         formatter,
+        None,
         None,
         true,
     )

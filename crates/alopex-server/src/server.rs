@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use alopex_core::kv::any::AnyKV;
 use alopex_core::kv::async_adapter::{AsyncKVStoreAdapter, AsyncKVTransactionAdapter};
@@ -32,6 +33,7 @@ pub struct ServerState {
     pub metrics: Metrics,
     pub audit: AuditLogger,
     pub auth: AuthMiddleware,
+    pub start_time: Instant,
 }
 
 impl Server {
@@ -69,6 +71,7 @@ impl Server {
                 metrics,
                 audit,
                 auth,
+                start_time: Instant::now(),
             }),
         })
     }
