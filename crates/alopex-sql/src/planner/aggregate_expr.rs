@@ -6,10 +6,12 @@ use crate::planner::types::ResolvedType;
 pub enum AggregateFunction {
     Count,
     Sum,
+    Total,
     Avg,
     Min,
     Max,
     GroupConcat { separator: Option<String> },
+    StringAgg { separator: Option<String> },
 }
 
 /// Aggregate expression definition.
@@ -43,6 +45,15 @@ impl AggregateExpr {
     pub fn sum(arg: TypedExpr) -> Self {
         Self {
             function: AggregateFunction::Sum,
+            arg: Some(arg),
+            distinct: false,
+            result_type: ResolvedType::Double,
+        }
+    }
+
+    pub fn total(arg: TypedExpr) -> Self {
+        Self {
+            function: AggregateFunction::Total,
             arg: Some(arg),
             distinct: false,
             result_type: ResolvedType::Double,

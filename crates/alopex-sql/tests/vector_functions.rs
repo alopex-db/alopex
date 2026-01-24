@@ -55,6 +55,29 @@ fn vector_similarity_and_distance_end_to_end() {
 }
 
 #[test]
+fn vector_dims_and_norm_end_to_end() {
+    let sql = r#"
+        CREATE TABLE dummy (id INT);
+        INSERT INTO dummy (id) VALUES (1);
+        SELECT vector_dims([1.0, 2.0, 3.0]) AS dims FROM dummy;
+        SELECT vector_norm([3.0, 4.0]) AS norm FROM dummy;
+    "#;
+    let results = run_sql(sql);
+    match &results[2] {
+        ExecutionResult::Query(q) => {
+            assert_eq!(q.rows[0][0], alopex_sql::storage::SqlValue::Integer(3));
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    match &results[3] {
+        ExecutionResult::Query(q) => {
+            assert_eq!(q.rows[0][0], alopex_sql::storage::SqlValue::Double(5.0));
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
 fn vector_function_invalid_args_return_error() {
     let store = Arc::new(MemoryKV::new());
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));

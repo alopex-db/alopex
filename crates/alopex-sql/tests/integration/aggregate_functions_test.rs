@@ -26,7 +26,8 @@ fn aggregates_without_group_by() {
     let mut harness = TestHarness::new();
     seed_products(&mut harness);
 
-    let result = harness.query_sql("SELECT COUNT(*), AVG(price), MAX(price) FROM products");
+    let result =
+        harness.query_sql("SELECT COUNT(*), AVG(price), MAX(price), TOTAL(price) FROM products");
     assert_eq!(result.rows.len(), 1);
     let row = &result.rows[0];
     match &row[0] {
@@ -40,6 +41,10 @@ fn aggregates_without_group_by() {
     match &row[2] {
         SqlValue::Double(value) => assert!((*value - 20.0).abs() < 1e-6),
         other => panic!("unexpected max {other:?}"),
+    }
+    match &row[3] {
+        SqlValue::Double(value) => assert!((*value - 48.0).abs() < 1e-6),
+        other => panic!("unexpected total {other:?}"),
     }
 }
 
@@ -103,6 +108,32 @@ fn group_concat_with_separator() {
         match category.as_str() {
             "book" => {
                 assert_eq!(row[1], SqlValue::Text("a|b|a".into()));
+            }
+            "game" => {
+                assert_eq!(row[1], SqlValue::Text("c".into()));
+            }
+            "toy" => {
+                assert_eq!(row[1], SqlValue::Text("c".into()));
+            }
+            other => panic!("unexpected category {other}"),
+        }
+    }
+}
+
+#[test]
+fn string_agg_with_separator() {
+    let mut harness = TestHarness::new();
+    seed_products(&mut harness);
+
+    let result = harness
+        .query_sql("SELECT category, STRING_AGG(label, ';') FROM products GROUP BY category");
+    for row in result.rows {
+        let SqlValue::Text(category) = &row[0] else {
+            panic!("expected text category");
+        };
+        match category.as_str() {
+            "book" => {
+                assert_eq!(row[1], SqlValue::Text("a;b;a".into()));
             }
             "game" => {
                 assert_eq!(row[1], SqlValue::Text("c".into()));

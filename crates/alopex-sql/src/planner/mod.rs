@@ -350,12 +350,15 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             .as_ref()
             .is_some_and(|items| !items.is_empty());
         let has_aggregate = self.select_contains_aggregate(stmt);
+        let distinct_only =
+            stmt.distinct && !has_group_by && !has_aggregate && stmt.having.is_none();
 
-        let scan_projection = if has_group_by || has_aggregate || stmt.having.is_some() {
-            Projection::All(table.column_names().into_iter().map(String::from).collect())
-        } else {
-            self.build_projection(&stmt.projection, table)?
-        };
+        let scan_projection =
+            if has_group_by || has_aggregate || stmt.having.is_some() || stmt.distinct {
+                Projection::All(table.column_names().into_iter().map(String::from).collect())
+            } else {
+                self.build_projection(&stmt.projection, table)?
+            };
 
         // 2. Create the base Scan plan
         let mut plan = LogicalPlan::Scan {
@@ -382,15 +385,24 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             };
         }
 
-        if has_group_by || has_aggregate || stmt.having.is_some() {
+        if has_group_by || has_aggregate || stmt.having.is_some() || stmt.distinct {
             if !has_group_by && !has_aggregate && stmt.having.is_some() {
                 return Err(PlannerError::invalid_expression(
                     "HAVING requires GROUP BY or aggregate functions".to_string(),
                 ));
             }
 
-            let group_keys = self.build_group_keys(stmt, table)?;
-            let projected = self.build_projected_columns_for_aggregate(&stmt.projection, table)?;
+            let (group_keys, projected) = if distinct_only {
+                let projected =
+                    self.build_projected_columns_for_distinct(&stmt.projection, table)?;
+                let group_keys = projected.iter().map(|col| col.expr.clone()).collect();
+                (group_keys, projected)
+            } else {
+                let group_keys = self.build_group_keys(stmt, table)?;
+                let projected =
+                    self.build_projected_columns_for_aggregate(&stmt.projection, table)?;
+                (group_keys, projected)
+            };
             let mut aggregates = Vec::new();
             let mut agg_map = HashMap::new();
 
@@ -653,6 +665,41 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         Ok(projected)
     }
 
+    fn build_projected_columns_for_distinct(
+        &self,
+        items: &[SelectItem],
+        table: &TableMetadata,
+    ) -> Result<Vec<ProjectedColumn>, PlannerError> {
+        let projection = self.build_projection(items, table)?;
+        match projection {
+            Projection::All(columns) => {
+                let mut projected = Vec::with_capacity(columns.len());
+                for column in columns {
+                    let column_index = table.get_column_index(&column).ok_or_else(|| {
+                        PlannerError::invalid_expression(format!(
+                            "column '{column}' not found for DISTINCT projection"
+                        ))
+                    })?;
+                    let column_meta = table.get_column(&column).ok_or_else(|| {
+                        PlannerError::invalid_expression(format!(
+                            "column '{column}' not found for DISTINCT projection"
+                        ))
+                    })?;
+                    let typed_expr = TypedExpr::column_ref(
+                        table.name.clone(),
+                        column.clone(),
+                        column_index,
+                        column_meta.data_type.clone(),
+                        crate::ast::Span::default(),
+                    );
+                    projected.push(ProjectedColumn::new(typed_expr));
+                }
+                Ok(projected)
+            }
+            Projection::Columns(columns) => Ok(columns),
+        }
+    }
+
     fn collect_aggregates_from_typed_expr(
         &self,
         expr: &TypedExpr,
@@ -774,6 +821,17 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let signature = aggregate_signature(name, false, star, Some(arg), None, expr);
                 Ok((agg, signature))
             }
+            "total" => {
+                let arg = self.require_single_aggregate_arg(args, expr.span)?;
+                let agg = AggregateExpr {
+                    function: AggregateFunction::Total,
+                    arg: Some(arg.clone()),
+                    distinct: false,
+                    result_type: ResolvedType::Double,
+                };
+                let signature = aggregate_signature(name, false, star, Some(arg), None, expr);
+                Ok((agg, signature))
+            }
             "avg" => {
                 let arg = self.require_single_aggregate_arg(args, expr.span)?;
                 let agg = AggregateExpr {
@@ -839,6 +897,42 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     Some(arg),
                     match &agg.function {
                         AggregateFunction::GroupConcat { separator } => separator.as_ref(),
+                        _ => None,
+                    },
+                    expr,
+                );
+                Ok((agg, signature))
+            }
+            "string_agg" => {
+                if args.len() != 2 {
+                    return Err(PlannerError::type_mismatch(
+                        "2 arguments",
+                        format!("{} arguments", args.len()),
+                        expr.span,
+                    ));
+                }
+                let arg = &args[0];
+                let separator =
+                    if let TypedExprKind::Literal(Literal::String(value)) = &args[1].kind {
+                        Some(value.clone())
+                    } else {
+                        return Err(PlannerError::invalid_expression(
+                            "STRING_AGG separator must be a string literal".to_string(),
+                        ));
+                    };
+                let agg = AggregateExpr {
+                    function: AggregateFunction::StringAgg { separator },
+                    arg: Some(arg.clone()),
+                    distinct: false,
+                    result_type: ResolvedType::Text,
+                };
+                let signature = aggregate_signature(
+                    name,
+                    false,
+                    star,
+                    Some(arg),
+                    match &agg.function {
+                        AggregateFunction::StringAgg { separator } => separator.as_ref(),
                         _ => None,
                     },
                     expr,
@@ -1247,7 +1341,7 @@ fn typed_expr_contains_aggregate(expr: &TypedExpr) -> bool {
 fn is_aggregate_function(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "count" | "sum" | "avg" | "min" | "max" | "group_concat"
+        "count" | "sum" | "total" | "avg" | "min" | "max" | "group_concat" | "string_agg"
     )
 }
 
@@ -1291,11 +1385,18 @@ fn build_aggregate_map(aggregates: &[AggregateExpr]) -> HashMap<AggregateSignatu
                 agg.arg.as_ref(),
             ),
             AggregateFunction::Sum => ("sum".to_string(), None, false, agg.arg.as_ref()),
+            AggregateFunction::Total => ("total".to_string(), None, false, agg.arg.as_ref()),
             AggregateFunction::Avg => ("avg".to_string(), None, false, agg.arg.as_ref()),
             AggregateFunction::Min => ("min".to_string(), None, false, agg.arg.as_ref()),
             AggregateFunction::Max => ("max".to_string(), None, false, agg.arg.as_ref()),
             AggregateFunction::GroupConcat { separator } => (
                 "group_concat".to_string(),
+                separator.clone(),
+                false,
+                agg.arg.as_ref(),
+            ),
+            AggregateFunction::StringAgg { separator } => (
+                "string_agg".to_string(),
                 separator.clone(),
                 false,
                 agg.arg.as_ref(),
@@ -1329,10 +1430,12 @@ fn build_aggregate_schema(
         let name = match &agg.function {
             AggregateFunction::Count => format!("count_{idx}"),
             AggregateFunction::Sum => format!("sum_{idx}"),
+            AggregateFunction::Total => format!("total_{idx}"),
             AggregateFunction::Avg => format!("avg_{idx}"),
             AggregateFunction::Min => format!("min_{idx}"),
             AggregateFunction::Max => format!("max_{idx}"),
             AggregateFunction::GroupConcat { .. } => format!("group_concat_{idx}"),
+            AggregateFunction::StringAgg { .. } => format!("string_agg_{idx}"),
         };
         schema.push(ColumnMetadata::new(name, agg.result_type.clone()));
     }
@@ -1369,6 +1472,14 @@ fn rewrite_expr_with_maps(
                 } else {
                     return Err(PlannerError::invalid_expression(
                         "GROUP_CONCAT separator must be a string literal".to_string(),
+                    ));
+                }
+            } else if name.eq_ignore_ascii_case("string_agg") && args.len() == 2 {
+                if let TypedExprKind::Literal(Literal::String(value)) = &args[1].kind {
+                    Some(value.clone())
+                } else {
+                    return Err(PlannerError::invalid_expression(
+                        "STRING_AGG separator must be a string literal".to_string(),
                     ));
                 }
             } else {

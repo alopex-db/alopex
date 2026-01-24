@@ -199,3 +199,23 @@ fn group_by_order_by_group_key() {
         vec!["book".to_string(), "game".to_string(), "toy".to_string()]
     );
 }
+
+#[test]
+fn select_distinct_removes_duplicates() {
+    let mut harness = TestHarness::new();
+    seed_products(&mut harness);
+
+    let result = harness.query_sql("SELECT DISTINCT category FROM products ORDER BY category ASC");
+    let categories: Vec<String> = result
+        .rows
+        .into_iter()
+        .map(|row| match &row[0] {
+            SqlValue::Text(value) => value.clone(),
+            other => panic!("unexpected category {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        categories,
+        vec!["book".to_string(), "game".to_string(), "toy".to_string()]
+    );
+}

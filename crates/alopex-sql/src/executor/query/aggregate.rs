@@ -192,6 +192,47 @@ impl Accumulator for SumAccumulator {
     }
 }
 
+/// Accumulator for TOTAL (SUM that returns 0.0 on empty/all-NULL input).
+#[derive(Debug, Clone)]
+pub struct TotalAccumulator {
+    sum: Option<f64>,
+}
+
+impl TotalAccumulator {
+    /// Create a new total accumulator.
+    pub fn new() -> Self {
+        Self { sum: None }
+    }
+}
+
+impl Default for TotalAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Accumulator for TotalAccumulator {
+    fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        let Some(value) = value else {
+            return Ok(());
+        };
+        if value.is_null() {
+            return Ok(());
+        }
+        let numeric = numeric_to_f64(&value)?;
+        self.sum = Some(self.sum.unwrap_or(0.0) + numeric);
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        Ok(SqlValue::Double(self.sum.unwrap_or(0.0)))
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+}
+
 /// Accumulator for AVG.
 #[derive(Debug, Clone)]
 pub struct AvgAccumulator {
@@ -372,17 +413,71 @@ impl Accumulator for GroupConcatAccumulator {
     }
 }
 
+/// Accumulator for STRING_AGG.
+#[derive(Debug, Clone)]
+pub struct StringAggAccumulator {
+    values: Vec<String>,
+    separator: String,
+}
+
+impl StringAggAccumulator {
+    /// Create a new string_agg accumulator.
+    pub fn new(separator: String) -> Self {
+        Self {
+            values: Vec::new(),
+            separator,
+        }
+    }
+}
+
+impl Accumulator for StringAggAccumulator {
+    fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        let Some(value) = value else {
+            return Ok(());
+        };
+        match value {
+            SqlValue::Null => Ok(()),
+            SqlValue::Text(s) => {
+                self.values.push(s);
+                Ok(())
+            }
+            other => Err(ExecutorError::Evaluation(
+                crate::executor::EvaluationError::TypeMismatch {
+                    expected: "Text".into(),
+                    actual: other.type_name().into(),
+                },
+            )),
+        }
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        if self.values.is_empty() {
+            return Ok(SqlValue::Null);
+        }
+        Ok(SqlValue::Text(self.values.join(&self.separator)))
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+}
+
 /// Create a new accumulator instance for the aggregate function.
 pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<dyn Accumulator> {
     match function {
         AggregateFunction::Count => Box::new(CountAccumulator::new(distinct)),
         AggregateFunction::Sum => Box::new(SumAccumulator::new()),
+        AggregateFunction::Total => Box::new(TotalAccumulator::new()),
         AggregateFunction::Avg => Box::new(AvgAccumulator::new()),
         AggregateFunction::Min => Box::new(MinMaxAccumulator::new(true)),
         AggregateFunction::Max => Box::new(MinMaxAccumulator::new(false)),
         AggregateFunction::GroupConcat { separator } => {
             let sep = separator.clone().unwrap_or_else(|| ",".to_string());
             Box::new(GroupConcatAccumulator::new(sep))
+        }
+        AggregateFunction::StringAgg { separator } => {
+            let sep = separator.clone().unwrap_or_else(|| ",".to_string());
+            Box::new(StringAggAccumulator::new(sep))
         }
     }
 }
@@ -571,10 +666,12 @@ pub fn build_aggregate_schema(
         let name = match &agg.function {
             AggregateFunction::Count => format!("count_{idx}"),
             AggregateFunction::Sum => format!("sum_{idx}"),
+            AggregateFunction::Total => format!("total_{idx}"),
             AggregateFunction::Avg => format!("avg_{idx}"),
             AggregateFunction::Min => format!("min_{idx}"),
             AggregateFunction::Max => format!("max_{idx}"),
             AggregateFunction::GroupConcat { .. } => format!("group_concat_{idx}"),
+            AggregateFunction::StringAgg { .. } => format!("string_agg_{idx}"),
         };
         schema.push(ColumnMetadata::new(name, agg.result_type.clone()));
     }
@@ -610,6 +707,21 @@ mod tests {
         acc.update(Some(SqlValue::Double(3.5))).unwrap();
         acc.update(Some(SqlValue::Null)).unwrap();
         assert_eq!(acc.finalize().unwrap(), SqlValue::Double(5.5));
+    }
+
+    #[test]
+    fn total_accumulator_returns_zero_for_empty() {
+        let acc = TotalAccumulator::new();
+        assert_eq!(acc.finalize().unwrap(), SqlValue::Double(0.0));
+    }
+
+    #[test]
+    fn total_accumulator_aggregates_numeric_values() {
+        let mut acc = TotalAccumulator::new();
+        acc.update(Some(SqlValue::Integer(2))).unwrap();
+        acc.update(Some(SqlValue::Null)).unwrap();
+        acc.update(Some(SqlValue::Double(1.5))).unwrap();
+        assert_eq!(acc.finalize().unwrap(), SqlValue::Double(3.5));
     }
 
     #[test]
@@ -659,6 +771,21 @@ mod tests {
     #[test]
     fn group_concat_accumulator_empty_returns_null() {
         let acc = GroupConcatAccumulator::new(",".into());
+        assert_eq!(acc.finalize().unwrap(), SqlValue::Null);
+    }
+
+    #[test]
+    fn string_agg_accumulator_joins_values() {
+        let mut acc = StringAggAccumulator::new("::".into());
+        acc.update(Some(SqlValue::Text("a".into()))).unwrap();
+        acc.update(Some(SqlValue::Null)).unwrap();
+        acc.update(Some(SqlValue::Text("b".into()))).unwrap();
+        assert_eq!(acc.finalize().unwrap(), SqlValue::Text("a::b".into()));
+    }
+
+    #[test]
+    fn string_agg_accumulator_empty_returns_null() {
+        let acc = StringAggAccumulator::new(",".into());
         assert_eq!(acc.finalize().unwrap(), SqlValue::Null);
     }
 

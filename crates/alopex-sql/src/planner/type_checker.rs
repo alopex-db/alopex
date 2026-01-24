@@ -712,12 +712,16 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         match lower_name.as_str() {
             "count" => self.check_count(args, distinct, star, span),
             "sum" => self.check_sum(args, distinct, star, span),
+            "total" => self.check_total(args, distinct, star, span),
             "avg" => self.check_avg(args, distinct, star, span),
             "min" => self.check_min_max(args, distinct, star, span),
             "max" => self.check_min_max(args, distinct, star, span),
             "group_concat" => self.check_group_concat(args, distinct, star, span),
+            "string_agg" => self.check_string_agg(args, distinct, star, span),
             "vector_distance" => self.check_vector_distance(args, span),
             "vector_similarity" => self.check_vector_similarity(args, span),
+            "vector_dims" => self.check_vector_dims(args, span),
+            "vector_norm" => self.check_vector_norm(args, span),
             // Add more built-in functions here as needed
             _ => {
                 // Unknown function is an error
@@ -904,6 +908,38 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         Ok(ResolvedType::Double)
     }
 
+    fn check_total(
+        &self,
+        args: &[TypedExpr],
+        distinct: bool,
+        star: bool,
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        if star {
+            return Err(PlannerError::type_mismatch(
+                "numeric argument",
+                "COUNT(*) style",
+                span,
+            ));
+        }
+        if distinct {
+            return Err(PlannerError::unsupported_feature(
+                "TOTAL(DISTINCT ...)",
+                "future",
+                span,
+            ));
+        }
+        let arg = self.require_single_arg(args, span)?;
+        if !is_numeric_type(&arg.resolved_type) && arg.resolved_type != ResolvedType::Null {
+            return Err(PlannerError::type_mismatch(
+                "numeric",
+                arg.resolved_type.type_name().to_string(),
+                arg.span,
+            ));
+        }
+        Ok(ResolvedType::Double)
+    }
+
     fn check_avg(
         &self,
         args: &[TypedExpr],
@@ -1019,6 +1055,95 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             ));
         }
         Ok(ResolvedType::Text)
+    }
+
+    fn check_string_agg(
+        &self,
+        args: &[TypedExpr],
+        distinct: bool,
+        star: bool,
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        if star {
+            return Err(PlannerError::type_mismatch(
+                "text argument",
+                "COUNT(*) style",
+                span,
+            ));
+        }
+        if distinct {
+            return Err(PlannerError::unsupported_feature(
+                "STRING_AGG(DISTINCT ...)",
+                "future",
+                span,
+            ));
+        }
+        if args.len() != 2 {
+            return Err(PlannerError::type_mismatch(
+                "2 arguments",
+                format!("{} arguments", args.len()),
+                span,
+            ));
+        }
+        if !matches!(
+            args[0].resolved_type,
+            ResolvedType::Text | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Text",
+                args[0].resolved_type.type_name().to_string(),
+                args[0].span,
+            ));
+        }
+        if !matches!(
+            args[1].resolved_type,
+            ResolvedType::Text | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Text",
+                args[1].resolved_type.type_name().to_string(),
+                args[1].span,
+            ));
+        }
+        Ok(ResolvedType::Text)
+    }
+
+    fn check_vector_dims(
+        &self,
+        args: &[TypedExpr],
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        let arg = self.require_single_arg(args, span)?;
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Vector { .. } | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Vector",
+                arg.resolved_type.type_name().to_string(),
+                arg.span,
+            ));
+        }
+        Ok(ResolvedType::Integer)
+    }
+
+    fn check_vector_norm(
+        &self,
+        args: &[TypedExpr],
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        let arg = self.require_single_arg(args, span)?;
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Vector { .. } | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Vector",
+                arg.resolved_type.type_name().to_string(),
+                arg.span,
+            ));
+        }
+        Ok(ResolvedType::Double)
     }
 
     fn require_single_arg<'b>(
@@ -1404,7 +1529,7 @@ struct AggregateSignature {
 fn is_aggregate_name(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "count" | "sum" | "avg" | "min" | "max" | "group_concat"
+        "count" | "sum" | "total" | "avg" | "min" | "max" | "group_concat" | "string_agg"
     )
 }
 
@@ -1417,11 +1542,18 @@ fn aggregate_signature_from_expr(expr: &AggregateExpr) -> AggregateSignature {
             expr.arg.as_ref(),
         ),
         AggregateFunction::Sum => ("sum".to_string(), None, false, expr.arg.as_ref()),
+        AggregateFunction::Total => ("total".to_string(), None, false, expr.arg.as_ref()),
         AggregateFunction::Avg => ("avg".to_string(), None, false, expr.arg.as_ref()),
         AggregateFunction::Min => ("min".to_string(), None, false, expr.arg.as_ref()),
         AggregateFunction::Max => ("max".to_string(), None, false, expr.arg.as_ref()),
         AggregateFunction::GroupConcat { separator } => (
             "group_concat".to_string(),
+            separator.clone(),
+            false,
+            expr.arg.as_ref(),
+        ),
+        AggregateFunction::StringAgg { separator } => (
+            "string_agg".to_string(),
             separator.clone(),
             false,
             expr.arg.as_ref(),
@@ -1448,6 +1580,14 @@ fn aggregate_signature_from_call(
         } else {
             return Err(PlannerError::invalid_expression(
                 "GROUP_CONCAT separator must be a string literal".to_string(),
+            ));
+        }
+    } else if name.eq_ignore_ascii_case("string_agg") && args.len() == 2 {
+        if let TypedExprKind::Literal(Literal::String(value)) = &args[1].kind {
+            Some(value.clone())
+        } else {
+            return Err(PlannerError::invalid_expression(
+                "STRING_AGG separator must be a string literal".to_string(),
             ));
         }
     } else {

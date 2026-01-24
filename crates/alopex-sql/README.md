@@ -50,13 +50,22 @@ SELECT category, COUNT(*) FROM products GROUP BY category ORDER BY COUNT(*) DESC
 - `COUNT(column)`
 - `COUNT(DISTINCT column)`
 - `SUM(column)` (numeric)
+- `TOTAL(column)` (numeric, returns 0.0 for all-NULL)
 - `AVG(column)` (numeric)
 - `MIN(column)` / `MAX(column)` (comparable types)
 - `GROUP_CONCAT(column)` / `GROUP_CONCAT(column, separator)`
+- `STRING_AGG(column, separator)`
 
 ## Limitations
 
 - JOIN/Subquery/Window 関数は未対応。
 - `SUM/AVG/MIN/MAX` の `DISTINCT` は未対応。
 - `GROUP BY` の式は現状カラム参照のみを想定。
+
+## Error Scenarios
+
+- `ColumnNotFound`: 存在しないカラムを `GROUP BY` で参照した場合。
+- `TypeMismatch`: `SUM/AVG` に非数値型、`GROUP_CONCAT` に非 TEXT を指定した場合。
+- `InvalidExpression`: `HAVING` や `SELECT` で GROUP BY に含まれない非集約列を参照した場合。
+- `ResourceExhausted`: グループ数が上限を超えた場合（デフォルト 1,000,000）。
 ```
