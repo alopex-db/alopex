@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use arrow::array::{BooleanArray, Int16Array, Int32Array, Int64Array, Int8Array};
+use arrow::array::{Array, BooleanArray, Int16Array, Int32Array, Int64Array, Int8Array};
 use arrow::array::{Float32Array, Float64Array, UInt32Builder};
 use arrow::array::{StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array};
 use arrow::datatypes::{DataType, Schema};

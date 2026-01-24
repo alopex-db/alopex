@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use alopex_dataframe::{DataFrame, DataFrameError, Series};
-use arrow::array::{ArrayRef, Int64Array, StringArray};
+use arrow::array::{Array, ArrayRef, Int64Array, StringArray};
 
 fn s_i64(name: &str, values: Vec<Option<i64>>) -> Series {
     let array: ArrayRef = Arc::new(Int64Array::from(values));

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use alopex_dataframe::ops::JoinType;
 use alopex_dataframe::{DataFrame, DataFrameError, Series};
-use arrow::array::{ArrayRef, Int64Array, StringArray};
+use arrow::array::{Array, ArrayRef, Int64Array, StringArray};
 
 fn s_i64(name: &str, values: Vec<i64>) -> Series {
     let array: ArrayRef = Arc::new(Int64Array::from(values));
@@ -39,8 +39,20 @@ fn join_inner_suffixes_right_columns() {
         .join(&right, vec!["id".to_string()], JoinType::Inner)
         .unwrap();
 
-    let names: Vec<_> = out.schema().fields().iter().map(|f| f.name()).collect();
-    assert_eq!(names, vec!["id", "value", "value_right"]);
+    let schema = out.schema();
+    let names: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "id".to_string(),
+            "value".to_string(),
+            "value_right".to_string()
+        ]
+    );
     assert_eq!(out.height(), 2);
 }
 
@@ -71,10 +83,20 @@ fn join_semi_and_anti_return_left_columns_only() {
         .join(&right, vec!["id".to_string()], JoinType::Anti)
         .unwrap();
 
-    let semi_names: Vec<_> = semi.schema().fields().iter().map(|f| f.name()).collect();
-    let anti_names: Vec<_> = anti.schema().fields().iter().map(|f| f.name()).collect();
-    assert_eq!(semi_names, vec!["id", "value"]);
-    assert_eq!(anti_names, vec!["id", "value"]);
+    let semi_schema = semi.schema();
+    let semi_names: Vec<String> = semi_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    let anti_schema = anti.schema();
+    let anti_names: Vec<String> = anti_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    assert_eq!(semi_names, vec!["id".to_string(), "value".to_string()]);
+    assert_eq!(anti_names, vec!["id".to_string(), "value".to_string()]);
     assert_eq!(semi.height(), 2);
     assert_eq!(anti.height(), 1);
 }
@@ -100,8 +122,21 @@ fn join_left_right_keys_include_right_key_column() {
         )
         .unwrap();
 
-    let names: Vec<_> = out.schema().fields().iter().map(|f| f.name()).collect();
-    assert_eq!(names, vec!["id", "value", "rid", "value_right"]);
+    let schema = out.schema();
+    let names: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "id".to_string(),
+            "value".to_string(),
+            "rid".to_string(),
+            "value_right".to_string()
+        ]
+    );
 }
 
 #[test]

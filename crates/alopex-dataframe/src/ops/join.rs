@@ -79,8 +79,8 @@ pub fn join_batches(
     }
 
     if matches!(how, JoinType::Right | JoinType::Full) {
-        for r in 0..right_rows {
-            if !matched_right[r] {
+        for (r, matched) in matched_right.iter().enumerate() {
+            if !*matched {
                 left_indices.push(None);
                 right_indices.push(Some(r));
             }

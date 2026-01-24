@@ -948,7 +948,7 @@ fn fill_stat_f64(col: &Arc<dyn Array>, stat: Stat) -> Result<Arc<dyn Array>> {
         .as_any()
         .downcast_ref::<Float64Array>()
         .ok_or_else(|| DataFrameError::invalid_operation("bad Float64Array downcast"))?;
-    let (min, max, mean) = stats_float(array.iter().flatten().map(|v| v as f64));
+    let (min, max, mean) = stats_float(array.iter().flatten());
     let value = match stat {
         Stat::Min => min,
         Stat::Max => max,
@@ -964,8 +964,8 @@ fn stats_signed<I>(values: I) -> (Option<i128>, Option<i128>, Option<i128>)
 where
     I: Iterator<Item = i128>,
 {
-    let mut min = None;
-    let mut max = None;
+    let mut min: Option<i128> = None;
+    let mut max: Option<i128> = None;
     let mut sum: i128 = 0;
     let mut count = 0;
     for v in values {
@@ -982,8 +982,8 @@ fn stats_unsigned<I>(values: I) -> (Option<u128>, Option<u128>, Option<u128>)
 where
     I: Iterator<Item = u128>,
 {
-    let mut min = None;
-    let mut max = None;
+    let mut min: Option<u128> = None;
+    let mut max: Option<u128> = None;
     let mut sum: u128 = 0;
     let mut count = 0;
     for v in values {
@@ -1000,8 +1000,8 @@ fn stats_float<I>(values: I) -> (Option<f64>, Option<f64>, Option<f64>)
 where
     I: Iterator<Item = f64>,
 {
-    let mut min = None;
-    let mut max = None;
+    let mut min: Option<f64> = None;
+    let mut max: Option<f64> = None;
     let mut sum = 0.0_f64;
     let mut count = 0;
     for v in values {
