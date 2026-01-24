@@ -600,6 +600,8 @@ fn test_resolve_expr_function_call() {
                 },
                 span: test_span(),
             }],
+            distinct: false,
+            star: false,
         },
         span: test_span(),
     };

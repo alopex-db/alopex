@@ -32,8 +32,10 @@ pub enum Keyword {
     UNIQUE,
 
     // Clauses
+    GROUP,
     ORDER,
     BY,
+    HAVING,
     ASC,
     DESC,
     NULLS,
@@ -118,8 +120,10 @@ impl Keyword {
             "DEFAULT" => Self::DEFAULT,
             "UNIQUE" => Self::UNIQUE,
 
+            "GROUP" => Self::GROUP,
             "ORDER" => Self::ORDER,
             "BY" => Self::BY,
+            "HAVING" => Self::HAVING,
             "ASC" => Self::ASC,
             "DESC" => Self::DESC,
             "NULLS" => Self::NULLS,

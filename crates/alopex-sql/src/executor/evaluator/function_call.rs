@@ -10,8 +10,15 @@ use super::{EvalContext, evaluate};
 pub fn evaluate_function_call(
     name: &str,
     args: &[TypedExpr],
+    distinct: bool,
+    star: bool,
     ctx: &EvalContext<'_>,
 ) -> Result<SqlValue> {
+    if distinct || star {
+        return Err(ExecutorError::Evaluation(
+            EvaluationError::UnsupportedFunction(format!("{name} with modifiers")),
+        ));
+    }
     let name_lower = name.to_lowercase();
     match name_lower.as_str() {
         "vector_similarity" => evaluate_vector_function(args, ctx, VectorFn::Similarity),
@@ -140,7 +147,8 @@ mod tests {
         let row = vec![SqlValue::Vector(vec![1.0, 0.0])];
         let ctx = EvalContext::new(&row);
 
-        let result = evaluate_function_call("vector_similarity", &args, &ctx).unwrap();
+        let result =
+            evaluate_function_call("vector_similarity", &args, false, false, &ctx).unwrap();
         match result {
             SqlValue::Double(v) => assert!((v - 0.0).abs() < 1e-6),
             other => panic!("unexpected value {other:?}"),
@@ -157,7 +165,7 @@ mod tests {
         let row = vec![SqlValue::Vector(vec![1.0, 2.0, 3.0])];
         let ctx = EvalContext::new(&row);
 
-        let result = evaluate_function_call("vector_distance", &args, &ctx).unwrap();
+        let result = evaluate_function_call("vector_distance", &args, false, false, &ctx).unwrap();
         match result {
             SqlValue::Double(v) => assert!((v - 32.0).abs() < 1e-6),
             other => panic!("unexpected value {other:?}"),
@@ -173,7 +181,8 @@ mod tests {
         let row = vec![SqlValue::Vector(vec![1.0, 0.0])];
         let ctx = EvalContext::new(&row);
 
-        let err = evaluate_function_call("vector_similarity", &args, &ctx).unwrap_err();
+        let err =
+            evaluate_function_call("vector_similarity", &args, false, false, &ctx).unwrap_err();
         match err {
             ExecutorError::Evaluation(EvaluationError::Vector(
                 VectorError::ArgumentCountMismatch { actual },
@@ -197,7 +206,8 @@ mod tests {
         let row = vec![SqlValue::Vector(vec![1.0, 0.0])];
         let ctx = EvalContext::new(&row);
 
-        let err = evaluate_function_call("vector_similarity", &args, &ctx).unwrap_err();
+        let err =
+            evaluate_function_call("vector_similarity", &args, false, false, &ctx).unwrap_err();
         match err {
             ExecutorError::Evaluation(EvaluationError::Vector(VectorError::InvalidMetric {
                 ..
@@ -217,7 +227,8 @@ mod tests {
         let row = vec![SqlValue::Null];
         let ctx = EvalContext::new(&row);
 
-        let err = evaluate_function_call("vector_similarity", &args, &ctx).unwrap_err();
+        let err =
+            evaluate_function_call("vector_similarity", &args, false, false, &ctx).unwrap_err();
         match err {
             ExecutorError::Evaluation(EvaluationError::Vector(VectorError::TypeMismatch)) => {}
             other => panic!("unexpected error {other:?}"),
@@ -234,7 +245,8 @@ mod tests {
         let row = vec![SqlValue::Vector(vec![])];
         let ctx = EvalContext::new(&row);
 
-        let err = evaluate_function_call("vector_similarity", &args, &ctx).unwrap_err();
+        let err =
+            evaluate_function_call("vector_similarity", &args, false, false, &ctx).unwrap_err();
         match err {
             ExecutorError::Evaluation(EvaluationError::Vector(
                 VectorError::InvalidVectorLiteral { reason },
@@ -253,7 +265,8 @@ mod tests {
         let row = vec![SqlValue::Vector(vec![1.0, 0.0])];
         let ctx = EvalContext::new(&row);
 
-        let err = evaluate_function_call("vector_similarity", &args, &ctx).unwrap_err();
+        let err =
+            evaluate_function_call("vector_similarity", &args, false, false, &ctx).unwrap_err();
         match err {
             ExecutorError::Evaluation(EvaluationError::Vector(VectorError::InvalidMetric {
                 reason,

@@ -91,6 +91,8 @@ pub enum LogicalPlan {
         aggregates: Vec<AggregateExpr>,
         /// HAVING filter applied after aggregation.
         having: Option<TypedExpr>,
+        /// Projection to apply after aggregation.
+        projection: Projection,
     },
 
     /// Sort operation (ORDER BY clause).
@@ -234,12 +236,14 @@ impl LogicalPlan {
         group_keys: Vec<TypedExpr>,
         aggregates: Vec<AggregateExpr>,
         having: Option<TypedExpr>,
+        projection: Projection,
     ) -> Self {
         LogicalPlan::Aggregate {
             input: Box::new(input),
             group_keys,
             aggregates,
             having,
+            projection,
         }
     }
 

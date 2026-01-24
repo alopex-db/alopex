@@ -9,6 +9,7 @@ pub enum AggregateFunction {
     Avg,
     Min,
     Max,
+    GroupConcat { separator: Option<String> },
 }
 
 /// Aggregate expression definition.
@@ -40,12 +41,11 @@ impl AggregateExpr {
     }
 
     pub fn sum(arg: TypedExpr) -> Self {
-        let result_type = arg.resolved_type.clone();
         Self {
             function: AggregateFunction::Sum,
             arg: Some(arg),
             distinct: false,
-            result_type,
+            result_type: ResolvedType::Double,
         }
     }
 
