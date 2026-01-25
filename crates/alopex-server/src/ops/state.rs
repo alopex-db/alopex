@@ -251,3 +251,67 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_validation_rejects_empty() {
+        let invalid = Progress {
+            percent: None,
+            bytes_processed: None,
+        };
+        assert!(invalid.validate().is_err());
+        let mut state = OperationState::running();
+        assert!(state.set_progress(invalid).is_err());
+    }
+
+    #[test]
+    fn lifecycle_write_guard_blocks_non_normal_modes() {
+        let manager = LifecycleStateManager::new(Mode::Normal);
+        assert_eq!(manager.current_mode(), Mode::Normal);
+        assert!(!manager.should_block_writes());
+        assert!(manager.check_write_allowed().is_ok());
+
+        manager.set_mode(Mode::ReadOnly);
+        assert!(manager.should_block_writes());
+        assert!(manager.check_write_allowed().is_err());
+
+        manager.set_mode(Mode::Maintenance);
+        assert!(manager.should_block_writes());
+        assert!(manager.check_write_allowed().is_err());
+    }
+
+    #[test]
+    fn operation_state_transitions_capture_timestamps() {
+        let mut state = OperationState::queued();
+        assert_eq!(state.status, OperationStatus::Queued);
+        assert!(state.started_at_ms.is_none());
+        assert!(state.finished_at_ms.is_none());
+
+        state.mark_running();
+        assert_eq!(state.status, OperationStatus::Running);
+        assert!(state.started_at_ms.is_some());
+        assert!(state.finished_at_ms.is_none());
+
+        state.mark_finished(OperationStatus::Completed, None);
+        assert_eq!(state.status, OperationStatus::Completed);
+        assert!(state.finished_at_ms.is_some());
+    }
+
+    #[test]
+    fn restore_metadata_is_stored_and_loaded() {
+        let manager = LifecycleStateManager::new(Mode::Normal);
+        let metadata = RestoreMetadata {
+            backup_id: "backup-1".to_string(),
+            location: "/tmp/backup".to_string(),
+            restored_at_ms: 1234,
+            size_bytes: 512,
+        };
+        manager.set_restore_metadata(Some(metadata.clone()));
+        assert_eq!(manager.restore_metadata(), Some(metadata));
+        manager.set_restore_metadata(None);
+        assert!(manager.restore_metadata().is_none());
+    }
+}
