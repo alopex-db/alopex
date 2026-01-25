@@ -211,6 +211,7 @@ dependencies = [
  "bincode",
  "chrono",
  "config",
+ "crc32fast",
  "dashmap",
  "futures",
  "futures-core",
