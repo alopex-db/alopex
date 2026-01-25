@@ -4,7 +4,6 @@ use std::time::Instant;
 
 use alopex_core::kv::any::AnyKV;
 use alopex_core::kv::async_adapter::{AsyncKVStoreAdapter, AsyncKVTransactionAdapter};
-use alopex_core::kv::storage::{StorageFactory, StorageMode};
 use alopex_core::kv::AsyncKVStore;
 use alopex_core::types::TxnMode;
 use alopex_sql::catalog::{Catalog, CatalogError, PersistentCatalog};
@@ -17,6 +16,8 @@ use crate::auth::AuthMiddleware;
 use crate::config::ServerConfig;
 use crate::error::{Result, ServerError};
 use crate::metrics::Metrics;
+use crate::ops::recovery::{RecoveryCoordinator, RecoveryInfo};
+use crate::ops::state::{LifecycleStateManager, Mode};
 use crate::session::{SessionConfig, SessionManager, TransactionFactory};
 use crate::tls;
 
@@ -34,15 +35,17 @@ pub struct ServerState {
     pub audit: AuditLogger,
     pub auth: AuthMiddleware,
     pub start_time: Instant,
+    pub lifecycle_state: Arc<LifecycleStateManager>,
+    pub recovery_info: RecoveryInfo,
 }
 
 impl Server {
     pub fn new(config: ServerConfig) -> Result<Self> {
         config.validate()?;
-        let store = StorageFactory::create(StorageMode::Disk {
-            path: config.data_dir.clone(),
-            config: None,
-        })?;
+        let (store, recovery_info) = RecoveryCoordinator::open_store(&config.data_dir)?;
+        let lifecycle_state = Arc::new(LifecycleStateManager::new(Mode::Normal));
+        RecoveryCoordinator::apply_initial_mode(&lifecycle_state, &recovery_info);
+
         let store = Arc::new(store);
         let catalog = load_catalog(store.clone())?;
         let async_store = Arc::new(AsyncKVStoreAdapter::from_arc(
@@ -72,6 +75,8 @@ impl Server {
                 audit,
                 auth,
                 start_time: Instant::now(),
+                lifecycle_state,
+                recovery_info,
             }),
         })
     }

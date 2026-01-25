@@ -7,6 +7,7 @@ pub mod error;
 pub mod grpc;
 pub mod http;
 pub mod metrics;
+pub mod ops;
 pub mod server;
 pub mod session;
 pub mod tls;
