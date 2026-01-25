@@ -16,6 +16,7 @@ s3 = ["alopex-core/s3", "tokio", "object_store", "bytes", "futures", "url"]
 alopex-core.workspace = true
 alopex-sql.workspace = true
 alopex-dataframe.workspace = true
+arrow = "53"
 thiserror = "1.0"
 tokio = { workspace = true, optional = true }
 object_store = { workspace = true, optional = true }

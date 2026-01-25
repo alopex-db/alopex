@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-dataframe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "arrow-csv",
@@ -172,7 +172,9 @@ name = "alopex-embedded"
 version = "0.4.2"
 dependencies = [
  "alopex-core",
+ "alopex-dataframe",
  "alopex-sql",
+ "arrow",
  "bytes",
  "criterion",
  "futures",
@@ -238,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-sql"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "alopex-core",
  "arrow-array 52.2.0",
