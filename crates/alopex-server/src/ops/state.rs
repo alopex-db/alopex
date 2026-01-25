@@ -268,6 +268,14 @@ mod tests {
     }
 
     #[test]
+    fn progress_validation_accepts_percent_and_bytes() {
+        let percent = Progress::percent(10);
+        assert!(percent.validate().is_ok());
+        let bytes = Progress::bytes(2048);
+        assert!(bytes.validate().is_ok());
+    }
+
+    #[test]
     fn lifecycle_write_guard_blocks_non_normal_modes() {
         let manager = LifecycleStateManager::new(Mode::Normal);
         assert_eq!(manager.current_mode(), Mode::Normal);
