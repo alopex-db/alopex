@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::lazy::{LogicalPlan, Optimizer, ProjectionKind};
+use crate::ops::{FillNull, JoinKeys, JoinType, SortOptions};
 use crate::{DataFrame, Expr, Result};
 
 /// A lazily-evaluated query backed by a `LogicalPlan`.
@@ -76,6 +77,94 @@ impl LazyFrame {
         LazyGroupBy {
             plan: self.plan,
             by,
+        }
+    }
+
+    /// Join with another `LazyFrame` using provided join keys.
+    pub fn join<K: Into<JoinKeys>>(self, other: LazyFrame, keys: K, how: JoinType) -> Self {
+        let keys = keys.into();
+        Self {
+            plan: LogicalPlan::Join {
+                left: Box::new(self.plan),
+                right: Box::new(other.plan),
+                keys,
+                how,
+            },
+        }
+    }
+
+    /// Sort by one or more columns.
+    pub fn sort(self, mut options: SortOptions) -> Self {
+        options.nulls_last = true;
+        options.stable = true;
+        Self {
+            plan: LogicalPlan::Sort {
+                input: Box::new(self.plan),
+                options,
+            },
+        }
+    }
+
+    /// Return the first `n` rows.
+    pub fn head(self, n: usize) -> Self {
+        Self {
+            plan: LogicalPlan::Slice {
+                input: Box::new(self.plan),
+                offset: 0,
+                len: n,
+                from_end: false,
+            },
+        }
+    }
+
+    /// Return the last `n` rows.
+    pub fn tail(self, n: usize) -> Self {
+        Self {
+            plan: LogicalPlan::Slice {
+                input: Box::new(self.plan),
+                offset: 0,
+                len: n,
+                from_end: true,
+            },
+        }
+    }
+
+    /// Remove duplicate rows.
+    pub fn unique(self, subset: Option<Vec<String>>) -> Self {
+        Self {
+            plan: LogicalPlan::Unique {
+                input: Box::new(self.plan),
+                subset,
+            },
+        }
+    }
+
+    /// Fill null values using a scalar or strategy.
+    pub fn fill_null<T: Into<FillNull>>(self, fill: T) -> Self {
+        Self {
+            plan: LogicalPlan::FillNull {
+                input: Box::new(self.plan),
+                fill: fill.into(),
+            },
+        }
+    }
+
+    /// Drop rows containing null values.
+    pub fn drop_nulls(self, subset: Option<Vec<String>>) -> Self {
+        Self {
+            plan: LogicalPlan::DropNulls {
+                input: Box::new(self.plan),
+                subset,
+            },
+        }
+    }
+
+    /// Count null values per column.
+    pub fn null_count(self) -> Self {
+        Self {
+            plan: LogicalPlan::NullCount {
+                input: Box::new(self.plan),
+            },
         }
     }
 

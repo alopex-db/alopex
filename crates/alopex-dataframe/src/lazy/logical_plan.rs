@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::ops::{FillNull, JoinKeys, JoinType, SortOptions};
 use crate::{DataFrame, Expr};
 
 /// How a projection node should be interpreted.
@@ -45,6 +46,42 @@ pub enum LogicalPlan {
         group_by: Vec<Expr>,
         aggs: Vec<Expr>,
     },
+    /// Join two inputs.
+    Join {
+        left: Box<LogicalPlan>,
+        right: Box<LogicalPlan>,
+        keys: JoinKeys,
+        how: JoinType,
+    },
+    /// Sort input rows.
+    Sort {
+        input: Box<LogicalPlan>,
+        options: SortOptions,
+    },
+    /// Slice rows (used for head/tail).
+    Slice {
+        input: Box<LogicalPlan>,
+        offset: usize,
+        len: usize,
+        from_end: bool,
+    },
+    /// Remove duplicate rows.
+    Unique {
+        input: Box<LogicalPlan>,
+        subset: Option<Vec<String>>,
+    },
+    /// Fill nulls using a scalar or strategy.
+    FillNull {
+        input: Box<LogicalPlan>,
+        fill: FillNull,
+    },
+    /// Drop rows containing nulls.
+    DropNulls {
+        input: Box<LogicalPlan>,
+        subset: Option<Vec<String>>,
+    },
+    /// Count nulls per column.
+    NullCount { input: Box<LogicalPlan> },
 }
 
 impl LogicalPlan {
@@ -116,7 +153,70 @@ impl LogicalPlan {
                 ));
                 input.fmt_into(out, indent + 1);
             }
+            LogicalPlan::Join {
+                left,
+                right,
+                keys,
+                how,
+            } => {
+                out.push_str(&format!(
+                    "{pad}join how={how:?} keys={}\n",
+                    fmt_join_keys(keys)
+                ));
+                left.fmt_into(out, indent + 1);
+                right.fmt_into(out, indent + 1);
+            }
+            LogicalPlan::Sort { input, options } => {
+                out.push_str(&format!(
+                    "{pad}sort by={:?} desc={:?} nulls_last={} stable={}\n",
+                    options.by, options.descending, options.nulls_last, options.stable
+                ));
+                input.fmt_into(out, indent + 1);
+            }
+            LogicalPlan::Slice {
+                input,
+                offset,
+                len,
+                from_end,
+            } => {
+                out.push_str(&format!(
+                    "{pad}slice offset={offset} len={len} from_end={from_end}\n"
+                ));
+                input.fmt_into(out, indent + 1);
+            }
+            LogicalPlan::Unique { input, subset } => {
+                out.push_str(&format!("{pad}unique subset={subset:?}\n"));
+                input.fmt_into(out, indent + 1);
+            }
+            LogicalPlan::FillNull { input, fill } => {
+                out.push_str(&format!("{pad}fill_null {}\n", fmt_fill_null(fill)));
+                input.fmt_into(out, indent + 1);
+            }
+            LogicalPlan::DropNulls { input, subset } => {
+                out.push_str(&format!("{pad}drop_nulls subset={subset:?}\n"));
+                input.fmt_into(out, indent + 1);
+            }
+            LogicalPlan::NullCount { input } => {
+                out.push_str(&format!("{pad}null_count\n"));
+                input.fmt_into(out, indent + 1);
+            }
         }
+    }
+}
+
+fn fmt_join_keys(keys: &JoinKeys) -> String {
+    match keys {
+        JoinKeys::On(cols) => format!("on={cols:?}"),
+        JoinKeys::LeftRight { left_on, right_on } => {
+            format!("left_on={left_on:?} right_on={right_on:?}")
+        }
+    }
+}
+
+fn fmt_fill_null(fill: &FillNull) -> String {
+    match fill {
+        FillNull::Value(value) => format!("value={value:?}"),
+        FillNull::Strategy(strategy) => format!("strategy={strategy:?}"),
     }
 }
 
