@@ -63,6 +63,14 @@ pub struct OperationState {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RestoreMetadata {
+    pub backup_id: String,
+    pub location: String,
+    pub restored_at_ms: u64,
+    pub size_bytes: u64,
+}
+
 impl OperationState {
     pub fn queued() -> Self {
         Self {
@@ -141,6 +149,7 @@ struct LifecycleState {
     mode: Mode,
     backup_state: OperationState,
     restore_state: OperationState,
+    restore_metadata: Option<RestoreMetadata>,
 }
 
 #[derive(Debug)]
@@ -155,6 +164,7 @@ impl LifecycleStateManager {
                 mode: initial_mode,
                 backup_state: OperationState::queued(),
                 restore_state: OperationState::queued(),
+                restore_metadata: None,
             }),
         }
     }
@@ -201,6 +211,21 @@ impl LifecycleStateManager {
             .write()
             .expect("lifecycle state lock poisoned")
             .restore_state = state;
+    }
+
+    pub fn restore_metadata(&self) -> Option<RestoreMetadata> {
+        self.inner
+            .read()
+            .expect("lifecycle state lock poisoned")
+            .restore_metadata
+            .clone()
+    }
+
+    pub fn set_restore_metadata(&self, metadata: Option<RestoreMetadata>) {
+        self.inner
+            .write()
+            .expect("lifecycle state lock poisoned")
+            .restore_metadata = metadata;
     }
 
     pub fn should_block_writes(&self) -> bool {
