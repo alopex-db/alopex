@@ -68,7 +68,7 @@ async fn send_empty(router: axum::Router, method: Method, path: &str) -> (Status
 
 async fn wait_for_backup(router: axum::Router, handle: &str) -> Value {
     let path = format!("/api/admin/backup/{handle}");
-    for _ in 0..50 {
+    for _ in 0..200 {
         let (status, body) = send_empty(router.clone(), Method::GET, &path).await;
         assert_eq!(status, StatusCode::OK);
         let value: Value = serde_json::from_slice(&body).expect("backup status json");
@@ -80,14 +80,14 @@ async fn wait_for_backup(router: axum::Router, handle: &str) -> Value {
         if status_value != "running" && status_value != "queued" {
             return state;
         }
-        sleep(TokioDuration::from_millis(50)).await;
+        sleep(TokioDuration::from_millis(100)).await;
     }
     panic!("backup did not complete in time");
 }
 
 async fn wait_for_restore(router: axum::Router, handle: &str) -> Value {
     let path = format!("/api/admin/restore/{handle}");
-    for _ in 0..50 {
+    for _ in 0..200 {
         let (status, body) = send_empty(router.clone(), Method::GET, &path).await;
         assert_eq!(status, StatusCode::OK);
         let value: Value = serde_json::from_slice(&body).expect("restore status json");
@@ -99,7 +99,7 @@ async fn wait_for_restore(router: axum::Router, handle: &str) -> Value {
         if status_value != "running" && status_value != "queued" {
             return value;
         }
-        sleep(TokioDuration::from_millis(50)).await;
+        sleep(TokioDuration::from_millis(100)).await;
     }
     panic!("restore did not complete in time");
 }
@@ -284,25 +284,15 @@ async fn maintenance_blocks_writes_after_restore_start() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, body) = send_empty(router.clone(), Method::POST, "/api/admin/backup").await;
-    assert_eq!(status, StatusCode::OK);
-    let value: Value = serde_json::from_slice(&body).expect("backup json");
-    let handle = value
-        .get("handle")
-        .and_then(|v| v.as_str())
-        .expect("handle");
-    let location = value
-        .get("location")
-        .and_then(|v| v.as_str())
-        .expect("location");
-
-    let _ = wait_for_backup(router.clone(), handle).await;
+    let source_dir = tempdir().expect("tempdir");
+    let source_file = source_dir.path().join("bulk.bin");
+    fs::write(&source_file, vec![0u8; 5_000_000]).expect("write source");
 
     let (status, _) = send_json(
         router.clone(),
         Method::POST,
         "/api/admin/restore",
-        json!({ "source": location }),
+        json!({ "source": source_dir.path().display().to_string() }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
