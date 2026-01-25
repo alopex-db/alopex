@@ -58,6 +58,9 @@ pub enum Error {
     /// An error from the SQL execution pipeline.
     #[error("{0}")]
     Sql(#[from] alopex_sql::SqlError),
+    /// An error from DataFrame operations.
+    #[error("{0}")]
+    DataFrame(#[from] alopex_dataframe::DataFrameError),
     /// The transaction has already been completed and cannot be used.
     #[error("transaction is completed")]
     TxnCompleted,
