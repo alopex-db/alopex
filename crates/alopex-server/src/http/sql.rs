@@ -92,6 +92,9 @@ async fn execute_non_streaming(
     let start = Instant::now();
     let sql = request.sql.as_str();
     let is_ddl = is_ddl(sql);
+    if is_write_sql(sql) {
+        state.lifecycle_state.check_write_allowed()?;
+    }
 
     let exec_result: Result<alopex_sql::executor::ExecutionResult> = async {
         if let Some(session_id) = &request.session_id {
@@ -143,6 +146,11 @@ async fn execute_non_streaming(
 }
 
 fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestContext) -> Response {
+    if is_write_sql(&request.sql) {
+        if let Err(err) = state.lifecycle_state.check_write_allowed() {
+            return error_response(err, ctx);
+        }
+    }
     let (sender, receiver) = mpsc::channel(32);
     let sql = request.sql.clone();
     let correlation_id = ctx.correlation_id.clone();
@@ -394,4 +402,13 @@ fn is_ddl(sql: &str) -> bool {
         | alopex_sql::ast::StatementKind::Update(_)
         | alopex_sql::ast::StatementKind::Delete(_) => false,
     })
+}
+
+fn is_write_sql(sql: &str) -> bool {
+    let Ok(statements) = alopex_sql::parser::Parser::parse_sql(&AlopexDialect, sql) else {
+        return false;
+    };
+    statements
+        .iter()
+        .any(|stmt| !matches!(stmt.kind, alopex_sql::ast::StatementKind::Select(_)))
 }

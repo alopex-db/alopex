@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use serde::Serialize;
 
+use crate::ops::status::StatusReporter;
 use crate::server::ServerState;
 
 #[derive(Serialize)]
@@ -36,6 +37,8 @@ async fn metrics(Extension(state): Extension<Arc<ServerState>>) -> Response {
     if !state.config.metrics_enabled {
         return StatusCode::NOT_FOUND.into_response();
     }
+    let reporter = StatusReporter::new(state.lifecycle_state.clone(), state.recovery_info.clone());
+    reporter.refresh_metrics(&state.metrics);
     match state.metrics.expose_prometheus() {
         Ok(body) => (
             StatusCode::OK,

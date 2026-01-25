@@ -8,6 +8,8 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthMode;
+use crate::ops::status::StatusReporter;
+use crate::ops::status::StatusView;
 use crate::server::ServerState;
 
 #[derive(Serialize)]
@@ -22,6 +24,8 @@ struct AdminStatusResponse {
     uptime_secs: Option<u64>,
     connections: Option<u64>,
     queries_per_second: Option<f64>,
+    #[serde(flatten)]
+    status: StatusView,
 }
 
 #[derive(Serialize)]
@@ -66,11 +70,14 @@ pub async fn capabilities(Extension(state): Extension<Arc<ServerState>>) -> impl
 
 pub async fn status(Extension(state): Extension<Arc<ServerState>>) -> impl IntoResponse {
     let uptime = state.start_time.elapsed().as_secs();
+    let reporter = StatusReporter::new(state.lifecycle_state.clone(), state.recovery_info.clone());
+    let status = reporter.status_view();
     Json(AdminStatusResponse {
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
         uptime_secs: Some(uptime),
         connections: None,
         queries_per_second: None,
+        status,
     })
 }
 

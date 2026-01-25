@@ -4,7 +4,9 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use alopex_core::kv::async_adapter::AsyncKVTransactionAdapter;
+use alopex_sql::parser::Parser;
 use alopex_sql::storage::AsyncSqlTransaction;
+use alopex_sql::AlopexDialect;
 use futures::{future::BoxFuture, StreamExt};
 use prost::Message;
 use tokio::sync::broadcast;
@@ -187,6 +189,11 @@ impl AlopexService for AlopexServiceImpl {
         if req.sql.trim().is_empty() {
             return Err(Status::invalid_argument("sql must not be empty"));
         }
+        if is_write_sql(&req.sql) {
+            if let Err(err) = self.state.lifecycle_state.check_write_allowed() {
+                return Err(map_status(err, &ctx.correlation_id));
+            }
+        }
 
         let (sender, receiver) = mpsc::channel(32);
         let sql = req.sql;
@@ -331,6 +338,9 @@ impl AlopexService for AlopexServiceImpl {
         if req.sql.trim().is_empty() {
             return Err(Status::invalid_argument("sql must not be empty"));
         }
+        if let Err(err) = self.state.lifecycle_state.check_write_allowed() {
+            return Err(map_status(err, &ctx.correlation_id));
+        }
         let start = Instant::now();
         let exec_result = if !req.session_id.is_empty() {
             let session_id = match req.session_id.parse::<SessionId>() {
@@ -418,6 +428,9 @@ impl AlopexService for AlopexServiceImpl {
         let req = request.into_inner();
         if req.sql.trim().is_empty() {
             return Err(Status::invalid_argument("sql must not be empty"));
+        }
+        if let Err(err) = self.state.lifecycle_state.check_write_allowed() {
+            return Err(map_status(err, &ctx.correlation_id));
         }
         let start = Instant::now();
         let exec_result = if !req.session_id.is_empty() {
@@ -827,4 +840,13 @@ fn map_status(err: ServerError, correlation_id: &str) -> Status {
         format!("{} (correlation_id={})", err, correlation_id)
     };
     Status::new(code, message)
+}
+
+fn is_write_sql(sql: &str) -> bool {
+    let Ok(statements) = Parser::parse_sql(&AlopexDialect, sql) else {
+        return false;
+    };
+    statements
+        .iter()
+        .any(|stmt| !matches!(stmt.kind, alopex_sql::ast::StatementKind::Select(_)))
 }
