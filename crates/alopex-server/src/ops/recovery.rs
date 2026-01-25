@@ -79,7 +79,10 @@ impl RecoveryCoordinator {
     }
 
     pub fn apply_initial_mode(state: &LifecycleStateManager, info: &RecoveryInfo) {
-        if matches!(info.outcome, RecoveryOutcome::ReadOnly | RecoveryOutcome::Failed) {
+        if matches!(
+            info.outcome,
+            RecoveryOutcome::ReadOnly | RecoveryOutcome::Failed
+        ) {
             state.set_mode(Mode::ReadOnly);
         }
     }
