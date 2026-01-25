@@ -16,6 +16,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{Result, ServerError};
 use crate::http::{error_response, json_response, RequestContext};
+use crate::ops::memory::MemoryControlPolicy;
 use crate::server::ServerState;
 use crate::session::{SessionId, TxnHandle};
 
@@ -156,6 +157,7 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
     let correlation_id = ctx.correlation_id.clone();
     let max_response_size = state.config.max_response_size;
     let timeout = state.config.query_timeout;
+    let memory_policy = MemoryControlPolicy::from_env();
     let metrics = state.metrics.clone();
     let mut audit = None;
     if state.config.audit_log_enabled && is_ddl(&sql) {
@@ -164,6 +166,7 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
 
     let session_id = request.session_id.clone();
     let state_clone = state.clone();
+    let memory_policy = memory_policy.clone();
     tokio::spawn(async move {
         let start = Instant::now();
         let mut bytes_sent = 0usize;
@@ -247,6 +250,15 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
                             match serde_json::to_vec(&item) {
                                 Ok(bytes) => {
                                     bytes_sent += bytes.len();
+                                    if let Err(err) =
+                                        memory_policy.enforce_output_bytes(bytes_sent as u64)
+                                    {
+                                        let _ = sender
+                                            .send(stream_item_error(err, &correlation_id))
+                                            .await;
+                                        success = false;
+                                        break;
+                                    }
                                     if bytes_sent > max_response_size {
                                         let _ = sender
                                             .send(stream_item_error(

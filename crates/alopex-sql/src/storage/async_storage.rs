@@ -12,6 +12,7 @@ use alopex_core::vector::hnsw::{HnswIndex, HnswTransactionState};
 use crate::ast::Statement;
 use crate::catalog::{Catalog, TableMetadata};
 use crate::dialect::AlopexDialect;
+use crate::executor::memory::MemoryPolicy;
 use crate::executor::{ExecutionResult, ExecutorError, Result as ExecResult, Row, ddl, dml, query};
 use crate::parser::Parser;
 use crate::planner::{LogicalPlan, Planner};
@@ -43,6 +44,7 @@ where
     state: Arc<tokio::sync::Mutex<AsyncTxnState<T>>>,
     mode: TxnMode,
     catalog: Option<Arc<RwLock<dyn Catalog + Send + Sync>>>,
+    memory_policy: Option<MemoryPolicy>,
     _marker: PhantomData<&'txn ()>,
 }
 
@@ -56,6 +58,7 @@ where
             state: Arc::new(tokio::sync::Mutex::new(AsyncTxnState::new(txn))),
             mode,
             catalog: None,
+            memory_policy: None,
             _marker: PhantomData,
         }
     }
@@ -69,6 +72,17 @@ where
         let mut bridge = Self::new(txn, mode);
         bridge.catalog = Some(catalog);
         bridge
+    }
+
+    /// Attach a memory policy for query execution.
+    pub fn set_memory_policy(&mut self, policy: Option<MemoryPolicy>) {
+        self.memory_policy = policy;
+    }
+
+    /// Attach a memory policy and return the updated bridge.
+    pub fn with_memory_policy(mut self, policy: MemoryPolicy) -> Self {
+        self.memory_policy = Some(policy);
+        self
     }
 
     /// Returns the transaction mode.
@@ -201,7 +215,8 @@ where
             };
             let handle = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
-                let mut blocking_txn = BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices);
+                let mut blocking_txn =
+                    BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, None);
                 blocking_txn.commit_hnsw()?;
                 blocking_txn.inner.commit_self().map_err(StorageError::from)
             })
@@ -226,7 +241,8 @@ where
             };
             let handle = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
-                let mut blocking_txn = BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices);
+                let mut blocking_txn =
+                    BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, None);
                 blocking_txn.rollback_hnsw()?;
                 blocking_txn
                     .inner
@@ -266,6 +282,7 @@ where
         let sql = sql.to_string();
         let state = Arc::clone(&self.state);
         let mode = self.mode;
+        let memory_policy = self.memory_policy.clone();
         Box::pin(async move {
             let (txn, hnsw_indices) = {
                 let mut guard = state.lock().await;
@@ -279,7 +296,8 @@ where
 
             let handle = tokio::runtime::Handle::current();
             let join = tokio::task::spawn_blocking(move || {
-                let mut blocking_txn = BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices);
+                let mut blocking_txn =
+                    BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, memory_policy);
                 let result = execute_sql_blocking(&mut blocking_txn, &catalog, &sql, mode);
                 let (txn, hnsw) = blocking_txn.into_parts();
                 (result, txn, hnsw)
@@ -314,6 +332,7 @@ where
         let sql = sql.to_string();
         let state = Arc::clone(&self.state);
         let mode = self.mode;
+        let memory_policy = self.memory_policy.clone();
         let sender_for_task = sender.clone();
 
         tokio::spawn(async move {
@@ -335,7 +354,8 @@ where
             let handle = tokio::runtime::Handle::current();
             let sender_blocking = sender.clone();
             let join = tokio::task::spawn_blocking(move || {
-                let mut blocking_txn = BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices);
+                let mut blocking_txn =
+                    BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, memory_policy);
                 stream_query_blocking(&mut blocking_txn, &catalog, &sql, sender_blocking);
                 blocking_txn.into_parts()
             });
@@ -461,7 +481,8 @@ where
             }
             query_plan => {
                 let guard = catalog.read().expect("catalog lock poisoned");
-                query::execute_query(txn, &*guard, query_plan)?
+                let policy = txn.memory_policy().cloned();
+                query::execute_query_with_policy(txn, &*guard, query_plan, policy.as_ref())?
             }
         };
     }
@@ -512,13 +533,15 @@ fn stream_query_blocking<T>(
     }
 
     let guard = catalog.read().expect("catalog lock poisoned");
-    let mut iter = match query::execute_query_streaming(txn, &*guard, plan) {
-        Ok(iter) => iter,
-        Err(err) => {
-            let _ = sender.blocking_send(Err(err));
-            return;
-        }
-    };
+    let policy = txn.memory_policy().cloned();
+    let mut iter =
+        match query::execute_query_streaming_with_policy(txn, &*guard, plan, policy.as_ref()) {
+            Ok(iter) => iter,
+            Err(err) => {
+                let _ = sender.blocking_send(Err(err));
+                return;
+            }
+        };
 
     let mut row_id = 0u64;
     loop {
@@ -584,6 +607,7 @@ struct BlockingSqlTransaction<T> {
     inner: BlockingKVTransaction<T>,
     mode: TxnMode,
     hnsw_indices: HashMap<String, HnswTxnEntry>,
+    memory_policy: Option<MemoryPolicy>,
 }
 
 impl<T> BlockingSqlTransaction<T>
@@ -595,16 +619,22 @@ where
         mode: TxnMode,
         handle: tokio::runtime::Handle,
         hnsw_indices: HashMap<String, HnswTxnEntry>,
+        memory_policy: Option<MemoryPolicy>,
     ) -> Self {
         Self {
             inner: BlockingKVTransaction::new(txn, mode, handle),
             mode,
             hnsw_indices,
+            memory_policy,
         }
     }
 
     fn into_parts(self) -> (T, HashMap<String, HnswTxnEntry>) {
         (self.inner.into_inner(), self.hnsw_indices)
+    }
+
+    fn memory_policy(&self) -> Option<&MemoryPolicy> {
+        self.memory_policy.as_ref()
     }
 
     fn commit_hnsw(&mut self) -> StorageResult<()> {

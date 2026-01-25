@@ -3,9 +3,10 @@ use alopex_core::kv::KVStore;
 use crate::ast::LITERAL_TABLE;
 use crate::catalog::{Catalog, StorageType};
 use crate::executor::evaluator::EvalContext;
+use crate::executor::memory::MemoryPolicy;
 use crate::executor::{ExecutionResult, ExecutorError, QueryRowIterator, Result};
 use crate::planner::logical_plan::LogicalPlan;
-use crate::planner::typed_expr::Projection;
+use crate::planner::typed_expr::{Projection, SortExpr};
 use crate::storage::{SqlTxn, SqlValue};
 
 use super::{ColumnInfo, Row};
@@ -37,11 +38,25 @@ pub fn execute_query<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'tx
     catalog: &C,
     plan: LogicalPlan,
 ) -> Result<ExecutionResult> {
+    execute_query_with_policy(txn, catalog, plan, None)
+}
+
+pub fn execute_query_with_policy<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    plan: LogicalPlan,
+    memory: Option<&MemoryPolicy>,
+) -> Result<ExecutionResult> {
     if let Some((pattern, projection, filter)) = knn::extract_knn_context(&plan) {
         return knn::execute_knn_query(txn, catalog, &pattern, &projection, filter.as_ref());
     }
 
-    let (mut iter, projection, schema) = build_iterator_pipeline(txn, catalog, plan)?;
+    let (mut iter, projection, schema) = build_iterator_pipeline(txn, catalog, plan, memory)?;
 
     // Collect rows from iterator and apply projection
     let mut rows = Vec::new();
@@ -73,10 +88,24 @@ pub fn execute_query_streaming<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: 
     catalog: &C,
     plan: LogicalPlan,
 ) -> Result<QueryRowIterator<'static>> {
+    execute_query_streaming_with_policy(txn, catalog, plan, None)
+}
+
+pub fn execute_query_streaming_with_policy<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    plan: LogicalPlan,
+    memory: Option<&MemoryPolicy>,
+) -> Result<QueryRowIterator<'static>> {
     // KNN queries not yet supported for streaming - fall back would need different handling
     if knn::extract_knn_context(&plan).is_some() {
         // For KNN, we materialize and wrap in VecIterator
-        let result = execute_query(txn, catalog, plan)?;
+        let result = execute_query_with_policy(txn, catalog, plan, memory)?;
         if let ExecutionResult::Query(qr) = result {
             let column_names: Vec<String> = qr.columns.iter().map(|c| c.name.clone()).collect();
             let schema: Vec<crate::catalog::ColumnMetadata> = qr
@@ -103,7 +132,7 @@ pub fn execute_query_streaming<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: 
         });
     }
 
-    let (iter, projection, schema) = build_iterator_pipeline(txn, catalog, plan)?;
+    let (iter, projection, schema) = build_iterator_pipeline(txn, catalog, plan, memory)?;
 
     Ok(QueryRowIterator::new(iter, projection, schema))
 }
@@ -118,6 +147,7 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
     txn: &mut T,
     catalog: &C,
     plan: LogicalPlan,
+    memory: Option<&MemoryPolicy>,
 ) -> Result<(
     Box<dyn RowIterator>,
     Projection,
@@ -169,7 +199,8 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
                 let iter = iterator::VecIterator::new(rows, schema.clone());
                 return Ok((Box::new(iter), projection.clone(), schema));
             }
-            let (input_iter, projection, schema) = build_iterator_pipeline(txn, catalog, *input)?;
+            let (input_iter, projection, schema) =
+                build_iterator_pipeline(txn, catalog, *input, memory)?;
             let filter_iter = FilterIterator::new(input_iter, predicate);
             Ok((Box::new(filter_iter), projection, schema))
         }
@@ -180,20 +211,63 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
             having,
             projection,
         } => {
-            let (input_iter, _projection, _schema) = build_iterator_pipeline(txn, catalog, *input)?;
+            let (input_iter, _projection, _schema) =
+                build_iterator_pipeline(txn, catalog, *input, memory)?;
             let schema = aggregate::build_aggregate_schema(&group_keys, &aggregates);
-            let iter = aggregate::AggregateIterator::new(
+            if let Some(policy) = memory
+                && policy.spill_directory().is_some()
+            {
+                if group_keys.is_empty() {
+                    let iter = aggregate::StreamingAggregateIterator::new(
+                        input_iter,
+                        group_keys,
+                        aggregates,
+                        having,
+                        schema.clone(),
+                    );
+                    return Ok((Box::new(iter), projection, schema));
+                }
+                let order_by = group_keys
+                    .iter()
+                    .cloned()
+                    .map(|expr| SortExpr {
+                        expr,
+                        asc: true,
+                        nulls_first: false,
+                    })
+                    .collect::<Vec<_>>();
+                let sort_iter =
+                    SortIterator::new_with_policy(input_iter, &order_by, Some(policy.clone()))?;
+                let iter = aggregate::StreamingAggregateIterator::new(
+                    Box::new(sort_iter),
+                    group_keys,
+                    aggregates,
+                    having,
+                    schema.clone(),
+                );
+                return Ok((Box::new(iter), projection, schema));
+            }
+
+            let mut iter = aggregate::AggregateIterator::new(
                 input_iter,
                 group_keys,
                 aggregates,
                 having,
                 schema.clone(),
             );
+            if let Some(policy) = memory {
+                iter = iter.with_memory_policy(Some(policy.clone()));
+            }
             Ok((Box::new(iter), projection, schema))
         }
         LogicalPlan::Sort { input, order_by } => {
-            let (input_iter, projection, schema) = build_iterator_pipeline(txn, catalog, *input)?;
-            let sort_iter = SortIterator::new(input_iter, &order_by)?;
+            let (input_iter, projection, schema) =
+                build_iterator_pipeline(txn, catalog, *input, memory)?;
+            let sort_iter = if let Some(policy) = memory {
+                SortIterator::new_with_policy(input_iter, &order_by, Some(policy.clone()))?
+            } else {
+                SortIterator::new(input_iter, &order_by)?
+            };
             Ok((Box::new(sort_iter), projection, schema))
         }
         LogicalPlan::Limit {
@@ -201,7 +275,8 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
             limit,
             offset,
         } => {
-            let (input_iter, projection, schema) = build_iterator_pipeline(txn, catalog, *input)?;
+            let (input_iter, projection, schema) =
+                build_iterator_pipeline(txn, catalog, *input, memory)?;
             let limit_iter = LimitIterator::new(input_iter, limit, offset);
             Ok((Box::new(limit_iter), projection, schema))
         }
@@ -237,7 +312,26 @@ pub fn build_streaming_pipeline<
     Projection,
     Vec<crate::catalog::ColumnMetadata>,
 )> {
-    build_streaming_pipeline_inner(txn, catalog, plan)
+    build_streaming_pipeline_with_policy(txn, catalog, plan, None)
+}
+
+pub fn build_streaming_pipeline_with_policy<
+    'a,
+    'txn: 'a,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &'a mut T,
+    catalog: &C,
+    plan: LogicalPlan,
+    memory: Option<&MemoryPolicy>,
+) -> Result<(
+    Box<dyn RowIterator + 'a>,
+    Projection,
+    Vec<crate::catalog::ColumnMetadata>,
+)> {
+    build_streaming_pipeline_inner(txn, catalog, plan, memory)
 }
 
 /// Inner implementation of streaming pipeline builder.
@@ -251,6 +345,7 @@ fn build_streaming_pipeline_inner<
     txn: &'a mut T,
     catalog: &C,
     plan: LogicalPlan,
+    memory: Option<&MemoryPolicy>,
 ) -> Result<(
     Box<dyn RowIterator + 'a>,
     Projection,
@@ -300,7 +395,7 @@ fn build_streaming_pipeline_inner<
                 return Ok((Box::new(iter), projection.clone(), schema));
             }
             let (input_iter, projection, schema) =
-                build_streaming_pipeline_inner(txn, catalog, *input)?;
+                build_streaming_pipeline_inner(txn, catalog, *input, memory)?;
             let filter_iter = FilterIterator::new(input_iter, predicate);
             Ok((Box::new(filter_iter), projection, schema))
         }
@@ -312,21 +407,62 @@ fn build_streaming_pipeline_inner<
             projection,
         } => {
             let (input_iter, _projection, _schema) =
-                build_streaming_pipeline_inner(txn, catalog, *input)?;
+                build_streaming_pipeline_inner(txn, catalog, *input, memory)?;
             let schema = aggregate::build_aggregate_schema(&group_keys, &aggregates);
-            let iter = aggregate::AggregateIterator::new(
+            if let Some(policy) = memory
+                && policy.spill_directory().is_some()
+            {
+                if group_keys.is_empty() {
+                    let iter = aggregate::StreamingAggregateIterator::new(
+                        input_iter,
+                        group_keys,
+                        aggregates,
+                        having,
+                        schema.clone(),
+                    );
+                    return Ok((Box::new(iter), projection, schema));
+                }
+                let order_by = group_keys
+                    .iter()
+                    .cloned()
+                    .map(|expr| SortExpr {
+                        expr,
+                        asc: true,
+                        nulls_first: false,
+                    })
+                    .collect::<Vec<_>>();
+                let sort_iter =
+                    SortIterator::new_with_policy(input_iter, &order_by, Some(policy.clone()))?;
+                let iter = aggregate::StreamingAggregateIterator::new(
+                    Box::new(sort_iter),
+                    group_keys,
+                    aggregates,
+                    having,
+                    schema.clone(),
+                );
+                return Ok((Box::new(iter), projection, schema));
+            }
+
+            let mut iter = aggregate::AggregateIterator::new(
                 input_iter,
                 group_keys,
                 aggregates,
                 having,
                 schema.clone(),
             );
+            if let Some(policy) = memory {
+                iter = iter.with_memory_policy(Some(policy.clone()));
+            }
             Ok((Box::new(iter), projection, schema))
         }
         LogicalPlan::Sort { input, order_by } => {
             let (input_iter, projection, schema) =
-                build_streaming_pipeline_inner(txn, catalog, *input)?;
-            let sort_iter = SortIterator::new(input_iter, &order_by)?;
+                build_streaming_pipeline_inner(txn, catalog, *input, memory)?;
+            let sort_iter = if let Some(policy) = memory {
+                SortIterator::new_with_policy(input_iter, &order_by, Some(policy.clone()))?
+            } else {
+                SortIterator::new(input_iter, &order_by)?
+            };
             Ok((Box::new(sort_iter), projection, schema))
         }
         LogicalPlan::Limit {
@@ -335,7 +471,7 @@ fn build_streaming_pipeline_inner<
             offset,
         } => {
             let (input_iter, projection, schema) =
-                build_streaming_pipeline_inner(txn, catalog, *input)?;
+                build_streaming_pipeline_inner(txn, catalog, *input, memory)?;
             let limit_iter = LimitIterator::new(input_iter, limit, offset);
             Ok((Box::new(limit_iter), projection, schema))
         }

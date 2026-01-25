@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::catalog::ColumnMetadata;
 use crate::executor::evaluator::EvalContext;
+use crate::executor::memory::{MemoryPolicy, MemoryTracker};
 use crate::executor::{ExecutorError, Result};
 use crate::planner::aggregate_expr::{AggregateExpr, AggregateFunction};
 use crate::planner::typed_expr::TypedExpr;
@@ -483,6 +484,7 @@ pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<d
 }
 
 const DEFAULT_GROUP_LIMIT: usize = 1_000_000;
+const AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES: u64 = 32;
 
 struct AggregateGroup {
     key_values: Vec<SqlValue>,
@@ -500,6 +502,7 @@ pub struct AggregateIterator<'a> {
     index: usize,
     schema: Vec<ColumnMetadata>,
     group_limit: usize,
+    memory_tracker: Option<MemoryTracker>,
 }
 
 impl<'a> AggregateIterator<'a> {
@@ -521,12 +524,19 @@ impl<'a> AggregateIterator<'a> {
             index: 0,
             schema,
             group_limit: DEFAULT_GROUP_LIMIT,
+            memory_tracker: None,
         }
     }
 
     /// Override the maximum number of groups allowed during aggregation.
     pub fn with_group_limit(mut self, limit: usize) -> Self {
         self.group_limit = limit;
+        self
+    }
+
+    /// Attach a memory policy for enforcing in-flight aggregation limits.
+    pub fn with_memory_policy(mut self, policy: Option<MemoryPolicy>) -> Self {
+        self.memory_tracker = policy.map(MemoryTracker::new);
         self
     }
 
@@ -553,6 +563,12 @@ impl<'a> AggregateIterator<'a> {
                         ),
                     });
                 }
+                if let Some(tracker) = &mut self.memory_tracker {
+                    tracker.add_values(&key_values)?;
+                    tracker.add_bytes(
+                        self.aggregates.len() as u64 * AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES,
+                    )?;
+                }
                 let accumulators = self
                     .aggregates
                     .iter()
@@ -573,12 +589,27 @@ impl<'a> AggregateIterator<'a> {
                         None => None,
                         Some(expr) => Some(crate::executor::evaluator::evaluate(expr, &ctx)?),
                     };
+                    if let Some(tracker) = &mut self.memory_tracker
+                        && matches!(
+                            agg.function,
+                            AggregateFunction::GroupConcat { .. }
+                                | AggregateFunction::StringAgg { .. }
+                        )
+                        && let Some(value_ref) = value.as_ref()
+                    {
+                        tracker.add_value(value_ref)?;
+                    }
                     group.accumulators[idx].update(value)?;
                 }
             }
         }
 
         if table.is_empty() && self.group_keys.is_empty() {
+            if let Some(tracker) = &mut self.memory_tracker {
+                tracker.add_bytes(
+                    self.aggregates.len() as u64 * AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES,
+                )?;
+            }
             let accumulators = self
                 .aggregates
                 .iter()
@@ -602,6 +633,9 @@ impl<'a> AggregateIterator<'a> {
             }
             let row = Row::new(next_row_id, values);
             next_row_id += 1;
+            if let Some(tracker) = &mut self.memory_tracker {
+                tracker.add_row(&row.values)?;
+            }
 
             if let Some(having) = &self.having {
                 let ctx = EvalContext::new(&row.values);
@@ -642,6 +676,172 @@ impl<'a> RowIterator for AggregateIterator<'a> {
         let row = self.result_rows[self.index].clone();
         self.index += 1;
         Some(Ok(row))
+    }
+
+    fn schema(&self) -> &[ColumnMetadata] {
+        &self.schema
+    }
+}
+
+/// Iterator that performs streaming aggregation over sorted input.
+pub struct StreamingAggregateIterator<'a> {
+    input: Box<dyn RowIterator + 'a>,
+    group_keys: Vec<TypedExpr>,
+    aggregates: Vec<AggregateExpr>,
+    having: Option<TypedExpr>,
+    schema: Vec<ColumnMetadata>,
+    current_key: Option<Vec<SqlValue>>,
+    accumulators: Vec<Box<dyn Accumulator>>,
+    pending_row: Option<Row>,
+    finished: bool,
+    next_row_id: u64,
+    saw_row: bool,
+}
+
+impl<'a> StreamingAggregateIterator<'a> {
+    pub fn new(
+        input: Box<dyn RowIterator + 'a>,
+        group_keys: Vec<TypedExpr>,
+        aggregates: Vec<AggregateExpr>,
+        having: Option<TypedExpr>,
+        schema: Vec<ColumnMetadata>,
+    ) -> Self {
+        Self {
+            input,
+            group_keys,
+            aggregates,
+            having,
+            schema,
+            current_key: None,
+            accumulators: Vec::new(),
+            pending_row: None,
+            finished: false,
+            next_row_id: 0,
+            saw_row: false,
+        }
+    }
+
+    fn init_accumulators(&self) -> Vec<Box<dyn Accumulator>> {
+        self.aggregates
+            .iter()
+            .map(|agg| create_accumulator(&agg.function, agg.distinct))
+            .collect()
+    }
+
+    fn update_accumulators(&mut self, ctx: &EvalContext<'_>) -> Result<()> {
+        for (idx, agg) in self.aggregates.iter().enumerate() {
+            let value = match &agg.arg {
+                None => None,
+                Some(expr) => Some(crate::executor::evaluator::evaluate(expr, ctx)?),
+            };
+            self.accumulators[idx].update(value)?;
+        }
+        Ok(())
+    }
+
+    fn finalize_group(&mut self, key_values: &[SqlValue]) -> Result<Option<Row>> {
+        let mut values = Vec::with_capacity(self.group_keys.len() + self.aggregates.len());
+        values.extend(key_values.iter().cloned());
+        for acc in &self.accumulators {
+            values.push(acc.finalize()?);
+        }
+        let row = Row::new(self.next_row_id, values);
+        self.next_row_id = self.next_row_id.saturating_add(1);
+
+        if let Some(having) = &self.having {
+            let ctx = EvalContext::new(&row.values);
+            match crate::executor::evaluator::evaluate(having, &ctx)? {
+                SqlValue::Boolean(true) => Ok(Some(row)),
+                SqlValue::Boolean(false) | SqlValue::Null => Ok(None),
+                other => Err(ExecutorError::Evaluation(
+                    crate::executor::EvaluationError::TypeMismatch {
+                        expected: "Boolean".into(),
+                        actual: other.type_name().into(),
+                    },
+                )),
+            }
+        } else {
+            Ok(Some(row))
+        }
+    }
+}
+
+impl<'a> RowIterator for StreamingAggregateIterator<'a> {
+    fn next_row(&mut self) -> Option<Result<Row>> {
+        if let Some(row) = self.pending_row.take() {
+            return Some(Ok(row));
+        }
+        if self.finished {
+            return None;
+        }
+
+        loop {
+            match self.input.next_row() {
+                Some(Ok(row)) => {
+                    self.saw_row = true;
+                    let ctx = EvalContext::new(&row.values);
+                    let mut key_values = Vec::with_capacity(self.group_keys.len());
+                    for expr in &self.group_keys {
+                        match crate::executor::evaluator::evaluate(expr, &ctx) {
+                            Ok(value) => key_values.push(value),
+                            Err(err) => return Some(Err(err)),
+                        }
+                    }
+
+                    match &self.current_key {
+                        None => {
+                            self.current_key = Some(key_values);
+                            self.accumulators = self.init_accumulators();
+                            if let Err(err) = self.update_accumulators(&ctx) {
+                                return Some(Err(err));
+                            }
+                        }
+                        Some(current_key) if *current_key == key_values => {
+                            if let Err(err) = self.update_accumulators(&ctx) {
+                                return Some(Err(err));
+                            }
+                        }
+                        Some(_) => {
+                            let current_key = self.current_key.clone().unwrap_or_default();
+                            let output = match self.finalize_group(&current_key) {
+                                Ok(value) => value,
+                                Err(err) => return Some(Err(err)),
+                            };
+                            self.current_key = Some(key_values);
+                            self.accumulators = self.init_accumulators();
+                            if let Err(err) = self.update_accumulators(&ctx) {
+                                return Some(Err(err));
+                            }
+                            if let Some(row) = output {
+                                return Some(Ok(row));
+                            }
+                        }
+                    }
+                }
+                Some(Err(err)) => return Some(Err(err)),
+                None => {
+                    self.finished = true;
+                    if let Some(current_key) = self.current_key.take() {
+                        return match self.finalize_group(&current_key) {
+                            Ok(Some(row)) => Some(Ok(row)),
+                            Ok(None) => None,
+                            Err(err) => Some(Err(err)),
+                        };
+                    }
+
+                    if self.group_keys.is_empty() && !self.saw_row {
+                        self.accumulators = self.init_accumulators();
+                        return match self.finalize_group(&[]) {
+                            Ok(Some(row)) => Some(Ok(row)),
+                            Ok(None) => None,
+                            Err(err) => Some(Err(err)),
+                        };
+                    }
+
+                    return None;
+                }
+            }
+        }
     }
 
     fn schema(&self) -> &[ColumnMetadata] {

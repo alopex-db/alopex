@@ -26,6 +26,8 @@ pub struct Metrics {
     backup_progress_percent: IntGauge,
     restore_status: IntGauge,
     restore_progress_percent: IntGauge,
+    spill_bytes: IntCounter,
+    spill_files: IntCounter,
 }
 
 impl Metrics {
@@ -85,6 +87,12 @@ impl Metrics {
             "Restore operation progress percent",
         ))
         .map_err(|err| ServerError::Internal(err.to_string()))?;
+        let spill_bytes =
+            IntCounter::with_opts(Opts::new("spill_bytes_total", "Total spill bytes"))
+                .map_err(|err| ServerError::Internal(err.to_string()))?;
+        let spill_files =
+            IntCounter::with_opts(Opts::new("spill_files_total", "Total spill files"))
+                .map_err(|err| ServerError::Internal(err.to_string()))?;
 
         registry
             .register(Box::new(query_count.clone()))
@@ -125,6 +133,12 @@ impl Metrics {
         registry
             .register(Box::new(restore_progress_percent.clone()))
             .map_err(|err| ServerError::Internal(err.to_string()))?;
+        registry
+            .register(Box::new(spill_bytes.clone()))
+            .map_err(|err| ServerError::Internal(err.to_string()))?;
+        registry
+            .register(Box::new(spill_files.clone()))
+            .map_err(|err| ServerError::Internal(err.to_string()))?;
 
         Ok(Self {
             registry,
@@ -141,6 +155,8 @@ impl Metrics {
             backup_progress_percent,
             restore_status,
             restore_progress_percent,
+            spill_bytes,
+            spill_files,
         })
     }
 
@@ -170,6 +186,12 @@ impl Metrics {
     /// Record a generic error.
     pub fn record_error(&self, kind: &str) {
         self.error_count.with_label_values(&[kind]).inc();
+    }
+
+    /// Record spill usage metrics.
+    pub fn record_spill(&self, bytes: u64, files: u64) {
+        self.spill_bytes.inc_by(bytes);
+        self.spill_files.inc_by(files);
     }
 
     /// Record operational recovery/backup/restore state metrics.

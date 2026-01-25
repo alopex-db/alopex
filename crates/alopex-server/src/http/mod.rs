@@ -105,6 +105,22 @@ pub fn router(state: Arc<ServerState>) -> Router {
         .route("/api/admin/metrics", axum::routing::get(admin_api::metrics))
         .route("/api/admin/health", axum::routing::get(admin_api::health))
         .route(
+            "/api/admin/backup",
+            axum::routing::post(admin_api::start_backup),
+        )
+        .route(
+            "/api/admin/backup/:id",
+            axum::routing::get(admin_api::backup_status),
+        )
+        .route(
+            "/api/admin/restore",
+            axum::routing::post(admin_api::start_restore),
+        )
+        .route(
+            "/api/admin/restore/:id",
+            axum::routing::get(admin_api::restore_status),
+        )
+        .route(
             "/api/admin/lifecycle",
             axum::routing::post(admin_api::lifecycle),
         )

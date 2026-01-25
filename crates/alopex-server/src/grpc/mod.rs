@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::error::{Result, ServerError};
 use crate::metrics::Metrics;
+use crate::ops::memory::MemoryControlPolicy;
 use crate::server::ServerState;
 use crate::session::{SessionId, TxnHandle};
 use crate::tls;
@@ -209,6 +210,7 @@ impl AlopexService for AlopexServiceImpl {
         let state = self.state.clone();
         let correlation_id = ctx.correlation_id.clone();
         let span = ctx.span.clone();
+        let memory_policy = MemoryControlPolicy::from_env();
         tokio::spawn(async move {
             let _enter = span.enter();
             let start = Instant::now();
@@ -275,6 +277,15 @@ impl AlopexService for AlopexServiceImpl {
                                     values: row.values.iter().map(sql_value_to_proto).collect(),
                                 };
                                 bytes_sent = bytes_sent.saturating_add(proto_row.encoded_len());
+                                if let Err(err) =
+                                    memory_policy.enforce_output_bytes(bytes_sent as u64)
+                                {
+                                    let _ = sender
+                                        .send(Err(map_status(err, &correlation_id)))
+                                        .await;
+                                    success = false;
+                                    break;
+                                }
                                 if bytes_sent > state.config.max_response_size {
                                     let _ = sender
                                         .send(Err(map_status(
