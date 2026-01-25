@@ -37,6 +37,8 @@ pub enum ExprKind {
     FunctionCall {
         name: String,
         args: Vec<Expr>,
+        distinct: bool,
+        star: bool,
     },
     Between {
         expr: Box<Expr>,

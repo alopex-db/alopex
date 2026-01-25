@@ -46,3 +46,7 @@ harness = false
 [[bench]]
 name = "knn_rowid"
 harness = false
+
+[[bench]]
+name = "group_by_bench"
+harness = false

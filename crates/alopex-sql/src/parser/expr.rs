@@ -83,14 +83,24 @@ impl<'a> Parser<'a> {
                     if let Token::LParen = self.peek().token {
                         self.advance(); // consume '('
                         let mut args = Vec::new();
+                        let mut distinct = false;
+                        let mut star = false;
                         if !matches!(self.peek().token, Token::RParen) {
-                            loop {
-                                args.push(self.parse_subexpr(PREC_UNKNOWN)?);
-                                if matches!(self.peek().token, Token::Comma) {
-                                    self.advance();
-                                    continue;
+                            if matches!(self.peek().token, Token::Mul) {
+                                self.advance();
+                                star = true;
+                            } else {
+                                if self.consume_keyword(Keyword::DISTINCT) {
+                                    distinct = true;
                                 }
-                                break;
+                                loop {
+                                    args.push(self.parse_subexpr(PREC_UNKNOWN)?);
+                                    if matches!(self.peek().token, Token::Comma) {
+                                        self.advance();
+                                        continue;
+                                    }
+                                    break;
+                                }
                             }
                         }
                         self.expect_token("')'", |t| matches!(t, Token::RParen))?;
@@ -99,6 +109,8 @@ impl<'a> Parser<'a> {
                             ExprKind::FunctionCall {
                                 name: value.clone(),
                                 args,
+                                distinct,
+                                star,
                             },
                             ident_span.union(&end_span),
                         ))

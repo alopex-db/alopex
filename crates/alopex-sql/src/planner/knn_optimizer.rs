@@ -38,7 +38,7 @@ pub fn detect_knn_pattern(plan: &LogicalPlan) -> Option<KnnPattern> {
     let (table, _projection, _filter) = extract_scan_context(input_after_sort)?;
 
     let (func_name, args) = match &order_expr.expr.kind {
-        TypedExprKind::FunctionCall { name, args } => (name.to_ascii_lowercase(), args),
+        TypedExprKind::FunctionCall { name, args, .. } => (name.to_ascii_lowercase(), args),
         _ => return None,
     };
 
@@ -179,6 +179,8 @@ mod tests {
                     span,
                 ),
             ],
+            false,
+            false,
             ResolvedType::Double,
             span,
         );

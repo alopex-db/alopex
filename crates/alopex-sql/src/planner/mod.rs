@@ -345,16 +345,28 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 .resolve_table(&stmt.from.name, stmt.from.span)?
         };
 
-        // 2. Build the projection
-        let projection = self.build_projection(&stmt.projection, table)?;
+        let has_group_by = stmt
+            .group_by
+            .as_ref()
+            .is_some_and(|items| !items.is_empty());
+        let has_aggregate = self.select_contains_aggregate(stmt);
+        let distinct_only =
+            stmt.distinct && !has_group_by && !has_aggregate && stmt.having.is_none();
 
-        // 3. Create the base Scan plan
+        let scan_projection =
+            if has_group_by || has_aggregate || stmt.having.is_some() || stmt.distinct {
+                Projection::All(table.column_names().into_iter().map(String::from).collect())
+            } else {
+                self.build_projection(&stmt.projection, table)?
+            };
+
+        // 2. Create the base Scan plan
         let mut plan = LogicalPlan::Scan {
             table: stmt.from.name.clone(),
-            projection,
+            projection: scan_projection,
         };
 
-        // 4. Add Filter if WHERE clause is present
+        // 3. Add Filter if WHERE clause is present
         if let Some(ref selection) = stmt.selection {
             let predicate = self.type_checker.infer_type(selection, table)?;
 
@@ -373,7 +385,125 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             };
         }
 
-        // 5. Add Sort if ORDER BY clause is present
+        if has_group_by || has_aggregate || stmt.having.is_some() || stmt.distinct {
+            if !has_group_by && !has_aggregate && stmt.having.is_some() {
+                return Err(PlannerError::invalid_expression(
+                    "HAVING requires GROUP BY or aggregate functions".to_string(),
+                ));
+            }
+
+            let (group_keys, projected) = if distinct_only {
+                let projected =
+                    self.build_projected_columns_for_distinct(&stmt.projection, table)?;
+                let group_keys = projected.iter().map(|col| col.expr.clone()).collect();
+                (group_keys, projected)
+            } else {
+                let group_keys = self.build_group_keys(stmt, table)?;
+                let projected =
+                    self.build_projected_columns_for_aggregate(&stmt.projection, table)?;
+                (group_keys, projected)
+            };
+            let mut aggregates = Vec::new();
+            let mut agg_map = HashMap::new();
+
+            for col in &projected {
+                self.collect_aggregates_from_typed_expr(&col.expr, &mut aggregates, &mut agg_map)?;
+            }
+
+            let having_typed = if let Some(having) = &stmt.having {
+                let typed = self.type_checker.infer_type(having, table)?;
+                if typed.resolved_type != ResolvedType::Boolean {
+                    return Err(PlannerError::type_mismatch(
+                        "Boolean",
+                        typed.resolved_type.type_name().to_string(),
+                        typed.span,
+                    ));
+                }
+                self.collect_aggregates_from_typed_expr(&typed, &mut aggregates, &mut agg_map)?;
+                Some(typed)
+            } else {
+                None
+            };
+
+            let mut order_by = Vec::new();
+            if !stmt.order_by.is_empty() {
+                for order_expr in &stmt.order_by {
+                    let typed = self.type_checker.infer_type(&order_expr.expr, table)?;
+                    self.collect_aggregates_from_typed_expr(&typed, &mut aggregates, &mut agg_map)?;
+                    let asc = order_expr.asc.unwrap_or(true);
+                    let nulls_first = order_expr.nulls_first.unwrap_or(false);
+                    order_by.push(SortExpr::new(typed, asc, nulls_first));
+                }
+            }
+
+            if let Some(ref having) = having_typed {
+                self.type_checker
+                    .validate_having_expr(having, &group_keys, &aggregates)?;
+            }
+
+            let output_schema = build_aggregate_schema(&group_keys, &aggregates);
+            let output_names: Vec<String> = output_schema.iter().map(|c| c.name.clone()).collect();
+
+            let projection = self.build_aggregate_projection(
+                projected,
+                &group_keys,
+                &aggregates,
+                &output_names,
+            )?;
+
+            let having = if let Some(having) = having_typed {
+                Some(self.rewrite_expr_for_aggregate(
+                    &having,
+                    &group_keys,
+                    &aggregates,
+                    &output_names,
+                )?)
+            } else {
+                None
+            };
+
+            let order_by = order_by
+                .into_iter()
+                .map(|expr| {
+                    let rewritten = self.rewrite_expr_for_aggregate(
+                        &expr.expr,
+                        &group_keys,
+                        &aggregates,
+                        &output_names,
+                    )?;
+                    Ok(SortExpr::new(rewritten, expr.asc, expr.nulls_first))
+                })
+                .collect::<Result<Vec<_>, PlannerError>>()?;
+
+            plan = LogicalPlan::Aggregate {
+                input: Box::new(plan),
+                group_keys,
+                aggregates,
+                having,
+                projection,
+            };
+
+            if !order_by.is_empty() {
+                plan = LogicalPlan::Sort {
+                    input: Box::new(plan),
+                    order_by,
+                };
+            }
+
+            if stmt.limit.is_some() || stmt.offset.is_some() {
+                let limit = self.extract_limit_value(&stmt.limit, stmt.span)?;
+                let offset = self.extract_limit_value(&stmt.offset, stmt.span)?;
+                plan = LogicalPlan::Limit {
+                    input: Box::new(plan),
+                    limit,
+                    offset,
+                };
+            }
+
+            return Ok(plan);
+        }
+
+        // Non-aggregate path: ORDER BY + LIMIT/OFFSET
         if !stmt.order_by.is_empty() {
             let order_by = self.build_sort_exprs(&stmt.order_by, table)?;
             plan = LogicalPlan::Sort {
@@ -382,7 +512,6 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             };
         }
 
-        // 6. Add Limit if LIMIT/OFFSET is present
         if stmt.limit.is_some() || stmt.offset.is_some() {
             let limit = self.extract_limit_value(&stmt.limit, stmt.span)?;
             let offset = self.extract_limit_value(&stmt.offset, stmt.span)?;
@@ -464,6 +593,405 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
 
         Ok(sort_exprs)
+    }
+
+    fn select_contains_aggregate(&self, stmt: &Select) -> bool {
+        stmt.projection.iter().any(|item| match item {
+            SelectItem::Wildcard { .. } => false,
+            SelectItem::Expr { expr, .. } => expr_contains_aggregate(expr),
+        }) || stmt
+            .group_by
+            .as_ref()
+            .map(|items| items.iter().any(expr_contains_aggregate))
+            .unwrap_or(false)
+            || stmt
+                .having
+                .as_ref()
+                .map(expr_contains_aggregate)
+                .unwrap_or(false)
+            || stmt
+                .order_by
+                .iter()
+                .any(|order| expr_contains_aggregate(&order.expr))
+    }
+
+    fn build_group_keys(
+        &self,
+        stmt: &Select,
+        table: &TableMetadata,
+    ) -> Result<Vec<TypedExpr>, PlannerError> {
+        let mut keys = Vec::new();
+        if let Some(items) = &stmt.group_by {
+            for expr in items {
+                let typed = self.type_checker.infer_type(expr, table)?;
+                if typed_expr_contains_aggregate(&typed) {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUP BY cannot contain aggregate functions".to_string(),
+                    ));
+                }
+                if !matches!(typed.kind, TypedExprKind::ColumnRef { .. }) {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUP BY expressions must be column references".to_string(),
+                    ));
+                }
+                keys.push(typed);
+            }
+        }
+        Ok(keys)
+    }
+
+    fn build_projected_columns_for_aggregate(
+        &self,
+        items: &[SelectItem],
+        table: &TableMetadata,
+    ) -> Result<Vec<ProjectedColumn>, PlannerError> {
+        let mut projected = Vec::new();
+        for item in items {
+            match item {
+                SelectItem::Wildcard { .. } => {
+                    return Err(PlannerError::invalid_expression(
+                        "wildcard projection not supported with GROUP BY/aggregate".to_string(),
+                    ));
+                }
+                SelectItem::Expr { expr, alias, .. } => {
+                    let typed = self.type_checker.infer_type(expr, table)?;
+                    projected.push(ProjectedColumn {
+                        expr: typed,
+                        alias: alias.clone(),
+                    });
+                }
+            }
+        }
+        Ok(projected)
+    }
+
+    fn build_projected_columns_for_distinct(
+        &self,
+        items: &[SelectItem],
+        table: &TableMetadata,
+    ) -> Result<Vec<ProjectedColumn>, PlannerError> {
+        let projection = self.build_projection(items, table)?;
+        match projection {
+            Projection::All(columns) => {
+                let mut projected = Vec::with_capacity(columns.len());
+                for column in columns {
+                    let column_index = table.get_column_index(&column).ok_or_else(|| {
+                        PlannerError::invalid_expression(format!(
+                            "column '{column}' not found for DISTINCT projection"
+                        ))
+                    })?;
+                    let column_meta = table.get_column(&column).ok_or_else(|| {
+                        PlannerError::invalid_expression(format!(
+                            "column '{column}' not found for DISTINCT projection"
+                        ))
+                    })?;
+                    let typed_expr = TypedExpr::column_ref(
+                        table.name.clone(),
+                        column.clone(),
+                        column_index,
+                        column_meta.data_type.clone(),
+                        crate::ast::Span::default(),
+                    );
+                    projected.push(ProjectedColumn::new(typed_expr));
+                }
+                Ok(projected)
+            }
+            Projection::Columns(columns) => Ok(columns),
+        }
+    }
+
+    fn collect_aggregates_from_typed_expr(
+        &self,
+        expr: &TypedExpr,
+        aggregates: &mut Vec<AggregateExpr>,
+        aggregate_map: &mut HashMap<AggregateSignature, usize>,
+    ) -> Result<(), PlannerError> {
+        match &expr.kind {
+            TypedExprKind::FunctionCall {
+                name,
+                args,
+                distinct,
+                star,
+            } if is_aggregate_function(name) => {
+                for arg in args {
+                    if typed_expr_contains_aggregate(arg) {
+                        return Err(PlannerError::invalid_expression(
+                            "nested aggregate functions are not supported".to_string(),
+                        ));
+                    }
+                }
+                let (agg, signature) =
+                    self.build_aggregate_expr_from_typed(expr, name, args, *distinct, *star)?;
+                aggregate_map.entry(signature).or_insert_with(|| {
+                    aggregates.push(agg);
+                    aggregates.len() - 1
+                });
+                Ok(())
+            }
+            TypedExprKind::BinaryOp { left, right, .. } => {
+                self.collect_aggregates_from_typed_expr(left, aggregates, aggregate_map)?;
+                self.collect_aggregates_from_typed_expr(right, aggregates, aggregate_map)?;
+                Ok(())
+            }
+            TypedExprKind::UnaryOp { operand, .. } => {
+                self.collect_aggregates_from_typed_expr(operand, aggregates, aggregate_map)
+            }
+            TypedExprKind::FunctionCall { args, .. } => {
+                for arg in args {
+                    self.collect_aggregates_from_typed_expr(arg, aggregates, aggregate_map)?;
+                }
+                Ok(())
+            }
+            TypedExprKind::Between {
+                expr, low, high, ..
+            } => {
+                self.collect_aggregates_from_typed_expr(expr, aggregates, aggregate_map)?;
+                self.collect_aggregates_from_typed_expr(low, aggregates, aggregate_map)?;
+                self.collect_aggregates_from_typed_expr(high, aggregates, aggregate_map)?;
+                Ok(())
+            }
+            TypedExprKind::Like {
+                expr,
+                pattern,
+                escape,
+                ..
+            } => {
+                self.collect_aggregates_from_typed_expr(expr, aggregates, aggregate_map)?;
+                self.collect_aggregates_from_typed_expr(pattern, aggregates, aggregate_map)?;
+                if let Some(esc) = escape {
+                    self.collect_aggregates_from_typed_expr(esc, aggregates, aggregate_map)?;
+                }
+                Ok(())
+            }
+            TypedExprKind::InList { expr, list, .. } => {
+                self.collect_aggregates_from_typed_expr(expr, aggregates, aggregate_map)?;
+                for item in list {
+                    self.collect_aggregates_from_typed_expr(item, aggregates, aggregate_map)?;
+                }
+                Ok(())
+            }
+            TypedExprKind::IsNull { expr, .. } => {
+                self.collect_aggregates_from_typed_expr(expr, aggregates, aggregate_map)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn build_aggregate_expr_from_typed(
+        &self,
+        expr: &TypedExpr,
+        name: &str,
+        args: &[TypedExpr],
+        distinct: bool,
+        star: bool,
+    ) -> Result<(AggregateExpr, AggregateSignature), PlannerError> {
+        let lower = name.to_lowercase();
+        match lower.as_str() {
+            "count" => {
+                if star {
+                    let agg = AggregateExpr::count_star();
+                    let signature = aggregate_signature(name, distinct, star, None, None, expr);
+                    return Ok((agg, signature));
+                }
+                if args.len() != 1 {
+                    return Err(PlannerError::type_mismatch(
+                        "1 argument",
+                        format!("{} arguments", args.len()),
+                        expr.span,
+                    ));
+                }
+                let agg = AggregateExpr {
+                    function: AggregateFunction::Count,
+                    arg: Some(args[0].clone()),
+                    distinct,
+                    result_type: ResolvedType::BigInt,
+                };
+                let signature =
+                    aggregate_signature(name, distinct, star, Some(&args[0]), None, expr);
+                Ok((agg, signature))
+            }
+            "sum" => {
+                let arg = self.require_single_aggregate_arg(args, expr.span)?;
+                let agg = AggregateExpr {
+                    function: AggregateFunction::Sum,
+                    arg: Some(arg.clone()),
+                    distinct: false,
+                    result_type: ResolvedType::Double,
+                };
+                let signature = aggregate_signature(name, false, star, Some(arg), None, expr);
+                Ok((agg, signature))
+            }
+            "total" => {
+                let arg = self.require_single_aggregate_arg(args, expr.span)?;
+                let agg = AggregateExpr {
+                    function: AggregateFunction::Total,
+                    arg: Some(arg.clone()),
+                    distinct: false,
+                    result_type: ResolvedType::Double,
+                };
+                let signature = aggregate_signature(name, false, star, Some(arg), None, expr);
+                Ok((agg, signature))
+            }
+            "avg" => {
+                let arg = self.require_single_aggregate_arg(args, expr.span)?;
+                let agg = AggregateExpr {
+                    function: AggregateFunction::Avg,
+                    arg: Some(arg.clone()),
+                    distinct: false,
+                    result_type: ResolvedType::Double,
+                };
+                let signature = aggregate_signature(name, false, star, Some(arg), None, expr);
+                Ok((agg, signature))
+            }
+            "min" => {
+                let arg = self.require_single_aggregate_arg(args, expr.span)?;
+                let agg = AggregateExpr {
+                    function: AggregateFunction::Min,
+                    arg: Some(arg.clone()),
+                    distinct: false,
+                    result_type: arg.resolved_type.clone(),
+                };
+                let signature = aggregate_signature(name, false, star, Some(arg), None, expr);
+                Ok((agg, signature))
+            }
+            "max" => {
+                let arg = self.require_single_aggregate_arg(args, expr.span)?;
+                let agg = AggregateExpr {
+                    function: AggregateFunction::Max,
+                    arg: Some(arg.clone()),
+                    distinct: false,
+                    result_type: arg.resolved_type.clone(),
+                };
+                let signature = aggregate_signature(name, false, star, Some(arg), None, expr);
+                Ok((agg, signature))
+            }
+            "group_concat" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(PlannerError::type_mismatch(
+                        "1 or 2 arguments",
+                        format!("{} arguments", args.len()),
+                        expr.span,
+                    ));
+                }
+                let arg = &args[0];
+                let mut separator = None;
+                if args.len() == 2 {
+                    if let TypedExprKind::Literal(Literal::String(value)) = &args[1].kind {
+                        separator = Some(value.clone());
+                    } else {
+                        return Err(PlannerError::invalid_expression(
+                            "GROUP_CONCAT separator must be a string literal".to_string(),
+                        ));
+                    }
+                }
+                let agg = AggregateExpr {
+                    function: AggregateFunction::GroupConcat { separator },
+                    arg: Some(arg.clone()),
+                    distinct: false,
+                    result_type: ResolvedType::Text,
+                };
+                let signature = aggregate_signature(
+                    name,
+                    false,
+                    star,
+                    Some(arg),
+                    match &agg.function {
+                        AggregateFunction::GroupConcat { separator } => separator.as_ref(),
+                        _ => None,
+                    },
+                    expr,
+                );
+                Ok((agg, signature))
+            }
+            "string_agg" => {
+                if args.len() != 2 {
+                    return Err(PlannerError::type_mismatch(
+                        "2 arguments",
+                        format!("{} arguments", args.len()),
+                        expr.span,
+                    ));
+                }
+                let arg = &args[0];
+                let separator =
+                    if let TypedExprKind::Literal(Literal::String(value)) = &args[1].kind {
+                        Some(value.clone())
+                    } else {
+                        return Err(PlannerError::invalid_expression(
+                            "STRING_AGG separator must be a string literal".to_string(),
+                        ));
+                    };
+                let agg = AggregateExpr {
+                    function: AggregateFunction::StringAgg { separator },
+                    arg: Some(arg.clone()),
+                    distinct: false,
+                    result_type: ResolvedType::Text,
+                };
+                let signature = aggregate_signature(
+                    name,
+                    false,
+                    star,
+                    Some(arg),
+                    match &agg.function {
+                        AggregateFunction::StringAgg { separator } => separator.as_ref(),
+                        _ => None,
+                    },
+                    expr,
+                );
+                Ok((agg, signature))
+            }
+            _ => Err(PlannerError::unsupported_feature(
+                format!("function '{}'", name),
+                "future",
+                expr.span,
+            )),
+        }
+    }
+
+    fn require_single_aggregate_arg<'b>(
+        &self,
+        args: &'b [TypedExpr],
+        span: crate::ast::Span,
+    ) -> Result<&'b TypedExpr, PlannerError> {
+        if args.len() != 1 {
+            return Err(PlannerError::type_mismatch(
+                "1 argument",
+                format!("{} arguments", args.len()),
+                span,
+            ));
+        }
+        Ok(&args[0])
+    }
+
+    fn build_aggregate_projection(
+        &self,
+        projected: Vec<ProjectedColumn>,
+        group_keys: &[TypedExpr],
+        aggregates: &[AggregateExpr],
+        output_names: &[String],
+    ) -> Result<Projection, PlannerError> {
+        let mut columns = Vec::new();
+        for col in projected {
+            let rewritten =
+                self.rewrite_expr_for_aggregate(&col.expr, group_keys, aggregates, output_names)?;
+            columns.push(ProjectedColumn {
+                expr: rewritten,
+                alias: col.alias,
+            });
+        }
+        Ok(Projection::Columns(columns))
+    }
+
+    fn rewrite_expr_for_aggregate(
+        &self,
+        expr: &TypedExpr,
+        group_keys: &[TypedExpr],
+        aggregates: &[AggregateExpr],
+        output_names: &[String],
+    ) -> Result<TypedExpr, PlannerError> {
+        let group_key_map = build_group_key_map(group_keys);
+        let aggregate_map = build_aggregate_map(aggregates);
+
+        rewrite_expr_with_maps(expr, &group_key_map, &aggregate_map, output_names)
     }
 
     /// Extract a numeric value from a LIMIT or OFFSET expression.
@@ -721,4 +1249,437 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             filter,
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AggregateSignature {
+    name: String,
+    distinct: bool,
+    star: bool,
+    arg_key: Option<String>,
+    separator: Option<String>,
+}
+
+fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
+    use crate::ast::expr::ExprKind;
+
+    match &expr.kind {
+        ExprKind::FunctionCall { name, args, .. } => {
+            if is_aggregate_function(name) {
+                return true;
+            }
+            args.iter().any(expr_contains_aggregate)
+        }
+        ExprKind::BinaryOp { left, right, .. } => {
+            expr_contains_aggregate(left) || expr_contains_aggregate(right)
+        }
+        ExprKind::UnaryOp { operand, .. } => expr_contains_aggregate(operand),
+        ExprKind::Between {
+            expr, low, high, ..
+        } => {
+            expr_contains_aggregate(expr)
+                || expr_contains_aggregate(low)
+                || expr_contains_aggregate(high)
+        }
+        ExprKind::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_aggregate(expr)
+                || expr_contains_aggregate(pattern)
+                || escape.as_deref().is_some_and(expr_contains_aggregate)
+        }
+        ExprKind::InList { expr, list, .. } => {
+            expr_contains_aggregate(expr) || list.iter().any(expr_contains_aggregate)
+        }
+        ExprKind::IsNull { expr, .. } => expr_contains_aggregate(expr),
+        ExprKind::Literal(_) | ExprKind::VectorLiteral(_) | ExprKind::ColumnRef { .. } => false,
+    }
+}
+
+fn typed_expr_contains_aggregate(expr: &TypedExpr) -> bool {
+    match &expr.kind {
+        TypedExprKind::FunctionCall { name, args, .. } => {
+            if is_aggregate_function(name) {
+                return true;
+            }
+            args.iter().any(typed_expr_contains_aggregate)
+        }
+        TypedExprKind::BinaryOp { left, right, .. } => {
+            typed_expr_contains_aggregate(left) || typed_expr_contains_aggregate(right)
+        }
+        TypedExprKind::UnaryOp { operand, .. } => typed_expr_contains_aggregate(operand),
+        TypedExprKind::Between {
+            expr, low, high, ..
+        } => {
+            typed_expr_contains_aggregate(expr)
+                || typed_expr_contains_aggregate(low)
+                || typed_expr_contains_aggregate(high)
+        }
+        TypedExprKind::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            typed_expr_contains_aggregate(expr)
+                || typed_expr_contains_aggregate(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|inner| typed_expr_contains_aggregate(inner))
+        }
+        TypedExprKind::InList { expr, list, .. } => {
+            typed_expr_contains_aggregate(expr) || list.iter().any(typed_expr_contains_aggregate)
+        }
+        TypedExprKind::IsNull { expr, .. } => typed_expr_contains_aggregate(expr),
+        _ => false,
+    }
+}
+
+fn is_aggregate_function(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "count" | "sum" | "total" | "avg" | "min" | "max" | "group_concat" | "string_agg"
+    )
+}
+
+fn expr_key(expr: &TypedExpr) -> String {
+    format!("{:?}", expr.kind)
+}
+
+fn aggregate_signature(
+    name: &str,
+    distinct: bool,
+    star: bool,
+    arg: Option<&TypedExpr>,
+    separator: Option<&String>,
+    _expr: &TypedExpr,
+) -> AggregateSignature {
+    AggregateSignature {
+        name: name.to_ascii_lowercase(),
+        distinct,
+        star,
+        arg_key: arg.map(expr_key),
+        separator: separator.cloned(),
+    }
+}
+
+fn build_group_key_map(group_keys: &[TypedExpr]) -> HashMap<String, usize> {
+    let mut map = HashMap::new();
+    for (idx, key) in group_keys.iter().enumerate() {
+        map.insert(expr_key(key), idx);
+    }
+    map
+}
+
+fn build_aggregate_map(aggregates: &[AggregateExpr]) -> HashMap<AggregateSignature, usize> {
+    let mut map = HashMap::new();
+    for (idx, agg) in aggregates.iter().enumerate() {
+        let (name, separator, star, arg) = match &agg.function {
+            AggregateFunction::Count => (
+                "count".to_string(),
+                None,
+                agg.arg.is_none(),
+                agg.arg.as_ref(),
+            ),
+            AggregateFunction::Sum => ("sum".to_string(), None, false, agg.arg.as_ref()),
+            AggregateFunction::Total => ("total".to_string(), None, false, agg.arg.as_ref()),
+            AggregateFunction::Avg => ("avg".to_string(), None, false, agg.arg.as_ref()),
+            AggregateFunction::Min => ("min".to_string(), None, false, agg.arg.as_ref()),
+            AggregateFunction::Max => ("max".to_string(), None, false, agg.arg.as_ref()),
+            AggregateFunction::GroupConcat { separator } => (
+                "group_concat".to_string(),
+                separator.clone(),
+                false,
+                agg.arg.as_ref(),
+            ),
+            AggregateFunction::StringAgg { separator } => (
+                "string_agg".to_string(),
+                separator.clone(),
+                false,
+                agg.arg.as_ref(),
+            ),
+        };
+        let signature = AggregateSignature {
+            name,
+            distinct: agg.distinct,
+            star,
+            arg_key: arg.map(expr_key),
+            separator,
+        };
+        map.insert(signature, idx);
+    }
+    map
+}
+
+fn build_aggregate_schema(
+    group_keys: &[TypedExpr],
+    aggregates: &[AggregateExpr],
+) -> Vec<ColumnMetadata> {
+    let mut schema = Vec::new();
+    for (idx, key) in group_keys.iter().enumerate() {
+        let name = match &key.kind {
+            TypedExprKind::ColumnRef { column, .. } => column.clone(),
+            _ => format!("group_{idx}"),
+        };
+        schema.push(ColumnMetadata::new(name, key.resolved_type.clone()));
+    }
+    for (idx, agg) in aggregates.iter().enumerate() {
+        let name = match &agg.function {
+            AggregateFunction::Count => format!("count_{idx}"),
+            AggregateFunction::Sum => format!("sum_{idx}"),
+            AggregateFunction::Total => format!("total_{idx}"),
+            AggregateFunction::Avg => format!("avg_{idx}"),
+            AggregateFunction::Min => format!("min_{idx}"),
+            AggregateFunction::Max => format!("max_{idx}"),
+            AggregateFunction::GroupConcat { .. } => format!("group_concat_{idx}"),
+            AggregateFunction::StringAgg { .. } => format!("string_agg_{idx}"),
+        };
+        schema.push(ColumnMetadata::new(name, agg.result_type.clone()));
+    }
+    schema
+}
+
+fn rewrite_expr_with_maps(
+    expr: &TypedExpr,
+    group_key_map: &HashMap<String, usize>,
+    aggregate_map: &HashMap<AggregateSignature, usize>,
+    output_names: &[String],
+) -> Result<TypedExpr, PlannerError> {
+    let group_key_count = output_names.len().saturating_sub(aggregate_map.len());
+    let key = expr_key(expr);
+    if let Some(idx) = group_key_map.get(&key) {
+        return Ok(make_output_column_ref(
+            *idx,
+            output_names,
+            expr.resolved_type.clone(),
+            expr.span,
+        ));
+    }
+
+    match &expr.kind {
+        TypedExprKind::FunctionCall {
+            name,
+            args,
+            distinct,
+            star,
+        } if is_aggregate_function(name) => {
+            let separator = if name.eq_ignore_ascii_case("group_concat") && args.len() == 2 {
+                if let TypedExprKind::Literal(Literal::String(value)) = &args[1].kind {
+                    Some(value.clone())
+                } else {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUP_CONCAT separator must be a string literal".to_string(),
+                    ));
+                }
+            } else if name.eq_ignore_ascii_case("string_agg") && args.len() == 2 {
+                if let TypedExprKind::Literal(Literal::String(value)) = &args[1].kind {
+                    Some(value.clone())
+                } else {
+                    return Err(PlannerError::invalid_expression(
+                        "STRING_AGG separator must be a string literal".to_string(),
+                    ));
+                }
+            } else {
+                None
+            };
+            let signature = AggregateSignature {
+                name: name.to_ascii_lowercase(),
+                distinct: *distinct,
+                star: *star,
+                arg_key: args.first().map(expr_key),
+                separator,
+            };
+            let idx = aggregate_map.get(&signature).ok_or_else(|| {
+                PlannerError::invalid_expression(
+                    "aggregate in expression is not part of plan".to_string(),
+                )
+            })?;
+            let output_index = group_key_count + idx;
+            Ok(make_output_column_ref(
+                output_index,
+                output_names,
+                expr.resolved_type.clone(),
+                expr.span,
+            ))
+        }
+        TypedExprKind::FunctionCall {
+            name,
+            args,
+            distinct,
+            star,
+        } => {
+            if *distinct || *star {
+                return Err(PlannerError::invalid_expression(
+                    "DISTINCT/STAR modifiers are only supported for aggregates".to_string(),
+                ));
+            }
+            let mut rewritten_args = Vec::with_capacity(args.len());
+            for arg in args {
+                rewritten_args.push(rewrite_expr_with_maps(
+                    arg,
+                    group_key_map,
+                    aggregate_map,
+                    output_names,
+                )?);
+            }
+            Ok(TypedExpr {
+                kind: TypedExprKind::FunctionCall {
+                    name: name.clone(),
+                    args: rewritten_args,
+                    distinct: false,
+                    star: false,
+                },
+                resolved_type: expr.resolved_type.clone(),
+                span: expr.span,
+            })
+        }
+        TypedExprKind::BinaryOp { left, op, right } => {
+            let left = rewrite_expr_with_maps(left, group_key_map, aggregate_map, output_names)?;
+            let right = rewrite_expr_with_maps(right, group_key_map, aggregate_map, output_names)?;
+            Ok(TypedExpr {
+                kind: TypedExprKind::BinaryOp {
+                    left: Box::new(left),
+                    op: *op,
+                    right: Box::new(right),
+                },
+                resolved_type: expr.resolved_type.clone(),
+                span: expr.span,
+            })
+        }
+        TypedExprKind::UnaryOp { op, operand } => {
+            let operand =
+                rewrite_expr_with_maps(operand, group_key_map, aggregate_map, output_names)?;
+            Ok(TypedExpr {
+                kind: TypedExprKind::UnaryOp {
+                    op: *op,
+                    operand: Box::new(operand),
+                },
+                resolved_type: expr.resolved_type.clone(),
+                span: expr.span,
+            })
+        }
+        TypedExprKind::Between {
+            expr: inner,
+            low,
+            high,
+            negated,
+        } => {
+            let inner = rewrite_expr_with_maps(inner, group_key_map, aggregate_map, output_names)?;
+            let low = rewrite_expr_with_maps(low, group_key_map, aggregate_map, output_names)?;
+            let high = rewrite_expr_with_maps(high, group_key_map, aggregate_map, output_names)?;
+            Ok(TypedExpr {
+                kind: TypedExprKind::Between {
+                    expr: Box::new(inner),
+                    low: Box::new(low),
+                    high: Box::new(high),
+                    negated: *negated,
+                },
+                resolved_type: expr.resolved_type.clone(),
+                span: expr.span,
+            })
+        }
+        TypedExprKind::Like {
+            expr: inner,
+            pattern,
+            escape,
+            negated,
+        } => {
+            let inner = rewrite_expr_with_maps(inner, group_key_map, aggregate_map, output_names)?;
+            let pattern =
+                rewrite_expr_with_maps(pattern, group_key_map, aggregate_map, output_names)?;
+            let escape = if let Some(esc) = escape {
+                Some(Box::new(rewrite_expr_with_maps(
+                    esc,
+                    group_key_map,
+                    aggregate_map,
+                    output_names,
+                )?))
+            } else {
+                None
+            };
+            Ok(TypedExpr {
+                kind: TypedExprKind::Like {
+                    expr: Box::new(inner),
+                    pattern: Box::new(pattern),
+                    escape,
+                    negated: *negated,
+                },
+                resolved_type: expr.resolved_type.clone(),
+                span: expr.span,
+            })
+        }
+        TypedExprKind::InList {
+            expr: inner,
+            list,
+            negated,
+        } => {
+            let inner = rewrite_expr_with_maps(inner, group_key_map, aggregate_map, output_names)?;
+            let mut rewritten_list = Vec::with_capacity(list.len());
+            for item in list {
+                rewritten_list.push(rewrite_expr_with_maps(
+                    item,
+                    group_key_map,
+                    aggregate_map,
+                    output_names,
+                )?);
+            }
+            Ok(TypedExpr {
+                kind: TypedExprKind::InList {
+                    expr: Box::new(inner),
+                    list: rewritten_list,
+                    negated: *negated,
+                },
+                resolved_type: expr.resolved_type.clone(),
+                span: expr.span,
+            })
+        }
+        TypedExprKind::IsNull {
+            expr: inner,
+            negated,
+        } => {
+            let inner = rewrite_expr_with_maps(inner, group_key_map, aggregate_map, output_names)?;
+            Ok(TypedExpr {
+                kind: TypedExprKind::IsNull {
+                    expr: Box::new(inner),
+                    negated: *negated,
+                },
+                resolved_type: expr.resolved_type.clone(),
+                span: expr.span,
+            })
+        }
+        TypedExprKind::Literal(_) | TypedExprKind::VectorLiteral(_) => Ok(expr.clone()),
+        TypedExprKind::ColumnRef { .. } => Err(PlannerError::invalid_expression(
+            "column reference must appear in GROUP BY or be aggregated".to_string(),
+        )),
+        TypedExprKind::Cast {
+            expr: inner,
+            target_type,
+        } => {
+            let inner = rewrite_expr_with_maps(inner, group_key_map, aggregate_map, output_names)?;
+            Ok(TypedExpr {
+                kind: TypedExprKind::Cast {
+                    expr: Box::new(inner),
+                    target_type: target_type.clone(),
+                },
+                resolved_type: expr.resolved_type.clone(),
+                span: expr.span,
+            })
+        }
+    }
+}
+
+fn make_output_column_ref(
+    index: usize,
+    output_names: &[String],
+    resolved_type: ResolvedType,
+    span: crate::ast::Span,
+) -> TypedExpr {
+    let name = output_names
+        .get(index)
+        .cloned()
+        .unwrap_or_else(|| format!("col_{index}"));
+    TypedExpr::column_ref("__agg__".to_string(), name, index, resolved_type, span)
 }

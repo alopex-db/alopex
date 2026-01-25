@@ -320,6 +320,11 @@ impl From<PlannerError> for SqlError {
                 location: ErrorLocation { line, column },
                 code: "ALOPEX-F001",
             },
+            PlannerError::InvalidExpression { message } => Self::Plan {
+                message,
+                location: ErrorLocation::default(),
+                code: "ALOPEX-T007",
+            },
         }
     }
 }

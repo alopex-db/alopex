@@ -92,6 +92,10 @@ pub enum TypedExprKind {
         name: String,
         /// Function arguments.
         args: Vec<TypedExpr>,
+        /// DISTINCT modifier for aggregate functions.
+        distinct: bool,
+        /// STAR modifier for COUNT(*).
+        star: bool,
     },
 
     /// An explicit type cast.
@@ -335,11 +339,18 @@ impl TypedExpr {
     pub fn function_call(
         name: String,
         args: Vec<TypedExpr>,
+        distinct: bool,
+        star: bool,
         resolved_type: ResolvedType,
         span: Span,
     ) -> Self {
         Self::new(
-            TypedExprKind::FunctionCall { name, args },
+            TypedExprKind::FunctionCall {
+                name,
+                args,
+                distinct,
+                star,
+            },
             resolved_type,
             span,
         )

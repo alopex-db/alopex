@@ -132,6 +132,23 @@ fn compare(left: SqlValue, right: SqlValue, kind: OrderingKind) -> Result<SqlVal
 
     use OrderingKind::*;
     use std::cmp::Ordering;
+    if let (Some(lhs), Some(rhs)) = (numeric_as_f64(&left), numeric_as_f64(&right)) {
+        let cmp = lhs.partial_cmp(&rhs).ok_or(ExecutorError::Evaluation(
+            EvaluationError::TypeMismatch {
+                expected: "Comparable".into(),
+                actual: format!("{:?} vs {:?}", left.type_name(), right.type_name()),
+            },
+        ))?;
+        let result = match kind {
+            Eq => cmp == Ordering::Equal,
+            Neq => cmp != Ordering::Equal,
+            Lt => cmp == Ordering::Less,
+            Gt => cmp == Ordering::Greater,
+            Le => cmp != Ordering::Greater,
+            Ge => cmp != Ordering::Less,
+        };
+        return Ok(SqlValue::Boolean(result));
+    }
     let cmp = left.partial_cmp(&right).ok_or(ExecutorError::Evaluation(
         EvaluationError::TypeMismatch {
             expected: "Comparable".into(),
@@ -148,6 +165,16 @@ fn compare(left: SqlValue, right: SqlValue, kind: OrderingKind) -> Result<SqlVal
         Ge => cmp != Ordering::Less,
     };
     Ok(SqlValue::Boolean(result))
+}
+
+fn numeric_as_f64(value: &SqlValue) -> Option<f64> {
+    match value {
+        SqlValue::Integer(v) => Some(*v as f64),
+        SqlValue::BigInt(v) => Some(*v as f64),
+        SqlValue::Float(v) => Some(*v as f64),
+        SqlValue::Double(v) => Some(*v),
+        _ => None,
+    }
 }
 
 fn logical_and(left: SqlValue, right: SqlValue) -> Result<SqlValue> {

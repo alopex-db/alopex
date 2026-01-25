@@ -10,6 +10,7 @@ use crate::storage::{SqlTxn, SqlValue};
 
 use super::{ColumnInfo, Row};
 
+pub mod aggregate;
 pub mod columnar_scan;
 pub mod iterator;
 mod knn;
@@ -172,6 +173,24 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
             let filter_iter = FilterIterator::new(input_iter, predicate);
             Ok((Box::new(filter_iter), projection, schema))
         }
+        LogicalPlan::Aggregate {
+            input,
+            group_keys,
+            aggregates,
+            having,
+            projection,
+        } => {
+            let (input_iter, _projection, _schema) = build_iterator_pipeline(txn, catalog, *input)?;
+            let schema = aggregate::build_aggregate_schema(&group_keys, &aggregates);
+            let iter = aggregate::AggregateIterator::new(
+                input_iter,
+                group_keys,
+                aggregates,
+                having,
+                schema.clone(),
+            );
+            Ok((Box::new(iter), projection, schema))
+        }
         LogicalPlan::Sort { input, order_by } => {
             let (input_iter, projection, schema) = build_iterator_pipeline(txn, catalog, *input)?;
             let sort_iter = SortIterator::new(input_iter, &order_by)?;
@@ -284,6 +303,25 @@ fn build_streaming_pipeline_inner<
                 build_streaming_pipeline_inner(txn, catalog, *input)?;
             let filter_iter = FilterIterator::new(input_iter, predicate);
             Ok((Box::new(filter_iter), projection, schema))
+        }
+        LogicalPlan::Aggregate {
+            input,
+            group_keys,
+            aggregates,
+            having,
+            projection,
+        } => {
+            let (input_iter, _projection, _schema) =
+                build_streaming_pipeline_inner(txn, catalog, *input)?;
+            let schema = aggregate::build_aggregate_schema(&group_keys, &aggregates);
+            let iter = aggregate::AggregateIterator::new(
+                input_iter,
+                group_keys,
+                aggregates,
+                having,
+                schema.clone(),
+            );
+            Ok((Box::new(iter), projection, schema))
         }
         LogicalPlan::Sort { input, order_by } => {
             let (input_iter, projection, schema) =
