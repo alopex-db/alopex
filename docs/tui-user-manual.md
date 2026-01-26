@@ -463,6 +463,65 @@ cargo run -p alopex-cli -- --data-dir "$DATA_DIR" vector search --index demo_hns
 `--output` による batch 出力は Admin TUI では再現できません。  
 必要な場合は `scripts/tui-demo.sh` と同じ CLI コマンドを単独で実行してください。
 
+### 4) サーバー接続デモ（server profile + TUI）
+
+`scripts/tui-demo.sh` の後半では **サーバーを起動して profile 経由で TUI を実行**します。  
+手動で再現する場合は以下の流れです。
+
+#### 4-1) サーバー起動
+
+```bash
+SERVER_DIR="$(mktemp -d)"
+HTTP_PORT=8080
+ADMIN_PORT=8081
+GRPC_PORT=9090
+
+cat > "$SERVER_DIR/alopex.toml" <<EOF
+http_bind = "127.0.0.1:${HTTP_PORT}"
+grpc_bind = "127.0.0.1:${GRPC_PORT}"
+admin_bind = "127.0.0.1:${ADMIN_PORT}"
+data_dir = "${SERVER_DIR}"
+metrics_enabled = true
+tracing_enabled = false
+audit_log_enabled = false
+EOF
+
+cargo run -p alopex-server -- --config "$SERVER_DIR/alopex.toml"
+```
+
+#### 4-2) プロファイル作成（HOME を分離する例）
+
+`~/.alopex/config` は権限 `600` が必須です。既存設定を汚したくない場合は `HOME` を分離します。
+
+```bash
+DEMO_HOME="$(mktemp -d)"
+mkdir -p "$DEMO_HOME/.alopex"
+cat > "$DEMO_HOME/.alopex/config" <<EOF
+[profiles.demo]
+connection_type = "server"
+
+[profiles.demo.server]
+url = "http://127.0.0.1:${HTTP_PORT}"
+EOF
+chmod 600 "$DEMO_HOME/.alopex/config"
+```
+
+#### 4-3) サーバー経由で TUI を実行
+
+```bash
+HOME="$DEMO_HOME" cargo run -p alopex-cli -- --profile demo sql \
+  "CREATE TABLE server_items (id INT PRIMARY KEY, name TEXT, embedding VECTOR(2, L2));"
+HOME="$DEMO_HOME" cargo run -p alopex-cli -- --profile demo sql \
+  "INSERT INTO server_items VALUES (1,'alpha',[0.1,0.2]),(2,'beta',[0.2,0.1]);"
+
+# Results TUI
+HOME="$DEMO_HOME" cargo run -p alopex-cli -- --profile demo sql \
+  "SELECT id, name FROM server_items ORDER BY id"
+
+# Admin TUI
+HOME="$DEMO_HOME" cargo run -p alopex-cli -- --profile demo
+```
+
 
 ## キーバインド一覧
 
