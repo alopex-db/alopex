@@ -488,11 +488,44 @@ pub enum LifecycleCommand {
     /// Archive data (placeholder)
     Archive,
     /// Restore archived data (placeholder)
-    Restore,
+    Restore {
+        /// Restore source (server mode only)
+        #[arg(long)]
+        source: Option<String>,
+        /// Restore subcommands
+        #[command(subcommand)]
+        command: Option<LifecycleRestoreCommand>,
+    },
     /// Backup data (placeholder)
-    Backup,
+    Backup {
+        /// Backup subcommands
+        #[command(subcommand)]
+        command: Option<LifecycleBackupCommand>,
+    },
     /// Export data (placeholder)
     Export,
+}
+
+/// Backup lifecycle subcommands
+#[derive(Subcommand, Debug)]
+pub enum LifecycleBackupCommand {
+    /// Show backup status for a handle
+    Status {
+        /// Backup handle
+        #[arg(long)]
+        handle: String,
+    },
+}
+
+/// Restore lifecycle subcommands
+#[derive(Subcommand, Debug)]
+pub enum LifecycleRestoreCommand {
+    /// Show restore status for a handle
+    Status {
+        /// Restore handle
+        #[arg(long)]
+        handle: String,
+    },
 }
 
 /// Server compaction subcommands

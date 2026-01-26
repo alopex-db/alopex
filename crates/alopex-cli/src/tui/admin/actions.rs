@@ -330,7 +330,14 @@ pub async fn execute_remote_action<W: Write>(
             }
         }
         AdminCommand::Lifecycle(cmd) => {
-            lifecycle::execute_remote_with_formatter(client, &cmd, writer, formatter).await
+            lifecycle::execute_remote_with_formatter(
+                client,
+                &cmd,
+                lifecycle::RemoteLifecycleSupport::unknown(),
+                writer,
+                formatter,
+            )
+            .await
         }
     }
 }
@@ -366,8 +373,8 @@ fn ensure_action_matches_command(action: AdminAction, command: &AdminCommand) ->
 fn lifecycle_action_for(command: &LifecycleCommand) -> AdminAction {
     match command {
         LifecycleCommand::Archive => AdminAction::Archive,
-        LifecycleCommand::Restore => AdminAction::Restore,
-        LifecycleCommand::Backup => AdminAction::Backup,
+        LifecycleCommand::Restore { .. } => AdminAction::Restore,
+        LifecycleCommand::Backup { .. } => AdminAction::Backup,
         LifecycleCommand::Export => AdminAction::Export,
     }
 }
