@@ -12,9 +12,15 @@ fn e2e_lifecycle_actions_report_success() {
 
     let cases = [
         (LifecycleCommand::Archive, "Archived"),
-        (LifecycleCommand::Backup, "Backup"),
+        (LifecycleCommand::Backup { command: None }, "Backup"),
         (LifecycleCommand::Export, "Exported"),
-        (LifecycleCommand::Restore, "Restored"),
+        (
+            LifecycleCommand::Restore {
+                source: None,
+                command: None,
+            },
+            "Restored",
+        ),
     ];
 
     for (command, label) in cases {

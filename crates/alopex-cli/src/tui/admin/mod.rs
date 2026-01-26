@@ -30,8 +30,9 @@ use crate::ui::mode::UiMode;
 use crate::{
     batch::BatchMode,
     cli::{
-        ColumnarCommand, DistanceMetric, HnswCommand, IndexCommand, KvCommand, LifecycleCommand,
-        OutputFormat, SqlCommand, VectorCommand,
+        ColumnarCommand, DistanceMetric, HnswCommand, IndexCommand, KvCommand,
+        LifecycleBackupCommand, LifecycleCommand, LifecycleRestoreCommand, OutputFormat,
+        SqlCommand, VectorCommand,
     },
     client::http::HttpClient,
 };
@@ -78,7 +79,7 @@ impl AuthCapabilities {
         }
     }
 
-    fn allows(&self, action: AdminAction) -> bool {
+    pub fn allows(&self, action: AdminAction) -> bool {
         match self.scope {
             AuthScope::Full => true,
             AuthScope::Restricted => self.allowed_actions.contains(&action),
@@ -1391,6 +1392,17 @@ impl ResourceTree {
 
 fn build_form_fields(target: AdminTarget, action: AdminAction) -> Vec<AdminFormField> {
     match (target, action) {
+        (_, AdminAction::Backup) => vec![form_field(
+            "handle",
+            "Handle (status)",
+            "",
+            "backup-handle",
+            false,
+        )],
+        (_, AdminAction::Restore) => vec![
+            form_field("source", "Source", "", "s3://bucket/path", false),
+            form_field("handle", "Handle (status)", "", "restore-handle", false),
+        ],
         (AdminTarget::Sql, AdminAction::Read) => vec![
             form_field("query", "Query", "", "SELECT * FROM table", false),
             form_field_with_list(
@@ -2212,10 +2224,41 @@ fn build_command_for(
         action,
         AdminAction::Archive | AdminAction::Restore | AdminAction::Backup | AdminAction::Export
     ) {
+        let handle = params
+            .get("handle")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        let source = params
+            .get("source")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+
         let command = match action {
             AdminAction::Archive => LifecycleCommand::Archive,
-            AdminAction::Restore => LifecycleCommand::Restore,
-            AdminAction::Backup => LifecycleCommand::Backup,
+            AdminAction::Restore => {
+                if let Some(handle) = handle {
+                    LifecycleCommand::Restore {
+                        source: None,
+                        command: Some(LifecycleRestoreCommand::Status { handle }),
+                    }
+                } else {
+                    LifecycleCommand::Restore {
+                        source,
+                        command: None,
+                    }
+                }
+            }
+            AdminAction::Backup => {
+                if let Some(handle) = handle {
+                    LifecycleCommand::Backup {
+                        command: Some(LifecycleBackupCommand::Status { handle }),
+                    }
+                } else {
+                    LifecycleCommand::Backup { command: None }
+                }
+            }
             AdminAction::Export => LifecycleCommand::Export,
             _ => return Ok(None),
         };

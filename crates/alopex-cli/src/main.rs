@@ -32,6 +32,7 @@ use tracing_subscriber::EnvFilter;
 use batch::BatchMode;
 use cli::{Cli, Command};
 use client::http::HttpClient;
+use commands::lifecycle::{RemoteLifecycleSupport, SupportLevel};
 use config::{setup_signal_handler, validate_thread_mode, EXIT_CODE_INTERRUPTED};
 use error::{handle_error, CliError, Result};
 use models::{Column, DataType, Row, Value};
@@ -565,7 +566,28 @@ fn execute_server_command(
     })?;
     let client = HttpClient::new(server_config)
         .map_err(|err| CliError::ServerConnection(err.to_string()))?;
-    let auth = auth_capabilities_from_server(&client, server_config, &runtime);
+    let auth_result = runtime.block_on(fetch_auth_capabilities(&client));
+    let (auth, lifecycle_support) = match auth_result {
+        Ok(auth) => (
+            auth.clone(),
+            RemoteLifecycleSupport {
+                backup: if auth.allows(AdminAction::Backup) {
+                    SupportLevel::Supported
+                } else {
+                    SupportLevel::Unsupported
+                },
+                restore: if auth.allows(AdminAction::Restore) {
+                    SupportLevel::Supported
+                } else {
+                    SupportLevel::Unsupported
+                },
+            },
+        ),
+        Err(_) => (
+            auth_capabilities_from_config(server_config),
+            RemoteLifecycleSupport::unknown(),
+        ),
+    };
 
     match command {
         Command::Kv { command: kv_cmd } => {
@@ -981,6 +1003,7 @@ fn execute_server_command(
             runtime.block_on(commands::lifecycle::execute_remote_with_formatter(
                 &client,
                 command,
+                lifecycle_support,
                 &mut handle,
                 formatter,
             ))
