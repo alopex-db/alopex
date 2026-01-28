@@ -830,28 +830,24 @@ fn write_parquet_append(
     storage_options: &HashMap<String, String>,
 ) -> PyResult<()> {
     let kwargs = storage_options_to_kwargs(py, storage_options)?;
-    py.allow_threads(move || {
-        Python::with_gil(|py| -> PyResult<()> {
-            let polars = PyModule::import(py, "polars")?;
-            let scan_parquet = polars.getattr("scan_parquet")?;
-            let args = (storage_location.as_str(),);
-            let existing_lf = if let Some(kwargs) = kwargs.as_ref() {
-                scan_parquet.call(args, Some(kwargs.bind(py)))?
-            } else {
-                scan_parquet.call1(args)?
-            };
-            let existing_df = existing_lf.call_method0("collect")?;
-            let concat = polars.getattr("concat")?;
-            let list = PyList::new(py, vec![existing_df.unbind(), df.clone_ref(py)])?;
-            let combined = concat.call1((list,))?;
-            if let Some(kwargs) = kwargs.as_ref() {
-                combined.call_method("write_parquet", args, Some(kwargs.bind(py)))?;
-            } else {
-                combined.call_method1("write_parquet", args)?;
-            }
-            Ok(())
-        })
-    })
+    let polars = PyModule::import(py, "polars")?;
+    let scan_parquet = polars.getattr("scan_parquet")?;
+    let args = (storage_location.as_str(),);
+    let existing_lf = if let Some(kwargs) = kwargs.as_ref() {
+        scan_parquet.call(args, Some(kwargs.bind(py)))?
+    } else {
+        scan_parquet.call1(args)?
+    };
+    let existing_df = existing_lf.call_method0("collect")?;
+    let concat = polars.getattr("concat")?;
+    let list = PyList::new(py, vec![existing_df.unbind(), df.clone_ref(py)])?;
+    let combined = concat.call1((list,))?;
+    if let Some(kwargs) = kwargs.as_ref() {
+        combined.call_method("write_parquet", args, Some(kwargs.bind(py)))?;
+    } else {
+        combined.call_method1("write_parquet", args)?;
+    }
+    Ok(())
 }
 
 fn write_parquet_overwrite(
@@ -861,18 +857,14 @@ fn write_parquet_overwrite(
     storage_options: &HashMap<String, String>,
 ) -> PyResult<()> {
     let kwargs = storage_options_to_kwargs(py, storage_options)?;
-    py.allow_threads(move || {
-        Python::with_gil(|py| -> PyResult<()> {
-            let df = df.bind(py);
-            let args = (storage_location.as_str(),);
-            if let Some(kwargs) = kwargs.as_ref() {
-                df.call_method("write_parquet", args, Some(kwargs.bind(py)))?;
-            } else {
-                df.call_method1("write_parquet", args)?;
-            }
-            Ok(())
-        })
-    })
+    let df = df.bind(py);
+    let args = (storage_location.as_str(),);
+    if let Some(kwargs) = kwargs.as_ref() {
+        df.call_method("write_parquet", args, Some(kwargs.bind(py)))?;
+    } else {
+        df.call_method1("write_parquet", args)?;
+    }
+    Ok(())
 }
 
 fn write_table_merge(
@@ -883,39 +875,35 @@ fn write_table_merge(
     storage_options: &HashMap<String, String>,
 ) -> PyResult<()> {
     let kwargs = storage_options_to_kwargs(py, storage_options)?;
-    py.allow_threads(move || {
-        Python::with_gil(|py| -> PyResult<()> {
-            let polars = PyModule::import(py, "polars")?;
-            let scan_parquet = polars.getattr("scan_parquet")?;
-            let args = (storage_location.as_str(),);
-            let existing_lf = if let Some(kwargs) = kwargs.as_ref() {
-                scan_parquet.call(args, Some(kwargs.bind(py)))?
-            } else {
-                scan_parquet.call1(args)?
-            };
-            let existing_df = existing_lf.call_method0("collect")?;
-            let new_df = df.bind(py);
-            let pk_cols = primary_key
-                .iter()
-                .map(|name| name.as_str())
-                .collect::<Vec<_>>();
-            let pk_cols = PyList::new(py, pk_cols)?.unbind();
-            let join_kwargs = PyDict::new(py);
-            join_kwargs.set_item("on", pk_cols.bind(py))?;
-            join_kwargs.set_item("how", "anti")?;
-            let existing_without_updates =
-                existing_df.call_method("join", (new_df,), Some(&join_kwargs))?;
-            let concat = polars.getattr("concat")?;
-            let merged = concat.call1((PyList::new(
-                py,
-                vec![existing_without_updates.unbind(), df.clone_ref(py)],
-            )?,))?;
-            if let Some(kwargs) = kwargs.as_ref() {
-                merged.call_method("write_parquet", args, Some(kwargs.bind(py)))?;
-            } else {
-                merged.call_method1("write_parquet", args)?;
-            }
-            Ok(())
-        })
-    })
+    let polars = PyModule::import(py, "polars")?;
+    let scan_parquet = polars.getattr("scan_parquet")?;
+    let args = (storage_location.as_str(),);
+    let existing_lf = if let Some(kwargs) = kwargs.as_ref() {
+        scan_parquet.call(args, Some(kwargs.bind(py)))?
+    } else {
+        scan_parquet.call1(args)?
+    };
+    let existing_df = existing_lf.call_method0("collect")?;
+    let new_df = df.bind(py);
+    let pk_cols = primary_key
+        .iter()
+        .map(|name| name.as_str())
+        .collect::<Vec<_>>();
+    let pk_cols = PyList::new(py, pk_cols)?.unbind();
+    let join_kwargs = PyDict::new(py);
+    join_kwargs.set_item("on", pk_cols.bind(py))?;
+    join_kwargs.set_item("how", "anti")?;
+    let existing_without_updates =
+        existing_df.call_method("join", (new_df,), Some(&join_kwargs))?;
+    let concat = polars.getattr("concat")?;
+    let merged = concat.call1((PyList::new(
+        py,
+        vec![existing_without_updates.unbind(), df.clone_ref(py)],
+    )?,))?;
+    if let Some(kwargs) = kwargs.as_ref() {
+        merged.call_method("write_parquet", args, Some(kwargs.bind(py)))?;
+    } else {
+        merged.call_method1("write_parquet", args)?;
+    }
+    Ok(())
 }
