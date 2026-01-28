@@ -6,6 +6,7 @@
 #   ./scripts/container-ci.sh alopex-py          # Run alopex-py workflow
 #   ./scripts/container-ci.sh alopex-py test     # Run specific job
 #   ./scripts/container-ci.sh --custom alopex-py # Use pre-built custom runner image
+#   ./scripts/container-ci.sh --clean           # Clean up containers, volumes, artifacts
 #
 # Requirements:
 #   - Docker daemon (act runs inside a container and uses the host Docker socket)
@@ -64,6 +65,24 @@ check_prerequisites() {
     fi
 }
 
+clean() {
+    log_info "Cleaning up act containers..."
+    docker ps -a --filter "label=act" -q | xargs -r docker rm -f
+
+    log_info "Cleaning up act volumes..."
+    docker volume ls -q --filter "label=act" | xargs -r docker volume rm
+    docker volume ls --format "{{.Name}}" | grep -E '^act-' | xargs -r docker volume rm
+
+    log_info "Cleaning up artifacts directory..."
+    rm -rf "${ARTIFACTS_DIR}"
+}
+
+cleanup_volumes() {
+    log_info "Cleaning up act volumes..."
+    docker volume ls -q --filter "label=act" | xargs -r docker volume rm
+    docker volume ls --format "{{.Name}}" | grep -E '^act-' | xargs -r docker volume rm
+}
+
 list_workflows() {
     log_info "Available workflows:"
     echo ""
@@ -116,6 +135,7 @@ run_act() {
     fi
 
     log_info "Running workflow: ${workflow}"
+    trap cleanup_volumes EXIT
     docker run --rm \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -v "${PROJECT_ROOT}:${ACT_WORKDIR}" \
@@ -171,6 +191,7 @@ run_act_custom() {
     fi
 
     log_info "Running workflow with custom image: ${workflow}"
+    trap cleanup_volumes EXIT
     docker run --rm \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -v "${PROJECT_ROOT}:${ACT_WORKDIR}" \
@@ -187,6 +208,7 @@ Usage:
     $0                           List available workflows
     $0 <workflow> [job]          Run workflow (optionally specific job)
     $0 --custom <workflow> [job] Run with pre-built custom runner image
+    $0 --clean                   Clean up containers, volumes, artifacts
     $0 --help                    Show this help
 
 Examples:
@@ -211,6 +233,9 @@ main() {
             ;;
         --help|-h)
             show_help
+            ;;
+        --clean)
+            clean
             ;;
         --custom)
             shift

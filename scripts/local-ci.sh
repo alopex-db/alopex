@@ -6,7 +6,7 @@
 #   ./scripts/local-ci.sh alopex-py          # Run alopex-py workflow
 #   ./scripts/local-ci.sh alopex-py test     # Run specific job
 #   ./scripts/local-ci.sh --build-image      # Build custom Docker image
-#   ./scripts/local-ci.sh --clean            # Clean up containers
+#   ./scripts/local-ci.sh --clean            # Clean up containers, volumes, artifacts
 #
 # Requirements:
 #   - Docker
@@ -92,15 +92,25 @@ build_image() {
     log_success "Image built successfully"
 }
 
-# Clean up act containers and artifacts
+# Clean up act containers, volumes, and artifacts
 clean() {
     log_info "Cleaning up act containers..."
     docker ps -a --filter "label=act" -q | xargs -r docker rm -f
+
+    log_info "Cleaning up act volumes..."
+    docker volume ls -q --filter "label=act" | xargs -r docker volume rm
+    docker volume ls --format "{{.Name}}" | grep -E '^act-' | xargs -r docker volume rm
 
     log_info "Cleaning up artifacts directory..."
     rm -rf "${ARTIFACTS_DIR}"
 
     log_success "Cleanup complete"
+}
+
+cleanup_volumes() {
+    log_info "Cleaning up act volumes..."
+    docker volume ls -q --filter "label=act" | xargs -r docker volume rm
+    docker volume ls --format "{{.Name}}" | grep -E '^act-' | xargs -r docker volume rm
 }
 
 # List available workflows
@@ -161,6 +171,7 @@ run_workflow() {
 
     # Run act
     cd "${PROJECT_ROOT}"
+    trap cleanup_volumes EXIT
     "${ACT_BIN}" "${act_args[@]}"
 }
 
