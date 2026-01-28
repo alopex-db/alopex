@@ -3,6 +3,7 @@
 pub mod actions;
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -891,18 +892,13 @@ impl<'a> AdminApp<'a> {
             }
             AdminBackend::Remote {
                 client, batch_mode, ..
-            } => {
-                let runtime = Runtime::new().map_err(|err| {
-                    CliError::InvalidArgument(format!("Failed to start async runtime: {err}"))
-                })?;
-                runtime.block_on(execute_remote_action(
-                    client,
-                    batch_mode,
-                    request,
-                    &mut sink,
-                    Box::new(formatter),
-                ))
-            }
+            } => block_on_remote_action(execute_remote_action(
+                client,
+                batch_mode,
+                request,
+                &mut sink,
+                Box::new(formatter),
+            )),
         };
 
         let capture = state.lock().expect("admin capture lock");
@@ -1147,6 +1143,19 @@ impl<'a> AdminApp<'a> {
         items.dedup();
         items
     }
+}
+
+fn block_on_remote_action<F, T>(future: F) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        return tokio::task::block_in_place(|| handle.block_on(future));
+    }
+    let runtime = Runtime::new().map_err(|err| {
+        CliError::InvalidArgument(format!("Failed to start async runtime: {err}"))
+    })?;
+    runtime.block_on(future)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1664,18 +1673,13 @@ fn capture_admin_command(
         }
         AdminBackend::Remote {
             client, batch_mode, ..
-        } => {
-            let runtime = Runtime::new().map_err(|err| {
-                CliError::InvalidArgument(format!("Failed to start async runtime: {err}"))
-            })?;
-            runtime.block_on(execute_remote_action(
-                client,
-                batch_mode,
-                request,
-                &mut sink,
-                Box::new(formatter),
-            ))
-        }
+        } => block_on_remote_action(execute_remote_action(
+            client,
+            batch_mode,
+            request,
+            &mut sink,
+            Box::new(formatter),
+        )),
     };
     result?;
     let capture = state.lock().expect("admin capture lock").clone();

@@ -177,6 +177,25 @@ async fn streaming_handler(
     response
 }
 
+async fn streaming_jsonl_handler(
+    State(state): State<Arc<StreamServerState>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut guard = state.request_body.lock().await;
+    *guard = Some(body);
+    drop(guard);
+
+    let stream = build_chunk_stream(state.chunks.clone(), state.delay);
+    let body = boxed(Body::wrap_stream(stream));
+    let mut response = Response::new(body);
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/jsonl"),
+    );
+    response
+}
+
 async fn cancel_handler(State(state): State<Arc<StreamServerState>>) -> StatusCode {
     state.cancel_count.fetch_add(1, Ordering::SeqCst);
     StatusCode::OK
@@ -203,6 +222,34 @@ async fn start_streaming_server(
 
     let router = axum::Router::new()
         .route("/api/sql/query", post(streaming_handler))
+        .route("/api/sql/cancel", post(cancel_handler))
+        .with_state(state.clone());
+
+    let (base_url, shutdown, dir) = spawn_tls_server(router).await;
+    (base_url, shutdown, state, dir)
+}
+
+async fn start_jsonl_streaming_server(
+    chunks: Vec<&'static str>,
+    delay: Option<Duration>,
+) -> (
+    String,
+    oneshot::Sender<()>,
+    Arc<StreamServerState>,
+    tempfile::TempDir,
+) {
+    let state = Arc::new(StreamServerState {
+        chunks: chunks
+            .into_iter()
+            .map(|chunk| Bytes::from_static(chunk.as_bytes()))
+            .collect(),
+        delay,
+        request_body: Mutex::new(None),
+        cancel_count: AtomicUsize::new(0),
+    });
+
+    let router = axum::Router::new()
+        .route("/api/sql/query", post(streaming_jsonl_handler))
         .route("/api/sql/cancel", post(cancel_handler))
         .with_state(state.clone());
 
@@ -690,6 +737,43 @@ async fn server_sql_streaming_json_array_success() {
         first_obj.find("\"id\"").unwrap() < first_obj.find("\"name\"").unwrap(),
         "expected column order to follow first object keys: {first_obj}"
     );
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn server_sql_streaming_jsonl_success() {
+    let chunks = vec![
+        r#"{"row":[{"Integer":1},{"Text":"alpha"}],"error":null,"done":false}
+"#,
+        r#"{"row":[{"Integer":2},{"Text":"beta"}],"error":null,"done":false}
+"#,
+        r#"{"row":null,"error":null,"done":true}
+"#,
+    ];
+    let (base_url, shutdown, _state, _dir) = start_jsonl_streaming_server(chunks, None).await;
+
+    let cmd = SqlCommand {
+        query: Some("SELECT id, name FROM items".to_string()),
+        file: None,
+        fetch_size: None,
+        max_rows: None,
+        deadline: None,
+        tui: false,
+    };
+    let cancel = CancelSignal::new();
+    let deadline = Deadline::new(Duration::from_secs(5));
+
+    let output = execute_streaming_request(&base_url, cmd, &cancel, &deadline, OutputFormat::Json)
+        .await
+        .expect("streaming output");
+    let value: Value = serde_json::from_str(&output).expect("json array");
+    let rows = value.as_array().expect("array");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["col1"], json!(1));
+    assert_eq!(rows[0]["col2"], json!("alpha"));
+    assert_eq!(rows[1]["col1"], json!(2));
+    assert_eq!(rows[1]["col2"], json!("beta"));
 
     let _ = shutdown.send(());
 }
