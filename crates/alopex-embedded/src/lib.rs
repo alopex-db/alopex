@@ -6,6 +6,7 @@
 pub mod catalog;
 pub mod catalog_api;
 pub mod columnar_api;
+mod dataframe_api;
 pub mod options;
 mod sql_api;
 mod txn_manager;
@@ -21,6 +22,7 @@ pub use crate::columnar_api::{
 pub use crate::options::DatabaseOptions;
 pub use crate::sql_api::{SqlStreamingResult, StreamingQueryResult, StreamingRows};
 pub use crate::txn_manager::{TransactionInfo, TransactionManager};
+pub use alopex_dataframe::{DataFrame, JoinKeys, JoinType, SortOptions};
 pub use alopex_sql::{DataSourceFormat, TableType};
 /// `Database::execute_sql()` / `Transaction::execute_sql()` の返却型。
 pub type SqlResult = alopex_sql::SqlResult;
@@ -58,6 +60,9 @@ pub enum Error {
     /// An error from the SQL execution pipeline.
     #[error("{0}")]
     Sql(#[from] alopex_sql::SqlError),
+    /// An error from DataFrame operations.
+    #[error("{0}")]
+    DataFrame(#[from] alopex_dataframe::DataFrameError),
     /// The transaction has already been completed and cannot be used.
     #[error("transaction is completed")]
     TxnCompleted,

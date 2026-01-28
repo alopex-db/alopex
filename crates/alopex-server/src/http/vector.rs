@@ -286,6 +286,7 @@ pub(crate) async fn upsert_impl(
     request: VectorUpsertRequest,
 ) -> Result<VectorUpsertResponse> {
     let start = Instant::now();
+    state.lifecycle_state.check_write_allowed()?;
     let (table_meta, vector_col, _) =
         match resolve_vector_table(&state, &request.table, request.column.as_deref()) {
             Ok(values) => values,
@@ -407,6 +408,7 @@ pub(crate) async fn delete_impl(
     request: VectorDeleteRequest,
 ) -> Result<VectorDeleteResponse> {
     let start = Instant::now();
+    state.lifecycle_state.check_write_allowed()?;
     let (table_meta, _, _) =
         resolve_vector_table(&state, &request.table, request.column.as_deref())?;
     let pk_index = primary_key_index(&table_meta).ok_or_else(|| {
@@ -467,6 +469,7 @@ pub(crate) async fn index_create_impl(
     request: VectorIndexCreateRequest,
 ) -> Result<VectorIndexResponse> {
     let start = Instant::now();
+    state.lifecycle_state.check_write_allowed()?;
     let sql = match build_create_index_sql(
         &request.name,
         &request.table,
@@ -490,6 +493,7 @@ pub(crate) async fn index_update_impl(
     request: VectorIndexUpdateRequest,
 ) -> Result<VectorIndexResponse> {
     let start = Instant::now();
+    state.lifecycle_state.check_write_allowed()?;
     let create_sql = match build_create_index_sql(
         &request.name,
         &request.table,
@@ -515,6 +519,7 @@ pub(crate) async fn index_delete_impl(
     request: VectorIndexDeleteRequest,
 ) -> Result<VectorIndexResponse> {
     let start = Instant::now();
+    state.lifecycle_state.check_write_allowed()?;
     let sql = build_drop_index_sql(&request.name, request.if_exists);
     let response = execute_index_sql(state, start, &sql).await?;
     Ok(response)
@@ -525,6 +530,7 @@ pub(crate) async fn index_compact_impl(
     request: VectorIndexCompactRequest,
 ) -> Result<VectorIndexResponse> {
     let start = Instant::now();
+    state.lifecycle_state.check_write_allowed()?;
     let index = {
         let guard = match state.catalog.read() {
             Ok(guard) => guard,

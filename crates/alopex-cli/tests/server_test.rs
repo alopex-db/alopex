@@ -5,6 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alopex_cli::client::http::{ClientError, HttpClient};
+use alopex_cli::commands::lifecycle::{
+    execute_remote_with_formatter as execute_lifecycle_remote, RemoteLifecycleSupport, SupportLevel,
+};
 use alopex_cli::commands::server::execute_remote as execute_server_remote;
 use alopex_cli::commands::sql::execute_remote_with_formatter_control;
 use alopex_cli::commands::sql::SqlExecutionOptions;
@@ -13,7 +16,10 @@ use alopex_cli::output::formatter::create_formatter;
 use alopex_cli::profile::config::ServerConfig as CliServerConfig;
 use alopex_cli::streaming::{CancelSignal, Deadline};
 use alopex_cli::ui::mode::UiMode;
-use alopex_cli::{batch::BatchMode, cli::CompactionCommand, cli::ServerCommand, cli::SqlCommand};
+use alopex_cli::{
+    batch::BatchMode, cli::CompactionCommand, cli::LifecycleBackupCommand, cli::LifecycleCommand,
+    cli::LifecycleRestoreCommand, cli::ServerCommand, cli::SqlCommand,
+};
 use alopex_cli::{batch::BatchModeSource, cli::OutputFormat};
 use alopex_core::columnar::encoding::LogicalType;
 use alopex_core::columnar::segment_v2::{ColumnSchema, RecordBatch, Schema, SegmentWriterV2};
@@ -22,7 +28,7 @@ use alopex_server::config::ServerConfig;
 use alopex_server::http;
 use alopex_server::server::Server;
 use axum::body::{boxed, Body, Bytes};
-use axum::extract::{Json, State};
+use axum::extract::{Json, Path, State};
 use axum::http::{header, Request, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -171,6 +177,25 @@ async fn streaming_handler(
     response
 }
 
+async fn streaming_jsonl_handler(
+    State(state): State<Arc<StreamServerState>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut guard = state.request_body.lock().await;
+    *guard = Some(body);
+    drop(guard);
+
+    let stream = build_chunk_stream(state.chunks.clone(), state.delay);
+    let body = boxed(Body::wrap_stream(stream));
+    let mut response = Response::new(body);
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/jsonl"),
+    );
+    response
+}
+
 async fn cancel_handler(State(state): State<Arc<StreamServerState>>) -> StatusCode {
     state.cancel_count.fetch_add(1, Ordering::SeqCst);
     StatusCode::OK
@@ -197,6 +222,34 @@ async fn start_streaming_server(
 
     let router = axum::Router::new()
         .route("/api/sql/query", post(streaming_handler))
+        .route("/api/sql/cancel", post(cancel_handler))
+        .with_state(state.clone());
+
+    let (base_url, shutdown, dir) = spawn_tls_server(router).await;
+    (base_url, shutdown, state, dir)
+}
+
+async fn start_jsonl_streaming_server(
+    chunks: Vec<&'static str>,
+    delay: Option<Duration>,
+) -> (
+    String,
+    oneshot::Sender<()>,
+    Arc<StreamServerState>,
+    tempfile::TempDir,
+) {
+    let state = Arc::new(StreamServerState {
+        chunks: chunks
+            .into_iter()
+            .map(|chunk| Bytes::from_static(chunk.as_bytes()))
+            .collect(),
+        delay,
+        request_body: Mutex::new(None),
+        cancel_count: AtomicUsize::new(0),
+    });
+
+    let router = axum::Router::new()
+        .route("/api/sql/query", post(streaming_jsonl_handler))
         .route("/api/sql/cancel", post(cancel_handler))
         .with_state(state.clone());
 
@@ -241,6 +294,77 @@ async fn start_admin_server() -> (String, oneshot::Sender<()>, tempfile::TempDir
     spawn_tls_server(router).await
 }
 
+struct AdminLifecycleState {
+    backup_body: Mutex<Option<Value>>,
+    restore_body: Mutex<Option<Value>>,
+}
+
+async fn start_admin_lifecycle_server() -> (
+    String,
+    oneshot::Sender<()>,
+    Arc<AdminLifecycleState>,
+    tempfile::TempDir,
+) {
+    let state = Arc::new(AdminLifecycleState {
+        backup_body: Mutex::new(None),
+        restore_body: Mutex::new(None),
+    });
+    let router = axum::Router::new()
+        .route(
+            "/api/admin/backup",
+            post(|State(state): State<Arc<AdminLifecycleState>>, Json(body): Json<Value>| async move {
+                let mut guard = state.backup_body.lock().await;
+                *guard = Some(body);
+                Json(json!({
+                    "status": "OK",
+                    "handle": "backup-1",
+                    "state": "running",
+                    "location": "s3://bucket/backup-1",
+                    "message": "started"
+                }))
+            }),
+        )
+        .route(
+            "/api/admin/backup/:id",
+            get(|Path(handle): Path<String>| async move {
+                Json(json!({
+                    "status": "OK",
+                    "handle": handle,
+                    "state": "completed",
+                    "location": "s3://bucket/backup-1"
+                }))
+            }),
+        )
+        .route(
+            "/api/admin/restore",
+            post(|State(state): State<Arc<AdminLifecycleState>>, Json(body): Json<Value>| async move {
+                let mut guard = state.restore_body.lock().await;
+                *guard = Some(body.clone());
+                Json(json!({
+                    "status": "OK",
+                    "handle": "restore-1",
+                    "state": "running",
+                    "metadata": { "source": body.get("source").cloned().unwrap_or(Value::Null) }
+                }))
+            }),
+        )
+        .route(
+            "/api/admin/restore/:id",
+            get(|Path(handle): Path<String>| async move {
+                Json(json!({
+                    "status": "OK",
+                    "handle": handle,
+                    "state": "completed",
+                    "metadata": { "stage": "done" }
+                }))
+            }),
+        )
+        .with_state(state.clone());
+
+    let (base_url, shutdown, dir) = spawn_tls_server(router).await;
+    (base_url, shutdown, state, dir)
+}
+
 async fn execute_streaming_request(
     base_url: &str,
     cmd: SqlCommand,
@@ -268,6 +392,19 @@ async fn execute_streaming_request(
     )
     .await?;
     Ok(String::from_utf8(output).expect("utf8"))
+}
+
+async fn execute_lifecycle_request(
+    base_url: &str,
+    command: &LifecycleCommand,
+    support: RemoteLifecycleSupport,
+) -> Result<Value, CliError> {
+    let client = build_test_client(base_url);
+    let formatter = create_formatter(OutputFormat::Json);
+    let mut output = Vec::new();
+    execute_lifecycle_remote(&client, command, support, &mut output, formatter).await?;
+    let value: Value = serde_json::from_slice(&output).expect("json");
+    Ok(value)
 }
 
 fn table_id(table: &str) -> u32 {
@@ -605,6 +742,43 @@ async fn server_sql_streaming_json_array_success() {
 }
 
 #[tokio::test]
+async fn server_sql_streaming_jsonl_success() {
+    let chunks = vec![
+        r#"{"row":[{"Integer":1},{"Text":"alpha"}],"error":null,"done":false}
+"#,
+        r#"{"row":[{"Integer":2},{"Text":"beta"}],"error":null,"done":false}
+"#,
+        r#"{"row":null,"error":null,"done":true}
+"#,
+    ];
+    let (base_url, shutdown, _state, _dir) = start_jsonl_streaming_server(chunks, None).await;
+
+    let cmd = SqlCommand {
+        query: Some("SELECT id, name FROM items".to_string()),
+        file: None,
+        fetch_size: None,
+        max_rows: None,
+        deadline: None,
+        tui: false,
+    };
+    let cancel = CancelSignal::new();
+    let deadline = Deadline::new(Duration::from_secs(5));
+
+    let output = execute_streaming_request(&base_url, cmd, &cancel, &deadline, OutputFormat::Json)
+        .await
+        .expect("streaming output");
+    let value: Value = serde_json::from_str(&output).expect("json array");
+    let rows = value.as_array().expect("array");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["col1"], json!(1));
+    assert_eq!(rows[0]["col2"], json!("alpha"));
+    assert_eq!(rows[1]["col1"], json!(2));
+    assert_eq!(rows[1]["col2"], json!("beta"));
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
 async fn server_sql_streaming_empty_array_outputs_json() {
     let (base_url, shutdown, _state, _dir) = start_streaming_server(vec!["[]"], None).await;
 
@@ -919,4 +1093,189 @@ async fn server_admin_connection_error() {
         .await
         .unwrap_err();
     assert!(matches!(err, CliError::ServerConnection(_)));
+}
+
+#[tokio::test]
+async fn server_admin_lifecycle_backup_restore_success() {
+    let (base_url, shutdown, state, _dir) = start_admin_lifecycle_server().await;
+    let support = RemoteLifecycleSupport {
+        backup: SupportLevel::Supported,
+        restore: SupportLevel::Supported,
+    };
+
+    let value = execute_lifecycle_request(
+        &base_url,
+        &LifecycleCommand::Backup { command: None },
+        support,
+    )
+    .await
+    .expect("backup start");
+    let row = value
+        .as_array()
+        .and_then(|rows| rows.first())
+        .and_then(|row| row.as_object())
+        .expect("row object");
+    assert_eq!(row.get("Status").and_then(|v| v.as_str()), Some("OK"));
+    assert_eq!(row.get("Handle").and_then(|v| v.as_str()), Some("backup-1"));
+    assert_eq!(row.get("State").and_then(|v| v.as_str()), Some("running"));
+    assert_eq!(
+        row.get("Location").and_then(|v| v.as_str()),
+        Some("s3://bucket/backup-1")
+    );
+
+    let value = execute_lifecycle_request(
+        &base_url,
+        &LifecycleCommand::Backup {
+            command: Some(LifecycleBackupCommand::Status {
+                handle: "backup-1".to_string(),
+            }),
+        },
+        support,
+    )
+    .await
+    .expect("backup status");
+    let row = value
+        .as_array()
+        .and_then(|rows| rows.first())
+        .and_then(|row| row.as_object())
+        .expect("row object");
+    assert_eq!(row.get("State").and_then(|v| v.as_str()), Some("completed"));
+
+    let value = execute_lifecycle_request(
+        &base_url,
+        &LifecycleCommand::Restore {
+            source: Some("s3://bucket/restore".to_string()),
+            command: None,
+        },
+        support,
+    )
+    .await
+    .expect("restore start");
+    let row = value
+        .as_array()
+        .and_then(|rows| rows.first())
+        .and_then(|row| row.as_object())
+        .expect("row object");
+    assert_eq!(
+        row.get("Handle").and_then(|v| v.as_str()),
+        Some("restore-1")
+    );
+    assert_eq!(row.get("State").and_then(|v| v.as_str()), Some("running"));
+    assert!(row
+        .get("Metadata")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .contains("source"));
+
+    let value = execute_lifecycle_request(
+        &base_url,
+        &LifecycleCommand::Restore {
+            source: None,
+            command: Some(LifecycleRestoreCommand::Status {
+                handle: "restore-1".to_string(),
+            }),
+        },
+        support,
+    )
+    .await
+    .expect("restore status");
+    let row = value
+        .as_array()
+        .and_then(|rows| rows.first())
+        .and_then(|row| row.as_object())
+        .expect("row object");
+    assert_eq!(row.get("State").and_then(|v| v.as_str()), Some("completed"));
+
+    let restore_body = state.restore_body.lock().await;
+    assert_eq!(
+        restore_body
+            .as_ref()
+            .and_then(|body| body.get("source"))
+            .and_then(|value| value.as_str()),
+        Some("s3://bucket/restore")
+    );
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn server_admin_lifecycle_unsupported_endpoint_maps_error() {
+    let router = axum::Router::new().route(
+        "/api/admin/backup/:id",
+        get(|| async { (StatusCode::NOT_FOUND, Json(json!({ "error": "missing" }))) }),
+    );
+    let (base_url, shutdown, _dir) = spawn_tls_server(router).await;
+    let client = build_test_client(&base_url);
+    let mut output = Vec::new();
+    let formatter = create_formatter(OutputFormat::Json);
+
+    let err = execute_lifecycle_remote(
+        &client,
+        &LifecycleCommand::Backup {
+            command: Some(LifecycleBackupCommand::Status {
+                handle: "missing".to_string(),
+            }),
+        },
+        RemoteLifecycleSupport::unknown(),
+        &mut output,
+        formatter,
+    )
+    .await
+    .expect_err("unsupported");
+    assert!(matches!(err, CliError::ServerUnsupported(_)));
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn server_admin_lifecycle_http_error_maps_to_connection_error() {
+    let router = axum::Router::new().route(
+        "/api/admin/restore",
+        post(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+    );
+    let (base_url, shutdown, _dir) = spawn_tls_server(router).await;
+    let client = build_test_client(&base_url);
+    let mut output = Vec::new();
+    let formatter = create_formatter(OutputFormat::Json);
+
+    let err = execute_lifecycle_remote(
+        &client,
+        &LifecycleCommand::Restore {
+            source: Some("s3://bucket/restore".to_string()),
+            command: None,
+        },
+        RemoteLifecycleSupport::unknown(),
+        &mut output,
+        formatter,
+    )
+    .await
+    .expect_err("http error");
+    assert!(matches!(err, CliError::ServerConnection(_)));
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn server_admin_lifecycle_invalid_json_maps_to_connection_error() {
+    let router = axum::Router::new().route(
+        "/api/admin/backup",
+        post(|| async { (StatusCode::OK, "not-json") }),
+    );
+    let (base_url, shutdown, _dir) = spawn_tls_server(router).await;
+    let client = build_test_client(&base_url);
+    let mut output = Vec::new();
+    let formatter = create_formatter(OutputFormat::Json);
+
+    let err = execute_lifecycle_remote(
+        &client,
+        &LifecycleCommand::Backup { command: None },
+        RemoteLifecycleSupport::unknown(),
+        &mut output,
+        formatter,
+    )
+    .await
+    .expect_err("invalid json");
+    assert!(matches!(err, CliError::ServerConnection(_)));
+
+    let _ = shutdown.send(());
 }

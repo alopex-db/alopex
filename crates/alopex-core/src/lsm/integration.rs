@@ -55,7 +55,8 @@ pub mod crud {
 
         // 大量 insert（バッチコミットで write_set を肥大化させない）。
         {
-            let store = LsmKV::open_with_config(dir.path(), cfg.clone()).expect("open");
+            let (store, _recovery) =
+                LsmKV::open_with_config(dir.path(), cfg.clone()).expect("open");
             let mut i = 0usize;
             let batch = 1_000usize;
             while i < n {
@@ -71,7 +72,7 @@ pub mod crud {
         }
 
         // reopen して読み取れること（WAL replay を含む）。
-        let store = LsmKV::open_with_config(dir.path(), cfg.clone()).expect("reopen");
+        let (store, _recovery) = LsmKV::open_with_config(dir.path(), cfg.clone()).expect("reopen");
 
         // point get（サンプル）
         {
@@ -124,7 +125,8 @@ pub mod crud {
         }
 
         // reopen 後も整合が保たれること
-        let store = LsmKV::open_with_config(dir.path(), cfg).expect("reopen after updates");
+        let (store, _recovery) =
+            LsmKV::open_with_config(dir.path(), cfg).expect("reopen after updates");
         {
             let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
             // updated: 0..100（ただし delete される 0,10,... は消える）
@@ -180,7 +182,8 @@ pub mod recovery {
 
         // 1) 正常に 1 件コミット（WAL に確実に残る）
         {
-            let store = LsmKV::open_with_config(dir.path(), cfg.clone()).expect("open");
+            let (store, _recovery) =
+                LsmKV::open_with_config(dir.path(), cfg.clone()).expect("open");
             let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
             tx.put(b"k1".to_vec(), b"v1".to_vec()).unwrap();
             tx.commit_self().unwrap();
@@ -210,7 +213,7 @@ pub mod recovery {
         }
 
         // 3) reopen: reader は末尾で停止しつつ、先頭のエントリは復元される
-        let store = LsmKV::open_with_config(dir.path(), cfg.clone()).expect("reopen");
+        let (store, _recovery) = LsmKV::open_with_config(dir.path(), cfg.clone()).expect("reopen");
         let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
         assert_eq!(ro.get(&b"k1".to_vec()).unwrap(), Some(b"v1".to_vec()));
         assert_eq!(ro.get(&b"k2".to_vec()).unwrap(), None);

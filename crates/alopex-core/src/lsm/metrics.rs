@@ -134,7 +134,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let store = LsmKV::open_with_config(dir.path(), cfg).unwrap();
+        let (store, _recovery) = LsmKV::open_with_config(dir.path(), cfg).unwrap();
 
         let before = store.metrics().wal_write_bytes;
         let mut tx = store.begin(TxnMode::ReadWrite).unwrap();

@@ -7,6 +7,7 @@ use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::storage::{KeyEncoder, SqlTxn};
 
 use super::is_implicit_pk_index;
+use super::persistence::delete_index;
 
 /// Execute DROP INDEX.
 pub fn execute_drop_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
@@ -49,6 +50,7 @@ pub fn execute_drop_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     }
 
     catalog.drop_index(index_name)?;
+    delete_index(txn.inner_mut(), &index)?;
 
     Ok(ExecutionResult::Success)
 }

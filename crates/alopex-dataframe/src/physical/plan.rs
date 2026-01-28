@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::lazy::{LogicalPlan, ProjectionKind};
+use crate::ops::{FillNull, JoinKeys, JoinType, SortOptions};
 use crate::{DataFrame, Expr, Result};
 
 /// Source for a physical scan operator.
@@ -44,6 +45,42 @@ pub enum PhysicalPlan {
         group_by: Vec<Expr>,
         aggs: Vec<Expr>,
     },
+    /// Join operator.
+    JoinExec {
+        left: Box<PhysicalPlan>,
+        right: Box<PhysicalPlan>,
+        keys: JoinKeys,
+        how: JoinType,
+    },
+    /// Sort operator.
+    SortExec {
+        input: Box<PhysicalPlan>,
+        options: SortOptions,
+    },
+    /// Slice operator (head/tail).
+    SliceExec {
+        input: Box<PhysicalPlan>,
+        offset: usize,
+        len: usize,
+        from_end: bool,
+    },
+    /// Unique operator.
+    UniqueExec {
+        input: Box<PhysicalPlan>,
+        subset: Option<Vec<String>>,
+    },
+    /// Fill-null operator.
+    FillNullExec {
+        input: Box<PhysicalPlan>,
+        fill: FillNull,
+    },
+    /// Drop-nulls operator.
+    DropNullsExec {
+        input: Box<PhysicalPlan>,
+        subset: Option<Vec<String>>,
+    },
+    /// Null-count operator.
+    NullCountExec { input: Box<PhysicalPlan> },
 }
 
 /// Compile a `LogicalPlan` into a `PhysicalPlan`.
@@ -91,6 +128,47 @@ pub fn compile(logical: &LogicalPlan) -> Result<PhysicalPlan> {
             input: Box::new(compile(input)?),
             group_by: group_by.clone(),
             aggs: aggs.clone(),
+        },
+        LogicalPlan::Join {
+            left,
+            right,
+            keys,
+            how,
+        } => PhysicalPlan::JoinExec {
+            left: Box::new(compile(left)?),
+            right: Box::new(compile(right)?),
+            keys: keys.clone(),
+            how: *how,
+        },
+        LogicalPlan::Sort { input, options } => PhysicalPlan::SortExec {
+            input: Box::new(compile(input)?),
+            options: options.clone(),
+        },
+        LogicalPlan::Slice {
+            input,
+            offset,
+            len,
+            from_end,
+        } => PhysicalPlan::SliceExec {
+            input: Box::new(compile(input)?),
+            offset: *offset,
+            len: *len,
+            from_end: *from_end,
+        },
+        LogicalPlan::Unique { input, subset } => PhysicalPlan::UniqueExec {
+            input: Box::new(compile(input)?),
+            subset: subset.clone(),
+        },
+        LogicalPlan::FillNull { input, fill } => PhysicalPlan::FillNullExec {
+            input: Box::new(compile(input)?),
+            fill: fill.clone(),
+        },
+        LogicalPlan::DropNulls { input, subset } => PhysicalPlan::DropNullsExec {
+            input: Box::new(compile(input)?),
+            subset: subset.clone(),
+        },
+        LogicalPlan::NullCount { input } => PhysicalPlan::NullCountExec {
+            input: Box::new(compile(input)?),
         },
     };
 

@@ -72,6 +72,10 @@ pub enum ExecutorError {
     #[error("invalid operation: {operation} - {reason}")]
     InvalidOperation { operation: String, reason: String },
 
+    /// Resource exhausted during execution.
+    #[error("resource exhausted: {message}")]
+    ResourceExhausted { message: String },
+
     /// Input file not found.
     #[error("file not found: {0}")]
     FileNotFound(String),

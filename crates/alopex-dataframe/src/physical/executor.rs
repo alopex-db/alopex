@@ -33,6 +33,45 @@ fn execute_plan(plan: &PhysicalPlan) -> Result<Vec<RecordBatch>> {
             let batches = execute_plan(input)?;
             operators::aggregate_batches(batches, group_by, aggs)
         }
+        PhysicalPlan::JoinExec {
+            left,
+            right,
+            keys,
+            how,
+        } => {
+            let left_batches = execute_plan(left)?;
+            let right_batches = execute_plan(right)?;
+            operators::join_batches(left_batches, right_batches, keys, how)
+        }
+        PhysicalPlan::SortExec { input, options } => {
+            let batches = execute_plan(input)?;
+            operators::sort_batches(batches, options)
+        }
+        PhysicalPlan::SliceExec {
+            input,
+            offset,
+            len,
+            from_end,
+        } => {
+            let batches = execute_plan(input)?;
+            operators::slice_batches(batches, *offset, *len, *from_end)
+        }
+        PhysicalPlan::UniqueExec { input, subset } => {
+            let batches = execute_plan(input)?;
+            operators::unique_batches(batches, subset.as_deref())
+        }
+        PhysicalPlan::FillNullExec { input, fill } => {
+            let batches = execute_plan(input)?;
+            operators::fill_null_batches(batches, fill)
+        }
+        PhysicalPlan::DropNullsExec { input, subset } => {
+            let batches = execute_plan(input)?;
+            operators::drop_nulls_batches(batches, subset.as_deref())
+        }
+        PhysicalPlan::NullCountExec { input } => {
+            let batches = execute_plan(input)?;
+            operators::null_count_batches(batches)
+        }
     }
 }
 

@@ -4,7 +4,9 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use alopex_core::kv::async_adapter::AsyncKVTransactionAdapter;
+use alopex_sql::parser::Parser;
 use alopex_sql::storage::AsyncSqlTransaction;
+use alopex_sql::AlopexDialect;
 use futures::{future::BoxFuture, StreamExt};
 use prost::Message;
 use tokio::sync::broadcast;
@@ -17,6 +19,7 @@ use uuid::Uuid;
 
 use crate::error::{Result, ServerError};
 use crate::metrics::Metrics;
+use crate::ops::memory::MemoryControlPolicy;
 use crate::server::ServerState;
 use crate::session::{SessionId, TxnHandle};
 use crate::tls;
@@ -187,6 +190,11 @@ impl AlopexService for AlopexServiceImpl {
         if req.sql.trim().is_empty() {
             return Err(Status::invalid_argument("sql must not be empty"));
         }
+        if is_write_sql(&req.sql) {
+            if let Err(err) = self.state.lifecycle_state.check_write_allowed() {
+                return Err(map_status(err, &ctx.correlation_id));
+            }
+        }
 
         let (sender, receiver) = mpsc::channel(32);
         let sql = req.sql;
@@ -202,6 +210,7 @@ impl AlopexService for AlopexServiceImpl {
         let state = self.state.clone();
         let correlation_id = ctx.correlation_id.clone();
         let span = ctx.span.clone();
+        let memory_policy = MemoryControlPolicy::from_env();
         tokio::spawn(async move {
             let _enter = span.enter();
             let start = Instant::now();
@@ -268,6 +277,15 @@ impl AlopexService for AlopexServiceImpl {
                                     values: row.values.iter().map(sql_value_to_proto).collect(),
                                 };
                                 bytes_sent = bytes_sent.saturating_add(proto_row.encoded_len());
+                                if let Err(err) =
+                                    memory_policy.enforce_output_bytes(bytes_sent as u64)
+                                {
+                                    let _ = sender
+                                        .send(Err(map_status(err, &correlation_id)))
+                                        .await;
+                                    success = false;
+                                    break;
+                                }
                                 if bytes_sent > state.config.max_response_size {
                                     let _ = sender
                                         .send(Err(map_status(
@@ -330,6 +348,9 @@ impl AlopexService for AlopexServiceImpl {
         let req = request.into_inner();
         if req.sql.trim().is_empty() {
             return Err(Status::invalid_argument("sql must not be empty"));
+        }
+        if let Err(err) = self.state.lifecycle_state.check_write_allowed() {
+            return Err(map_status(err, &ctx.correlation_id));
         }
         let start = Instant::now();
         let exec_result = if !req.session_id.is_empty() {
@@ -418,6 +439,9 @@ impl AlopexService for AlopexServiceImpl {
         let req = request.into_inner();
         if req.sql.trim().is_empty() {
             return Err(Status::invalid_argument("sql must not be empty"));
+        }
+        if let Err(err) = self.state.lifecycle_state.check_write_allowed() {
+            return Err(map_status(err, &ctx.correlation_id));
         }
         let start = Instant::now();
         let exec_result = if !req.session_id.is_empty() {
@@ -827,4 +851,13 @@ fn map_status(err: ServerError, correlation_id: &str) -> Status {
         format!("{} (correlation_id={})", err, correlation_id)
     };
     Status::new(code, message)
+}
+
+fn is_write_sql(sql: &str) -> bool {
+    let Ok(statements) = Parser::parse_sql(&AlopexDialect, sql) else {
+        return false;
+    };
+    statements
+        .iter()
+        .any(|stmt| !matches!(stmt.kind, alopex_sql::ast::StatementKind::Select(_)))
 }

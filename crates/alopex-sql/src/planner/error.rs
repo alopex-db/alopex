@@ -115,6 +115,10 @@ pub enum PlannerError {
         column: u64,
     },
 
+    /// ALOPEX-T007: Invalid expression for the current context.
+    #[error("error[ALOPEX-T007]: invalid expression: {message}")]
+    InvalidExpression { message: String },
+
     // === Feature Errors (ALOPEX-F*) ===
     /// ALOPEX-F001: Unsupported feature.
     #[error(
@@ -188,6 +192,13 @@ impl PlannerError {
             found: found.into(),
             line: span.start.line,
             column: span.start.column,
+        }
+    }
+
+    /// Create an InvalidExpression error.
+    pub fn invalid_expression(message: impl Into<String>) -> Self {
+        Self::InvalidExpression {
+            message: message.into(),
         }
     }
 

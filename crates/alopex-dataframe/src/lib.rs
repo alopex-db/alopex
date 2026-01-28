@@ -14,6 +14,8 @@ pub mod expr;
 pub mod io;
 /// Lazy query planning and optimization.
 pub mod lazy;
+/// P1 operation types and helpers.
+pub mod ops;
 /// Physical plan compilation and execution.
 pub mod physical;
 
@@ -27,6 +29,8 @@ pub use crate::expr::{all, col, lit, Expr};
 pub use crate::io::{read_csv, read_parquet, write_csv, write_parquet};
 /// Re-export of the primary lazy type.
 pub use crate::lazy::LazyFrame;
+/// Re-export of P1 operation types.
+pub use crate::ops::{FillNullStrategy, JoinKeys, JoinType, SortOptions};
 
 /// Create a `LazyFrame` that scans a CSV file without performing I/O eagerly.
 pub fn scan_csv(path: impl AsRef<std::path::Path>) -> Result<LazyFrame> {

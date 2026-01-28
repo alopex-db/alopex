@@ -1522,6 +1522,8 @@ fn test_unknown_function_error() {
                 },
                 span: test_span(),
             }],
+            distinct: false,
+            star: false,
         },
         span: span_at(3, 5),
     };

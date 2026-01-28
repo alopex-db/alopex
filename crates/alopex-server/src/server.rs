@@ -4,7 +4,6 @@ use std::time::Instant;
 
 use alopex_core::kv::any::AnyKV;
 use alopex_core::kv::async_adapter::{AsyncKVStoreAdapter, AsyncKVTransactionAdapter};
-use alopex_core::kv::storage::{StorageFactory, StorageMode};
 use alopex_core::kv::AsyncKVStore;
 use alopex_core::types::TxnMode;
 use alopex_sql::catalog::{Catalog, CatalogError, PersistentCatalog};
@@ -17,6 +16,11 @@ use crate::auth::AuthMiddleware;
 use crate::config::ServerConfig;
 use crate::error::{Result, ServerError};
 use crate::metrics::Metrics;
+use crate::ops::backup::BackupCoordinator;
+use crate::ops::memory::MemoryControlPolicy;
+use crate::ops::recovery::{RecoveryCoordinator, RecoveryInfo};
+use crate::ops::restore::RestoreCoordinator;
+use crate::ops::state::{LifecycleStateManager, Mode};
 use crate::session::{SessionConfig, SessionManager, TransactionFactory};
 use crate::tls;
 
@@ -34,15 +38,19 @@ pub struct ServerState {
     pub audit: AuditLogger,
     pub auth: AuthMiddleware,
     pub start_time: Instant,
+    pub lifecycle_state: Arc<LifecycleStateManager>,
+    pub recovery_info: RecoveryInfo,
+    pub backup_coordinator: BackupCoordinator,
+    pub restore_coordinator: RestoreCoordinator,
 }
 
 impl Server {
     pub fn new(config: ServerConfig) -> Result<Self> {
         config.validate()?;
-        let store = StorageFactory::create(StorageMode::Disk {
-            path: config.data_dir.clone(),
-            config: None,
-        })?;
+        let (store, recovery_info) = RecoveryCoordinator::open_store(&config.data_dir)?;
+        let lifecycle_state = Arc::new(LifecycleStateManager::new(Mode::Normal));
+        RecoveryCoordinator::apply_initial_mode(&lifecycle_state, &recovery_info);
+
         let store = Arc::new(store);
         let catalog = load_catalog(store.clone())?;
         let async_store = Arc::new(AsyncKVStoreAdapter::from_arc(
@@ -53,13 +61,29 @@ impl Server {
         let audit = AuditLogger::new(config.audit_log_output.clone())?;
         let auth = AuthMiddleware::new(config.auth_mode.clone());
 
-        let txn_factory = build_txn_factory(async_store.clone(), catalog.clone());
+        let txn_factory = build_txn_factory(async_store.clone(), catalog.clone(), metrics.clone());
         let session_manager = Arc::new(SessionManager::new(
             SessionConfig {
                 ttl: config.session_ttl,
             },
             txn_factory,
         ));
+        let data_dir = config.data_dir.clone();
+        let checkpoint = {
+            let store = store.clone();
+            Arc::new(move || match store.as_ref() {
+                AnyKV::Lsm(kv) => {
+                    kv.checkpoint()?;
+                    Ok(())
+                }
+                _ => Err(ServerError::BadRequest(
+                    "checkpoint unsupported for current storage engine".to_string(),
+                )),
+            })
+        };
+        let backup_coordinator =
+            BackupCoordinator::new(data_dir.clone(), lifecycle_state.clone(), checkpoint);
+        let restore_coordinator = RestoreCoordinator::new(data_dir, lifecycle_state.clone());
 
         Ok(Self {
             state: Arc::new(ServerState {
@@ -72,6 +96,10 @@ impl Server {
                 audit,
                 auth,
                 start_time: Instant::now(),
+                lifecycle_state,
+                recovery_info,
+                backup_coordinator,
+                restore_coordinator,
             }),
         })
     }
@@ -129,25 +157,29 @@ impl ServerState {
         &self,
     ) -> Result<AsyncTxnBridge<'static, AsyncKVTransactionAdapter>> {
         let txn = self.async_store.begin_async().await?;
-        Ok(AsyncTxnBridge::with_catalog(
-            txn,
-            TxnMode::ReadWrite,
-            self.catalog.clone(),
-        ))
+        let mut bridge =
+            AsyncTxnBridge::with_catalog(txn, TxnMode::ReadWrite, self.catalog.clone());
+        let policy = MemoryControlPolicy::from_env_with_metrics(self.metrics.clone()).sql_policy();
+        bridge.set_memory_policy(policy);
+        Ok(bridge)
     }
 }
 
 fn build_txn_factory(
     store: Arc<AsyncKVStoreAdapter<AnyKV>>,
     catalog: Arc<RwLock<dyn Catalog + Send + Sync>>,
+    metrics: Metrics,
 ) -> TransactionFactory {
     Arc::new(move || {
         let store = store.clone();
         let catalog = catalog.clone();
+        let metrics = metrics.clone();
         Box::pin(async move {
             let txn = store.begin_async().await?;
-            let bridge: AsyncTxnBridge<'static, AsyncKVTransactionAdapter> =
+            let mut bridge: AsyncTxnBridge<'static, AsyncKVTransactionAdapter> =
                 AsyncTxnBridge::with_catalog(txn, TxnMode::ReadWrite, catalog);
+            let policy = MemoryControlPolicy::from_env_with_metrics(metrics).sql_policy();
+            bridge.set_memory_policy(policy);
             Ok(Box::new(bridge) as Box<dyn ErasedAsyncSqlTransaction>)
         })
     })

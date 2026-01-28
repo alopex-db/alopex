@@ -44,12 +44,14 @@ pub(crate) mod dml;
 mod error;
 pub mod evaluator;
 mod hnsw_bridge;
+pub mod memory;
 pub mod query;
 mod result;
 
 #[cfg(feature = "tokio")]
 pub use async_executor::AsyncExecutor;
 pub use error::{ConstraintViolation, EvaluationError, ExecutorError, Result};
+pub use memory::{MemoryPolicy, SpillPolicy};
 pub use query::{RowIterator, ScanIterator, build_streaming_pipeline};
 pub use result::{ColumnInfo, ExecutionResult, QueryResult, QueryRowIterator, Row};
 

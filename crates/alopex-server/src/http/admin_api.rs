@@ -1,13 +1,20 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use axum::extract::Extension;
+use axum::extract::{Extension, Path as AxumPath};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::auth::AuthMode;
+use crate::http::{error_response, RequestContext};
+use crate::ops::backup::BackupHandle;
+use crate::ops::restore::{RestoreHandle, RestoreSource};
+use crate::ops::state::{OperationState, RestoreMetadata};
+use crate::ops::status::StatusReporter;
+use crate::ops::status::StatusView;
 use crate::server::ServerState;
 
 #[derive(Serialize)]
@@ -22,6 +29,8 @@ struct AdminStatusResponse {
     uptime_secs: Option<u64>,
     connections: Option<u64>,
     queries_per_second: Option<f64>,
+    #[serde(flatten)]
+    status: StatusView,
 }
 
 #[derive(Serialize)]
@@ -44,6 +53,12 @@ pub struct AdminLifecycleRequest {
     action: String,
 }
 
+#[derive(Deserialize)]
+pub struct AdminRestoreRequest {
+    #[serde(default)]
+    source: Option<String>,
+}
+
 #[derive(Serialize)]
 struct AdminLifecycleResponse {
     status: &'static str,
@@ -56,6 +71,20 @@ struct AdminCompactionResponse {
     message: String,
 }
 
+#[derive(Serialize)]
+struct AdminBackupResponse {
+    handle: String,
+    location: String,
+    state: OperationState,
+}
+
+#[derive(Serialize)]
+struct AdminRestoreResponse {
+    handle: String,
+    state: OperationState,
+    metadata: Option<RestoreMetadata>,
+}
+
 pub async fn capabilities(Extension(state): Extension<Arc<ServerState>>) -> impl IntoResponse {
     let (scope, allowed_actions) = capabilities_for_auth(&state.auth);
     Json(AdminCapabilitiesResponse {
@@ -66,11 +95,14 @@ pub async fn capabilities(Extension(state): Extension<Arc<ServerState>>) -> impl
 
 pub async fn status(Extension(state): Extension<Arc<ServerState>>) -> impl IntoResponse {
     let uptime = state.start_time.elapsed().as_secs();
+    let reporter = StatusReporter::new(state.lifecycle_state.clone(), state.recovery_info.clone());
+    let status = reporter.status_view();
     Json(AdminStatusResponse {
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
         uptime_secs: Some(uptime),
         connections: None,
         queries_per_second: None,
+        status,
     })
 }
 
@@ -96,6 +128,92 @@ pub async fn compaction() -> impl IntoResponse {
         success: false,
         message: "Compaction is not available on this server build.".to_string(),
     })
+}
+
+pub async fn start_backup(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+) -> Response {
+    match state.backup_coordinator.start_backup().await {
+        Ok(handle) => match backup_response(&state, &handle) {
+            Ok(response) => Json(response).into_response(),
+            Err(err) => error_response(err, &ctx),
+        },
+        Err(err) => error_response(err, &ctx),
+    }
+}
+
+pub async fn backup_status(
+    AxumPath(id): AxumPath<String>,
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+) -> Response {
+    let handle = match parse_backup_handle(&id) {
+        Ok(handle) => handle,
+        Err(err) => return error_response(err, &ctx),
+    };
+    match backup_response(&state, &handle) {
+        Ok(response) => Json(response).into_response(),
+        Err(err) => error_response(err, &ctx),
+    }
+}
+
+pub async fn start_restore(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+    Json(request): Json<AdminRestoreRequest>,
+) -> Response {
+    let source_path = match request.source {
+        Some(source) => source.into(),
+        None => match crate::ops::restore::resolve_default_source(&state.config.data_dir) {
+            Ok(path) => path,
+            Err(crate::error::ServerError::NotFound(_)) => {
+                match state.backup_coordinator.latest_location() {
+                    Some(path) => path,
+                    None => {
+                        let data_dir = state.config.data_dir.clone();
+                        let archive_result = tokio::task::spawn_blocking(move || {
+                            perform_lifecycle_action("archive", Path::new(&data_dir))
+                        })
+                        .await
+                        .map_err(|err| crate::error::ServerError::Internal(err.to_string()))
+                        .and_then(|res| res.map_err(crate::error::ServerError::BadRequest));
+                        if let Err(err) = archive_result {
+                            return error_response(err, &ctx);
+                        }
+                        match crate::ops::restore::resolve_default_source(&state.config.data_dir) {
+                            Ok(path) => path,
+                            Err(err) => return error_response(err, &ctx),
+                        }
+                    }
+                }
+            }
+            Err(err) => return error_response(err, &ctx),
+        },
+    };
+    let source = RestoreSource { path: source_path };
+    match state.restore_coordinator.start_restore(source).await {
+        Ok(handle) => match restore_response(&state, &handle) {
+            Ok(response) => Json(response).into_response(),
+            Err(err) => error_response(err, &ctx),
+        },
+        Err(err) => error_response(err, &ctx),
+    }
+}
+
+pub async fn restore_status(
+    AxumPath(id): AxumPath<String>,
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+) -> Response {
+    let handle = match parse_restore_handle(&id) {
+        Ok(handle) => handle,
+        Err(err) => return error_response(err, &ctx),
+    };
+    match restore_response(&state, &handle) {
+        Ok(response) => Json(response).into_response(),
+        Err(err) => error_response(err, &ctx),
+    }
 }
 
 pub async fn lifecycle(
@@ -129,6 +247,44 @@ pub async fn lifecycle(
         )
             .into_response(),
     }
+}
+
+fn parse_backup_handle(id: &str) -> crate::error::Result<BackupHandle> {
+    let id = Uuid::parse_str(id)
+        .map_err(|_| crate::error::ServerError::BadRequest("invalid backup handle".into()))?;
+    Ok(BackupHandle { id })
+}
+
+fn parse_restore_handle(id: &str) -> crate::error::Result<RestoreHandle> {
+    let id = Uuid::parse_str(id)
+        .map_err(|_| crate::error::ServerError::BadRequest("invalid restore handle".into()))?;
+    Ok(RestoreHandle { id })
+}
+
+fn backup_response(
+    state: &ServerState,
+    handle: &BackupHandle,
+) -> crate::error::Result<AdminBackupResponse> {
+    let location = state.backup_coordinator.location(handle)?;
+    let status = state.backup_coordinator.status(handle)?;
+    Ok(AdminBackupResponse {
+        handle: handle.id.to_string(),
+        location: location.display().to_string(),
+        state: status,
+    })
+}
+
+fn restore_response(
+    state: &ServerState,
+    handle: &RestoreHandle,
+) -> crate::error::Result<AdminRestoreResponse> {
+    let status = state.restore_coordinator.status(handle)?;
+    let metadata = state.restore_coordinator.metadata(handle)?;
+    Ok(AdminRestoreResponse {
+        handle: handle.id.to_string(),
+        state: status,
+        metadata,
+    })
 }
 
 fn capabilities_for_auth(auth: &crate::auth::AuthMiddleware) -> (&'static str, Vec<&'static str>) {
@@ -167,25 +323,6 @@ fn perform_lifecycle_action(action: &str, data_dir: &Path) -> Result<String, Str
             copy_data_dir(data_dir, &dest)?;
             write_latest_marker(&lifecycle_root.join("archive"), &dest)?;
             Ok(format!("Archived data to {}", dest.display()))
-        }
-        "restore" => {
-            let archive_root = lifecycle_root.join("archive");
-            let latest = read_latest_marker(&archive_root)?;
-            let backup_dir = lifecycle_root.join("restore-backup").join(timestamp_dir());
-            copy_data_dir(data_dir, &backup_dir)?;
-            clear_data_dir(data_dir)?;
-            copy_data_dir(&latest, data_dir)?;
-            Ok(format!(
-                "Restored data from {} (backup at {})",
-                latest.display(),
-                backup_dir.display()
-            ))
-        }
-        "backup" => {
-            let dest = lifecycle_root.join("backup").join(timestamp_dir());
-            copy_data_dir(data_dir, &dest)?;
-            write_latest_marker(&lifecycle_root.join("backup"), &dest)?;
-            Ok(format!("Backup created at {}", dest.display()))
         }
         "export" => {
             let dest = lifecycle_root.join("export").join(timestamp_dir());
@@ -228,36 +365,9 @@ fn copy_dir_filtered(src: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn clear_data_dir(dir: &Path) -> Result<(), String> {
-    for entry in std::fs::read_dir(dir).map_err(|err| err.to_string())? {
-        let entry = entry.map_err(|err| err.to_string())?;
-        let name = entry.file_name();
-        if name == ".lifecycle" {
-            continue;
-        }
-        let path = entry.path();
-        if path.is_dir() {
-            std::fs::remove_dir_all(&path).map_err(|err| err.to_string())?;
-        } else {
-            std::fs::remove_file(&path).map_err(|err| err.to_string())?;
-        }
-    }
-    Ok(())
-}
-
 fn write_latest_marker(root: &Path, dest: &Path) -> Result<(), String> {
     let marker = root.join("latest");
     std::fs::create_dir_all(root).map_err(|err| err.to_string())?;
     std::fs::write(&marker, dest.to_string_lossy().as_bytes()).map_err(|err| err.to_string())?;
     Ok(())
-}
-
-fn read_latest_marker(root: &Path) -> Result<std::path::PathBuf, String> {
-    let marker = root.join("latest");
-    let contents = std::fs::read_to_string(&marker).map_err(|err| err.to_string())?;
-    let path = contents.trim();
-    if path.is_empty() {
-        return Err("Lifecycle archive marker is empty.".to_string());
-    }
-    Ok(std::path::PathBuf::from(path))
 }

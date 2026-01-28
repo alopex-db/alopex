@@ -19,6 +19,7 @@ use crate::streaming::{CancelSignal, Deadline, StreamingWriter, WriteStatus};
 use crate::tui::{is_tty, TuiApp};
 use crate::ui::mode::UiMode;
 use futures_util::StreamExt;
+use reqwest::Response;
 
 #[doc(hidden)]
 pub struct SqlExecutionOptions<'a> {
@@ -465,6 +466,16 @@ async fn collect_remote_streaming_rows(
         }
     };
 
+    if let Some(content_type) = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    {
+        if content_type.starts_with("application/jsonl") {
+            return collect_remote_jsonl_rows(client, response, options).await;
+        }
+    }
+
     let mut stream = response.bytes_stream();
     let mut buffer: Vec<u8> = Vec::new();
     let mut pos: usize = 0;
@@ -696,6 +707,65 @@ async fn collect_remote_streaming_rows(
     Ok((columns, rows))
 }
 
+#[allow(dead_code)]
+async fn collect_remote_non_streaming_rows(
+    client: &HttpClient,
+    sql: &str,
+    options: &SqlExecutionOptions<'_>,
+    fetch_size: Option<usize>,
+    max_rows: Option<usize>,
+) -> Result<(Vec<Column>, Vec<Row>)> {
+    let request = RemoteSqlRequest {
+        sql: sql.to_string(),
+        streaming: false,
+        fetch_size,
+        max_rows,
+    };
+    let response: RemoteSqlResponse = tokio::select! {
+        result = tokio::time::timeout(options.deadline.remaining(), client.post_json("api/sql/query", &request)) => {
+            match result {
+                Ok(value) => value.map_err(map_client_error)?,
+                Err(_) => {
+                    let _ = send_cancel_request(client).await;
+                    return Err(CliError::Timeout(format!(
+                        "deadline exceeded after {}",
+                        humantime::format_duration(options.deadline.duration())
+                    )));
+                }
+            }
+        }
+        _ = options.cancel.wait() => {
+            let _ = send_cancel_request(client).await;
+            return Err(CliError::Cancelled);
+        }
+    };
+
+    if response.columns.is_empty() {
+        let message = match response.affected_rows {
+            Some(count) => format!("{count} row(s) affected"),
+            None => "Operation completed successfully".to_string(),
+        };
+        let columns = sql_status_columns();
+        let row = Row::new(vec![Value::Text("OK".to_string()), Value::Text(message)]);
+        return Ok((columns, vec![row]));
+    }
+
+    let columns = response
+        .columns
+        .iter()
+        .map(|col| Column::new(&col.name, data_type_from_string(&col.data_type)))
+        .collect::<Vec<_>>();
+    let mut rows = response
+        .rows
+        .into_iter()
+        .map(|row| Row::new(row.into_iter().map(remote_value_to_value).collect()))
+        .collect::<Vec<_>>();
+    if let Some(limit) = options.limit {
+        rows.truncate(limit);
+    }
+    Ok((columns, rows))
+}
+
 async fn execute_remote_streaming<W: Write>(
     client: &HttpClient,
     sql: &str,
@@ -730,6 +800,17 @@ async fn execute_remote_streaming<W: Write>(
             return Err(CliError::Cancelled);
         }
     };
+
+    if let Some(content_type) = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    {
+        if content_type.starts_with("application/jsonl") {
+            return execute_remote_jsonl_streaming(client, response, writer, formatter, options)
+                .await;
+        }
+    }
 
     let mut stream = response.bytes_stream();
     let mut buffer: Vec<u8> = Vec::new();
@@ -982,6 +1063,310 @@ async fn execute_remote_streaming<W: Write>(
     }
 
     Ok(())
+}
+
+async fn collect_remote_jsonl_rows(
+    client: &HttpClient,
+    response: Response,
+    options: &SqlExecutionOptions<'_>,
+) -> Result<(Vec<Column>, Vec<Row>)> {
+    let mut stream = response.bytes_stream();
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut columns: Option<Vec<Column>> = None;
+    let mut rows: Vec<Row> = Vec::new();
+    let mut done = false;
+
+    while !done {
+        if options.cancel.is_cancelled() {
+            let _ = send_cancel_request(client).await;
+            return Err(CliError::Cancelled);
+        }
+        if let Err(err) = options.deadline.check() {
+            let _ = send_cancel_request(client).await;
+            return Err(err);
+        }
+
+        let next = tokio::select! {
+            _ = options.cancel.wait() => {
+                let _ = send_cancel_request(client).await;
+                return Err(CliError::Cancelled);
+            }
+            result = tokio::time::timeout(options.deadline.remaining(), stream.next()) => {
+                match result {
+                    Ok(value) => value,
+                    Err(_) => {
+                        let _ = send_cancel_request(client).await;
+                        return Err(CliError::Timeout(format!(
+                            "deadline exceeded after {}",
+                            humantime::format_duration(options.deadline.duration())
+                        )));
+                    }
+                }
+            }
+        };
+
+        let chunk = match next {
+            Some(chunk) => chunk,
+            None => break,
+        };
+
+        let bytes = match chunk {
+            Ok(bytes) => bytes,
+            Err(err) => return Err(CliError::ServerConnection(format!("request failed: {err}"))),
+        };
+
+        buffer.extend_from_slice(&bytes);
+
+        while let Some(newline) = buffer.iter().position(|&b| b == b'\n') {
+            let line = buffer.drain(..=newline).collect::<Vec<u8>>();
+            if let Some(item) = parse_jsonl_line(&line)? {
+                if let Some(error) = item.error {
+                    return Err(CliError::InvalidArgument(format!(
+                        "Server error: {}",
+                        error.message
+                    )));
+                }
+                if item.done {
+                    done = true;
+                    break;
+                }
+                let row = item.row.ok_or_else(|| {
+                    CliError::InvalidArgument("Invalid streaming response: missing row".into())
+                })?;
+                if columns.is_none() {
+                    columns = Some(default_stream_columns(row.len()));
+                }
+                rows.push(Row::new(
+                    row.into_iter().map(remote_value_to_value).collect(),
+                ));
+                if let Some(limit) = options.limit {
+                    if rows.len() >= limit {
+                        let _ = send_cancel_request(client).await;
+                        done = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if !done {
+        if let Some(item) = parse_jsonl_line(&buffer)? {
+            if let Some(error) = item.error {
+                return Err(CliError::InvalidArgument(format!(
+                    "Server error: {}",
+                    error.message
+                )));
+            }
+            if item.done {
+                done = true;
+            } else if let Some(row) = item.row {
+                if columns.is_none() {
+                    columns = Some(default_stream_columns(row.len()));
+                }
+                rows.push(Row::new(
+                    row.into_iter().map(remote_value_to_value).collect(),
+                ));
+                if let Some(limit) = options.limit {
+                    if rows.len() >= limit {
+                        let _ = send_cancel_request(client).await;
+                        done = true;
+                    }
+                }
+            } else {
+                return Err(CliError::InvalidArgument(
+                    "Invalid streaming response: missing row".into(),
+                ));
+            }
+        }
+    }
+
+    if !done {
+        return Err(CliError::InvalidArgument(
+            "Invalid streaming response: unexpected end of stream".into(),
+        ));
+    }
+
+    Ok((columns.unwrap_or_default(), rows))
+}
+
+async fn execute_remote_jsonl_streaming<W: Write>(
+    client: &HttpClient,
+    response: Response,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    options: &SqlExecutionOptions<'_>,
+) -> Result<()> {
+    let mut stream = response.bytes_stream();
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut streaming_writer: Option<StreamingWriter<&mut W>> = None;
+    let mut formatter = Some(formatter);
+    let mut done = false;
+
+    while !done {
+        if options.cancel.is_cancelled() {
+            let _ = send_cancel_request(client).await;
+            return Err(CliError::Cancelled);
+        }
+        if let Err(err) = options.deadline.check() {
+            let _ = send_cancel_request(client).await;
+            return Err(err);
+        }
+
+        let next = tokio::select! {
+            _ = options.cancel.wait() => {
+                let _ = send_cancel_request(client).await;
+                return Err(CliError::Cancelled);
+            }
+            result = tokio::time::timeout(options.deadline.remaining(), stream.next()) => {
+                match result {
+                    Ok(value) => value,
+                    Err(_) => {
+                        let _ = send_cancel_request(client).await;
+                        return Err(CliError::Timeout(format!(
+                            "deadline exceeded after {}",
+                            humantime::format_duration(options.deadline.duration())
+                        )));
+                    }
+                }
+            }
+        };
+
+        let chunk = match next {
+            Some(chunk) => chunk,
+            None => break,
+        };
+
+        let bytes = match chunk {
+            Ok(bytes) => bytes,
+            Err(err) => return Err(CliError::ServerConnection(format!("request failed: {err}"))),
+        };
+
+        buffer.extend_from_slice(&bytes);
+
+        while let Some(newline) = buffer.iter().position(|&b| b == b'\n') {
+            let line = buffer.drain(..=newline).collect::<Vec<u8>>();
+            if let Some(item) = parse_jsonl_line(&line)? {
+                if let Some(error) = item.error {
+                    return Err(CliError::InvalidArgument(format!(
+                        "Server error: {}",
+                        error.message
+                    )));
+                }
+                if item.done {
+                    done = true;
+                    break;
+                }
+                let row = item.row.ok_or_else(|| {
+                    CliError::InvalidArgument("Invalid streaming response: missing row".into())
+                })?;
+                if streaming_writer.is_none() {
+                    let columns = default_stream_columns(row.len());
+                    let formatter = formatter
+                        .take()
+                        .ok_or_else(|| CliError::InvalidArgument("Missing formatter".into()))?;
+                    let mut writer =
+                        StreamingWriter::new(&mut *writer, formatter, columns, options.limit)
+                            .with_quiet(options.quiet);
+                    writer.prepare(None)?;
+                    streaming_writer = Some(writer);
+                }
+                let values = row.into_iter().map(remote_value_to_value).collect();
+                if let Some(writer) = streaming_writer.as_mut() {
+                    match writer.write_row(Row::new(values))? {
+                        WriteStatus::LimitReached => {
+                            let _ = send_cancel_request(client).await;
+                            done = true;
+                            break;
+                        }
+                        WriteStatus::Continue => {}
+                    }
+                }
+            }
+        }
+    }
+
+    if !done {
+        if let Some(item) = parse_jsonl_line(&buffer)? {
+            if let Some(error) = item.error {
+                return Err(CliError::InvalidArgument(format!(
+                    "Server error: {}",
+                    error.message
+                )));
+            }
+            if item.done {
+                done = true;
+            } else if let Some(row) = item.row {
+                if streaming_writer.is_none() {
+                    let columns = default_stream_columns(row.len());
+                    let formatter = formatter
+                        .take()
+                        .ok_or_else(|| CliError::InvalidArgument("Missing formatter".into()))?;
+                    let mut writer =
+                        StreamingWriter::new(&mut *writer, formatter, columns, options.limit)
+                            .with_quiet(options.quiet);
+                    writer.prepare(None)?;
+                    streaming_writer = Some(writer);
+                }
+                let values = row.into_iter().map(remote_value_to_value).collect();
+                if let Some(writer) = streaming_writer.as_mut() {
+                    match writer.write_row(Row::new(values))? {
+                        WriteStatus::LimitReached => {
+                            let _ = send_cancel_request(client).await;
+                            done = true;
+                        }
+                        WriteStatus::Continue => {}
+                    }
+                }
+            } else {
+                return Err(CliError::InvalidArgument(
+                    "Invalid streaming response: missing row".into(),
+                ));
+            }
+        }
+    }
+
+    if !done {
+        return Err(CliError::InvalidArgument(
+            "Invalid streaming response: unexpected end of stream".into(),
+        ));
+    }
+
+    if let Some(mut writer) = streaming_writer {
+        return writer.finish();
+    }
+
+    if let Some(formatter) = formatter.take() {
+        let mut writer = StreamingWriter::new(&mut *writer, formatter, Vec::new(), options.limit)
+            .with_quiet(options.quiet);
+        writer.prepare(None)?;
+        return writer.finish();
+    }
+
+    Ok(())
+}
+
+fn default_stream_columns(count: usize) -> Vec<Column> {
+    (0..count)
+        .map(|idx| Column::new(format!("col{}", idx + 1), DataType::Text))
+        .collect()
+}
+
+fn parse_jsonl_line(line: &[u8]) -> Result<Option<RemoteStreamItem>> {
+    if line
+        .iter()
+        .all(|b| matches!(b, b' ' | b'\n' | b'\r' | b'\t'))
+    {
+        return Ok(None);
+    }
+    let text = std::str::from_utf8(line)
+        .map_err(|err| CliError::InvalidArgument(format!("Invalid UTF-8: {err}")))?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let item = serde_json::from_str::<RemoteStreamItem>(trimmed)?;
+    Ok(Some(item))
 }
 
 fn skip_whitespace(buffer: &[u8], pos: &mut usize) {
@@ -1272,6 +1657,19 @@ struct RemoteSqlResponse {
     columns: Vec<RemoteColumnInfo>,
     rows: Vec<Vec<alopex_sql::storage::SqlValue>>,
     affected_rows: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct RemoteStreamItem {
+    row: Option<Vec<alopex_sql::storage::SqlValue>>,
+    error: Option<RemoteStreamError>,
+    #[serde(default)]
+    done: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct RemoteStreamError {
+    message: String,
 }
 
 fn map_client_error(err: ClientError) -> CliError {

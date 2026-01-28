@@ -195,6 +195,7 @@ fn get_impl(state: Arc<ServerState>, request: KvGetRequest) -> Result<KvGetRespo
 }
 
 fn put_impl(state: Arc<ServerState>, request: KvPutRequest) -> Result<KvStatusResponse> {
+    state.lifecycle_state.check_write_allowed()?;
     let mut txn = state.store.begin(TxnMode::ReadWrite)?;
     txn.put(request.key.into_bytes(), request.value)?;
     txn.commit_self()?;
@@ -202,6 +203,7 @@ fn put_impl(state: Arc<ServerState>, request: KvPutRequest) -> Result<KvStatusRe
 }
 
 fn delete_impl(state: Arc<ServerState>, request: KvDeleteRequest) -> Result<KvStatusResponse> {
+    state.lifecycle_state.check_write_allowed()?;
     let mut txn = state.store.begin(TxnMode::ReadWrite)?;
     txn.delete(request.key.into_bytes())?;
     txn.commit_self()?;
@@ -223,6 +225,7 @@ fn txn_begin_impl(
     state: Arc<ServerState>,
     request: KvTxnBeginRequest,
 ) -> Result<KvTxnBeginResponse> {
+    state.lifecycle_state.check_write_allowed()?;
     let timeout_secs = request.timeout_secs.unwrap_or(DEFAULT_TXN_TIMEOUT_SECS);
     let meta = TxnMeta {
         started_at_secs: current_timestamp_secs(),
@@ -262,6 +265,7 @@ fn txn_get_impl(state: Arc<ServerState>, request: KvTxnRequest) -> Result<KvGetR
 }
 
 fn txn_put_impl(state: Arc<ServerState>, request: KvTxnRequest) -> Result<KvStatusResponse> {
+    state.lifecycle_state.check_write_allowed()?;
     let key = request
         .key
         .ok_or_else(|| ServerError::BadRequest("key is required".into()))?;
@@ -284,6 +288,7 @@ fn txn_put_impl(state: Arc<ServerState>, request: KvTxnRequest) -> Result<KvStat
 }
 
 fn txn_delete_impl(state: Arc<ServerState>, request: KvTxnRequest) -> Result<KvStatusResponse> {
+    state.lifecycle_state.check_write_allowed()?;
     let key = request
         .key
         .ok_or_else(|| ServerError::BadRequest("key is required".into()))?;
@@ -303,11 +308,13 @@ fn txn_delete_impl(state: Arc<ServerState>, request: KvTxnRequest) -> Result<KvS
 }
 
 fn txn_commit_impl(state: Arc<ServerState>, request: KvTxnRequest) -> Result<KvStatusResponse> {
+    state.lifecycle_state.check_write_allowed()?;
     commit_transaction(state, &request.txn_id)?;
     Ok(KvStatusResponse { success: true })
 }
 
 fn txn_rollback_impl(state: Arc<ServerState>, request: KvTxnRequest) -> Result<KvStatusResponse> {
+    state.lifecycle_state.check_write_allowed()?;
     rollback_transaction(state, &request.txn_id)?;
     Ok(KvStatusResponse { success: true })
 }

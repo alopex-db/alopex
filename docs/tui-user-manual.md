@@ -226,6 +226,13 @@ Admin TUI には 3 つのフォーカス領域があります:
 - **Columnar Segments**: カラムナストレージのセグメント一覧
 - **KV Keys**: Key-Value ストアのキー一覧
 
+#### リモート接続時のリソース表示
+
+- リモート接続でも `/api/admin/resources` 経由でリソース一覧を取得できます。
+- 各セクションの表示件数は **最大 50 件**（SQL Tables / Columnar Segments / KV Keys）。
+- 制限に達した場合は `Truncated: showing first 50 ...` が表示されます。
+- 権限不足の場合は `Remote listing denied.` が表示されます（管理 API 権限を確認してください）。
+
 #### リソースツリーの操作（Table フォーカス時）
 
 | キー | 動作 |
@@ -256,6 +263,11 @@ Admin TUI には 3 つのフォーカス領域があります:
 | **Restore** | アーカイブからの復元 |
 | **Backup** | バックアップの作成 |
 | **Export** | データのエクスポート |
+
+#### Restore の既定動作（サーバー接続）
+
+- `Source` を空欄のまま `Restore` を実行すると、サーバー側で **バックアップの最新**を優先します。
+- `.lifecycle/backup/latest` が存在しない場合は `.lifecycle/archive/latest` が使用されます。
 
 #### アクションの操作（Detail フォーカス時）
 
@@ -463,6 +475,65 @@ cargo run -p alopex-cli -- --data-dir "$DATA_DIR" vector search --index demo_hns
 `--output` による batch 出力は Admin TUI では再現できません。  
 必要な場合は `scripts/tui-demo.sh` と同じ CLI コマンドを単独で実行してください。
 
+### 4) サーバー接続デモ（server profile + TUI）
+
+`scripts/tui-demo.sh` の後半では **サーバーを起動して profile 経由で TUI を実行**します。  
+手動で再現する場合は以下の流れです。
+
+#### 4-1) サーバー起動
+
+```bash
+SERVER_DIR="$(mktemp -d)"
+HTTP_PORT=8080
+ADMIN_PORT=8081
+GRPC_PORT=9090
+
+cat > "$SERVER_DIR/alopex.toml" <<EOF
+http_bind = "127.0.0.1:${HTTP_PORT}"
+grpc_bind = "127.0.0.1:${GRPC_PORT}"
+admin_bind = "127.0.0.1:${ADMIN_PORT}"
+data_dir = "${SERVER_DIR}"
+metrics_enabled = true
+tracing_enabled = false
+audit_log_enabled = false
+EOF
+
+cargo run -p alopex-server -- --config "$SERVER_DIR/alopex.toml"
+```
+
+#### 4-2) プロファイル作成（HOME を分離する例）
+
+`~/.alopex/config` は権限 `600` が必須です。既存設定を汚したくない場合は `HOME` を分離します。
+
+```bash
+DEMO_HOME="$(mktemp -d)"
+mkdir -p "$DEMO_HOME/.alopex"
+cat > "$DEMO_HOME/.alopex/config" <<EOF
+[profiles.demo]
+connection_type = "server"
+
+[profiles.demo.server]
+url = "http://127.0.0.1:${HTTP_PORT}"
+EOF
+chmod 600 "$DEMO_HOME/.alopex/config"
+```
+
+#### 4-3) サーバー経由で TUI を実行
+
+```bash
+HOME="$DEMO_HOME" cargo run -p alopex-cli -- --profile demo sql \
+  "CREATE TABLE server_items (id INT PRIMARY KEY, name TEXT, embedding VECTOR(2, L2));"
+HOME="$DEMO_HOME" cargo run -p alopex-cli -- --profile demo sql \
+  "INSERT INTO server_items VALUES (1,'alpha',[0.1,0.2]),(2,'beta',[0.2,0.1]);"
+
+# Results TUI
+HOME="$DEMO_HOME" cargo run -p alopex-cli -- --profile demo sql \
+  "SELECT id, name FROM server_items ORDER BY id"
+
+# Admin TUI
+HOME="$DEMO_HOME" cargo run -p alopex-cli -- --profile demo
+```
+
 
 ## キーバインド一覧
 
@@ -619,11 +690,15 @@ alopex --output json sql "SELECT * FROM users"
 
 ### Admin TUI でリモートリソースが表示されない
 
-**原因**: リモート接続ではリソース一覧の取得に制限がある
+**原因**:
+- サーバーが admin API v0.5 に未対応
+- 管理 API の権限が不足している（`Remote listing denied.`）
+- ネットワーク/認証エラーで `/api/admin/resources` に到達できない
 
 **解決策**:
-- ローカル接続を使用
-- raw パラメータモードで直接クエリを入力
+- サーバーを v0.5 以降に更新し、管理 API を有効化する
+- 認証設定（トークン/Basic/mTLS）と `--insecure` の指定を見直す
+- 一時回避として raw パラメータモードで直接クエリを入力
 
 ### キーが効かない
 

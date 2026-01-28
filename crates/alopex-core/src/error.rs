@@ -38,9 +38,22 @@ pub enum Error {
     #[error("checksum mismatch")]
     ChecksumMismatch,
 
+    /// WAL recovery stopped before completion.
+    #[error("recovery incomplete: recovered={recovered_entries}, stop_offset={stop_offset}, reason={reason}")]
+    RecoveryIncomplete {
+        /// Number of entries recovered before stopping.
+        recovered_entries: usize,
+        /// Byte offset where recovery stopped.
+        stop_offset: u64,
+        /// Reason for stopping.
+        reason: String,
+    },
+
     /// On-disk segment is corrupted (e.g., checksum failure).
-    #[error("corrupted segment: {reason}")]
+    #[error("corrupted segment {segment_id}: {reason}")]
     CorruptedSegment {
+        /// Segment identifier.
+        segment_id: u64,
         /// Reason for corruption detection.
         reason: String,
     },

@@ -5,6 +5,7 @@
 use std::io::Write;
 
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
+use crossterm::terminal;
 
 use crate::error::Result;
 use crate::models::{Column, Row, Value};
@@ -29,6 +30,11 @@ impl TableFormatter {
         table
             .load_preset(UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic);
+        if let Ok((width, _)) = terminal::size() {
+            if width == 0 {
+                table.set_content_arrangement(ContentArrangement::Disabled);
+            }
+        }
 
         Self {
             table,

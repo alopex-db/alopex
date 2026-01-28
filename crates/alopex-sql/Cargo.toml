@@ -1,6 +1,6 @@
 [package]
 name = "alopex-sql"
-version.workspace = true
+version = "0.5.0"
 edition = "2024"  # Uses let chains feature
 license.workspace = true
 repository.workspace = true
@@ -45,4 +45,8 @@ harness = false
 
 [[bench]]
 name = "knn_rowid"
+harness = false
+
+[[bench]]
+name = "group_by_bench"
 harness = false

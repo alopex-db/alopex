@@ -7,6 +7,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::expr::{Expr as E, Scalar};
 use crate::lazy::ProjectionKind;
+use crate::ops::{FillNull, JoinKeys, JoinType, SortOptions};
 use crate::physical::expr_eval::ExprEval;
 use crate::physical::plan::ScanSource;
 use crate::{DataFrame, DataFrameError, Expr, Result};
@@ -220,6 +221,57 @@ pub fn aggregate_batches(
 
     let batch = build_grouped_batch(groups, &group_specs, &agg_specs)?;
     Ok(vec![batch])
+}
+
+/// Join two record batch streams.
+pub fn join_batches(
+    left: Vec<RecordBatch>,
+    right: Vec<RecordBatch>,
+    keys: &JoinKeys,
+    how: &JoinType,
+) -> Result<Vec<RecordBatch>> {
+    crate::ops::join::join_batches(left, right, keys, how)
+}
+
+/// Sort record batches.
+pub fn sort_batches(input: Vec<RecordBatch>, options: &SortOptions) -> Result<Vec<RecordBatch>> {
+    crate::ops::sort::sort_batches(input, options)
+}
+
+/// Slice record batches.
+pub fn slice_batches(
+    input: Vec<RecordBatch>,
+    offset: usize,
+    len: usize,
+    from_end: bool,
+) -> Result<Vec<RecordBatch>> {
+    crate::ops::sort::slice_batches(input, offset, len, from_end)
+}
+
+/// Remove duplicate rows.
+pub fn unique_batches(
+    input: Vec<RecordBatch>,
+    subset: Option<&[String]>,
+) -> Result<Vec<RecordBatch>> {
+    crate::ops::unique::unique_batches(input, subset)
+}
+
+/// Fill null values.
+pub fn fill_null_batches(input: Vec<RecordBatch>, fill: &FillNull) -> Result<Vec<RecordBatch>> {
+    crate::ops::nulls::fill_null_batches(input, fill)
+}
+
+/// Drop rows containing nulls.
+pub fn drop_nulls_batches(
+    input: Vec<RecordBatch>,
+    subset: Option<&[String]>,
+) -> Result<Vec<RecordBatch>> {
+    crate::ops::nulls::drop_nulls_batches(input, subset)
+}
+
+/// Count null values per column.
+pub fn null_count_batches(input: Vec<RecordBatch>) -> Result<Vec<RecordBatch>> {
+    crate::ops::nulls::null_count_batches(input)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
