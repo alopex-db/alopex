@@ -20,11 +20,13 @@ thread_local! {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn reset_sync_calls() {
     WAL_SYNC_CALLS.with(|counter| counter.set(0));
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn sync_calls() -> usize {
     WAL_SYNC_CALLS.with(|counter| counter.get())
 }
