@@ -16,7 +16,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use serde_json::{json, Value};
 use tempfile::tempdir;
-use tokio::time::{sleep, Duration as TokioDuration};
+use tokio::time::{sleep, Duration as TokioDuration, Instant as TokioInstant};
 use tower::ServiceExt;
 
 async fn build_state() -> (Arc<ServerState>, tempfile::TempDir) {
@@ -68,7 +68,13 @@ async fn send_empty(router: axum::Router, method: Method, path: &str) -> (Status
 
 async fn wait_for_backup(router: axum::Router, handle: &str) -> Value {
     let path = format!("/api/admin/backup/{handle}");
-    for _ in 0..200 {
+    let timeout = if cfg!(windows) {
+        TokioDuration::from_secs(60)
+    } else {
+        TokioDuration::from_secs(20)
+    };
+    let deadline = TokioInstant::now() + timeout;
+    loop {
         let (status, body) = send_empty(router.clone(), Method::GET, &path).await;
         assert_eq!(status, StatusCode::OK);
         let value: Value = serde_json::from_slice(&body).expect("backup status json");
@@ -80,6 +86,9 @@ async fn wait_for_backup(router: axum::Router, handle: &str) -> Value {
         if status_value != "running" && status_value != "queued" {
             return state;
         }
+        if TokioInstant::now() >= deadline {
+            break;
+        }
         sleep(TokioDuration::from_millis(100)).await;
     }
     panic!("backup did not complete in time");
@@ -87,7 +96,13 @@ async fn wait_for_backup(router: axum::Router, handle: &str) -> Value {
 
 async fn wait_for_restore(router: axum::Router, handle: &str) -> Value {
     let path = format!("/api/admin/restore/{handle}");
-    for _ in 0..200 {
+    let timeout = if cfg!(windows) {
+        TokioDuration::from_secs(60)
+    } else {
+        TokioDuration::from_secs(20)
+    };
+    let deadline = TokioInstant::now() + timeout;
+    loop {
         let (status, body) = send_empty(router.clone(), Method::GET, &path).await;
         assert_eq!(status, StatusCode::OK);
         let value: Value = serde_json::from_slice(&body).expect("restore status json");
@@ -98,6 +113,9 @@ async fn wait_for_restore(router: axum::Router, handle: &str) -> Value {
             .unwrap_or_default();
         if status_value != "running" && status_value != "queued" {
             return value;
+        }
+        if TokioInstant::now() >= deadline {
+            break;
         }
         sleep(TokioDuration::from_millis(100)).await;
     }
