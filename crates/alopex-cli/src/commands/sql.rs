@@ -465,8 +465,16 @@ async fn collect_remote_streaming_rows(
         }
     };
 
-    if is_jsonl_response(&response) {
-        return collect_remote_jsonl_rows(client, response, options).await;
+    if let Some(content_type) = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    {
+        if content_type.starts_with("application/jsonl") {
+            let _ = send_cancel_request(client).await;
+            return collect_remote_non_streaming_rows(client, sql, options, fetch_size, max_rows)
+                .await;
+        }
     }
 
     let mut stream = response.bytes_stream();
@@ -700,103 +708,62 @@ async fn collect_remote_streaming_rows(
     Ok((columns, rows))
 }
 
-async fn collect_remote_jsonl_rows(
+async fn collect_remote_non_streaming_rows(
     client: &HttpClient,
-    response: reqwest::Response,
+    sql: &str,
     options: &SqlExecutionOptions<'_>,
+    fetch_size: Option<usize>,
+    max_rows: Option<usize>,
 ) -> Result<(Vec<Column>, Vec<Row>)> {
-    let mut stream = response.bytes_stream();
-    let mut buffer: Vec<u8> = Vec::new();
-    let mut columns: Option<Vec<Column>> = None;
-    let mut rows: Vec<Row> = Vec::new();
-    let mut done = false;
-
-    while !done {
-        if options.cancel.is_cancelled() {
+    let request = RemoteSqlRequest {
+        sql: sql.to_string(),
+        streaming: false,
+        fetch_size,
+        max_rows,
+    };
+    let response: RemoteSqlResponse = tokio::select! {
+        result = tokio::time::timeout(options.deadline.remaining(), client.post_json("api/sql/query", &request)) => {
+            match result {
+                Ok(value) => value.map_err(map_client_error)?,
+                Err(_) => {
+                    let _ = send_cancel_request(client).await;
+                    return Err(CliError::Timeout(format!(
+                        "deadline exceeded after {}",
+                        humantime::format_duration(options.deadline.duration())
+                    )));
+                }
+            }
+        }
+        _ = options.cancel.wait() => {
             let _ = send_cancel_request(client).await;
             return Err(CliError::Cancelled);
         }
-        if let Err(err) = options.deadline.check() {
-            let _ = send_cancel_request(client).await;
-            return Err(err);
-        }
+    };
 
-        let next = tokio::select! {
-            _ = options.cancel.wait() => {
-                let _ = send_cancel_request(client).await;
-                return Err(CliError::Cancelled);
-            }
-            result = tokio::time::timeout(options.deadline.remaining(), stream.next()) => {
-                match result {
-                    Ok(value) => value,
-                    Err(_) => {
-                        let _ = send_cancel_request(client).await;
-                        return Err(CliError::Timeout(format!(
-                            "deadline exceeded after {}",
-                            humantime::format_duration(options.deadline.duration())
-                        )));
-                    }
-                }
-            }
+    if response.columns.is_empty() {
+        let message = match response.affected_rows {
+            Some(count) => format!("{count} row(s) affected"),
+            None => "Operation completed successfully".to_string(),
         };
-
-        let chunk = match next {
-            Some(chunk) => chunk,
-            None => break,
-        };
-
-        let bytes = match chunk {
-            Ok(bytes) => bytes,
-            Err(err) => return Err(CliError::ServerConnection(format!("request failed: {err}"))),
-        };
-
-        buffer.extend_from_slice(&bytes);
-
-        while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
-            let mut line = buffer.drain(..=pos).collect::<Vec<u8>>();
-            trim_jsonl_line(&mut line);
-            if line.is_empty() {
-                continue;
-            }
-            let item: RemoteStreamItem = serde_json::from_slice(&line).map_err(CliError::Json)?;
-            if let Some(error) = item.error {
-                return Err(CliError::InvalidArgument(format!(
-                    "Server error {}: {} (correlation_id={})",
-                    error.code, error.message, error.correlation_id
-                )));
-            }
-            if let Some(row) = item.row {
-                if columns.is_none() {
-                    let cols = row
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, value)| {
-                            Column::new(
-                                format!("col{}", idx + 1),
-                                data_type_from_remote_value(value),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    columns = Some(cols);
-                }
-                let values = row.into_iter().map(remote_value_to_value).collect();
-                rows.push(Row::new(values));
-                if let Some(limit) = options.limit {
-                    if rows.len() >= limit {
-                        let _ = send_cancel_request(client).await;
-                        done = true;
-                        break;
-                    }
-                }
-            }
-            if item.done {
-                done = true;
-                break;
-            }
-        }
+        let columns = sql_status_columns();
+        let row = Row::new(vec![Value::Text("OK".to_string()), Value::Text(message)]);
+        return Ok((columns, vec![row]));
     }
 
-    Ok((columns.unwrap_or_default(), rows))
+    let columns = response
+        .columns
+        .iter()
+        .map(|col| Column::new(&col.name, data_type_from_string(&col.data_type)))
+        .collect::<Vec<_>>();
+    let mut rows = response
+        .rows
+        .into_iter()
+        .map(|row| Row::new(row.into_iter().map(remote_value_to_value).collect()))
+        .collect::<Vec<_>>();
+    if let Some(limit) = options.limit {
+        rows.truncate(limit);
+    }
+    Ok((columns, rows))
 }
 
 async fn execute_remote_streaming<W: Write>(
@@ -833,10 +800,6 @@ async fn execute_remote_streaming<W: Write>(
             return Err(CliError::Cancelled);
         }
     };
-
-    if is_jsonl_response(&response) {
-        return execute_remote_jsonl_streaming(client, response, writer, formatter, options).await;
-    }
 
     let mut stream = response.bytes_stream();
     let mut buffer: Vec<u8> = Vec::new();
@@ -1086,126 +1049,6 @@ async fn execute_remote_streaming<W: Write>(
             writer.prepare(None)?;
             return writer.finish();
         }
-    }
-
-    Ok(())
-}
-
-async fn execute_remote_jsonl_streaming<W: Write>(
-    client: &HttpClient,
-    response: reqwest::Response,
-    writer: &mut W,
-    formatter: Box<dyn Formatter>,
-    options: &SqlExecutionOptions<'_>,
-) -> Result<()> {
-    let mut stream = response.bytes_stream();
-    let mut buffer: Vec<u8> = Vec::new();
-    let mut formatter = Some(formatter);
-    let mut streaming_writer: Option<StreamingWriter<&mut W>> = None;
-    let mut done = false;
-    let mut saw_row = false;
-
-    while !done {
-        if options.cancel.is_cancelled() {
-            let _ = send_cancel_request(client).await;
-            return Err(CliError::Cancelled);
-        }
-        if let Err(err) = options.deadline.check() {
-            let _ = send_cancel_request(client).await;
-            return Err(err);
-        }
-
-        let next = tokio::select! {
-            _ = options.cancel.wait() => {
-                let _ = send_cancel_request(client).await;
-                return Err(CliError::Cancelled);
-            }
-            result = tokio::time::timeout(options.deadline.remaining(), stream.next()) => {
-                match result {
-                    Ok(value) => value,
-                    Err(_) => {
-                        let _ = send_cancel_request(client).await;
-                        return Err(CliError::Timeout(format!(
-                            "deadline exceeded after {}",
-                            humantime::format_duration(options.deadline.duration())
-                        )));
-                    }
-                }
-            }
-        };
-
-        let chunk = match next {
-            Some(chunk) => chunk,
-            None => break,
-        };
-
-        let bytes = match chunk {
-            Ok(bytes) => bytes,
-            Err(err) => return Err(CliError::ServerConnection(format!("request failed: {err}"))),
-        };
-
-        buffer.extend_from_slice(&bytes);
-
-        while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
-            let mut line = buffer.drain(..=pos).collect::<Vec<u8>>();
-            trim_jsonl_line(&mut line);
-            if line.is_empty() {
-                continue;
-            }
-            let item: RemoteStreamItem = serde_json::from_slice(&line).map_err(CliError::Json)?;
-            if let Some(error) = item.error {
-                return Err(CliError::InvalidArgument(format!(
-                    "Server error {}: {} (correlation_id={})",
-                    error.code, error.message, error.correlation_id
-                )));
-            }
-            if let Some(row) = item.row {
-                if streaming_writer.is_none() {
-                    let columns = row
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, value)| {
-                            Column::new(
-                                format!("col{}", idx + 1),
-                                data_type_from_remote_value(value),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    let formatter = formatter.take().ok_or_else(|| {
-                        CliError::InvalidArgument("stream formatter missing".to_string())
-                    })?;
-                    let mut writer =
-                        StreamingWriter::new(&mut *writer, formatter, columns, options.limit)
-                            .with_quiet(options.quiet);
-                    writer.prepare(None)?;
-                    streaming_writer = Some(writer);
-                }
-                saw_row = true;
-                let values = row.into_iter().map(remote_value_to_value).collect();
-                if let Some(writer) = streaming_writer.as_mut() {
-                    match writer.write_row(Row::new(values))? {
-                        WriteStatus::LimitReached => {
-                            let _ = send_cancel_request(client).await;
-                            done = true;
-                            break;
-                        }
-                        WriteStatus::Continue => {}
-                    }
-                }
-            }
-            if item.done {
-                done = true;
-                break;
-            }
-        }
-    }
-
-    if let Some(mut writer) = streaming_writer {
-        return writer.finish();
-    }
-
-    if !options.quiet && !saw_row {
-        println!("OK (0 rows)");
     }
 
     Ok(())
@@ -1501,20 +1344,6 @@ struct RemoteSqlResponse {
     affected_rows: Option<u64>,
 }
 
-#[derive(serde::Deserialize)]
-struct RemoteStreamError {
-    code: String,
-    message: String,
-    correlation_id: String,
-}
-
-#[derive(serde::Deserialize)]
-struct RemoteStreamItem {
-    row: Option<Vec<alopex_sql::storage::SqlValue>>,
-    error: Option<RemoteStreamError>,
-    done: bool,
-}
-
 fn map_client_error(err: ClientError) -> CliError {
     match err {
         ClientError::Request { source, .. } => {
@@ -1657,39 +1486,6 @@ fn remote_value_to_value(sql_value: alopex_sql::storage::SqlValue) -> Value {
         SqlValue::Boolean(b) => Value::Bool(b),
         SqlValue::Timestamp(ts) => Value::Text(ts.to_string()),
         SqlValue::Vector(v) => Value::Vector(v),
-    }
-}
-
-fn data_type_from_remote_value(value: &alopex_sql::storage::SqlValue) -> DataType {
-    use alopex_sql::storage::SqlValue;
-
-    match value {
-        SqlValue::Integer(_) | SqlValue::BigInt(_) => DataType::Int,
-        SqlValue::Float(_) | SqlValue::Double(_) => DataType::Float,
-        SqlValue::Boolean(_) => DataType::Bool,
-        SqlValue::Blob(_) => DataType::Bytes,
-        SqlValue::Vector(_) => DataType::Vector,
-        SqlValue::Text(_) | SqlValue::Timestamp(_) => DataType::Text,
-        SqlValue::Null => DataType::Text,
-    }
-}
-
-fn is_jsonl_response(response: &reqwest::Response) -> bool {
-    response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.contains("jsonl"))
-        .unwrap_or(false)
-}
-
-fn trim_jsonl_line(line: &mut Vec<u8>) {
-    while let Some(last) = line.last() {
-        if last.is_ascii_whitespace() {
-            line.pop();
-        } else {
-            break;
-        }
     }
 }
 

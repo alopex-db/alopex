@@ -880,6 +880,24 @@ impl<'a, S: KVStore> Catalog for TxnCatalogView<'a, S> {
     fn next_index_id(&mut self) -> u32 {
         unreachable!("TxnCatalogView は参照専用です")
     }
+
+    fn list_tables(&self) -> Vec<TableMetadata> {
+        let mut names = HashSet::new();
+        for name in self.catalog.inner.table_names() {
+            names.insert(name.to_string());
+        }
+        for fqn in self.overlay.added_tables.keys() {
+            names.insert(fqn.table.clone());
+        }
+
+        let mut tables = Vec::new();
+        for name in names {
+            if let Some(table) = self.catalog.get_table_in_txn(&name, self.overlay) {
+                tables.push(table.clone());
+            }
+        }
+        tables
+    }
 }
 
 /// 永続カタログ実装。
@@ -2137,6 +2155,20 @@ impl<S: KVStore> Catalog for PersistentCatalog<S> {
 
     fn next_index_id(&mut self) -> u32 {
         self.inner.next_index_id()
+    }
+
+    fn list_tables(&self) -> Vec<TableMetadata> {
+        let mut tables = Vec::new();
+        for name in self.inner.table_names() {
+            if let Some(table) = self.inner.get_table(name) {
+                tables.push(table.clone());
+            }
+        }
+        tables
+    }
+
+    fn persistence_enabled(&self) -> bool {
+        true
     }
 }
 

@@ -3,7 +3,6 @@
 pub mod actions;
 
 use std::collections::HashSet;
-use std::future::Future;
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -20,10 +19,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 
 use alopex_embedded::{CreateCatalogRequest, CreateNamespaceRequest};
 
+use crate::client::admin_resources::{fetch_admin_resources, AdminResourcesRequest};
+use crate::client::http::ClientError;
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::{create_formatter, Formatter};
@@ -133,10 +134,14 @@ impl<'a> AdminApp<'a> {
             .map(|action| build_form_fields(target, action))
             .unwrap_or_default();
         let resources = ResourceTree::new(&backend);
-        let last_result = resources
-            .last_error
-            .as_ref()
-            .map(|err| AdminResult::status(format!("Resource load failed: {err}")));
+        let last_result = if let Some(err) = resources.last_error.as_ref() {
+            Some(AdminResult::status(format!("Resource load failed: {err}")))
+        } else {
+            resources
+                .last_status
+                .as_ref()
+                .map(|message| AdminResult::status(message.clone()))
+        };
         Self {
             items,
             selected: 0,
@@ -175,7 +180,8 @@ impl<'a> AdminApp<'a> {
         let tick_rate = Duration::from_millis(16);
         let mut last_tick = Instant::now();
 
-        loop {
+        let mut should_exit = false;
+        while !should_exit {
             terminal.draw(|frame| self.draw(frame))?;
 
             let timeout = tick_rate
@@ -183,8 +189,14 @@ impl<'a> AdminApp<'a> {
                 .unwrap_or_else(|| Duration::from_secs(0));
 
             if event::poll(timeout)? {
-                if let Event::Key(key) = event::read()? {
-                    if self.handle_key(key)? {
+                loop {
+                    if let Event::Key(key) = event::read()? {
+                        if self.handle_key(key)? {
+                            should_exit = true;
+                            break;
+                        }
+                    }
+                    if !event::poll(Duration::from_millis(0))? {
                         break;
                     }
                 }
@@ -730,6 +742,8 @@ impl<'a> AdminApp<'a> {
                         if let Some(err) = self.resources.last_error.clone() {
                             self.last_result =
                                 Some(AdminResult::status(format!("Resource load failed: {err}")));
+                        } else if let Some(status) = self.resources.last_status.clone() {
+                            self.last_result = Some(AdminResult::status(status));
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
@@ -763,6 +777,13 @@ impl<'a> AdminApp<'a> {
                 }
             }
             AdminFocus::Detail => match key.code {
+                KeyCode::Char(ch) if ch.is_ascii_digit() => {
+                    let idx = ch.to_digit(10).unwrap_or(0) as usize;
+                    if idx > 0 && idx <= self.items.len() {
+                        self.selected = idx - 1;
+                        self.refresh_form_for_selection();
+                    }
+                }
                 KeyCode::Char('e') => {
                     self.input_mode = if self.use_raw_params {
                         AdminInputMode::EditingRaw
@@ -892,13 +913,13 @@ impl<'a> AdminApp<'a> {
             }
             AdminBackend::Remote {
                 client, batch_mode, ..
-            } => block_on_remote_action(execute_remote_action(
+            } => block_on_with_runtime(execute_remote_action(
                 client,
                 batch_mode,
                 request,
                 &mut sink,
                 Box::new(formatter),
-            )),
+            ))?,
         };
 
         let capture = state.lock().expect("admin capture lock");
@@ -1032,6 +1053,8 @@ impl<'a> AdminApp<'a> {
     fn ensure_target(&mut self, target: AdminTarget) {
         if self.target != target {
             self.target = target;
+            self.selected = 0;
+            self.last_action = None;
             self.reset_form();
         }
     }
@@ -1145,19 +1168,6 @@ impl<'a> AdminApp<'a> {
     }
 }
 
-fn block_on_remote_action<F, T>(future: F) -> Result<T>
-where
-    F: Future<Output = Result<T>>,
-{
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        return tokio::task::block_in_place(|| handle.block_on(future));
-    }
-    let runtime = Runtime::new().map_err(|err| {
-        CliError::InvalidArgument(format!("Failed to start async runtime: {err}"))
-    })?;
-    runtime.block_on(future)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdminInputMode {
     Normal,
@@ -1216,6 +1226,7 @@ struct ResourceTree {
     search: Option<String>,
     search_focused: bool,
     last_error: Option<String>,
+    last_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1249,9 +1260,9 @@ fn target_for_resource(entry: &ResourceEntry) -> Option<AdminTarget> {
 
 impl ResourceTree {
     fn new(backend: &AdminBackend<'_>) -> Self {
-        let (entries, last_error) = match load_resource_entries(backend) {
-            Ok(entries) => (entries, None),
-            Err(err) => (Vec::new(), Some(err.to_string())),
+        let (entries, last_error, last_status) = match load_resource_entries(backend) {
+            Ok((entries, status)) => (entries, None, status),
+            Err(err) => (Vec::new(), Some(err.to_string()), None),
         };
         Self {
             entries,
@@ -1259,20 +1270,23 @@ impl ResourceTree {
             search: None,
             search_focused: false,
             last_error,
+            last_status,
         }
     }
 
     fn reload(&mut self, backend: &AdminBackend<'_>) {
         match load_resource_entries(backend) {
-            Ok(entries) => {
+            Ok((entries, status)) => {
                 self.entries = entries;
                 self.selected = 0;
                 self.last_error = None;
+                self.last_status = status;
             }
             Err(err) => {
                 self.entries.clear();
                 self.selected = 0;
                 self.last_error = Some(err.to_string());
+                self.last_status = None;
             }
         }
     }
@@ -1673,13 +1687,18 @@ fn capture_admin_command(
         }
         AdminBackend::Remote {
             client, batch_mode, ..
-        } => block_on_remote_action(execute_remote_action(
-            client,
-            batch_mode,
-            request,
-            &mut sink,
-            Box::new(formatter),
-        )),
+        } => {
+            let runtime = Runtime::new().map_err(|err| {
+                CliError::InvalidArgument(format!("Failed to start async runtime: {err}"))
+            })?;
+            runtime.block_on(execute_remote_action(
+                client,
+                batch_mode,
+                request,
+                &mut sink,
+                Box::new(formatter),
+            ))
+        }
     };
     result?;
     let capture = state.lock().expect("admin capture lock").clone();
@@ -1735,12 +1754,219 @@ fn parse_segment_id(segment_id: &str) -> Option<(u32, u64)> {
 const RESOURCE_LIMIT: usize = 50;
 const COLUMNAR_COLUMN_LIMIT: usize = 20;
 
-fn load_resource_entries(backend: &AdminBackend<'_>) -> Result<Vec<ResourceEntry>> {
+fn block_on_with_runtime<F, T>(future: F) -> Result<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    match Handle::try_current() {
+        Ok(handle) => Ok(tokio::task::block_in_place(|| handle.block_on(future))),
+        Err(_) => {
+            let runtime = Runtime::new().map_err(|err| {
+                CliError::InvalidArgument(format!("Failed to start async runtime: {err}"))
+            })?;
+            Ok(runtime.block_on(future))
+        }
+    }
+}
+
+fn load_resource_entries(
+    backend: &AdminBackend<'_>,
+) -> Result<(Vec<ResourceEntry>, Option<String>)> {
+    match backend {
+        AdminBackend::Remote { client, .. } => load_remote_resources(client),
+        _ => {
+            let mut entries = Vec::new();
+            entries.extend(load_sql_resources(backend)?);
+            entries.extend(load_columnar_resources(backend)?);
+            entries.extend(load_kv_resources(backend)?);
+            Ok((entries, None))
+        }
+    }
+}
+
+fn load_remote_resources(client: &HttpClient) -> Result<(Vec<ResourceEntry>, Option<String>)> {
+    let request = AdminResourcesRequest {
+        limit: Some(RESOURCE_LIMIT),
+        include_columnar_columns: Some(true),
+        columnar_column_limit: Some(COLUMNAR_COLUMN_LIMIT),
+        kv_prefix: None,
+    };
+    let response = block_on_with_runtime(fetch_admin_resources(client, &request))?;
+    match response {
+        Ok(response) => {
+            let status = truncated_status(&response.truncated);
+            Ok((build_remote_entries(response), status))
+        }
+        Err(ClientError::HttpStatus { status, .. })
+            if status == reqwest::StatusCode::FORBIDDEN
+                || status == reqwest::StatusCode::UNAUTHORIZED =>
+        {
+            Ok((remote_listing_denied_entries(), None))
+        }
+        Err(err) => Err(map_client_error(err)),
+    }
+}
+
+fn truncated_status(
+    truncated: &crate::client::admin_resources::TruncatedSections,
+) -> Option<String> {
+    let mut sections = Vec::new();
+    if truncated.sql_tables {
+        sections.push("SQL tables");
+    }
+    if truncated.columnar_segments {
+        sections.push("columnar segments");
+    }
+    if truncated.kv_keys {
+        sections.push("KV keys");
+    }
+    if sections.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Resources truncated (limit {RESOURCE_LIMIT}): {}.",
+            sections.join(", ")
+        ))
+    }
+}
+
+fn build_remote_entries(
+    response: crate::client::admin_resources::AdminResourcesResponse,
+) -> Vec<ResourceEntry> {
     let mut entries = Vec::new();
-    entries.extend(load_sql_resources(backend)?);
-    entries.extend(load_columnar_resources(backend)?);
-    entries.extend(load_kv_resources(backend)?);
-    Ok(entries)
+
+    entries.push(ResourceEntry {
+        label: "SQL Tables".to_string(),
+        kind: ResourceKind::Section(ResourceSection::SqlTables),
+        depth: 0,
+        selectable: false,
+    });
+    for table in response.sql_tables {
+        let table_name = table.name.clone();
+        entries.push(ResourceEntry {
+            label: table_name.clone(),
+            kind: ResourceKind::Table {
+                name: table_name.clone(),
+            },
+            depth: 1,
+            selectable: true,
+        });
+        for column in table.columns {
+            entries.push(ResourceEntry {
+                label: column.name.clone(),
+                kind: ResourceKind::Column {
+                    table: table_name.clone(),
+                    name: column.name,
+                },
+                depth: 2,
+                selectable: true,
+            });
+        }
+    }
+    if response.truncated.sql_tables {
+        let label = format!("Truncated: showing first {RESOURCE_LIMIT} tables.");
+        entries.push(truncated_entry(&label, 1));
+    }
+
+    entries.push(ResourceEntry {
+        label: "Columnar Segments".to_string(),
+        kind: ResourceKind::Section(ResourceSection::ColumnarSegments),
+        depth: 0,
+        selectable: false,
+    });
+    for segment in response.columnar_segments {
+        let segment_id = segment.id.clone();
+        entries.push(ResourceEntry {
+            label: segment_id.clone(),
+            kind: ResourceKind::ColumnarSegment { id: segment_id },
+            depth: 1,
+            selectable: true,
+        });
+        if let Some(columns) = segment.columns {
+            for column in columns {
+                entries.push(ResourceEntry {
+                    label: column.clone(),
+                    kind: ResourceKind::ColumnarColumn {
+                        segment_id: segment.id.clone(),
+                        name: column,
+                    },
+                    depth: 2,
+                    selectable: true,
+                });
+            }
+        }
+    }
+    if response.truncated.columnar_segments {
+        let label = format!("Truncated: showing first {RESOURCE_LIMIT} segments.");
+        entries.push(truncated_entry(&label, 1));
+    }
+
+    entries.push(ResourceEntry {
+        label: "KV Keys".to_string(),
+        kind: ResourceKind::Section(ResourceSection::KvKeys),
+        depth: 0,
+        selectable: false,
+    });
+    for key in response.kv_keys {
+        entries.push(ResourceEntry {
+            label: key.clone(),
+            kind: ResourceKind::KvKey { key },
+            depth: 1,
+            selectable: true,
+        });
+    }
+    if response.truncated.kv_keys {
+        let label = format!("Truncated: showing first {RESOURCE_LIMIT} keys.");
+        entries.push(truncated_entry(&label, 1));
+    }
+
+    entries
+}
+
+fn remote_listing_denied_entries() -> Vec<ResourceEntry> {
+    let mut entries = Vec::new();
+    for section in [
+        ResourceSection::SqlTables,
+        ResourceSection::ColumnarSegments,
+        ResourceSection::KvKeys,
+    ] {
+        let label = match section {
+            ResourceSection::SqlTables => "SQL Tables",
+            ResourceSection::ColumnarSegments => "Columnar Segments",
+            ResourceSection::KvKeys => "KV Keys",
+        };
+        entries.push(ResourceEntry {
+            label: label.to_string(),
+            kind: ResourceKind::Section(section),
+            depth: 0,
+            selectable: false,
+        });
+        entries.push(truncated_entry("Remote listing denied.", 1));
+    }
+    entries
+}
+
+fn truncated_entry(label: &str, depth: usize) -> ResourceEntry {
+    ResourceEntry {
+        label: label.to_string(),
+        kind: ResourceKind::Info,
+        depth,
+        selectable: false,
+    }
+}
+
+fn map_client_error(err: ClientError) -> CliError {
+    match err {
+        ClientError::Request { source, .. } => {
+            CliError::ServerConnection(format!("request failed: {source}"))
+        }
+        ClientError::InvalidUrl(message) => CliError::InvalidArgument(message),
+        ClientError::Build(message) => CliError::InvalidArgument(message),
+        ClientError::Auth(err) => CliError::InvalidArgument(err.to_string()),
+        ClientError::HttpStatus { status, body } => {
+            CliError::ServerConnection(format!("server error {status}: {body}"))
+        }
+    }
 }
 
 fn load_sql_resources(backend: &AdminBackend<'_>) -> Result<Vec<ResourceEntry>> {
@@ -1906,6 +2132,12 @@ fn validate_params(
     target: AdminTarget,
     params: &std::collections::HashMap<String, String>,
 ) -> std::result::Result<(), String> {
+    if matches!(
+        action,
+        AdminAction::Archive | AdminAction::Restore | AdminAction::Backup | AdminAction::Export
+    ) {
+        return Ok(());
+    }
     match (target, action) {
         (AdminTarget::Sql, AdminAction::Read) => {
             if params.contains_key("query") {
@@ -2961,6 +3193,7 @@ mod tests {
             search: Some("email".to_string()),
             search_focused: false,
             last_error: None,
+            last_status: None,
         };
         let indices = tree.filtered_indices();
         assert_eq!(indices, vec![0, 1, 2]);
@@ -2982,6 +3215,7 @@ mod tests {
             search: None,
             search_focused: false,
             last_error: None,
+            last_status: None,
         };
         tree.page_down();
         assert_eq!(tree.selected, 5);
@@ -3046,6 +3280,7 @@ mod tests {
             search: None,
             search_focused: false,
             last_error: None,
+            last_status: None,
         };
         app.apply_resource_selection().expect("select table");
         assert_eq!(app.target, AdminTarget::Sql);
@@ -3069,6 +3304,7 @@ mod tests {
             search: None,
             search_focused: false,
             last_error: None,
+            last_status: None,
         };
         app.apply_resource_selection().expect("select key");
         assert_eq!(app.target, AdminTarget::Kv);

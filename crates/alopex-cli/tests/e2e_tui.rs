@@ -7,31 +7,52 @@ use ratatui_testlib::{
     events::{KeyCode, Modifiers},
     Result, TuiTestHarness,
 };
-use serde_json::Value;
-use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
-
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 fn wait_for_contains(harness: &mut TuiTestHarness, needle: &str, timeout: Duration) -> Result<()> {
     let start = Instant::now();
+    let mut last_screen = String::new();
     while start.elapsed() < timeout {
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(150));
         harness.update_state()?;
-        if harness.screen_contents().contains(needle) {
+        let contents = harness.screen_contents();
+        last_screen = contents.clone();
+        if contents.contains(needle) {
             return Ok(());
         }
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
-        format!("Timed out waiting for '{needle}' to appear."),
+        format!("Timed out waiting for '{needle}' to appear. Last screen:\n{last_screen}"),
+    )
+    .into())
+}
+
+fn wait_for_value<T, F>(harness: &mut TuiTestHarness, timeout: Duration, mut f: F) -> Result<T>
+where
+    F: FnMut(&str) -> Option<T>,
+{
+    let start = Instant::now();
+    let mut last_screen = String::new();
+    while start.elapsed() < timeout {
+        std::thread::sleep(Duration::from_millis(150));
+        harness.update_state()?;
+        let contents = harness.screen_contents();
+        last_screen = contents.clone();
+        if let Some(value) = f(&contents) {
+            return Ok(value);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("Timed out waiting for value. Last screen:\n{last_screen}"),
     )
     .into())
 }
@@ -39,7 +60,7 @@ fn wait_for_contains(harness: &mut TuiTestHarness, needle: &str, timeout: Durati
 fn wait_for_absent(harness: &mut TuiTestHarness, needle: &str, timeout: Duration) -> Result<()> {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(150));
         harness.update_state()?;
         if !harness.screen_contents().contains(needle) {
             return Ok(());
@@ -50,6 +71,10 @@ fn wait_for_absent(harness: &mut TuiTestHarness, needle: &str, timeout: Duration
         format!("Timed out waiting for '{needle}' to disappear."),
     )
     .into())
+}
+
+fn visible_prefix(label: &str, max: usize) -> String {
+    label.chars().take(max).collect()
 }
 
 fn ensure_guided_fields(harness: &mut TuiTestHarness) -> Result<()> {
@@ -157,22 +182,77 @@ fn alopex_bin() -> PathBuf {
     })
 }
 
-fn alopex_command_with_env(args: &[&str], envs: &[(&str, &str)]) -> CommandBuilder {
-    let mut cmd = CommandBuilder::new("env");
-    cmd.arg("ALOPEX_TEST_TTY=1");
-    cmd.arg("TERM=xterm-256color");
-    for (key, value) in envs {
-        cmd.arg(format!("{key}={value}"));
+fn alopex_server_bin() -> PathBuf {
+    static SERVER_BIN: OnceLock<PathBuf> = OnceLock::new();
+    let path = SERVER_BIN.get_or_init(|| {
+        if let Ok(explicit) = std::env::var("ALOPEX_TEST_SERVER_BIN") {
+            let path = PathBuf::from(explicit);
+            if path.exists() {
+                return path;
+            }
+        }
+        let exe = std::env::var("CARGO_BIN_EXE_alopex-server")
+            .ok()
+            .map(PathBuf::from);
+        let exe = exe.or_else(|| {
+            let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+            let path = PathBuf::from(manifest_dir).join("../../target/debug/alopex-server");
+            Some(path)
+        });
+        let path = exe.unwrap_or_else(|| {
+            panic!(
+                "Failed to locate alopex-server binary; set CARGO_BIN_EXE_alopex-server, ALOPEX_TEST_SERVER_BIN, or build target/debug/alopex-server"
+            );
+        });
+        if !path.exists() {
+            build_server_binary(&path);
+        }
+        path
+    });
+    path.clone()
+}
+
+fn build_server_binary(expected: &Path) {
+    if std::env::var("ALOPEX_TEST_SKIP_BUILD").is_ok() {
+        panic!(
+            "alopex-server binary not found at {}; build it or unset ALOPEX_TEST_SKIP_BUILD",
+            expected.display()
+        );
     }
-    cmd.arg(alopex_bin());
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().expect("current dir"));
+    let workspace_root = manifest_dir.join("../..");
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build").arg("-p").arg("alopex-server");
+    cmd.current_dir(workspace_root);
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        cmd.env("CARGO_TARGET_DIR", target_dir);
+    }
+    let status = cmd.status().expect("failed to spawn cargo build");
+    if !status.success() {
+        panic!("failed to build alopex-server binary");
+    }
+    if !expected.exists() {
+        panic!(
+            "alopex-server binary still missing at {}",
+            expected.display()
+        );
+    }
+}
+
+fn alopex_command(args: &[&str]) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new(alopex_bin());
+    cmd.env("ALOPEX_TEST_TTY", "1");
+    cmd.env("ALOPEX_MODE", "tui");
+    cmd.env("TERM", "xterm-256color");
+    if let Ok(home) = std::env::var("ALOPEX_TEST_SERVER_HOME") {
+        cmd.env("HOME", home);
+    }
     for arg in args {
         cmd.arg(arg);
     }
     cmd
-}
-
-fn alopex_command(args: &[&str]) -> CommandBuilder {
-    alopex_command_with_env(args, &[])
 }
 
 fn alopex_batch(args: &[&str]) -> std::io::Result<()> {
@@ -183,224 +263,23 @@ fn alopex_batch(args: &[&str]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn alopex_server_bin() -> PathBuf {
-    let exe = std::env::var("CARGO_BIN_EXE_alopex-server")
-        .ok()
-        .map(PathBuf::from);
-    let exe = exe.or_else(|| {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
-        let path = PathBuf::from(manifest_dir).join("../../target/debug/alopex-server");
-        Some(path)
-    });
-    exe.unwrap_or_else(|| {
-        panic!(
-            "Failed to locate alopex-server binary; set CARGO_BIN_EXE_alopex-server or build target/debug/alopex-server"
-        );
-    })
-}
-
-fn reserve_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind port");
-    listener.local_addr().expect("local addr").port()
-}
-
-fn reserve_unique_port(used: &mut HashSet<u16>) -> u16 {
-    loop {
-        let port = reserve_port();
-        if used.insert(port) {
-            return port;
-        }
+fn alopex_batch_with_profile(profile: &str, args: &[&str]) -> std::io::Result<()> {
+    let mut cmd = Command::new(alopex_bin());
+    cmd.env("ALOPEX_TEST_TTY", "1");
+    cmd.env("ALOPEX_MODE", "tui");
+    if let Ok(home) = std::env::var("ALOPEX_TEST_SERVER_HOME") {
+        cmd.env("HOME", home);
     }
-}
-
-fn toml_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "\\\\")
-}
-
-fn write_server_config(dir: &Path, http_port: u16, admin_port: u16, grpc_port: u16) -> PathBuf {
-    let config_path = dir.join("alopex.toml");
-    let contents = format!(
-        "\
-http_bind = \"127.0.0.1:{http_port}\"
-grpc_bind = \"127.0.0.1:{grpc_port}\"
-admin_bind = \"127.0.0.1:{admin_port}\"
-data_dir = \"{data_dir}\"
-metrics_enabled = false
-tracing_enabled = false
-audit_log_enabled = false
-",
-        data_dir = toml_path(dir),
-    );
-    fs::write(&config_path, contents).expect("write config");
-    config_path
-}
-
-fn write_profile_config(home_dir: &Path, profile: &str, url: &str) -> std::io::Result<PathBuf> {
-    let config_dir = home_dir.join(".alopex");
-    fs::create_dir_all(&config_dir)?;
-    let config_path = config_dir.join("config");
-    let contents = format!(
-        "\
-default = \"{profile}\"
-
-[profiles.{profile}]
-connection_type = \"server\"
-
-[profiles.{profile}.server]
-url = \"{url}\"
-insecure = true
-"
-    );
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        options.mode(0o600);
+    let status = cmd
+        .arg("--profile")
+        .arg(profile)
+        .arg("--batch")
+        .args(args)
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::other("alopex batch command failed"));
     }
-    let mut file = options.open(&config_path)?;
-    file.write_all(contents.as_bytes())?;
-    file.flush()?;
-    #[cfg(unix)]
-    {
-        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(config_path)
-}
-
-fn http_get_status(host: &str, port: u16, path: &str) -> Option<u16> {
-    let addr: SocketAddr = format!("{host}:{port}").parse().ok()?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(200)).ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
-    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes()).ok()?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response).ok()?;
-    let status_line = response.lines().next()?;
-    let mut parts = status_line.split_whitespace();
-    let _ = parts.next()?;
-    let status = parts.next()?.parse::<u16>().ok()?;
-    Some(status)
-}
-
-fn wait_for_server_ready(
-    child: &mut Child,
-    http_port: u16,
-    admin_port: u16,
-    timeout: Duration,
-) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    let mut admin_ok = false;
-    let mut api_ok = false;
-
-    while Instant::now() < deadline {
-        if let Ok(Some(status)) = child.try_wait() {
-            let mut stderr_output = String::new();
-            if let Some(mut stderr) = child.stderr.take() {
-                let _ = stderr.read_to_string(&mut stderr_output);
-            }
-            return Err(std::io::Error::other(format!(
-                "alopex-server exited early ({status}). stderr:\n{stderr_output}"
-            ))
-            .into());
-        }
-
-        if !admin_ok {
-            if let Some(status) = http_get_status("127.0.0.1", admin_port, "/healthz") {
-                admin_ok = status == 200;
-            }
-        }
-        if !api_ok {
-            if let Some(status) = http_get_status("127.0.0.1", http_port, "/api/admin/health") {
-                api_ok = status == 200;
-            }
-        }
-        if admin_ok && api_ok {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-
-    Err(std::io::Error::other(format!(
-        "alopex-server failed health checks (admin_ok={admin_ok}, api_ok={api_ok})."
-    ))
-    .into())
-}
-
-struct ServerGuard {
-    child: Child,
-}
-
-impl ServerGuard {
-    fn new(child: Child) -> Self {
-        Self { child }
-    }
-
-    fn child_mut(&mut self) -> &mut Child {
-        &mut self.child
-    }
-
-    fn stderr_output(&mut self) -> String {
-        let mut output = String::new();
-        if let Some(mut stderr) = self.child.stderr.take() {
-            let _ = stderr.read_to_string(&mut output);
-        }
-        output
-    }
-}
-
-impl Drop for ServerGuard {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-struct ServerEnv {
-    _server: ServerGuard,
-    _server_dir: TempDir,
-    home_dir: TempDir,
-    profile: String,
-}
-
-fn start_server_env() -> Result<ServerEnv> {
-    let server_dir = TempDir::new().expect("tempdir");
-    let mut used = HashSet::new();
-    let http_port = reserve_unique_port(&mut used);
-    let admin_port = reserve_unique_port(&mut used);
-    let grpc_port = reserve_unique_port(&mut used);
-    let config_path = write_server_config(server_dir.path(), http_port, admin_port, grpc_port);
-
-    let child = Command::new(alopex_server_bin())
-        .arg("--config")
-        .arg(&config_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn server");
-    let mut server = ServerGuard::new(child);
-
-    if let Err(err) = wait_for_server_ready(
-        server.child_mut(),
-        http_port,
-        admin_port,
-        Duration::from_secs(10),
-    ) {
-        let stderr_output = server.stderr_output();
-        return Err(std::io::Error::other(format!("{err}\nstderr:\n{stderr_output}")).into());
-    }
-
-    let home_dir = TempDir::new().expect("tempdir");
-    let profile = "server-e2e";
-    let base_url = format!("http://127.0.0.1:{http_port}");
-    write_profile_config(home_dir.path(), profile, &base_url)?;
-
-    Ok(ServerEnv {
-        _server: server,
-        _server_dir: server_dir,
-        home_dir,
-        profile: profile.to_string(),
-    })
+    Ok(())
 }
 
 fn alopex_output(
@@ -421,19 +300,147 @@ fn alopex_output(
     cmd.output()
 }
 
-fn run_alopex_batch_with_env(args: &[&str], envs: &[(&str, &str)]) -> Result<()> {
-    let mut cmd = Command::new(alopex_bin());
-    for arg in args {
-        cmd.arg(arg);
+fn server_profile() -> Result<String> {
+    if let Ok(profile) = std::env::var("ALOPEX_TEST_SERVER_PROFILE") {
+        return Ok(profile);
     }
-    for (key, value) in envs {
-        cmd.env(key, value);
+    let server = ensure_test_server()?;
+    Ok(server.profile.clone())
+}
+
+fn unique_suffix() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let short = millis % 100_000;
+    format!("{}{:05}", std::process::id(), short)
+}
+
+struct TestServer {
+    _temp: TempDir,
+    _data_dir: PathBuf,
+    _config_path: PathBuf,
+    _log_path: PathBuf,
+    #[allow(dead_code)]
+    home_dir: PathBuf,
+    profile: String,
+    #[allow(dead_code)]
+    http_port: u16,
+    child: std::process::Child,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
-    let status = cmd.status()?;
-    if !status.success() {
-        return Err(std::io::Error::other("alopex batch command failed").into());
+}
+
+static TEST_SERVER: OnceLock<std::result::Result<TestServer, String>> = OnceLock::new();
+static SERVER_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+
+fn ensure_test_server() -> Result<&'static TestServer> {
+    let entry = TEST_SERVER.get_or_init(|| start_test_server().map_err(|err| err.to_string()));
+    match entry {
+        Ok(server) => Ok(server),
+        Err(message) => Err(std::io::Error::other(message.clone()).into()),
     }
-    Ok(())
+}
+
+fn server_lock() -> std::sync::MutexGuard<'static, ()> {
+    SERVER_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("server lock")
+}
+
+fn start_test_server() -> Result<TestServer> {
+    let temp = TempDir::new().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let home_dir = temp.path().join("home");
+    fs::create_dir_all(&data_dir)?;
+    fs::create_dir_all(&home_dir)?;
+
+    let (http_port, admin_port, grpc_port) = pick_ports()?;
+    let config_path = temp.path().join("alopex.toml");
+    let log_path = temp.path().join("server.log");
+    let config = format!(
+        "http_bind = \"127.0.0.1:{http_port}\"\n\
+grpc_bind = \"127.0.0.1:{grpc_port}\"\n\
+admin_bind = \"127.0.0.1:{admin_port}\"\n\
+data_dir = \"{}\"\n",
+        data_dir.display()
+    );
+    fs::write(&config_path, config)?;
+
+    let child = Command::new(alopex_server_bin())
+        .arg("--config")
+        .arg(&config_path)
+        .stdout(Stdio::from(fs::File::create(&log_path)?))
+        .stderr(Stdio::from(fs::File::create(&log_path)?))
+        .spawn()?;
+
+    wait_for_server(http_port)?;
+
+    let profile = "e2e-server".to_string();
+    let config_dir = home_dir.join(".alopex");
+    fs::create_dir_all(&config_dir)?;
+    let profile_path = config_dir.join("config");
+    let contents = format!(
+        "default_profile = \"{profile}\"\n\n[profiles.{profile}]\nconnection_type = \"server\"\n\n[profiles.{profile}.server]\nurl = \"http://127.0.0.1:{http_port}\"\ninsecure = true\n"
+    );
+    fs::write(&profile_path, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&profile_path, fs::Permissions::from_mode(0o600))?;
+    }
+
+    std::env::set_var("ALOPEX_TEST_SERVER_PROFILE", &profile);
+    std::env::set_var("ALOPEX_TEST_SERVER_HOME", &home_dir);
+
+    Ok(TestServer {
+        _temp: temp,
+        _data_dir: data_dir,
+        _config_path: config_path,
+        _log_path: log_path,
+        home_dir,
+        profile,
+        http_port,
+        child,
+    })
+}
+
+fn pick_ports() -> Result<(u16, u16, u16)> {
+    let http = TcpListener::bind("127.0.0.1:0")?;
+    let admin = TcpListener::bind("127.0.0.1:0")?;
+    let grpc = TcpListener::bind("127.0.0.1:0")?;
+    let http_port = http.local_addr()?.port();
+    let admin_port = admin.local_addr()?.port();
+    let grpc_port = grpc.local_addr()?.port();
+    drop(http);
+    drop(admin);
+    drop(grpc);
+    Ok((http_port, admin_port, grpc_port))
+}
+
+fn wait_for_server(port: u16) -> Result<()> {
+    let addr = format!("127.0.0.1:{port}");
+    for _ in 0..80 {
+        if let Ok(mut stream) = TcpStream::connect(&addr) {
+            let request =
+                b"GET /api/admin/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(request);
+            let mut response = String::new();
+            let _ = stream.read_to_string(&mut response);
+            if response.contains("200") {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(std::io::Error::other("server did not become ready").into())
 }
 
 fn seed_kv_entries(dir: &Path, entries: &[(&str, &str)]) -> Result<()> {
@@ -451,46 +458,10 @@ fn seed_kv_entries(dir: &Path, entries: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
-fn fetch_local_columnar_segment_id(dir: &Path) -> Result<String> {
-    let output = alopex_output(
-        &[
-            "--data-dir",
-            dir.to_str().expect("data dir"),
-            "--output",
-            "json",
-            "columnar",
-            "list",
-        ],
-        &[("TERM", "xterm-256color")],
-        false,
-    )?;
-    if !output.status.success() {
-        return Err(std::io::Error::other("columnar list failed").into());
+fn seed_kv_entries_remote(profile: &str, entries: &[(&str, &str)]) -> Result<()> {
+    for (key, value) in entries {
+        alopex_batch_with_profile(profile, &["kv", "put", key, value])?;
     }
-    let value: Value = serde_json::from_slice(&output.stdout).map_err(std::io::Error::other)?;
-    let rows = value
-        .as_array()
-        .ok_or_else(|| std::io::Error::other("columnar list output is not array"))?;
-    let segment_id = rows
-        .first()
-        .and_then(|row| row.get("segment_id"))
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| std::io::Error::other("segment_id missing"))?;
-    Ok(segment_id.to_string())
-}
-
-fn run_tui_command_and_expect(
-    args: &[&str],
-    envs: &[(&str, &str)],
-    expects: &[&str],
-) -> Result<()> {
-    let mut harness = new_harness()?;
-    let cmd = alopex_command_with_env(args, envs);
-    harness.spawn(cmd)?;
-    for expect in expects {
-        wait_for_contains(&mut harness, expect, Duration::from_secs(10))?;
-    }
-    harness.send_text("q")?;
     Ok(())
 }
 
@@ -512,6 +483,24 @@ fn seed_sql_table(dir: &Path, table: &str) -> Result<()> {
     Ok(())
 }
 
+fn seed_sql_table_remote(profile: &str, table: &str) -> Result<()> {
+    alopex_batch_with_profile(
+        profile,
+        &[
+            "sql",
+            &format!("CREATE TABLE IF NOT EXISTS {table} (id INTEGER, name TEXT);"),
+        ],
+    )?;
+    alopex_batch_with_profile(
+        profile,
+        &[
+            "sql",
+            &format!("INSERT INTO {table} (id, name) VALUES (1, 'alice');"),
+        ],
+    )?;
+    Ok(())
+}
+
 fn seed_columnar_segment(dir: &Path, table: &str) -> Result<()> {
     let file_path = dir.join("e2e_columnar.csv");
     fs::write(&file_path, "id,value\n1,10\n")?;
@@ -529,6 +518,25 @@ fn seed_columnar_segment(dir: &Path, table: &str) -> Result<()> {
     Ok(())
 }
 
+fn seed_columnar_segment_remote(profile: &str, table: &str, column: &str) -> Result<()> {
+    let temp = TempDir::new().expect("tempdir");
+    let file_path = temp.path().join("e2e_columnar.csv");
+    let contents = format!("id,{column}\n1,10\n");
+    fs::write(&file_path, contents)?;
+    alopex_batch_with_profile(
+        profile,
+        &[
+            "columnar",
+            "ingest",
+            "--file",
+            file_path.to_str().expect("csv path"),
+            "--table",
+            table,
+        ],
+    )?;
+    Ok(())
+}
+
 fn seed_hnsw_index(dir: &Path, name: &str, dim: usize) -> Result<()> {
     alopex_batch(&[
         "--data-dir",
@@ -542,6 +550,22 @@ fn seed_hnsw_index(dir: &Path, name: &str, dim: usize) -> Result<()> {
         "--metric",
         "l2",
     ])?;
+    Ok(())
+}
+
+fn seed_hnsw_index_remote(profile: &str, name: &str, dim: usize) -> Result<()> {
+    alopex_batch_with_profile(
+        profile,
+        &[
+            "hnsw",
+            "create",
+            name,
+            "--dim",
+            &dim.to_string(),
+            "--metric",
+            "l2",
+        ],
+    )?;
     Ok(())
 }
 
@@ -562,6 +586,16 @@ fn seed_vector_entry(dir: &Path, index: &str, key: &str, vector: &str) -> Result
     Ok(())
 }
 
+fn seed_vector_entry_remote(profile: &str, index: &str, key: &str, vector: &str) -> Result<()> {
+    alopex_batch_with_profile(
+        profile,
+        &[
+            "vector", "upsert", "--index", index, "--key", key, "--vector", vector,
+        ],
+    )?;
+    Ok(())
+}
+
 fn new_harness() -> Result<TuiTestHarness> {
     TuiTestHarness::builder()
         .with_size(120, 50)
@@ -571,22 +605,16 @@ fn new_harness() -> Result<TuiTestHarness> {
 }
 
 fn toggle_detail(harness: &mut TuiTestHarness) -> Result<()> {
-    harness.send_key(KeyCode::Enter)?;
-    if harness
-        .wait_for_text_timeout("Detail", Duration::from_secs(2))
-        .is_ok()
-    {
+    harness.send_text("\r")?;
+    if wait_for_contains(harness, "Detail", Duration::from_secs(5)).is_ok() {
         return Ok(());
     }
-    harness.send_text("\r")?;
-    if harness
-        .wait_for_text_timeout("Detail", Duration::from_secs(2))
-        .is_ok()
-    {
+    harness.send_key(KeyCode::Enter)?;
+    if wait_for_contains(harness, "Detail", Duration::from_secs(5)).is_ok() {
         return Ok(());
     }
     harness.send_text("\n")?;
-    harness.wait_for_text_timeout("Detail", Duration::from_secs(2))
+    wait_for_contains(harness, "Detail", Duration::from_secs(5))
 }
 
 fn confirm_selection_overlay(
@@ -607,9 +635,47 @@ fn confirm_selection_overlay(
 }
 
 fn execute_admin_action(harness: &mut TuiTestHarness) -> Result<()> {
-    harness.send_key(KeyCode::Enter)?;
+    stabilize_action_selection(harness, 5)?;
     harness.send_text("\r")?;
-    harness.send_text("\n")?;
+    Ok(())
+}
+
+fn execute_action(harness: &mut TuiTestHarness, label: &str, max_steps: usize) -> Result<()> {
+    for _ in 0..3 {
+        ensure_action_selected(harness, label, max_steps)?;
+        harness.update_state()?;
+        if action_selected_label(&harness.screen_contents())
+            .map(|selected| selected != label)
+            .unwrap_or(true)
+        {
+            ensure_action_selected(harness, label, max_steps)?;
+        }
+        wait_for_contains(harness, &format!("Action: {label}"), Duration::from_secs(2))?;
+        if ensure_action_stable(harness, label, 20)? {
+            return execute_admin_action(harness);
+        }
+    }
+    let snapshot = harness.screen_contents();
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!(
+            "Action selection '{label}' did not stabilize before execution. Screen snapshot:\n{snapshot}"
+        ),
+    )
+    .into())
+}
+
+fn stabilize_action_selection(harness: &mut TuiTestHarness, attempts: usize) -> Result<()> {
+    let mut last = None;
+    for _ in 0..attempts {
+        harness.update_state()?;
+        let current = action_selected_label(&harness.screen_contents());
+        if current.is_some() && current == last {
+            return Ok(());
+        }
+        last = current;
+        std::thread::sleep(Duration::from_millis(50));
+    }
     Ok(())
 }
 
@@ -644,7 +710,7 @@ fn move_selection_to(harness: &mut TuiTestHarness, label: &str, max_steps: usize
             return Ok(());
         }
         harness.send_text("j")?;
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
         harness.update_state()?;
     }
     for _ in 0..max_steps {
@@ -661,6 +727,195 @@ fn move_selection_to(harness: &mut TuiTestHarness, label: &str, max_steps: usize
         format!("Timed out waiting for selection '{label}'. Screen snapshot:\n{snapshot}"),
     )
     .into())
+}
+
+fn ensure_action_selected(
+    harness: &mut TuiTestHarness,
+    label: &str,
+    max_steps: usize,
+) -> Result<()> {
+    if let Some(shortcut) = action_shortcut(label) {
+        harness.send_key(KeyCode::Char(shortcut))?;
+        if wait_for_action_match(harness, label, 20)? {
+            return Ok(());
+        }
+        let snapshot = harness.screen_contents();
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "Timed out waiting for action '{label}' after shortcut. Screen snapshot:\n{snapshot}"
+            ),
+        )
+        .into());
+    }
+    if action_selected_label(&harness.screen_contents())
+        .map(|selected| selected == label)
+        .unwrap_or(false)
+        && ensure_action_stable(harness, label, 6)?
+    {
+        return Ok(());
+    }
+    for _ in 0..max_steps {
+        harness.send_key(KeyCode::Down)?;
+        if wait_for_action_match(harness, label, 6)? {
+            return Ok(());
+        }
+    }
+    for _ in 0..max_steps {
+        harness.send_key(KeyCode::Up)?;
+        if wait_for_action_match(harness, label, 6)? {
+            return Ok(());
+        }
+    }
+    let snapshot = harness.screen_contents();
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("Timed out waiting for action '{label}'. Screen snapshot:\n{snapshot}"),
+    )
+    .into())
+}
+
+fn wait_for_action_match(
+    harness: &mut TuiTestHarness,
+    label: &str,
+    attempts: usize,
+) -> Result<bool> {
+    for _ in 0..attempts {
+        std::thread::sleep(Duration::from_millis(50));
+        harness.update_state()?;
+        if action_selected_label(&harness.screen_contents())
+            .map(|selected| selected == label)
+            .unwrap_or(false)
+            && ensure_action_stable(harness, label, 4)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn action_selected_label(contents: &str) -> Option<String> {
+    for line in contents.lines() {
+        let parts: Vec<&str> = line.split('│').collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let action_cell = parts[3];
+        if let Some(pos) = action_cell.find('>') {
+            let after = action_cell[pos + 1..].trim_start();
+            if !after.is_empty() {
+                return Some(after.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn action_shortcut(label: &str) -> Option<char> {
+    match label {
+        "Read / List" => Some('1'),
+        "Create" => Some('2'),
+        "Update" => Some('3'),
+        "Delete" => Some('4'),
+        "Archive" => Some('5'),
+        "Restore" => Some('6'),
+        "Backup" => Some('7'),
+        "Export" => Some('8'),
+        _ => None,
+    }
+}
+
+fn ensure_action_stable(
+    harness: &mut TuiTestHarness,
+    label: &str,
+    attempts: usize,
+) -> Result<bool> {
+    let mut stable = 0usize;
+    for _ in 0..attempts {
+        std::thread::sleep(Duration::from_millis(50));
+        harness.update_state()?;
+        let matches = action_selected_label(&harness.screen_contents())
+            .map(|selected| selected == label)
+            .unwrap_or(false);
+        if matches {
+            stable += 1;
+            if stable >= 2 {
+                return Ok(true);
+            }
+        } else {
+            stable = 0;
+        }
+    }
+    Ok(false)
+}
+
+fn status_row_fields(contents: &str) -> Option<Vec<String>> {
+    for line in contents.lines() {
+        if !line.contains('|') {
+            continue;
+        }
+        let trimmed = line.trim_matches(|ch| ch == '│' || ch == ' ' || ch == '╞' || ch == '╡');
+        let parts: Vec<String> = trimmed
+            .split('|')
+            .map(|part| part.trim().to_string())
+            .filter(|part| !part.is_empty())
+            .collect();
+        if parts.len() >= 3 && parts[0] != "Status" {
+            return Some(parts);
+        }
+    }
+    None
+}
+
+fn find_handle_in_status(contents: &str) -> Option<String> {
+    let fields = status_row_fields(contents)?;
+    let handle = fields.get(1)?.trim();
+    if handle.len() == 36 && handle.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-') {
+        Some(handle.to_string())
+    } else {
+        None
+    }
+}
+
+fn find_state_in_status(contents: &str) -> Option<String> {
+    let fields = status_row_fields(contents)?;
+    let state = fields.get(2)?.trim();
+    if state.is_empty() {
+        None
+    } else {
+        Some(state.to_string())
+    }
+}
+
+fn wait_for_restore_completion(
+    harness: &mut TuiTestHarness,
+    handle: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        harness.update_state()?;
+        if let Some(state) = find_state_in_status(&harness.screen_contents()) {
+            let normalized = state.to_ascii_lowercase();
+            if normalized != "running" && normalized != "queued" {
+                return Ok(());
+            }
+        }
+
+        ensure_active_field(harness, "Handle", 6)?;
+        edit_guided_field(harness, handle)?;
+        execute_admin_action(harness)?;
+
+        if start.elapsed() > timeout {
+            let snapshot = harness.screen_contents();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("Timed out waiting for restore completion. Screen snapshot:\n{snapshot}"),
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 fn select_resource_target(
@@ -843,163 +1098,6 @@ fn e2e_results_escape_exit() -> Result<()> {
 }
 
 #[test]
-fn e2e_local_kv_list_tui() -> Result<()> {
-    let data_dir = TempDir::new().expect("tempdir");
-    seed_kv_entries(data_dir.path(), &[("demo:1", "alice"), ("demo:2", "bob")])?;
-
-    run_tui_command_and_expect(
-        &[
-            "--data-dir",
-            data_dir.path().to_str().unwrap(),
-            "kv",
-            "list",
-            "--prefix",
-            "demo:",
-        ],
-        &[],
-        &["Connection: local", "demo:1"],
-    )
-}
-
-#[test]
-fn e2e_local_vector_search_tui() -> Result<()> {
-    let data_dir = TempDir::new().expect("tempdir");
-    seed_hnsw_index(data_dir.path(), "demo_hnsw", 2)?;
-    seed_vector_entry(data_dir.path(), "demo_hnsw", "item1", "[0.1, 0.2]")?;
-    seed_vector_entry(data_dir.path(), "demo_hnsw", "item2", "[0.2, 0.1]")?;
-
-    run_tui_command_and_expect(
-        &[
-            "--data-dir",
-            data_dir.path().to_str().unwrap(),
-            "vector",
-            "search",
-            "--index",
-            "demo_hnsw",
-            "--query",
-            "[0.1, 0.2]",
-            "-k",
-            "2",
-        ],
-        &[],
-        &["Connection: local", "item1"],
-    )
-}
-
-#[test]
-fn e2e_local_hnsw_stats_tui() -> Result<()> {
-    let data_dir = TempDir::new().expect("tempdir");
-    seed_hnsw_index(data_dir.path(), "demo_hnsw", 2)?;
-
-    run_tui_command_and_expect(
-        &[
-            "--data-dir",
-            data_dir.path().to_str().unwrap(),
-            "hnsw",
-            "stats",
-            "demo_hnsw",
-        ],
-        &[],
-        &["Connection: local", "node_count"],
-    )
-}
-
-#[test]
-fn e2e_local_columnar_tui_sequence() -> Result<()> {
-    let data_dir = TempDir::new().expect("tempdir");
-    let file_path = data_dir.path().join("columnar.csv");
-    fs::write(&file_path, "id,name\n1,alpha\n2,beta\n3,gamma\n")?;
-
-    run_tui_command_and_expect(
-        &[
-            "--data-dir",
-            data_dir.path().to_str().unwrap(),
-            "columnar",
-            "ingest",
-            "--file",
-            file_path.to_str().unwrap(),
-            "--table",
-            "demo_columnar",
-            "--compression",
-            "zstd",
-        ],
-        &[],
-        &["Connection: local", "segment_id"],
-    )?;
-
-    run_tui_command_and_expect(
-        &[
-            "--data-dir",
-            data_dir.path().to_str().unwrap(),
-            "columnar",
-            "list",
-        ],
-        &[],
-        &["Connection: local", "segment_id"],
-    )?;
-
-    let segment_id = fetch_local_columnar_segment_id(data_dir.path())?;
-
-    run_tui_command_and_expect(
-        &[
-            "--data-dir",
-            data_dir.path().to_str().unwrap(),
-            "columnar",
-            "stats",
-            "--segment",
-            segment_id.as_str(),
-        ],
-        &[],
-        &["Connection: local", "row_count"],
-    )?;
-
-    run_tui_command_and_expect(
-        &[
-            "--data-dir",
-            data_dir.path().to_str().unwrap(),
-            "columnar",
-            "scan",
-            "--segment",
-            segment_id.as_str(),
-        ],
-        &[],
-        &["Connection: local", "Rows: 3"],
-    )?;
-
-    run_tui_command_and_expect(
-        &[
-            "--data-dir",
-            data_dir.path().to_str().unwrap(),
-            "columnar",
-            "index",
-            "create",
-            "--segment",
-            segment_id.as_str(),
-            "--column",
-            "name",
-            "--type",
-            "minmax",
-        ],
-        &[],
-        &["Connection: local", "message"],
-    )?;
-
-    run_tui_command_and_expect(
-        &[
-            "--data-dir",
-            data_dir.path().to_str().unwrap(),
-            "columnar",
-            "index",
-            "list",
-            "--segment",
-            segment_id.as_str(),
-        ],
-        &[],
-        &["Connection: local", "index_type"],
-    )
-}
-
-#[test]
 fn e2e_admin_escape_exit() -> Result<()> {
     let mut harness = new_harness()?;
     let data_dir = TempDir::new().expect("tempdir");
@@ -1015,11 +1113,9 @@ fn e2e_admin_escape_exit() -> Result<()> {
 
 #[test]
 fn e2e_admin_server_subcommand_launch() -> Result<()> {
+    let _guard = server_lock();
     let mut harness = new_harness()?;
-    let profile = match std::env::var("ALOPEX_TEST_SERVER_PROFILE") {
-        Ok(profile) => profile,
-        Err(_) => return Ok(()),
-    };
+    let profile = server_profile()?;
 
     let cmd = alopex_command(&["--profile", profile.as_str(), "server"]);
     harness.spawn(cmd)?;
@@ -1046,283 +1142,115 @@ fn e2e_admin_profile_launch() -> Result<()> {
 }
 
 #[test]
-fn e2e_results_server_profile_sql_query() -> Result<()> {
-    let mut harness = new_harness()?;
-    let env = start_server_env()?;
-    let home = env.home_dir.path().to_str().expect("home dir");
-    let cmd = alopex_command_with_env(
-        &[
-            "--profile",
-            env.profile.as_str(),
-            "sql",
-            "SELECT 1 AS col_0",
-        ],
-        &[("HOME", home)],
-    );
-    harness.spawn(cmd)?;
+fn e2e_admin_remote_resources_and_actions() -> Result<()> {
+    let _guard = server_lock();
+    let profile = server_profile()?;
+    let suffix = unique_suffix();
+    let table = format!("e2e_remote_sql_{suffix}");
+    let kv_key = format!("e2e-remote-kv-{suffix}");
+    let columnar_table = format!("e2e_remote_columnar_{suffix}");
+    let column_name = format!("col_{suffix}");
 
-    wait_for_contains(&mut harness, "Connection: server", Duration::from_secs(10))?;
-    wait_for_contains(&mut harness, "Rows: 1", Duration::from_secs(10))?;
-    harness.send_text("q")?;
-    Ok(())
-}
-
-#[test]
-fn e2e_results_server_profile_admin_launch() -> Result<()> {
-    let mut harness = new_harness()?;
-    let env = start_server_env()?;
-    let home = env.home_dir.path().to_str().expect("home dir");
-    let cmd = alopex_command_with_env(
-        &[
-            "--profile",
-            env.profile.as_str(),
-            "sql",
-            "SELECT 1 AS col_0",
-        ],
-        &[("HOME", home)],
-    );
-    harness.spawn(cmd)?;
-
-    wait_for_contains(&mut harness, "Connection: server", Duration::from_secs(10))?;
-    wait_for_contains(&mut harness, "Rows: 1", Duration::from_secs(10))?;
-
-    harness.send_text("a")?;
-    wait_for_contains(&mut harness, "Resources", Duration::from_secs(10))?;
-    wait_for_contains(&mut harness, "Actions", Duration::from_secs(10))?;
-
-    harness.send_text("q")?;
-    wait_for_contains(&mut harness, "Connection: server", Duration::from_secs(10))?;
-    harness.send_text("q")?;
-    Ok(())
-}
-
-#[test]
-fn e2e_server_kv_list_tui() -> Result<()> {
-    let env = start_server_env()?;
-    let home = env.home_dir.path();
-    let profile = env.profile.as_str();
-
-    run_alopex_batch_with_env(
-        &[
-            "--profile",
-            profile,
-            "--batch",
-            "kv",
-            "put",
-            "demo:1",
-            "alpha",
-        ],
-        &[("HOME", home.to_str().expect("home dir"))],
-    )?;
-    run_alopex_batch_with_env(
-        &[
-            "--profile",
-            profile,
-            "--batch",
-            "kv",
-            "put",
-            "demo:2",
-            "beta",
-        ],
-        &[("HOME", home.to_str().expect("home dir"))],
-    )?;
-
-    run_tui_command_and_expect(
-        &["--profile", profile, "kv", "list", "--prefix", "demo:"],
-        &[("HOME", home.to_str().expect("home dir"))],
-        &["Connection: server", "demo:1"],
-    )
-}
-
-#[test]
-fn e2e_server_vector_search_tui() -> Result<()> {
-    let env = start_server_env()?;
-    let home = env.home_dir.path();
-    let profile = env.profile.as_str();
-
-    run_alopex_batch_with_env(
-        &[
-            "--profile",
-            profile,
-            "--batch",
-            "hnsw",
-            "create",
-            "demo_hnsw",
-            "--dim",
-            "2",
-            "--metric",
-            "cosine",
-        ],
-        &[("HOME", home.to_str().expect("home dir"))],
-    )?;
-    run_alopex_batch_with_env(
-        &[
-            "--profile",
-            profile,
-            "--batch",
-            "vector",
-            "upsert",
-            "--index",
-            "demo_hnsw",
-            "--key",
-            "item1",
-            "--vector",
-            "[0.1, 0.2]",
-        ],
-        &[("HOME", home.to_str().expect("home dir"))],
-    )?;
-    run_alopex_batch_with_env(
-        &[
-            "--profile",
-            profile,
-            "--batch",
-            "vector",
-            "upsert",
-            "--index",
-            "demo_hnsw",
-            "--key",
-            "item2",
-            "--vector",
-            "[0.2, 0.1]",
-        ],
-        &[("HOME", home.to_str().expect("home dir"))],
-    )?;
-
-    run_tui_command_and_expect(
-        &[
-            "--profile",
-            profile,
-            "vector",
-            "search",
-            "--index",
-            "demo_hnsw",
-            "--query",
-            "[0.1, 0.2]",
-            "-k",
-            "2",
-        ],
-        &[("HOME", home.to_str().expect("home dir"))],
-        &["Connection: server", "item1"],
-    )
-}
-
-#[test]
-fn e2e_server_hnsw_stats_tui() -> Result<()> {
-    let env = start_server_env()?;
-    let home = env.home_dir.path();
-    let profile = env.profile.as_str();
-
-    run_alopex_batch_with_env(
-        &[
-            "--profile",
-            profile,
-            "--batch",
-            "hnsw",
-            "create",
-            "demo_hnsw",
-            "--dim",
-            "2",
-            "--metric",
-            "cosine",
-        ],
-        &[("HOME", home.to_str().expect("home dir"))],
-    )?;
-
-    run_tui_command_and_expect(
-        &["--profile", profile, "hnsw", "stats", "demo_hnsw"],
-        &[("HOME", home.to_str().expect("home dir"))],
-        &["Connection: server", "node_count"],
-    )
-}
-
-#[test]
-fn e2e_server_columnar_list_tui() -> Result<()> {
-    let env = start_server_env()?;
-    let home = env.home_dir.path();
-    let profile = env.profile.as_str();
-    let file_dir = TempDir::new().expect("tempdir");
-    let file_path = file_dir.path().join("columnar.csv");
-    fs::write(&file_path, "id,name\n1,alpha\n2,beta\n3,gamma\n")?;
-
-    run_alopex_batch_with_env(
-        &[
-            "--profile",
-            profile,
-            "--batch",
-            "columnar",
-            "ingest",
-            "--file",
-            file_path.to_str().unwrap(),
-            "--table",
-            "demo_columnar",
-            "--compression",
-            "zstd",
-        ],
-        &[("HOME", home.to_str().expect("home dir"))],
-    )?;
-
-    run_tui_command_and_expect(
-        &["--profile", profile, "columnar", "list"],
-        &[("HOME", home.to_str().expect("home dir"))],
-        &["Connection: server", "segment_id"],
-    )
-}
-
-#[test]
-fn e2e_server_admin_panes_render() -> Result<()> {
-    let env = start_server_env()?;
-    let home = env.home_dir.path();
-    let profile = env.profile.as_str();
-
-    run_alopex_batch_with_env(
-        &[
-            "--profile",
-            profile,
-            "--batch",
-            "kv",
-            "put",
-            "demo:1",
-            "alpha",
-        ],
-        &[("HOME", home.to_str().expect("home dir"))],
-    )?;
-    run_alopex_batch_with_env(
-        &[
-            "--profile",
-            profile,
-            "--batch",
-            "kv",
-            "put",
-            "demo:2",
-            "beta",
-        ],
-        &[("HOME", home.to_str().expect("home dir"))],
-    )?;
+    seed_sql_table_remote(&profile, &table)?;
+    seed_kv_entries_remote(&profile, &[(&kv_key, "value-00")])?;
+    seed_columnar_segment_remote(&profile, &columnar_table, &column_name)?;
 
     let mut harness = new_harness()?;
-    let cmd = alopex_command_with_env(
-        &["--profile", profile],
-        &[("HOME", home.to_str().expect("home dir"))],
-    );
+    let cmd = alopex_command(&["--profile", profile.as_str()]);
     harness.spawn(cmd)?;
 
-    wait_for_contains(&mut harness, "Resources", Duration::from_secs(10))?;
-    wait_for_contains(&mut harness, "Actions", Duration::from_secs(10))?;
-    wait_for_contains(&mut harness, "Connection: server", Duration::from_secs(10))?;
-    wait_for_contains(&mut harness, "KV Keys", Duration::from_secs(10))?;
-    wait_for_contains(&mut harness, "demo:1", Duration::from_secs(10))?;
+    wait_for_contains(&mut harness, "Resources", Duration::from_secs(15))?;
+    wait_for_contains(&mut harness, "Actions", Duration::from_secs(15))?;
     wait_for_contains(
         &mut harness,
-        "Remote listing unavailable",
-        Duration::from_secs(10),
+        &visible_prefix(&table, 18),
+        Duration::from_secs(15),
     )?;
-    wait_for_contains(&mut harness, "Read / List", Duration::from_secs(10))?;
+    wait_for_contains(
+        &mut harness,
+        &visible_prefix(&kv_key, 18),
+        Duration::from_secs(15),
+    )?;
+    wait_for_contains(
+        &mut harness,
+        &visible_prefix(&column_name, 18),
+        Duration::from_secs(15),
+    )?;
+
+    ensure_focus_table(&mut harness)?;
+    move_selection_to(&mut harness, "SQL Tables", 30)?;
+    activate_resource_selection(&mut harness)?;
+    let _ = wait_for_contains(&mut harness, "Target: SQL", Duration::from_secs(5));
 
     harness.send_text("l")?;
     wait_for_contains(&mut harness, "Focus: Detail", Duration::from_secs(5))?;
-    wait_for_contains(&mut harness, "Action: Read / List", Duration::from_secs(5))?;
+    ensure_guided_fields(&mut harness)?;
+    ensure_active_field(&mut harness, "Query", 6)?;
+    edit_guided_field(&mut harness, &format!("SELECT * FROM {table}"))?;
+    execute_admin_action(&mut harness)?;
+    wait_for_contains(&mut harness, "Last Result", Duration::from_secs(10))?;
+
+    harness.send_text("h")?;
+    wait_for_contains(&mut harness, "Focus: Table", Duration::from_secs(5))?;
+    move_selection_to(&mut harness, "KV Keys", 30)?;
+    activate_resource_selection(&mut harness)?;
+    wait_for_contains(&mut harness, "Target: KV", Duration::from_secs(5))?;
+
     harness.send_text("l")?;
-    wait_for_contains(&mut harness, "Focus: Status", Duration::from_secs(5))?;
+    wait_for_contains(&mut harness, "Focus: Detail", Duration::from_secs(5))?;
+    ensure_action_selected(&mut harness, "Create", 6)?;
+    ensure_guided_fields(&mut harness)?;
+    ensure_active_field(&mut harness, "Key", 6)?;
+    edit_guided_field(&mut harness, &format!("{kv_key}-new"))?;
+    harness.send_key(KeyCode::Tab)?;
+    edit_guided_field(&mut harness, "value-remote")?;
+    execute_admin_action(&mut harness)?;
+    wait_for_contains(&mut harness, "Last Result", Duration::from_secs(10))?;
+
+    harness.send_text("h")?;
+    wait_for_contains(&mut harness, "Focus: Table", Duration::from_secs(5))?;
+    move_selection_to(&mut harness, "Columnar Segments", 30)?;
+    activate_resource_selection(&mut harness)?;
+    wait_for_contains(&mut harness, "Target: Columnar", Duration::from_secs(5))?;
+
+    harness.send_text("l")?;
+    wait_for_contains(&mut harness, "Focus: Detail", Duration::from_secs(5))?;
+    ensure_action_selected(&mut harness, "Read / List", 6)?;
+    ensure_guided_fields(&mut harness)?;
+    execute_admin_action(&mut harness)?;
+    wait_for_contains(&mut harness, "Last Result", Duration::from_secs(10))?;
+
+    harness.send_text("q")?;
+    Ok(())
+}
+
+#[test]
+fn e2e_admin_remote_lifecycle_actions() -> Result<()> {
+    let _guard = server_lock();
+    let profile = server_profile()?;
+    let mut harness = new_harness()?;
+    let cmd = alopex_command(&["--profile", profile.as_str()]);
+    harness.spawn(cmd)?;
+
+    wait_for_contains(&mut harness, "Resources", Duration::from_secs(15))?;
+    wait_for_contains(&mut harness, "Actions", Duration::from_secs(15))?;
+
+    harness.send_text("l")?;
+    wait_for_contains(&mut harness, "Focus: Detail", Duration::from_secs(5))?;
+
+    execute_action(&mut harness, "Archive", 10)?;
+    wait_for_contains(&mut harness, "Archived", Duration::from_secs(15))?;
+
+    execute_action(&mut harness, "Export", 10)?;
+    wait_for_contains(&mut harness, "Exported", Duration::from_secs(15))?;
+
+    execute_action(&mut harness, "Backup", 10)?;
+    wait_for_contains(&mut harness, "Handle", Duration::from_secs(15))?;
+
+    execute_action(&mut harness, "Restore", 10)?;
+    wait_for_contains(&mut harness, "Handle", Duration::from_secs(15))?;
+    let handle = wait_for_value(&mut harness, Duration::from_secs(5), find_handle_in_status)?;
+    wait_for_restore_completion(&mut harness, &handle, Duration::from_secs(20))?;
 
     harness.send_text("q")?;
     Ok(())
@@ -1353,32 +1281,6 @@ fn e2e_output_flag_disables_tui() -> Result<()> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("col_0"));
     assert!(!stdout.contains("q/Esc: quit"));
-    Ok(())
-}
-
-#[test]
-fn e2e_output_kv_list_json() -> Result<()> {
-    let data_dir = TempDir::new().expect("tempdir");
-    seed_kv_entries(data_dir.path(), &[("demo:1", "alice"), ("demo:2", "bob")])?;
-
-    let output = alopex_output(
-        &[
-            "--data-dir",
-            data_dir.path().to_str().unwrap(),
-            "--output",
-            "json",
-            "kv",
-            "list",
-            "--prefix",
-            "demo:",
-        ],
-        &[("TERM", "xterm-256color")],
-        false,
-    )?;
-    assert!(output.status.success());
-    let value: Value = serde_json::from_slice(&output.stdout).map_err(std::io::Error::other)?;
-    let rows = value.as_array().expect("array");
-    assert!(rows.iter().any(|row| row["key"] == "demo:1"));
     Ok(())
 }
 
@@ -1757,6 +1659,103 @@ fn e2e_results_to_admin_hnsw_target() -> Result<()> {
     harness.send_text("a")?;
     wait_for_contains(&mut harness, "Resources", Duration::from_secs(10))?;
     wait_for_contains(&mut harness, "Target: HNSW", Duration::from_secs(5))?;
+    harness.send_text("q")?;
+    Ok(())
+}
+
+#[test]
+fn e2e_results_to_admin_flow_remote() -> Result<()> {
+    let _guard = server_lock();
+    let profile = server_profile()?;
+    let suffix = unique_suffix();
+    let table = format!("e2e_remote_flow_{suffix}");
+    seed_sql_table_remote(&profile, &table)?;
+
+    let mut harness = new_harness()?;
+    let query = format!("SELECT * FROM {table}");
+    let cmd = alopex_command(&["--profile", profile.as_str(), "sql", query.as_str()]);
+    harness.spawn(cmd)?;
+
+    wait_for_contains(&mut harness, "Rows:", Duration::from_secs(15))?;
+    harness.send_text("a")?;
+    wait_for_contains(&mut harness, "Resources", Duration::from_secs(15))?;
+    wait_for_contains(&mut harness, "Target: SQL", Duration::from_secs(5))?;
+    harness.send_text("q")?;
+    Ok(())
+}
+
+#[test]
+fn e2e_results_to_admin_vector_target_remote() -> Result<()> {
+    let _guard = server_lock();
+    let profile = server_profile()?;
+    let suffix = unique_suffix();
+    let index = format!("e2e_remote_vec_{suffix}");
+    seed_hnsw_index_remote(&profile, &index, 2)?;
+    seed_vector_entry_remote(&profile, &index, "vec1", "[1.0, 2.0]")?;
+
+    let mut harness = new_harness()?;
+    let cmd = alopex_command(&[
+        "--profile",
+        profile.as_str(),
+        "vector",
+        "search",
+        "--index",
+        index.as_str(),
+        "--query",
+        "[1.0, 2.0]",
+        "-k",
+        "1",
+    ]);
+    harness.spawn(cmd)?;
+
+    wait_for_contains(&mut harness, "Rows:", Duration::from_secs(15))?;
+    harness.send_text("a")?;
+    wait_for_contains(&mut harness, "Resources", Duration::from_secs(15))?;
+    wait_for_contains(&mut harness, "Target: Vector", Duration::from_secs(5))?;
+    harness.send_text("l")?;
+    wait_for_contains(&mut harness, "Focus: Detail", Duration::from_secs(5))?;
+    ensure_action_selected(&mut harness, "Read / List", 6)?;
+    ensure_guided_fields(&mut harness)?;
+    ensure_active_field(&mut harness, "Index", 6)?;
+    edit_guided_field(&mut harness, index.as_str())?;
+    ensure_active_field(&mut harness, "Query", 6)?;
+    edit_guided_field(&mut harness, "[1.0, 2.0]")?;
+    execute_admin_action(&mut harness)?;
+    wait_for_contains(&mut harness, "Last Result", Duration::from_secs(10))?;
+    harness.send_text("q")?;
+    Ok(())
+}
+
+#[test]
+fn e2e_results_to_admin_hnsw_target_remote() -> Result<()> {
+    let _guard = server_lock();
+    let profile = server_profile()?;
+    let suffix = unique_suffix();
+    let index = format!("e2e_remote_hnsw_{suffix}");
+    seed_hnsw_index_remote(&profile, &index, 2)?;
+
+    let mut harness = new_harness()?;
+    let cmd = alopex_command(&[
+        "--profile",
+        profile.as_str(),
+        "hnsw",
+        "stats",
+        index.as_str(),
+    ]);
+    harness.spawn(cmd)?;
+
+    wait_for_contains(&mut harness, "Rows:", Duration::from_secs(15))?;
+    harness.send_text("a")?;
+    wait_for_contains(&mut harness, "Resources", Duration::from_secs(15))?;
+    wait_for_contains(&mut harness, "Target: HNSW", Duration::from_secs(5))?;
+    harness.send_text("l")?;
+    wait_for_contains(&mut harness, "Focus: Detail", Duration::from_secs(5))?;
+    ensure_action_selected(&mut harness, "Read / List", 6)?;
+    ensure_guided_fields(&mut harness)?;
+    ensure_active_field(&mut harness, "Index", 6)?;
+    edit_guided_field(&mut harness, index.as_str())?;
+    execute_admin_action(&mut harness)?;
+    wait_for_contains(&mut harness, "Last Result", Duration::from_secs(10))?;
     harness.send_text("q")?;
     Ok(())
 }

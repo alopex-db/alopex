@@ -40,6 +40,7 @@ struct BackupRecord {
 struct BackupRuntime {
     active: Option<BackupHandle>,
     history: HashMap<BackupHandle, BackupRecord>,
+    last_location: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +86,7 @@ impl BackupCoordinator {
 
         let handle = BackupHandle { id: Uuid::new_v4() };
         let dest = backup_destination(&self.data_dir);
+        fs::create_dir_all(&dest)?;
         let metadata = BackupMetadata {
             handle: handle.clone(),
             location: dest.clone(),
@@ -92,6 +94,7 @@ impl BackupCoordinator {
         let mut running = OperationState::running();
         running.set_progress(Progress::percent(0))?;
         runtime.active = Some(handle.clone());
+        runtime.last_location = Some(dest.clone());
         runtime.history.insert(
             handle.clone(),
             BackupRecord {
@@ -154,6 +157,11 @@ impl BackupCoordinator {
             .map(|record| record.metadata.location.clone())
             .ok_or_else(|| ServerError::NotFound("backup handle not found".to_string()))
     }
+
+    pub fn latest_location(&self) -> Option<PathBuf> {
+        let runtime = self.runtime.lock().expect("backup runtime lock poisoned");
+        runtime.last_location.clone()
+    }
 }
 
 fn run_backup(
@@ -180,14 +188,16 @@ fn run_backup(
     copy_dir_filtered(data_dir, dest)?;
     write_snapshot_manifest(dest, &manifest)?;
     verify_snapshot(dest)?;
+    write_latest_marker(&backup_root(data_dir), dest)?;
     Ok(())
 }
 
 fn backup_destination(data_dir: &Path) -> PathBuf {
-    data_dir
-        .join(".lifecycle")
-        .join("backup")
-        .join(timestamp_dir())
+    backup_root(data_dir).join(timestamp_dir())
+}
+
+fn backup_root(data_dir: &Path) -> PathBuf {
+    data_dir.join(".lifecycle").join("backup")
 }
 
 fn timestamp_dir() -> String {
@@ -196,6 +206,13 @@ fn timestamp_dir() -> String {
         .unwrap_or_default()
         .as_secs();
     format!("ts-{seconds}")
+}
+
+fn write_latest_marker(root: &Path, latest: &Path) -> Result<()> {
+    fs::create_dir_all(root)?;
+    let marker = root.join("latest");
+    fs::write(marker, latest.display().to_string().as_bytes())?;
+    Ok(())
 }
 
 pub(crate) fn copy_dir_filtered(src: &Path, dest: &Path) -> Result<()> {

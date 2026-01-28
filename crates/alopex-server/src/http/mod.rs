@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod admin_api;
+pub mod admin_resources;
 pub mod columnar;
 pub mod hnsw;
 pub mod kv;
@@ -100,6 +101,10 @@ pub fn router(state: Arc<ServerState>) -> Router {
         .route(
             "/api/admin/capabilities",
             axum::routing::get(admin_api::capabilities),
+        )
+        .route(
+            "/api/admin/resources",
+            axum::routing::get(admin_resources::list),
         )
         .route("/api/admin/status", axum::routing::get(admin_api::status))
         .route("/api/admin/metrics", axum::routing::get(admin_api::metrics))

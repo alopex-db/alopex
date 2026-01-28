@@ -3,12 +3,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use alopex_core::kv::async_adapter::AsyncKVTransactionAdapter;
+use alopex_core::kv::{KVStore, KVTransaction};
+use alopex_core::types::TxnMode;
 use alopex_sql::storage::async_storage::AsyncTxnBridge;
 use alopex_sql::storage::AsyncSqlTransaction;
 use alopex_sql::AlopexDialect;
 use axum::extract::Extension;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use bincode::Options;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -19,6 +22,8 @@ use crate::http::{error_response, json_response, RequestContext};
 use crate::ops::memory::MemoryControlPolicy;
 use crate::server::ServerState;
 use crate::session::{SessionId, TxnHandle};
+use alopex_core::storage::format::bincode_config;
+use alopex_sql::catalog::persistent::{PersistedTableMeta, TABLES_PREFIX};
 
 #[derive(Debug, Deserialize)]
 pub struct SqlRequest {
@@ -141,9 +146,56 @@ async fn execute_non_streaming(
             .log_ddl(sql, ctx.actor.as_deref(), &ctx.correlation_id);
     }
 
+    if is_ddl {
+        sync_catalog_to_store(&state)?;
+    }
+
     state.metrics.record_query(start.elapsed(), true);
 
     Ok(map_execution_result(exec_result))
+}
+
+fn sync_catalog_to_store(state: &ServerState) -> Result<()> {
+    let guard = state
+        .catalog
+        .read()
+        .map_err(|_| ServerError::Internal("catalog lock poisoned".into()))?;
+    let tables = guard.list_tables();
+    let mut txn = state.store.begin(TxnMode::ReadWrite)?;
+    delete_prefix(&mut txn, TABLES_PREFIX)?;
+    for table in tables {
+        let persisted = PersistedTableMeta::from(&table);
+        let value = bincode_config()
+            .serialize(&persisted)
+            .map_err(|err| ServerError::Internal(err.to_string()))?;
+        txn.put(
+            table_key(&table.catalog_name, &table.namespace_name, &table.name),
+            value,
+        )?;
+    }
+    txn.commit_self()?;
+    Ok(())
+}
+
+fn delete_prefix<'a, T: KVTransaction<'a>>(txn: &mut T, prefix: &[u8]) -> Result<()> {
+    let mut keys = Vec::new();
+    for (key, _) in txn.scan_prefix(prefix)? {
+        keys.push(key);
+    }
+    for key in keys {
+        txn.delete(key)?;
+    }
+    Ok(())
+}
+
+fn table_key(catalog_name: &str, namespace_name: &str, table_name: &str) -> Vec<u8> {
+    let mut key = TABLES_PREFIX.to_vec();
+    key.extend_from_slice(catalog_name.as_bytes());
+    key.push(b'/');
+    key.extend_from_slice(namespace_name.as_bytes());
+    key.push(b'/');
+    key.extend_from_slice(table_name.as_bytes());
+    key
 }
 
 fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestContext) -> Response {
