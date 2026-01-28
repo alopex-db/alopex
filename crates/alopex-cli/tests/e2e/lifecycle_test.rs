@@ -156,11 +156,64 @@ async fn e2e_lifecycle_status_outputs_include_fields() {
     .await
     .expect("restore status");
     let text = String::from_utf8(output).expect("utf8");
+    let headers = extract_table_headers(&text);
     for label in [
         "Status", "Handle", "State", "Location", "Metadata", "Message",
     ] {
-        assert!(text.contains(label), "missing {label}");
+        let lower = label.to_ascii_lowercase();
+        assert!(
+            headers
+                .iter()
+                .any(|header| header.to_ascii_lowercase() == lower),
+            "missing {label}"
+        );
     }
 
     let _ = shutdown.send(());
+}
+
+fn extract_table_headers(text: &str) -> Vec<String> {
+    let mut header_lines = Vec::new();
+    let mut in_header = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('┌') {
+            in_header = true;
+            continue;
+        }
+        if in_header && (trimmed.starts_with('╞') || trimmed.starts_with('├')) {
+            break;
+        }
+        if in_header && (trimmed.contains('│') || trimmed.contains('┆')) {
+            header_lines.push(trimmed.to_string());
+        }
+    }
+    if header_lines.is_empty() {
+        return Vec::new();
+    }
+    let first: Vec<char> = header_lines[0].chars().collect();
+    let mut boundaries = Vec::new();
+    for (idx, ch) in first.iter().enumerate() {
+        if *ch == '│' || *ch == '┆' {
+            boundaries.push(idx);
+        }
+    }
+    let mut headers = Vec::new();
+    for window in boundaries.windows(2) {
+        let start = window[0] + 1;
+        let end = window[1];
+        let mut label = String::new();
+        for line in &header_lines {
+            let chars: Vec<char> = line.chars().collect();
+            if end <= chars.len() {
+                let slice: String = chars[start..end].iter().collect();
+                label.push_str(slice.trim());
+            }
+        }
+        let label = label.replace(' ', "");
+        if !label.is_empty() {
+            headers.push(label);
+        }
+    }
+    headers
 }

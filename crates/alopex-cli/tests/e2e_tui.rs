@@ -308,6 +308,32 @@ fn server_profile() -> Result<String> {
     Ok(server.profile.clone())
 }
 
+fn server_data_dir() -> Result<PathBuf> {
+    let server = ensure_test_server()?;
+    Ok(server._data_dir.clone())
+}
+
+fn read_latest_marker(root: &Path) -> Result<PathBuf> {
+    let marker = root.join("latest");
+    if !marker.exists() {
+        return Err(std::io::Error::other(format!(
+            "latest marker missing at {}",
+            marker.display()
+        ))
+        .into());
+    }
+    let path = fs::read_to_string(&marker)?;
+    let path = PathBuf::from(path.trim());
+    if !path.exists() {
+        return Err(std::io::Error::other(format!(
+            "latest path does not exist: {}",
+            path.display()
+        ))
+        .into());
+    }
+    Ok(path)
+}
+
 fn unique_suffix() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -858,9 +884,8 @@ fn status_row_fields(contents: &str) -> Option<Vec<String>> {
         let parts: Vec<String> = trimmed
             .split('|')
             .map(|part| part.trim().to_string())
-            .filter(|part| !part.is_empty())
             .collect();
-        if parts.len() >= 3 && parts[0] != "Status" {
+        if parts.len() >= 3 && parts.first().map(|part| part.as_str()) != Some("Status") {
             return Some(parts);
         }
     }
@@ -887,6 +912,51 @@ fn find_state_in_status(contents: &str) -> Option<String> {
     }
 }
 
+fn is_failure_state_label(state: &str) -> bool {
+    matches!(
+        state.trim().to_ascii_lowercase().as_str(),
+        "failed" | "error" | "failure" | "canceled" | "cancelled"
+    )
+}
+
+fn wait_for_backup_completion(
+    harness: &mut TuiTestHarness,
+    handle: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        harness.update_state()?;
+        if let Some(state) = find_state_in_status(&harness.screen_contents()) {
+            let normalized = state.trim().to_ascii_lowercase();
+            if normalized != "running" && normalized != "queued" {
+                if is_failure_state_label(&normalized) {
+                    let snapshot = harness.screen_contents();
+                    return Err(std::io::Error::other(format!(
+                        "Backup failed with state '{state}'. Screen snapshot:\n{snapshot}"
+                    ))
+                    .into());
+                }
+                return Ok(());
+            }
+        }
+
+        ensure_active_field(harness, "Handle", 6)?;
+        edit_guided_field(harness, handle)?;
+        execute_admin_action(harness)?;
+
+        if start.elapsed() > timeout {
+            let snapshot = harness.screen_contents();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("Timed out waiting for backup completion. Screen snapshot:\n{snapshot}"),
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn wait_for_restore_completion(
     harness: &mut TuiTestHarness,
     handle: &str,
@@ -898,6 +968,13 @@ fn wait_for_restore_completion(
         if let Some(state) = find_state_in_status(&harness.screen_contents()) {
             let normalized = state.to_ascii_lowercase();
             if normalized != "running" && normalized != "queued" {
+                if is_failure_state_label(&normalized) {
+                    let snapshot = harness.screen_contents();
+                    return Err(std::io::Error::other(format!(
+                        "Restore failed with state '{state}'. Screen snapshot:\n{snapshot}"
+                    ))
+                    .into());
+                }
                 return Ok(());
             }
         }
@@ -1244,10 +1321,27 @@ fn e2e_admin_remote_lifecycle_actions() -> Result<()> {
     execute_action(&mut harness, "Export", 10)?;
     wait_for_contains(&mut harness, "Exported", Duration::from_secs(15))?;
 
-    execute_action(&mut harness, "Backup", 10)?;
+    ensure_action_selected(&mut harness, "Backup", 10)?;
+    ensure_guided_fields(&mut harness)?;
+    ensure_active_field(&mut harness, "Handle", 6)?;
+    edit_guided_field(&mut harness, "")?;
+    execute_admin_action(&mut harness)?;
     wait_for_contains(&mut harness, "Handle", Duration::from_secs(15))?;
+    let backup_handle =
+        wait_for_value(&mut harness, Duration::from_secs(5), find_handle_in_status)?;
+    wait_for_backup_completion(&mut harness, &backup_handle, Duration::from_secs(20))?;
+    let backup_location =
+        read_latest_marker(&server_data_dir()?.join(".lifecycle").join("backup"))?
+            .display()
+            .to_string();
 
-    execute_action(&mut harness, "Restore", 10)?;
+    ensure_action_selected(&mut harness, "Restore", 10)?;
+    ensure_guided_fields(&mut harness)?;
+    ensure_active_field(&mut harness, "Handle", 6)?;
+    edit_guided_field(&mut harness, "")?;
+    ensure_active_field(&mut harness, "Source", 6)?;
+    edit_guided_field(&mut harness, &backup_location)?;
+    execute_admin_action(&mut harness)?;
     wait_for_contains(&mut harness, "Handle", Duration::from_secs(15))?;
     let handle = wait_for_value(&mut harness, Duration::from_secs(5), find_handle_in_status)?;
     wait_for_restore_completion(&mut harness, &handle, Duration::from_secs(20))?;
