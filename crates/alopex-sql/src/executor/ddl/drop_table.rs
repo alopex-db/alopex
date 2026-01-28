@@ -6,6 +6,7 @@ use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::storage::{KeyEncoder, SqlTxn};
 
+use super::persistence::{delete_index, delete_table};
 /// Execute DROP TABLE.
 pub fn execute_drop_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     txn: &mut impl SqlTxn<'txn, S>,
@@ -55,6 +56,11 @@ pub fn execute_drop_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
 
     // Finally drop from catalog (removes metadata + indexes).
     catalog.drop_table(table_name)?;
+
+    delete_table(txn.inner_mut(), &table_meta)?;
+    for index in &indexes {
+        delete_index(txn.inner_mut(), index)?;
+    }
 
     Ok(ExecutionResult::Success)
 }

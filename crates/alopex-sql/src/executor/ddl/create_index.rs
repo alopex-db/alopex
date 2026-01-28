@@ -7,6 +7,7 @@ use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Resul
 use crate::storage::{SqlTxn, SqlValue, StorageError};
 
 use super::is_implicit_pk_index;
+use super::persistence::persist_index;
 
 /// Execute CREATE INDEX.
 pub fn execute_create_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
@@ -48,7 +49,8 @@ pub fn execute_create_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         build_index_for_existing_rows(txn, &table, &index, column_indices)?;
     }
 
-    catalog.create_index(index)?;
+    catalog.create_index(index.clone())?;
+    persist_index(txn.inner_mut(), &index)?;
 
     Ok(ExecutionResult::Success)
 }

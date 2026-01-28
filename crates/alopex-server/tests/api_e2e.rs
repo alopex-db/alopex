@@ -635,6 +635,104 @@ async fn server_binary_exposes_all_http_apis() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    // Admin resources endpoint.
+    let (status, _) = send_json(
+        &client,
+        Method::POST,
+        &format!("{http_url}/kv/put"),
+        json!({ "key": "gamma", "value": [7, 8, 9] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send_json(
+        &client,
+        Method::POST,
+        &format!("{http_url}/kv/put"),
+        json!({ "key": "__alopex_test", "value": [0] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send_empty(
+        &client,
+        Method::GET,
+        &format!(
+            "{http_url}/api/admin/resources?limit=1&include_columnar_columns=true&columnar_column_limit=1"
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let resources: Value = serde_json::from_slice(&body).expect("resources json");
+    let truncated = resources.get("truncated").expect("truncated sections");
+    assert_eq!(
+        truncated.get("sql_tables").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        truncated.get("kv_keys").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    let sql_tables = resources
+        .get("sql_tables")
+        .and_then(|v| v.as_array())
+        .expect("sql tables");
+    assert_eq!(sql_tables.len(), 1);
+    assert_eq!(
+        sql_tables[0].get("name").and_then(|v| v.as_str()),
+        Some("items")
+    );
+    let columns = sql_tables[0]
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .expect("sql columns");
+    let column_names: HashSet<_> = columns
+        .iter()
+        .filter_map(|col| col.get("name").and_then(|v| v.as_str()))
+        .collect();
+    assert!(column_names.contains("id"));
+    assert!(column_names.contains("name"));
+    assert!(column_names.contains("embedding"));
+    let embedding_type = columns
+        .iter()
+        .find(|col| col.get("name").and_then(|v| v.as_str()) == Some("embedding"))
+        .and_then(|col| col.get("data_type").and_then(|v| v.as_str()));
+    assert_eq!(embedding_type, Some("VECTOR(2, L2)"));
+
+    let columnar_segments = resources
+        .get("columnar_segments")
+        .and_then(|v| v.as_array())
+        .expect("columnar segments");
+    assert_eq!(columnar_segments.len(), 1);
+    let columnar_columns = columnar_segments[0]
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .expect("columnar columns");
+    assert!(columnar_columns.len() <= 1);
+
+    let (status, body) = send_empty(
+        &client,
+        Method::GET,
+        &format!("{http_url}/api/admin/resources?limit=50"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let resources: Value = serde_json::from_slice(&body).expect("resources json");
+    let kv_keys = resources
+        .get("kv_keys")
+        .and_then(|v| v.as_array())
+        .expect("kv keys");
+    let kv_keys: HashSet<_> = kv_keys.iter().filter_map(|v| v.as_str()).collect();
+    assert!(kv_keys.contains("beta"));
+    assert!(kv_keys.contains("gamma"));
+    assert!(!kv_keys.contains("__alopex_test"));
+    let columnar_segments = resources
+        .get("columnar_segments")
+        .and_then(|v| v.as_array())
+        .expect("columnar segments");
+    if let Some(first_segment) = columnar_segments.first() {
+        assert!(first_segment.get("columns").is_some_and(Value::is_null));
+    }
+
     // Session endpoints.
     let (status, body) =
         send_empty(&client, Method::POST, &format!("{http_url}/session/begin")).await;
@@ -669,13 +767,11 @@ async fn server_binary_exposes_all_http_apis() {
     assert_eq!(status, StatusCode::OK);
 
     // Restore endpoint (run last to avoid disrupting other operations).
-    let restore_source = temp.path().join("restore-source");
-    std::fs::create_dir_all(&restore_source).expect("restore source");
     let (status, restore_body) = send_json(
         &client,
         Method::POST,
         &format!("{http_url}/api/admin/restore"),
-        json!({ "source": restore_source.to_string_lossy() }),
+        json!({}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);

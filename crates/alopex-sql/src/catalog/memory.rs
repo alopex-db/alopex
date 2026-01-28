@@ -202,4 +202,8 @@ impl Catalog for MemoryCatalog {
         self.index_id_counter += 1;
         self.index_id_counter
     }
+
+    fn list_tables(&self) -> Vec<TableMetadata> {
+        self.tables.values().cloned().collect()
+    }
 }

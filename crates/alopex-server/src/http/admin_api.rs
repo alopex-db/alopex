@@ -55,7 +55,8 @@ pub struct AdminLifecycleRequest {
 
 #[derive(Deserialize)]
 pub struct AdminRestoreRequest {
-    source: String,
+    #[serde(default)]
+    source: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -162,9 +163,35 @@ pub async fn start_restore(
     Extension(ctx): Extension<RequestContext>,
     Json(request): Json<AdminRestoreRequest>,
 ) -> Response {
-    let source = RestoreSource {
-        path: request.source.into(),
+    let source_path = match request.source {
+        Some(source) => source.into(),
+        None => match crate::ops::restore::resolve_default_source(&state.config.data_dir) {
+            Ok(path) => path,
+            Err(crate::error::ServerError::NotFound(_)) => {
+                match state.backup_coordinator.latest_location() {
+                    Some(path) => path,
+                    None => {
+                        let data_dir = state.config.data_dir.clone();
+                        let archive_result = tokio::task::spawn_blocking(move || {
+                            perform_lifecycle_action("archive", Path::new(&data_dir))
+                        })
+                        .await
+                        .map_err(|err| crate::error::ServerError::Internal(err.to_string()))
+                        .and_then(|res| res.map_err(crate::error::ServerError::BadRequest));
+                        if let Err(err) = archive_result {
+                            return error_response(err, &ctx);
+                        }
+                        match crate::ops::restore::resolve_default_source(&state.config.data_dir) {
+                            Ok(path) => path,
+                            Err(err) => return error_response(err, &ctx),
+                        }
+                    }
+                }
+            }
+            Err(err) => return error_response(err, &ctx),
+        },
     };
+    let source = RestoreSource { path: source_path };
     match state.restore_coordinator.start_restore(source).await {
         Ok(handle) => match restore_response(&state, &handle) {
             Ok(response) => Json(response).into_response(),

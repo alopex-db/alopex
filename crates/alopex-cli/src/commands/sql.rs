@@ -465,6 +465,18 @@ async fn collect_remote_streaming_rows(
         }
     };
 
+    if let Some(content_type) = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    {
+        if content_type.starts_with("application/jsonl") {
+            let _ = send_cancel_request(client).await;
+            return collect_remote_non_streaming_rows(client, sql, options, fetch_size, max_rows)
+                .await;
+        }
+    }
+
     let mut stream = response.bytes_stream();
     let mut buffer: Vec<u8> = Vec::new();
     let mut pos: usize = 0;
@@ -693,6 +705,64 @@ async fn collect_remote_streaming_rows(
         .into_iter()
         .map(|name| Column::new(name, DataType::Text))
         .collect();
+    Ok((columns, rows))
+}
+
+async fn collect_remote_non_streaming_rows(
+    client: &HttpClient,
+    sql: &str,
+    options: &SqlExecutionOptions<'_>,
+    fetch_size: Option<usize>,
+    max_rows: Option<usize>,
+) -> Result<(Vec<Column>, Vec<Row>)> {
+    let request = RemoteSqlRequest {
+        sql: sql.to_string(),
+        streaming: false,
+        fetch_size,
+        max_rows,
+    };
+    let response: RemoteSqlResponse = tokio::select! {
+        result = tokio::time::timeout(options.deadline.remaining(), client.post_json("api/sql/query", &request)) => {
+            match result {
+                Ok(value) => value.map_err(map_client_error)?,
+                Err(_) => {
+                    let _ = send_cancel_request(client).await;
+                    return Err(CliError::Timeout(format!(
+                        "deadline exceeded after {}",
+                        humantime::format_duration(options.deadline.duration())
+                    )));
+                }
+            }
+        }
+        _ = options.cancel.wait() => {
+            let _ = send_cancel_request(client).await;
+            return Err(CliError::Cancelled);
+        }
+    };
+
+    if response.columns.is_empty() {
+        let message = match response.affected_rows {
+            Some(count) => format!("{count} row(s) affected"),
+            None => "Operation completed successfully".to_string(),
+        };
+        let columns = sql_status_columns();
+        let row = Row::new(vec![Value::Text("OK".to_string()), Value::Text(message)]);
+        return Ok((columns, vec![row]));
+    }
+
+    let columns = response
+        .columns
+        .iter()
+        .map(|col| Column::new(&col.name, data_type_from_string(&col.data_type)))
+        .collect::<Vec<_>>();
+    let mut rows = response
+        .rows
+        .into_iter()
+        .map(|row| Row::new(row.into_iter().map(remote_value_to_value).collect()))
+        .collect::<Vec<_>>();
+    if let Some(limit) = options.limit {
+        rows.truncate(limit);
+    }
     Ok((columns, rows))
 }
 

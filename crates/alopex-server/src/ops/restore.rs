@@ -137,6 +137,16 @@ fn run_restore(data_dir: &Path, source: &Path) -> Result<RestoreMetadata> {
     })
 }
 
+pub fn resolve_default_source(data_dir: &Path) -> Result<PathBuf> {
+    let lifecycle_root = data_dir.join(".lifecycle");
+    let backup_root = lifecycle_root.join("backup");
+    let archive_root = lifecycle_root.join("archive");
+    if let Ok(path) = read_latest_marker(&backup_root) {
+        return Ok(path);
+    }
+    read_latest_marker(&archive_root)
+}
+
 fn validate_source(source: &Path) -> Result<()> {
     if !source.exists() {
         return Err(ServerError::NotFound(format!(
@@ -190,6 +200,25 @@ fn backup_id_from_path(source: &Path) -> String {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| source.display().to_string())
+}
+
+fn read_latest_marker(root: &Path) -> Result<PathBuf> {
+    let marker = root.join("latest");
+    if !marker.exists() {
+        return Err(ServerError::NotFound(format!(
+            "no snapshots found in {}",
+            root.display()
+        )));
+    }
+    let path = fs::read_to_string(&marker)?;
+    let path = PathBuf::from(path.trim());
+    if !path.exists() {
+        return Err(ServerError::NotFound(format!(
+            "latest snapshot path does not exist: {}",
+            path.display()
+        )));
+    }
+    Ok(path)
 }
 
 fn dir_size_bytes(dir: &Path) -> Result<u64> {

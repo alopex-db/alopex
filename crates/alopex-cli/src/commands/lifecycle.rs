@@ -71,14 +71,15 @@ struct RemoteLegacyResponse {
 
 #[derive(Serialize)]
 struct RemoteRestoreRequest {
-    source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RemoteLifecycleStatusResponse {
     status: Option<String>,
     handle: Option<String>,
-    state: Option<String>,
+    state: Option<JsonValue>,
     location: Option<String>,
     message: Option<String>,
     reason: Option<String>,
@@ -135,14 +136,8 @@ pub async fn execute_remote_with_formatter<W: Write>(
                     .as_ref()
                     .map(|value| value.trim())
                     .filter(|value| !value.is_empty())
-                    .ok_or_else(|| {
-                        CliError::InvalidArgument(
-                            "Restore source must be provided for remote restore.".to_string(),
-                        )
-                    })?;
-                let request = RemoteRestoreRequest {
-                    source: source.to_string(),
-                };
+                    .map(|value| value.to_string());
+                let request = RemoteRestoreRequest { source };
                 let response: RemoteLifecycleStatusResponse = client
                     .post_json("api/admin/restore", &request)
                     .await
@@ -255,7 +250,7 @@ fn remote_status_row(response: RemoteLifecycleStatusResponse) -> Row {
     Row::new(vec![
         Value::Text(status),
         text_or_null(response.handle),
-        text_or_null(response.state),
+        text_or_null(state_label(&response.state)),
         text_or_null(response.location),
         metadata_to_value(response.metadata),
         text_or_null(message),
@@ -271,13 +266,12 @@ fn resolve_status(response: &RemoteLifecycleStatusResponse) -> String {
     {
         return status.to_string();
     }
-    if let Some(state) = response
-        .state
+    if let Some(state) = state_label(&response.state)
         .as_ref()
-        .map(|value| value.trim())
+        .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
     {
-        if is_failure_state(state) {
+        if is_failure_state(&state) {
             return "Error".to_string();
         }
     }
@@ -294,6 +288,9 @@ fn resolve_message(response: &RemoteLifecycleStatusResponse) -> Option<String> {
             return Some(value.to_string());
         }
     }
+    if let Some(reason) = state_reason(&response.state) {
+        return Some(reason);
+    }
     None
 }
 
@@ -302,6 +299,28 @@ fn is_failure_state(state: &str) -> bool {
         state.to_lowercase().as_str(),
         "failed" | "error" | "failure"
     )
+}
+
+fn state_label(state: &Option<JsonValue>) -> Option<String> {
+    let value = state.as_ref()?;
+    match value {
+        JsonValue::String(text) => Some(text.clone()),
+        JsonValue::Object(map) => map
+            .get("status")
+            .and_then(|status| status.as_str())
+            .map(|status| status.to_string())
+            .or_else(|| Some(value.to_string())),
+        _ => Some(value.to_string()),
+    }
+}
+
+fn state_reason(state: &Option<JsonValue>) -> Option<String> {
+    let JsonValue::Object(map) = state.as_ref()? else {
+        return None;
+    };
+    map.get("reason")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
 }
 
 fn text_or_null(value: Option<String>) -> Value {

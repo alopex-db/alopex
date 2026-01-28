@@ -7,6 +7,7 @@ pub mod create_index;
 pub mod create_table;
 pub mod drop_index;
 pub mod drop_table;
+pub(crate) mod persistence;
 
 /// Prefix reserved for implicit primary key indexes.
 pub const PK_INDEX_PREFIX: &str = "__pk_";
