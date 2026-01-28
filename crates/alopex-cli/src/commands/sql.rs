@@ -801,6 +801,30 @@ async fn execute_remote_streaming<W: Write>(
         }
     };
 
+    if let Some(content_type) = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    {
+        if content_type.starts_with("application/jsonl") {
+            let _ = send_cancel_request(client).await;
+            let (columns, rows) =
+                collect_remote_non_streaming_rows(client, sql, options, fetch_size, max_rows)
+                    .await?;
+            let mut streaming_writer =
+                StreamingWriter::new(writer, formatter, columns, options.limit)
+                    .with_quiet(options.quiet);
+            streaming_writer.prepare(Some(rows.len()))?;
+            for row in rows {
+                match streaming_writer.write_row(row)? {
+                    WriteStatus::LimitReached => break,
+                    WriteStatus::Continue => {}
+                }
+            }
+            return streaming_writer.finish();
+        }
+    }
+
     let mut stream = response.bytes_stream();
     let mut buffer: Vec<u8> = Vec::new();
     let mut pos: usize = 0;
