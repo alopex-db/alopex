@@ -137,6 +137,13 @@ jobs:
       - name: Wait for crates.io index update
         run: sleep 30
 
+      - name: Publish alopex-dataframe
+        run: cargo publish -p alopex-dataframe
+        continue-on-error: true
+
+      - name: Wait for crates.io index update
+        run: sleep 30
+
       - name: Publish alopex-embedded
         run: cargo publish -p alopex-embedded
         continue-on-error: true
