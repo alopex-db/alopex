@@ -6,11 +6,12 @@ use alopex_core::Error as CoreError;
 use alopex_core::MemoryKV;
 use alopex_core::{KVStore, KVTransaction, Result as CoreResult, TxnMode};
 #[cfg(feature = "test-hooks")]
+use common::begin_op;
+#[cfg(feature = "test-hooks")]
 use common::open_store_with_crash_sim;
 use common::{
-    begin_op, corrupt_file, open_store_for_mode, selected_storage_modes, slo_presets,
-    storage_root_for_mode, wal_path_for_mode, ExecutionModel, StressStorageMode, StressTestConfig,
-    StressTestHarness,
+    corrupt_file, open_store_for_mode, selected_storage_modes, slo_presets, storage_root_for_mode,
+    wal_path_for_mode, ExecutionModel, StressStorageMode, StressTestConfig, StressTestHarness,
 };
 use std::fs::OpenOptions;
 #[cfg(feature = "test-hooks")]
