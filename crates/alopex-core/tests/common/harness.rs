@@ -1,13 +1,20 @@
 use alopex_core::{KVStore, KVTransaction, Result as CoreResult, TxnMode};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
+use super::artifacts::{
+    collect_env_metadata, command_hint, detect_git_sha, prepare_artifacts, storage_mode_env,
+    system_info, write_checks, write_command_txt, write_log, write_metrics, write_run_json,
+    CheckSummary, RunMetadata,
+};
 use super::fixtures::{open_store_for_mode, StressStorageMode};
+use super::lane::{should_run, Lane};
 use super::metrics::{
     metrics_output_dir, MetricsCollector, MetricsReport, MetricsSummary, SloConfig, SloResult,
 };
+use super::replay::{deterministic_mode, seed_for_name};
 use super::watchdog::{OperationGuard, Watchdog, WatchdogConfig, WatchdogResult};
 
 /// 実行モデル（sync/async × single/multi）。
@@ -23,6 +30,7 @@ pub enum ExecutionModel {
 #[derive(Clone, Debug)]
 pub struct StressTestConfig {
     pub name: String,
+    pub lane: Lane,
     pub execution_model: ExecutionModel,
     pub concurrency: usize,
     pub scenario_timeout: Duration,
@@ -36,6 +44,7 @@ impl Default for StressTestConfig {
     fn default() -> Self {
         Self {
             name: "unnamed_test".to_string(),
+            lane: Lane::Ci,
             execution_model: ExecutionModel::SyncSingle,
             concurrency: 1,
             scenario_timeout: Duration::from_secs(300),
@@ -54,6 +63,8 @@ pub struct TestContext {
     pub watchdog: Arc<Watchdog>,
     pub metrics: Arc<MetricsCollector>,
     pub thread_id: usize,
+    pub lane: Lane,
+    pub seed: u64,
 }
 
 /// テスト結果。
@@ -63,14 +74,21 @@ pub struct TestResult {
     pub slo: SloResult,
     pub duration: Duration,
     pub error: Option<String>,
+    pub skipped: bool,
 }
 
 impl TestResult {
     pub fn is_success(&self) -> bool {
-        matches!(self.watchdog, WatchdogResult::Success) && self.slo.passed && self.error.is_none()
+        self.skipped
+            || (matches!(self.watchdog, WatchdogResult::Success)
+                && self.slo.passed
+                && self.error.is_none())
     }
 
     pub fn failure_summary(&self) -> Option<String> {
+        if self.skipped {
+            return None;
+        }
         if self.is_success() {
             return None;
         }
@@ -94,12 +112,24 @@ impl TestResult {
     }
 }
 
+struct ArtifactContext<'a> {
+    started_at: DateTime<Utc>,
+    duration: Duration,
+    watchdog_result: &'a WatchdogResult,
+    slo_result: &'a SloResult,
+    summary: &'a MetricsSummary,
+    error: Option<&'a str>,
+    skipped: bool,
+    report: Option<&'a MetricsReport>,
+}
+
 /// ストレステストハーネス。
 pub struct StressTestHarness {
     pub config: StressTestConfig,
     watchdog: Arc<Watchdog>,
     metrics: Arc<MetricsCollector>,
     temp_dir: TempDir,
+    seed: u64,
 }
 
 impl StressTestHarness {
@@ -111,11 +141,13 @@ impl StressTestHarness {
             ..Default::default()
         }));
         let metrics = Arc::new(MetricsCollector::new());
+        let seed = seed_for_name(&config.name, 0x5eed_u64);
         Ok(Self {
             config,
             watchdog,
             metrics,
             temp_dir,
+            seed,
         })
     }
 
@@ -126,6 +158,8 @@ impl StressTestHarness {
             watchdog: self.watchdog.clone(),
             metrics: self.metrics.clone(),
             thread_id,
+            lane: self.config.lane,
+            seed: self.seed,
         }
     }
 
@@ -134,8 +168,12 @@ impl StressTestHarness {
     where
         F: FnOnce(&TestContext) -> CoreResult<()>,
     {
+        let started_at = Utc::now();
+        if !should_run(self.config.lane) {
+            return self.skip_result(started_at);
+        }
         let ctx = self.build_context(0);
-        self.execute_sync(|| test_fn(&ctx))
+        self.execute_sync(started_at, || test_fn(&ctx))
     }
 
     /// Sync並列実行。
@@ -143,8 +181,12 @@ impl StressTestHarness {
     where
         F: Fn(usize, &TestContext) -> CoreResult<()> + Send + Sync,
     {
+        let started_at = Utc::now();
+        if !should_run(self.config.lane) {
+            return self.skip_result(started_at);
+        }
         let ctx = self.build_context(0);
-        self.execute_concurrent(ctx, test_fn)
+        self.execute_concurrent(started_at, ctx, test_fn)
     }
 
     /// Async実行（current-thread）。
@@ -153,6 +195,10 @@ impl StressTestHarness {
         F: Fn(TestContext) -> Fut,
         Fut: std::future::Future<Output = CoreResult<()>>,
     {
+        let started_at = Utc::now();
+        if !should_run(self.config.lane) {
+            return self.skip_result(started_at);
+        }
         let ctx = self.build_context(0);
         match self.config.execution_model {
             ExecutionModel::AsyncSingle => {
@@ -160,7 +206,7 @@ impl StressTestHarness {
                     .enable_all()
                     .build()
                     .expect("tokio rt");
-                self.execute_sync(|| rt.block_on(test_fn(ctx.clone())))
+                self.execute_sync(started_at, || rt.block_on(test_fn(ctx.clone())))
             }
             ExecutionModel::AsyncMulti | ExecutionModel::SyncMulti | ExecutionModel::SyncSingle => {
                 let rt = tokio::runtime::Builder::new_multi_thread()
@@ -168,12 +214,16 @@ impl StressTestHarness {
                     .worker_threads(self.config.concurrency.max(1))
                     .build()
                     .expect("tokio rt");
-                self.execute_sync(|| rt.block_on(test_fn(ctx.clone())))
+                self.execute_sync(started_at, || rt.block_on(test_fn(ctx.clone())))
             }
         }
     }
 
-    fn execute_sync<T>(&self, f: impl FnOnce() -> CoreResult<T>) -> TestResult {
+    fn execute_sync<T>(
+        &self,
+        started_at: DateTime<Utc>,
+        f: impl FnOnce() -> CoreResult<T>,
+    ) -> TestResult {
         let start = Instant::now();
         let mut error = None;
         let watchdog = self.watchdog.clone();
@@ -190,17 +240,41 @@ impl StressTestHarness {
         } else {
             SloResult::passed()
         };
-        self.maybe_write_metrics_report(duration, &metrics_summary, &slo_result, &watchdog_result);
+        let report = self.build_metrics_report(
+            started_at,
+            duration,
+            &metrics_summary,
+            &slo_result,
+            &watchdog_result,
+        );
+        self.write_metrics_report(&report);
+        let ctx = ArtifactContext {
+            started_at,
+            duration,
+            watchdog_result: &watchdog_result,
+            slo_result: &slo_result,
+            summary: &metrics_summary,
+            error: error.as_deref(),
+            skipped: false,
+            report: Some(&report),
+        };
+        self.write_artifacts(&ctx);
         TestResult {
             watchdog: watchdog_result,
             metrics: metrics_summary,
             slo: slo_result,
             duration,
             error,
+            skipped: false,
         }
     }
 
-    fn execute_concurrent<F>(&self, ctx: TestContext, test_fn: F) -> TestResult
+    fn execute_concurrent<F>(
+        &self,
+        started_at: DateTime<Utc>,
+        ctx: TestContext,
+        test_fn: F,
+    ) -> TestResult
     where
         F: Fn(usize, &TestContext) -> CoreResult<()> + Send + Sync,
     {
@@ -216,6 +290,8 @@ impl StressTestHarness {
                     watchdog: ctx.watchdog.clone(),
                     metrics: ctx.metrics.clone(),
                     thread_id: tid,
+                    lane: ctx.lane,
+                    seed: ctx.seed,
                 };
                 let tf = test_fn.clone();
                 handles.push(scope.spawn(move || tf(tid, &ctx_cloned)));
@@ -246,7 +322,25 @@ impl StressTestHarness {
         } else {
             SloResult::passed()
         };
-        self.maybe_write_metrics_report(duration, &metrics_summary, &slo_result, &watchdog_result);
+        let report = self.build_metrics_report(
+            started_at,
+            duration,
+            &metrics_summary,
+            &slo_result,
+            &watchdog_result,
+        );
+        self.write_metrics_report(&report);
+        let ctx = ArtifactContext {
+            started_at,
+            duration,
+            watchdog_result: &watchdog_result,
+            slo_result: &slo_result,
+            summary: &metrics_summary,
+            error: error.as_deref(),
+            skipped: false,
+            report: Some(&report),
+        };
+        self.write_artifacts(&ctx);
 
         TestResult {
             watchdog: watchdog_result,
@@ -254,16 +348,31 @@ impl StressTestHarness {
             slo: slo_result,
             duration,
             error,
+            skipped: false,
         }
     }
 
-    fn maybe_write_metrics_report(
+    fn build_metrics_report(
         &self,
+        timestamp: DateTime<Utc>,
         duration: Duration,
         summary: &MetricsSummary,
         slo_result: &SloResult,
         watchdog_result: &WatchdogResult,
-    ) {
+    ) -> MetricsReport {
+        let execution_model = format!("{:?}", self.config.execution_model);
+        MetricsReport::new(
+            self.config.name.clone(),
+            execution_model,
+            timestamp,
+            duration,
+            summary.clone(),
+            slo_result.clone(),
+            format!("{:?}", watchdog_result),
+        )
+    }
+
+    fn write_metrics_report(&self, report: &MetricsReport) {
         if let Ok(v) = std::env::var("STRESS_REPORT_DIR") {
             if v.is_empty() {
                 return;
@@ -278,18 +387,6 @@ impl StressTestHarness {
             return;
         }
 
-        let timestamp = Utc::now();
-        let execution_model = format!("{:?}", self.config.execution_model);
-        let report = MetricsReport::new(
-            self.config.name.clone(),
-            execution_model.clone(),
-            timestamp,
-            duration,
-            summary.clone(),
-            slo_result.clone(),
-            format!("{:?}", watchdog_result),
-        );
-
         let sanitize = |s: &str| -> String {
             s.chars()
                 .map(|c| {
@@ -301,7 +398,8 @@ impl StressTestHarness {
                 })
                 .collect()
         };
-        let stamp = timestamp.format("%Y%m%dT%H%M%SZ").to_string();
+        let execution_model = report.execution_model.clone();
+        let stamp = report.timestamp.format("%Y%m%dT%H%M%SZ").to_string();
         let base = format!(
             "{}__{}__{}",
             sanitize(&self.config.name),
@@ -311,6 +409,91 @@ impl StressTestHarness {
 
         let _ = std::fs::write(out_dir.join(format!("{base}.json")), report.to_json());
         let _ = std::fs::write(out_dir.join(format!("{base}.md")), report.to_markdown());
+    }
+
+    fn skip_result(&self, started_at: DateTime<Utc>) -> TestResult {
+        let duration = Duration::from_secs(0);
+        let metrics_summary = MetricsSummary::default();
+        let slo_result = SloResult::passed();
+        let watchdog_result = WatchdogResult::Success;
+        let ctx = ArtifactContext {
+            started_at,
+            duration,
+            watchdog_result: &watchdog_result,
+            slo_result: &slo_result,
+            summary: &metrics_summary,
+            error: None,
+            skipped: true,
+            report: None,
+        };
+        self.write_artifacts(&ctx);
+        TestResult {
+            watchdog: watchdog_result,
+            metrics: metrics_summary,
+            slo: slo_result,
+            duration,
+            error: None,
+            skipped: true,
+        }
+    }
+
+    fn write_artifacts(&self, ctx: &ArtifactContext<'_>) {
+        let Some(paths) = prepare_artifacts(self.config.lane, &self.config.name, &ctx.started_at)
+        else {
+            return;
+        };
+
+        let run_meta = RunMetadata {
+            test_name: self.config.name.clone(),
+            lane: self.config.lane.to_string(),
+            seed: self.seed,
+            execution_model: format!("{:?}", self.config.execution_model),
+            concurrency: self.config.concurrency,
+            scenario_timeout_ms: self.config.scenario_timeout.as_millis() as u64,
+            operation_timeout_ms: self.config.operation_timeout.as_millis() as u64,
+            metrics_interval_ms: self.config.metrics_interval.as_millis() as u64,
+            warmup_ops: self.config.warmup_ops,
+            storage_mode: storage_mode_env(),
+            replay: deterministic_mode(),
+            started_at: ctx.started_at.to_rfc3339(),
+            git_sha: detect_git_sha(),
+            system: system_info(),
+            env: collect_env_metadata(),
+        };
+        write_run_json(&paths, &run_meta);
+
+        let package = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "alopex-core".to_string());
+        let cmd = command_hint(self.config.lane, self.seed, &package);
+        write_command_txt(&paths, &cmd);
+
+        if let Some(report) = ctx.report {
+            write_metrics(&paths, report);
+        }
+
+        let check = CheckSummary {
+            skipped: ctx.skipped,
+            success: !ctx.skipped
+                && matches!(ctx.watchdog_result, WatchdogResult::Success)
+                && ctx.slo_result.passed
+                && ctx.error.is_none(),
+            watchdog: format!("{:?}", ctx.watchdog_result),
+            slo_passed: ctx.slo_result.passed,
+            error: ctx.error.map(|v| v.to_string()),
+            duration_ms: ctx.duration.as_millis() as u64,
+        };
+        write_checks(&paths, &check);
+
+        let log = format!(
+            "lane={} seed={} success={} skipped={} successes={} errors={} throughput_per_sec={:.2}\n",
+            self.config.lane,
+            self.seed,
+            check.success,
+            ctx.skipped,
+            ctx.summary.successes,
+            ctx.summary.errors,
+            ctx.summary.throughput_per_sec
+        );
+        write_log(&paths, &log);
     }
 }
 

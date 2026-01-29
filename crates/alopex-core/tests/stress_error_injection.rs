@@ -4,7 +4,7 @@ mod common;
 
 use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnMode};
 use common::{
-    begin_op, open_store_with_fault_injector, slo_presets, ExecutionModel, IoErrorInjector,
+    begin_op, open_store_with_fault_injector, slo_presets, ExecutionModel, IoErrorInjector, Lane,
     StressTestConfig, StressTestHarness,
 };
 use std::io::ErrorKind;
@@ -14,6 +14,7 @@ use std::time::Duration;
 fn error_config(name: &str) -> StressTestConfig {
     StressTestConfig {
         name: name.to_string(),
+        lane: Lane::Nightly,
         execution_model: ExecutionModel::SyncSingle,
         concurrency: 1,
         scenario_timeout: Duration::from_secs(30),

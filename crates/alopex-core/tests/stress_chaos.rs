@@ -2,10 +2,11 @@ mod common;
 
 use alopex_core::kv::memory::MemoryTransaction;
 use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnMode};
+use common::replay::gen_u32;
 use common::{
     begin_op, slo_presets, ChaosConfig, ChaosOperation, ChaosWorkloadGenerator, ColumnarOperation,
-    DdlOperation, ExecutionModel, MultiModelOperation, SloConfig, SqlOperation, StressTestConfig,
-    StressTestHarness, TestResult, VectorOperation, WorkloadConfig,
+    DdlOperation, ExecutionModel, Lane, MultiModelOperation, SloConfig, SqlOperation,
+    StressTestConfig, StressTestHarness, TestResult, VectorOperation, WorkloadConfig,
 };
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
@@ -30,6 +31,7 @@ const PERSISTENT_TABLE: &str = "persist_seed";
 fn chaos_config(name: &str, model: ExecutionModel, concurrency: usize) -> StressTestConfig {
     StressTestConfig {
         name: name.to_string(),
+        lane: Lane::Nightly,
         execution_model: model,
         concurrency,
         scenario_timeout: Duration::from_secs(180),
@@ -78,7 +80,7 @@ fn apply_kv_op(txn: &mut MemoryTransaction<'_>, op: common::Operation) -> CoreRe
 fn apply_sql_op(txn: &mut MemoryTransaction<'_>, op: SqlOperation) -> CoreResult<()> {
     match op {
         SqlOperation::Insert { table, row } => {
-            let key = format!("sql:{table}:{:08x}", rand::random::<u32>()).into_bytes();
+            let key = format!("sql:{table}:{:08x}", gen_u32()).into_bytes();
             txn.put(key, encode_row(&row))?;
         }
         SqlOperation::Select { table, .. } => {
@@ -86,7 +88,7 @@ fn apply_sql_op(txn: &mut MemoryTransaction<'_>, op: SqlOperation) -> CoreResult
             let _ = txn.scan_prefix(&prefix)?.next();
         }
         SqlOperation::Update { table, set, .. } => {
-            let key = format!("sql:{table}:{:08x}", rand::random::<u32>()).into_bytes();
+            let key = format!("sql:{table}:{:08x}", gen_u32()).into_bytes();
             txn.put(key, encode_row(&set))?;
         }
         SqlOperation::Delete { table, .. } => {

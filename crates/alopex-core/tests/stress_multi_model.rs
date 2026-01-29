@@ -5,7 +5,7 @@ use alopex_core::types::Value;
 use alopex_core::KVTransaction;
 use alopex_core::{Error as CoreError, KVStore, MemoryKV, TxnMode};
 use common::{
-    begin_op, slo_presets, Column, ColumnarOperation, ExecutionModel, ModelMix,
+    begin_op, slo_presets, Column, ColumnarOperation, ExecutionModel, Lane, ModelMix,
     MultiModelOperation, MultiModelWorkloadConfig, MultiModelWorkloadGenerator, Operation,
     SqlOperation, StressTestConfig, StressTestHarness, TestResult, VectorOperation, WorkloadConfig,
 };
@@ -102,6 +102,7 @@ fn multi_model_config(name: &str, model: ExecutionModel, concurrency: usize) -> 
     }
     StressTestConfig {
         name: name.to_string(),
+        lane: Lane::Nightly,
         execution_model: model,
         concurrency,
         scenario_timeout: Duration::from_secs(60),

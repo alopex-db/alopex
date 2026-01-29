@@ -1,22 +1,28 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+pub mod artifacts;
 pub mod assertions;
 #[cfg(feature = "test-hooks")]
 pub mod fault_injection;
 pub mod fixtures;
 pub mod harness;
+pub mod lane;
 pub mod metrics;
+pub mod replay;
 pub mod tracing_setup;
 pub mod watchdog;
 pub mod workload;
 
+pub use artifacts::*;
 pub use assertions::*;
 #[cfg(feature = "test-hooks")]
 pub use fault_injection::*;
 pub use fixtures::*;
 pub use harness::*;
+pub use lane::*;
 pub use metrics::*;
+pub use replay::*;
 pub use tracing_setup::*;
 pub use watchdog::*;
 pub use workload::*;

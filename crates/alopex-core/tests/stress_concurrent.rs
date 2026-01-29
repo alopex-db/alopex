@@ -8,8 +8,8 @@ use alopex_core::{
     TxnMode,
 };
 use common::{
-    begin_op, selected_storage_modes, slo_presets, ExecutionModel, SloConfig, StressStorageMode,
-    StressTestConfig, StressTestHarness, WorkloadConfig, WorkloadGenerator,
+    begin_op, selected_storage_modes, slo_presets, ExecutionModel, Lane, SloConfig,
+    StressStorageMode, StressTestConfig, StressTestHarness, WorkloadConfig, WorkloadGenerator,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,6 +49,7 @@ fn concurrency_config(
     };
     StressTestConfig {
         name: format!("{name}_{}", mode.as_str()),
+        lane: Lane::Nightly,
         execution_model: model,
         concurrency,
         scenario_timeout: Duration::from_secs(60),

@@ -11,7 +11,8 @@ use common::begin_op;
 use common::open_store_with_crash_sim;
 use common::{
     corrupt_file, open_store_for_mode, selected_storage_modes, slo_presets, storage_root_for_mode,
-    wal_path_for_mode, ExecutionModel, StressStorageMode, StressTestConfig, StressTestHarness,
+    wal_path_for_mode, ExecutionModel, Lane, StressStorageMode, StressTestConfig,
+    StressTestHarness,
 };
 use std::fs::OpenOptions;
 #[cfg(feature = "test-hooks")]
@@ -29,6 +30,7 @@ fn recovery_config(
 ) -> StressTestConfig {
     StressTestConfig {
         name: format!("{name}_{}", mode.as_str()),
+        lane: Lane::Nightly,
         execution_model: model,
         concurrency,
         scenario_timeout: Duration::from_secs(45),

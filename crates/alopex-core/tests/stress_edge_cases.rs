@@ -3,7 +3,8 @@ mod common;
 use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnManager, TxnMode};
 use common::{
     begin_op, new_shared_store_for_mode, open_store_for_mode, selected_storage_modes, slo_presets,
-    storage_root_for_mode, ExecutionModel, StressStorageMode, StressTestConfig, StressTestHarness,
+    storage_root_for_mode, ExecutionModel, Lane, StressStorageMode, StressTestConfig,
+    StressTestHarness,
 };
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
@@ -16,6 +17,7 @@ fn edge_config(
 ) -> StressTestConfig {
     StressTestConfig {
         name: format!("{name}_{}", mode.as_str()),
+        lane: Lane::Nightly,
         execution_model: model,
         concurrency,
         scenario_timeout: Duration::from_secs(60),

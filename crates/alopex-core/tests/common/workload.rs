@@ -4,6 +4,7 @@ use rand::rngs::StdRng;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+use super::replay::effective_seed;
 /// ワークロード操作。
 #[derive(Clone, Debug)]
 pub enum Operation {
@@ -41,6 +42,8 @@ pub struct WorkloadGenerator {
 
 impl WorkloadGenerator {
     pub fn new(cfg: WorkloadConfig) -> Self {
+        let mut cfg = cfg;
+        cfg.seed = effective_seed(cfg.seed);
         Self {
             rng: StdRng::seed_from_u64(cfg.seed),
             cfg,
@@ -209,6 +212,8 @@ pub struct MultiModelWorkloadGenerator {
 
 impl MultiModelWorkloadGenerator {
     pub fn new(cfg: MultiModelWorkloadConfig) -> Self {
+        let mut cfg = cfg;
+        cfg.workload.seed = effective_seed(cfg.workload.seed);
         let kv_gen = WorkloadGenerator::new(cfg.workload.clone());
         Self {
             rng: StdRng::seed_from_u64(cfg.workload.seed),
@@ -370,6 +375,7 @@ pub struct DdlWorkloadGenerator {
 
 impl DdlWorkloadGenerator {
     pub fn new(seed: u64) -> Self {
+        let seed = effective_seed(seed);
         Self {
             rng: Mutex::new(StdRng::seed_from_u64(seed)),
             table_counter: AtomicUsize::new(1),
@@ -456,6 +462,7 @@ pub struct InvalidOperationGenerator {
 
 impl InvalidOperationGenerator {
     pub fn new(seed: u64) -> Self {
+        let seed = effective_seed(seed);
         Self {
             rng: StdRng::seed_from_u64(seed),
         }
@@ -528,6 +535,10 @@ pub struct ChaosWorkloadGenerator {
 
 impl ChaosWorkloadGenerator {
     pub fn new(cfg: ChaosConfig) -> Self {
+        let mut cfg = cfg;
+        cfg.workload.seed = effective_seed(cfg.workload.seed);
+        cfg.ddl_seed = effective_seed(cfg.ddl_seed);
+        cfg.invalid_seed = effective_seed(cfg.invalid_seed);
         let rng = StdRng::seed_from_u64(cfg.workload.seed ^ 0x000c_4a05_u64);
         let invalid_seed = cfg.invalid_seed;
         let ddl_seed = cfg.ddl_seed;

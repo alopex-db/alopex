@@ -3,7 +3,7 @@ mod common;
 use alopex_core::kv::memory::MemoryTransaction;
 use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnMode};
 use common::{
-    begin_op, slo_presets, AlterAction, DdlOperation, DdlWorkloadGenerator, ExecutionModel,
+    begin_op, slo_presets, AlterAction, DdlOperation, DdlWorkloadGenerator, ExecutionModel, Lane,
     StressTestConfig, StressTestHarness, TestResult,
 };
 use std::collections::HashSet;
@@ -63,6 +63,7 @@ fn retry_txn_conflict_sync<T>(mut f: impl FnMut() -> CoreResult<T>) -> CoreResul
 fn ddl_config(name: &str, model: ExecutionModel, concurrency: usize) -> StressTestConfig {
     StressTestConfig {
         name: name.to_string(),
+        lane: Lane::Nightly,
         execution_model: model,
         concurrency,
         scenario_timeout: Duration::from_secs(45),

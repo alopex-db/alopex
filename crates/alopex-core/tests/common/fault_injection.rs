@@ -1,10 +1,10 @@
 #![allow(unused_imports)]
 
-use rand::Rng;
 use std::io::{Error, ErrorKind, Read, Result as IoResult, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use super::replay::{gen_f64, gen_range_usize, gen_u8};
 /// Fault injection hooks used by file wrappers and IoHooks adapters.
 pub trait FaultInjector: Send + Sync {
     /// Invoked before writing data.
@@ -116,7 +116,7 @@ impl IoErrorInjector {
     }
 
     fn should_inject(&self, rate: f64) -> bool {
-        self.enabled.load(Ordering::Relaxed) && rate > 0.0 && rand::thread_rng().gen::<f64>() < rate
+        self.enabled.load(Ordering::Relaxed) && rate > 0.0 && gen_f64() < rate
     }
 
     fn inject(&self) -> IoResult<()> {
@@ -194,7 +194,7 @@ impl CorruptionInjector {
     fn should_corrupt(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
             && self.corruption_rate > 0.0
-            && rand::thread_rng().gen::<f64>() < self.corruption_rate
+            && gen_f64() < self.corruption_rate
     }
 
     fn corrupt(&self, data: &mut [u8]) {
@@ -203,13 +203,13 @@ impl CorruptionInjector {
         }
         match self.mode {
             CorruptionMode::SingleBitFlip => {
-                let idx = rand::thread_rng().gen_range(0..data.len());
-                let bit = 1u8 << (rand::thread_rng().gen_range(0..8));
+                let idx = gen_range_usize(0..data.len());
+                let bit = 1u8 << gen_range_usize(0..8);
                 data[idx] ^= bit;
             }
             CorruptionMode::RandomByte => {
-                let idx = rand::thread_rng().gen_range(0..data.len());
-                data[idx] = rand::thread_rng().gen();
+                let idx = gen_range_usize(0..data.len());
+                data[idx] = gen_u8();
             }
             CorruptionMode::PartialZero => {
                 let start = data.len() / 2;

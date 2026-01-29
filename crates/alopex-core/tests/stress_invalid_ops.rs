@@ -2,7 +2,7 @@ mod common;
 
 use alopex_core::{Error as CoreError, KVStore, KVTransaction, TxnMode};
 use common::{
-    begin_op, open_store_for_mode, selected_storage_modes, ExecutionModel, SloConfig,
+    begin_op, open_store_for_mode, selected_storage_modes, ExecutionModel, Lane, SloConfig,
     StressStorageMode, StressTestConfig, StressTestHarness,
 };
 use std::time::Duration;
@@ -10,6 +10,7 @@ use std::time::Duration;
 fn invalid_config(name: &str, mode: StressStorageMode) -> StressTestConfig {
     StressTestConfig {
         name: format!("{name}_{}", mode.as_str()),
+        lane: Lane::Nightly,
         execution_model: ExecutionModel::SyncSingle,
         concurrency: 1,
         scenario_timeout: Duration::from_secs(30),

@@ -9,6 +9,7 @@ fn test_harness_sync_single() {
     for mode in selected_storage_modes() {
         let cfg = StressTestConfig {
             name: format!("sync_single_{}", mode.as_str()),
+            lane: Lane::Smoke,
             execution_model: ExecutionModel::SyncSingle,
             concurrency: 1,
             scenario_timeout: Duration::from_secs(30),
@@ -38,6 +39,7 @@ fn test_harness_sync_multi() {
     for mode in selected_storage_modes() {
         let cfg = StressTestConfig {
             name: format!("sync_multi_{}", mode.as_str()),
+            lane: Lane::Smoke,
             execution_model: ExecutionModel::SyncMulti,
             concurrency: 4,
             scenario_timeout: Duration::from_secs(30),
@@ -71,6 +73,7 @@ fn test_harness_async_multi() {
     for mode in selected_storage_modes() {
         let cfg = StressTestConfig {
             name: format!("async_multi_{}", mode.as_str()),
+            lane: Lane::Smoke,
             execution_model: ExecutionModel::AsyncMulti,
             concurrency: 2,
             scenario_timeout: Duration::from_secs(30),
