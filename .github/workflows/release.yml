@@ -142,7 +142,11 @@ jobs:
           sys.exit(1)
           PY
           )"
-          status="$(curl -s -o /dev/null -w "%{http_code}" "https://crates.io/api/v1/crates/${crate}/${version}")"
+          status="$(curl -sS --retry 5 --retry-connrefused --retry-delay 2 \
+            -H "User-Agent: alopex-release/${GITHUB_RUN_ID:-local}" \
+            -H "Accept: application/json" \
+            -o /dev/null -w "%{http_code}" \
+            "https://crates.io/api/v1/crates/${crate}/${version}")"
           if [[ "$status" == "200" ]]; then
             echo "skip: ${crate}@${version} already published"
             exit 0
