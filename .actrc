@@ -1,0 +1,19 @@
+# act configuration for alopex local CI testing
+# https://github.com/nektos/act
+
+# Use medium-sized Ubuntu image (good balance of size vs compatibility)
+--platform ubuntu-latest=catthehacker/ubuntu:act-latest
+
+# Reuse containers for faster subsequent runs
+--reuse
+
+# IMPORTANT: Do NOT use --bind
+# act runs as root inside containers, and actions/checkout rewrites files.
+# This leaves root-owned files in the host workspace, causing permission errors.
+# --bind
+
+# Artifact server path (relative to working directory)
+--artifact-server-path .act-artifacts
+
+# Verbose output for debugging
+# --verbose

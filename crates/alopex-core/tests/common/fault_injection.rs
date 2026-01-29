@@ -1,4 +1,4 @@
-#![cfg(feature = "test-hooks")]
+#![allow(unused_imports)]
 
 use rand::Rng;
 use std::io::{Error, ErrorKind, Read, Result as IoResult, Write};
@@ -237,4 +237,4 @@ impl FaultInjector for CorruptionInjector {
 }
 
 // Re-export CrashSimulator types from alopex_core for test convenience.
-pub use alopex_core::{CrashOperation, CrashPoint, CrashSimulator, CrashTiming};
+pub use alopex_core::{CrashOperation, CrashPoint, CrashTiming};

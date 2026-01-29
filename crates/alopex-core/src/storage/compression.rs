@@ -284,7 +284,7 @@ pub fn create_compressor(compression: CompressionV2) -> Result<Box<dyn Compresso
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

@@ -43,7 +43,7 @@ fn embedded_readonly_and_rollback_behaviors() {
     let mut ro = db.begin(TxnMode::ReadOnly).unwrap();
     assert!(matches!(
         ro.put(b"k", b"forbidden"),
-        Err(Error::Core(CoreError::TxnConflict))
+        Err(Error::Core(CoreError::TxnReadOnly))
     ));
 
     let mut tx = db.begin(TxnMode::ReadWrite).unwrap();

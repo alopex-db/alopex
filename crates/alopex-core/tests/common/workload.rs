@@ -334,6 +334,7 @@ pub struct ColumnDef {
 }
 
 /// ALTER TABLEの操作内容。
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug)]
 pub enum AlterAction {
     AddColumn(ColumnDef),
@@ -342,12 +343,23 @@ pub enum AlterAction {
 }
 
 /// DDL操作。
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug)]
 pub enum DdlOperation {
-    CreateTable { name: String, columns: Vec<ColumnDef> },
-    DropTable { name: String },
-    TruncateTable { name: String },
-    AlterTable { name: String, action: AlterAction },
+    CreateTable {
+        name: String,
+        columns: Vec<ColumnDef>,
+    },
+    DropTable {
+        name: String,
+    },
+    TruncateTable {
+        name: String,
+    },
+    AlterTable {
+        name: String,
+        action: AlterAction,
+    },
 }
 
 /// DDLワークロードジェネレーター。
@@ -516,7 +528,7 @@ pub struct ChaosWorkloadGenerator {
 
 impl ChaosWorkloadGenerator {
     pub fn new(cfg: ChaosConfig) -> Self {
-        let rng = StdRng::seed_from_u64(cfg.workload.seed ^ 0xc4a0_5u64);
+        let rng = StdRng::seed_from_u64(cfg.workload.seed ^ 0x000c_4a05_u64);
         let invalid_seed = cfg.invalid_seed;
         let ddl_seed = cfg.ddl_seed;
         Self {

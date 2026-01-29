@@ -77,7 +77,7 @@ impl ColumnarKvsBridge {
     pub fn new(store: Arc<AnyKV>) -> Self {
         Self {
             store,
-            max_retries: 3,
+            max_retries: 10,
         }
     }
 
@@ -144,7 +144,8 @@ impl ColumnarKvsBridge {
             match commit_result {
                 Ok(()) => return Ok(next_id),
                 Err(ColumnarError::TxnConflict) if attempts < self.max_retries => {
-                    std::thread::sleep(Duration::from_millis(10));
+                    let backoff_ms = 10u64.saturating_mul(attempts as u64);
+                    std::thread::sleep(Duration::from_millis(backoff_ms));
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -159,16 +160,24 @@ impl ColumnarKvsBridge {
         segment_id: u64,
         columns: &[usize],
     ) -> Result<Vec<RecordBatch>> {
+        let reader = self.open_segment_reader(table_id, segment_id)?;
+        reader.read_columns(columns)
+    }
+
+    /// セグメント本体を取得する。
+    pub fn read_segment_raw(&self, table_id: u32, segment_id: u64) -> Result<ColumnSegmentV2> {
         let key = key_layout::column_segment_key(table_id, segment_id, 0);
         let mut txn = self.store.begin(TxnMode::ReadOnly)?;
         let bytes = txn.get(&key)?.ok_or(ColumnarError::NotFound)?;
-
-        let segment: ColumnSegmentV2 = bincode_config()
+        bincode_config()
             .deserialize(&bytes)
-            .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
-        let reader =
-            SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data.clone())))?;
-        reader.read_columns(columns)
+            .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))
+    }
+
+    /// セグメントリーダーを開く。
+    pub fn open_segment_reader(&self, table_id: u32, segment_id: u64) -> Result<SegmentReaderV2> {
+        let segment = self.read_segment_raw(table_id, segment_id)?;
+        SegmentReaderV2::open(Box::new(InMemorySegmentSource::new(segment.data)))
     }
 
     /// セグメントメタデータのみ取得する（統計用）。
@@ -194,9 +203,34 @@ impl ColumnarKvsBridge {
             .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
         Ok(meta.schema.column_count())
     }
+
+    /// すべてのセグメント (table_id, segment_id) を返す。
+    ///
+    /// セグメントインデックスキーをスキャンして全テーブルのセグメントを収集する。
+    pub fn list_segments(&self) -> Result<Vec<(u32, u64)>> {
+        let mut txn = self.store.begin(TxnMode::ReadOnly)?;
+        let mut result = Vec::new();
+
+        // PREFIX_SEGMENT_INDEX (0x12) で始まるキーをスキャンし、
+        // 各テーブルのインデックスを読み取る
+        let prefix = vec![key_layout::PREFIX_SEGMENT_INDEX];
+        for (key, value) in txn.scan_prefix(&prefix)? {
+            if key.len() >= 5 {
+                // キー形式: [prefix(1) + table_id(4)]
+                let table_id = u32::from_le_bytes([key[1], key[2], key[3], key[4]]);
+                let index: Vec<u64> = bincode_config()
+                    .deserialize(&value)
+                    .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))?;
+                for seg_id in index {
+                    result.push((table_id, seg_id));
+                }
+            }
+        }
+        Ok(result)
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::columnar::encoding::{Column, LogicalType};

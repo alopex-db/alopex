@@ -1,11 +1,13 @@
 #[cfg(feature = "test-hooks")]
 use super::fault_injection::FaultInjector;
-#[cfg(feature = "test-hooks")]
-use alopex_core::{CrashSimulator, IoHooks};
 use alopex_core::kv::AnyKV;
 use alopex_core::lsm::wal::{SyncMode, WalConfig};
 use alopex_core::lsm::LsmKVConfig;
-use alopex_core::{KVStore, KVTransaction, MemoryKV, Result as CoreResult, StorageFactory, StorageMode, TxnMode};
+#[cfg(feature = "test-hooks")]
+use alopex_core::{CrashSimulator, IoHooks};
+use alopex_core::{
+    KVStore, KVTransaction, MemoryKV, Result as CoreResult, StorageFactory, StorageMode, TxnMode,
+};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::env;
@@ -146,12 +148,11 @@ pub fn open_store_for_mode(base_wal_path: &Path, mode: StressStorageMode) -> Cor
                 path: root,
                 config: Some(cfg),
             })
-            .map(|store| {
+            .inspect(|_| {
                 if initializer {
                     let _ = std::fs::write(&ready_path, b"");
                     let _ = std::fs::remove_file(&lock_path);
                 }
-                store
             })
         }
     }

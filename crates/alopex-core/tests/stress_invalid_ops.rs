@@ -136,8 +136,9 @@ fn test_null_not_null_column() {
         let result = harness.run(|ctx| {
             let _op = begin_op(ctx);
             // Simulate NOT NULL violation
-            let err: CoreResult<()> =
-                Err(CoreError::InvalidFormat("NOT NULL violation on column name".into()));
+            let err: CoreResult<()> = Err(CoreError::InvalidFormat(
+                "NOT NULL violation on column name".into(),
+            ));
             assert!(err.is_err());
             ctx.metrics.record_error();
             pad_metrics(ctx, 3000);
@@ -215,7 +216,8 @@ fn test_error_rollback_retry() {
 #[test]
 fn test_fk_constraint_violation() {
     for mode in selected_storage_modes() {
-        let harness = StressTestHarness::new(invalid_config("fk_constraint_violation", mode)).unwrap();
+        let harness =
+            StressTestHarness::new(invalid_config("fk_constraint_violation", mode)).unwrap();
         let result = harness.run(|ctx| {
             let _op = begin_op(ctx);
             // Simulate FK violation: parent missing

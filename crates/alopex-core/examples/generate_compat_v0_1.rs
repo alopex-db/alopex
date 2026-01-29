@@ -3,16 +3,19 @@
 //! Run from the workspace root:
 //! `cargo run -p alopex-core --example generate_compat_v0_1`
 
-#![cfg(not(target_arch = "wasm32"))]
-
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
+#[cfg(not(target_arch = "wasm32"))]
 use alopex_core::storage::compression::CompressionAlgorithm;
+#[cfg(not(target_arch = "wasm32"))]
 use alopex_core::storage::format::{
     AlopexFileWriter, FileFlags, FileHeader, FileVersion, SectionType, HEADER_SIZE,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let output = PathBuf::from("crates/alopex-core/tests/data/compatibility/v0_1.alopex");
     if let Some(parent) = output.parent() {
@@ -47,3 +50,6 @@ fn main() {
 
     println!("Generated compatibility fixture: {}", output.display());
 }
+
+#[cfg(target_arch = "wasm32")]
+fn main() {}

@@ -52,6 +52,10 @@ pub enum ExecutorError {
     #[error("transaction conflict")]
     TransactionConflict,
 
+    /// Read-only トランザクションで書き込み操作を実行しようとした。
+    #[error("read-only transaction: cannot execute {operation}")]
+    ReadOnlyTransaction { operation: String },
+
     /// Storage layer error.
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
@@ -67,6 +71,10 @@ pub enum ExecutorError {
     /// Invalid operation.
     #[error("invalid operation: {operation} - {reason}")]
     InvalidOperation { operation: String, reason: String },
+
+    /// Resource exhausted during execution.
+    #[error("resource exhausted: {message}")]
+    ResourceExhausted { message: String },
 
     /// Input file not found.
     #[error("file not found: {0}")]

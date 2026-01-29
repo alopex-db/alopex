@@ -1,4 +1,4 @@
-use alopex_sql::{AlopexDialect, ExprKind, Parser, ParserError, StatementKind};
+use alopex_sql::{AlopexDialect, ExprKind, LITERAL_TABLE, Parser, StatementKind};
 
 #[test]
 fn parses_multiple_statements() {
@@ -27,19 +27,25 @@ fn vector_literal_parses_via_dialect_prefix() {
 }
 
 #[test]
-fn reports_error_positions() {
-    let err = Parser::parse_sql(&AlopexDialect, "SELECT 1").unwrap_err();
-    match err {
-        ParserError::ExpectedToken {
-            expected,
-            line,
-            column,
-            ..
-        } => {
-            assert_eq!(expected, "FROM");
-            assert_eq!(line, 1);
-            assert_eq!(column, 9);
+fn parses_select_without_from_single_literal() {
+    let stmts = Parser::parse_sql(&AlopexDialect, "SELECT 1").unwrap();
+    match &stmts[0].kind {
+        StatementKind::Select(select) => {
+            assert_eq!(select.from.name, LITERAL_TABLE);
+            assert_eq!(select.projection.len(), 1);
         }
-        other => panic!("unexpected error {:?}", other),
+        other => panic!("expected select, got {:?}", other),
+    }
+}
+
+#[test]
+fn parses_select_without_from_multiple_literals() {
+    let stmts = Parser::parse_sql(&AlopexDialect, "SELECT 1, 'ok'").unwrap();
+    match &stmts[0].kind {
+        StatementKind::Select(select) => {
+            assert_eq!(select.from.name, LITERAL_TABLE);
+            assert_eq!(select.projection.len(), 2);
+        }
+        other => panic!("expected select, got {:?}", other),
     }
 }

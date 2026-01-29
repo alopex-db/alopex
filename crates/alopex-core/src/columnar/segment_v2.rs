@@ -1069,6 +1069,11 @@ impl SegmentReaderV2 {
             index: 0,
         }
     }
+
+    /// RowGroup の総数を返す。
+    pub fn row_group_count(&self) -> usize {
+        self.footer.row_group_table.entries.len()
+    }
 }
 
 /// RowGroup イテレータ。
@@ -1092,7 +1097,7 @@ impl<'a> Iterator for RowGroupIter<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

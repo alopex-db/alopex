@@ -3,9 +3,9 @@ mod common;
 use alopex_core::kv::memory::MemoryTransaction;
 use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnMode};
 use common::{
-    begin_op, slo_presets, ChaosConfig, ChaosOperation, ChaosWorkloadGenerator, ColumnarOperation, DdlOperation,
-    ExecutionModel, MultiModelOperation, SqlOperation, SloConfig, StressTestConfig, StressTestHarness, TestResult,
-    VectorOperation, WorkloadConfig,
+    begin_op, slo_presets, ChaosConfig, ChaosOperation, ChaosWorkloadGenerator, ColumnarOperation,
+    DdlOperation, ExecutionModel, MultiModelOperation, SloConfig, SqlOperation, StressTestConfig,
+    StressTestHarness, TestResult, VectorOperation, WorkloadConfig,
 };
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
@@ -66,12 +66,10 @@ fn apply_kv_op(txn: &mut MemoryTransaction<'_>, op: common::Operation) -> CoreRe
             txn.put(key, val)?;
         }
         common::Operation::Delete(key) => {
-            let _ = txn.delete(key)?;
+            txn.delete(key)?;
         }
         common::Operation::Scan(prefix) => {
-            for (_k, _v) in txn.scan_prefix(&prefix)? {
-                break;
-            }
+            let _ = txn.scan_prefix(&prefix)?.next();
         }
     }
     Ok(())
@@ -85,9 +83,7 @@ fn apply_sql_op(txn: &mut MemoryTransaction<'_>, op: SqlOperation) -> CoreResult
         }
         SqlOperation::Select { table, .. } => {
             let prefix = format!("sql:{table}:").into_bytes();
-            for (_k, _v) in txn.scan_prefix(&prefix)? {
-                break;
-            }
+            let _ = txn.scan_prefix(&prefix)?.next();
         }
         SqlOperation::Update { table, set, .. } => {
             let key = format!("sql:{table}:{:08x}", rand::random::<u32>()).into_bytes();
@@ -97,7 +93,7 @@ fn apply_sql_op(txn: &mut MemoryTransaction<'_>, op: SqlOperation) -> CoreResult
             let prefix = format!("sql:{table}:").into_bytes();
             let keys: Vec<Vec<u8>> = txn.scan_prefix(&prefix)?.map(|(k, _)| k).collect();
             for k in keys {
-                let _ = txn.delete(k)?;
+                txn.delete(k)?;
             }
         }
     }
@@ -118,13 +114,11 @@ fn apply_vector_op(txn: &mut MemoryTransaction<'_>, op: VectorOperation) -> Core
             }
         }
         VectorOperation::Search { query: _, k: _ } => {
-            for (_k, _v) in txn.scan_prefix(b"vec:")? {
-                break;
-            }
+            let _ = txn.scan_prefix(b"vec:")?.next();
         }
         VectorOperation::Delete { id } => {
-            let _ = txn.delete(format!("vec:{id}").into_bytes())?;
-            let _ = txn.delete(format!("vec_meta:{id}").into_bytes())?;
+            txn.delete(format!("vec:{id}").into_bytes())?;
+            txn.delete(format!("vec_meta:{id}").into_bytes())?;
         }
     }
     Ok(())
@@ -140,16 +134,20 @@ fn apply_columnar_op(txn: &mut MemoryTransaction<'_>, op: ColumnarOperation) -> 
                 }
             }
         }
-        ColumnarOperation::Scan { filter: _, projection: _ } => {
-            for (_k, _v) in txn.scan_prefix(b"col:")? {
-                break;
-            }
+        ColumnarOperation::Scan {
+            filter: _,
+            projection: _,
+        } => {
+            let _ = txn.scan_prefix(b"col:")?.next();
         }
     }
     Ok(())
 }
 
-fn apply_multi_model_op(txn: &mut MemoryTransaction<'_>, op: MultiModelOperation) -> CoreResult<()> {
+fn apply_multi_model_op(
+    txn: &mut MemoryTransaction<'_>,
+    op: MultiModelOperation,
+) -> CoreResult<()> {
     match op {
         MultiModelOperation::Kv(op) => apply_kv_op(txn, op),
         MultiModelOperation::Sql(op) => apply_sql_op(txn, op),
@@ -158,34 +156,47 @@ fn apply_multi_model_op(txn: &mut MemoryTransaction<'_>, op: MultiModelOperation
     }
 }
 
-fn apply_ddl_op(store: &Arc<MemoryKV>, op: DdlOperation, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<()> {
+fn apply_ddl_op(
+    store: &Arc<MemoryKV>,
+    op: DdlOperation,
+    tables: &Arc<Mutex<HashSet<String>>>,
+) -> CoreResult<()> {
     let mut txn = store.begin(TxnMode::ReadWrite)?;
     match op {
         DdlOperation::CreateTable { name, columns } => {
             tables.lock().unwrap().insert(name.clone());
-            txn.put(format!("meta:{name}").into_bytes(), format!("cols:{}", columns.len()).into_bytes())?;
+            txn.put(
+                format!("meta:{name}").into_bytes(),
+                format!("cols:{}", columns.len()).into_bytes(),
+            )?;
         }
         DdlOperation::DropTable { name } => {
             tables.lock().unwrap().remove(&name);
-            let _ = txn.delete(format!("meta:{name}").into_bytes())?;
+            txn.delete(format!("meta:{name}").into_bytes())?;
         }
         DdlOperation::TruncateTable { name } => {
             let prefix = format!("tbl:{name}:").into_bytes();
             let keys: Vec<Vec<u8>> = txn.scan_prefix(&prefix)?.map(|(k, _)| k).collect();
             for k in keys {
-                let _ = txn.delete(k)?;
+                txn.delete(k)?;
             }
         }
         DdlOperation::AlterTable { name, action } => match action {
             common::AlterAction::AddColumn(col) => {
-                txn.put(format!("meta:{name}:add:{}", col.name).into_bytes(), b"add".to_vec())?;
+                txn.put(
+                    format!("meta:{name}:add:{}", col.name).into_bytes(),
+                    b"add".to_vec(),
+                )?;
             }
             common::AlterAction::DropColumn(col) => {
-                let _ = txn.delete(format!("meta:{name}:{col}").into_bytes())?;
+                txn.delete(format!("meta:{name}:{col}").into_bytes())?;
             }
             common::AlterAction::RenameColumn { from, to } => {
-                let _ = txn.delete(format!("meta:{name}:{from}").into_bytes())?;
-                txn.put(format!("meta:{name}:{to}").into_bytes(), b"renamed".to_vec())?;
+                txn.delete(format!("meta:{name}:{from}").into_bytes())?;
+                txn.put(
+                    format!("meta:{name}:{to}").into_bytes(),
+                    b"renamed".to_vec(),
+                )?;
             }
         },
     }
@@ -206,13 +217,11 @@ fn simulate_crash(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<String>>>) -
     let mut txn = store.begin(TxnMode::ReadWrite)?;
     let keys: Vec<Vec<u8>> = txn.scan_prefix(b"")?.map(|(k, _)| k).collect();
     for k in keys {
-        let _ = txn.delete(k)?;
+        txn.delete(k)?;
     }
-    txn.commit_self()
-        .and_then(|_| {
-            tables.lock().unwrap().clear();
-            Ok(())
-        })
+    txn.commit_self().map(|_| {
+        tables.lock().unwrap().clear();
+    })
 }
 
 fn crash_file_paths(path: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -229,23 +238,35 @@ fn truncate_file_half(path: &std::path::Path) -> io::Result<()> {
     if let Ok(meta) = fs::metadata(path) {
         if meta.is_dir() {
             fs::remove_dir_all(path)?;
-            OpenOptions::new().write(true).create(true).open(path)?;
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path)?;
             return Ok(());
         }
         let target = meta.len() / 2;
         OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)
             .and_then(|file| file.set_len(target))?;
     } else if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
-        OpenOptions::new().write(true).create(true).open(path)?;
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
     }
     Ok(())
 }
 
-fn simulate_persistent_crash(path: &std::path::Path, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<()> {
+fn simulate_persistent_crash(
+    path: &std::path::Path,
+    tables: &Arc<Mutex<HashSet<String>>>,
+) -> CoreResult<()> {
     tables.lock().unwrap().clear();
     let (wal_path, sst_path) = crash_file_paths(path);
     truncate_file_half(&wal_path).map_err(CoreError::Io)?;
@@ -268,15 +289,27 @@ fn open_persistent_store(path: &std::path::Path) -> CoreResult<MemoryKV> {
             }
             let _ = fs::remove_file(&wal);
             let _ = fs::remove_file(&sst);
-            let _ = OpenOptions::new().write(true).create(true).open(&wal);
-            let _ = OpenOptions::new().write(true).create(true).open(&sst);
+            let _ = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&wal);
+            let _ = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&sst);
             MemoryKV::open(path)
         }
         Err(e) => Err(e),
     }
 }
 
-fn apply_chaos_op(store: &Arc<MemoryKV>, op: ChaosOperation, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<bool> {
+fn apply_chaos_op(
+    store: &Arc<MemoryKV>,
+    op: ChaosOperation,
+    tables: &Arc<Mutex<HashSet<String>>>,
+) -> CoreResult<bool> {
     match op {
         ChaosOperation::Normal(op) => {
             let mut txn = store.begin(TxnMode::ReadWrite)?;
@@ -302,13 +335,19 @@ fn apply_chaos_op(store: &Arc<MemoryKV>, op: ChaosOperation, tables: &Arc<Mutex<
     }
 }
 
-fn refresh_tables_from_meta(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<()> {
+fn refresh_tables_from_meta(
+    store: &Arc<MemoryKV>,
+    tables: &Arc<Mutex<HashSet<String>>>,
+) -> CoreResult<()> {
     let mut reader = store.begin(TxnMode::ReadOnly)?;
     let meta_names: HashSet<String> = reader
         .scan_prefix(b"meta:")?
         .map(|(k, _)| {
             let name_bytes = k.strip_prefix(b"meta:").unwrap_or(&k);
-            let primary = name_bytes.split(|b| *b == b':').next().unwrap_or(name_bytes);
+            let primary = name_bytes
+                .split(|b| *b == b':')
+                .next()
+                .unwrap_or(name_bytes);
             String::from_utf8_lossy(primary).to_string()
         })
         .collect();
@@ -318,7 +357,10 @@ fn refresh_tables_from_meta(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<St
     Ok(())
 }
 
-fn seed_persistent_baseline(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<()> {
+fn seed_persistent_baseline(
+    store: &Arc<MemoryKV>,
+    tables: &Arc<Mutex<HashSet<String>>>,
+) -> CoreResult<()> {
     for _ in 0..3 {
         refresh_tables_from_meta(store, tables)?;
         if !tables.lock().unwrap().contains(PERSISTENT_TABLE) {
@@ -357,7 +399,10 @@ fn seed_persistent_baseline(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<St
     Err(CoreError::TxnConflict)
 }
 
-fn verify_persistent_state(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<()> {
+fn verify_persistent_state(
+    store: &Arc<MemoryKV>,
+    tables: &Arc<Mutex<HashSet<String>>>,
+) -> CoreResult<()> {
     let mut reader = store.begin(TxnMode::ReadOnly)?;
     let baseline = reader.get(&PERSISTENT_BASELINE_KEY.to_vec())?;
     if baseline.is_none() {
@@ -375,7 +420,10 @@ fn verify_persistent_state(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<Str
         .scan_prefix(b"meta:")?
         .map(|(k, _)| {
             let name_bytes = k.strip_prefix(b"meta:").unwrap_or(&k);
-            let primary = name_bytes.split(|b| *b == b':').next().unwrap_or(name_bytes);
+            let primary = name_bytes
+                .split(|b| *b == b':')
+                .next()
+                .unwrap_or(name_bytes);
             String::from_utf8_lossy(primary).to_string()
         })
         .collect();
@@ -576,16 +624,18 @@ fn run_chaos_mix(
                                                 ctx_clone.metrics.record_error();
                                             }
                                         }
-                                        Err(CoreError::TxnConflict) => ctx_clone.metrics.record_error(),
+                                        Err(CoreError::TxnConflict) => {
+                                            ctx_clone.metrics.record_error()
+                                        }
                                         Err(e) => return Err(e),
                                     }
                                 }
                                 ctx_clone.metrics.record_latency(start.elapsed());
                             }
-                        pad_chaos_metrics(&ctx_clone, batches * batch_size * 3);
-                        Ok::<_, CoreError>(())
-                    });
-                }
+                            pad_chaos_metrics(&ctx_clone, batches * batch_size * 3);
+                            Ok::<_, CoreError>(())
+                        });
+                    }
                     while let Some(res) = set.join_next().await {
                         match res {
                             Ok(inner) => inner?,
@@ -639,53 +689,21 @@ fn run_restart_integrity(model: ExecutionModel) -> TestResult {
             pad_chaos_metrics(ctx, 400);
             Ok(())
         }),
-        ExecutionModel::SyncMulti => {
-            harness.run_concurrent(|tid, ctx| {
-                let store = MemoryKV::open(&ctx.db_path)?;
-                let tables = Arc::new(Mutex::new(HashSet::new()));
-                let mut gen = ChaosWorkloadGenerator::new(ChaosConfig {
-                    workload: WorkloadConfig {
-                        operation_count: 10,
-                        seed: 900 + tid as u64,
-                        ..Default::default()
-                    },
-                    ddl_ratio: 0.3,
-                    ..Default::default()
-                });
-                let start = Instant::now();
-                for op in gen.generate_batch(10) {
-                    match apply_chaos_op(&Arc::new(store.clone()), op, &tables) {
-                        Ok(ok) => {
-                            if ok {
-                                ctx.metrics.record_success();
-                            } else {
-                                ctx.metrics.record_error();
-                            }
-                        }
-                        Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
-                        Err(e) => return Err(e),
-                    }
-                }
-                ctx.metrics.record_latency(start.elapsed());
-                pad_chaos_metrics(ctx, 200);
-                Ok(())
-            })
-        }
-        ExecutionModel::AsyncSingle | ExecutionModel::AsyncMulti => harness.run_async(|ctx| async move {
-            let store = Arc::new(MemoryKV::open(&ctx.db_path)?);
+        ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
+            let store = MemoryKV::open(&ctx.db_path)?;
             let tables = Arc::new(Mutex::new(HashSet::new()));
             let mut gen = ChaosWorkloadGenerator::new(ChaosConfig {
                 workload: WorkloadConfig {
-                    operation_count: 15,
-                    seed: 700,
+                    operation_count: 10,
+                    seed: 900 + tid as u64,
                     ..Default::default()
                 },
-                ddl_ratio: 0.25,
+                ddl_ratio: 0.3,
                 ..Default::default()
             });
             let start = Instant::now();
-            for op in gen.generate_batch(15) {
-                match apply_chaos_op(&store, op, &tables) {
+            for op in gen.generate_batch(10) {
+                match apply_chaos_op(&Arc::new(store.clone()), op, &tables) {
                     Ok(ok) => {
                         if ok {
                             ctx.metrics.record_success();
@@ -698,14 +716,46 @@ fn run_restart_integrity(model: ExecutionModel) -> TestResult {
                 }
             }
             ctx.metrics.record_latency(start.elapsed());
-            drop(store);
-            let reopened = MemoryKV::open(&ctx.db_path)?;
-            let mut reader = reopened.begin(TxnMode::ReadOnly)?;
-            let has_meta = reader.scan_prefix(b"meta:")?.next().is_some();
-            assert!(has_meta || tables.lock().unwrap().is_empty());
-            pad_chaos_metrics(&ctx, 300);
+            pad_chaos_metrics(ctx, 200);
             Ok(())
         }),
+        ExecutionModel::AsyncSingle | ExecutionModel::AsyncMulti => {
+            harness.run_async(|ctx| async move {
+                let store = Arc::new(MemoryKV::open(&ctx.db_path)?);
+                let tables = Arc::new(Mutex::new(HashSet::new()));
+                let mut gen = ChaosWorkloadGenerator::new(ChaosConfig {
+                    workload: WorkloadConfig {
+                        operation_count: 15,
+                        seed: 700,
+                        ..Default::default()
+                    },
+                    ddl_ratio: 0.25,
+                    ..Default::default()
+                });
+                let start = Instant::now();
+                for op in gen.generate_batch(15) {
+                    match apply_chaos_op(&store, op, &tables) {
+                        Ok(ok) => {
+                            if ok {
+                                ctx.metrics.record_success();
+                            } else {
+                                ctx.metrics.record_error();
+                            }
+                        }
+                        Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
+                        Err(e) => return Err(e),
+                    }
+                }
+                ctx.metrics.record_latency(start.elapsed());
+                drop(store);
+                let reopened = MemoryKV::open(&ctx.db_path)?;
+                let mut reader = reopened.begin(TxnMode::ReadOnly)?;
+                let has_meta = reader.scan_prefix(b"meta:")?.next().is_some();
+                assert!(has_meta || tables.lock().unwrap().is_empty());
+                pad_chaos_metrics(&ctx, 300);
+                Ok(())
+            })
+        }
     }
 }
 
@@ -725,7 +775,14 @@ fn run_long_running(model: ExecutionModel) -> TestResult {
         crash_ratio: 0.05,
         ..Default::default()
     };
-    run_chaos_mix("chaos_long_running", model, cfg, batches, batch_size, Some(12))
+    run_chaos_mix(
+        "chaos_long_running",
+        model,
+        cfg,
+        batches,
+        batch_size,
+        Some(12),
+    )
 }
 
 fn run_backpressure(model: ExecutionModel) -> TestResult {
@@ -805,7 +862,14 @@ fn run_multi_model_error_injection(model: ExecutionModel) -> TestResult {
         crash_ratio: 0.05,
         ..Default::default()
     };
-    run_chaos_mix("chaos_multi_model_error_injection", model, cfg, 8, 28, Some(12))
+    run_chaos_mix(
+        "chaos_multi_model_error_injection",
+        model,
+        cfg,
+        8,
+        28,
+        Some(12),
+    )
 }
 
 fn run_recovery_to_baseline(model: ExecutionModel) -> TestResult {
@@ -941,22 +1005,22 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
                                 match run_persistent_batch(
                                     &ctx_clone,
                                     &mut store_handle,
-                                &tables_clone,
-                                &mut gen,
-                                batch_size,
-                            ) {
-                                Ok(_) => {}
-                                Err(CoreError::TxnConflict) => {
-                                    ctx_clone.metrics.record_error();
-                                    continue;
+                                    &tables_clone,
+                                    &mut gen,
+                                    batch_size,
+                                ) {
+                                    Ok(_) => {}
+                                    Err(CoreError::TxnConflict) => {
+                                        ctx_clone.metrics.record_error();
+                                        continue;
+                                    }
+                                    Err(e) => return Err(e),
                                 }
-                                Err(e) => return Err(e),
                             }
-                        }
-                        verify_persistent_state(&store_handle, &tables_clone)?;
-                        pad_chaos_metrics(&ctx_clone, batches * batch_size * 3);
-                        Ok::<_, CoreError>(())
-                    });
+                            verify_persistent_state(&store_handle, &tables_clone)?;
+                            pad_chaos_metrics(&ctx_clone, batches * batch_size * 3);
+                            Ok::<_, CoreError>(())
+                        });
                     }
                     while let Some(res) = set.join_next().await {
                         match res {
@@ -977,8 +1041,7 @@ macro_rules! chaos_test {
         fn $name() {
             if std::env::var("STRESS_STORAGE_MODE")
                 .unwrap_or_else(|_| "both".to_string())
-                .to_ascii_lowercase()
-                == "disk"
+                .eq_ignore_ascii_case("disk")
             {
                 return;
             }
@@ -998,7 +1061,10 @@ macro_rules! chaos_test {
 chaos_test!(test_ddl_dml_error_crash_combined, run_combined);
 chaos_test!(test_50_threads_random_operations, run_random_ops);
 chaos_test!(test_long_txn_ddl_dml_conflict, run_long_txn_conflict);
-chaos_test!(test_multi_model_ddl_error_injection, run_multi_model_error_injection);
+chaos_test!(
+    test_multi_model_ddl_error_injection,
+    run_multi_model_error_injection
+);
 chaos_test!(test_1hour_chaos_no_leak, run_long_running);
 chaos_test!(test_chaos_restart_integrity, run_restart_integrity);
 chaos_test!(test_chaos_backpressure_no_corruption, run_backpressure);

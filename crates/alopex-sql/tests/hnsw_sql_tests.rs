@@ -16,7 +16,7 @@ fn run_sql(
     catalog: &Arc<RwLock<MemoryCatalog>>,
     sql: &str,
 ) -> Vec<ExecutionResult> {
-    let dialect = AlopexDialect::default();
+    let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(&dialect, sql).expect("SQL のパースに失敗");
     let mut results = Vec::new();
     for stmt in stmts {
@@ -68,7 +68,7 @@ fn invalid_with_option_returns_error() {
         "CREATE TABLE docs (id INT PRIMARY KEY, embedding VECTOR(2, COSINE));",
     );
 
-    let dialect = AlopexDialect::default();
+    let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(
         &dialect,
         "CREATE INDEX bad_idx ON docs (embedding) USING HNSW WITH (unknown = 1)",
@@ -147,7 +147,7 @@ fn dimension_mismatch_on_insert_returns_error_and_no_index_write() {
     ",
     );
 
-    let dialect = AlopexDialect::default();
+    let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(
         &dialect,
         "INSERT INTO items (id, embedding) VALUES (1, [1.0])",

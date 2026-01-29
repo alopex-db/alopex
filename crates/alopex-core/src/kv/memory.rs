@@ -376,7 +376,7 @@ impl MemoryTxnManager {
             self.notify_wal_hooks(&data, CrashTiming::During)?;
             wal.append(record)?;
             self.notify_wal_hooks(&data, CrashTiming::After)?;
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(feature = "test-hooks"))]
@@ -439,11 +439,9 @@ impl MemoryTxnManager {
 
     /// Flushes the current in-memory data to an SSTable file.
     pub fn flush(&self) -> Result<()> {
-        let path = self
-            .state
-            .sstable_path
-            .as_ref()
-            .ok_or_else(|| Error::InvalidFormat("sstable path is not configured".into()))?;
+        let Some(path) = self.state.sstable_path.as_ref() else {
+            return Ok(());
+        };
 
         #[cfg(feature = "test-hooks")]
         self.notify_compaction(CrashTiming::Before);
@@ -718,6 +716,15 @@ impl<'a> MemoryTransaction<'a> {
         Ok(())
     }
 
+    /// トランザクションを消費せずにロールバックする。
+    pub(crate) fn rollback_in_place(&mut self) -> Result<()> {
+        if self.state != TxnState::Active {
+            return Err(Error::TxnClosed);
+        }
+        self.state = TxnState::RolledBack;
+        Ok(())
+    }
+
     fn scan_range_internal(&mut self, start: &[u8], end: &[u8]) -> MergedScanIter<'_> {
         let start_vec = start.to_vec();
         let end_vec = end.to_vec();
@@ -806,7 +813,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
             return Err(Error::TxnClosed);
         }
         if self.mode == TxnMode::ReadOnly {
-            return Err(Error::TxnConflict);
+            return Err(Error::TxnReadOnly);
         }
         self.writes.insert(key, Some(value));
         Ok(())
@@ -817,7 +824,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
             return Err(Error::TxnClosed);
         }
         if self.mode == TxnMode::ReadOnly {
-            return Err(Error::TxnConflict);
+            return Err(Error::TxnReadOnly);
         }
         self.writes.insert(key, None);
         Ok(())
@@ -1062,7 +1069,7 @@ impl<'a> Drop for MemoryTransaction<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::{KVTransaction, TxnManager};
@@ -1132,9 +1139,9 @@ mod tests {
         let mut txn = manager.begin(TxnMode::ReadOnly).unwrap();
         assert!(matches!(
             txn.put(key("k1"), value("v1")),
-            Err(Error::TxnConflict)
+            Err(Error::TxnReadOnly)
         ));
-        assert!(matches!(txn.delete(key("k1")), Err(Error::TxnConflict)));
+        assert!(matches!(txn.delete(key("k1")), Err(Error::TxnReadOnly)));
     }
 
     #[test]

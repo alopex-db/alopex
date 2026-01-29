@@ -74,8 +74,8 @@ fn bench_table_storage_insert_scan(c: &mut Criterion) {
                         let row = vec![SqlValue::Integer(i), SqlValue::Text(format!("user{i}"))];
                         table.insert(i as u64, &row).unwrap();
                     }
-                    let mut iter = table.scan().unwrap();
-                    while let Some(res) = iter.next() {
+                    let iter = table.scan().unwrap();
+                    for res in iter {
                         let _ = res.unwrap();
                     }
                 }

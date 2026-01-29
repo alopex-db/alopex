@@ -93,6 +93,15 @@ pub fn vector_distance(
     vector_similarity(column_value, query_vector, metric)
 }
 
+pub fn vector_dims(vector: &[f32]) -> usize {
+    vector.len()
+}
+
+pub fn vector_norm(vector: &[f32]) -> f64 {
+    let sum_sq: f32 = vector.iter().map(|v| v * v).sum();
+    (sum_sq.sqrt()) as f64
+}
+
 fn validate_dimensions(a: &[f32], b: &[f32]) -> Result<(), VectorError> {
     if a.len() != b.len() {
         return Err(VectorError::DimensionMismatch {

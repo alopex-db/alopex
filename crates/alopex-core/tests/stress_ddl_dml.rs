@@ -26,8 +26,7 @@ macro_rules! ddl_test {
         fn $name() {
             if std::env::var("STRESS_STORAGE_MODE")
                 .unwrap_or_else(|_| "both".to_string())
-                .to_ascii_lowercase()
-                == "disk"
+                .eq_ignore_ascii_case("disk")
             {
                 return;
             }
@@ -83,7 +82,7 @@ fn pad_ddl_metrics(ctx: &common::TestContext, count: usize) {
 fn clear_prefix(txn: &mut MemoryTransaction<'_>, prefix: &[u8]) -> CoreResult<()> {
     let keys: Vec<Vec<u8>> = txn.scan_prefix(prefix)?.map(|(k, _)| k).collect();
     for k in keys {
-        let _ = txn.delete(k)?;
+        txn.delete(k)?;
     }
     Ok(())
 }
@@ -121,7 +120,7 @@ impl DdlFixture {
         self.tables.lock().unwrap().remove(name);
         let mut txn = self.store.begin(TxnMode::ReadWrite)?;
         clear_prefix(&mut txn, format!("tbl:{name}:").as_bytes())?;
-        let _ = txn.delete(format!("meta:{name}").into_bytes())?;
+        txn.delete(format!("meta:{name}").into_bytes())?;
         txn.commit_self()
     }
 
@@ -157,8 +156,11 @@ impl DdlFixture {
                 clear_prefix(&mut txn, format!("meta:{name}:{col}").as_bytes())?;
             }
             AlterAction::RenameColumn { from, to } => {
-                let _ = txn.delete(format!("meta:{name}:{from}").into_bytes())?;
-                txn.put(format!("meta:{name}:{to}").into_bytes(), b"renamed".to_vec())?;
+                txn.delete(format!("meta:{name}:{from}").into_bytes())?;
+                txn.put(
+                    format!("meta:{name}:{to}").into_bytes(),
+                    b"renamed".to_vec(),
+                )?;
             }
         }
         txn.commit_self()
@@ -333,7 +335,6 @@ fn run_select_during_truncate(model: ExecutionModel) -> TestResult {
         }),
         ExecutionModel::AsyncMulti => {
             let fixture = Arc::new(DdlFixture::new_in_memory());
-            let conc = conc;
             harness.run_async(move |ctx| {
                 let fixture = fixture.clone();
                 async move {
@@ -387,22 +388,20 @@ fn run_rapid_create_drop_cycle(model: ExecutionModel) -> TestResult {
             pad_ddl_metrics(ctx, 400);
             Ok(())
         }),
-        ExecutionModel::SyncMulti => {
-            harness.run_concurrent(move |_tid, ctx| {
-                let fixture = DdlFixture::new_in_memory();
-                let start = Instant::now();
-                for i in 0..12 {
-                    let name = format!("cycle_multi_{i}");
-                    fixture.create(&name)?;
-                    fixture.insert_row(&name, i)?;
-                    fixture.drop_table(&name)?;
-                }
-                ctx.metrics.record_success();
-                ctx.metrics.record_latency(start.elapsed());
-                pad_ddl_metrics(ctx, 400);
-                Ok(())
-            })
-        }
+        ExecutionModel::SyncMulti => harness.run_concurrent(move |_tid, ctx| {
+            let fixture = DdlFixture::new_in_memory();
+            let start = Instant::now();
+            for i in 0..12 {
+                let name = format!("cycle_multi_{i}");
+                fixture.create(&name)?;
+                fixture.insert_row(&name, i)?;
+                fixture.drop_table(&name)?;
+            }
+            ctx.metrics.record_success();
+            ctx.metrics.record_latency(start.elapsed());
+            pad_ddl_metrics(ctx, 400);
+            Ok(())
+        }),
         ExecutionModel::AsyncSingle => harness.run_async(|ctx| async move {
             let fixture = DdlFixture::new_in_memory();
             let start = Instant::now();
@@ -416,37 +415,33 @@ fn run_rapid_create_drop_cycle(model: ExecutionModel) -> TestResult {
             pad_ddl_metrics(&ctx, 400);
             Ok(())
         }),
-        ExecutionModel::AsyncMulti => {
-            harness.run_async(move |ctx| {
-                async move {
-                    let mut set = tokio::task::JoinSet::new();
-                    for tid in 0..conc {
-                        let ctx_clone = ctx.clone();
-                        set.spawn(async move {
-                            let fixture = DdlFixture::new_in_memory();
-                            let start = Instant::now();
-                            for i in 0..8 {
-                                let name = format!("cycle_async_{tid}_{i}");
-                                fixture.create(&name)?;
-                                fixture.insert_row(&name, i)?;
-                                fixture.drop_table(&name)?;
-                            }
-                            ctx_clone.metrics.record_success();
-                            ctx_clone.metrics.record_latency(start.elapsed());
-                            pad_ddl_metrics(&ctx_clone, 200);
-                            Ok::<_, CoreError>(())
-                        });
+        ExecutionModel::AsyncMulti => harness.run_async(move |ctx| async move {
+            let mut set = tokio::task::JoinSet::new();
+            for tid in 0..conc {
+                let ctx_clone = ctx.clone();
+                set.spawn(async move {
+                    let fixture = DdlFixture::new_in_memory();
+                    let start = Instant::now();
+                    for i in 0..8 {
+                        let name = format!("cycle_async_{tid}_{i}");
+                        fixture.create(&name)?;
+                        fixture.insert_row(&name, i)?;
+                        fixture.drop_table(&name)?;
                     }
-                    while let Some(res) = set.join_next().await {
-                        match res {
-                            Ok(inner) => inner?,
-                            Err(e) => return Err(CoreError::Io(io::Error::other(e))),
-                        }
-                    }
-                    Ok(())
+                    ctx_clone.metrics.record_success();
+                    ctx_clone.metrics.record_latency(start.elapsed());
+                    pad_ddl_metrics(&ctx_clone, 200);
+                    Ok::<_, CoreError>(())
+                });
+            }
+            while let Some(res) = set.join_next().await {
+                match res {
+                    Ok(inner) => inner?,
+                    Err(e) => return Err(CoreError::Io(io::Error::other(e))),
                 }
-            })
-        }
+            }
+            Ok(())
+        }),
     }
 }
 
@@ -665,23 +660,21 @@ fn run_ddl_crash_metadata_integrity(model: ExecutionModel) -> TestResult {
             pad_ddl_metrics(ctx, 200);
             Ok(())
         }),
-        ExecutionModel::SyncMulti => {
-            harness.run_concurrent(|_, ctx| {
-                let start = Instant::now();
-                {
-                    let fixture = DdlFixture::new_persistent(&ctx.db_path)?;
-                    fixture.create("t5")?;
-                    fixture.insert_row("t5", 1)?;
-                }
-                let reopened = MemoryKV::open(&ctx.db_path)?;
-                let mut reader = reopened.begin(TxnMode::ReadOnly)?;
-                assert!(reader.get(&b"meta:t5".to_vec())?.is_some());
-                ctx.metrics.record_success();
-                ctx.metrics.record_latency(start.elapsed());
-                pad_ddl_metrics(ctx, 200);
-                Ok(())
-            })
-        }
+        ExecutionModel::SyncMulti => harness.run_concurrent(|_, ctx| {
+            let start = Instant::now();
+            {
+                let fixture = DdlFixture::new_persistent(&ctx.db_path)?;
+                fixture.create("t5")?;
+                fixture.insert_row("t5", 1)?;
+            }
+            let reopened = MemoryKV::open(&ctx.db_path)?;
+            let mut reader = reopened.begin(TxnMode::ReadOnly)?;
+            assert!(reader.get(&b"meta:t5".to_vec())?.is_some());
+            ctx.metrics.record_success();
+            ctx.metrics.record_latency(start.elapsed());
+            pad_ddl_metrics(ctx, 200);
+            Ok(())
+        }),
         ExecutionModel::AsyncSingle => harness.run_async(|ctx| async move {
             let start = Instant::now();
             {
@@ -697,35 +690,33 @@ fn run_ddl_crash_metadata_integrity(model: ExecutionModel) -> TestResult {
             pad_ddl_metrics(&ctx, 200);
             Ok(())
         }),
-        ExecutionModel::AsyncMulti => harness.run_async(move |ctx| {
-            async move {
-                let mut set = tokio::task::JoinSet::new();
-                for _ in 0..conc {
-                    let ctx_clone = ctx.clone();
-                    set.spawn(async move {
-                        let start = Instant::now();
-                        {
-                            let fixture = DdlFixture::new_persistent(&ctx_clone.db_path)?;
-                            fixture.create("t5")?;
-                            fixture.insert_row("t5", 1)?;
-                        }
-                        let reopened = MemoryKV::open(&ctx_clone.db_path)?;
-                        let mut reader = reopened.begin(TxnMode::ReadOnly)?;
-                        assert!(reader.get(&b"meta:t5".to_vec())?.is_some());
-                        ctx_clone.metrics.record_success();
-                        ctx_clone.metrics.record_latency(start.elapsed());
-                        pad_ddl_metrics(&ctx_clone, 200);
-                        Ok::<_, CoreError>(())
-                    });
-                }
-                while let Some(res) = set.join_next().await {
-                    match res {
-                        Ok(inner) => inner?,
-                        Err(e) => return Err(CoreError::Io(io::Error::other(e))),
+        ExecutionModel::AsyncMulti => harness.run_async(move |ctx| async move {
+            let mut set = tokio::task::JoinSet::new();
+            for _ in 0..conc {
+                let ctx_clone = ctx.clone();
+                set.spawn(async move {
+                    let start = Instant::now();
+                    {
+                        let fixture = DdlFixture::new_persistent(&ctx_clone.db_path)?;
+                        fixture.create("t5")?;
+                        fixture.insert_row("t5", 1)?;
                     }
-                }
-                Ok(())
+                    let reopened = MemoryKV::open(&ctx_clone.db_path)?;
+                    let mut reader = reopened.begin(TxnMode::ReadOnly)?;
+                    assert!(reader.get(&b"meta:t5".to_vec())?.is_some());
+                    ctx_clone.metrics.record_success();
+                    ctx_clone.metrics.record_latency(start.elapsed());
+                    pad_ddl_metrics(&ctx_clone, 200);
+                    Ok::<_, CoreError>(())
+                });
             }
+            while let Some(res) = set.join_next().await {
+                match res {
+                    Ok(inner) => inner?,
+                    Err(e) => return Err(CoreError::Io(io::Error::other(e))),
+                }
+            }
+            Ok(())
         }),
     }
 }
@@ -752,35 +743,31 @@ fn run_1000_create_drop_truncate_no_storage_leak(model: ExecutionModel) -> TestR
     };
     match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| runner(ctx, 777)),
-        ExecutionModel::SyncMulti => {
-            harness.run_concurrent(move |tid, ctx| {
-                let _op = begin_op(ctx);
-                runner(ctx, 777 + tid as u64)?;
-                Ok(())
-            })
-        }
+        ExecutionModel::SyncMulti => harness.run_concurrent(move |tid, ctx| {
+            let _op = begin_op(ctx);
+            runner(ctx, 777 + tid as u64)?;
+            Ok(())
+        }),
         ExecutionModel::AsyncSingle => harness.run_async(|ctx| async move {
             runner(&ctx, 777)?;
             Ok(())
         }),
-        ExecutionModel::AsyncMulti => harness.run_async(move |ctx| {
-            async move {
-                let mut set = tokio::task::JoinSet::new();
-                for tid in 0..conc {
-                    let ctx_clone = ctx.clone();
-                    set.spawn(async move {
-                        runner(&ctx_clone, 777 + tid as u64)?;
-                        Ok::<_, CoreError>(())
-                    });
-                }
-                while let Some(res) = set.join_next().await {
-                    match res {
-                        Ok(inner) => inner?,
-                        Err(e) => return Err(CoreError::Io(io::Error::other(e))),
-                    }
-                }
-                Ok(())
+        ExecutionModel::AsyncMulti => harness.run_async(move |ctx| async move {
+            let mut set = tokio::task::JoinSet::new();
+            for tid in 0..conc {
+                let ctx_clone = ctx.clone();
+                set.spawn(async move {
+                    runner(&ctx_clone, 777 + tid as u64)?;
+                    Ok::<_, CoreError>(())
+                });
             }
+            while let Some(res) = set.join_next().await {
+                match res {
+                    Ok(inner) => inner?,
+                    Err(e) => return Err(CoreError::Io(io::Error::other(e))),
+                }
+            }
+            Ok(())
         }),
     }
 }
@@ -788,7 +775,10 @@ fn run_1000_create_drop_truncate_no_storage_leak(model: ExecutionModel) -> TestR
 ddl_test!(test_insert_during_drop_table, run_insert_during_drop_table);
 ddl_test!(test_select_during_truncate, run_select_during_truncate);
 ddl_test!(test_rapid_create_drop_cycle, run_rapid_create_drop_cycle);
-ddl_test!(test_alter_table_during_insert, run_alter_table_during_insert);
+ddl_test!(
+    test_alter_table_during_insert,
+    run_alter_table_during_insert
+);
 ddl_test!(
     test_drop_create_same_name_no_leak,
     run_drop_create_same_name_no_leak

@@ -938,6 +938,13 @@ impl SSTableReader {
         })
     }
 
+    /// Return the overall key range for this SSTable based on index entries.
+    pub fn key_range(&self) -> Option<(Key, Key)> {
+        let first = self.index.first()?.first_key.clone();
+        let last = self.index.last()?.last_key.clone();
+        Some((first, last))
+    }
+
     /// Return the number of entries.
     pub fn entry_count(&self) -> u64 {
         self.header.entry_count
@@ -1298,7 +1305,7 @@ fn find_in_entries(
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use tempfile::tempdir;
@@ -1398,7 +1405,10 @@ mod tests {
             b"v2".to_vec()
         );
         assert!(r.get(b"b", 99).unwrap().unwrap().value.is_none());
-        assert_eq!(r.get(b"c", 99).unwrap().unwrap().value.unwrap(), Vec::new());
+        assert_eq!(
+            r.get(b"c", 99).unwrap().unwrap().value.unwrap(),
+            Vec::<u8>::new()
+        );
     }
 
     #[test]

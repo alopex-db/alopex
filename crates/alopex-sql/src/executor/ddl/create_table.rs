@@ -5,13 +5,14 @@ use crate::catalog::{
     Catalog, Compression, IndexMetadata, RowIdMode, StorageOptions, StorageType, TableMetadata,
 };
 use crate::executor::{ExecutionResult, ExecutorError, Result};
-use crate::storage::{KeyEncoder, SqlTransaction};
+use crate::storage::{KeyEncoder, SqlTxn};
 
 use super::create_pk_index_name;
+use super::persistence::{persist_index, persist_table};
 
 /// Execute CREATE TABLE.
-pub fn execute_create_table<S: KVStore, C: Catalog>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_create_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
     catalog: &mut C,
     mut table: TableMetadata,
     with_options: Vec<(String, String)>,
@@ -54,12 +55,17 @@ pub fn execute_create_table<S: KVStore, C: Catalog>(
 
     catalog.create_table(table.clone())?;
 
-    if let Some(index) = pk_index
+    if let Some(index) = pk_index.clone()
         && let Err(err) = catalog.create_index(index)
     {
         // Best-effort rollback to keep catalog consistent.
         let _ = catalog.drop_table(&table.name);
         return Err(err.into());
+    }
+
+    persist_table(txn.inner_mut(), &table)?;
+    if let Some(index) = pk_index.as_ref() {
+        persist_index(txn.inner_mut(), index)?;
     }
 
     Ok(ExecutionResult::Success)

@@ -247,7 +247,7 @@ fn wal_partial_body(ctx: &common::TestContext, mode: StressStorageMode) -> CoreR
     let wal_path = wal_path_for_mode(&ctx.db_path, mode);
     let meta = std::fs::metadata(&wal_path)?;
     let new_len = meta.len() / 2;
-    let mut f = OpenOptions::new().write(true).open(&wal_path)?;
+    let f = OpenOptions::new().write(true).open(&wal_path)?;
     f.set_len(new_len)?;
 
     let reopened = open_store_for_mode(&ctx.db_path, mode);
@@ -373,15 +373,18 @@ fn sst_corruption_body(
 fn test_wal_mid_crash_recovery() {
     if std::env::var("STRESS_STORAGE_MODE")
         .unwrap_or_else(|_| "both".to_string())
-        .to_ascii_lowercase()
-        == "disk"
+        .eq_ignore_ascii_case("disk")
     {
         return;
     }
     let model = ExecutionModel::SyncSingle;
-    let harness =
-        StressTestHarness::new(recovery_config("wal_mid_crash", model, 1, StressStorageMode::Memory))
-            .unwrap();
+    let harness = StressTestHarness::new(recovery_config(
+        "wal_mid_crash",
+        model,
+        1,
+        StressStorageMode::Memory,
+    ))
+    .unwrap();
     let result = harness.run(|ctx| {
         let _op = begin_op(ctx);
         // Baseline write
@@ -434,8 +437,7 @@ fn test_wal_mid_crash_recovery() {
 fn test_wal_multi_segment_recovery() {
     if std::env::var("STRESS_STORAGE_MODE")
         .unwrap_or_else(|_| "both".to_string())
-        .to_ascii_lowercase()
-        == "disk"
+        .eq_ignore_ascii_case("disk")
     {
         return;
     }
@@ -521,15 +523,18 @@ fn test_wal_multi_segment_recovery() {
 fn test_compaction_crash_recovery() {
     if std::env::var("STRESS_STORAGE_MODE")
         .unwrap_or_else(|_| "both".to_string())
-        .to_ascii_lowercase()
-        == "disk"
+        .eq_ignore_ascii_case("disk")
     {
         return;
     }
     let model = ExecutionModel::SyncSingle;
-    let harness =
-        StressTestHarness::new(recovery_config("compaction_crash", model, 1, StressStorageMode::Memory))
-            .unwrap();
+    let harness = StressTestHarness::new(recovery_config(
+        "compaction_crash",
+        model,
+        1,
+        StressStorageMode::Memory,
+    ))
+    .unwrap();
     let result = harness.run(|ctx| {
         let crash_sim = Arc::new(alopex_core::CrashSimulator::new().add_crash_point(
             alopex_core::CrashPoint {
@@ -646,7 +651,7 @@ fn test_sst_truncated_file() {
                 |p| {
                     let meta = std::fs::metadata(p)?;
                     let new_len = meta.len() / 2;
-                    let mut f = OpenOptions::new().write(true).open(p)?;
+                    let f = OpenOptions::new().write(true).open(p)?;
                     f.set_len(new_len)?;
                     Ok(())
                 },

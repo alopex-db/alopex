@@ -113,7 +113,7 @@ fn percentile(sorted: &[u64], p: u64) -> u64 {
     sorted[rank.min(len - 1)]
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

@@ -22,7 +22,7 @@ pub fn write_empty_vector_segment(path: &Path) -> Result<()> {
     Ok(write_segment(path, &col, &meta)?)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::columnar::segment::SegmentReader;

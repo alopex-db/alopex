@@ -39,7 +39,9 @@ fn parse_select_with_clauses() {
 fn select_requires_from() {
     let err = parse_with("SELECT id", |p| p.parse_select().unwrap_err());
     match err {
-        ParserError::ExpectedToken { expected, .. } => assert_eq!(expected, "FROM"),
+        ParserError::UnexpectedToken { expected, .. } => {
+            assert_eq!(expected, "literal expression");
+        }
         other => panic!("unexpected error {:?}", other),
     }
 }

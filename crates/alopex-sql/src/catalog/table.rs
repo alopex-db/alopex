@@ -4,7 +4,9 @@
 //! schema information for tables and their columns.
 
 use crate::ast::expr::Expr;
+use crate::catalog::persistent::{DataSourceFormat, TableType};
 use crate::planner::types::ResolvedType;
+use std::collections::HashMap;
 
 /// Storage layout for a table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,12 +85,26 @@ pub struct TableMetadata {
     pub table_id: u32,
     /// Table name.
     pub name: String,
+    /// Catalog name.
+    pub catalog_name: String,
+    /// Namespace name.
+    pub namespace_name: String,
+    /// Table type.
+    pub table_type: TableType,
+    /// Data source format.
+    pub data_source_format: DataSourceFormat,
     /// Column definitions (order is preserved).
     pub columns: Vec<ColumnMetadata>,
     /// Primary key columns (supports composite keys).
     pub primary_key: Option<Vec<String>>,
     /// Storage configuration (row/columnar, compression, row group sizing).
     pub storage_options: StorageOptions,
+    /// Storage location path.
+    pub storage_location: Option<String>,
+    /// Comment.
+    pub comment: Option<String>,
+    /// Custom properties.
+    pub properties: HashMap<String, String>,
 }
 
 impl TableMetadata {
@@ -100,9 +116,16 @@ impl TableMetadata {
         Self {
             table_id: 0,
             name: name.into(),
+            catalog_name: "default".to_string(),
+            namespace_name: "default".to_string(),
+            table_type: TableType::Managed,
+            data_source_format: DataSourceFormat::default(),
             columns,
             primary_key: None,
             storage_options: StorageOptions::default(),
+            storage_location: None,
+            comment: None,
+            properties: HashMap::new(),
         }
     }
 

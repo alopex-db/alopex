@@ -41,6 +41,10 @@ pub struct IndexMetadata {
     pub index_id: u32,
     /// Index name.
     pub name: String,
+    /// Catalog name.
+    pub catalog_name: String,
+    /// Namespace name.
+    pub namespace_name: String,
     /// Target table name.
     pub table: String,
     /// Target column names (supports composite indexes).
@@ -74,6 +78,8 @@ impl IndexMetadata {
         Self {
             index_id,
             name: name.into(),
+            catalog_name: "default".to_string(),
+            namespace_name: "default".to_string(),
             table: table.into(),
             columns,
             column_indices: Vec::new(),

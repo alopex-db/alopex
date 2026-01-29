@@ -18,7 +18,7 @@ fn create_table(
     catalog: &Arc<RwLock<MemoryCatalog>>,
 ) {
     let stmt = Parser::parse_sql(
-        &AlopexDialect::default(),
+        &AlopexDialect,
         "CREATE TABLE users (id INT PRIMARY KEY, name TEXT) WITH (storage='columnar');",
     )
     .unwrap()
@@ -66,13 +66,10 @@ fn copy_csv_success_and_query() {
         assert_eq!(res, ExecutionResult::RowsAffected(2));
     }
 
-    let stmt = Parser::parse_sql(
-        &AlopexDialect::default(),
-        "SELECT name FROM users ORDER BY id",
-    )
-    .unwrap()
-    .pop()
-    .unwrap();
+    let stmt = Parser::parse_sql(&AlopexDialect, "SELECT name FROM users ORDER BY id")
+        .unwrap()
+        .pop()
+        .unwrap();
     let plan = {
         let guard = catalog.read().unwrap();
         Planner::new(&*guard).plan(&stmt).unwrap()

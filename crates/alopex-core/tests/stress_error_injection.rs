@@ -35,8 +35,7 @@ fn pad_metrics(ctx: &common::TestContext, count: usize) {
 fn test_eio_during_write() {
     if std::env::var("STRESS_STORAGE_MODE")
         .unwrap_or_else(|_| "both".to_string())
-        .to_ascii_lowercase()
-        == "disk"
+        .eq_ignore_ascii_case("disk")
     {
         return;
     }
@@ -72,8 +71,7 @@ fn test_eio_during_write() {
 fn test_fsync_failure() {
     if std::env::var("STRESS_STORAGE_MODE")
         .unwrap_or_else(|_| "both".to_string())
-        .to_ascii_lowercase()
-        == "disk"
+        .eq_ignore_ascii_case("disk")
     {
         return;
     }
@@ -107,8 +105,7 @@ fn test_fsync_failure() {
 fn test_enospc_on_open() {
     if std::env::var("STRESS_STORAGE_MODE")
         .unwrap_or_else(|_| "both".to_string())
-        .to_ascii_lowercase()
-        == "disk"
+        .eq_ignore_ascii_case("disk")
     {
         return;
     }
@@ -146,8 +143,7 @@ fn test_enospc_on_open() {
 fn test_transient_io_recovery() {
     if std::env::var("STRESS_STORAGE_MODE")
         .unwrap_or_else(|_| "both".to_string())
-        .to_ascii_lowercase()
-        == "disk"
+        .eq_ignore_ascii_case("disk")
     {
         return;
     }

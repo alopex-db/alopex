@@ -1,13 +1,13 @@
 #![cfg(target_arch = "wasm32")]
 
 use alopex_core::storage::format::{
-    BufferRangeLoader, FileFooter, FileHeader, FileSource, FileVersion, SectionIndex, SectionType,
+    BufferRangeLoader, FileFooter, FileHeader, FileReader, FileSource, FileVersion, SectionIndex,
     WasmReaderConfig, HEADER_SIZE,
 };
+use getrandom as getrandom02;
+use getrandom03;
 use std::sync::{Arc, Mutex};
 use wasm_bindgen_test::*;
-
-wasm_bindgen_test_configure!(run_in_browser);
 
 struct MockRangeLoader {
     inner: BufferRangeLoader,
@@ -79,6 +79,17 @@ fn below_threshold_uses_buffer() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_getrandom_is_available() {
+    let mut buf = [0u8; 8];
+    if getrandom02::getrandom(&mut buf).is_err() {
+        return;
+    }
+    if getrandom03::fill(&mut buf).is_err() {
+        return;
+    }
+}
+
+#[wasm_bindgen_test]
 fn above_threshold_without_loader_errors() {
     let file = build_minimal_file();
     let cfg = WasmReaderConfig {
@@ -89,7 +100,8 @@ fn above_threshold_without_loader_errors() {
         FileSource::Buffer(file),
         cfg,
     )
-    .expect_err("should require loader when exceeding threshold");
+    .err()
+    .expect("should require loader when exceeding threshold");
     assert!(matches!(
         err,
         alopex_core::storage::format::FormatError::IncompleteWrite

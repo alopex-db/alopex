@@ -44,6 +44,7 @@
 
 mod index;
 mod memory;
+pub mod persistent;
 mod table;
 
 #[cfg(test)]
@@ -51,6 +52,8 @@ mod tests;
 
 pub use index::IndexMetadata;
 pub use memory::MemoryCatalog;
+pub use persistent::TxnCatalogView;
+pub use persistent::{CatalogError, CatalogOverlay, PersistentCatalog};
 pub use table::{
     ColumnMetadata, Compression, RowIdMode, StorageOptions, StorageType, TableMetadata,
 };
@@ -136,4 +139,15 @@ pub trait Catalog {
     /// Called by the Executor when creating a new index.
     /// IDs start from 1 and increment monotonically.
     fn next_index_id(&mut self) -> u32;
+
+    /// List all tables in the catalog.
+    ///
+    /// This returns owned table metadata to allow callers to use the data
+    /// without holding a catalog lock.
+    fn list_tables(&self) -> Vec<TableMetadata>;
+
+    /// Whether catalog changes should be persisted to KV storage.
+    fn persistence_enabled(&self) -> bool {
+        false
+    }
 }

@@ -44,6 +44,7 @@
 //! ```
 
 use crate::catalog::{IndexMetadata, TableMetadata};
+use crate::planner::aggregate_expr::AggregateExpr;
 use crate::planner::typed_expr::{Projection, SortExpr, TypedAssignment, TypedExpr};
 
 /// Logical query plan representation.
@@ -76,6 +77,22 @@ pub enum LogicalPlan {
         input: Box<LogicalPlan>,
         /// Filter predicate (must evaluate to Boolean).
         predicate: TypedExpr,
+    },
+
+    /// Aggregate operation (GROUP BY / aggregation).
+    ///
+    /// Aggregates rows from the input plan using group keys and aggregate expressions.
+    Aggregate {
+        /// Input plan to aggregate.
+        input: Box<LogicalPlan>,
+        /// Group-by key expressions (empty for global aggregation).
+        group_keys: Vec<TypedExpr>,
+        /// Aggregate expressions to compute.
+        aggregates: Vec<AggregateExpr>,
+        /// HAVING filter applied after aggregation.
+        having: Option<TypedExpr>,
+        /// Projection to apply after aggregation.
+        projection: Projection,
     },
 
     /// Sort operation (ORDER BY clause).
@@ -183,6 +200,23 @@ pub enum LogicalPlan {
 }
 
 impl LogicalPlan {
+    pub fn operation_name(&self) -> &'static str {
+        match self {
+            LogicalPlan::Scan { .. }
+            | LogicalPlan::Filter { .. }
+            | LogicalPlan::Aggregate { .. }
+            | LogicalPlan::Sort { .. }
+            | LogicalPlan::Limit { .. } => "SELECT",
+            LogicalPlan::Insert { .. } => "INSERT",
+            LogicalPlan::Update { .. } => "UPDATE",
+            LogicalPlan::Delete { .. } => "DELETE",
+            LogicalPlan::CreateTable { .. } => "CREATE TABLE",
+            LogicalPlan::DropTable { .. } => "DROP TABLE",
+            LogicalPlan::CreateIndex { .. } => "CREATE INDEX",
+            LogicalPlan::DropIndex { .. } => "DROP INDEX",
+        }
+    }
+
     /// Creates a new Scan plan.
     pub fn scan(table: String, projection: Projection) -> Self {
         LogicalPlan::Scan { table, projection }
@@ -193,6 +227,23 @@ impl LogicalPlan {
         LogicalPlan::Filter {
             input: Box::new(input),
             predicate,
+        }
+    }
+
+    /// Creates a new Aggregate plan.
+    pub fn aggregate(
+        input: LogicalPlan,
+        group_keys: Vec<TypedExpr>,
+        aggregates: Vec<AggregateExpr>,
+        having: Option<TypedExpr>,
+        projection: Projection,
+    ) -> Self {
+        LogicalPlan::Aggregate {
+            input: Box::new(input),
+            group_keys,
+            aggregates,
+            having,
+            projection,
         }
     }
 
@@ -276,6 +327,7 @@ impl LogicalPlan {
         match self {
             LogicalPlan::Scan { .. } => "Scan",
             LogicalPlan::Filter { .. } => "Filter",
+            LogicalPlan::Aggregate { .. } => "Aggregate",
             LogicalPlan::Sort { .. } => "Sort",
             LogicalPlan::Limit { .. } => "Limit",
             LogicalPlan::Insert { .. } => "Insert",
@@ -294,6 +346,7 @@ impl LogicalPlan {
             self,
             LogicalPlan::Scan { .. }
                 | LogicalPlan::Filter { .. }
+                | LogicalPlan::Aggregate { .. }
                 | LogicalPlan::Sort { .. }
                 | LogicalPlan::Limit { .. }
         )
@@ -318,10 +371,11 @@ impl LogicalPlan {
         )
     }
 
-    /// Returns the input plan if this is a transformation (Filter, Sort, Limit).
+    /// Returns the input plan if this is a transformation (Filter, Aggregate, Sort, Limit).
     pub fn input(&self) -> Option<&LogicalPlan> {
         match self {
             LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. } => Some(input),
             _ => None,
@@ -340,6 +394,7 @@ impl LogicalPlan {
             LogicalPlan::CreateIndex { index, .. } => Some(&index.table),
             LogicalPlan::DropIndex { .. } => None,
             LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. } => input.table_name(),
         }

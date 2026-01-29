@@ -10,45 +10,54 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  create-release:
-    name: Create Release
+  # Run CI checks before release
+  ci-gate:
+    name: CI Gate
     runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
-          draft: false
-          prerelease: false
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run tests
+        # Exclude alopex-py as it requires numpy and has its own CI workflow
+        run: cargo test --workspace --all-features --exclude alopex-py
 
   build-release:
-    name: Build Release
-    needs: create-release
+    name: Build Release (${{ matrix.target }})
+    needs: ci-gate
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: alopex-cli
+            artifact_name: alopex
             asset_name: alopex-linux-x86_64
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact_name: alopex-cli
+            artifact_name: alopex
             asset_name: alopex-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: alopex-cli
+            artifact_name: alopex
             asset_name: alopex-macos-aarch64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: alopex-cli.exe
+            artifact_name: alopex.exe
             asset_name: alopex-windows-x86_64.exe
 
     steps:
@@ -59,6 +68,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p alopex-cli
 
@@ -66,40 +77,123 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
 
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
+      - name: Rename artifact
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} artifacts/${{ matrix.asset_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: artifacts/${{ matrix.asset_name }}
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
-          asset_name: ${{ matrix.asset_name }}
-          asset_content_type: application/octet-stream
 
   publish-crate:
     name: Publish to crates.io
-    needs: build-release
+    needs: create-release
     runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Create publish helper
+        run: |
+          cat > publish-crate.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          crate="$1"
+          version="$(cargo metadata --no-deps --format-version 1 | python - "$crate" <<'PY'
+          import json
+          import subprocess
+          import sys
+          name = sys.argv[1]
+          data = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"]))
+          for pkg in data["packages"]:
+              if pkg["name"] == name:
+                  print(pkg["version"])
+                  sys.exit(0)
+          sys.exit(1)
+          PY
+          )"
+          status="$(curl -sS --retry 5 --retry-connrefused --retry-delay 2 \
+            -H "User-Agent: alopex-release/${GITHUB_RUN_ID:-local}" \
+            -H "Accept: application/json" \
+            -o /dev/null -w "%{http_code}" \
+            "https://crates.io/api/v1/crates/${crate}/${version}")"
+          if [[ "$status" == "200" ]]; then
+            echo "skip: ${crate}@${version} already published"
+            exit 0
+          fi
+          if [[ "$status" != "404" ]]; then
+            echo "unexpected crates.io status ${status} for ${crate}@${version}" >&2
+            exit 1
+          fi
+          cargo publish -p "${crate}"
+          EOF
+          chmod +x publish-crate.sh
 
       - name: Publish alopex-core
-        run: cargo publish -p alopex-core --token ${{ secrets.CARGO_TOKEN }}
+        run: ./publish-crate.sh alopex-core
         continue-on-error: true
+
+      - name: Wait for crates.io index update
+        run: sleep 30
 
       - name: Publish alopex-sql
-        run: cargo publish -p alopex-sql --token ${{ secrets.CARGO_TOKEN }}
+        run: ./publish-crate.sh alopex-sql
         continue-on-error: true
+
+      - name: Wait for crates.io index update
+        run: sleep 30
+
+      - name: Publish alopex-dataframe
+        run: ./publish-crate.sh alopex-dataframe
+        continue-on-error: true
+
+      - name: Wait for crates.io index update
+        run: sleep 30
 
       - name: Publish alopex-embedded
-        run: cargo publish -p alopex-embedded --token ${{ secrets.CARGO_TOKEN }}
+        run: ./publish-crate.sh alopex-embedded
         continue-on-error: true
+
+      - name: Wait for crates.io index update
+        run: sleep 30
 
       - name: Publish alopex-server
-        run: cargo publish -p alopex-server --token ${{ secrets.CARGO_TOKEN }}
+        run: ./publish-crate.sh alopex-server
         continue-on-error: true
 
+      - name: Wait for crates.io index update
+        run: sleep 30
+
       - name: Publish alopex-cli
-        run: cargo publish -p alopex-cli --token ${{ secrets.CARGO_TOKEN }}
+        run: ./publish-crate.sh alopex-cli
         continue-on-error: true

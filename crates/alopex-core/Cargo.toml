@@ -1,16 +1,25 @@
 [package]
 name = "alopex-core"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Core storage engine for Alopex DB - LSM-tree, columnar storage, and vector index"
+keywords = ["database", "storage", "lsm-tree", "columnar", "vector"]
+categories = ["database-implementations"]
 
 [features]
 default = []
+async = []
+tokio = ["async", "dep:tokio"]
+wasm = ["async"]
 compression-zstd = ["zstd"]
 compression-lz4 = ["lz4"]
 checksum-xxh64 = ["xxhash-rust/xxh64"]
 wasm-indexeddb = ["js-sys", "web-sys"]
 memory-profiling = ["dhat", "crossbeam-skiplist"]
-# Enable test-only I/O and crash hooks
+s3 = ["object_store", "tokio", "bytes", "futures", "url"]
 test-hooks = []
 
 [dependencies]
@@ -20,18 +29,24 @@ serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 snap = "1.1"
 tracing = { workspace = true }
+futures-core = { workspace = true }
 zstd = { version = "0.13", optional = true }
 lz4 = { version = "1.24", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh64"], optional = true }
-jemalloc-ctl = { version = "0.5", optional = true }
 dhat = { version = "0.3", optional = true }
 crossbeam-skiplist = { version = "0.1", optional = true }
 rand = { workspace = true }
+object_store = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 
-[dev-dependencies]
-parking_lot = "0.12"
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+memmap2 = "0.9"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tempfile = "3.8"
-tokio = { version = "1.35", default-features = false, features = ["rt", "rt-multi-thread", "macros", "time"] }
 criterion = { workspace = true }
 rand = { workspace = true }
 proptest = "1.4"
@@ -40,15 +55,19 @@ crossbeam-skiplist = "0.1"
 chrono = { version = "0.4", default-features = true, features = ["clock", "serde"] }
 serde_json = { workspace = true }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-memmap2 = "0.9"
+# jemalloc doesn't support Windows
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+jemalloc-ctl = { version = "0.5", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = { version = "0.3", optional = true }
 web-sys = { version = "0.3", optional = true }
+getrandom = { version = "0.2", features = ["js"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [[bench]]
 name = "vector_flat"

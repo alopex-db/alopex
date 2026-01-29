@@ -1,7 +1,9 @@
 use alopex_core::{KVStore, KVTransaction, MemoryKV, TxnMode};
 use alopex_sql::catalog::{Catalog, ColumnMetadata, MemoryCatalog, TableMetadata};
 use alopex_sql::planner::types::ResolvedType;
-use alopex_sql::{AlopexDialect, Parser, Planner, PlannerError, SqlValue, StorageError, TableStorage};
+use alopex_sql::{
+    AlopexDialect, Parser, Planner, PlannerError, SqlValue, StorageError, TableStorage,
+};
 
 fn build_catalog_with_table() -> MemoryCatalog {
     let mut catalog = MemoryCatalog::new();
@@ -19,7 +21,7 @@ fn build_catalog_with_table() -> MemoryCatalog {
 
 #[test]
 fn insert_missing_table_returns_planner_error() {
-    let dialect = AlopexDialect::default();
+    let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(&dialect, "INSERT INTO missing(id) VALUES (1)");
     let ast = stmts.expect("parse failed");
 
@@ -31,7 +33,7 @@ fn insert_missing_table_returns_planner_error() {
 
 #[test]
 fn type_mismatch_insert_detected_by_planner() {
-    let dialect = AlopexDialect::default();
+    let dialect = AlopexDialect;
     let stmts =
         Parser::parse_sql(&dialect, "INSERT INTO t(id, name) VALUES ('oops', 'alice')").unwrap();
     let catalog = build_catalog_with_table();
@@ -42,18 +44,20 @@ fn type_mismatch_insert_detected_by_planner() {
 
 #[test]
 fn null_constraint_violation_detected_by_planner() {
-    let dialect = AlopexDialect::default();
-    let stmts =
-        Parser::parse_sql(&dialect, "INSERT INTO t(id, name) VALUES (1, NULL)").unwrap();
+    let dialect = AlopexDialect;
+    let stmts = Parser::parse_sql(&dialect, "INSERT INTO t(id, name) VALUES (1, NULL)").unwrap();
     let catalog = build_catalog_with_table();
     let planner = Planner::new(&catalog);
     let res = planner.plan(&stmts[0]);
-    assert!(matches!(res, Err(PlannerError::NullConstraintViolation { .. })));
+    assert!(matches!(
+        res,
+        Err(PlannerError::NullConstraintViolation { .. })
+    ));
 }
 
 #[test]
 fn parser_reports_invalid_sql_bulk() {
-    let dialect = AlopexDialect::default();
+    let dialect = AlopexDialect;
     for _ in 0..100 {
         let res = Parser::parse_sql(&dialect, "INSRT bad syntax");
         assert!(res.is_err());
@@ -71,18 +75,12 @@ fn storage_detects_primary_key_duplicate() {
         storage
             .insert(
                 1,
-                &[
-                    SqlValue::Integer(1),
-                    SqlValue::Text("alice".to_string()),
-                ],
+                &[SqlValue::Integer(1), SqlValue::Text("alice".to_string())],
             )
             .unwrap();
         let err = storage.insert(
             1,
-            &[
-                SqlValue::Integer(1),
-                SqlValue::Text("dup".to_string()),
-            ],
+            &[SqlValue::Integer(1), SqlValue::Text("dup".to_string())],
         );
         assert!(matches!(err, Err(StorageError::PrimaryKeyViolation { .. })));
     }
@@ -91,7 +89,7 @@ fn storage_detects_primary_key_duplicate() {
 
 #[test]
 fn fk_constraint_not_supported_reports_error() {
-    let dialect = AlopexDialect::default();
+    let dialect = AlopexDialect;
     let res = Parser::parse_sql(
         &dialect,
         "ALTER TABLE child ADD FOREIGN KEY (parent_id) REFERENCES parent(id)",

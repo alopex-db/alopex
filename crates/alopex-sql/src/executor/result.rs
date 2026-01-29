@@ -3,10 +3,17 @@
 //! This module defines the output types for SQL execution:
 //! - [`ExecutionResult`]: Top-level execution result
 //! - [`QueryResult`]: SELECT query results with column info
+//! - [`QueryRowIterator`]: Streaming query result with row iterator
 //! - [`Row`]: Internal row representation with row_id
 
+use crate::catalog::ColumnMetadata;
+use crate::executor::evaluator::EvalContext;
+use crate::executor::query::iterator::RowIterator;
 use crate::planner::ResolvedType;
+use crate::planner::typed_expr::Projection;
 use crate::storage::SqlValue;
+
+use super::ExecutorError;
 
 /// Result of executing a SQL statement.
 #[derive(Debug, Clone, PartialEq)]
@@ -110,6 +117,108 @@ impl Row {
     /// Returns true if the row has no columns.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
+    }
+}
+
+// ============================================================================
+// QueryRowIterator - Streaming query result
+// ============================================================================
+
+/// Streaming query result that yields rows one at a time.
+///
+/// This type enables true streaming output for SELECT queries by applying
+/// projection on-the-fly and yielding projected rows through an iterator.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut iter = db.execute_sql_streaming("SELECT * FROM users")?;
+/// while let Some(row) = iter.next_row()? {
+///     println!("{:?}", row);
+/// }
+/// ```
+pub struct QueryRowIterator<'a> {
+    /// Underlying row iterator.
+    inner: Box<dyn RowIterator + 'a>,
+    /// Projection to apply to each row.
+    projection: Projection,
+    /// Schema of the input rows (kept for potential future use).
+    #[allow(dead_code)]
+    schema: Vec<ColumnMetadata>,
+    /// Column information for output rows.
+    columns: Vec<ColumnInfo>,
+}
+
+impl<'a> QueryRowIterator<'a> {
+    /// Create a new streaming query result.
+    pub fn new(
+        inner: Box<dyn RowIterator + 'a>,
+        projection: Projection,
+        schema: Vec<ColumnMetadata>,
+    ) -> Self {
+        // Build column info from projection
+        let columns = match &projection {
+            Projection::All(_) => schema
+                .iter()
+                .map(|col| ColumnInfo::new(&col.name, col.data_type.clone()))
+                .collect(),
+            Projection::Columns(cols) => cols
+                .iter()
+                .map(|col| {
+                    let name = col.alias.clone().unwrap_or_else(|| match &col.expr.kind {
+                        crate::planner::typed_expr::TypedExprKind::ColumnRef { column, .. } => {
+                            column.clone()
+                        }
+                        _ => "?column?".to_string(),
+                    });
+                    ColumnInfo::new(name, col.expr.resolved_type.clone())
+                })
+                .collect(),
+        };
+
+        Self {
+            inner,
+            projection,
+            schema,
+            columns,
+        }
+    }
+
+    /// Returns column information for the result set.
+    pub fn columns(&self) -> &[ColumnInfo] {
+        &self.columns
+    }
+
+    /// Advance and return the next projected row, or None if exhausted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading or projection fails.
+    pub fn next_row(&mut self) -> Result<Option<Vec<SqlValue>>, ExecutorError> {
+        match self.inner.next_row() {
+            Some(Ok(row)) => {
+                let projected = self.project_row(&row)?;
+                Ok(Some(projected))
+            }
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
+
+    /// Apply projection to a single row.
+    fn project_row(&self, row: &Row) -> Result<Vec<SqlValue>, ExecutorError> {
+        match &self.projection {
+            Projection::All(_) => Ok(row.values.clone()),
+            Projection::Columns(proj_cols) => {
+                let mut output = Vec::with_capacity(proj_cols.len());
+                let ctx = EvalContext::new(&row.values);
+                for col in proj_cols {
+                    let value = crate::executor::evaluator::evaluate(&col.expr, &ctx)?;
+                    output.push(value);
+                }
+                Ok(output)
+            }
+        }
     }
 }
 

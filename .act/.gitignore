@@ -1,0 +1,5 @@
+# Ignore build artifacts but keep Dockerfile
+*
+!.gitignore
+!Dockerfile.*
+!README.md

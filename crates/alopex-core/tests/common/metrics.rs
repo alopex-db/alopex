@@ -148,23 +148,24 @@ impl MetricsSummary {
         let p99 = percentile(0.99);
         let p999 = percentile(0.999);
         let p9999 = percentile(0.9999);
-        let (outlier_count, outlier_samples, outlier_ratio) = if let Some(th) = p9999.map(|d| d.as_nanos() as u64) {
-            let outliers: Vec<u64> = latencies_ns.iter().copied().filter(|v| *v > th).collect();
-            let samples = outliers
-                .iter()
-                .rev()
-                .take(100)
-                .map(|ns| Duration::from_nanos(*ns))
-                .collect();
-            let ratio = if sample_count > 0 {
-                outliers.len() as f64 / sample_count as f64
+        let (outlier_count, outlier_samples, outlier_ratio) =
+            if let Some(th) = p9999.map(|d| d.as_nanos() as u64) {
+                let outliers: Vec<u64> = latencies_ns.iter().copied().filter(|v| *v > th).collect();
+                let samples = outliers
+                    .iter()
+                    .rev()
+                    .take(100)
+                    .map(|ns| Duration::from_nanos(*ns))
+                    .collect();
+                let ratio = if sample_count > 0 {
+                    outliers.len() as f64 / sample_count as f64
+                } else {
+                    0.0
+                };
+                (outliers.len(), samples, ratio)
             } else {
-                0.0
+                (0, Vec::new(), 0.0)
             };
-            (outliers.len(), samples, ratio)
-        } else {
-            (0, Vec::new(), 0.0)
-        };
 
         Self {
             successes,
@@ -287,13 +288,14 @@ impl MetricsReport {
         out.push_str(&format!("- Execution Model: {}\n", self.execution_model));
         out.push_str(&format!("- Timestamp: {}\n", self.timestamp.to_rfc3339()));
         out.push_str(&format!("- Duration: {}\n", fmt_duration(self.duration)));
-        out.push_str(&format!(
-            "- Watchdog: {}\n",
-            self.watchdog_result
-        ));
+        out.push_str(&format!("- Watchdog: {}\n", self.watchdog_result));
         out.push_str(&format!(
             "- SLO: {}\n\n",
-            if self.slo_result.passed { "PASS" } else { "FAIL" }
+            if self.slo_result.passed {
+                "PASS"
+            } else {
+                "FAIL"
+            }
         ));
 
         out.push_str("## Metrics\n");
@@ -304,9 +306,18 @@ impl MetricsReport {
             "| throughput/sec | {:.2} |\n",
             self.summary.throughput_per_sec
         ));
-        out.push_str(&format!("| p50 | {} |\n", fmt_opt_duration(self.summary.p50)));
-        out.push_str(&format!("| p95 | {} |\n", fmt_opt_duration(self.summary.p95)));
-        out.push_str(&format!("| p99 | {} |\n", fmt_opt_duration(self.summary.p99)));
+        out.push_str(&format!(
+            "| p50 | {} |\n",
+            fmt_opt_duration(self.summary.p50)
+        ));
+        out.push_str(&format!(
+            "| p95 | {} |\n",
+            fmt_opt_duration(self.summary.p95)
+        ));
+        out.push_str(&format!(
+            "| p99 | {} |\n",
+            fmt_opt_duration(self.summary.p99)
+        ));
         out.push_str(&format!(
             "| p99.9 | {} |\n",
             fmt_opt_duration(self.summary.p999)

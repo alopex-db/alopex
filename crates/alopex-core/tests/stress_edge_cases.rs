@@ -1,13 +1,11 @@
 mod common;
 
-use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnMode, TxnManager};
+use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnManager, TxnMode};
 use common::{
     begin_op, new_shared_store_for_mode, open_store_for_mode, selected_storage_modes, slo_presets,
-    storage_root_for_mode, ExecutionModel, SloConfig, StressStorageMode, StressTestConfig,
-    StressTestHarness,
+    storage_root_for_mode, ExecutionModel, StressStorageMode, StressTestConfig, StressTestHarness,
 };
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::Arc;
 use std::time::Duration;
 
 fn edge_config(
@@ -238,13 +236,9 @@ fn run_nested_transaction_pattern(model: ExecutionModel, mode: StressStorageMode
 }
 
 fn run_panic_rollback(model: ExecutionModel, mode: StressStorageMode) {
-    let harness = StressTestHarness::new(edge_config(
-        "panic_in_transaction_rollback",
-        model,
-        2,
-        mode,
-    ))
-    .unwrap();
+    let harness =
+        StressTestHarness::new(edge_config("panic_in_transaction_rollback", model, 2, mode))
+            .unwrap();
     let (store, _store_guard) = new_shared_store_for_mode(mode).unwrap();
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
@@ -297,9 +291,13 @@ fn run_compaction_read_concurrency(model: ExecutionModel, mode: StressStorageMod
     } else {
         1
     };
-    let harness =
-        StressTestHarness::new(edge_config("compaction_read_concurrency", model, concurrency, mode))
-            .unwrap();
+    let harness = StressTestHarness::new(edge_config(
+        "compaction_read_concurrency",
+        model,
+        concurrency,
+        mode,
+    ))
+    .unwrap();
     if mode == StressStorageMode::Disk {
         let result = match model {
             ExecutionModel::SyncSingle => harness.run(|ctx| {
@@ -339,35 +337,35 @@ fn run_compaction_read_concurrency(model: ExecutionModel, mode: StressStorageMod
                 ctx.metrics.record_success();
                 store.flush()?; // simulate compaction cadence
             }
-        pad_metrics(ctx, 5000);
-        Ok(())
-    }),
-    ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
-        let store = open_store_for_mode(&ctx.db_path, mode)?;
-        if tid == 0 {
-            let mut writer = store.begin(TxnMode::ReadWrite)?;
-            for i in 0..200u32 {
-                let _op = begin_op(ctx);
-                let key = format!("live_{i}").into_bytes();
-                writer.put(key, b"w".to_vec())?;
-            }
-            writer.commit_self()?;
-            store.flush()?;
-            ctx.metrics.record_success();
-        } else {
-            for _ in 0..200 {
-                let _op = begin_op(ctx);
-                let mut reader = store.begin(TxnMode::ReadOnly)?;
-                let _ = reader.get(&b"live_0".to_vec())?;
+            pad_metrics(ctx, 5000);
+            Ok(())
+        }),
+        ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
+            let store = open_store_for_mode(&ctx.db_path, mode)?;
+            if tid == 0 {
+                let mut writer = store.begin(TxnMode::ReadWrite)?;
+                for i in 0..200u32 {
+                    let _op = begin_op(ctx);
+                    let key = format!("live_{i}").into_bytes();
+                    writer.put(key, b"w".to_vec())?;
+                }
+                writer.commit_self()?;
+                store.flush()?;
                 ctx.metrics.record_success();
-                std::thread::yield_now();
+            } else {
+                for _ in 0..200 {
+                    let _op = begin_op(ctx);
+                    let mut reader = store.begin(TxnMode::ReadOnly)?;
+                    let _ = reader.get(&b"live_0".to_vec())?;
+                    ctx.metrics.record_success();
+                    std::thread::yield_now();
+                }
             }
-        }
-        pad_metrics(ctx, 5000);
-        Ok(())
-    }),
-    _ => panic!("edge cases are sync-only"),
-};
+            pad_metrics(ctx, 5000);
+            Ok(())
+        }),
+        _ => panic!("edge cases are sync-only"),
+    };
     assert!(
         result.is_success(),
         "compaction_read_concurrency {:?}: {:?}",
@@ -382,9 +380,13 @@ fn run_compaction_write_concurrency(model: ExecutionModel, mode: StressStorageMo
     } else {
         1
     };
-    let harness =
-        StressTestHarness::new(edge_config("compaction_write_concurrency", model, concurrency, mode))
-            .unwrap();
+    let harness = StressTestHarness::new(edge_config(
+        "compaction_write_concurrency",
+        model,
+        concurrency,
+        mode,
+    ))
+    .unwrap();
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
             let store = open_store_for_mode(&ctx.db_path, mode)?;
@@ -462,10 +464,7 @@ fn run_multi_level_compaction(model: ExecutionModel, mode: StressStorageMode) {
                 store.flush()?; // stepwise compaction
             }
             let mut reader = store.begin(TxnMode::ReadOnly)?;
-            assert_eq!(
-                reader.get(&b"ml2_0".to_vec())?,
-                Some(b"v2".to_vec())
-            );
+            assert_eq!(reader.get(&b"ml2_0".to_vec())?, Some(b"v2".to_vec()));
             ctx.metrics.record_success();
             pad_metrics(ctx, 5000);
             Ok(())
@@ -503,8 +502,8 @@ fn run_multi_level_compaction(model: ExecutionModel, mode: StressStorageMode) {
 }
 
 fn run_memtable_flush_trigger(model: ExecutionModel, mode: StressStorageMode) {
-    let harness = StressTestHarness::new(edge_config("memtable_flush_trigger", model, 1, mode))
-        .unwrap();
+    let harness =
+        StressTestHarness::new(edge_config("memtable_flush_trigger", model, 1, mode)).unwrap();
     if mode == StressStorageMode::Disk {
         let result = match model {
             ExecutionModel::SyncSingle => harness.run(|ctx| {
@@ -642,7 +641,8 @@ fn run_write_faster_than_flush(model: ExecutionModel, mode: StressStorageMode) {
 }
 
 fn run_cache_lru_eviction(model: ExecutionModel, mode: StressStorageMode) {
-    let harness = StressTestHarness::new(edge_config("cache_lru_eviction", model, 1, mode)).unwrap();
+    let harness =
+        StressTestHarness::new(edge_config("cache_lru_eviction", model, 1, mode)).unwrap();
     if mode == StressStorageMode::Disk {
         let result = harness.run(|ctx| {
             ctx.metrics.record_success();

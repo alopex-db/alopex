@@ -68,11 +68,11 @@ pub struct ResolvedColumn {
 /// // Resolve a table reference
 /// let table = resolver.resolve_table("users", span)?;
 /// ```
-pub struct NameResolver<'a, C: Catalog> {
+pub struct NameResolver<'a, C: Catalog + ?Sized> {
     catalog: &'a C,
 }
 
-impl<'a, C: Catalog> NameResolver<'a, C> {
+impl<'a, C: Catalog + ?Sized> NameResolver<'a, C> {
     /// Create a new name resolver with the given catalog.
     pub fn new(catalog: &'a C) -> Self {
         Self { catalog }
@@ -95,6 +95,7 @@ impl<'a, C: Catalog> NameResolver<'a, C> {
     pub fn resolve_table(&self, name: &str, span: Span) -> Result<&TableMetadata, PlannerError> {
         self.catalog
             .get_table(name)
+            .filter(|table| table.catalog_name == "default" && table.namespace_name == "default")
             .ok_or_else(|| PlannerError::TableNotFound {
                 name: name.to_string(),
                 line: span.start.line,

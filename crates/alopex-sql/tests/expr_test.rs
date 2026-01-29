@@ -125,7 +125,9 @@ fn parses_between_like_in_and_isnull() {
 fn parses_function_and_vector_literal() {
     let func = parse("foo(1, 2)");
     match func.kind {
-        ExprKind::FunctionCall { ref name, ref args } => {
+        ExprKind::FunctionCall {
+            ref name, ref args, ..
+        } => {
             assert_eq!(name, "foo");
             assert_eq!(args.len(), 2);
         }

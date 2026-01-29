@@ -1,6 +1,9 @@
 use crate::ast::span::Spanned;
-use crate::ast::{Assignment, Delete, Insert, OrderByExpr, Select, SelectItem, TableRef, Update};
-use crate::error::Result;
+use crate::ast::{
+    Assignment, Delete, Expr, Insert, LITERAL_TABLE, OrderByExpr, Select, SelectItem, TableRef,
+    Update,
+};
+use crate::error::{ParserError, Result};
 use crate::tokenizer::keyword::Keyword;
 use crate::tokenizer::token::{Token, Word};
 
@@ -12,10 +15,23 @@ impl<'a> Parser<'a> {
         let distinct = self.consume_keyword(Keyword::DISTINCT);
 
         let projection = self.parse_projection_list()?;
+        let mut end_span = projection
+            .last()
+            .map(|item| item.span())
+            .unwrap_or(start_span);
 
-        self.expect_keyword("FROM", Keyword::FROM)?;
-        let from = self.parse_table_ref()?;
-        let mut end_span = from.span;
+        let from = if self.consume_keyword(Keyword::FROM) {
+            let from = self.parse_table_ref()?;
+            end_span = from.span;
+            from
+        } else {
+            validate_literal_projection(&projection)?;
+            TableRef {
+                name: LITERAL_TABLE.to_string(),
+                alias: None,
+                span: end_span,
+            }
+        };
 
         let selection = if self.consume_keyword(Keyword::WHERE) {
             let expr = self.parse_expr()?;
@@ -24,6 +40,35 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+
+        let group_by = self.parse_group_by()?;
+        if let Some(items) = &group_by
+            && let Some(last) = items.last()
+        {
+            end_span = end_span.union(&last.span());
+        }
+
+        if matches!(
+            self.peek().token,
+            Token::Word(Word {
+                keyword: Keyword::HAVING,
+                ..
+            })
+        ) && group_by.is_none()
+        {
+            let tok = self.peek().clone();
+            return Err(ParserError::ExpectedToken {
+                line: tok.span.start.line,
+                column: tok.span.start.column,
+                expected: "GROUP BY".to_string(),
+                found: "HAVING".to_string(),
+            });
+        }
+
+        let having = self.parse_having()?;
+        if let Some(expr) = &having {
+            end_span = end_span.union(&expr.span());
+        }
 
         let order_by = if self.consume_keyword(Keyword::ORDER) {
             self.expect_keyword("BY", Keyword::BY)?;
@@ -56,6 +101,8 @@ impl<'a> Parser<'a> {
             projection,
             from,
             selection,
+            group_by,
+            having,
             order_by,
             limit,
             offset,
@@ -196,6 +243,34 @@ impl<'a> Parser<'a> {
         Ok(items)
     }
 
+    fn parse_group_by(&mut self) -> Result<Option<Vec<Expr>>> {
+        if !self.consume_keyword(Keyword::GROUP) {
+            return Ok(None);
+        }
+
+        self.expect_keyword("BY", Keyword::BY)?;
+        let mut items = Vec::new();
+        loop {
+            items.push(self.parse_expr()?);
+            if matches!(self.peek().token, Token::Comma) {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+
+        Ok(Some(items))
+    }
+
+    fn parse_having(&mut self) -> Result<Option<Expr>> {
+        if !self.consume_keyword(Keyword::HAVING) {
+            return Ok(None);
+        }
+
+        let expr = self.parse_expr()?;
+        Ok(Some(expr))
+    }
+
     pub fn parse_insert(&mut self) -> Result<Insert> {
         let start_span = self.expect_keyword("INSERT", Keyword::INSERT)?;
         self.expect_keyword("INTO", Keyword::INTO)?;
@@ -318,5 +393,144 @@ impl<'a> Parser<'a> {
             selection,
             span,
         })
+    }
+}
+
+fn validate_literal_projection(items: &[SelectItem]) -> Result<()> {
+    for item in items {
+        match item {
+            SelectItem::Wildcard { span } => {
+                return Err(ParserError::UnexpectedToken {
+                    line: span.start.line,
+                    column: span.start.column,
+                    expected: "literal expression".to_string(),
+                    found: "*".to_string(),
+                });
+            }
+            SelectItem::Expr { expr, .. } => {
+                if expr_contains_column_ref(expr) {
+                    return Err(ParserError::UnexpectedToken {
+                        line: expr.span.start.line,
+                        column: expr.span.start.column,
+                        expected: "literal expression".to_string(),
+                        found: "column reference".to_string(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn expr_contains_column_ref(expr: &crate::ast::Expr) -> bool {
+    use crate::ast::expr::ExprKind;
+    match &expr.kind {
+        ExprKind::ColumnRef { .. } => true,
+        ExprKind::BinaryOp { left, right, .. } => {
+            expr_contains_column_ref(left) || expr_contains_column_ref(right)
+        }
+        ExprKind::UnaryOp { operand, .. } => expr_contains_column_ref(operand),
+        ExprKind::FunctionCall { args, .. } => args.iter().any(expr_contains_column_ref),
+        ExprKind::Between {
+            expr, low, high, ..
+        } => {
+            expr_contains_column_ref(expr)
+                || expr_contains_column_ref(low)
+                || expr_contains_column_ref(high)
+        }
+        ExprKind::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_column_ref(expr)
+                || expr_contains_column_ref(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_column_ref(expr))
+        }
+        ExprKind::InList { expr, list, .. } => {
+            expr_contains_column_ref(expr) || list.iter().any(expr_contains_column_ref)
+        }
+        ExprKind::IsNull { expr, .. } => expr_contains_column_ref(expr),
+        ExprKind::Literal(_) | ExprKind::VectorLiteral(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{AlopexDialect, Parser, ParserError, Tokenizer};
+
+    fn parse_select(sql: &str) -> crate::ast::dml::Select {
+        let dialect = AlopexDialect;
+        let tokens = Tokenizer::new(&dialect, sql).tokenize().unwrap();
+        let mut parser = Parser::new(&dialect, tokens);
+        parser.parse_select().unwrap()
+    }
+
+    fn parse_select_err(sql: &str) -> ParserError {
+        let dialect = AlopexDialect;
+        let tokens = Tokenizer::new(&dialect, sql).tokenize().unwrap();
+        let mut parser = Parser::new(&dialect, tokens);
+        parser.parse_select().unwrap_err()
+    }
+
+    #[test]
+    fn parse_group_by_single_column() {
+        let select = parse_select("SELECT id, COUNT(*) FROM users GROUP BY id");
+        assert_eq!(select.group_by.as_ref().map(Vec::len), Some(1));
+        assert!(select.having.is_none());
+    }
+
+    #[test]
+    fn parse_group_by_multi_column() {
+        let select = parse_select("SELECT id, name FROM users GROUP BY id, name");
+        assert_eq!(select.group_by.as_ref().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn parse_having_with_aggregate_condition() {
+        let select = parse_select("SELECT id, COUNT(*) FROM users GROUP BY id HAVING COUNT(*) > 5");
+        assert_eq!(select.group_by.as_ref().map(Vec::len), Some(1));
+        assert!(select.having.is_some());
+    }
+
+    #[test]
+    fn parse_group_by_without_having() {
+        let select = parse_select("SELECT id FROM users GROUP BY id");
+        assert!(select.having.is_none());
+    }
+
+    #[test]
+    fn parse_group_by_with_order_by() {
+        let select = parse_select("SELECT id, COUNT(*) FROM users GROUP BY id ORDER BY id DESC");
+        assert_eq!(select.group_by.as_ref().map(Vec::len), Some(1));
+        assert_eq!(select.order_by.len(), 1);
+    }
+
+    #[test]
+    fn parse_group_by_requires_expression() {
+        let err = parse_select_err("SELECT id FROM users GROUP BY");
+        match err {
+            ParserError::UnexpectedToken { expected, .. } => {
+                assert_eq!(expected, "expression");
+            }
+            other => panic!("unexpected error {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_having_without_group_by() {
+        let err = parse_select_err("SELECT COUNT(*) FROM users HAVING COUNT(*) > 1");
+        match err {
+            ParserError::ExpectedToken {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, "GROUP BY");
+                assert_eq!(found, "HAVING");
+            }
+            other => panic!("unexpected error {:?}", other),
+        }
     }
 }

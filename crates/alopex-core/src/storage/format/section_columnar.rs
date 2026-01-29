@@ -4,16 +4,19 @@ use bincode::Options;
 
 use crate::columnar::segment_v2::ColumnSegmentV2;
 use crate::storage::format::{
-    bincode_config, AlopexFileReader, AlopexFileWriter, FileReader, FormatError, SectionEntry,
-    SectionType,
+    bincode_config, AlopexFileReader, FileReader, FormatError, SectionEntry,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::storage::format::{AlopexFileWriter, SectionType};
 
 /// セクションタイプ定数（0x03）。
 pub const SECTION_TYPE_COLUMNAR: u8 = 0x03;
 
 /// カラムナーセクションの書き込みヘルパー。
+#[cfg(not(target_arch = "wasm32"))]
 pub struct ColumnarSectionWriter;
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ColumnarSectionWriter {
     /// セグメントを Section 0x03 として追加し、セクションIDを返す。
     pub fn write_section(
@@ -43,7 +46,7 @@ impl ColumnarSectionReader {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::columnar::encoding::{Column, LogicalType};

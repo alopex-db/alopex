@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use alopex_core::{HnswConfig, HnswIndex, Metric, TxnMode};
 use alopex_embedded::Database;
+use tempfile::tempdir;
 
 fn config() -> HnswConfig {
     HnswConfig::default()
@@ -70,6 +71,25 @@ fn transaction_commit_and_rollback_are_respected() {
     let (results, _) = db.search_hnsw("vec_idx", &[0.0, 0.0], 5, None).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].key, b"keep");
+}
+
+#[test]
+fn hnsw_index_persists_across_reopen() {
+    let dir = tempdir().expect("tempdir");
+    {
+        let db = Database::open(dir.path()).expect("open db");
+        db.create_hnsw_index("vec_idx", config()).unwrap();
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+        txn.upsert_to_hnsw("vec_idx", b"a", &[0.0, 0.0], b"ma")
+            .unwrap();
+        txn.upsert_to_hnsw("vec_idx", b"b", &[1.0, 0.0], b"mb")
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let db = Database::open(dir.path()).expect("reopen db");
+    let (results, _) = db.search_hnsw("vec_idx", &[0.0, 0.0], 2, None).unwrap();
+    assert_eq!(results.len(), 2);
 }
 
 #[test]

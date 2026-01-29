@@ -8,8 +8,8 @@ use alopex_core::{
     TxnMode,
 };
 use common::{
-    begin_op, slo_presets, ExecutionModel, SloConfig, StressTestConfig, StressTestHarness,
-    selected_storage_modes, StressStorageMode, WorkloadConfig, WorkloadGenerator,
+    begin_op, selected_storage_modes, slo_presets, ExecutionModel, SloConfig, StressStorageMode,
+    StressTestConfig, StressTestHarness, WorkloadConfig, WorkloadGenerator,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,7 +61,9 @@ fn concurrency_config(
 
 fn new_shared_store(mode: StressStorageMode) -> CoreResult<(Arc<AnyKV>, Option<TempDir>)> {
     match mode {
-        StressStorageMode::Memory => Ok((Arc::new(AnyKV::Memory(alopex_core::MemoryKV::new())), None)),
+        StressStorageMode::Memory => {
+            Ok((Arc::new(AnyKV::Memory(alopex_core::MemoryKV::new())), None))
+        }
         StressStorageMode::Disk => {
             let dir = TempDir::new()?;
             let cfg = LsmKVConfig {

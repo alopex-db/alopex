@@ -1,12 +1,24 @@
 [workspace]
 members = [
     "crates/alopex-core",
+    "crates/alopex-dataframe",
     "crates/alopex-sql",
-    "crates/alopex-embedded", "crates/alopex-server", "crates/alopex-cluster", "crates/alopex-cli", "crates/alopex-tools",
+    "crates/alopex-embedded", "crates/alopex-server", "crates/alopex-cluster", "crates/alopex-cli", "crates/alopex-tools", "crates/alopex-py",
 ]
 resolver = "2"
 
+[workspace.package]
+version = "0.5.0"
+license = "Apache-2.0"
+repository = "https://github.com/alopex-db/alopex"
+edition = "2021"
+
 [workspace.dependencies]
+# Internal crates
+alopex-core = { version = "0.5.0", path = "crates/alopex-core", features = ["compression-zstd"] }
+alopex-sql = { version = "0.5.0", path = "crates/alopex-sql" }
+alopex-dataframe = { version = "0.2.0", path = "crates/alopex-dataframe" }
+alopex-embedded = { version = "0.5.0", path = "crates/alopex-embedded" }
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
 
@@ -22,6 +34,13 @@ anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Object storage
+object_store = { version = "0.11", features = ["aws"] }
+bytes = "1.5"
+futures = "0.3"
+futures-core = "0.3"
+url = "2.5"
+
 # Testing
 criterion = "0.5"
 rand = "0.8"
@@ -36,3 +55,6 @@ opt-level = 0
 
 [profile.test]
 opt-level = 1
+
+[patch.crates-io]
+ratatui-testlib = { path = "vendor/ratatui-testlib" }

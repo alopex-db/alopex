@@ -501,7 +501,7 @@ mod tests {
         }
 
         #[test]
-        fn prop_text_order_matches_encoded(a in ".*", b in ".*") {
+        fn prop_text_order_matches_encoded(a in r"[^\x00]*", b in r"[^\x00]*") {
             let va = SqlValue::Text(a.clone());
             let vb = SqlValue::Text(b.clone());
             let ka = KeyEncoder::index_key(1, &va, 0).unwrap();

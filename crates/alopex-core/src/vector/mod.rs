@@ -4,12 +4,18 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 use crate::{Error, Result};
+#[cfg(feature = "async")]
+pub mod async_vector;
 pub mod columnar;
 pub mod flat;
 pub mod hnsw;
 pub mod simd;
 
 // Re-export主要型。
+#[cfg(feature = "tokio")]
+pub use async_vector::AsyncVectorStoreAdapter;
+#[cfg(feature = "async")]
+pub use async_vector::{AsyncHnswIndex, AsyncVectorStore};
 pub use columnar::{
     key_layout as vector_key_layout, AppendResult, SearchStats, VectorSearchParams,
     VectorSearchResult, VectorSegment, VectorStoreConfig, VectorStoreManager,
@@ -17,10 +23,10 @@ pub use columnar::{
 pub use hnsw::{HnswConfig, HnswIndex, HnswSearchResult, HnswStats};
 pub use simd::{select_kernel, DistanceKernel, ScalarKernel};
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod disk;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod integration;
 
 /// Batch delete result.
@@ -174,7 +180,7 @@ pub fn score(metric: Metric, query: &[f32], item: &[f32]) -> Result<f32> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

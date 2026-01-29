@@ -37,9 +37,12 @@ pub fn evaluate(expr: &TypedExpr, ctx: &EvalContext<'_>) -> Result<SqlValue> {
         TypedExprKind::VectorLiteral(values) => {
             Ok(SqlValue::Vector(values.iter().map(|v| *v as f32).collect()))
         }
-        TypedExprKind::FunctionCall { name, args } => {
-            function_call::evaluate_function_call(name, args, ctx)
-        }
+        TypedExprKind::FunctionCall {
+            name,
+            args,
+            distinct,
+            star,
+        } => function_call::evaluate_function_call(name, args, *distinct, *star, ctx),
         // Unsupported expressions return a clear error message.
         other => Err(ExecutorError::Evaluation(
             EvaluationError::UnsupportedExpression(format!("{other:?}")),

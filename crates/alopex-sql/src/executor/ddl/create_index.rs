@@ -4,13 +4,14 @@ use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
-use crate::storage::{SqlTransaction, SqlValue, StorageError};
+use crate::storage::{SqlTxn, SqlValue, StorageError};
 
 use super::is_implicit_pk_index;
+use super::persistence::persist_index;
 
 /// Execute CREATE INDEX.
-pub fn execute_create_index<S: KVStore, C: Catalog>(
-    txn: &mut SqlTransaction<'_, S>,
+pub fn execute_create_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
+    txn: &mut impl SqlTxn<'txn, S>,
     catalog: &mut C,
     mut index: IndexMetadata,
     if_not_exists: bool,
@@ -48,7 +49,8 @@ pub fn execute_create_index<S: KVStore, C: Catalog>(
         build_index_for_existing_rows(txn, &table, &index, column_indices)?;
     }
 
-    catalog.create_index(index)?;
+    catalog.create_index(index.clone())?;
+    persist_index(txn.inner_mut(), &index)?;
 
     Ok(ExecutionResult::Success)
 }
@@ -76,8 +78,8 @@ fn should_skip_unique_index_for_null(index: &IndexMetadata, row: &[SqlValue]) ->
             .any(|&idx| row.get(idx).is_none_or(SqlValue::is_null))
 }
 
-fn build_index_for_existing_rows<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+pub(crate) fn build_index_for_existing_rows<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table: &TableMetadata,
     index: &IndexMetadata,
     column_indices: Vec<usize>,
@@ -126,8 +128,8 @@ fn build_index_for_existing_rows<S: KVStore>(
     Ok(())
 }
 
-fn fetch_rows_chunk<S: KVStore>(
-    txn: &mut SqlTransaction<'_, S>,
+fn fetch_rows_chunk<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
     table: &TableMetadata,
     start_row_id: u64,
     chunk_size: u64,

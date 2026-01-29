@@ -93,7 +93,7 @@ pub trait BulkReader {
 }
 
 /// COPY 文を実行する。
-pub fn execute_copy<S: KVStore, C: Catalog>(
+pub fn execute_copy<S: KVStore, C: Catalog + ?Sized>(
     txn: &mut SqlTransaction<'_, S>,
     catalog: &C,
     table_name: &str,
@@ -237,7 +237,7 @@ pub fn validate_schema(schema: &CopySchema, table_meta: &TableMetadata) -> Resul
 }
 
 /// Row ストレージへの書き込み。
-fn bulk_load_row<S: KVStore, C: Catalog>(
+fn bulk_load_row<S: KVStore, C: Catalog + ?Sized>(
     txn: &mut SqlTransaction<'_, S>,
     catalog: &C,
     table: &TableMetadata,
@@ -282,7 +282,7 @@ fn bulk_load_row<S: KVStore, C: Catalog>(
 }
 
 /// Columnar ストレージへの書き込み（現状は Row と同経路で処理）。
-fn bulk_load_columnar<S: KVStore, C: Catalog>(
+fn bulk_load_columnar<S: KVStore, C: Catalog + ?Sized>(
     txn: &mut SqlTransaction<'_, S>,
     catalog: &C,
     table: &TableMetadata,

@@ -91,18 +91,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.3
+        uses: jetli/wasm-pack-action@v0.4.0
         with:
           version: latest
 
-      - name: Install Firefox for headless wasm-bindgen-test
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y firefox
+      - name: Ensure wasm-pack in PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Run wasm compatibility tests
         env:
           ALOPEX_COMPAT_COMPRESSION: ${{ matrix.compression }}
+          NODE_OPTIONS: --experimental-global-webcrypto
+          RUSTFLAGS: -D warnings --cfg getrandom_backend="wasm_js"
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target-wasm
+          WASM_BINDGEN_TEST_NO_CAPTURE: "1"
         run: |
-          wasm-pack test --firefox --headless crates/alopex-core -- --test format_compatibility_test --test format_wasm_large_file_test
+          wasm-pack test --node crates/alopex-core

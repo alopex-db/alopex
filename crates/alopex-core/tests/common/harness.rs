@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use super::fixtures::{open_store_for_mode, StressStorageMode};
-use super::metrics::{metrics_output_dir, MetricsCollector, MetricsReport, MetricsSummary, SloConfig, SloResult};
+use super::metrics::{
+    metrics_output_dir, MetricsCollector, MetricsReport, MetricsSummary, SloConfig, SloResult,
+};
 use super::watchdog::{OperationGuard, Watchdog, WatchdogConfig, WatchdogResult};
 
 /// 実行モデル（sync/async × single/multi）。
@@ -290,7 +292,13 @@ impl StressTestHarness {
 
         let sanitize = |s: &str| -> String {
             s.chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect()
         };
         let stamp = timestamp.format("%Y%m%dT%H%M%SZ").to_string();

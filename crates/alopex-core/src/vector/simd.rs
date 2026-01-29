@@ -228,7 +228,7 @@ mod avx2 {
         Box::new(Avx2Kernel)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     mod tests {
         use super::*;
 
@@ -374,7 +374,7 @@ pub fn select_kernel() -> Box<dyn DistanceKernel> {
 
     #[cfg(target_arch = "aarch64")]
     {
-        if std::is_aarch64_feature_detected!("neon") {
+        if std::arch::is_aarch64_feature_detected!("neon") {
             return neon::create();
         }
     }
@@ -382,7 +382,7 @@ pub fn select_kernel() -> Box<dyn DistanceKernel> {
     Box::new(ScalarKernel)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::vector::score;

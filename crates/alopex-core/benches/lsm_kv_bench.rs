@@ -70,7 +70,8 @@ struct LsmHarness {
 impl LsmHarness {
     fn new() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = LsmKV::open_with_config(dir.path(), bench_config()).expect("open lsmkv");
+        let (store, _recovery) =
+            LsmKV::open_with_config(dir.path(), bench_config()).expect("open lsmkv");
         Self { _dir: dir, store }
     }
 }
@@ -252,9 +253,9 @@ fn bench_scan_range(c: &mut Criterion) {
             },
             |(start, end)| {
                 let mut tx = store.begin(TxnMode::ReadOnly).unwrap();
-                let mut it = tx.scan_range(&start, &end).unwrap();
+                let it = tx.scan_range(&start, &end).unwrap();
                 let mut count = 0usize;
-                while let Some((_k, _v)) = it.next() {
+                for (_k, _v) in it {
                     count += 1;
                 }
                 black_box(count);
@@ -281,9 +282,9 @@ fn bench_scan_range(c: &mut Criterion) {
             },
             |(start, end)| {
                 let mut tx = harness.store.begin(TxnMode::ReadOnly).unwrap();
-                let mut it = tx.scan_range(&start, &end).unwrap();
+                let it = tx.scan_range(&start, &end).unwrap();
                 let mut count = 0usize;
-                while let Some((_k, _v)) = it.next() {
+                for (_k, _v) in it {
                     count += 1;
                 }
                 black_box(count);

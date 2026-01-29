@@ -1,8 +1,8 @@
 mod common;
 
 use alopex_core::kv::memory::MemoryTransaction;
-use alopex_core::KVTransaction;
 use alopex_core::types::Value;
+use alopex_core::KVTransaction;
 use alopex_core::{Error as CoreError, KVStore, MemoryKV, TxnMode};
 use common::{
     begin_op, slo_presets, Column, ColumnarOperation, ExecutionModel, ModelMix,
@@ -30,8 +30,7 @@ macro_rules! mm_test {
         fn $name() {
             if std::env::var("STRESS_STORAGE_MODE")
                 .unwrap_or_else(|_| "both".to_string())
-                .to_ascii_lowercase()
-                == "disk"
+                .eq_ignore_ascii_case("disk")
             {
                 return;
             }
@@ -122,7 +121,8 @@ fn pad_multi_metrics(ctx: &common::TestContext, count: usize) {
 fn hash_bytes(bytes: &[u8]) -> u64 {
     bytes
         .iter()
-        .fold(0xcbf2_9ce4_8422_2325u64, |acc, b| acc ^ (*b as u64)).wrapping_mul(0x100_0000_01b3)
+        .fold(0xcbf2_9ce4_8422_2325u64, |acc, b| acc ^ (*b as u64))
+        .wrapping_mul(0x100_0000_01b3)
 }
 
 fn encode_row(row: &[(String, Value)]) -> Vec<u8> {
@@ -169,12 +169,10 @@ fn apply_kv_op(txn: &mut MemoryTransaction<'_>, op: Operation) -> CoreResult<()>
             txn.put(key, val)?;
         }
         Operation::Delete(key) => {
-            let _ = txn.delete(key)?;
+            txn.delete(key)?;
         }
         Operation::Scan(prefix) => {
-            for (_k, _v) in txn.scan_prefix(&prefix)? {
-                break;
-            }
+            let _ = txn.scan_prefix(&prefix)?.next();
         }
     }
     Ok(())
@@ -188,9 +186,7 @@ fn apply_sql_op(txn: &mut MemoryTransaction<'_>, op: SqlOperation) -> CoreResult
         }
         SqlOperation::Select { table, .. } => {
             let prefix = format!("sql:{table}:").into_bytes();
-            for (_k, _v) in txn.scan_prefix(&prefix)? {
-                break;
-            }
+            let _ = txn.scan_prefix(&prefix)?.next();
         }
         SqlOperation::Update { table, set, .. } => {
             let key = sql_row_key(&table, &set);
@@ -200,7 +196,7 @@ fn apply_sql_op(txn: &mut MemoryTransaction<'_>, op: SqlOperation) -> CoreResult
             let prefix = format!("sql:{table}:").into_bytes();
             let keys: Vec<Vec<u8>> = txn.scan_prefix(&prefix)?.map(|(k, _)| k).collect();
             for k in keys {
-                let _ = txn.delete(k)?;
+                txn.delete(k)?;
             }
         }
     }
@@ -234,8 +230,8 @@ fn apply_vector_op(txn: &mut MemoryTransaction<'_>, op: VectorOperation) -> Core
             scored.truncate(k);
         }
         VectorOperation::Delete { id } => {
-            let _ = txn.delete(format!("vec:{id}").into_bytes())?;
-            let _ = txn.delete(format!("vec_meta:{id}").into_bytes())?;
+            txn.delete(format!("vec:{id}").into_bytes())?;
+            txn.delete(format!("vec_meta:{id}").into_bytes())?;
         }
     }
     Ok(())
@@ -256,9 +252,7 @@ fn apply_columnar_op(txn: &mut MemoryTransaction<'_>, op: ColumnarOperation) -> 
         ColumnarOperation::Scan { projection, .. } => {
             for col in projection {
                 let prefix = format!("col:{col}").into_bytes();
-                for (_k, _v) in txn.scan_prefix(&prefix)? {
-                    break;
-                }
+                let _ = txn.scan_prefix(&prefix)?.next();
             }
         }
     }
@@ -429,7 +423,8 @@ fn run_generated_mix(
                                 let mut attempts = 0;
                                 loop {
                                     let start = Instant::now();
-                                    match apply_multi_batch(&store, gen.generate_batch(batch_size)) {
+                                    match apply_multi_batch(&store, gen.generate_batch(batch_size))
+                                    {
                                         Ok(applied) => {
                                             for _ in 0..applied {
                                                 ctx_clone.metrics.record_success();
@@ -437,7 +432,9 @@ fn run_generated_mix(
                                             ctx_clone.metrics.record_latency(start.elapsed());
                                             break;
                                         }
-                                        Err(CoreError::TxnConflict) if attempts < MAX_TXN_RETRIES => {
+                                        Err(CoreError::TxnConflict)
+                                            if attempts < MAX_TXN_RETRIES =>
+                                        {
                                             attempts += 1;
                                             tokio::task::yield_now().await;
                                             continue;
@@ -630,9 +627,7 @@ fn run_cross_model_rollback(model: ExecutionModel) -> TestResult {
         ExecutionModel::SyncMulti => {
             let store_sync = store.clone();
             {
-                let mut bootstrap = store_sync
-                    .begin(TxnMode::ReadWrite)
-                    .expect("bootstrap txn");
+                let mut bootstrap = store_sync.begin(TxnMode::ReadWrite).expect("bootstrap txn");
                 apply_vector_op(
                     &mut bootstrap,
                     VectorOperation::Insert {
@@ -654,7 +649,9 @@ fn run_cross_model_rollback(model: ExecutionModel) -> TestResult {
                     }
                 }
                 let mut reader = store_sync.begin(TxnMode::ReadOnly)?;
-                assert!(reader.get(&format!("kv_commit_{tid}_1").into_bytes())?.is_none());
+                assert!(reader
+                    .get(&format!("kv_commit_{tid}_1").into_bytes())?
+                    .is_none());
                 ctx.metrics.record_latency(start.elapsed());
                 pad_multi_metrics(ctx, 300);
                 Ok(())
@@ -706,9 +703,7 @@ fn run_vector_metadata_sync(model: ExecutionModel) -> TestResult {
             )?;
             txn.commit_self()?;
             let mut reader = store.begin(TxnMode::ReadOnly)?;
-            assert!(reader
-                .get(&b"vec_meta:9".to_vec())?
-                .is_some());
+            assert!(reader.get(&b"vec_meta:9".to_vec())?.is_some());
             ctx.metrics.record_success();
             ctx.metrics.record_latency(start.elapsed());
             pad_multi_metrics(ctx, 200);
@@ -814,25 +809,27 @@ fn run_cross_model_crash_recovery(model: ExecutionModel) -> TestResult {
             pad_multi_metrics(ctx, 400);
             Ok(())
         }),
-        ExecutionModel::AsyncSingle | ExecutionModel::AsyncMulti => harness.run_async(|ctx| async move {
-            let start = Instant::now();
-            let store = MemoryKV::open(&ctx.db_path)?;
-            {
-                let mut txn = store.begin(TxnMode::ReadWrite)?;
-                for op in cross_model_ops(0, 2) {
-                    apply_multi_op(&mut txn, op)?;
-                    ctx.metrics.record_success();
+        ExecutionModel::AsyncSingle | ExecutionModel::AsyncMulti => {
+            harness.run_async(|ctx| async move {
+                let start = Instant::now();
+                let store = MemoryKV::open(&ctx.db_path)?;
+                {
+                    let mut txn = store.begin(TxnMode::ReadWrite)?;
+                    for op in cross_model_ops(0, 2) {
+                        apply_multi_op(&mut txn, op)?;
+                        ctx.metrics.record_success();
+                    }
+                    txn.commit_self()?;
                 }
-                txn.commit_self()?;
-            }
-            drop(store);
-            let reopened = MemoryKV::open(&ctx.db_path)?;
-            let mut reader = reopened.begin(TxnMode::ReadOnly)?;
-            assert!(reader.get(&b"kv_commit_0_2".to_vec())?.is_some());
-            ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(&ctx, 400);
-            Ok(())
-        }),
+                drop(store);
+                let reopened = MemoryKV::open(&ctx.db_path)?;
+                let mut reader = reopened.begin(TxnMode::ReadOnly)?;
+                assert!(reader.get(&b"kv_commit_0_2".to_vec())?.is_some());
+                ctx.metrics.record_latency(start.elapsed());
+                pad_multi_metrics(&ctx, 400);
+                Ok(())
+            })
+        }
     }
 }
 
@@ -876,10 +873,7 @@ fn run_sql_select_kv_update_isolation(model: ExecutionModel) -> TestResult {
                 barrier.wait();
                 if tid != 0 {
                     let mut reader = store_sync.begin(TxnMode::ReadOnly)?;
-                    assert_eq!(
-                        reader.get(&b"kv:isolation".to_vec())?,
-                        Some(b"v1".to_vec())
-                    );
+                    assert_eq!(reader.get(&b"kv:isolation".to_vec())?, Some(b"v1".to_vec()));
                 }
                 ctx.metrics.record_success();
                 ctx.metrics.record_latency(start.elapsed());
@@ -1423,18 +1417,27 @@ fn run_transaction_mode_change(model: ExecutionModel) -> TestResult {
     }
 }
 
-mm_test!(test_cross_model_atomic_commit, run_cross_model_atomic_commit);
+mm_test!(
+    test_cross_model_atomic_commit,
+    run_cross_model_atomic_commit
+);
 mm_test!(test_cross_model_rollback, run_cross_model_rollback);
 mm_test!(test_kv_sql_same_entity, run_kv_sql_same_entity);
 mm_test!(test_vector_metadata_sync, run_vector_metadata_sync);
-mm_test!(test_cross_model_crash_recovery, run_cross_model_crash_recovery);
+mm_test!(
+    test_cross_model_crash_recovery,
+    run_cross_model_crash_recovery
+);
 mm_test!(test_kv_sql_concurrent_access, run_kv_sql_concurrent_access);
 mm_test!(
     test_sql_select_kv_update_isolation,
     run_sql_select_kv_update_isolation
 );
 mm_test!(test_vector_search_sql_insert, run_vector_search_sql_insert);
-mm_test!(test_100_connections_mixed_api, run_100_connections_mixed_api);
+mm_test!(
+    test_100_connections_mixed_api,
+    run_100_connections_mixed_api
+);
 mm_test!(test_columnar_scan_kv_update, run_columnar_scan_kv_update);
 mm_test!(test_sql_vector_column_update, run_sql_vector_column_update);
 mm_test!(test_kv_sql_row_consistency, run_kv_sql_row_consistency);
@@ -1446,10 +1449,7 @@ mm_test!(
     test_partial_index_update_rollback,
     run_partial_index_update_rollback
 );
-mm_test!(
-    test_btree_vector_index_sync,
-    run_btree_vector_index_sync
-);
+mm_test!(test_btree_vector_index_sync, run_btree_vector_index_sync);
 mm_test!(test_rapid_api_switch, run_rapid_api_switch);
 mm_test!(
     test_1000_api_switches_no_leak,

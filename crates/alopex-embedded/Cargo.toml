@@ -1,11 +1,28 @@
 [package]
 name = "alopex-embedded"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embedded database interface for Alopex DB"
+keywords = ["database", "embedded"]
+categories = ["database-implementations"]
+
+[features]
+default = []
+s3 = ["alopex-core/s3", "tokio", "object_store", "bytes", "futures", "url"]
 
 [dependencies]
-alopex-core = { path = "../alopex-core" }
+alopex-core.workspace = true
+alopex-sql.workspace = true
+alopex-dataframe.workspace = true
+arrow = "53"
 thiserror = "1.0"
+tokio = { workspace = true, optional = true }
+object_store = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.8"

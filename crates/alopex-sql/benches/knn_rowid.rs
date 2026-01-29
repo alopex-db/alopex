@@ -27,7 +27,7 @@ impl Harness {
         let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
         let executor = Executor::new(store, catalog.clone());
         Self {
-            dialect: AlopexDialect::default(),
+            dialect: AlopexDialect,
             catalog,
             executor,
         }
@@ -140,7 +140,7 @@ where
         let insert = insert_tmpl.replace("{}", &values.join(","));
         harness.exec_sql(&insert);
         inserted = upper;
-        if inserted % 100_000 == 0 {
+        if inserted.is_multiple_of(100_000) {
             eprintln!("inserted {} rows", inserted);
         }
     }

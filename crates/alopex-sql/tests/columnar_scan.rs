@@ -22,7 +22,7 @@ fn create_table(
     catalog: &Arc<RwLock<MemoryCatalog>>,
 ) {
     let stmt = Parser::parse_sql(
-        &AlopexDialect::default(),
+        &AlopexDialect,
         "CREATE TABLE users (id INT PRIMARY KEY, name TEXT) WITH (storage='columnar', row_group_size=1000);",
     )
     .unwrap()

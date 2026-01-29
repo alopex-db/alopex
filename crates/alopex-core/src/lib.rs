@@ -2,6 +2,9 @@
 
 #![deny(missing_docs)]
 
+#[cfg(feature = "async")]
+pub mod async_runtime;
+pub mod async_util;
 pub mod columnar;
 pub mod compaction;
 pub mod error;
@@ -14,16 +17,27 @@ pub mod txn;
 pub mod types;
 pub mod vector;
 
+pub use async_util::{BoxFuture, BoxStream, MaybeSend};
 pub use columnar::encoding::{
     decode_column, encode_column, Column, Compression, Encoding, LogicalType,
 };
 pub use columnar::segment::{write_segment, ChunkIter, SegmentMeta, SegmentReader};
+#[cfg(feature = "tokio")]
+pub use columnar::AsyncColumnarReaderAdapter;
+#[cfg(feature = "async")]
+pub use columnar::{AsyncColumnarReader, ColumnId, RowBatch, Segment, SegmentId};
 pub use error::{Error, Result};
 #[cfg(feature = "test-hooks")]
 pub use kv::hooks::{CrashOperation, CrashPoint, CrashSimulator, CrashTiming, IoHooks};
 pub use kv::memory::{MemoryKV, MemoryStats, MemoryTransaction, MemoryTxnManager};
 pub use kv::storage::{StorageFactory, StorageMode};
+#[cfg(feature = "async")]
+pub use kv::{AsyncKVStore, AsyncKVTransaction};
+#[cfg(feature = "tokio")]
+pub use kv::{AsyncKVStoreAdapter, AsyncKVTransactionAdapter};
 pub use kv::{KVStore, KVTransaction};
+#[cfg(feature = "s3")]
+pub use kv::{S3Config, S3KV};
 pub use storage::large_value::{
     LargeValueChunkInfo, LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter,
     DEFAULT_CHUNK_SIZE,
@@ -37,4 +51,8 @@ pub use vector::columnar::{
 pub use vector::flat::{search_flat, ScoredItem};
 pub use vector::hnsw::{HnswConfig, HnswIndex, HnswSearchResult, HnswStats};
 pub use vector::simd::{select_kernel, DistanceKernel, ScalarKernel};
+#[cfg(feature = "tokio")]
+pub use vector::AsyncVectorStoreAdapter;
 pub use vector::{score, validate_dimensions, Metric, VectorType};
+#[cfg(feature = "async")]
+pub use vector::{AsyncHnswIndex, AsyncVectorStore};

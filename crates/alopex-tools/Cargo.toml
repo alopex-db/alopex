@@ -1,6 +1,11 @@
 [package]
 name = "alopex-tools"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition = "2024"  # Uses let chains feature
+license.workspace = true
+repository.workspace = true
+description = "Development and debugging tools for Alopex DB"
+keywords = ["database", "tools", "debugging"]
+categories = ["database-implementations", "development-tools"]
 
 [dependencies]

@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 use alopex_core::kv::memory::MemoryKV;
 use alopex_core::vector::flat::{search_flat, Candidate};
 use alopex_core::{KVStore, KVTransaction, Metric, TxnManager, TxnMode};
