@@ -14,6 +14,7 @@ fn df() -> DataFrame {
     .unwrap()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn column_resolution_is_case_sensitive() {
     let df = df();
@@ -21,6 +22,7 @@ fn column_resolution_is_case_sensitive() {
     assert!(matches!(err, DataFrameError::ColumnNotFound { .. }));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn select_preserves_input_expression_order() {
     let df = df();
@@ -34,6 +36,7 @@ fn select_preserves_input_expression_order() {
     assert_eq!(names, vec!["b", "a"]);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn filter_has_expected_semantics() {
     let df = df();

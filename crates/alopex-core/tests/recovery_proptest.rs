@@ -18,6 +18,7 @@ fn op_strategy() -> impl Strategy<Value = (Vec<u8>, Vec<u8>)> {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 32, .. ProptestConfig::default() })]
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
     #[test]
     fn proptest_recovery_preserves_committed_prefix(
         batches in prop::collection::vec(prop::collection::vec(op_strategy(), 1..4), 1..8),

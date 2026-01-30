@@ -23,6 +23,7 @@ fn make_batch() -> RecordBatch {
     RecordBatch::new(schema, cols, vec![None, None])
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn columnar_projection_roundtrip_in_memory() {
     let db = Database::open_in_memory().unwrap();
@@ -38,6 +39,7 @@ fn columnar_projection_roundtrip_in_memory() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn columnar_roundtrip_disk_mode() {
     let dir = tempfile::tempdir().unwrap();

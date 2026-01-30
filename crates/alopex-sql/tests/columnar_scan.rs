@@ -44,6 +44,7 @@ fn write_csv(path: &Path) {
     writeln!(f, "4,delta").unwrap();
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn columnar_scan_applies_pushdown_and_projection() {
     let store = Arc::new(MemoryKV::new());

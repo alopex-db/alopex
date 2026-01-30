@@ -10,6 +10,7 @@ fn span(line: u64, col: u64) -> Span {
     )
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn ddl_nodes_carry_spans() {
     let tbl = CreateTable {
@@ -34,6 +35,7 @@ fn ddl_nodes_carry_spans() {
     assert_eq!(idx.span().start.line, 2);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn dml_nodes_carry_spans() {
     let select = Select {

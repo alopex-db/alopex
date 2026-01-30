@@ -8,6 +8,7 @@ fn s_i64(name: &str, values: Vec<i64>) -> Series {
     Series::from_arrow(name, vec![array]).unwrap()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn unique_keeps_first_occurrence() {
     let df = DataFrame::new(vec![
@@ -26,6 +27,7 @@ fn unique_keeps_first_occurrence() {
     assert_eq!(ids.value(2), 2);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn unique_subset_keeps_first_per_key() {
     let df = DataFrame::new(vec![
@@ -43,6 +45,7 @@ fn unique_subset_keeps_first_per_key() {
     assert_eq!(vals.value(1), 20);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn unique_errors_on_missing_subset_column() {
     let df = DataFrame::new(vec![s_i64("id", vec![1])]).unwrap();

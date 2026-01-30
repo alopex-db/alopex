@@ -2,6 +2,7 @@ use crate::vector::hnsw::HnswConfig;
 use crate::vector::Metric;
 use crate::Error;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn validate_accepts_valid_parameters() {
     let config = HnswConfig::default()
@@ -11,6 +12,7 @@ fn validate_accepts_valid_parameters() {
     assert!(config.validate().is_ok());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn validate_rejects_invalid_m_range() {
     let low = HnswConfig {
@@ -32,6 +34,7 @@ fn validate_rejects_invalid_m_range() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn validate_rejects_ef_construction_lt_m() {
     let cfg = HnswConfig {
@@ -46,6 +49,7 @@ fn validate_rejects_ef_construction_lt_m() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn validate_rejects_invalid_dimension() {
     let zero = HnswConfig::default().with_dimension(0);
@@ -58,6 +62,7 @@ fn validate_rejects_invalid_dimension() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn builder_methods_apply_each_field() {
     let cfg = HnswConfig::default()

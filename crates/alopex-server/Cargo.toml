@@ -8,6 +8,9 @@ description = "Server component for Alopex DB"
 keywords = ["database", "server"]
 categories = ["database-implementations"]
 
+[features]
+lane_ci = []
+
 [dependencies]
 alopex-core = { workspace = true, features = ["async", "tokio"] }
 alopex-sql = { workspace = true, features = ["tokio"] }

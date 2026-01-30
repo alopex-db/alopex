@@ -12,6 +12,7 @@ fn large_value(len: usize, seed: u8) -> Vec<u8> {
     (0..len).map(|i| seed.wrapping_add(i as u8)).collect()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn inline_and_separated_values_roundtrip() {
     let dir = tempdir().unwrap();
@@ -70,6 +71,7 @@ fn inline_and_separated_values_roundtrip() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn pending_pointer_errors_and_resolved_succeeds() {
     let config = ValueSeparationConfig {

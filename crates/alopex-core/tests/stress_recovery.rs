@@ -372,6 +372,7 @@ fn sst_corruption_body(
 }
 
 #[cfg(feature = "test-hooks")]
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_wal_mid_crash_recovery() {
     if std::env::var("STRESS_STORAGE_MODE")
@@ -436,6 +437,7 @@ fn test_wal_mid_crash_recovery() {
 }
 
 #[cfg(feature = "test-hooks")]
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_wal_multi_segment_recovery() {
     if std::env::var("STRESS_STORAGE_MODE")
@@ -522,6 +524,7 @@ fn test_wal_multi_segment_recovery() {
 }
 
 #[cfg(feature = "test-hooks")]
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_compaction_crash_recovery() {
     if std::env::var("STRESS_STORAGE_MODE")
@@ -585,6 +588,7 @@ fn test_compaction_crash_recovery() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_wal_crc_corruption_recovery() {
     for mode in selected_storage_modes() {
@@ -594,6 +598,7 @@ fn test_wal_crc_corruption_recovery() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_wal_empty_file_recovery() {
     for mode in selected_storage_modes() {
@@ -603,6 +608,7 @@ fn test_wal_empty_file_recovery() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_wal_partial_record_recovery() {
     for mode in selected_storage_modes() {
@@ -612,6 +618,7 @@ fn test_wal_partial_record_recovery() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_sst_data_block_corruption() {
     for mode in selected_storage_modes() {
@@ -626,6 +633,7 @@ fn test_sst_data_block_corruption() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_sst_index_block_corruption() {
     for mode in selected_storage_modes() {
@@ -644,6 +652,7 @@ fn test_sst_index_block_corruption() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_sst_truncated_file() {
     for mode in selected_storage_modes() {
@@ -664,6 +673,7 @@ fn test_sst_truncated_file() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_sst_compressed_data_corruption() {
     for mode in selected_storage_modes() {
@@ -678,6 +688,7 @@ fn test_sst_compressed_data_corruption() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_multiple_sst_corruption() {
     for mode in selected_storage_modes() {

@@ -8,6 +8,7 @@ use alopex_core::vector::{
     VectorStoreConfig, VectorStoreManager,
 };
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn async_vector_store_and_hnsw_roundtrip() {
     let manager = VectorStoreManager::new(VectorStoreConfig {

@@ -99,6 +99,7 @@ fn build_stream_body(total_rows: usize) -> Vec<Bytes> {
     chunks
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn e2e_streaming_large_dataset() {
     let chunks = Arc::new(build_stream_body(500));

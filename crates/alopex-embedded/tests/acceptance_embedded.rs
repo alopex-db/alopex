@@ -6,6 +6,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use tempfile::tempdir;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn embedded_flush_and_reopen_overlays_wal() {
     // flush + WAL リカバリで最新値が残ることを確認する。
@@ -31,6 +32,7 @@ fn embedded_flush_and_reopen_overlays_wal() {
     assert_eq!(ro.get(b"k2").unwrap(), Some(b"v3".to_vec()));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn embedded_readonly_and_rollback_behaviors() {
     // ReadOnly の書き込みエラーと rollback 後に変更が残らないことを確認する。
@@ -54,6 +56,7 @@ fn embedded_readonly_and_rollback_behaviors() {
     assert_eq!(check.get(b"k").unwrap(), Some(b"v1".to_vec()));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn embedded_concurrent_writes_surface_conflict() {
     // 並行 put は一方が TxnConflict となり、勝者のみが反映される。
@@ -88,6 +91,7 @@ fn embedded_concurrent_writes_surface_conflict() {
     assert_eq!(ro.get(b"k").unwrap(), Some(b"v2".to_vec()));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn embedded_large_value_streaming_and_cancel() {
     // Blob/Typed のストリーミングと cancel 後の再書き込みを一通り確認する。

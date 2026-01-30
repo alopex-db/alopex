@@ -10,6 +10,7 @@ fn sample_writer(path: &std::path::Path) -> AlopexFileWriter {
     AlopexFileWriter::new(path.to_path_buf(), FileVersion::CURRENT, FileFlags(0)).unwrap()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn abort_removes_temp_file() {
     let dir = tempdir().unwrap();
@@ -24,6 +25,7 @@ fn abort_removes_temp_file() {
     assert!(!path.exists());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn truncated_file_detected_as_incomplete() {
     let dir = tempdir().unwrap();
@@ -53,6 +55,7 @@ fn truncated_file_detected_as_incomplete() {
     ));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn finalize_performs_atomic_rename() {
     let dir = tempdir().unwrap();

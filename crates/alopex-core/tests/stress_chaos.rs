@@ -1039,6 +1039,7 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
 
 macro_rules! chaos_test {
     ($name:ident, $runner:ident) => {
+        #[cfg_attr(not(feature = "lane_nightly"), ignore)]
         #[test]
         fn $name() {
             if std::env::var("STRESS_STORAGE_MODE")

@@ -683,6 +683,7 @@ fn run_recovery_after_spike(model: ExecutionModel, mode: StressStorageMode) {
     );
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_concurrent_same_key_write() {
     for mode in selected_storage_modes() {
@@ -697,6 +698,7 @@ fn test_concurrent_same_key_write() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_read_write_conflict() {
     for mode in selected_storage_modes() {
@@ -711,6 +713,7 @@ fn test_read_write_conflict() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_long_short_transaction_mix() {
     for mode in selected_storage_modes() {
@@ -725,6 +728,7 @@ fn test_long_short_transaction_mix() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_deadlock_detection() {
     for mode in selected_storage_modes() {
@@ -734,6 +738,7 @@ fn test_deadlock_detection() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_backpressure_under_load() {
     for mode in selected_storage_modes() {
@@ -748,6 +753,7 @@ fn test_backpressure_under_load() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_recovery_after_spike() {
     for mode in selected_storage_modes() {

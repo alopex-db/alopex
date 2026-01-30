@@ -10,6 +10,7 @@ fn large_value(len: usize, seed: u8) -> Vec<u8> {
     (0..len).map(|i| seed.wrapping_add(i as u8)).collect()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn pending_pointer_is_error_when_unresolved() {
     let config = ValueSeparationConfig {
@@ -45,6 +46,7 @@ fn pending_pointer_is_error_when_unresolved() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn duplicate_length_values_do_not_mismatch() {
     let config = ValueSeparationConfig {
@@ -76,6 +78,7 @@ fn duplicate_length_values_do_not_mismatch() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn compressed_large_value_roundtrip() {
     let config = ValueSeparationConfig {

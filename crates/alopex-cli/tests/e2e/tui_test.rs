@@ -14,6 +14,7 @@ fn sample_data() -> (Vec<Column>, Vec<Row>) {
     (columns, rows)
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_tui_navigation_search_exit() {
     let (columns, rows) = sample_data();

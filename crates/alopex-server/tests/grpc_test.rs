@@ -114,6 +114,7 @@ fn extract_int(value: &grpc::proto::Value) -> Option<i64> {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn grpc_sql_vector_transaction_flow() {
     let (state, _temp) = build_state(AuthMode::None).await;
@@ -210,6 +211,7 @@ async fn grpc_sql_vector_transaction_flow() {
     assert_eq!(ids, vec![1, 2, 3]);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn grpc_invalid_sql_returns_invalid_argument() {
     let (state, _temp) = build_state(AuthMode::None).await;
@@ -226,6 +228,7 @@ async fn grpc_invalid_sql_returns_invalid_argument() {
     assert_eq!(err.code(), Code::InvalidArgument);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn grpc_health_returns_ok() {
     let (state, _temp) = build_state(AuthMode::None).await;

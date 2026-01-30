@@ -10,6 +10,7 @@ fn parse_err(input: &str) -> ParserError {
     Parser::parse_expression_sql(&AlopexDialect, input).expect_err("parse should fail")
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parses_literals_and_unary() {
     let num = parse("123");
@@ -33,6 +34,7 @@ fn parses_literals_and_unary() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn respects_precedence_and_parentheses() {
     let expr = parse("1 + 2 * 3");
@@ -66,6 +68,7 @@ fn respects_precedence_and_parentheses() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parses_between_like_in_and_isnull() {
     let between = parse("a BETWEEN 1 AND 2");
@@ -121,6 +124,7 @@ fn parses_between_like_in_and_isnull() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parses_function_and_vector_literal() {
     let func = parse("foo(1, 2)");
@@ -143,6 +147,7 @@ fn parses_function_and_vector_literal() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn vector_literal_allows_negative_numbers() {
     let vec = parse("[-1.0, 2.0]");
@@ -154,6 +159,7 @@ fn vector_literal_allows_negative_numbers() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn reserved_keywords_are_not_identifiers() {
     let err = parse_err("SELECT");
@@ -163,6 +169,7 @@ fn reserved_keywords_are_not_identifiers() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn leftover_tokens_are_rejected() {
     let err = Parser::parse_expression_sql(&AlopexDialect, "1 2").unwrap_err();
@@ -172,6 +179,7 @@ fn leftover_tokens_are_rejected() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn recursion_limit_errors() {
     // Build a deeply nested expression to exceed a small recursion limit.

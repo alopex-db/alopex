@@ -61,6 +61,7 @@ fn build_client(base_url: &str) -> HttpClient {
     HttpClient::new_with_client(&config, client).expect("http client")
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn e2e_server_commands_workflow() {
     let router = axum::Router::new()

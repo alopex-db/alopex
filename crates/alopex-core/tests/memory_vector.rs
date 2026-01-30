@@ -12,6 +12,7 @@ fn encode_vec(v: &[f32]) -> Vec<u8> {
     buf
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn memorykv_vector_search_cosine() {
     let store = MemoryKV::new_with_limit(Some(16 * 1024));
@@ -50,6 +51,7 @@ fn memorykv_vector_search_cosine() {
     assert_eq!(res[1].key, b"c"); // mixed vector ranks second for cosine
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn memorykv_vector_search_respects_l2_metric() {
     let store = MemoryKV::new_with_limit(Some(16 * 1024));

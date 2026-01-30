@@ -32,6 +32,7 @@ fn pad_metrics(ctx: &common::TestContext, count: usize) {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_eio_during_write() {
     if std::env::var("STRESS_STORAGE_MODE")
@@ -68,6 +69,7 @@ fn test_eio_during_write() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_fsync_failure() {
     if std::env::var("STRESS_STORAGE_MODE")
@@ -102,6 +104,7 @@ fn test_fsync_failure() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_enospc_on_open() {
     if std::env::var("STRESS_STORAGE_MODE")
@@ -140,6 +143,7 @@ fn test_enospc_on_open() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_transient_io_recovery() {
     if std::env::var("STRESS_STORAGE_MODE")

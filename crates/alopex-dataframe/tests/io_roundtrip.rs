@@ -17,6 +17,7 @@ fn df_no_nulls() -> DataFrame {
     .unwrap()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn csv_write_then_read_roundtrip() {
     let df = df_no_nulls();
@@ -30,6 +31,7 @@ fn csv_write_then_read_roundtrip() {
     assert_eq!(df.to_arrow(), df2.to_arrow());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn csv_read_options_header_and_delimiter() {
     let dir = tempfile::tempdir().unwrap();
@@ -54,6 +56,7 @@ fn csv_read_options_header_and_delimiter() {
     assert_eq!(df_wrong.width(), 1);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parquet_write_then_read_roundtrip() {
     let a: ArrayRef = Arc::new(Int64Array::from(vec![Some(1_i64), None, Some(3)]));
@@ -74,6 +77,7 @@ fn parquet_write_then_read_roundtrip() {
     assert_eq!(df.to_arrow(), df2.to_arrow());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parquet_read_options_columns_and_predicate() {
     let df = df_no_nulls();

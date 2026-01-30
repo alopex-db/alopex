@@ -26,6 +26,7 @@ fn literal(kind: TypedExprKind, ty: ResolvedType) -> TypedExpr {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn executor_end_to_end_manual_plans() {
     let (mut executor, _catalog) = create_executor();
@@ -194,6 +195,7 @@ fn executor_end_to_end_manual_plans() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn create_table_with_options_applies_storage() {
     let (mut executor, catalog) = create_executor();
@@ -226,6 +228,7 @@ fn create_table_with_options_applies_storage() {
     assert_eq!(stored.storage_options.row_group_size, 2_000);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn create_table_with_duplicate_option_errors() {
     let (mut executor, _catalog) = create_executor();

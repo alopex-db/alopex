@@ -28,6 +28,7 @@ fn run_sql(
     (executor, catalog)
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn knn_optimization_without_index() {
     let sql = r#"

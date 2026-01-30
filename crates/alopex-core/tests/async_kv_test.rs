@@ -5,6 +5,7 @@ use alopex_core::kv::memory::MemoryKV;
 use alopex_core::kv::{AsyncKVStore, AsyncKVTransaction};
 use futures::StreamExt;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn async_kv_put_get_scan_commit() {
     let store = MemoryKV::new();
@@ -36,6 +37,7 @@ async fn async_kv_put_get_scan_commit() {
     txn.async_rollback().await.expect("rollback");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn async_kv_rollback_discards_changes() {
     let store = MemoryKV::new();

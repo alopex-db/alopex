@@ -79,6 +79,7 @@ fn compression_available(alg: CompressionAlgorithm) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn reads_v0_1_golden_file() {
     let (_dir, path) = generate_v0_1_test_file();
@@ -95,6 +96,7 @@ fn reads_v0_1_golden_file() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn newer_version_is_rejected() {
     let (_dir, path) = generate_v0_1_test_file();
@@ -120,6 +122,7 @@ fn newer_version_is_rejected() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn roundtrip_with_requested_compression() {
     let alg = compression_from_env();

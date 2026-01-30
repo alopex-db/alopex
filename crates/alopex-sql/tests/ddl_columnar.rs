@@ -24,6 +24,7 @@ fn plan_and_exec(sql: &str) -> Result<Vec<ExecutionResult>, ExecutorError> {
     Ok(results)
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn create_table_with_columnar_options() {
     let sql = r#"
@@ -36,6 +37,7 @@ fn create_table_with_columnar_options() {
     assert_eq!(res.len(), 1);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn create_table_with_invalid_option_fails() {
     let sql = r#"

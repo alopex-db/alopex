@@ -30,6 +30,7 @@ fn right_df() -> DataFrame {
     .unwrap()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn p1_ops_pipeline_eager_matches_lazy() {
     let left = left_df();
@@ -67,6 +68,7 @@ fn p1_ops_pipeline_eager_matches_lazy() {
     assert_eq!(eager.to_arrow(), lazy.to_arrow());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn p1_null_count_matches_lazy() {
     let left = left_df();

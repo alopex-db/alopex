@@ -159,6 +159,7 @@ fn build_columnar_segment_bytes() -> Vec<u8> {
         .expect("serialize segment")
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_binary_exposes_all_http_apis() {
     let temp = tempdir().expect("tempdir");

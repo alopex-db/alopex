@@ -18,6 +18,7 @@ fn value(s: &str) -> Vec<u8> {
     s.as_bytes().to_vec()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn txn_consistency_covers_readonly_error_and_rollback() {
     // ReadOnly は書き込みできず、rollback した変更は永続化されないことを確認する。
@@ -42,6 +43,7 @@ fn txn_consistency_covers_readonly_error_and_rollback() {
     assert_eq!(verify.get(&key("k1")).unwrap(), Some(value("v1")));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn flush_and_wal_recovery_overlay_sstable() {
     // flush 後の SST を基盤に WAL の後勝ち適用が再オープンで効くことを検証する。
@@ -70,6 +72,7 @@ fn flush_and_wal_recovery_overlay_sstable() {
     assert_eq!(ro.get(&key("post-flush")).unwrap(), Some(value("v3")));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn concurrent_writes_detect_conflict_and_keep_latest() {
     // 並行書き込みは OCC で競合し、最新コミットのみが反映される。
@@ -107,6 +110,7 @@ fn concurrent_writes_detect_conflict_and_keep_latest() {
     assert_eq!(ro.get(&key("k")).unwrap(), Some(value("v2")));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn large_value_streams_blob_and_typed_in_chunks() {
     // Blob/Typed の両方でチャンク順序と O(chunk) ストリーミングを確認する。
@@ -163,6 +167,7 @@ fn large_value_streams_blob_and_typed_in_chunks() {
     assert_eq!(collected, b"hello");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn large_value_cancel_removes_partial_and_allows_restart() {
     // cancel で部分ファイルを消し、同一路径で再書き込みできることを確認する。

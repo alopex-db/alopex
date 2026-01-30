@@ -76,6 +76,7 @@ async fn send_empty(
     (status, headers, body.to_vec())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn admin_api_endpoints_return_expected_payloads() {
     let (state, _temp) = build_state(AuthMode::None, Duration::from_secs(5)).await;
@@ -116,6 +117,7 @@ async fn admin_api_endpoints_return_expected_payloads() {
     assert!(value.get("message").and_then(|v| v.as_str()).is_some());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn http_sql_vector_session_flow() {
     let (state, _temp) = build_state(AuthMode::None, Duration::from_secs(5)).await;
@@ -237,6 +239,7 @@ async fn http_sql_vector_session_flow() {
     assert!(rows.len() >= 3);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn http_session_rollback_discards_changes() {
     let (state, _temp) = build_state(AuthMode::None, Duration::from_secs(5)).await;
@@ -302,6 +305,7 @@ async fn http_session_rollback_discards_changes() {
     assert!(rows.is_empty());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn http_streaming_timeout_returns_error() {
     let (state, _temp) = build_state(AuthMode::None, Duration::from_millis(0)).await;
@@ -341,6 +345,7 @@ async fn http_streaming_timeout_returns_error() {
     assert!(saw_correlation);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn http_auth_failure_includes_correlation_id() {
     let (state, _temp) = build_state(

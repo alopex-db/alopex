@@ -40,6 +40,7 @@ fn pad_metrics(ctx: &common::TestContext, count: usize) {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_insert_nonexistent_table() {
     for mode in selected_storage_modes() {
@@ -67,6 +68,7 @@ fn test_insert_nonexistent_table() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_type_mismatch_insert() {
     for mode in selected_storage_modes() {
@@ -92,6 +94,7 @@ fn test_type_mismatch_insert() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_pk_duplicate_1000_times() {
     for mode in selected_storage_modes() {
@@ -130,6 +133,7 @@ fn test_pk_duplicate_1000_times() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_null_not_null_column() {
     for mode in selected_storage_modes() {
@@ -154,6 +158,7 @@ fn test_null_not_null_column() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_invalid_sql_10000_times() {
     for mode in selected_storage_modes() {
@@ -178,6 +183,7 @@ fn test_invalid_sql_10000_times() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_error_rollback_retry() {
     for mode in selected_storage_modes() {
@@ -214,6 +220,7 @@ fn test_error_rollback_retry() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_fk_constraint_violation() {
     for mode in selected_storage_modes() {
@@ -238,6 +245,7 @@ fn test_fk_constraint_violation() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_mixed_error_crud() {
     for mode in selected_storage_modes() {

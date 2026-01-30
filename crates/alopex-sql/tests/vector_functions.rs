@@ -24,6 +24,7 @@ fn run_sql(sql: &str) -> Vec<ExecutionResult> {
     results
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn vector_similarity_and_distance_end_to_end() {
     let sql = r#"
@@ -54,6 +55,7 @@ fn vector_similarity_and_distance_end_to_end() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn vector_dims_and_norm_end_to_end() {
     let sql = r#"
@@ -77,6 +79,7 @@ fn vector_dims_and_norm_end_to_end() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn vector_function_invalid_args_return_error() {
     let store = Arc::new(MemoryKV::new());

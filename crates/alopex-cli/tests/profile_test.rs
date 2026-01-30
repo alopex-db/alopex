@@ -48,6 +48,7 @@ fn server_profile(url: &str, auth: AuthType) -> Profile {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_profile_create_save_load() {
     let temp = tempdir().unwrap();
@@ -65,6 +66,7 @@ fn test_profile_create_save_load() {
 }
 
 #[cfg(unix)]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_profile_permissions_unix() {
     let temp = tempdir().unwrap();
@@ -78,6 +80,7 @@ fn test_profile_permissions_unix() {
     assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_profile_list_and_delete() {
     let temp = tempdir().unwrap();
@@ -94,6 +97,7 @@ fn test_profile_list_and_delete() {
     assert!(manager.get("dev").is_none());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_profile_delete_missing() {
     let temp = tempdir().unwrap();
@@ -104,6 +108,7 @@ fn test_profile_delete_missing() {
     assert!(matches!(result, Err(CliError::ProfileNotFound(_))));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_profile_set_default_missing() {
     let temp = tempdir().unwrap();
@@ -114,6 +119,7 @@ fn test_profile_set_default_missing() {
     assert!(matches!(result, Err(CliError::ProfileNotFound(_))));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_resolve_conflicting_options() {
     let temp = tempdir().unwrap();
@@ -133,6 +139,7 @@ fn test_resolve_conflicting_options() {
     assert!(matches!(result, Err(CliError::ConflictingOptions)));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_resolve_profile_and_data_dir() {
     let temp = tempdir().unwrap();
@@ -155,6 +162,7 @@ fn test_resolve_profile_and_data_dir() {
     assert!(resolved.profile_name.is_none());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_resolve_profile_missing_and_default_fallback() {
     let temp = tempdir().unwrap();
@@ -174,6 +182,7 @@ fn test_resolve_profile_missing_and_default_fallback() {
     assert_eq!(resolved.profile_name.as_deref(), Some("dev"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_resolve_in_memory_fallback() {
     let temp = tempdir().unwrap();
@@ -188,6 +197,7 @@ fn test_resolve_in_memory_fallback() {
     assert_eq!(resolved.connection_type, ConnectionType::Local);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_profile_load_invalid_toml() {
     let temp = tempdir().unwrap();
@@ -201,6 +211,7 @@ fn test_profile_load_invalid_toml() {
     assert!(matches!(result, Err(CliError::Parse(_))));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_profile_load_server_auth_configs() {
     let temp = tempdir().unwrap();
@@ -299,6 +310,7 @@ key_path = "/tmp/key.pem"
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_resolve_server_profile_with_fallback() {
     let temp = tempdir().unwrap();

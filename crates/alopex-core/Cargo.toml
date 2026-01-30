@@ -64,6 +64,7 @@ chrono = { version = "0.4", default-features = true, features = ["clock", "serde
 serde_json = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
+libc = "0.2"
 
 # jemalloc doesn't support Windows
 [target.'cfg(not(target_os = "windows"))'.dependencies]

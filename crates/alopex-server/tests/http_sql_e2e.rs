@@ -52,6 +52,7 @@ async fn send_empty(app: &axum::Router, uri: &str) -> (StatusCode, String) {
     (status, body)
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn http_session_commit_and_rollback() {
     let (state, _temp_dir) = test_state();
@@ -117,6 +118,7 @@ async fn http_session_commit_and_rollback() {
     assert_eq!(rows.len(), 1);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn http_streaming_select_and_error_propagation() {
     let (state, _temp_dir) = test_state();

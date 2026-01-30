@@ -1,5 +1,6 @@
 use alopex_sql::{AlopexDialect, ExprKind, LITERAL_TABLE, Parser, StatementKind};
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parses_multiple_statements() {
     let sql = "CREATE TABLE docs (id INT); INSERT INTO docs (id) VALUES (1); SELECT * FROM docs;";
@@ -10,6 +11,7 @@ fn parses_multiple_statements() {
     assert!(matches!(stmts[2].kind, StatementKind::Select(_)));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn vector_literal_parses_via_dialect_prefix() {
     let sql = "INSERT INTO docs VALUES ([0.1, -0.2])";
@@ -26,6 +28,7 @@ fn vector_literal_parses_via_dialect_prefix() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parses_select_without_from_single_literal() {
     let stmts = Parser::parse_sql(&AlopexDialect, "SELECT 1").unwrap();
@@ -38,6 +41,7 @@ fn parses_select_without_from_single_literal() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parses_select_without_from_multiple_literals() {
     let stmts = Parser::parse_sql(&AlopexDialect, "SELECT 1, 'ok'").unwrap();

@@ -58,6 +58,7 @@ async fn get_status(
     Some(response.status())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_binary_starts_and_serves_health() {
     let temp = tempdir().expect("tempdir");

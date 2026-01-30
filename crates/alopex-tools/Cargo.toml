@@ -8,4 +8,7 @@ description = "Development and debugging tools for Alopex DB"
 keywords = ["database", "tools", "debugging"]
 categories = ["database-implementations", "development-tools"]
 
+[features]
+lane_ci = []
+
 [dependencies]

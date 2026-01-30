@@ -19,6 +19,7 @@ fn build_catalog_with_table() -> MemoryCatalog {
     catalog
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn insert_missing_table_returns_planner_error() {
     let dialect = AlopexDialect;
@@ -31,6 +32,7 @@ fn insert_missing_table_returns_planner_error() {
     assert!(matches!(res, Err(PlannerError::TableNotFound { .. })));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn type_mismatch_insert_detected_by_planner() {
     let dialect = AlopexDialect;
@@ -42,6 +44,7 @@ fn type_mismatch_insert_detected_by_planner() {
     assert!(matches!(res, Err(PlannerError::TypeMismatch { .. })));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn null_constraint_violation_detected_by_planner() {
     let dialect = AlopexDialect;
@@ -55,6 +58,7 @@ fn null_constraint_violation_detected_by_planner() {
     ));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parser_reports_invalid_sql_bulk() {
     let dialect = AlopexDialect;
@@ -64,6 +68,7 @@ fn parser_reports_invalid_sql_bulk() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn storage_detects_primary_key_duplicate() {
     let catalog = build_catalog_with_table();
@@ -87,6 +92,7 @@ fn storage_detects_primary_key_duplicate() {
     txn.commit_self().unwrap();
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn fk_constraint_not_supported_reports_error() {
     let dialect = AlopexDialect;

@@ -1,5 +1,6 @@
 use alopex_embedded::{Database, Metric, TxnMode};
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn upsert_vector_rejects_empty_input() {
     let db = Database::new();
@@ -8,6 +9,7 @@ fn upsert_vector_rejects_empty_input() {
     assert!(format!("{err:?}").contains("vector cannot be empty"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn search_similar_dimension_mismatch_surfaces() {
     let db = Database::new();
@@ -21,6 +23,7 @@ fn search_similar_dimension_mismatch_surfaces() {
     assert!(format!("{err:?}").contains("DimensionMismatch"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn search_similar_topk_determinism_on_tie() {
     let db = Database::new();

@@ -38,6 +38,7 @@ fn write_csv(path: &Path) {
     writeln!(f, "2,bob").unwrap();
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn copy_csv_success_and_query() {
     let store = Arc::new(MemoryKV::new());
@@ -88,6 +89,7 @@ fn copy_csv_success_and_query() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn copy_schema_mismatch_rolls_back() {
     let store = Arc::new(MemoryKV::new());

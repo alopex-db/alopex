@@ -11,6 +11,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use tempfile::tempdir;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn recovery_skips_pre_checkpoint_entries() -> Result<()> {
     let dir = tempdir()?;
@@ -40,6 +41,7 @@ fn recovery_skips_pre_checkpoint_entries() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn recovery_includes_checkpoint_and_post_writes() -> Result<()> {
     let dir = tempdir()?;
@@ -66,6 +68,7 @@ fn recovery_includes_checkpoint_and_post_writes() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn corrupted_checkpoint_meta_falls_back_to_full_wal() -> Result<()> {
     let dir = tempdir()?;

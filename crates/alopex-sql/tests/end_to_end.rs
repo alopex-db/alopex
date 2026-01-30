@@ -6,6 +6,7 @@ use alopex_sql::parser::Parser;
 use alopex_sql::planner::Planner;
 use std::sync::{Arc, RwLock};
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parser_planner_executor_pipeline() {
     let sql = r#"

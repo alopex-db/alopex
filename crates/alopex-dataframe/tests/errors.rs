@@ -7,6 +7,7 @@ use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn column_not_found_is_reported() {
     let a: ArrayRef = Arc::new(Int64Array::from(vec![1_i64]));
@@ -16,6 +17,7 @@ fn column_not_found_is_reported() {
     assert!(err.to_string().contains("missing"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn schema_mismatch_duplicate_column_name() {
     let a1: ArrayRef = Arc::new(Int64Array::from(vec![1_i64]));
@@ -29,6 +31,7 @@ fn schema_mismatch_duplicate_column_name() {
     assert!(err.to_string().contains("duplicate"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn schema_mismatch_length_mismatch() {
     let a: ArrayRef = Arc::new(Int64Array::from(vec![1_i64, 2]));
@@ -42,6 +45,7 @@ fn schema_mismatch_length_mismatch() {
     assert!(err.to_string().contains("length"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn from_batches_schema_mismatch() {
     let s1 = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, true)]));
@@ -64,6 +68,7 @@ fn from_batches_schema_mismatch() {
     assert!(msg.contains("batch 1"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn type_mismatch_for_mixed_series_dtypes() {
     let a: ArrayRef = Arc::new(Int64Array::from(vec![1_i64]));
@@ -73,6 +78,7 @@ fn type_mismatch_for_mixed_series_dtypes() {
     assert!(err.to_string().contains("expected"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn type_mismatch_for_non_numeric_agg() {
     let g: ArrayRef = Arc::new(StringArray::from(vec!["x", "x"]));
@@ -97,6 +103,7 @@ fn type_mismatch_for_non_numeric_agg() {
     assert!(msg.contains("Utf8"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn configuration_error_for_invalid_csv_delimiter() {
     let dir = tempfile::tempdir().unwrap();

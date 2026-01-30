@@ -22,6 +22,7 @@ const MAX_DDL_RETRIES: usize = 20;
 
 macro_rules! ddl_test {
     ($name:ident, $runner:ident) => {
+        #[cfg_attr(not(feature = "lane_nightly"), ignore)]
         #[test]
         fn $name() {
             if std::env::var("STRESS_STORAGE_MODE")

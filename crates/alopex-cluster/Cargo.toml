@@ -8,4 +8,7 @@ description = "Distributed cluster coordination for Alopex DB"
 keywords = ["database", "cluster", "distributed"]
 categories = ["database-implementations"]
 
+[features]
+lane_ci = []
+
 [dependencies]

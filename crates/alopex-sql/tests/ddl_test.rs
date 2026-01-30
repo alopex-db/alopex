@@ -13,6 +13,7 @@ where
     f(&mut parser)
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parse_create_table_with_constraints_and_vector() {
     let table: CreateTable = parse_with(
@@ -39,6 +40,7 @@ fn parse_create_table_with_constraints_and_vector() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parse_drop_table_if_exists() {
     let drop: DropTable = parse_with("DROP TABLE IF EXISTS docs", |p| {
@@ -48,6 +50,7 @@ fn parse_drop_table_if_exists() {
     assert_eq!(drop.name, "docs");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parse_create_index_with_using_and_with_options() {
     let idx: CreateIndex = parse_with(
@@ -61,6 +64,7 @@ fn parse_create_index_with_using_and_with_options() {
     assert_eq!(idx.options.len(), 2);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parse_drop_index_if_exists() {
     let drop: DropIndex = parse_with("DROP INDEX IF EXISTS idx_docs", |p| {
@@ -70,6 +74,7 @@ fn parse_drop_index_if_exists() {
     assert_eq!(drop.name, "idx_docs");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parse_create_table_with_options() {
     let table: CreateTable = parse_with(

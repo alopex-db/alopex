@@ -54,6 +54,7 @@ fn rewrite_segment_headers_as_legacy(path: &Path, config: &WalConfig) {
     file.sync_data().expect("sync legacy headers");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn migrates_legacy_wal_and_preserves_data() {
     let dir = tempdir().expect("tempdir");

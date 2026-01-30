@@ -1,5 +1,6 @@
 use alopex_sql::ParserError;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn unexpected_token_display_matches_spec() {
     let err = ParserError::UnexpectedToken {
@@ -15,6 +16,7 @@ fn unexpected_token_display_matches_spec() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn expected_token_display_matches_spec() {
     let err = ParserError::ExpectedToken {
@@ -30,6 +32,7 @@ fn expected_token_display_matches_spec() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn unterminated_string_display_matches_spec() {
     let err = ParserError::UnterminatedString { line: 5, column: 6 };
@@ -40,6 +43,7 @@ fn unterminated_string_display_matches_spec() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn invalid_number_display_matches_spec() {
     let err = ParserError::InvalidNumber {
@@ -54,6 +58,7 @@ fn invalid_number_display_matches_spec() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn invalid_vector_display_matches_spec() {
     let err = ParserError::InvalidVector {
@@ -67,6 +72,7 @@ fn invalid_vector_display_matches_spec() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn recursion_limit_exceeded_display_matches_spec() {
     let err = ParserError::RecursionLimitExceeded { depth: 42 };

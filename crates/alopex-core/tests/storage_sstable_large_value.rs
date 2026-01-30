@@ -15,6 +15,7 @@ fn value(s: &str) -> Vec<u8> {
     s.as_bytes().to_vec()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sst_flush_reopen_roundtrip_and_checksum() {
     let dir = tempdir().unwrap();
@@ -53,6 +54,7 @@ fn sst_flush_reopen_roundtrip_and_checksum() {
     assert!(reopen_err.is_err());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sst_reopen_reads_values_and_overlays_wal() {
     let dir = tempdir().unwrap();
@@ -77,6 +79,7 @@ fn sst_reopen_reads_values_and_overlays_wal() {
     assert_eq!(txn.get(&key("k1")).unwrap(), Some(value("v2")));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn large_value_typed_streaming_roundtrip() {
     let dir = tempdir().unwrap();
@@ -108,6 +111,7 @@ fn large_value_typed_streaming_roundtrip() {
     assert_eq!(buf, payload);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn large_value_cancel_removes_partial_file() {
     let dir = tempdir().unwrap();

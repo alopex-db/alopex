@@ -11,6 +11,7 @@ use std::fs::OpenOptions;
 use std::io::Read;
 use tempfile::tempdir;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn recovery_recovers_clean_wal() -> Result<()> {
     let dir = tempdir()?;
@@ -32,6 +33,7 @@ fn recovery_recovers_clean_wal() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn recovery_ignores_uncommitted_writes_after_crash() -> Result<()> {
     let dir = tempdir()?;
@@ -63,6 +65,7 @@ fn recovery_ignores_uncommitted_writes_after_crash() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn recovery_stops_at_truncated_entry() -> Result<()> {
     let dir = tempdir()?;
@@ -85,6 +88,7 @@ fn recovery_stops_at_truncated_entry() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn recovery_stops_on_corrupted_wal_byte() -> Result<()> {
     let dir = tempdir()?;
@@ -129,6 +133,7 @@ fn recovery_stops_on_corrupted_wal_byte() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn recovery_handles_empty_wal() -> Result<()> {
     let dir = tempdir()?;

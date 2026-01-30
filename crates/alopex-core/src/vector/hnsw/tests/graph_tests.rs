@@ -13,6 +13,7 @@ fn make_graph() -> HnswGraph {
     HnswGraph::new(base_config()).expect("設定が正しいので初期化に失敗しない")
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn insert_and_search_basic_flow() {
     let mut graph = make_graph();
@@ -28,6 +29,7 @@ fn insert_and_search_basic_flow() {
     assert!(stats.nodes_visited > 0);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn ef_search_is_auto_corrected() {
     let mut graph = make_graph();
@@ -43,6 +45,7 @@ fn ef_search_is_auto_corrected() {
     assert_eq!(results.len(), 3);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn deleted_nodes_are_skipped_in_results() {
     let mut graph = make_graph();
@@ -55,6 +58,7 @@ fn deleted_nodes_are_skipped_in_results() {
     assert_eq!(graph.deleted_count, 1);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn tie_breaks_by_key_order() {
     let mut graph = make_graph();
@@ -68,6 +72,7 @@ fn tie_breaks_by_key_order() {
     assert_eq!(results[1].key, b"bravo");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn returns_less_than_k_when_insufficient() {
     let mut graph = make_graph();
@@ -78,6 +83,7 @@ fn returns_less_than_k_when_insufficient() {
     assert_eq!(results[0].key, b"solo");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn delete_marks_node_and_compact_removes_it() {
     let mut graph = make_graph();

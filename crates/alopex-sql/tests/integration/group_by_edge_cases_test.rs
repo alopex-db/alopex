@@ -12,6 +12,7 @@ use alopex_sql::storage::SqlValue;
 
 use super::TestHarness;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn aggregates_handle_empty_table() {
     let mut harness = TestHarness::new();
@@ -31,6 +32,7 @@ fn aggregates_handle_empty_table() {
     assert_eq!(row[2], SqlValue::Null);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn aggregates_handle_all_nulls() {
     let mut harness = TestHarness::new();
@@ -59,6 +61,7 @@ fn aggregates_handle_all_nulls() {
     assert_eq!(row[5], SqlValue::Null);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn invalid_group_by_column_returns_error() {
     let mut harness = TestHarness::new();
@@ -75,6 +78,7 @@ fn invalid_group_by_column_returns_error() {
     assert!(matches!(err, PlannerError::ColumnNotFound { .. }));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn group_by_expression_not_supported() {
     let mut harness = TestHarness::new();
@@ -91,6 +95,7 @@ fn group_by_expression_not_supported() {
     assert!(matches!(err, PlannerError::InvalidExpression { .. }));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn invalid_having_non_grouped_column() {
     let mut harness = TestHarness::new();
@@ -112,6 +117,7 @@ fn invalid_having_non_grouped_column() {
     assert!(matches!(err, PlannerError::InvalidExpression { .. }));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn invalid_select_non_grouped_column() {
     let mut harness = TestHarness::new();
@@ -133,6 +139,7 @@ fn invalid_select_non_grouped_column() {
     assert!(matches!(err, PlannerError::InvalidExpression { .. }));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sum_on_text_returns_type_mismatch() {
     let mut harness = TestHarness::new();
@@ -149,6 +156,7 @@ fn sum_on_text_returns_type_mismatch() {
     assert!(matches!(err, PlannerError::TypeMismatch { .. }));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn group_by_resource_limit_exceeded() {
     let schema = vec![ColumnMetadata::new("category", ResolvedType::Text)];

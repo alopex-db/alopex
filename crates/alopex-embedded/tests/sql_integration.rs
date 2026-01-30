@@ -2,6 +2,7 @@ use alopex_embedded::{Database, Error, TxnMode};
 use alopex_sql::ExecutionResult;
 use alopex_sql::SqlValue;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sql_integration_database_execute_sql_ddl() {
     let db = Database::new();
@@ -17,6 +18,7 @@ fn sql_integration_database_execute_sql_ddl() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sql_integration_database_execute_sql_dml() {
     let db = Database::new();
@@ -43,6 +45,7 @@ fn sql_integration_database_execute_sql_dml() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sql_integration_database_execute_sql_query() {
     let db = Database::new();
@@ -66,6 +69,7 @@ fn sql_integration_database_execute_sql_query() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sql_integration_database_execute_sql_error() {
     let db = Database::new();
@@ -76,6 +80,7 @@ fn sql_integration_database_execute_sql_error() {
     assert_eq!(err.sql_error_code(), Some("ALOPEX-C001"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sql_integration_transaction_execute_sql_shares_kv_changes() {
     let db = Database::new();
@@ -95,6 +100,7 @@ fn sql_integration_transaction_execute_sql_shares_kv_changes() {
     db.execute_sql("SELECT id FROM t;").unwrap();
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sql_integration_transaction_rollback_discards_sql_changes() {
     let db = Database::new();
@@ -109,6 +115,7 @@ fn sql_integration_transaction_rollback_discards_sql_changes() {
     assert_eq!(err.sql_error_code(), Some("ALOPEX-C001"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sql_integration_readonly_txn_rejects_ddl() {
     let db = Database::new();
@@ -119,6 +126,7 @@ fn sql_integration_readonly_txn_rejects_ddl() {
     assert_eq!(err.sql_error_code(), Some("ALOPEX-E002"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sql_integration_readonly_txn_rejects_dml() {
     let db = Database::new();
@@ -132,6 +140,7 @@ fn sql_integration_readonly_txn_rejects_dml() {
     assert_eq!(err.sql_error_code(), Some("ALOPEX-E002"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sql_integration_readonly_txn_allows_select() {
     let db = Database::new();
@@ -154,6 +163,7 @@ fn sql_integration_readonly_txn_allows_select() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sql_integration_multiple_execute_sql_in_same_txn() {
     let db = Database::new();
@@ -177,6 +187,7 @@ fn sql_integration_multiple_execute_sql_in_same_txn() {
     txn.commit().unwrap();
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sql_integration_create_then_insert_in_same_txn() {
     let db = Database::new();

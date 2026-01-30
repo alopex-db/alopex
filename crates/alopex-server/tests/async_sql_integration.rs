@@ -61,6 +61,7 @@ fn insert_row(table: &str, id: i64, name: &str) -> LogicalPlan {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn async_txn_commit_and_rollback_integrate() {
     let store = Arc::new(MemoryKV::new());
@@ -110,6 +111,7 @@ async fn async_txn_commit_and_rollback_integrate() {
     assert!(matches!(err, Err(ExecutorError::TableNotFound(_))));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn async_streaming_matches_sync_results() {
     let store = Arc::new(MemoryKV::new());
@@ -151,6 +153,7 @@ async fn async_streaming_matches_sync_results() {
     txn.commit().await.unwrap();
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn async_streaming_propagates_errors() {
     let store = Arc::new(MemoryKV::new());

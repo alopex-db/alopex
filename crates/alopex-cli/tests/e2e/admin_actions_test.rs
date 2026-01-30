@@ -11,6 +11,7 @@ use alopex_cli::ui::mode::UiMode;
 use alopex_embedded::Database;
 use tempfile::tempdir;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn admin_non_tty_fallback_uses_formatter() {
     let mut output = Vec::new();
@@ -27,6 +28,7 @@ fn admin_non_tty_fallback_uses_formatter() {
     assert!(message.contains("Admin UI is unavailable without a TTY."));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn admin_dispatches_lifecycle_archive() {
     let temp = tempdir().expect("tempdir");

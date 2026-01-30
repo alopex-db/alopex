@@ -13,6 +13,7 @@ default = []
 async = ["alopex-core/async", "dep:futures"]
 tokio = ["async", "alopex-core/tokio", "dep:tokio"]
 
+lane_ci = []
 [dependencies]
 thiserror = "2.0"
 alopex-core.workspace = true

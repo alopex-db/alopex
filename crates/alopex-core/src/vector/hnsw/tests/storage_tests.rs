@@ -27,6 +27,7 @@ fn meta_key() -> Vec<u8> {
     format!("hnsw:meta:{}", storage().index_name).into_bytes()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn save_and_load_roundtrip_preserves_graph() {
     let kv = MemoryKV::new();
@@ -47,6 +48,7 @@ fn save_and_load_roundtrip_preserves_graph() {
     assert!(keys.contains(&b"b".to_vec()));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn checksum_mismatch_is_detected() {
     let kv = MemoryKV::new();
@@ -73,6 +75,7 @@ fn checksum_mismatch_is_detected() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn version_mismatch_is_reported() {
     let kv = MemoryKV::new();
@@ -101,6 +104,7 @@ fn version_mismatch_is_reported() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn incremental_save_persists_changes() {
     let kv = MemoryKV::new();
@@ -128,6 +132,7 @@ fn incremental_save_persists_changes() {
     assert_eq!(results[0].metadata, b"ma");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn free_list_and_key_map_reconstructed_after_compaction() {
     let kv = MemoryKV::new();

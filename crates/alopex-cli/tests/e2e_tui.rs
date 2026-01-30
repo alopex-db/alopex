@@ -1113,6 +1113,7 @@ fn selected_row_number(harness: &TuiTestHarness) -> Option<usize> {
     selected_row_number_from_contents(&harness.screen_contents())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_results_to_admin_flow() -> Result<()> {
     let mut harness = new_harness()?;
@@ -1161,6 +1162,7 @@ fn e2e_results_to_admin_flow() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_results_escape_exit() -> Result<()> {
     let mut harness = new_harness()?;
@@ -1174,6 +1176,7 @@ fn e2e_results_escape_exit() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_admin_escape_exit() -> Result<()> {
     let mut harness = new_harness()?;
@@ -1188,6 +1191,7 @@ fn e2e_admin_escape_exit() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_admin_server_subcommand_launch() -> Result<()> {
     let _guard = server_lock();
@@ -1202,6 +1206,7 @@ fn e2e_admin_server_subcommand_launch() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_admin_profile_launch() -> Result<()> {
     let mut harness = new_harness()?;
@@ -1218,6 +1223,7 @@ fn e2e_admin_profile_launch() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_admin_remote_resources_and_actions() -> Result<()> {
     let _guard = server_lock();
@@ -1301,6 +1307,7 @@ fn e2e_admin_remote_resources_and_actions() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_admin_remote_lifecycle_actions() -> Result<()> {
     let _guard = server_lock();
@@ -1350,6 +1357,7 @@ fn e2e_admin_remote_lifecycle_actions() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_batch_mode_flag_disables_tui() -> Result<()> {
     let output = alopex_output(
@@ -1364,6 +1372,7 @@ fn e2e_batch_mode_flag_disables_tui() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_output_flag_disables_tui() -> Result<()> {
     let output = alopex_output(
@@ -1378,6 +1387,7 @@ fn e2e_output_flag_disables_tui() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_non_tty_fallback_to_batch() -> Result<()> {
     let output = alopex_output(
@@ -1394,6 +1404,7 @@ fn e2e_non_tty_fallback_to_batch() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_results_help_and_detail_toggle() -> Result<()> {
     let mut harness = new_harness()?;
@@ -1425,6 +1436,7 @@ fn e2e_results_help_and_detail_toggle() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_admin_select_key_overlay() -> Result<()> {
     let mut harness = new_harness()?;
@@ -1477,6 +1489,7 @@ fn e2e_admin_select_key_overlay() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_admin_sql_query_execution() -> Result<()> {
     let mut harness = new_harness()?;
@@ -1517,6 +1530,7 @@ fn e2e_admin_sql_query_execution() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_admin_focus_edit_raw_and_exit() -> Result<()> {
     let mut harness = new_harness()?;
@@ -1703,6 +1717,7 @@ fn e2e_admin_focus_edit_raw_and_exit() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_results_to_admin_vector_target() -> Result<()> {
     let mut harness = new_harness()?;
@@ -1733,6 +1748,7 @@ fn e2e_results_to_admin_vector_target() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_results_to_admin_hnsw_target() -> Result<()> {
     let mut harness = new_harness()?;
@@ -1757,6 +1773,7 @@ fn e2e_results_to_admin_hnsw_target() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_results_to_admin_flow_remote() -> Result<()> {
     let _guard = server_lock();
@@ -1778,6 +1795,7 @@ fn e2e_results_to_admin_flow_remote() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_results_to_admin_vector_target_remote() -> Result<()> {
     let _guard = server_lock();
@@ -1820,6 +1838,7 @@ fn e2e_results_to_admin_vector_target_remote() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_results_to_admin_hnsw_target_remote() -> Result<()> {
     let _guard = server_lock();
@@ -1854,6 +1873,7 @@ fn e2e_results_to_admin_hnsw_target_remote() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_results_search_confirm_and_navigation() -> Result<()> {
     let mut harness = new_harness()?;
@@ -1898,6 +1918,7 @@ fn e2e_results_search_confirm_and_navigation() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_results_navigation_and_paging() -> Result<()> {
     let mut harness = new_harness()?;
@@ -1944,6 +1965,7 @@ fn e2e_results_navigation_and_paging() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_results_horizontal_scroll() -> Result<()> {
     let mut harness = new_harness()?;

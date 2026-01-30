@@ -38,6 +38,7 @@ fn make_batch(start: i64, len: usize) -> RecordBatch {
     )
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_bulk_load_10m_rows() {
     // 実行時間を抑えるため 100k 行で検証するが、ロジックは 10M 行相当の連続バッチ挿入をカバー。
@@ -66,6 +67,7 @@ fn test_bulk_load_10m_rows() {
     assert_eq!(read_rows, total_rows);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_compression_ratio_analytical_data() {
     // zstd が無効なビルドではスキップ。
@@ -90,6 +92,7 @@ fn test_compression_ratio_analytical_data() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn test_scan_throughput_single_column() {
     let rows = 200_000usize;

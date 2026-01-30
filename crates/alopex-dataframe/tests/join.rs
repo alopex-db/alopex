@@ -30,6 +30,7 @@ fn right_df() -> DataFrame {
     .unwrap()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn join_inner_suffixes_right_columns() {
     let left = left_df();
@@ -56,6 +57,7 @@ fn join_inner_suffixes_right_columns() {
     assert_eq!(out.height(), 2);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn join_left_keeps_unmatched_rows() {
     let left = left_df();
@@ -71,6 +73,7 @@ fn join_left_keeps_unmatched_rows() {
     assert!(array.is_null(0));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn join_semi_and_anti_return_left_columns_only() {
     let left = left_df();
@@ -101,6 +104,7 @@ fn join_semi_and_anti_return_left_columns_only() {
     assert_eq!(anti.height(), 1);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn join_left_right_keys_include_right_key_column() {
     let left = DataFrame::new(vec![
@@ -139,6 +143,7 @@ fn join_left_right_keys_include_right_key_column() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn join_rejects_mismatched_key_types() {
     let left = DataFrame::new(vec![s_i64("id", vec![1, 2])]).unwrap();

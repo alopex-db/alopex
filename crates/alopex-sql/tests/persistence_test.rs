@@ -54,6 +54,7 @@ fn run_sql_in_txn(
     last
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn persistence_test_catalog_survives_restart_with_flush() {
     let dir = tempfile::tempdir().unwrap();
@@ -81,6 +82,7 @@ fn persistence_test_catalog_survives_restart_with_flush() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn persistence_test_data_survives_restart_with_flush() {
     let dir = tempfile::tempdir().unwrap();
@@ -121,6 +123,7 @@ fn persistence_test_data_survives_restart_with_flush() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn persistence_test_catalog_survives_restart_wal_only() {
     let dir = tempfile::tempdir().unwrap();
@@ -144,6 +147,7 @@ fn persistence_test_catalog_survives_restart_wal_only() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn persistence_test_id_counter_consistent_after_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -176,6 +180,7 @@ fn persistence_test_id_counter_consistent_after_restart() {
     assert!(t2_id > t1_id);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn persistence_test_wal_truncation_recovery_without_hooks() {
     let dir = tempfile::tempdir().unwrap();

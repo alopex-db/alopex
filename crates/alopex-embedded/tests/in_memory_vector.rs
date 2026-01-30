@@ -1,5 +1,6 @@
 use alopex_embedded::{Database, DatabaseOptions, Metric, TxnMode};
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn vector_search_in_memory_orders_results() {
     let opts = DatabaseOptions::in_memory().with_memory_limit(64 * 1024);
@@ -23,6 +24,7 @@ fn vector_search_in_memory_orders_results() {
     assert_eq!(res[1].key, b"v3");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn vector_search_honors_memory_limit_option() {
     let opts = DatabaseOptions::in_memory().with_memory_limit(8 * 1024);

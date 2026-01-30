@@ -20,6 +20,7 @@ fn sample_table_meta() -> TableMetadata {
     .with_table_id(1)
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn end_to_end_storage_flow() {
     let store = Arc::new(MemoryKV::new());

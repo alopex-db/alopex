@@ -67,6 +67,7 @@ anyhow = "1.0"
 default = ["s3"]
 s3 = ["alopex-embedded/s3"]
 
+lane_ci = []
 [dev-dependencies]
 alopex-server = { path = "../alopex-server" }
 axum = "0.6"

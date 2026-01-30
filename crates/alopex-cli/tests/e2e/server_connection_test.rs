@@ -111,6 +111,7 @@ fn build_identity() -> (reqwest::Identity, tempfile::TempDir, std::path::PathBuf
     )
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn e2e_server_connection_token() {
     let expectation = Arc::new(AuthExpectation {
@@ -142,6 +143,7 @@ async fn e2e_server_connection_token() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn e2e_server_connection_basic() {
     let expectation = Arc::new(AuthExpectation {
@@ -173,6 +175,7 @@ async fn e2e_server_connection_basic() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn e2e_server_connection_mtls() {
     let expectation = Arc::new(AuthExpectation {

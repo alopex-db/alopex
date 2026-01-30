@@ -17,6 +17,7 @@ use serde_json::json;
 use tempfile::tempdir;
 use tokio::sync::oneshot;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_lifecycle_actions_report_success() {
     let temp = tempdir().expect("tempdir");
@@ -77,6 +78,7 @@ async fn spawn_http_server(router: Router) -> (String, oneshot::Sender<()>) {
     (format!("http://{}", addr), shutdown_tx)
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn e2e_lifecycle_status_outputs_include_fields() {
     let router = Router::new()

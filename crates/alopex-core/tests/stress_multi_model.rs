@@ -26,6 +26,7 @@ const MAX_TXN_RETRIES: usize = 20;
 
 macro_rules! mm_test {
     ($name:ident, $runner:ident) => {
+        #[cfg_attr(not(feature = "lane_nightly"), ignore)]
         #[test]
         fn $name() {
             if std::env::var("STRESS_STORAGE_MODE")

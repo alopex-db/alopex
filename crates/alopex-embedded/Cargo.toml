@@ -12,6 +12,7 @@ categories = ["database-implementations"]
 default = []
 s3 = ["alopex-core/s3", "tokio", "object_store", "bytes", "futures", "url"]
 
+lane_ci = []
 [dependencies]
 alopex-core.workspace = true
 alopex-sql.workspace = true

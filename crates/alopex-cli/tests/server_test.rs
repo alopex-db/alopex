@@ -413,6 +413,7 @@ fn table_id(table: &str) -> u32 {
     (hasher.finish() & 0xffff_ffff) as u32
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_kv_txn_success_paths() {
     let (router, _dir) = build_server();
@@ -493,6 +494,7 @@ async fn server_kv_txn_success_paths() {
     assert!(body["value"].is_null());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_kv_txn_rollback_and_failures() {
     let (router, _dir) = build_server();
@@ -568,6 +570,7 @@ async fn server_kv_txn_rollback_and_failures() {
     assert_eq!(status, StatusCode::GONE);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_columnar_ingest_paths() {
     let (router, _dir) = build_server();
@@ -642,6 +645,7 @@ async fn server_columnar_ingest_paths() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_sql_success_and_http_error() {
     let (router, _dir) = build_server();
@@ -682,6 +686,7 @@ async fn server_sql_success_and_http_error() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_sql_connection_error() {
     let config = CliServerConfig {
@@ -704,6 +709,7 @@ async fn server_sql_connection_error() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_sql_streaming_json_array_success() {
     let chunks = vec![r#"[{"id":1,"name":"a"},"#, r#" {"id":2,"name":"b"}]"#];
@@ -741,6 +747,7 @@ async fn server_sql_streaming_json_array_success() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_sql_streaming_jsonl_success() {
     let chunks = vec![
@@ -778,6 +785,7 @@ async fn server_sql_streaming_jsonl_success() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_sql_streaming_empty_array_outputs_json() {
     let (base_url, shutdown, _state, _dir) = start_streaming_server(vec!["[]"], None).await;
@@ -803,6 +811,7 @@ async fn server_sql_streaming_empty_array_outputs_json() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_sql_streaming_invalid_rows_error() {
     let cases = vec![
@@ -833,6 +842,7 @@ async fn server_sql_streaming_invalid_rows_error() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_sql_streaming_csv_output() {
     let (base_url, shutdown, _state, _dir) =
@@ -858,6 +868,7 @@ async fn server_sql_streaming_csv_output() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_sql_streaming_tsv_output() {
     let (base_url, shutdown, _state, _dir) =
@@ -883,6 +894,7 @@ async fn server_sql_streaming_tsv_output() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_sql_streaming_non_array_error() {
     let (base_url, shutdown, _state, _dir) =
@@ -905,6 +917,7 @@ async fn server_sql_streaming_non_array_error() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_sql_streaming_sends_fetch_size_and_max_rows() {
     let (base_url, shutdown, state, _dir) = start_streaming_server(vec!["[]"], None).await;
@@ -933,6 +946,7 @@ async fn server_sql_streaming_sends_fetch_size_and_max_rows() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_sql_streaming_deadline_sends_cancel() {
     let (base_url, shutdown, state, _dir) =
@@ -957,6 +971,7 @@ async fn server_sql_streaming_deadline_sends_cancel() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_sql_streaming_cancel_sends_cancel_endpoint() {
     let (base_url, shutdown, state, _dir) =
@@ -987,6 +1002,7 @@ async fn server_sql_streaming_cancel_sends_cancel_endpoint() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_admin_commands_success() {
     let (base_url, shutdown, _dir) = start_admin_server().await;
@@ -1047,6 +1063,7 @@ async fn server_admin_commands_success() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_admin_http_error() {
     let router = axum::Router::new()
@@ -1084,6 +1101,7 @@ async fn server_admin_http_error() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_admin_connection_error() {
     let client = build_test_client("https://127.0.0.1:1");
@@ -1095,6 +1113,7 @@ async fn server_admin_connection_error() {
     assert!(matches!(err, CliError::ServerConnection(_)));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_admin_lifecycle_backup_restore_success() {
     let (base_url, shutdown, state, _dir) = start_admin_lifecycle_server().await;
@@ -1198,6 +1217,7 @@ async fn server_admin_lifecycle_backup_restore_success() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_admin_lifecycle_unsupported_endpoint_maps_error() {
     let router = axum::Router::new().route(
@@ -1227,6 +1247,7 @@ async fn server_admin_lifecycle_unsupported_endpoint_maps_error() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_admin_lifecycle_http_error_maps_to_connection_error() {
     let router = axum::Router::new().route(
@@ -1255,6 +1276,7 @@ async fn server_admin_lifecycle_http_error_maps_to_connection_error() {
     let _ = shutdown.send(());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn server_admin_lifecycle_invalid_json_maps_to_connection_error() {
     let router = axum::Router::new().route(

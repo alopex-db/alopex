@@ -13,6 +13,7 @@ use alopex_sql::planner::typed_expr::{TypedExpr, TypedExprKind};
 use alopex_sql::planner::types::ResolvedType;
 use alopex_sql::{AsyncSqlTransaction, AsyncTxnBridge, LogicalPlan, Span, TokioAsyncTxnBridge};
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn async_txn_preserves_hnsw_index_consistency() {
     let store = Arc::new(MemoryKV::new());

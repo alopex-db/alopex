@@ -23,6 +23,7 @@ fn ensure_default_catalog(db: &Database) {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn catalog_integration_hierarchy_create_and_list() {
     let db = Database::new();
@@ -65,6 +66,7 @@ fn catalog_integration_hierarchy_create_and_list() {
     assert!(indexes.iter().any(|index| index.name == "idx_users_id"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn catalog_integration_force_cascade_delete() {
     let db = Database::new();
@@ -87,6 +89,7 @@ fn catalog_integration_force_cascade_delete() {
     assert!(err.to_string().contains("main"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn catalog_integration_delete_catalog_with_default_namespace_only() {
     let db = Database::new();
@@ -100,6 +103,7 @@ fn catalog_integration_delete_catalog_with_default_namespace_only() {
     assert!(matches!(err, Error::CatalogNotFound(name) if name == "temp"));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn catalog_integration_default_object_protection() {
     let db = Database::new();
@@ -111,6 +115,7 @@ fn catalog_integration_default_object_protection() {
     assert!(matches!(err, Error::CannotDeleteDefault(_)));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn catalog_integration_txn_overlay_and_commit() {
     let db = Database::new();
@@ -142,6 +147,7 @@ fn catalog_integration_txn_overlay_and_commit() {
     assert_eq!(tables.len(), 1);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn catalog_integration_txn_rollback_discards_changes() {
     let db = Database::new();
@@ -168,6 +174,7 @@ fn catalog_integration_txn_rollback_discards_changes() {
     ));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn catalog_integration_sql_create_table_defaults_to_default_namespace() {
     let db = Database::new();
@@ -180,6 +187,7 @@ fn catalog_integration_sql_create_table_defaults_to_default_namespace() {
     assert_eq!(info.namespace_name, "default");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn catalog_integration_api_and_sql_share_catalog() {
     let db = Database::new();
@@ -198,6 +206,7 @@ fn catalog_integration_api_and_sql_share_catalog() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn catalog_integration_sql_table_visible_via_api() {
     let db = Database::new();
@@ -211,6 +220,7 @@ fn catalog_integration_sql_table_visible_via_api() {
     assert_eq!(info.namespace_name, "default");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn catalog_integration_error_scenarios() {
     let db = Database::new();

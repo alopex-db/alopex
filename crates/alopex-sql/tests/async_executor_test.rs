@@ -64,6 +64,7 @@ async fn build_executor() -> (
     (AsyncExecutor::new(bridge), async_store)
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn async_executor_streams_rows() {
     let (mut executor, _store) = build_executor().await;
@@ -96,6 +97,7 @@ async fn async_executor_streams_rows() {
     executor.into_inner().async_commit().await.expect("commit");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn async_executor_large_scan_is_streamed() {
     let (mut executor, _store) = build_executor().await;
@@ -162,6 +164,7 @@ async fn async_executor_large_scan_is_streamed() {
     executor.into_inner().async_commit().await.expect("commit");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn async_executor_stream_cancellation_is_safe() {
     let (mut executor, _store) = build_executor().await;

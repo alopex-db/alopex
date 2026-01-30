@@ -11,6 +11,7 @@ fn execute(plan: &LogicalPlan) -> Vec<arrow::record_batch::RecordBatch> {
     Executor::execute(physical).unwrap()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn pushdown_equivalence_csv() {
     let dir = tempfile::tempdir().unwrap();
@@ -53,6 +54,7 @@ fn pushdown_equivalence_csv() {
     assert_eq!(unoptimized, optimized);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn pushdown_equivalence_parquet() {
     let dir = tempfile::tempdir().unwrap();

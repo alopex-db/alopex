@@ -5,6 +5,7 @@ use alopex_core::storage::compression::{compress, decompress, CompressionAlgorit
 use alopex_core::storage::format::FormatError;
 use proptest::prelude::*;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn snappy_roundtrip() {
     let data = b"hello compression";
@@ -13,6 +14,7 @@ fn snappy_roundtrip() {
     assert_eq!(decompressed, data);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn none_roundtrip_returns_same_bytes() {
     let data = b"no compression";
@@ -23,6 +25,7 @@ fn none_roundtrip_returns_same_bytes() {
 }
 
 #[cfg(feature = "compression-zstd")]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn zstd_roundtrip() {
     let data = b"zstd compress me";
@@ -32,6 +35,7 @@ fn zstd_roundtrip() {
 }
 
 #[cfg(not(feature = "compression-zstd"))]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn zstd_unsupported_without_feature() {
     let data = b"zstd unsupported";
@@ -40,6 +44,7 @@ fn zstd_unsupported_without_feature() {
 }
 
 #[cfg(feature = "compression-lz4")]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn lz4_roundtrip() {
     let data = b"lz4 compress me";
@@ -49,6 +54,7 @@ fn lz4_roundtrip() {
 }
 
 #[cfg(not(feature = "compression-lz4"))]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn lz4_unsupported_without_feature() {
     let data = b"lz4 unsupported";
@@ -57,6 +63,7 @@ fn lz4_unsupported_without_feature() {
 }
 
 proptest! {
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
     #[test]
 fn crc32_detects_bit_flip(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
         let checksum = compute(&bytes, ChecksumAlgorithm::Crc32).expect("compute");
@@ -76,6 +83,7 @@ fn crc32_detects_bit_flip(bytes in proptest::collection::vec(any::<u8>(), 0..256
 }
 
 #[cfg(not(feature = "compression-zstd"))]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn decompress_zstd_unsupported_without_feature() {
     let data = b"zstd data";
@@ -84,6 +92,7 @@ fn decompress_zstd_unsupported_without_feature() {
 }
 
 #[cfg(not(feature = "compression-lz4"))]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn decompress_lz4_unsupported_without_feature() {
     let data = b"lz4 data";
@@ -91,6 +100,7 @@ fn decompress_lz4_unsupported_without_feature() {
     assert!(matches!(err, FormatError::UnsupportedCompression { .. }));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn checksum_is_on_compressed_bytes() {
     let raw = b"compress then checksum";
@@ -104,6 +114,7 @@ fn checksum_is_on_compressed_bytes() {
 }
 
 #[cfg(feature = "checksum-xxh64")]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn xxh64_compute_and_verify_when_feature_enabled() {
     let data = b"xxh64 enabled";
@@ -112,6 +123,7 @@ fn xxh64_compute_and_verify_when_feature_enabled() {
 }
 
 #[cfg(not(feature = "checksum-xxh64"))]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn xxh64_unsupported_when_feature_disabled() {
     let data = b"xxh64 disabled";

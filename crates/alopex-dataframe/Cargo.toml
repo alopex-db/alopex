@@ -8,6 +8,9 @@ description = "Polars-compatible DataFrame API for Alopex DB (v0.1)"
 keywords = ["dataframe", "arrow", "polars"]
 categories = ["data-structures"]
 
+[features]
+lane_ci = []
+
 [dependencies]
 arrow = "53"
 arrow-csv = "53"

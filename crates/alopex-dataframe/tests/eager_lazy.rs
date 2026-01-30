@@ -15,6 +15,7 @@ fn df() -> DataFrame {
     .unwrap()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn eager_select_matches_lazy() {
     let df = df();
@@ -27,6 +28,7 @@ fn eager_select_matches_lazy() {
     assert_eq!(eager.to_arrow(), lazy.to_arrow());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn eager_filter_matches_lazy() {
     let df = df();
@@ -35,6 +37,7 @@ fn eager_filter_matches_lazy() {
     assert_eq!(eager.to_arrow(), lazy.to_arrow());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn eager_with_columns_matches_lazy() {
     let df = df();
@@ -49,6 +52,7 @@ fn eager_with_columns_matches_lazy() {
     assert_eq!(eager.to_arrow(), lazy.to_arrow());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn eager_group_by_agg_matches_lazy_semantically() {
     let df = df();

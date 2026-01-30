@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use super::artifacts::{
-    collect_env_metadata, command_hint, detect_git_sha, prepare_artifacts, storage_mode_env,
-    system_info, write_checks, write_command_txt, write_log, write_metrics, write_run_json,
-    CheckSummary, RunMetadata,
+    binary_version, collect_env_metadata, command_hint, detect_git_sha, prepare_artifacts,
+    storage_mode_env, system_info, topology_env, write_checks, write_command_txt, write_log,
+    write_metrics, write_run_json, CheckSummary, RunMetadata,
 };
 use super::fixtures::{open_store_for_mode, StressStorageMode};
 use super::lane::{should_run, Lane};
@@ -447,12 +447,15 @@ impl StressTestHarness {
             test_name: self.config.name.clone(),
             lane: self.config.lane.to_string(),
             seed: self.seed,
+            topology: topology_env(),
+            binary_version: binary_version(),
             execution_model: format!("{:?}", self.config.execution_model),
             concurrency: self.config.concurrency,
             scenario_timeout_ms: self.config.scenario_timeout.as_millis() as u64,
             operation_timeout_ms: self.config.operation_timeout.as_millis() as u64,
             metrics_interval_ms: self.config.metrics_interval.as_millis() as u64,
             warmup_ops: self.config.warmup_ops,
+            slo: self.config.slo.clone(),
             storage_mode: storage_mode_env(),
             replay: deterministic_mode(),
             started_at: ctx.started_at.to_rfc3339(),

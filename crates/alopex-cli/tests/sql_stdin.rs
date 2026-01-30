@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sql_reads_from_stdin_pipe() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_alopex"))

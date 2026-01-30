@@ -136,6 +136,7 @@ dependencies = [
  "getrandom 0.3.4",
  "jemalloc-ctl",
  "js-sys",
+ "libc",
  "lz4",
  "memmap2",
  "object_store",

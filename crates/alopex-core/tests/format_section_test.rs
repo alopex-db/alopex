@@ -3,6 +3,7 @@
 use alopex_core::storage::compression::CompressionAlgorithm;
 use alopex_core::storage::format::{SectionEntry, SectionIndex, SectionType, SECTION_ENTRY_SIZE};
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn section_entry_size_and_padding_zero() {
     let entry = SectionEntry::new(
@@ -23,6 +24,7 @@ fn section_entry_size_and_padding_zero() {
     assert_eq!(&bytes[4 + 36..4 + 40], &[0, 0, 0, 0]);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn section_entry_roundtrip() {
     let entry = SectionEntry::new(
@@ -42,6 +44,7 @@ fn section_entry_roundtrip() {
     assert_eq!(parsed_index.entries[0], entry);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn section_index_add_filter_find_and_size() {
     let mut index = SectionIndex::new();
@@ -78,6 +81,7 @@ fn section_index_add_filter_find_and_size() {
     assert_eq!(size, 4 + 2 * SECTION_ENTRY_SIZE);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn section_index_empty_state() {
     let index = SectionIndex::new();
@@ -91,6 +95,7 @@ fn section_index_empty_state() {
     assert!(parsed.entries.is_empty());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn section_index_all_section_types_roundtrip() {
     let variants = [

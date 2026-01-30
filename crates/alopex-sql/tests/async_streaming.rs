@@ -13,6 +13,7 @@ use alopex_sql::{
 };
 use tokio::time::{Duration, timeout};
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn dropping_stream_allows_commit_to_finish() {
     let store = Arc::new(MemoryKV::new());

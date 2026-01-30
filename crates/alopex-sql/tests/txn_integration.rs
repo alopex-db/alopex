@@ -55,6 +55,7 @@ fn vector_table() -> TableMetadata {
     .with_primary_key(vec!["id".to_string()])
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn wrap_external_preserves_mode() {
     let store = MemoryKV::new();
@@ -65,6 +66,7 @@ fn wrap_external_preserves_mode() {
     assert_eq!(borrowed.mode(), TxnMode::ReadOnly);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn execute_in_txn_readonly_rejects_dml() {
     let store = Arc::new(MemoryKV::new());
@@ -83,6 +85,7 @@ fn execute_in_txn_readonly_rejects_dml() {
     assert!(matches!(err, ExecutorError::ReadOnlyTransaction { .. }));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn execute_in_txn_readonly_allows_select() {
     let store = Arc::new(MemoryKV::new());
@@ -115,6 +118,7 @@ fn execute_in_txn_readonly_allows_select() {
     assert!(matches!(result, ExecutionResult::Query(_)));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn overlay_visible_in_same_txn() {
     let store = Arc::new(MemoryKV::new());
@@ -161,6 +165,7 @@ fn overlay_visible_in_same_txn() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn drop_table_in_txn_ignores_non_default_namespace() {
     let store = Arc::new(MemoryKV::new());
@@ -218,6 +223,7 @@ fn drop_table_in_txn_ignores_non_default_namespace() {
     drop(txn);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn drop_index_in_txn_ignores_non_default_namespace() {
     let store = Arc::new(MemoryKV::new());
@@ -285,6 +291,7 @@ fn drop_index_in_txn_ignores_non_default_namespace() {
     drop(txn);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn hnsw_flush_on_success() {
     let store = Arc::new(MemoryKV::new());
@@ -349,6 +356,7 @@ fn hnsw_flush_on_success() {
     assert_eq!(results.len(), 1);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn hnsw_abandon_on_drop() {
     let store = Arc::new(MemoryKV::new());

@@ -4,6 +4,7 @@ use alopex_core::{KVStore, KVTransaction, TxnMode};
 use common::*;
 use std::time::Duration;
 
+#[cfg_attr(not(feature = "lane_smoke"), ignore)]
 #[test]
 fn test_harness_sync_single() {
     for mode in selected_storage_modes() {
@@ -34,6 +35,7 @@ fn test_harness_sync_single() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_smoke"), ignore)]
 #[test]
 fn test_harness_sync_multi() {
     for mode in selected_storage_modes() {
@@ -68,6 +70,7 @@ fn test_harness_sync_multi() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_smoke"), ignore)]
 #[test]
 fn test_harness_async_multi() {
     for mode in selected_storage_modes() {
@@ -99,6 +102,7 @@ fn test_harness_async_multi() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_smoke"), ignore)]
 #[test]
 fn test_workload_generator_is_deterministic() {
     let mut g1 = WorkloadGenerator::new(WorkloadConfig {

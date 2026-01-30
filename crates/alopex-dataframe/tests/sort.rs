@@ -13,6 +13,7 @@ fn s_str(name: &str, values: Vec<&str>) -> Series {
     Series::from_arrow(name, vec![array]).unwrap()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sort_is_stable_and_nulls_last() {
     let df = DataFrame::new(vec![
@@ -39,6 +40,7 @@ fn sort_is_stable_and_nulls_last() {
     assert_eq!(b.value(3), 40);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sort_multiple_columns_with_descending() {
     let df = DataFrame::new(vec![
@@ -69,6 +71,7 @@ fn sort_multiple_columns_with_descending() {
     assert_eq!(score.value(3), 1);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sort_errors_on_missing_column() {
     let df = DataFrame::new(vec![s_i64("a", vec![Some(1)])]).unwrap();
@@ -78,6 +81,7 @@ fn sort_errors_on_missing_column() {
     assert!(matches!(err, DataFrameError::ColumnNotFound { .. }));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sort_errors_on_descending_length_mismatch() {
     let df = DataFrame::new(vec![s_i64("a", vec![Some(1)]), s_i64("b", vec![Some(2)])]).unwrap();
@@ -87,6 +91,7 @@ fn sort_errors_on_descending_length_mismatch() {
     assert!(matches!(err, DataFrameError::InvalidOperation { .. }));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn head_tail_handle_boundaries() {
     let df = DataFrame::new(vec![s_i64("a", vec![Some(1), Some(2)])]).unwrap();

@@ -14,6 +14,7 @@ fn df() -> DataFrame {
     .unwrap()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn select_supports_column_reorder_and_alias() {
     let df = df();
@@ -23,6 +24,7 @@ fn select_supports_column_reorder_and_alias() {
     assert_eq!(out.height(), 3);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn filter_filters_rows() {
     let df = df();
@@ -32,6 +34,7 @@ fn filter_filters_rows() {
     assert_eq!(a.len(), 2);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn with_columns_adds_and_overwrites() {
     let df = df();
@@ -48,6 +51,7 @@ fn with_columns_adds_and_overwrites() {
     assert_eq!(out.height(), 3);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn lazy_and_eager_operations_match() {
     let df = df();

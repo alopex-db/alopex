@@ -5,6 +5,7 @@ use alopex_core::storage::format::{
 };
 use tempfile::tempdir;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn file_roundtrip_metadata_and_sstable() {
     let dir = tempdir().unwrap();

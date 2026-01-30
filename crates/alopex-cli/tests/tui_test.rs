@@ -35,6 +35,7 @@ fn batch_mode() -> BatchMode {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn tui_renders_without_panic() {
     let columns = sample_columns();
@@ -48,6 +49,7 @@ fn tui_renders_without_panic() {
     assert!(buffer.area.width > 0);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn tui_keybindings_update_selection() {
     let columns = sample_columns();
@@ -63,6 +65,7 @@ fn tui_keybindings_update_selection() {
     assert_eq!(app.selected_index(), Some(0));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn tui_toggle_help_and_detail() {
     let columns = sample_columns();
@@ -80,6 +83,7 @@ fn tui_toggle_help_and_detail() {
     assert!(app.is_detail_visible());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn tui_search_selects_match() {
     let columns = sample_columns();
@@ -94,6 +98,7 @@ fn tui_search_selects_match() {
     assert_eq!(app.selected_index(), Some(1));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn tui_falls_back_in_non_tty() {
     if is_tty() {

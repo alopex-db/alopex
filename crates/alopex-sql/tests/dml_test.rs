@@ -10,6 +10,7 @@ where
     f(&mut parser)
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parse_select_with_clauses() {
     let select = parse_with(
@@ -35,6 +36,7 @@ fn parse_select_with_clauses() {
     assert!(select.offset.is_some());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn select_requires_from() {
     let err = parse_with("SELECT id", |p| p.parse_select().unwrap_err());
@@ -46,6 +48,7 @@ fn select_requires_from() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parse_select_wildcard_and_alias_without_as() {
     let select = parse_with("SELECT *, score s FROM docs", |p| p.parse_select().unwrap());
@@ -56,6 +59,7 @@ fn parse_select_wildcard_and_alias_without_as() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parse_insert_with_vectors_and_multiple_rows() {
     let insert = parse_with(
@@ -80,6 +84,7 @@ fn parse_insert_with_vectors_and_multiple_rows() {
     ));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parse_update_with_multiple_assignments() {
     let update = parse_with(
@@ -92,6 +97,7 @@ fn parse_update_with_multiple_assignments() {
     assert!(update.selection.is_some());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn parse_delete_with_and_without_where() {
     let delete_with = parse_with("DELETE FROM sessions WHERE expires_at < 100", |p| {
@@ -105,6 +111,7 @@ fn parse_delete_with_and_without_where() {
     assert!(delete_all.selection.is_none());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn insert_values_cannot_be_empty() {
     let err = parse_with("INSERT INTO t VALUES ()", |p| p.parse_insert().unwrap_err());

@@ -10,6 +10,7 @@ use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use tempfile::tempdir;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn committed_data_survives_crash() -> Result<()> {
     let dir = tempdir()?;
@@ -28,6 +29,7 @@ fn committed_data_survives_crash() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn crash_during_checkpoint_recovers_data() -> Result<()> {
     let dir = tempdir()?;
@@ -60,6 +62,7 @@ fn crash_during_checkpoint_recovers_data() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn truncated_wal_recovers_valid_prefix() -> Result<()> {
     let dir = tempdir()?;

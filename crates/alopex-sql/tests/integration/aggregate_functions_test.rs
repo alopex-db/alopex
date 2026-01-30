@@ -21,6 +21,7 @@ fn seed_products(harness: &mut TestHarness) {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn aggregates_without_group_by() {
     let mut harness = TestHarness::new();
@@ -48,6 +49,7 @@ fn aggregates_without_group_by() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn aggregates_with_group_by() {
     let mut harness = TestHarness::new();
@@ -94,6 +96,7 @@ fn aggregates_with_group_by() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn group_concat_with_separator() {
     let mut harness = TestHarness::new();
@@ -120,6 +123,7 @@ fn group_concat_with_separator() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn string_agg_with_separator() {
     let mut harness = TestHarness::new();

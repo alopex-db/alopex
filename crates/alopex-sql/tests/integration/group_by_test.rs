@@ -23,6 +23,7 @@ fn seed_products(harness: &mut TestHarness) {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn group_by_single_column_count() {
     let mut harness = TestHarness::new();
@@ -45,6 +46,7 @@ fn group_by_single_column_count() {
     assert_eq!(counts.get("toy"), Some(&1));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn group_by_without_aggregates() {
     let mut harness = TestHarness::new();
@@ -66,6 +68,7 @@ fn group_by_without_aggregates() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn group_by_multi_column_sum() {
     let mut harness = TestHarness::new();
@@ -94,6 +97,7 @@ fn group_by_multi_column_sum() {
     assert_eq!(sums.get(&("toy".into(), "jp".into())), Some(&3.0));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn group_by_having_filters_groups() {
     let mut harness = TestHarness::new();
@@ -114,6 +118,7 @@ fn group_by_having_filters_groups() {
     assert!(categories.contains(&"game".to_string()));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn group_by_having_complex_predicates_and_null() {
     let mut harness = TestHarness::new();
@@ -156,6 +161,7 @@ fn group_by_having_complex_predicates_and_null() {
     assert_eq!(categories, vec!["book".to_string()]);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn group_by_order_by_aggregate() {
     let mut harness = TestHarness::new();
@@ -178,6 +184,7 @@ fn group_by_order_by_aggregate() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn group_by_order_by_group_key() {
     let mut harness = TestHarness::new();
@@ -200,6 +207,7 @@ fn group_by_order_by_group_key() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn select_distinct_removes_duplicates() {
     let mut harness = TestHarness::new();

@@ -30,6 +30,7 @@ proptest = "1"
 default = []
 numpy = ["dep:numpy"]
 
+lane_ci = []
 [[bench]]
 name = "binding_overhead"
 harness = false

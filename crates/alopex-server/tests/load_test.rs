@@ -67,6 +67,7 @@ fn parse_metric(metrics: &str, name: &str) -> Option<f64> {
     None
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn load_test_concurrent_requests() {
     let (state, _temp) = build_state(Duration::from_secs(5)).await;
@@ -105,6 +106,7 @@ async fn load_test_concurrent_requests() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn load_test_backpressure_with_slow_client() {
     let (state, _temp) = build_state(Duration::from_secs(5)).await;
@@ -159,6 +161,7 @@ async fn load_test_backpressure_with_slow_client() {
         .expect("body");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn load_test_timeout_cancels_stream() {
     let (state, _temp) = build_state(Duration::from_millis(0)).await;

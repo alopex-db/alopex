@@ -769,6 +769,7 @@ fn run_memory_spike_adaptation(model: ExecutionModel, mode: StressStorageMode) {
     );
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_empty_transaction_commit() {
     for mode in selected_storage_modes() {
@@ -778,6 +779,7 @@ fn test_empty_transaction_commit() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_large_transaction_10k_keys() {
     for mode in selected_storage_modes() {
@@ -787,6 +789,7 @@ fn test_large_transaction_10k_keys() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_rapid_abort_restart_cycle() {
     for mode in selected_storage_modes() {
@@ -796,6 +799,7 @@ fn test_rapid_abort_restart_cycle() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_nested_transaction_pattern() {
     for mode in selected_storage_modes() {
@@ -805,6 +809,7 @@ fn test_nested_transaction_pattern() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_panic_in_transaction_rollback() {
     for mode in selected_storage_modes() {
@@ -814,6 +819,7 @@ fn test_panic_in_transaction_rollback() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_compaction_read_concurrency() {
     for mode in selected_storage_modes() {
@@ -823,6 +829,7 @@ fn test_compaction_read_concurrency() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_compaction_write_concurrency() {
     for mode in selected_storage_modes() {
@@ -832,6 +839,7 @@ fn test_compaction_write_concurrency() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_multi_level_compaction() {
     for mode in selected_storage_modes() {
@@ -841,6 +849,7 @@ fn test_multi_level_compaction() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_memtable_flush_trigger() {
     for mode in selected_storage_modes() {
@@ -850,6 +859,7 @@ fn test_memtable_flush_trigger() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_write_faster_than_flush() {
     for mode in selected_storage_modes() {
@@ -859,6 +869,7 @@ fn test_write_faster_than_flush() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_cache_lru_eviction() {
     for mode in selected_storage_modes() {
@@ -868,6 +879,7 @@ fn test_cache_lru_eviction() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_memory_spike_adaptation() {
     for mode in selected_storage_modes() {

@@ -2,6 +2,7 @@ use alopex_dataframe::DataFrameError;
 use alopex_embedded::{Database, Error, JoinType};
 use arrow::array::{Array, Int32Array, StringArray};
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn dataframe_query_join_sort_supported_types() {
     let db = Database::new();
@@ -53,6 +54,7 @@ fn dataframe_query_join_sort_supported_types() {
     assert_eq!(value.value(2), 100);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn dataframe_query_join_variants() {
     let db = Database::new();
@@ -132,6 +134,7 @@ fn dataframe_query_join_variants() {
     assert_eq!(anti.height(), 1);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn dataframe_query_rejects_vector_columns() {
     let db = Database::new();
@@ -147,6 +150,7 @@ fn dataframe_query_rejects_vector_columns() {
     assert!(matches!(err, Error::DataFrame(_)));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn dataframe_sort_rejects_blob_columns() {
     let db = Database::new();
@@ -163,6 +167,7 @@ fn dataframe_sort_rejects_blob_columns() {
     assert!(matches!(err, DataFrameError::InvalidOperation { .. }));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn dataframe_sort_multi_column_stable_nulls_last() {
     let db = Database::new();
@@ -207,6 +212,7 @@ fn dataframe_sort_multi_column_stable_nulls_last() {
     assert!(scores.is_null(2));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn dataframe_join_validation_errors() {
     let db = Database::new();

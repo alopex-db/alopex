@@ -150,6 +150,7 @@ async fn wait_for_restore_state(
     panic!("restore did not complete in time");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn backup_restore_flow_reports_status_and_metadata() {
     let (state, _temp) = build_state().await;
@@ -229,6 +230,7 @@ async fn backup_restore_flow_reports_status_and_metadata() {
         .is_some());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn status_payload_includes_operational_fields() {
     let (state, _temp) = build_state().await;
@@ -245,6 +247,7 @@ async fn status_payload_includes_operational_fields() {
     assert!(value.get("restore_state").is_some());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn backup_fails_on_corrupt_wal_sets_reason() {
     let temp = tempdir().expect("tempdir");
@@ -267,6 +270,7 @@ async fn backup_fails_on_corrupt_wal_sets_reason() {
     assert!(state.reason.is_some());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn restore_invalid_source_sets_failed_and_read_only() {
     let temp = tempdir().expect("tempdir");
@@ -286,6 +290,7 @@ async fn restore_invalid_source_sets_failed_and_read_only() {
     assert_eq!(lifecycle.current_mode(), Mode::ReadOnly);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn maintenance_blocks_writes_after_restore_start() {
     let (state, _temp) = build_state().await;

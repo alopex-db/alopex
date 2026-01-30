@@ -18,6 +18,7 @@ fn s_str(name: &str, values: Vec<Option<&str>>) -> Series {
     Series::from_arrow(name, vec![array]).unwrap()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn fill_null_with_scalar_value() {
     let df = DataFrame::new(vec![s_i64("a", vec![Some(1), None, Some(3)])]).unwrap();
@@ -27,6 +28,7 @@ fn fill_null_with_scalar_value() {
     assert_eq!(a.value(1), 0);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn fill_null_forward_strategy() {
     let df = DataFrame::new(vec![s_i64("a", vec![Some(1), None, Some(3), None])]).unwrap();
@@ -37,6 +39,7 @@ fn fill_null_forward_strategy() {
     assert_eq!(a.value(3), 3);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn fill_null_mean_strategy_on_float() {
     let df = DataFrame::new(vec![s_f64("a", vec![Some(1.0), None, Some(3.0)])]).unwrap();
@@ -46,6 +49,7 @@ fn fill_null_mean_strategy_on_float() {
     assert_eq!(a.value(1), 2.0);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn drop_nulls_subset_only_drops_target_columns() {
     let df = DataFrame::new(vec![
@@ -58,6 +62,7 @@ fn drop_nulls_subset_only_drops_target_columns() {
     assert_eq!(out.height(), 2);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn null_count_returns_single_row() {
     let df = DataFrame::new(vec![
@@ -76,6 +81,7 @@ fn null_count_returns_single_row() {
     assert_eq!(b.value(0), 2);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn fill_null_type_mismatch_errors() {
     let df = DataFrame::new(vec![s_i64("a", vec![Some(1), None])]).unwrap();

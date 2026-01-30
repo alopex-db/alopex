@@ -11,6 +11,7 @@ fn header_with_version(version: FileVersion, flags: FileFlags) -> FileHeader {
     header
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn header_roundtrip_and_magic_ok() {
     let flags = FileFlags(FileFlags::ENCRYPTED | FileFlags::VALUE_SEPARATED);
@@ -25,6 +26,7 @@ fn header_roundtrip_and_magic_ok() {
     assert_eq!(parsed.compression_algorithm, header.compression_algorithm);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn header_invalid_magic_is_detected() {
     let mut bytes = [0u8; HEADER_SIZE];
@@ -34,6 +36,7 @@ fn header_invalid_magic_is_detected() {
 }
 
 proptest! {
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
     #[test]
     fn header_version_compatibility_matches_order(
         file_major in 0u16..3,
@@ -67,6 +70,7 @@ fn footer_sample() -> FileFooter {
     footer
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn footer_roundtrip_and_checksum_valid() {
     let footer = footer_sample();
@@ -76,6 +80,7 @@ fn footer_roundtrip_and_checksum_valid() {
     assert_eq!(parsed, footer);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn footer_checksum_mismatch_detected() {
     let footer = footer_sample();
@@ -86,6 +91,7 @@ fn footer_checksum_mismatch_detected() {
     assert!(matches!(err, FormatError::ChecksumMismatch { .. }));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn footer_reverse_magic_invalid_detected() {
     let mut footer = footer_sample();

@@ -28,6 +28,7 @@ fn setup_db() -> Database {
     db
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn streaming_max_rows_limits_output() {
     let db = setup_db();
@@ -67,6 +68,7 @@ fn streaming_max_rows_limits_output() {
     assert_eq!(rows.len(), 2);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn streaming_deadline_exceeded() {
     let db = setup_db();
@@ -103,6 +105,7 @@ fn streaming_deadline_exceeded() {
     assert!(matches!(err, CliError::Timeout(_)));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn streaming_cancelled() {
     let db = setup_db();

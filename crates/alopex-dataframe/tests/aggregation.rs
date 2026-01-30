@@ -29,6 +29,7 @@ fn df() -> DataFrame {
     .unwrap()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn group_by_agg_semantics_and_column_order() {
     let out = df()
@@ -77,6 +78,7 @@ fn group_by_agg_semantics_and_column_order() {
     assert_eq!(means.get("y").copied(), Some(5.0));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn non_numeric_aggregation_is_type_mismatch() {
     let g: ArrayRef = Arc::new(StringArray::from(vec!["x", "x"]));

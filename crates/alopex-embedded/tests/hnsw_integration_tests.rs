@@ -12,6 +12,7 @@ fn config() -> HnswConfig {
         .with_ef_construction(32)
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn hnsw_lifecycle_via_embedded_api() {
     let db = Database::new();
@@ -51,6 +52,7 @@ fn hnsw_lifecycle_via_embedded_api() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn transaction_commit_and_rollback_are_respected() {
     let db = Database::new();
@@ -73,6 +75,7 @@ fn transaction_commit_and_rollback_are_respected() {
     assert_eq!(results[0].key, b"keep");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn hnsw_index_persists_across_reopen() {
     let dir = tempdir().expect("tempdir");
@@ -92,6 +95,7 @@ fn hnsw_index_persists_across_reopen() {
     assert_eq!(results.len(), 2);
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn callbacks_fire_on_core_index() {
     let calls = Arc::new(Mutex::new(Vec::new()));

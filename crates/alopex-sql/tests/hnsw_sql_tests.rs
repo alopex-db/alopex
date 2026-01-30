@@ -31,6 +31,7 @@ fn run_sql(
     results
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn create_insert_and_search_hnsw_index() {
     let store = Arc::new(MemoryKV::new());
@@ -56,6 +57,7 @@ fn create_insert_and_search_hnsw_index() {
     assert_eq!(results[1].key, 3u64.to_be_bytes().to_vec());
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn invalid_with_option_returns_error() {
     let store = Arc::new(MemoryKV::new());
@@ -89,6 +91,7 @@ fn invalid_with_option_returns_error() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn dml_changes_are_reflected_in_hnsw_index() {
     let store = Arc::new(MemoryKV::new());
@@ -132,6 +135,7 @@ fn dml_changes_are_reflected_in_hnsw_index() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn dimension_mismatch_on_insert_returns_error_and_no_index_write() {
     let store = Arc::new(MemoryKV::new());

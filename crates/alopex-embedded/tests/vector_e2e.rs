@@ -7,6 +7,7 @@ fn key(bytes: &[u8]) -> Vec<u8> {
     bytes.to_vec()
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn upsert_and_search_end_to_end_with_filter() {
     let db = Database::new();
@@ -34,6 +35,7 @@ fn upsert_and_search_end_to_end_with_filter() {
     assert_eq!(filtered[0].key, b"k2");
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn checksum_corruption_surfaces() {
     use std::fs;

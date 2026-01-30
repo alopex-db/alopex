@@ -2,6 +2,7 @@ use alopex_embedded::{Database, Error, TxnMode};
 use alopex_sql::ExecutionResult;
 use alopex_sql::SqlValue;
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn full_sql_workflow() {
     let dir = tempfile::tempdir().unwrap();
@@ -35,6 +36,7 @@ fn full_sql_workflow() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn mixed_kv_sql_transaction() {
     let db = Database::new();
@@ -60,6 +62,7 @@ fn mixed_kv_sql_transaction() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sql_group_by_having_aggregates() {
     let db = Database::new();
@@ -165,6 +168,7 @@ fn sql_group_by_having_aggregates() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn sql_invalid_having_surface_sql_error() {
     let db = Database::new();

@@ -92,6 +92,7 @@ fn write_csv(path: &Path) {
     writeln!(f, "4,delta").unwrap();
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn copy_and_select_columnar_with_pruning_and_projection() {
     let (_store, bridge, catalog, mut executor) = create_executor();
@@ -151,6 +152,7 @@ fn copy_and_select_columnar_with_pruning_and_projection() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn columnar_default_row_id_mode_is_direct() {
     let (_store, bridge, catalog, mut executor) = create_executor();
@@ -201,6 +203,7 @@ fn columnar_default_row_id_mode_is_direct() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn columnar_row_id_direct_is_encoded_with_segment_and_offset() {
     let (_store, bridge, catalog, mut executor) = create_executor();
@@ -255,6 +258,7 @@ fn columnar_row_id_direct_is_encoded_with_segment_and_offset() {
     }
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn execute_columnar_row_ids_filters_and_returns_encoded_row_ids() {
     let (_store, bridge, catalog, mut executor) = create_executor();
@@ -328,6 +332,7 @@ fn execute_columnar_row_ids_filters_and_returns_encoded_row_ids() {
     assert_eq!(decoded[1], (0, 3));
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn columnar_scan_falls_back_when_statistics_missing() {
     let (_store, bridge, catalog, mut executor) = create_executor();
