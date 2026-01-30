@@ -36,3 +36,4 @@ crates/alopex-py/python/alopex/_alopex*.so
 benchmark*.json
 profile*.log
 crates/*/proptest-regressions/
+crates/alopex-core/artifacts/
