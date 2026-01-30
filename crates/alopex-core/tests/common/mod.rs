@@ -3,6 +3,7 @@
 
 pub mod artifacts;
 pub mod assertions;
+pub mod consistency;
 #[cfg(feature = "test-hooks")]
 pub mod fault_injection;
 pub mod fixtures;
@@ -16,6 +17,7 @@ pub mod workload;
 
 pub use artifacts::*;
 pub use assertions::*;
+pub use consistency::*;
 #[cfg(feature = "test-hooks")]
 pub use fault_injection::*;
 pub use fixtures::*;

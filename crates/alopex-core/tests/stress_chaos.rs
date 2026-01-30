@@ -5,10 +5,11 @@ use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnMode}
 use chrono::Utc;
 use common::replay::{gen_f64, gen_range_usize, gen_u32};
 use common::{
-    begin_op, log_path, open_store_with_fault_injector, prepare_artifacts, slo_presets,
-    ChaosConfig, ChaosOperation, ChaosWorkloadGenerator, ColumnarOperation, DdlOperation,
-    DiskFullInjector, ExecutionModel, Lane, MultiModelOperation, SloConfig, SqlOperation,
-    StressTestConfig, StressTestHarness, TestResult, VectorOperation, WorkloadConfig,
+    begin_op, log_path, open_store_with_fault_injector, prepare_artifacts,
+    run_full_consistency_checks, slo_presets, ChaosConfig, ChaosOperation, ChaosWorkloadGenerator,
+    ColumnarOperation, DdlOperation, DiskFullInjector, ExecutionModel, Lane, MultiModelOperation,
+    SloConfig, SqlOperation, StressStorageMode, StressTestConfig, StressTestHarness, TestResult,
+    VectorOperation, WorkloadConfig,
 };
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
@@ -503,6 +504,7 @@ fn run_chaos_mix(
     batches: usize,
     batch_size: usize,
     concurrency_override: Option<usize>,
+    post_consistency: bool,
 ) -> TestResult {
     let base_conc = match model {
         ExecutionModel::SyncMulti | ExecutionModel::AsyncMulti => concurrency_override.unwrap_or(8),
@@ -532,6 +534,9 @@ fn run_chaos_mix(
                     }
                 }
                 ctx.metrics.record_latency(start.elapsed());
+            }
+            if post_consistency {
+                run_full_consistency_checks(ctx, std::slice::from_ref(&StressStorageMode::Memory))?;
             }
             pad_chaos_metrics(ctx, batches * batch_size * 3);
             Ok(())
@@ -566,6 +571,12 @@ fn run_chaos_mix(
                     }
                     ctx.metrics.record_latency(start.elapsed());
                 }
+                if post_consistency {
+                    run_full_consistency_checks(
+                        ctx,
+                        std::slice::from_ref(&StressStorageMode::Memory),
+                    )?;
+                }
                 pad_chaos_metrics(ctx, batches * batch_size * 3);
                 Ok(())
             })
@@ -594,6 +605,12 @@ fn run_chaos_mix(
                             }
                         }
                         ctx.metrics.record_latency(start.elapsed());
+                    }
+                    if post_consistency {
+                        run_full_consistency_checks(
+                            &ctx,
+                            std::slice::from_ref(&StressStorageMode::Memory),
+                        )?;
                     }
                     pad_chaos_metrics(&ctx, batches * batch_size * 3);
                     Ok(())
@@ -637,6 +654,12 @@ fn run_chaos_mix(
                                     }
                                 }
                                 ctx_clone.metrics.record_latency(start.elapsed());
+                            }
+                            if post_consistency {
+                                run_full_consistency_checks(
+                                    &ctx_clone,
+                                    std::slice::from_ref(&StressStorageMode::Memory),
+                                )?;
                             }
                             pad_chaos_metrics(&ctx_clone, batches * batch_size * 3);
                             Ok::<_, CoreError>(())
@@ -788,6 +811,7 @@ fn run_long_running(model: ExecutionModel) -> TestResult {
         batches,
         batch_size,
         Some(12),
+        false,
     )
 }
 
@@ -804,7 +828,7 @@ fn run_backpressure(model: ExecutionModel) -> TestResult {
         crash_ratio: 0.05,
         ..Default::default()
     };
-    run_chaos_mix("chaos_backpressure", model, cfg, 8, 30, Some(16))
+    run_chaos_mix("chaos_backpressure", model, cfg, 8, 30, Some(16), false)
 }
 
 fn run_random_ops(model: ExecutionModel) -> TestResult {
@@ -820,7 +844,7 @@ fn run_random_ops(model: ExecutionModel) -> TestResult {
         crash_ratio: 0.1,
         ..Default::default()
     };
-    run_chaos_mix("chaos_random_ops", model, cfg, 6, 50, Some(50))
+    run_chaos_mix("chaos_random_ops", model, cfg, 6, 50, Some(50), false)
 }
 
 fn run_combined(model: ExecutionModel) -> TestResult {
@@ -836,7 +860,7 @@ fn run_combined(model: ExecutionModel) -> TestResult {
         crash_ratio: 0.1,
         ..Default::default()
     };
-    run_chaos_mix("chaos_combined", model, cfg, 10, 24, Some(12))
+    run_chaos_mix("chaos_combined", model, cfg, 10, 24, Some(12), false)
 }
 
 fn run_long_txn_conflict(model: ExecutionModel) -> TestResult {
@@ -852,7 +876,15 @@ fn run_long_txn_conflict(model: ExecutionModel) -> TestResult {
         crash_ratio: 0.1,
         ..Default::default()
     };
-    run_chaos_mix("chaos_long_txn_conflict", model, cfg, 8, 32, Some(10))
+    run_chaos_mix(
+        "chaos_long_txn_conflict",
+        model,
+        cfg,
+        8,
+        32,
+        Some(10),
+        false,
+    )
 }
 
 fn run_multi_model_error_injection(model: ExecutionModel) -> TestResult {
@@ -875,6 +907,7 @@ fn run_multi_model_error_injection(model: ExecutionModel) -> TestResult {
         8,
         28,
         Some(12),
+        false,
     )
 }
 
@@ -891,7 +924,7 @@ fn run_recovery_to_baseline(model: ExecutionModel) -> TestResult {
         crash_ratio: 0.1,
         ..Default::default()
     };
-    run_chaos_mix("chaos_recovery_baseline", model, cfg, 6, 20, Some(8))
+    run_chaos_mix("chaos_recovery_baseline", model, cfg, 6, 20, Some(8), true)
 }
 
 fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
@@ -943,6 +976,8 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
                 run_persistent_batch(ctx, &mut store, &tables, &mut gen, batch_size)?;
             }
             verify_persistent_state(&store, &tables)?;
+            drop(store);
+            run_full_consistency_checks(ctx, std::slice::from_ref(&StressStorageMode::Memory))?;
             pad_chaos_metrics(ctx, batches * batch_size * 3);
             Ok(())
         }),
@@ -961,6 +996,8 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
                     run_persistent_batch(ctx, &mut store, &tables, &mut gen, batch_size)?;
                 }
                 verify_persistent_state(&store, &tables)?;
+                drop(store);
+                run_full_consistency_checks(ctx, std::slice::from_ref(&StressStorageMode::Memory))?;
                 pad_chaos_metrics(ctx, batches * batch_size * 3);
                 Ok(())
             })
@@ -978,6 +1015,11 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
                         run_persistent_batch(&ctx, &mut store, &tables, &mut gen, batch_size)?;
                     }
                     verify_persistent_state(&store, &tables)?;
+                    drop(store);
+                    run_full_consistency_checks(
+                        &ctx,
+                        std::slice::from_ref(&StressStorageMode::Memory),
+                    )?;
                     pad_chaos_metrics(&ctx, batches * batch_size * 3);
                     Ok(())
                 }
@@ -1024,6 +1066,11 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
                                 }
                             }
                             verify_persistent_state(&store_handle, &tables_clone)?;
+                            drop(store_handle);
+                            run_full_consistency_checks(
+                                &ctx_clone,
+                                std::slice::from_ref(&StressStorageMode::Memory),
+                            )?;
                             pad_chaos_metrics(&ctx_clone, batches * batch_size * 3);
                             Ok::<_, CoreError>(())
                         });

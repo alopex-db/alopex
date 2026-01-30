@@ -7,7 +7,7 @@ use tempfile::TempDir;
 use super::artifacts::{
     binary_version, collect_env_metadata, command_hint, detect_git_sha, prepare_artifacts,
     storage_mode_env, system_info, topology_env, write_checks, write_command_txt, write_log,
-    write_metrics, write_run_json, CheckSummary, RunMetadata,
+    write_metrics, write_run_json, ArtifactPaths, CheckSummary, RunMetadata,
 };
 use super::fixtures::{open_store_for_mode, StressStorageMode};
 use super::lane::{should_run, Lane};
@@ -65,6 +65,7 @@ pub struct TestContext {
     pub thread_id: usize,
     pub lane: Lane,
     pub seed: u64,
+    pub artifact_paths: Option<super::artifacts::ArtifactPaths>,
 }
 
 /// テスト結果。
@@ -151,7 +152,11 @@ impl StressTestHarness {
         })
     }
 
-    fn build_context(&self, thread_id: usize) -> TestContext {
+    fn build_context(
+        &self,
+        thread_id: usize,
+        artifact_paths: Option<super::artifacts::ArtifactPaths>,
+    ) -> TestContext {
         let db_path = self.temp_dir.path().join(format!("db-{thread_id}.wal"));
         TestContext {
             db_path,
@@ -160,6 +165,7 @@ impl StressTestHarness {
             thread_id,
             lane: self.config.lane,
             seed: self.seed,
+            artifact_paths,
         }
     }
 
@@ -169,11 +175,12 @@ impl StressTestHarness {
         F: FnOnce(&TestContext) -> CoreResult<()>,
     {
         let started_at = Utc::now();
+        let artifact_paths = prepare_artifacts(self.config.lane, &self.config.name, &started_at);
         if !should_run(self.config.lane) {
-            return self.skip_result(started_at);
+            return self.skip_result(started_at, artifact_paths);
         }
-        let ctx = self.build_context(0);
-        self.execute_sync(started_at, || test_fn(&ctx))
+        let ctx = self.build_context(0, artifact_paths.clone());
+        self.execute_sync(started_at, artifact_paths, || test_fn(&ctx))
     }
 
     /// Sync並列実行。
@@ -182,11 +189,12 @@ impl StressTestHarness {
         F: Fn(usize, &TestContext) -> CoreResult<()> + Send + Sync,
     {
         let started_at = Utc::now();
+        let artifact_paths = prepare_artifacts(self.config.lane, &self.config.name, &started_at);
         if !should_run(self.config.lane) {
-            return self.skip_result(started_at);
+            return self.skip_result(started_at, artifact_paths);
         }
-        let ctx = self.build_context(0);
-        self.execute_concurrent(started_at, ctx, test_fn)
+        let ctx = self.build_context(0, artifact_paths.clone());
+        self.execute_concurrent(started_at, artifact_paths, ctx, test_fn)
     }
 
     /// Async実行（current-thread）。
@@ -196,17 +204,20 @@ impl StressTestHarness {
         Fut: std::future::Future<Output = CoreResult<()>>,
     {
         let started_at = Utc::now();
+        let artifact_paths = prepare_artifacts(self.config.lane, &self.config.name, &started_at);
         if !should_run(self.config.lane) {
-            return self.skip_result(started_at);
+            return self.skip_result(started_at, artifact_paths);
         }
-        let ctx = self.build_context(0);
+        let ctx = self.build_context(0, artifact_paths.clone());
         match self.config.execution_model {
             ExecutionModel::AsyncSingle => {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("tokio rt");
-                self.execute_sync(started_at, || rt.block_on(test_fn(ctx.clone())))
+                self.execute_sync(started_at, artifact_paths, || {
+                    rt.block_on(test_fn(ctx.clone()))
+                })
             }
             ExecutionModel::AsyncMulti | ExecutionModel::SyncMulti | ExecutionModel::SyncSingle => {
                 let rt = tokio::runtime::Builder::new_multi_thread()
@@ -214,7 +225,9 @@ impl StressTestHarness {
                     .worker_threads(self.config.concurrency.max(1))
                     .build()
                     .expect("tokio rt");
-                self.execute_sync(started_at, || rt.block_on(test_fn(ctx.clone())))
+                self.execute_sync(started_at, artifact_paths, || {
+                    rt.block_on(test_fn(ctx.clone()))
+                })
             }
         }
     }
@@ -222,6 +235,7 @@ impl StressTestHarness {
     fn execute_sync<T>(
         &self,
         started_at: DateTime<Utc>,
+        artifact_paths: Option<super::artifacts::ArtifactPaths>,
         f: impl FnOnce() -> CoreResult<T>,
     ) -> TestResult {
         let start = Instant::now();
@@ -258,7 +272,7 @@ impl StressTestHarness {
             skipped: false,
             report: Some(&report),
         };
-        self.write_artifacts(&ctx);
+        self.write_artifacts(&ctx, artifact_paths.as_ref());
         TestResult {
             watchdog: watchdog_result,
             metrics: metrics_summary,
@@ -272,6 +286,7 @@ impl StressTestHarness {
     fn execute_concurrent<F>(
         &self,
         started_at: DateTime<Utc>,
+        artifact_paths: Option<super::artifacts::ArtifactPaths>,
         ctx: TestContext,
         test_fn: F,
     ) -> TestResult
@@ -292,6 +307,7 @@ impl StressTestHarness {
                     thread_id: tid,
                     lane: ctx.lane,
                     seed: ctx.seed,
+                    artifact_paths: ctx.artifact_paths.clone(),
                 };
                 let tf = test_fn.clone();
                 handles.push(scope.spawn(move || tf(tid, &ctx_cloned)));
@@ -340,7 +356,7 @@ impl StressTestHarness {
             skipped: false,
             report: Some(&report),
         };
-        self.write_artifacts(&ctx);
+        self.write_artifacts(&ctx, artifact_paths.as_ref());
 
         TestResult {
             watchdog: watchdog_result,
@@ -411,7 +427,11 @@ impl StressTestHarness {
         let _ = std::fs::write(out_dir.join(format!("{base}.md")), report.to_markdown());
     }
 
-    fn skip_result(&self, started_at: DateTime<Utc>) -> TestResult {
+    fn skip_result(
+        &self,
+        started_at: DateTime<Utc>,
+        artifact_paths: Option<super::artifacts::ArtifactPaths>,
+    ) -> TestResult {
         let duration = Duration::from_secs(0);
         let metrics_summary = MetricsSummary::default();
         let slo_result = SloResult::passed();
@@ -426,7 +446,7 @@ impl StressTestHarness {
             skipped: true,
             report: None,
         };
-        self.write_artifacts(&ctx);
+        self.write_artifacts(&ctx, artifact_paths.as_ref());
         TestResult {
             watchdog: watchdog_result,
             metrics: metrics_summary,
@@ -437,9 +457,14 @@ impl StressTestHarness {
         }
     }
 
-    fn write_artifacts(&self, ctx: &ArtifactContext<'_>) {
-        let Some(paths) = prepare_artifacts(self.config.lane, &self.config.name, &ctx.started_at)
-        else {
+    fn write_artifacts(&self, ctx: &ArtifactContext<'_>, paths: Option<&ArtifactPaths>) {
+        let owned_paths = if paths.is_none() {
+            prepare_artifacts(self.config.lane, &self.config.name, &ctx.started_at)
+        } else {
+            None
+        };
+        let paths = paths.or(owned_paths.as_ref());
+        let Some(paths) = paths else {
             return;
         };
 
@@ -463,14 +488,14 @@ impl StressTestHarness {
             system: system_info(),
             env: collect_env_metadata(),
         };
-        write_run_json(&paths, &run_meta);
+        write_run_json(paths, &run_meta);
 
         let package = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "alopex-core".to_string());
         let cmd = command_hint(self.config.lane, self.seed, &package);
-        write_command_txt(&paths, &cmd);
+        write_command_txt(paths, &cmd);
 
         if let Some(report) = ctx.report {
-            write_metrics(&paths, report);
+            write_metrics(paths, report);
         }
 
         let check = CheckSummary {
@@ -484,7 +509,7 @@ impl StressTestHarness {
             error: ctx.error.map(|v| v.to_string()),
             duration_ms: ctx.duration.as_millis() as u64,
         };
-        write_checks(&paths, &check);
+        write_checks(paths, &check);
 
         let log = format!(
             "lane={} seed={} success={} skipped={} successes={} errors={} throughput_per_sec={:.2}\n",
@@ -496,7 +521,7 @@ impl StressTestHarness {
             ctx.summary.errors,
             ctx.summary.throughput_per_sec
         );
-        write_log(&paths, &log);
+        write_log(paths, &log);
     }
 }
 

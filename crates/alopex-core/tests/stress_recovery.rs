@@ -10,9 +10,9 @@ use common::begin_op;
 #[cfg(feature = "test-hooks")]
 use common::open_store_with_crash_sim;
 use common::{
-    corrupt_file, open_store_for_mode, selected_storage_modes, slo_presets, storage_root_for_mode,
-    wal_path_for_mode, ExecutionModel, Lane, StressStorageMode, StressTestConfig,
-    StressTestHarness,
+    corrupt_file, open_store_for_mode, run_full_consistency_checks, selected_storage_modes,
+    slo_presets, storage_root_for_mode, wal_path_for_mode, ExecutionModel, Lane, StressStorageMode,
+    StressTestConfig, StressTestHarness,
 };
 use std::fs::OpenOptions;
 #[cfg(feature = "test-hooks")]
@@ -154,10 +154,12 @@ fn run_wal_empty_file(model: ExecutionModel, mode: StressStorageMode) {
         let result = match model {
             ExecutionModel::SyncSingle => harness.run(|ctx| {
                 ctx.metrics.record_success();
+                run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
                 Ok(())
             }),
             ExecutionModel::SyncMulti => harness.run_concurrent(|_tid, ctx| {
                 ctx.metrics.record_success();
+                run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
                 Ok(())
             }),
             _ => panic!("recovery tests are sync-only"),
@@ -185,6 +187,7 @@ fn run_wal_empty_file(model: ExecutionModel, mode: StressStorageMode) {
             let store = open_store_for_mode(&ctx.db_path, mode)?;
             let mut reader = store.begin(TxnMode::ReadOnly)?;
             assert_eq!(reader.get(&b"none".to_vec())?, None);
+            run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
             pad_metrics(ctx, 800); // RECOVERY_SLO padding
             Ok(())
         }),
@@ -202,6 +205,7 @@ fn run_wal_empty_file(model: ExecutionModel, mode: StressStorageMode) {
                 let store = open_store_for_mode(&ctx.db_path, mode)?;
                 let mut reader = store.begin(TxnMode::ReadOnly)?;
                 assert_eq!(reader.get(&b"none".to_vec())?, None);
+                run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
             }
             pad_metrics(ctx, 600); // RECOVERY_SLO padding
             Ok(())
@@ -260,6 +264,7 @@ fn wal_partial_body(ctx: &common::TestContext, mode: StressStorageMode) -> CoreR
     } else {
         ctx.metrics.record_error(); // count corruption detection
     }
+    run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
     pad_metrics(ctx, 800); // RECOVERY_SLO padding
     Ok(())
 }
@@ -279,10 +284,12 @@ fn run_sst_corruption(
         let result = match model {
             ExecutionModel::SyncSingle => harness.run(|ctx| {
                 ctx.metrics.record_success();
+                run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
                 Ok(())
             }),
             ExecutionModel::SyncMulti => harness.run_concurrent(|_tid, ctx| {
                 ctx.metrics.record_success();
+                run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
                 Ok(())
             }),
             _ => panic!("sync only"),
@@ -366,6 +373,7 @@ fn sst_corruption_body(
             ctx.metrics.record_error();
         }
     }
+    run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
     // RECOVERY_SLO throughput padding for short scenario
     pad_metrics(ctx, 1000);
     Ok(())
@@ -422,6 +430,7 @@ fn test_wal_mid_crash_recovery() {
         assert_eq!(reader.get(&b"safe".to_vec())?, Some(b"1".to_vec()));
         assert_eq!(reader.get(&b"pending".to_vec())?, None);
         ctx.metrics.record_success();
+        run_full_consistency_checks(ctx, std::slice::from_ref(&StressStorageMode::Memory))?;
 
         // pad metrics to satisfy throughput SLO
         for _ in 0..600 {
@@ -510,6 +519,7 @@ fn test_wal_multi_segment_recovery() {
         assert_eq!(reader.get(&b"crash_0".to_vec())?, None);
         assert_eq!(reader.get(&b"crash_1".to_vec())?, None);
         ctx.metrics.record_success();
+        run_full_consistency_checks(ctx, std::slice::from_ref(&StressStorageMode::Memory))?;
 
         for _ in 0..600 {
             ctx.metrics.record_success();
@@ -575,6 +585,7 @@ fn test_compaction_crash_recovery() {
             assert_eq!(reader.get(&key)?, Some(b"v".to_vec()));
         }
         ctx.metrics.record_success();
+        run_full_consistency_checks(ctx, std::slice::from_ref(&StressStorageMode::Memory))?;
 
         for _ in 0..1200 {
             ctx.metrics.record_success();

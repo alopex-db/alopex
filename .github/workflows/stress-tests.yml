@@ -129,3 +129,58 @@ jobs:
         with:
           name: fuzz-reports
           path: target/stress-reports/fuzz
+
+  perf-lane:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          profile: minimal
+
+      - name: Download latest perf baselines
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          run_id=$(gh run list --workflow stress-tests.yml --event schedule --limit 1 --json databaseId -q '.[0].databaseId')
+          if [ -n "$run_id" ]; then
+            gh run download "$run_id" -n perf-baselines -D target/stress-baselines || true
+          fi
+
+      - name: Run perf baseline checks
+        env:
+          RUST_BACKTRACE: 1
+          STRESS_BASELINE_REQUIRED: "true"
+          STRESS_BASELINE_DIR: target/stress-baselines
+          STRESS_REPORT_DIR: target/stress-reports/perf
+          STRESS_ARTIFACTS_DIR: target/stress-artifacts/perf
+        run: |
+          cargo test --features lane_perf --test stress_perf_baseline -- --test-threads=1
+
+      - name: Upload perf reports
+        if: ${{ env.STRESS_REPORT_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-reports
+          path: ${{ env.STRESS_REPORT_DIR }}
+
+      - name: Upload perf artifacts
+        if: ${{ env.STRESS_ARTIFACTS_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-artifacts
+          path: ${{ env.STRESS_ARTIFACTS_DIR }}
+
+      - name: Upload perf baselines
+        if: ${{ env.STRESS_BASELINE_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-baselines
+          path: ${{ env.STRESS_BASELINE_DIR }}
