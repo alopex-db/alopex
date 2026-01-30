@@ -2,17 +2,21 @@ mod common;
 
 use alopex_core::kv::memory::MemoryTransaction;
 use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnMode};
-use common::replay::gen_u32;
+use chrono::Utc;
+use common::replay::{gen_f64, gen_range_usize, gen_u32};
 use common::{
-    begin_op, slo_presets, ChaosConfig, ChaosOperation, ChaosWorkloadGenerator, ColumnarOperation,
-    DdlOperation, ExecutionModel, Lane, MultiModelOperation, SloConfig, SqlOperation,
+    begin_op, log_path, open_store_with_fault_injector, prepare_artifacts, slo_presets,
+    ChaosConfig, ChaosOperation, ChaosWorkloadGenerator, ColumnarOperation, DdlOperation,
+    DiskFullInjector, ExecutionModel, Lane, MultiModelOperation, SloConfig, SqlOperation,
     StressTestConfig, StressTestHarness, TestResult, VectorOperation, WorkloadConfig,
 };
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tempfile::TempDir;
 use tokio::task::JoinSet;
 
 type CoreResult<T> = Result<T, CoreError>;
@@ -1037,6 +1041,417 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
     }
 }
 
+struct ChaosMatrixConfig {
+    nodes: usize,
+    zones: usize,
+    steps: usize,
+    inject_interval: Duration,
+    max_latency_ms: u64,
+    loss_rate: f64,
+    partition_rate: f64,
+    zone_outage_rate: f64,
+    zone_restart_rate: f64,
+    kill_rate: f64,
+    restart_rate: f64,
+    disk_full_rate: f64,
+}
+
+impl ChaosMatrixConfig {
+    fn from_env() -> Self {
+        Self {
+            nodes: env_usize("STRESS_CHAOS_MATRIX_NODES", 3).max(3),
+            zones: env_usize("STRESS_CHAOS_MATRIX_ZONES", 2).max(1),
+            steps: env_usize("STRESS_CHAOS_MATRIX_STEPS", 400),
+            inject_interval: Duration::from_millis(env_u64("STRESS_CHAOS_MATRIX_INJECT_MS", 250)),
+            max_latency_ms: env_u64("STRESS_CHAOS_MATRIX_MAX_LATENCY_MS", 10),
+            loss_rate: env_f64("STRESS_CHAOS_MATRIX_LOSS_RATE", 0.05),
+            partition_rate: env_f64("STRESS_CHAOS_MATRIX_PARTITION_RATE", 0.2),
+            zone_outage_rate: env_f64("STRESS_CHAOS_MATRIX_ZONE_OUTAGE_RATE", 0.05),
+            zone_restart_rate: env_f64("STRESS_CHAOS_MATRIX_ZONE_RESTART_RATE", 0.4),
+            kill_rate: env_f64("STRESS_CHAOS_MATRIX_KILL_RATE", 0.05),
+            restart_rate: env_f64("STRESS_CHAOS_MATRIX_RESTART_RATE", 0.1),
+            disk_full_rate: env_f64("STRESS_CHAOS_MATRIX_DISK_FULL_RATE", 0.05),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ChaosLink {
+    latency_ms: u64,
+    loss_rate: f64,
+    partitioned: bool,
+}
+
+struct ChaosNode {
+    id: usize,
+    zone: usize,
+    path: PathBuf,
+    store: Option<Arc<MemoryKV>>,
+    disk_full: Arc<DiskFullInjector>,
+}
+
+struct ChaosMatrix {
+    nodes: Vec<ChaosNode>,
+    links: Vec<Vec<ChaosLink>>,
+    _temp_dir: TempDir,
+    timeline_path: Option<PathBuf>,
+}
+
+impl ChaosMatrix {
+    fn new(cfg: &ChaosMatrixConfig, timeline_path: Option<PathBuf>) -> CoreResult<Self> {
+        let temp_dir = TempDir::new().map_err(CoreError::Io)?;
+        let mut nodes = Vec::with_capacity(cfg.nodes);
+        for id in 0..cfg.nodes {
+            let zone = id % cfg.zones.max(1);
+            let path = temp_dir.path().join(format!("node-{id}"));
+            let disk_full = Arc::new(DiskFullInjector::new());
+            let store = Some(open_matrix_store(&path, disk_full.clone())?);
+            nodes.push(ChaosNode {
+                id,
+                zone,
+                path,
+                store,
+                disk_full,
+            });
+        }
+        let links = (0..cfg.nodes)
+            .map(|_| {
+                (0..cfg.nodes)
+                    .map(|_| ChaosLink {
+                        latency_ms: 0,
+                        loss_rate: 0.0,
+                        partitioned: false,
+                    })
+                    .collect()
+            })
+            .collect();
+        Ok(Self {
+            nodes,
+            links,
+            _temp_dir: temp_dir,
+            timeline_path,
+        })
+    }
+
+    fn inject_faults(&mut self, cfg: &ChaosMatrixConfig) -> CoreResult<()> {
+        for node in &self.nodes {
+            node.disk_full.set_full(false);
+        }
+        for i in 0..self.links.len() {
+            for j in 0..self.links.len() {
+                if i == j {
+                    continue;
+                }
+                let link = &mut self.links[i][j];
+                link.partitioned = false;
+                link.loss_rate = 0.0;
+                link.latency_ms = 0;
+            }
+        }
+
+        let partitioned = gen_f64() < cfg.partition_rate;
+        if partitioned {
+            for i in 0..self.nodes.len() {
+                for j in 0..self.nodes.len() {
+                    if i == j {
+                        continue;
+                    }
+                    if self.nodes[i].zone != self.nodes[j].zone {
+                        self.links[i][j].partitioned = true;
+                    }
+                }
+            }
+            self.log_link_event("partition", |link| link.partitioned);
+        }
+
+        let max_latency = cfg.max_latency_ms;
+        for i in 0..self.nodes.len() {
+            for j in 0..self.nodes.len() {
+                if i == j {
+                    continue;
+                }
+                let link = &mut self.links[i][j];
+                if max_latency > 0 && gen_f64() < 0.5 {
+                    let upper = (max_latency as usize).saturating_add(1).max(1);
+                    link.latency_ms = gen_range_usize(0..upper) as u64;
+                }
+                if cfg.loss_rate > 0.0 && gen_f64() < cfg.loss_rate {
+                    link.loss_rate = cfg.loss_rate;
+                }
+            }
+        }
+        self.log_link_event("latency", |link| link.latency_ms > 0);
+        self.log_link_event("loss", |link| link.loss_rate > 0.0);
+
+        if cfg.disk_full_rate > 0.0 && gen_f64() < cfg.disk_full_rate && self.nodes.len() > 1 {
+            let idx = 1 + gen_range_usize(0..self.nodes.len() - 1);
+            self.nodes[idx].disk_full.set_full(true);
+            self.log_event("disk_full", &format!("nodes=[{idx}]"));
+        }
+
+        if cfg.zone_outage_rate > 0.0 && gen_f64() < cfg.zone_outage_rate {
+            let zone = self.pick_outage_zone(cfg.zones.max(1));
+            let mut affected = Vec::new();
+            for node in &mut self.nodes {
+                if node.zone == zone && node.id != 0 {
+                    node.store = None;
+                    affected.push(node.id);
+                }
+            }
+            if !affected.is_empty() {
+                self.log_event("zone_outage", &format!("zone={zone} nodes={:?}", affected));
+            }
+            if cfg.zone_restart_rate > 0.0 && gen_f64() < cfg.zone_restart_rate {
+                let restart_ids: Vec<usize> = self
+                    .nodes
+                    .iter()
+                    .filter(|node| node.zone == zone && node.store.is_none())
+                    .map(|node| node.id)
+                    .collect();
+                let mut restarted = Vec::new();
+                for node_id in restart_ids {
+                    self.restart_node(node_id)?;
+                    restarted.push(node_id);
+                }
+                if !restarted.is_empty() {
+                    self.log_event(
+                        "zone_restart",
+                        &format!("zone={zone} nodes={:?}", restarted),
+                    );
+                }
+            }
+        }
+
+        if cfg.kill_rate > 0.0 && gen_f64() < cfg.kill_rate && self.nodes.len() > 1 {
+            let idx = 1 + gen_range_usize(0..self.nodes.len() - 1);
+            self.kill_node(idx);
+            self.log_event("kill", &format!("nodes=[{idx}]"));
+        }
+
+        if cfg.restart_rate > 0.0 && gen_f64() < cfg.restart_rate {
+            let dead: Vec<usize> = self
+                .nodes
+                .iter()
+                .filter(|n| n.store.is_none() && n.id != 0)
+                .map(|n| n.id)
+                .collect();
+            if !dead.is_empty() {
+                let pick = dead[gen_range_usize(0..dead.len())];
+                self.restart_node(pick)?;
+                self.log_event("restart", &format!("nodes=[{pick}]"));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn kill_node(&mut self, idx: usize) {
+        if let Some(node) = self.nodes.get_mut(idx) {
+            node.store = None;
+        }
+    }
+
+    fn restart_node(&mut self, idx: usize) -> CoreResult<()> {
+        let node = self
+            .nodes
+            .get_mut(idx)
+            .ok_or_else(|| CoreError::Io(io::Error::other("node index out of range")))?;
+        let store = open_matrix_store(&node.path, node.disk_full.clone())?;
+        node.store = Some(store);
+        Ok(())
+    }
+
+    fn pick_outage_zone(&self, zones: usize) -> usize {
+        let primary_zone = self.nodes.first().map(|n| n.zone).unwrap_or(0);
+        let mut candidates: Vec<usize> = (0..zones).collect();
+        if zones > 1 {
+            candidates.retain(|z| *z != primary_zone);
+        }
+        if candidates.is_empty() {
+            primary_zone
+        } else {
+            candidates[gen_range_usize(0..candidates.len())]
+        }
+    }
+
+    fn log_event(&self, kind: &str, detail: &str) {
+        let Some(path) = &self.timeline_path else {
+            return;
+        };
+        let line = format!("ts={} event={} {}\n", Utc::now().to_rfc3339(), kind, detail);
+        let _ = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(line.as_bytes())
+            });
+    }
+
+    fn log_link_event(&self, kind: &str, predicate: impl Fn(&ChaosLink) -> bool) {
+        let Some(_) = &self.timeline_path else {
+            return;
+        };
+        let mut links = Vec::new();
+        for i in 0..self.links.len() {
+            for j in 0..self.links.len() {
+                if i == j {
+                    continue;
+                }
+                if predicate(&self.links[i][j]) {
+                    links.push(format!("{i}->{j}"));
+                }
+            }
+        }
+        if !links.is_empty() {
+            self.log_event(kind, &format!("links=[{}]", links.join(",")));
+        }
+    }
+
+    fn primary_store(&self) -> CoreResult<Arc<MemoryKV>> {
+        self.nodes
+            .first()
+            .and_then(|n| n.store.clone())
+            .ok_or_else(|| CoreError::Io(io::Error::other("primary node unavailable")))
+    }
+
+    fn apply_primary(
+        &mut self,
+        op: ChaosOperation,
+        tables: &Arc<Mutex<HashSet<String>>>,
+    ) -> CoreResult<bool> {
+        let primary = self.primary_store()?;
+        let ok = apply_chaos_op(&primary, op.clone(), tables)?;
+        self.replicate(0, &op, tables);
+        Ok(ok)
+    }
+
+    fn replicate(
+        &mut self,
+        primary_idx: usize,
+        op: &ChaosOperation,
+        tables: &Arc<Mutex<HashSet<String>>>,
+    ) {
+        for idx in 0..self.nodes.len() {
+            if idx == primary_idx {
+                continue;
+            }
+            let node = &mut self.nodes[idx];
+            let Some(store) = node.store.clone() else {
+                continue;
+            };
+            let link = &self.links[primary_idx][idx];
+            if link.partitioned {
+                continue;
+            }
+            if link.loss_rate > 0.0 && gen_f64() < link.loss_rate {
+                continue;
+            }
+            if link.latency_ms > 0 {
+                std::thread::sleep(Duration::from_millis(link.latency_ms));
+            }
+            let _ = apply_chaos_op(&store, op.clone(), tables);
+        }
+    }
+}
+
+fn open_matrix_store(path: &Path, injector: Arc<DiskFullInjector>) -> CoreResult<Arc<MemoryKV>> {
+    #[cfg(feature = "test-hooks")]
+    {
+        let hook: Arc<dyn common::FaultInjector> = injector;
+        open_store_with_fault_injector(path, hook).map(Arc::new)
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        let _ = injector;
+        MemoryKV::open(path).map(Arc::new)
+    }
+}
+
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn env_f64(key: &str, default: f64) -> f64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(default)
+}
+
+fn run_chaos_matrix(model: ExecutionModel) -> Vec<(usize, TestResult)> {
+    let chaos_cfg = ChaosConfig {
+        crash_ratio: 0.0,
+        error_ratio: 0.05,
+        multi_model_ratio: 0.3,
+        ddl_ratio: 0.15,
+        ..Default::default()
+    };
+    let mut results = Vec::new();
+    for scale in chaos_matrix_scales() {
+        let test_name = format!("chaos_matrix_short_interval_n{scale}");
+        let mut cfg = chaos_config(&test_name, model, 1);
+        cfg.scenario_timeout = Duration::from_secs(300);
+        let harness = StressTestHarness::new(cfg).unwrap();
+        let mut matrix_cfg = ChaosMatrixConfig::from_env();
+        matrix_cfg.nodes = scale.max(3);
+        matrix_cfg.zones = matrix_cfg.zones.min(matrix_cfg.nodes).max(1);
+        let started_at = Utc::now();
+        let timeline_path = prepare_artifacts(Lane::Nightly, &test_name, &started_at)
+            .map(|paths| log_path(&paths, "chaos_timeline.log"));
+        let result = harness.run(|ctx| {
+            let _op = begin_op(ctx);
+            let mut matrix = ChaosMatrix::new(&matrix_cfg, timeline_path.clone())?;
+            let tables = Arc::new(Mutex::new(HashSet::new()));
+            let mut gen = ChaosWorkloadGenerator::new(chaos_cfg.clone());
+            let mut last_inject = Instant::now();
+            for _ in 0..matrix_cfg.steps {
+                if last_inject.elapsed() >= matrix_cfg.inject_interval {
+                    matrix.inject_faults(&matrix_cfg)?;
+                    last_inject = Instant::now();
+                }
+                let op = gen.next_chaos_operation();
+                let start = Instant::now();
+                match matrix.apply_primary(op, &tables) {
+                    Ok(true) => ctx.metrics.record_success(),
+                    Ok(false) => ctx.metrics.record_error(),
+                    Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
+                    Err(e) => return Err(e),
+                }
+                ctx.metrics.record_latency(start.elapsed());
+            }
+            pad_chaos_metrics(ctx, matrix_cfg.steps * 2);
+            Ok(())
+        });
+        results.push((scale, result));
+    }
+    results
+}
+
+fn chaos_matrix_scales() -> Vec<usize> {
+    let raw = std::env::var("STRESS_CHAOS_MATRIX_SCALES").unwrap_or_else(|_| "3,5,7".to_string());
+    let mut values: Vec<usize> = raw
+        .split([',', ';', ' '])
+        .filter_map(|v| v.trim().parse::<usize>().ok())
+        .filter(|v| *v >= 3)
+        .collect();
+    if values.is_empty() {
+        values = vec![3, 5, 7];
+    }
+    values
+}
+
 macro_rules! chaos_test {
     ($name:ident, $runner:ident) => {
         #[cfg_attr(not(feature = "lane_nightly"), ignore)]
@@ -1076,3 +1491,17 @@ chaos_test!(
     test_persistent_crash_reopen_scenario,
     run_persistent_crash_reopen
 );
+
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
+#[test]
+fn test_chaos_matrix_short_interval() {
+    let results = run_chaos_matrix(ExecutionModel::SyncSingle);
+    for (scale, result) in results {
+        assert!(
+            result.is_success(),
+            "chaos_matrix_short_interval scale={}: {:?}",
+            scale,
+            result.failure_summary()
+        );
+    }
+}

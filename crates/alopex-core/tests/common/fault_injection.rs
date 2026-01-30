@@ -125,6 +125,43 @@ impl IoErrorInjector {
     }
 }
 
+/// Simulates disk-full failures by rejecting writes when enabled.
+pub struct DiskFullInjector {
+    enabled: AtomicBool,
+}
+
+impl DiskFullInjector {
+    pub fn new() -> Self {
+        Self {
+            enabled: AtomicBool::new(false),
+        }
+    }
+
+    pub fn set_full(&self, full: bool) {
+        self.enabled.store(full, Ordering::Relaxed);
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+}
+
+impl FaultInjector for DiskFullInjector {
+    fn before_write(&self, _data: &[u8]) -> IoResult<()> {
+        if self.enabled.load(Ordering::Relaxed) {
+            return Err(Error::other("ENOSPC simulated disk full"));
+        }
+        Ok(())
+    }
+
+    fn before_fsync(&self) -> IoResult<()> {
+        if self.enabled.load(Ordering::Relaxed) {
+            return Err(Error::other("ENOSPC simulated disk full"));
+        }
+        Ok(())
+    }
+}
+
 impl FaultInjector for IoErrorInjector {
     fn before_write(&self, _data: &[u8]) -> IoResult<()> {
         if self.should_inject(self.write_error_rate) {

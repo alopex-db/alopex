@@ -1,0 +1,21 @@
+[package]
+name = "alopex-dataframe-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[features]
+honggfuzz = ["dep:honggfuzz"]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+honggfuzz = { version = "0.5", optional = true }
+alopex-dataframe = { path = ".." }
+arrow = "53"
+
+[[bin]]
+name = "dataframe_conversion"
+path = "fuzz_targets/dataframe_conversion.rs"

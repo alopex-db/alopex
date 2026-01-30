@@ -1,0 +1,20 @@
+[package]
+name = "alopex-sql-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[features]
+honggfuzz = ["dep:honggfuzz"]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+honggfuzz = { version = "0.5", optional = true }
+alopex-sql = { path = ".." }
+
+[[bin]]
+name = "sql_parser"
+path = "fuzz_targets/sql_parser.rs"

@@ -3,6 +3,9 @@ name: Stress Tests
 on:
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+    - cron: "0 3 * * 0"
 
 jobs:
   stress-tests:
@@ -33,3 +36,96 @@ jobs:
         with:
           name: stress-reports
           path: ${{ env.STRESS_REPORT_DIR }}
+
+  sanitizer-lane:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            sanitizer: asan
+          - os: ubuntu-latest
+            sanitizer: tsan
+          - os: ubuntu-latest
+            sanitizer: lsan
+          - os: ubuntu-latest
+            sanitizer: msan
+          - os: macos-latest
+            sanitizer: asan
+          - os: macos-latest
+            sanitizer: tsan
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust (nightly)
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+          profile: minimal
+
+      - name: Run sanitizer lane
+        env:
+          RUST_BACKTRACE: 1
+          STRESS_REPORT_DIR: target/stress-reports/${{ matrix.sanitizer }}
+          STRESS_ARTIFACTS_DIR: target/stress-artifacts/${{ matrix.sanitizer }}
+        run: |
+          ./scripts/run-sanitizer-lane.sh ${{ matrix.sanitizer }}
+
+      - name: Upload sanitizer reports
+        if: ${{ env.STRESS_REPORT_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-${{ matrix.os }}-${{ matrix.sanitizer }}-reports
+          path: ${{ env.STRESS_REPORT_DIR }}
+
+      - name: Upload sanitizer artifacts
+        if: ${{ env.STRESS_ARTIFACTS_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-${{ matrix.os }}-${{ matrix.sanitizer }}-artifacts
+          path: ${{ env.STRESS_ARTIFACTS_DIR }}
+
+  fuzz-lane:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2880
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust (nightly)
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+          profile: minimal
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run SQL fuzz target (24h)
+        env:
+          STRESS_REPORT_DIR: target/stress-reports/fuzz/sql_parser
+        run: |
+          cd crates/alopex-sql/fuzz
+          export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
+          cargo fuzz run sql_parser -- -max_total_time=86400
+
+      - name: Run DataFrame fuzz target (24h)
+        env:
+          STRESS_REPORT_DIR: target/stress-reports/fuzz/dataframe_conversion
+        run: |
+          cd crates/alopex-dataframe/fuzz
+          export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
+          cargo fuzz run dataframe_conversion -- -max_total_time=86400
+
+      - name: Upload fuzz reports
+        if: ${{ env.STRESS_REPORT_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-reports
+          path: target/stress-reports/fuzz

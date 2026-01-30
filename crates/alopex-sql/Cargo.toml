@@ -14,6 +14,7 @@ async = ["alopex-core/async", "dep:futures"]
 tokio = ["async", "alopex-core/tokio", "dep:tokio"]
 
 lane_ci = []
+lane_fuzz = []
 [dependencies]
 thiserror = "2.0"
 alopex-core.workspace = true
