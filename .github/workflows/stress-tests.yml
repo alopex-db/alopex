@@ -28,7 +28,7 @@ jobs:
           STRESS_TEST_TIMEOUT: 120
           STRESS_REPORT_DIR: target/stress-reports # set empty string to skip artifact upload
         run: |
-          cargo test --features test-hooks --test stress_* -- --test-threads=1
+          cargo test --features test-hooks,lane_ci --test stress_* -- --test-threads=1
 
       - name: Upload stress reports
         if: ${{ env.STRESS_REPORT_DIR != '' }}
