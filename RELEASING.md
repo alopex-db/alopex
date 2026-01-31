@@ -54,6 +54,26 @@ alopex-core → alopex-sql → alopex-embedded → alopex-server → alopex-cli
 
 ## リリース手順
 
+### 0. RCブランチの作成（必須）
+
+リリース作業は **必ずRCブランチから開始**する。RCブランチは `main` から作成し、
+命名は `rc/<version>` を基本とする（例: `rc/v0.5.0`）。
+
+RCブランチの命名規則:
+
+- 基本: `rc/<version>`（例: `rc/v0.5.0`）
+- 追加RCが必要な場合: `rc/<version>-rcN`（例: `rc/v0.5.0-rc2`）
+- プレフィックスは必ず `rc/` とし、`release/` などは使用しない
+
+```bash
+git checkout main
+git pull origin main
+git checkout -b rc/v0.5.0
+git push -u origin rc/v0.5.0
+```
+
+以後のリリース準備はこの RC ブランチで実施する。
+
 ### 1. 事前確認
 
 ```bash
@@ -97,12 +117,19 @@ git commit -m "chore: bump version to 0.4.0"
 ### 4. プッシュ & CI 確認
 
 ```bash
-git push origin main
+git push origin rc/v0.5.0
 ```
 
 GitHub Actions の CI が成功することを確認してください。
 
-### 5. タグ作成 & プッシュ
+### 5. RCブランチから main へのマージ（必須）
+
+**RCブランチからのマージを必須**とし、直接 `main` でリリース作業を行わない。
+
+- RC ブランチ（例: `rc/v0.5.0`）から `main` への PR を作成
+- すべての必須チェックが通ったらマージ
+
+### 6. タグ作成 & プッシュ
 
 ```bash
 # タグ作成
@@ -112,7 +139,7 @@ git tag -a v0.4.0 -m "Release v0.4.0"
 git push origin v0.4.0
 ```
 
-### 6. リリース確認
+### 7. リリース確認
 
 - [ ] GitHub Actions の Release ワークフローが成功
 - [ ] GitHub Releases にバイナリがアップロードされている

@@ -38,6 +38,7 @@ jobs:
           path: ${{ env.STRESS_REPORT_DIR }}
 
   sanitizer-lane:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:

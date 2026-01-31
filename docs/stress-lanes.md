@@ -1,77 +1,77 @@
-# Stress Lanes
+# ストレスレーン
 
-This document defines the stress-test lanes, how they are selected, and how to run them.
+本ドキュメントは、ストレステストのレーン定義、選択規則、実行方法、CI起動方法を説明します。
 
-## Lane definitions
+## レーン定義
 
-| Lane | Feature flag | Purpose | Typical schedule |
+| レーン | feature フラグ | 目的 | 想定スケジュール |
 | --- | --- | --- | --- |
-| smoke | `lane_smoke` | Minimal, fast checks for local sanity | PR / local |
-| ci | `lane_ci` | Standard CI coverage | PR / main |
-| nightly | `lane_nightly` | Longer-running stress scenarios | nightly |
-| weekly | `lane_weekly` | Very long or heavy workloads | weekly |
-| soak | `lane_soak` | Multi-hour burn-in / resource monitoring | nightly / weekly |
-| perf | `lane_perf` | Performance baseline + regression checks | nightly |
-| fuzz | `lane_fuzz` | Long fuzz runs (24h targets) | nightly / weekly |
-| sanitizer | `lane_sanitizer` | TSAN/ASAN/LSAN/MSAN via `-Zsanitizer` | nightly / release gate |
+| smoke | `lane_smoke` | 最小の動作確認 | PR / ローカル |
+| ci | `lane_ci` | 標準CIカバレッジ | PR / main |
+| nightly | `lane_nightly` | 長めのストレスシナリオ | nightly |
+| weekly | `lane_weekly` | 非常に重い/長時間 | weekly |
+| soak | `lane_soak` | 長時間バーンイン/資源監視 | nightly / weekly |
+| perf | `lane_perf` | 性能ベースライン/回帰検知 | nightly |
+| fuzz | `lane_fuzz` | 長時間ファズ（24h） | nightly / weekly |
+| sanitizer | `lane_sanitizer` | TSAN/ASAN/LSAN/MSAN | nightly / weekly（schedule/dispatch） |
 
-## Lane selection rules
+## レーン選択規則
 
-Lane selection is resolved in the following order:
+レーンは次の順序で解決される。
 
-1) `STRESS_LANE` environment variable
-2) Enabled lane feature flags (`--features lane_*`)
-3) Default: `ci`
+1) 環境変数 `STRESS_LANE`
+2) feature フラグ（`--features lane_*`）
+3) 既定: `ci`
 
-Examples:
+例:
 
 ```bash
-# Run only nightly lane tests
+# nightly のみ
 STRESS_LANE=nightly cargo test -p alopex-core --tests --features lane_nightly
 
-# Run multiple lanes explicitly
+# 複数レーン
 STRESS_LANE=ci,nightly cargo test -p alopex-core --tests --features lane_ci,lane_nightly
 
-# Run all lanes
+# 全レーン
 STRESS_LANE=all cargo test -p alopex-core --tests --features lane_smoke,lane_ci,lane_nightly,lane_weekly,lane_soak,lane_perf,lane_fuzz,lane_sanitizer
 ```
 
-## Typical commands
+## 代表的な実行コマンド
 
 ```bash
-# CI lane
+# CI レーン
 cargo test -p alopex-core --tests --features lane_ci
 
-# Nightly lane
+# Nightly レーン
 cargo test -p alopex-core --tests --features lane_nightly
 
-# Weekly lane
+# Weekly レーン
 cargo test -p alopex-core --tests --features lane_weekly
 
-# Soak lane
+# Soak レーン
 cargo test -p alopex-core --tests --features lane_soak
 
-# Perf lane
+# Perf レーン
 STRESS_BASELINE_REQUIRED=true \
 STRESS_BASELINE_DIR=target/stress-baselines \
 STRESS_REPORT_DIR=target/stress-reports/perf \
 STRESS_ARTIFACTS_DIR=target/stress-artifacts/perf \
 cargo test -p alopex-core --features lane_perf --test stress_perf_baseline
 
-# Fuzz lane (cargo fuzz targets)
+# Fuzz レーン（cargo fuzz）
 cd crates/alopex-sql/fuzz
 cargo fuzz run sql_parser -- -max_total_time=86400
 cd ../../alopex-dataframe/fuzz
 cargo fuzz run dataframe_conversion -- -max_total_time=86400
-# Run both SQL and DataFrame targets for 24h.
+# SQL/DF の両ターゲットを 24h 実行する。
 
-# Sanitizer lane (nightly + script)
+# Sanitizer レーン（nightly + script）
 ./scripts/run-sanitizer-lane.sh asan
 ```
 
-## Lane-specific environment variables
+## レーン固有の環境変数
 
-Soak lane:
+Soak レーン:
 
 - `STRESS_SOAK_DURATION_SECS`
 - `STRESS_WEEKLY_DURATION_SECS`
@@ -82,30 +82,52 @@ Soak lane:
 - `STRESS_SOAK_VALUE_SIZE`
 - `STRESS_SOAK_KEY_SPACE`
 
-Fuzz lane:
+Fuzz レーン:
 
-Fuzz control is passed via libFuzzer args (e.g. `-max_total_time=86400`, `-seed=...`).
-The current fuzz targets do not consume `STRESS_FUZZ_DURATION_SECS`, `STRESS_SEED`,
-or `STRESS_REPLAY_SEED`.
+Fuzz の制御は libFuzzer の引数（例: `-max_total_time=86400`, `-seed=...`）で行う。
+現在のターゲットは `STRESS_FUZZ_DURATION_SECS` / `STRESS_SEED` / `STRESS_REPLAY_SEED` を使用しない。
 
-Perf lane:
+Perf レーン:
 
 - `STRESS_BASELINE_REQUIRED`
 - `STRESS_BASELINE_DIR`
 - `STRESS_BASELINE_UPDATE`
 - `STRESS_BASELINE_MARGIN_PCT`
 
-Sanitizer lane:
+Sanitizer レーン:
 
 - `STRESS_REPORT_DIR`
 - `STRESS_ARTIFACTS_DIR`
 - `RUSTFLAGS`
 
-## Common environment variables
+## 共通環境変数
 
-- `STRESS_LANE`: Override lane selection (e.g., `ci`, `nightly`, `all`).
-- `STRESS_SEED` / `STRESS_REPLAY_SEED`: Fix RNG seed for deterministic replay.
-- `STRESS_REPLAY`: Enable deterministic mode (`1` / `true`).
-- `STRESS_STORAGE_MODE`: `memory`, `disk`, or `both` (default).
-- `STRESS_REPORT_DIR`: Metrics report output directory.
-- `STRESS_ARTIFACTS_DIR`: Artifacts root directory.
+- `STRESS_LANE`: レーン指定（例: `ci`, `nightly`, `all`）
+- `STRESS_SEED` / `STRESS_REPLAY_SEED`: 乱数シード固定
+- `STRESS_REPLAY`: 再現モード有効化（`1` / `true`）
+- `STRESS_STORAGE_MODE`: `memory`, `disk`, `both`（既定）
+- `STRESS_REPORT_DIR`: メトリクス出力先
+- `STRESS_ARTIFACTS_DIR`: アーティファクト出力先
+
+## CI 起動方法
+
+ストレステストCIは `Stress Tests` ワークフロー（`.github/workflows/stress-tests.yml`）で実行する。
+
+起動トリガー:
+
+- `pull_request`: 短時間の `stress-tests` のみ
+- `workflow_dispatch`: sanitizer/fuzz/perf を含むすべての対象レーン
+- `schedule`: cron の定期実行（毎日 + 毎週）
+
+ジョブ対応:
+
+- `stress-tests`（短時間）: PR / schedule / dispatch で実行
+- `sanitizer-lane`: schedule / dispatch のみ
+- `fuzz-lane`: schedule / dispatch のみ（各ターゲット 24h）
+- `perf-lane`: schedule / dispatch のみ（ベースライン比較）
+
+手動実行:
+
+- GitHub Actions → `Stress Tests` → `Run workflow`
+- 対象ブランチ（例: `main`, `rc/<version>`）を選択して実行
+
