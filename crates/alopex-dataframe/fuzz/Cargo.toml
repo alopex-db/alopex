@@ -19,3 +19,5 @@ arrow = "53"
 [[bin]]
 name = "dataframe_conversion"
 path = "fuzz_targets/dataframe_conversion.rs"
+
+[workspace]

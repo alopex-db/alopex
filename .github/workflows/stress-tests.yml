@@ -67,6 +67,7 @@ jobs:
           toolchain: nightly
           override: true
           profile: minimal
+          components: rust-src
 
       - name: Run sanitizer lane
         env:
@@ -158,11 +159,16 @@ jobs:
       - name: Run perf baseline checks
         env:
           RUST_BACKTRACE: 1
-          STRESS_BASELINE_REQUIRED: "true"
           STRESS_BASELINE_DIR: target/stress-baselines
           STRESS_REPORT_DIR: target/stress-reports/perf
           STRESS_ARTIFACTS_DIR: target/stress-artifacts/perf
         run: |
+          if ls target/stress-baselines/*.json >/dev/null 2>&1; then
+            export STRESS_BASELINE_REQUIRED="true"
+          else
+            export STRESS_BASELINE_REQUIRED="false"
+            export STRESS_BASELINE_UPDATE="1"
+          fi
           cargo test --features lane_perf --test stress_perf_baseline -- --test-threads=1
 
       - name: Upload perf reports

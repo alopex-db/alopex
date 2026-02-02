@@ -18,3 +18,5 @@ alopex-sql = { path = ".." }
 [[bin]]
 name = "sql_parser"
 path = "fuzz_targets/sql_parser.rs"
+
+[workspace]
