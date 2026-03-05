@@ -234,6 +234,13 @@ pub(crate) fn copy_dir_filtered(src: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn export_snapshot(source: &Path, dest: &Path) -> Result<()> {
+    let manifest = build_snapshot_manifest(source)?;
+    copy_dir_filtered(source, dest)?;
+    write_snapshot_manifest(dest, &manifest)?;
+    verify_snapshot(dest)
+}
+
 fn verify_snapshot(dest: &Path) -> Result<()> {
     let manifest = read_snapshot_manifest(dest)?;
     validate_manifest(dest, &manifest)?;
@@ -275,6 +282,10 @@ fn verify_snapshot(dest: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn verify_snapshot_integrity(dest: &Path) -> Result<()> {
+    verify_snapshot(dest)
 }
 
 fn build_snapshot_manifest(source: &Path) -> Result<SnapshotManifest> {

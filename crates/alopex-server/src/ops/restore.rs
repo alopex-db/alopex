@@ -9,7 +9,7 @@ use tokio::task;
 use uuid::Uuid;
 
 use crate::error::{Result, ServerError};
-use crate::ops::backup::copy_dir_filtered;
+use crate::ops::backup::{copy_dir_filtered, verify_snapshot_integrity};
 use crate::ops::state::{LifecycleStateManager, Mode, OperationState, Progress, RestoreMetadata};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -45,6 +45,7 @@ impl RestoreCoordinator {
     }
 
     pub async fn start_restore(&self, source: RestoreSource) -> Result<RestoreHandle> {
+        preflight_restore_source(&source.path)?;
         let mut runtime = self.runtime.lock().expect("restore runtime lock poisoned");
         if runtime.active.is_some() {
             return Err(ServerError::Conflict("restore already running".to_string()));
@@ -123,7 +124,6 @@ impl RestoreCoordinator {
 }
 
 fn run_restore(data_dir: &Path, source: &Path) -> Result<RestoreMetadata> {
-    validate_source(source)?;
     let backup_dir = restore_backup_dir(data_dir);
     fs::create_dir_all(&backup_dir)?;
     copy_dir_filtered(data_dir, &backup_dir)?;
@@ -161,6 +161,19 @@ fn validate_source(source: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn preflight_restore_source(source: &Path) -> Result<()> {
+    validate_source(source)?;
+    let manifest_path = source.join("snapshot.manifest");
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+    verify_snapshot_integrity(source).map_err(|err| {
+        ServerError::RestoreIntegrityMismatch(format!(
+            "source snapshot failed integrity checks: {err}"
+        ))
+    })
 }
 
 fn restore_backup_dir(data_dir: &Path) -> PathBuf {

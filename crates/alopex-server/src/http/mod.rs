@@ -130,6 +130,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
             "/api/admin/backup",
             axum::routing::post(admin_api::start_backup),
         )
+        .route("/api/admin/export", axum::routing::post(admin_api::export))
         .route(
             "/api/admin/backup/:id",
             axum::routing::get(admin_api::backup_status),
