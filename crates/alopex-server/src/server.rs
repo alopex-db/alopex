@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -9,7 +10,7 @@ use alopex_core::types::TxnMode;
 use alopex_sql::catalog::{Catalog, CatalogError, PersistentCatalog};
 use alopex_sql::storage::async_storage::AsyncTxnBridge;
 use alopex_sql::storage::erased::ErasedAsyncSqlTransaction;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Semaphore};
 use tracing::info;
 
 use crate::audit::AuditLogger;
@@ -43,6 +44,8 @@ pub struct ServerState {
     pub recovery_info: RecoveryInfo,
     pub backup_coordinator: BackupCoordinator,
     pub restore_coordinator: RestoreCoordinator,
+    pub admission_permits: Arc<Semaphore>,
+    pub admission_waiters: AtomicUsize,
 }
 
 impl Server {
@@ -85,6 +88,7 @@ impl Server {
         let backup_coordinator =
             BackupCoordinator::new(data_dir.clone(), lifecycle_state.clone(), checkpoint);
         let restore_coordinator = RestoreCoordinator::new(data_dir, lifecycle_state.clone());
+        let admission_permits = Arc::new(Semaphore::new(config.max_concurrency));
 
         Ok(Self {
             state: Arc::new(ServerState {
@@ -101,6 +105,8 @@ impl Server {
                 recovery_info,
                 backup_coordinator,
                 restore_coordinator,
+                admission_permits,
+                admission_waiters: AtomicUsize::new(0),
             }),
         })
     }

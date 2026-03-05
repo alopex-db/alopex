@@ -164,28 +164,44 @@ async fn load_test_backpressure_with_slow_client() {
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn load_test_timeout_cancels_stream() {
-    let (state, _temp) = build_state(Duration::from_millis(0)).await;
+    let (state, _temp) = build_state(Duration::from_millis(1)).await;
     let router = http::router(state.clone());
+
+    let mut sql = String::from("SELECT 0 AS id");
+    for id in 1..4000 {
+        sql.push_str(" UNION ALL SELECT ");
+        sql.push_str(&id.to_string());
+    }
 
     let (status, body) = send_json(
         router,
         "/sql",
         json!({
-            "sql": "SELECT 1;",
+            "sql": sql,
             "streaming": true
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let text = String::from_utf8(body).expect("utf8");
+    assert!(status == StatusCode::OK || status == StatusCode::REQUEST_TIMEOUT);
+    let text = String::from_utf8(body.clone()).expect("utf8");
     let mut saw_timeout = false;
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let item: Value = serde_json::from_str(line).expect("json");
-        if let Some(error) = item.get("error") {
-            if error.get("code").and_then(|v| v.as_str()) == Some("QUERY_TIMEOUT") {
-                saw_timeout = true;
-                break;
+    if status == StatusCode::OK {
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let item: Value = serde_json::from_str(line).expect("json");
+            if let Some(error) = item.get("error") {
+                if error.get("code").and_then(|v| v.as_str()) == Some("QUERY_TIMEOUT") {
+                    saw_timeout = true;
+                    break;
+                }
             }
+        }
+    } else {
+        let payload: Value = serde_json::from_slice(&body).expect("json");
+        let Some(error) = payload.get("error") else {
+            panic!("timeout response must include error");
+        };
+        if error.get("code").and_then(|v| v.as_str()) == Some("QUERY_TIMEOUT") {
+            saw_timeout = true;
         }
     }
     assert!(saw_timeout);

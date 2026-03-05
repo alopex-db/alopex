@@ -8,6 +8,7 @@ pub mod session;
 pub mod sql;
 pub mod vector;
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::http::{HeaderValue, StatusCode};
@@ -41,6 +42,22 @@ struct ErrorBody {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: ErrorBody,
+}
+
+struct QueueWaitGuard<'a> {
+    counter: &'a std::sync::atomic::AtomicUsize,
+}
+
+impl<'a> QueueWaitGuard<'a> {
+    fn new(counter: &'a std::sync::atomic::AtomicUsize) -> Self {
+        Self { counter }
+    }
+}
+
+impl Drop for QueueWaitGuard<'_> {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 pub fn router(state: Arc<ServerState>) -> Router {
@@ -148,13 +165,12 @@ pub fn router(state: Arc<ServerState>) -> Router {
 
     let middleware = middleware::from_fn(context_middleware);
     let connection_middleware = middleware::from_fn(connection_middleware);
+    let admission_middleware = middleware::from_fn(admission_middleware);
     api.layer(
         ServiceBuilder::new()
             .layer(RequestBodyLimitLayer::new(state.config.max_request_size))
-            .layer(tower::limit::ConcurrencyLimitLayer::new(
-                state.config.max_concurrency,
-            ))
             .layer(TraceLayer::new_for_http().make_span_with(make_trace_span))
+            .layer(admission_middleware)
             .layer(middleware)
             .layer(connection_middleware),
     )
@@ -214,6 +230,41 @@ pub async fn connection_middleware<B>(
     res
 }
 
+pub async fn admission_middleware<B>(
+    axum::extract::Extension(state): axum::extract::Extension<Arc<ServerState>>,
+    req: axum::http::Request<B>,
+    next: middleware::Next<B>,
+) -> Response {
+    if let Ok(permit) = state.admission_permits.clone().try_acquire_owned() {
+        let res = next.run(req).await;
+        drop(permit);
+        return res;
+    }
+
+    let queued_now = state.admission_waiters.fetch_add(1, Ordering::AcqRel) + 1;
+    if queued_now > state.config.max_queue_len {
+        state.admission_waiters.fetch_sub(1, Ordering::AcqRel);
+        let correlation_id =
+            extract_correlation_id(req.headers()).unwrap_or_else(|| Uuid::new_v4().to_string());
+        return queue_overflow_response(&correlation_id);
+    }
+    let queue_wait_guard = QueueWaitGuard::new(&state.admission_waiters);
+
+    let permit = match state.admission_permits.clone().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            let correlation_id =
+                extract_correlation_id(req.headers()).unwrap_or_else(|| Uuid::new_v4().to_string());
+            return queue_overflow_response(&correlation_id);
+        }
+    };
+    drop(queue_wait_guard);
+
+    let res = next.run(req).await;
+    drop(permit);
+    res
+}
+
 fn auth_error_response(err: AuthError, correlation_id: &str) -> Response {
     let message = err.to_string();
     let body = Json(ErrorResponse {
@@ -224,6 +275,17 @@ fn auth_error_response(err: AuthError, correlation_id: &str) -> Response {
         },
     });
     (StatusCode::UNAUTHORIZED, body).into_response()
+}
+
+fn queue_overflow_response(correlation_id: &str) -> Response {
+    let body = Json(ErrorResponse {
+        error: ErrorBody {
+            code: "SERVER_BACKPRESSURE".to_string(),
+            message: "server request queue is full".to_string(),
+            correlation_id: correlation_id.to_string(),
+        },
+    });
+    (StatusCode::SERVICE_UNAVAILABLE, body).into_response()
 }
 
 pub fn error_response(err: ServerError, ctx: &RequestContext) -> Response {
