@@ -43,7 +43,9 @@ tracing-subscriber = { workspace = true }
 uuid = { version = "1.6", features = ["v4", "serde"] }
 
 [dev-dependencies]
+alopex-cli = { path = "../alopex-cli" }
 alopex-core = { path = "../alopex-core" }
+alopex-embedded = { path = "../alopex-embedded" }
 alopex-sql = { path = "../alopex-sql", features = ["tokio"] }
 futures-core = { workspace = true }
 hyper = "0.14"
