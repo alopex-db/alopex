@@ -10,6 +10,7 @@ use alopex_sql::catalog::{Catalog, CatalogError, PersistentCatalog};
 use alopex_sql::storage::async_storage::AsyncTxnBridge;
 use alopex_sql::storage::erased::ErasedAsyncSqlTransaction;
 use tokio::sync::broadcast;
+use tracing::info;
 
 use crate::audit::AuditLogger;
 use crate::auth::AuthMiddleware;
@@ -108,6 +109,12 @@ impl Server {
         if self.state.config.tracing_enabled {
             init_tracing();
         }
+        info!(
+            max_concurrency = self.state.config.max_concurrency,
+            max_queue_len = self.state.config.max_queue_len,
+            query_timeout_ms = self.state.config.query_timeout.as_millis(),
+            "Admission control configuration applied"
+        );
 
         let (shutdown_tx, _) = broadcast::channel(2);
         let http_state = self.state.clone();

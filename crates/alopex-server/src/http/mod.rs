@@ -152,7 +152,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
         ServiceBuilder::new()
             .layer(RequestBodyLimitLayer::new(state.config.max_request_size))
             .layer(tower::limit::ConcurrencyLimitLayer::new(
-                state.config.max_connections,
+                state.config.max_concurrency,
             ))
             .layer(TraceLayer::new_for_http().make_span_with(make_trace_span))
             .layer(middleware)
