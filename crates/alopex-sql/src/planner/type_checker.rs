@@ -60,7 +60,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     ) -> Result<TypedExpr, PlannerError> {
         let span = expr.span;
         match &expr.kind {
-            ExprKind::Literal(lit) => self.infer_literal_type(lit, span),
+            ExprKind::Literal { literal: lit } => self.infer_literal_type(lit, span),
 
             ExprKind::ColumnRef {
                 table: table_qualifier,
@@ -118,7 +118,28 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 self.infer_is_null_type(expr, *negated, table, span)
             }
 
-            ExprKind::VectorLiteral(values) => self.infer_vector_literal_type(values, span),
+            ExprKind::VectorLiteral { values } => self.infer_vector_literal_type(values, span),
+
+            ExprKind::ScalarSubquery { .. } => Err(PlannerError::unsupported_feature(
+                "scalar subquery type checking",
+                "v0.6.0-subquery Phase 6",
+                span,
+            )),
+            ExprKind::InSubquery { .. } => Err(PlannerError::unsupported_feature(
+                "IN subquery type checking",
+                "v0.6.0-subquery Phase 6",
+                span,
+            )),
+            ExprKind::Exists { .. } => Err(PlannerError::unsupported_feature(
+                "EXISTS subquery type checking",
+                "v0.6.0-subquery Phase 6",
+                span,
+            )),
+            ExprKind::Quantified { .. } => Err(PlannerError::unsupported_feature(
+                "quantified subquery type checking",
+                "v0.6.0-subquery Phase 6",
+                span,
+            )),
         }
     }
 

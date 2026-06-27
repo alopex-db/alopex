@@ -1,23 +1,26 @@
 use super::expr::Expr;
 use super::span::{Span, Spanned};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Select {
     pub distinct: bool,
     pub projection: Vec<SelectItem>,
-    pub from: TableRef,
+    pub from: Vec<FromItem>,
     pub selection: Option<Expr>,
     pub group_by: Option<Vec<Expr>>,
     pub having: Option<Expr>,
     pub order_by: Vec<OrderByExpr>,
     pub limit: Option<Expr>,
     pub offset: Option<Expr>,
+    #[serde(default)]
     pub span: Span,
 }
 
 pub const LITERAL_TABLE: &str = "__literal__";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
 pub enum SelectItem {
     Wildcard {
         span: Span,
@@ -29,14 +32,40 @@ pub enum SelectItem {
     },
 }
 
-#[derive(Debug, Clone)]
-pub struct TableRef {
-    pub name: String,
-    pub alias: Option<String>,
-    pub span: Span,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
+#[allow(clippy::large_enum_variant)]
+pub enum FromItem {
+    Table {
+        name: String,
+        alias: Option<String>,
+        span: Span,
+    },
+    Join {
+        left: Box<FromItem>,
+        right: Box<FromItem>,
+        join_type: JoinType,
+        condition: Option<Expr>,
+        using: Option<Vec<String>>,
+        span: Span,
+    },
+    Derived {
+        subquery: Box<super::Statement>,
+        alias: Option<String>,
+        span: Span,
+    },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JoinType {
+    Inner,
+    Left,
+    Right,
+    Full,
+    Cross,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderByExpr {
     pub expr: Expr,
     pub asc: Option<bool>,
@@ -44,7 +73,7 @@ pub struct OrderByExpr {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Insert {
     pub table: String,
     pub columns: Option<Vec<String>>,
@@ -52,7 +81,7 @@ pub struct Insert {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Update {
     pub table: String,
     pub assignments: Vec<Assignment>,
@@ -60,14 +89,14 @@ pub struct Update {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Assignment {
     pub column: String,
     pub value: Expr,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Delete {
     pub table: String,
     pub selection: Option<Expr>,
@@ -89,9 +118,13 @@ impl Spanned for SelectItem {
     }
 }
 
-impl Spanned for TableRef {
+impl Spanned for FromItem {
     fn span(&self) -> Span {
-        self.span
+        match self {
+            FromItem::Table { span, .. }
+            | FromItem::Join { span, .. }
+            | FromItem::Derived { span, .. } => *span,
+        }
     }
 }
 

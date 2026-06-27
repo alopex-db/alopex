@@ -35,12 +35,19 @@ pub use types::ResolvedType;
 use crate::ast::ddl::{
     ColumnConstraint, ColumnDef, CreateIndex, CreateTable, DropIndex, DropTable,
 };
-use crate::ast::dml::{Delete, Insert, LITERAL_TABLE, OrderByExpr, Select, SelectItem, Update};
+use crate::ast::dml::{
+    Delete, FromItem, Insert, LITERAL_TABLE, OrderByExpr, Select, SelectItem, Update,
+};
 use crate::ast::expr::Literal;
-use crate::ast::{Statement, StatementKind};
+use crate::ast::{Spanned, Statement, StatementKind};
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::{DataSourceFormat, TableType};
 use std::collections::HashMap;
+
+struct SingleTableFrom<'a> {
+    name: &'a str,
+    span: crate::ast::Span,
+}
 
 /// The SQL query planner.
 ///
@@ -149,7 +156,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         Ok(LogicalPlan::CreateTable {
             table,
             if_not_exists: stmt.if_not_exists,
-            with_options: stmt.with_options.clone(),
+            with_options: stmt
+                .with_options
+                .iter()
+                .map(|opt| (opt.key.clone(), opt.value.clone()))
+                .collect(),
         })
     }
 
@@ -172,24 +183,18 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         constraint: &ColumnConstraint,
     ) -> ColumnMetadata {
         match constraint {
-            ColumnConstraint::NotNull => {
+            ColumnConstraint::NotNull { .. } => {
                 meta.not_null = true;
             }
-            ColumnConstraint::Null => {
-                meta.not_null = false;
-            }
-            ColumnConstraint::PrimaryKey => {
+            ColumnConstraint::PrimaryKey { .. } => {
                 meta.primary_key = true;
                 meta.not_null = true; // PRIMARY KEY implies NOT NULL
             }
-            ColumnConstraint::Unique => {
+            ColumnConstraint::Unique { .. } => {
                 meta.unique = true;
             }
-            ColumnConstraint::Default(expr) => {
+            ColumnConstraint::Default { value: expr, .. } => {
                 meta.default = Some(expr.clone());
-            }
-            ColumnConstraint::WithSpan { kind, .. } => {
-                meta = Self::apply_column_constraint(meta, kind);
             }
         }
         meta
@@ -223,11 +228,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
     /// Check if a column constraint is a PRIMARY KEY constraint.
     fn is_primary_key_constraint(constraint: &ColumnConstraint) -> bool {
-        match constraint {
-            ColumnConstraint::PrimaryKey => true,
-            ColumnConstraint::WithSpan { kind, .. } => Self::is_primary_key_constraint(kind),
-            _ => false,
-        }
+        matches!(constraint, ColumnConstraint::PrimaryKey { .. })
     }
 
     /// Plan a DROP TABLE statement.
@@ -335,14 +336,14 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     /// Builds a logical plan tree: Scan -> Filter -> Sort -> Limit
     /// Each layer is optional and only added if the corresponding clause is present.
     fn plan_select(&self, stmt: &Select) -> Result<LogicalPlan, PlannerError> {
+        let from = self.single_table_from(stmt)?;
         // 1. Resolve the FROM table
         let literal_table;
-        let table = if stmt.from.name == LITERAL_TABLE {
+        let table = if from.name == LITERAL_TABLE {
             literal_table = TableMetadata::new(LITERAL_TABLE, Vec::new());
             &literal_table
         } else {
-            self.name_resolver
-                .resolve_table(&stmt.from.name, stmt.from.span)?
+            self.name_resolver.resolve_table(from.name, from.span)?
         };
 
         let has_group_by = stmt
@@ -362,7 +363,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
         // 2. Create the base Scan plan
         let mut plan = LogicalPlan::Scan {
-            table: stmt.from.name.clone(),
+            table: from.name.to_string(),
             projection: scan_projection,
         };
 
@@ -523,6 +524,34 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
 
         Ok(plan)
+    }
+
+    fn single_table_from<'b>(&self, stmt: &'b Select) -> Result<SingleTableFrom<'b>, PlannerError> {
+        match stmt.from.as_slice() {
+            [] => Ok(SingleTableFrom {
+                name: LITERAL_TABLE,
+                span: stmt.span,
+            }),
+            [FromItem::Table { name, span, .. }] => Ok(SingleTableFrom {
+                name: name.as_str(),
+                span: *span,
+            }),
+            [FromItem::Join { span, .. }] => Err(PlannerError::unsupported_feature(
+                "JOIN planning",
+                "v0.6.0 Phase 6",
+                *span,
+            )),
+            [FromItem::Derived { span, .. }] => Err(PlannerError::unsupported_feature(
+                "derived table planning",
+                "v0.6.0-subquery Phase 6",
+                *span,
+            )),
+            [first, ..] => Err(PlannerError::unsupported_feature(
+                "multiple FROM items",
+                "v0.6.0 Phase 6",
+                first.span(),
+            )),
+        }
     }
 
     /// Build the projection for a SELECT statement.
@@ -1006,7 +1035,10 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             None => Ok(None),
             Some(e) => {
                 // For now, only support literal integers
-                if let crate::ast::expr::ExprKind::Literal(Literal::Number(s)) = &e.kind {
+                if let crate::ast::expr::ExprKind::Literal {
+                    literal: Literal::Number(s),
+                } = &e.kind
+                {
                     s.parse::<u64>().map(Some).map_err(|_| {
                         PlannerError::type_mismatch("unsigned integer", s.clone(), e.span)
                     })
@@ -1295,7 +1327,13 @@ fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
             expr_contains_aggregate(expr) || list.iter().any(expr_contains_aggregate)
         }
         ExprKind::IsNull { expr, .. } => expr_contains_aggregate(expr),
-        ExprKind::Literal(_) | ExprKind::VectorLiteral(_) | ExprKind::ColumnRef { .. } => false,
+        ExprKind::ScalarSubquery { .. }
+        | ExprKind::InSubquery { .. }
+        | ExprKind::Exists { .. }
+        | ExprKind::Quantified { .. }
+        | ExprKind::Literal { .. }
+        | ExprKind::VectorLiteral { .. }
+        | ExprKind::ColumnRef { .. } => false,
     }
 }
 

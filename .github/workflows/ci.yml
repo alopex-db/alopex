@@ -39,6 +39,8 @@ jobs:
             -v "$PWD":/workspace \
             -w "/workspace/${NIM_SQL_PARSER_DIR}" \
             -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
             nimlang/nim:2.2 \
             sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - run: cargo clippy --all-targets --all-features -- -D warnings
@@ -134,6 +136,8 @@ jobs:
             -v "$PWD":/workspace \
             -w "/workspace/${NIM_SQL_PARSER_DIR}" \
             -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
             nimlang/nim:2.2 \
             sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
 
@@ -216,6 +220,8 @@ jobs:
             -v "$PWD":/workspace \
             -w "/workspace/${NIM_SQL_PARSER_DIR}" \
             -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
             nimlang/nim:2.2 \
             sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
 
@@ -270,6 +276,8 @@ jobs:
             -v "$PWD":/workspace \
             -w "/workspace/${NIM_SQL_PARSER_DIR}" \
             -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
             nimlang/nim:2.2 \
             sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
 

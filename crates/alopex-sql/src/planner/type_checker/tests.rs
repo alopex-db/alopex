@@ -79,7 +79,9 @@ fn test_infer_literal_integer() {
     let table = catalog.get_table("users").unwrap();
 
     let expr = Expr {
-        kind: ExprKind::Literal(Literal::Number("42".to_string())),
+        kind: ExprKind::Literal {
+            literal: Literal::Number("42".to_string()),
+        },
         span: test_span(),
     };
 
@@ -95,7 +97,9 @@ fn test_infer_literal_bigint() {
 
     // Number larger than i32::MAX
     let expr = Expr {
-        kind: ExprKind::Literal(Literal::Number("9999999999".to_string())),
+        kind: ExprKind::Literal {
+            literal: Literal::Number("9999999999".to_string()),
+        },
         span: test_span(),
     };
 
@@ -110,7 +114,9 @@ fn test_infer_literal_double() {
     let table = catalog.get_table("users").unwrap();
 
     let expr = Expr {
-        kind: ExprKind::Literal(Literal::Number("3.14".to_string())),
+        kind: ExprKind::Literal {
+            literal: Literal::Number("3.14".to_string()),
+        },
         span: test_span(),
     };
 
@@ -125,7 +131,9 @@ fn test_infer_literal_double_scientific() {
     let table = catalog.get_table("users").unwrap();
 
     let expr = Expr {
-        kind: ExprKind::Literal(Literal::Number("1e10".to_string())),
+        kind: ExprKind::Literal {
+            literal: Literal::Number("1e10".to_string()),
+        },
         span: test_span(),
     };
 
@@ -140,7 +148,9 @@ fn test_infer_literal_string() {
     let table = catalog.get_table("users").unwrap();
 
     let expr = Expr {
-        kind: ExprKind::Literal(Literal::String("hello".to_string())),
+        kind: ExprKind::Literal {
+            literal: Literal::String("hello".to_string()),
+        },
         span: test_span(),
     };
 
@@ -155,7 +165,9 @@ fn test_infer_literal_boolean() {
     let table = catalog.get_table("users").unwrap();
 
     let expr = Expr {
-        kind: ExprKind::Literal(Literal::Boolean(true)),
+        kind: ExprKind::Literal {
+            literal: Literal::Boolean(true),
+        },
         span: test_span(),
     };
 
@@ -170,7 +182,9 @@ fn test_infer_literal_null() {
     let table = catalog.get_table("users").unwrap();
 
     let expr = Expr {
-        kind: ExprKind::Literal(Literal::Null),
+        kind: ExprKind::Literal {
+            literal: Literal::Null,
+        },
         span: test_span(),
     };
 
@@ -713,7 +727,9 @@ fn test_infer_vector_literal() {
     let table = catalog.get_table("embeddings").unwrap();
 
     let expr = Expr {
-        kind: ExprKind::VectorLiteral(vec![1.0, 2.0, 3.0, 4.0]),
+        kind: ExprKind::VectorLiteral {
+            values: vec![1.0, 2.0, 3.0, 4.0],
+        },
         span: test_span(),
     };
 
@@ -775,11 +791,15 @@ fn test_check_insert_values_success() {
     let columns = vec!["id".to_string(), "name".to_string()];
     let values = vec![vec![
         Expr {
-            kind: ExprKind::Literal(Literal::Number("1".to_string())),
+            kind: ExprKind::Literal {
+                literal: Literal::Number("1".to_string()),
+            },
             span: test_span(),
         },
         Expr {
-            kind: ExprKind::Literal(Literal::String("Alice".to_string())),
+            kind: ExprKind::Literal {
+                literal: Literal::String("Alice".to_string()),
+            },
             span: test_span(),
         },
     ]];
@@ -802,27 +822,39 @@ fn test_check_insert_values_without_columns() {
     let columns: Vec<String> = vec![];
     let values = vec![vec![
         Expr {
-            kind: ExprKind::Literal(Literal::Number("1".to_string())),
+            kind: ExprKind::Literal {
+                literal: Literal::Number("1".to_string()),
+            },
             span: test_span(),
         },
         Expr {
-            kind: ExprKind::Literal(Literal::String("Alice".to_string())),
+            kind: ExprKind::Literal {
+                literal: Literal::String("Alice".to_string()),
+            },
             span: test_span(),
         },
         Expr {
-            kind: ExprKind::Literal(Literal::String("alice@example.com".to_string())),
+            kind: ExprKind::Literal {
+                literal: Literal::String("alice@example.com".to_string()),
+            },
             span: test_span(),
         },
         Expr {
-            kind: ExprKind::Literal(Literal::Number("30".to_string())),
+            kind: ExprKind::Literal {
+                literal: Literal::Number("30".to_string()),
+            },
             span: test_span(),
         },
         Expr {
-            kind: ExprKind::Literal(Literal::Number("95.5".to_string())),
+            kind: ExprKind::Literal {
+                literal: Literal::Number("95.5".to_string()),
+            },
             span: test_span(),
         },
         Expr {
-            kind: ExprKind::Literal(Literal::Boolean(true)),
+            kind: ExprKind::Literal {
+                literal: Literal::Boolean(true),
+            },
             span: test_span(),
         },
     ]];
@@ -841,7 +873,9 @@ fn test_check_insert_values_column_count_mismatch() {
     let values = vec![vec![
         // Only one value for two columns
         Expr {
-            kind: ExprKind::Literal(Literal::Number("1".to_string())),
+            kind: ExprKind::Literal {
+                literal: Literal::Number("1".to_string()),
+            },
             span: test_span(),
         },
     ]];
@@ -875,11 +909,15 @@ fn test_check_insert_values_type_mismatch() {
     let columns = vec!["id".to_string(), "name".to_string()];
     let values = vec![vec![
         Expr {
-            kind: ExprKind::Literal(Literal::String("not_a_number".to_string())),
+            kind: ExprKind::Literal {
+                literal: Literal::String("not_a_number".to_string()),
+            },
             span: test_span(),
         },
         Expr {
-            kind: ExprKind::Literal(Literal::String("Alice".to_string())),
+            kind: ExprKind::Literal {
+                literal: Literal::String("Alice".to_string()),
+            },
             span: test_span(),
         },
     ]];
@@ -908,11 +946,15 @@ fn test_check_insert_values_null_constraint_violation() {
     let columns = vec!["id".to_string(), "name".to_string()];
     let values = vec![vec![
         Expr {
-            kind: ExprKind::Literal(Literal::Null),
+            kind: ExprKind::Literal {
+                literal: Literal::Null,
+            },
             span: span_at(3, 10),
         },
         Expr {
-            kind: ExprKind::Literal(Literal::String("Alice".to_string())),
+            kind: ExprKind::Literal {
+                literal: Literal::String("Alice".to_string()),
+            },
             span: test_span(),
         },
     ]];
@@ -940,15 +982,21 @@ fn test_check_insert_values_implicit_conversion() {
     let columns = vec!["id".to_string(), "name".to_string(), "score".to_string()];
     let values = vec![vec![
         Expr {
-            kind: ExprKind::Literal(Literal::Number("1".to_string())),
+            kind: ExprKind::Literal {
+                literal: Literal::Number("1".to_string()),
+            },
             span: test_span(),
         },
         Expr {
-            kind: ExprKind::Literal(Literal::String("Alice".to_string())),
+            kind: ExprKind::Literal {
+                literal: Literal::String("Alice".to_string()),
+            },
             span: test_span(),
         },
         Expr {
-            kind: ExprKind::Literal(Literal::Number("90".to_string())), // Integer into Double
+            kind: ExprKind::Literal {
+                literal: Literal::Number("90".to_string()),
+            }, // Integer into Double
             span: test_span(),
         },
     ]];
@@ -968,7 +1016,9 @@ fn test_check_assignment_success() {
     let table = catalog.get_table("users").unwrap();
 
     let value = Expr {
-        kind: ExprKind::Literal(Literal::String("Bob".to_string())),
+        kind: ExprKind::Literal {
+            literal: Literal::String("Bob".to_string()),
+        },
         span: test_span(),
     };
 
@@ -987,7 +1037,9 @@ fn test_check_assignment_column_not_found() {
 
     let span = span_at(4, 12);
     let value = Expr {
-        kind: ExprKind::Literal(Literal::String("value".to_string())),
+        kind: ExprKind::Literal {
+            literal: Literal::String("value".to_string()),
+        },
         span: test_span(),
     };
 
@@ -1009,7 +1061,9 @@ fn test_check_assignment_type_mismatch() {
     let table = catalog.get_table("users").unwrap();
 
     let value = Expr {
-        kind: ExprKind::Literal(Literal::String("not_a_number".to_string())),
+        kind: ExprKind::Literal {
+            literal: Literal::String("not_a_number".to_string()),
+        },
         span: test_span(),
     };
 
@@ -1034,7 +1088,9 @@ fn test_check_assignment_null_constraint_violation() {
     let table = catalog.get_table("users").unwrap();
 
     let value = Expr {
-        kind: ExprKind::Literal(Literal::Null),
+        kind: ExprKind::Literal {
+            literal: Literal::Null,
+        },
         span: span_at(5, 15),
     };
 
@@ -1300,7 +1356,9 @@ fn test_infer_complex_expression() {
                             }),
                             op: BinaryOp::Add,
                             right: Box::new(Expr {
-                                kind: ExprKind::Literal(Literal::Number("10".to_string())),
+                                kind: ExprKind::Literal {
+                                    literal: Literal::Number("10".to_string()),
+                                },
                                 span: test_span(),
                             }),
                         },
@@ -1308,7 +1366,9 @@ fn test_infer_complex_expression() {
                     }),
                     op: BinaryOp::Gt,
                     right: Box::new(Expr {
-                        kind: ExprKind::Literal(Literal::Number("25".to_string())),
+                        kind: ExprKind::Literal {
+                            literal: Literal::Number("25".to_string()),
+                        },
                         span: test_span(),
                     }),
                 },
@@ -1347,11 +1407,15 @@ fn test_infer_between_expression() {
                 span: test_span(),
             }),
             low: Box::new(Expr {
-                kind: ExprKind::Literal(Literal::Number("18".to_string())),
+                kind: ExprKind::Literal {
+                    literal: Literal::Number("18".to_string()),
+                },
                 span: test_span(),
             }),
             high: Box::new(Expr {
-                kind: ExprKind::Literal(Literal::Number("65".to_string())),
+                kind: ExprKind::Literal {
+                    literal: Literal::Number("65".to_string()),
+                },
                 span: test_span(),
             }),
             negated: false,
@@ -1381,15 +1445,21 @@ fn test_infer_in_list_expression() {
             }),
             list: vec![
                 Expr {
-                    kind: ExprKind::Literal(Literal::Number("1".to_string())),
+                    kind: ExprKind::Literal {
+                        literal: Literal::Number("1".to_string()),
+                    },
                     span: test_span(),
                 },
                 Expr {
-                    kind: ExprKind::Literal(Literal::Number("2".to_string())),
+                    kind: ExprKind::Literal {
+                        literal: Literal::Number("2".to_string()),
+                    },
                     span: test_span(),
                 },
                 Expr {
-                    kind: ExprKind::Literal(Literal::Number("3".to_string())),
+                    kind: ExprKind::Literal {
+                        literal: Literal::Number("3".to_string()),
+                    },
                     span: test_span(),
                 },
             ],
@@ -1419,7 +1489,9 @@ fn test_infer_like_expression() {
                 span: test_span(),
             }),
             pattern: Box::new(Expr {
-                kind: ExprKind::Literal(Literal::String("A%".to_string())),
+                kind: ExprKind::Literal {
+                    literal: Literal::String("A%".to_string()),
+                },
                 span: test_span(),
             }),
             escape: None,

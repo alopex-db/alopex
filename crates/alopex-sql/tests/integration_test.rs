@@ -1,4 +1,4 @@
-use alopex_sql::{AlopexDialect, ExprKind, LITERAL_TABLE, Parser, StatementKind};
+use alopex_sql::{AlopexDialect, ExprKind, Parser, StatementKind};
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
@@ -20,7 +20,7 @@ fn vector_literal_parses_via_dialect_prefix() {
         StatementKind::Insert(ins) => {
             assert_eq!(ins.values.len(), 1);
             match ins.values[0][0].kind {
-                ExprKind::VectorLiteral(ref v) => assert_eq!(v, &vec![0.1, -0.2]),
+                ExprKind::VectorLiteral { values: ref v } => assert_eq!(v, &vec![0.1, -0.2]),
                 ref other => panic!("expected vector literal, got {:?}", other),
             }
         }
@@ -34,7 +34,7 @@ fn parses_select_without_from_single_literal() {
     let stmts = Parser::parse_sql(&AlopexDialect, "SELECT 1").unwrap();
     match &stmts[0].kind {
         StatementKind::Select(select) => {
-            assert_eq!(select.from.name, LITERAL_TABLE);
+            assert!(select.from.is_empty());
             assert_eq!(select.projection.len(), 1);
         }
         other => panic!("expected select, got {:?}", other),
@@ -47,7 +47,7 @@ fn parses_select_without_from_multiple_literals() {
     let stmts = Parser::parse_sql(&AlopexDialect, "SELECT 1, 'ok'").unwrap();
     match &stmts[0].kind {
         StatementKind::Select(select) => {
-            assert_eq!(select.from.name, LITERAL_TABLE);
+            assert!(select.from.is_empty());
             assert_eq!(select.projection.len(), 2);
         }
         other => panic!("expected select, got {:?}", other),

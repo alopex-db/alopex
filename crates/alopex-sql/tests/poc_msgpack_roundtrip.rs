@@ -151,6 +151,7 @@ fn run_nim_poc(out_dir: &Path) {
 }
 
 #[test]
+#[ignore = "requires Docker access to run the Nim MessagePack PoC container"]
 fn msgpack_from_nim_roundtrips_into_rust_struct() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir

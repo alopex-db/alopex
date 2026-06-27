@@ -1,18 +1,18 @@
 use super::expr::Expr;
 use super::span::{Span, Spanned};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTable {
     pub if_not_exists: bool,
     pub name: String,
     pub columns: Vec<ColumnDef>,
     pub constraints: Vec<TableConstraint>,
-    /// Raw WITH オプション (key, value) の組。
-    pub with_options: Vec<(String, String)>,
+    pub with_options: Vec<IndexOption>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnDef {
     pub name: String,
     pub data_type: DataType,
@@ -20,7 +20,8 @@ pub struct ColumnDef {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
 pub enum DataType {
     Integer,
     Int,
@@ -38,40 +39,36 @@ pub enum DataType {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VectorMetric {
     Cosine,
     L2,
     Inner,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
 pub enum ColumnConstraint {
-    NotNull,
-    Null,
-    PrimaryKey,
-    Unique,
-    Default(Expr),
-    /// Span for the constraint keyword/location.
-    WithSpan {
-        kind: Box<ColumnConstraint>,
-        span: Span,
-    },
+    NotNull { span: Span },
+    PrimaryKey { span: Span },
+    Unique { span: Span },
+    Default { value: Expr, span: Span },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
 pub enum TableConstraint {
     PrimaryKey { columns: Vec<String>, span: Span },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DropTable {
     pub if_exists: bool,
     pub name: String,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateIndex {
     pub if_not_exists: bool,
     pub name: String,
@@ -82,20 +79,20 @@ pub struct CreateIndex {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IndexMethod {
     BTree,
     Hnsw,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexOption {
     pub key: String,
     pub value: String,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DropIndex {
     pub if_exists: bool,
     pub name: String,
@@ -117,8 +114,10 @@ impl Spanned for ColumnDef {
 impl Spanned for ColumnConstraint {
     fn span(&self) -> Span {
         match self {
-            ColumnConstraint::WithSpan { span, .. } => *span,
-            _ => Span::empty(),
+            ColumnConstraint::NotNull { span }
+            | ColumnConstraint::PrimaryKey { span }
+            | ColumnConstraint::Unique { span }
+            | ColumnConstraint::Default { span, .. } => *span,
         }
     }
 }

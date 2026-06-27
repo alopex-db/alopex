@@ -514,7 +514,9 @@ fn test_resolve_expr_literal() {
     let table = resolver.resolve_table("users", test_span()).unwrap();
 
     let expr = Expr {
-        kind: ExprKind::Literal(Literal::Number("42".to_string())),
+        kind: ExprKind::Literal {
+            literal: Literal::Number("42".to_string()),
+        },
         span: test_span(),
     };
 
@@ -541,7 +543,9 @@ fn test_resolve_expr_binary_op() {
             }),
             op: BinaryOp::Gt,
             right: Box::new(Expr {
-                kind: ExprKind::Literal(Literal::Number("18".to_string())),
+                kind: ExprKind::Literal {
+                    literal: Literal::Number("18".to_string()),
+                },
                 span: test_span(),
             }),
         },
@@ -571,7 +575,9 @@ fn test_resolve_expr_binary_op_with_invalid_column() {
             }),
             op: BinaryOp::Gt,
             right: Box::new(Expr {
-                kind: ExprKind::Literal(Literal::Number("18".to_string())),
+                kind: ExprKind::Literal {
+                    literal: Literal::Number("18".to_string()),
+                },
                 span: test_span(),
             }),
         },
@@ -628,11 +634,15 @@ fn test_resolve_expr_between() {
                 span: test_span(),
             }),
             low: Box::new(Expr {
-                kind: ExprKind::Literal(Literal::Number("18".to_string())),
+                kind: ExprKind::Literal {
+                    literal: Literal::Number("18".to_string()),
+                },
                 span: test_span(),
             }),
             high: Box::new(Expr {
-                kind: ExprKind::Literal(Literal::Number("65".to_string())),
+                kind: ExprKind::Literal {
+                    literal: Literal::Number("65".to_string()),
+                },
                 span: test_span(),
             }),
             negated: false,
@@ -663,15 +673,21 @@ fn test_resolve_expr_in_list() {
             }),
             list: vec![
                 Expr {
-                    kind: ExprKind::Literal(Literal::Number("1".to_string())),
+                    kind: ExprKind::Literal {
+                        literal: Literal::Number("1".to_string()),
+                    },
                     span: test_span(),
                 },
                 Expr {
-                    kind: ExprKind::Literal(Literal::Number("2".to_string())),
+                    kind: ExprKind::Literal {
+                        literal: Literal::Number("2".to_string()),
+                    },
                     span: test_span(),
                 },
                 Expr {
-                    kind: ExprKind::Literal(Literal::Number("3".to_string())),
+                    kind: ExprKind::Literal {
+                        literal: Literal::Number("3".to_string()),
+                    },
                     span: test_span(),
                 },
             ],
@@ -728,7 +744,9 @@ fn test_resolve_expr_like() {
                 span: test_span(),
             }),
             pattern: Box::new(Expr {
-                kind: ExprKind::Literal(Literal::String("A%".to_string())),
+                kind: ExprKind::Literal {
+                    literal: Literal::String("A%".to_string()),
+                },
                 span: test_span(),
             }),
             escape: None,
@@ -749,7 +767,9 @@ fn test_resolve_expr_vector_literal() {
     let table = resolver.resolve_table("users", test_span()).unwrap();
 
     let expr = Expr {
-        kind: ExprKind::VectorLiteral(vec![1.0, 2.0, 3.0]),
+        kind: ExprKind::VectorLiteral {
+            values: vec![1.0, 2.0, 3.0],
+        },
         span: test_span(),
     };
 

@@ -1,6 +1,7 @@
 use super::span::{Span, Spanned};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
@@ -18,9 +19,13 @@ impl Spanned for Expr {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
+#[allow(clippy::large_enum_variant)]
 pub enum ExprKind {
-    Literal(Literal),
+    Literal {
+        literal: Literal,
+    },
     ColumnRef {
         table: Option<String>,
         column: String,
@@ -61,10 +66,31 @@ pub enum ExprKind {
         expr: Box<Expr>,
         negated: bool,
     },
-    VectorLiteral(Vec<f64>),
+    VectorLiteral {
+        values: Vec<f64>,
+    },
+    ScalarSubquery {
+        subquery: Box<super::Statement>,
+    },
+    InSubquery {
+        expr: Box<Expr>,
+        subquery: Box<super::Statement>,
+        negated: bool,
+    },
+    Exists {
+        subquery: Box<super::Statement>,
+        negated: bool,
+    },
+    Quantified {
+        expr: Box<Expr>,
+        op: BinaryOp,
+        quantifier: Quantifier,
+        subquery: Box<super::Statement>,
+    },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant", content = "value")]
 pub enum Literal {
     Number(String),
     String(String),
@@ -72,7 +98,7 @@ pub enum Literal {
     Null,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -90,8 +116,14 @@ pub enum BinaryOp {
     StringConcat,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnaryOp {
     Not,
     Minus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Quantifier {
+    Any,
+    All,
 }
