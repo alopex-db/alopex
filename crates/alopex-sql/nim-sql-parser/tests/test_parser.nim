@@ -599,3 +599,178 @@ suite "DDL — DROP TABLE":
     check ast.kind == nkDropTable
     check ast.children[0].strVal == "IF EXISTS"
     check ast.children[1].strVal == "users"
+
+# ---------------------------------------------------------------------------
+# Roadmap coverage tests — Phase 2
+# ---------------------------------------------------------------------------
+
+suite "Roadmap — lexer keywords and symbols":
+
+  test "roadmap reserved keywords and symbols":
+    var lex = initLexer("USING NATURAL ANY SOME ALL CAST NOW HNSW BTREE COSINE L2 ESCAPE WITH NULLS FIRST LAST || [ ]")
+    check lex.nextToken().kind == tkUsing
+    check lex.nextToken().kind == tkNatural
+    check lex.nextToken().kind == tkAny
+    check lex.nextToken().kind == tkSome
+    check lex.nextToken().kind == tkAll
+    check lex.nextToken().kind == tkCast
+    check lex.nextToken().kind == tkNow
+    check lex.nextToken().kind == tkHnsw
+    check lex.nextToken().kind == tkBtree
+    check lex.nextToken().kind == tkCosine
+    check lex.nextToken().kind == tkL2
+    check lex.nextToken().kind == tkEscape
+    check lex.nextToken().kind == tkWith
+    check lex.nextToken().kind == tkNulls
+    check lex.nextToken().kind == tkFirst
+    check lex.nextToken().kind == tkLast
+    check lex.nextToken().kind == tkPipePipe
+    check lex.nextToken().kind == tkLBracket
+    check lex.nextToken().kind == tkRBracket
+
+suite "Roadmap — DDL and Vector":
+
+  test "CREATE INDEX and DROP INDEX":
+    let createIdx = parseSql("CREATE INDEX idx_doc_embedding ON documents (embedding) USING HNSW WITH (m = 16, ef_construction = 200)")
+    check createIdx.kind == nkCreateIndex
+    check createIdx.children[0].strVal == "idx_doc_embedding"
+    check createIdx.children[1].strVal == "documents"
+    check createIdx.children[2].strVal == "embedding"
+    check createIdx.children[3].strVal == "HNSW"
+    check createIdx.children[4].kind == nkWithOptions
+    check createIdx.children[4].children.len == 2
+
+    let dropIdx = parseSql("DROP INDEX IF EXISTS idx_doc_embedding")
+    check dropIdx.kind == nkDropIndex
+    check dropIdx.children[0].strVal == "IF EXISTS"
+    check dropIdx.children[1].strVal == "idx_doc_embedding"
+
+  test "VECTOR type, vector literal, CAST and NOW":
+    let table = parseSql("CREATE TABLE items (id INT, embedding VECTOR(3, COSINE))")
+    check table.kind == nkCreateTable
+    check table.children[2].kind == nkColumnDef
+    check table.children[2].colType.children[0].strVal == "VECTOR"
+    check table.children[2].colType.children[1].intVal == 3
+    check table.children[2].colType.children[2].strVal == "COSINE"
+
+    let select = parseSql("SELECT [1.0, -2.0, 3.5], CAST(id AS TEXT), NOW() FROM items")
+    let cols = select.children[0]
+    check cols.children[0].kind == nkVectorLiteral
+    check cols.children[0].children.len == 3
+    check cols.children[0].children[1].floatVal == -2.0
+    check cols.children[1].kind == nkFunctionCall
+    check cols.children[1].children[0].strVal == "CAST"
+    check cols.children[2].children[0].strVal == "NOW"
+
+suite "Roadmap — aggregation":
+
+  test "COUNT DISTINCT, COUNT star, aggregates and string concat":
+    let ast = parseSql("""
+      SELECT COUNT(DISTINCT user_id), COUNT(*), SUM(amount), AVG(amount), MIN(amount), MAX(amount),
+             first_name || ' ' || last_name
+      FROM orders
+      GROUP BY user_id, first_name, last_name
+      HAVING COUNT(*) > 1
+    """)
+    let cols = ast.children[0]
+    check cols.children[0].kind == nkFunctionCall
+    check cols.children[0].funcDistinct == true
+    check cols.children[1].funcStar == true
+    check cols.children[6].kind == nkBinaryOp
+    check cols.children[6].binOp == opStringConcat
+    var groupFound = false
+    var havingFound = false
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupFound = true
+        check child.children.len == 3
+      if child.kind == nkHavingClause:
+        havingFound = true
+    check groupFound
+    check havingFound
+
+suite "Roadmap — JOIN":
+
+  test "JOIN USING and NATURAL":
+    let usingAst = parseSql("SELECT * FROM users JOIN orders USING (user_id)")
+    let usingFrom = usingAst.children[1]
+    let usingJoin = usingFrom.children[0]
+    check usingJoin.kind == nkJoin
+    check usingJoin.joinKind == jkInner
+    check usingJoin.joinUsing == @["user_id"]
+
+    let naturalAst = parseSql("SELECT * FROM users NATURAL LEFT JOIN profiles")
+    let naturalJoin = naturalAst.children[1].children[0]
+    check naturalJoin.kind == nkJoin
+    check naturalJoin.joinKind == jkLeft
+    check naturalJoin.natural == true
+
+  test "implicit comma join is a FromItem join tree":
+    let ast = parseSql("SELECT * FROM users u, orders o WHERE u.id = o.user_id")
+    let join = ast.children[1].children[0]
+    check join.kind == nkJoin
+    check join.joinKind == jkCross
+    check join.joinLeft.kind == nkAlias
+    check join.joinRight.kind == nkAlias
+
+suite "Roadmap — Subquery":
+
+  test "scalar subquery and FROM derived table":
+    let scalar = parseSql("SELECT (SELECT COUNT(*) FROM orders) AS order_count FROM users")
+    let item = scalar.children[0].children[0]
+    check item.kind == nkAlias
+    check item.aliasExpr.kind == nkScalarSubquery
+    check item.aliasExpr.children[0].kind == nkSelect
+
+    let derived = parseSql("SELECT * FROM (SELECT id, name FROM users WHERE active = TRUE) AS active_users")
+    let fromItem = derived.children[1].children[0]
+    check fromItem.kind == nkAlias
+    check fromItem.aliasExpr.kind == nkFromDerived
+
+  test "IN and EXISTS subqueries":
+    let inAst = parseSql("SELECT * FROM users WHERE id IN (SELECT user_id FROM orders)")
+    let inExpr = inAst.children[2].children[0]
+    check inExpr.kind == nkInSubquery
+    check inExpr.negated == false
+
+    let existsAst = parseSql("SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders WHERE user_id = u.id)")
+    let existsExpr = existsAst.children[2].children[0]
+    check existsExpr.kind == nkExists
+    check existsExpr.negated == false
+
+  test "ANY SOME and ALL quantified subqueries":
+    let anyAst = parseSql("SELECT * FROM scores WHERE score > ANY (SELECT score FROM baseline)")
+    let anyExpr = anyAst.children[2].children[0]
+    check anyExpr.kind == nkQuantified
+    check anyExpr.quantifier == qkAny
+
+    let allAst = parseSql("SELECT * FROM scores WHERE score >= ALL (SELECT score FROM baseline)")
+    let allExpr = allAst.children[2].children[0]
+    check allExpr.kind == nkQuantified
+    check allExpr.quantifier == qkAll
+
+suite "Roadmap — ordering, multi statements, spans":
+
+  test "ORDER BY NULLS FIRST and LAST":
+    let ast = parseSql("SELECT * FROM users ORDER BY name DESC NULLS LAST, id ASC NULLS FIRST")
+    let order = ast.children[2]
+    check order.kind == nkOrderByClause
+    check order.children[0].aliasName == "DESC"
+    check order.children[0].nullsFirst == 0
+    check order.children[1].aliasName == "ASC"
+    check order.children[1].nullsFirst == 1
+
+  test "multiple statements parse to statement list":
+    let ast = parseSql("SELECT 1; SELECT 2;")
+    check ast.kind == nkStatementList
+    check ast.children.len == 2
+    check ast.children[0].kind == nkSelect
+    check ast.children[1].kind == nkSelect
+
+  test "all nodes receive spans":
+    let ast = parseSql("SELECT id, name FROM users WHERE id = 1")
+    check ast.span.start.line == 1
+    check ast.children[0].span.start.line == 1
+    check ast.children[0].children[0].span.start.line == 1
+    check ast.children[1].span.start.line == 1
+    check ast.children[2].children[0].span.start.line == 1

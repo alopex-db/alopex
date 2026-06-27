@@ -13,22 +13,24 @@ type
     tkInsert, tkInto, tkValues, tkUpdate, tkSet, tkDelete
     tkCreate, tkDrop, tkTable, tkAlter, tkIndex
     tkJoin, tkInner, tkLeft, tkRight, tkFull, tkOuter, tkCross, tkOn
+    tkNatural, tkUsing
     tkAs, tkNull, tkTrue, tkFalse
-    tkOrder, tkBy, tkAsc, tkDesc
+    tkOrder, tkBy, tkAsc, tkDesc, tkNulls, tkFirst, tkLast
     tkGroup, tkHaving, tkLimit, tkOffset
-    tkLike, tkIn, tkBetween, tkIs, tkExists
-    tkDistinct, tkAll, tkCase, tkWhen, tkThen, tkElse, tkEnd
+    tkLike, tkIn, tkBetween, tkIs, tkExists, tkAny, tkSome
+    tkDistinct, tkAll, tkCast, tkCase, tkWhen, tkThen, tkElse, tkEnd, tkNow
     tkPrimary, tkKey, tkForeign, tkReferences
-    tkUnique, tkCheck, tkDefault, tkConstraint
+    tkUnique, tkCheck, tkDefault, tkConstraint, tkEscape, tkWith
     tkInt, tkBigint, tkSmallint, tkFloatType, tkDouble, tkDecimal
-    tkVarchar, tkChar, tkText, tkBlob, tkBoolean
-    tkTimestamp, tkDate, tkTime
+    tkVarchar, tkChar, tkText, tkBlob, tkBoolean, tkBool
+    tkTimestamp, tkDate, tkTime, tkVector
+    tkHnsw, tkBtree, tkCosine, tkL2
     tkIf, tkNotKw
     # Symbols
     tkStar, tkComma, tkDot, tkSemicolon
-    tkLParen, tkRParen
+    tkLParen, tkRParen, tkLBracket, tkRBracket
     tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe
-    tkPlus, tkMinus, tkSlash, tkPercent
+    tkPlus, tkMinus, tkSlash, tkPercent, tkPipePipe
     # Special
     tkEof
 
@@ -53,22 +55,26 @@ const Keywords = {
   "alter": tkAlter, "index": tkIndex,
   "join": tkJoin, "inner": tkInner, "left": tkLeft,
   "right": tkRight, "full": tkFull, "outer": tkOuter,
-  "cross": tkCross, "on": tkOn,
+  "cross": tkCross, "on": tkOn, "natural": tkNatural, "using": tkUsing,
   "as": tkAs, "null": tkNull, "true": tkTrue, "false": tkFalse,
   "order": tkOrder, "by": tkBy, "asc": tkAsc, "desc": tkDesc,
+  "nulls": tkNulls, "first": tkFirst, "last": tkLast,
   "group": tkGroup, "having": tkHaving, "limit": tkLimit, "offset": tkOffset,
   "like": tkLike, "in": tkIn, "between": tkBetween, "is": tkIs,
-  "exists": tkExists,
-  "distinct": tkDistinct, "all": tkAll,
+  "exists": tkExists, "any": tkAny, "some": tkSome,
+  "distinct": tkDistinct, "all": tkAll, "cast": tkCast, "now": tkNow,
   "case": tkCase, "when": tkWhen, "then": tkThen, "else": tkElse, "end": tkEnd,
   "primary": tkPrimary, "key": tkKey, "foreign": tkForeign,
   "references": tkReferences, "unique": tkUnique, "check": tkCheck,
-  "default": tkDefault, "constraint": tkConstraint,
+  "default": tkDefault, "constraint": tkConstraint, "escape": tkEscape,
+  "with": tkWith,
   "int": tkInt, "integer": tkInt, "bigint": tkBigint, "smallint": tkSmallint,
   "float": tkFloatType, "double": tkDouble, "decimal": tkDecimal,
   "varchar": tkVarchar, "char": tkChar, "text": tkText,
-  "blob": tkBlob, "boolean": tkBoolean,
+  "blob": tkBlob, "boolean": tkBoolean, "bool": tkBool,
   "timestamp": tkTimestamp, "date": tkDate, "time": tkTime,
+  "vector": tkVector, "hnsw": tkHnsw, "btree": tkBtree,
+  "cosine": tkCosine, "l2": tkL2,
   "if": tkIf,
 }.toTable
 
@@ -193,6 +199,12 @@ proc nextToken*(lex: var Lexer): Token =
   of ')':
     discard lex.advance()
     return Token(kind: tkRParen, value: ")", line: startLine, col: startCol)
+  of '[':
+    discard lex.advance()
+    return Token(kind: tkLBracket, value: "[", line: startLine, col: startCol)
+  of ']':
+    discard lex.advance()
+    return Token(kind: tkRBracket, value: "]", line: startLine, col: startCol)
   of '+':
     discard lex.advance()
     return Token(kind: tkPlus, value: "+", line: startLine, col: startCol)
@@ -205,6 +217,12 @@ proc nextToken*(lex: var Lexer): Token =
   of '%':
     discard lex.advance()
     return Token(kind: tkPercent, value: "%", line: startLine, col: startCol)
+  of '|':
+    discard lex.advance()
+    if lex.peek() == '|':
+      discard lex.advance()
+      return Token(kind: tkPipePipe, value: "||", line: startLine, col: startCol)
+    return Token(kind: tkIdent, value: "|", line: startLine, col: startCol)
   of '=':
     discard lex.advance()
     return Token(kind: tkEq, value: "=", line: startLine, col: startCol)
