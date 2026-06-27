@@ -20,6 +20,7 @@ on:
 env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
+  NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
 
 jobs:
   # ============================================================================
@@ -35,6 +36,17 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Format check
         run: cargo fmt -p alopex-cli -- --check
 
@@ -60,6 +72,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Build CLI
         run: cargo build -p alopex-cli --release
 
@@ -185,6 +208,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Build CLI
         run: cargo build -p alopex-cli --release
 
@@ -240,6 +274,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Build CLI
         run: cargo build -p alopex-cli --release
 
@@ -288,6 +333,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Build CLI
         run: cargo build -p alopex-cli --release
 

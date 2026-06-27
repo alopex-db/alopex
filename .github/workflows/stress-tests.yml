@@ -7,6 +7,9 @@ on:
     - cron: "0 2 * * *"
     - cron: "0 3 * * 0"
 
+env:
+  NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
+
 jobs:
   stress-tests:
     runs-on: ubuntu-latest
@@ -22,6 +25,17 @@ jobs:
           override: true
           profile: minimal
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Run stress tests (short)
         env:
           RUST_BACKTRACE: 1
@@ -68,6 +82,17 @@ jobs:
           override: true
           profile: minimal
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Run sanitizer lane
         env:
           RUST_BACKTRACE: 1
@@ -105,6 +130,17 @@ jobs:
           override: true
           profile: minimal
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
@@ -155,6 +191,17 @@ jobs:
             gh run download "$run_id" -n perf-baselines -D target/stress-baselines || true
           fi
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Run perf baseline checks
         env:
           RUST_BACKTRACE: 1
