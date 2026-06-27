@@ -1,0 +1,18 @@
+{
+  "name": "Alopex SQL Parser (Roc)",
+  "image": "debian:bookworm-slim",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "IvanDemchenko.roc-lang-unofficial"
+      ]
+    }
+  },
+  "postCreateCommand": "curl -OL https://github.com/roc-lang/roc/releases/download/alpha4-rolling/roc-linux_x86_64-alpha4-rolling.tar.gz && tar xzf roc-linux_x86_64-alpha4-rolling.tar.gz && sudo mv roc-linux_x86_64-alpha4-rolling /opt/roc && echo 'export PATH=/opt/roc:$PATH' >> ~/.bashrc",
+  "remoteEnv": {
+    "PATH": "/opt/roc:${containerEnv:PATH}"
+  }
+}
