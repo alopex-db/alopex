@@ -13,6 +13,7 @@ requires "msgpack4nim"
 # Tasks
 task test, "Run tests":
   exec "nim c -r tests/test_parser.nim"
+  exec "nim c -r tests/test_msgpack_output.nim"
 
 task lib, "Build shared library":
   exec "nim c -d:release --app:lib --mm:orc --opt:speed -o:libalopex_sql_parser.so src/alopex_sql_parser.nim"
