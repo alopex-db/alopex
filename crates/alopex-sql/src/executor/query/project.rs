@@ -21,6 +21,10 @@ fn project_all(
     names: &[String],
 ) -> Result<crate::executor::QueryResult> {
     let columns = column_infos_from_all(schema, names)?;
+    if names.len() == schema.len() {
+        let projected_rows = rows.into_iter().map(|row| row.values).collect();
+        return Ok(crate::executor::QueryResult::new(columns, projected_rows));
+    }
     let mut projected_rows = Vec::with_capacity(rows.len());
     for row in rows {
         let mut values = Vec::with_capacity(names.len());

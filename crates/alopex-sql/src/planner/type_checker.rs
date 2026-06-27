@@ -5,13 +5,32 @@
 //! for the types involved.
 
 use crate::ast::Span;
+use crate::ast::Statement;
 use crate::ast::ddl::VectorMetric;
-use crate::ast::expr::{BinaryOp, Expr, ExprKind, Literal, UnaryOp};
-use crate::catalog::{Catalog, TableMetadata};
+use crate::ast::expr::{BinaryOp, Expr, ExprKind, Literal, Quantifier as AstQuantifier, UnaryOp};
+use crate::catalog::{Catalog, ColumnMetadata, TableMetadata};
 use crate::planner::aggregate_expr::{AggregateExpr, AggregateFunction};
 use crate::planner::error::PlannerError;
-use crate::planner::typed_expr::{TypedExpr, TypedExprKind};
+use crate::planner::logical_plan::LogicalPlan;
+use crate::planner::name_resolver::NameResolver;
+use crate::planner::typed_expr::{Quantifier, TypedExpr, TypedExprKind};
 use crate::planner::types::ResolvedType;
+
+/// A table visible to expression name resolution.
+#[derive(Debug, Clone)]
+pub struct ScopedTable {
+    pub table: TableMetadata,
+    pub start_index: usize,
+}
+
+impl ScopedTable {
+    pub fn new(table: TableMetadata, start_index: usize) -> Self {
+        Self { table, start_index }
+    }
+}
+
+pub type SubqueryPlanner<'p> = dyn Fn(&Statement, &[ScopedTable]) -> Result<(LogicalPlan, Vec<ColumnMetadata>), PlannerError>
+    + 'p;
 
 /// Type checker for SQL expressions.
 ///
@@ -58,6 +77,20 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         expr: &Expr,
         table: &TableMetadata,
     ) -> Result<TypedExpr, PlannerError> {
+        let scope = [ScopedTable::new(table.clone(), 0)];
+        self.infer_type_with_scope(expr, &scope, &|stmt, _outer| {
+            let planner = crate::planner::Planner::new(self.catalog);
+            let plan = planner.plan(stmt)?;
+            Ok((plan, Vec::new()))
+        })
+    }
+
+    pub fn infer_type_with_scope(
+        &self,
+        expr: &Expr,
+        scope: &[ScopedTable],
+        plan_subquery: &SubqueryPlanner<'_>,
+    ) -> Result<TypedExpr, PlannerError> {
         let span = expr.span;
         match &expr.kind {
             ExprKind::Literal { literal: lit } => self.infer_literal_type(lit, span),
@@ -65,26 +98,19 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             ExprKind::ColumnRef {
                 table: table_qualifier,
                 column,
-            } => {
-                // If table qualifier is present, verify it matches the current table
-                if let Some(qualifier) = table_qualifier
-                    && qualifier != &table.name
-                {
-                    return Err(PlannerError::TableNotFound {
-                        name: qualifier.clone(),
-                        line: span.start.line,
-                        column: span.start.column,
-                    });
-                }
-                self.infer_column_ref_type(table, column, span)
-            }
+            } => self.infer_column_ref_type_with_scope(
+                scope,
+                table_qualifier.as_deref(),
+                column,
+                span,
+            ),
 
             ExprKind::BinaryOp { left, op, right } => {
-                self.infer_binary_op_type(left, *op, right, table, span)
+                self.infer_binary_op_type_with_scope(left, *op, right, scope, plan_subquery, span)
             }
 
             ExprKind::UnaryOp { op, operand } => {
-                self.infer_unary_op_type(*op, operand, table, span)
+                self.infer_unary_op_type_with_scope(*op, operand, scope, plan_subquery, span)
             }
 
             ExprKind::FunctionCall {
@@ -92,54 +118,123 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 args,
                 distinct,
                 star,
-            } => self.infer_function_call_type(name, args, *distinct, *star, table, span),
+            } => self.infer_function_call_type_with_scope(
+                name,
+                args,
+                *distinct,
+                *star,
+                scope,
+                plan_subquery,
+                span,
+            ),
 
             ExprKind::Between {
                 expr,
                 low,
                 high,
                 negated,
-            } => self.infer_between_type(expr, low, high, *negated, table, span),
+            } => self.infer_between_type_with_scope(
+                expr,
+                low,
+                high,
+                *negated,
+                scope,
+                plan_subquery,
+                span,
+            ),
 
             ExprKind::Like {
                 expr,
                 pattern,
                 escape,
                 negated,
-            } => self.infer_like_type(expr, pattern, escape.as_deref(), *negated, table, span),
+            } => self.infer_like_type_with_scope(
+                expr,
+                pattern,
+                escape.as_deref(),
+                *negated,
+                scope,
+                plan_subquery,
+                span,
+            ),
 
             ExprKind::InList {
                 expr,
                 list,
                 negated,
-            } => self.infer_in_list_type(expr, list, *negated, table, span),
+            } => {
+                self.infer_in_list_type_with_scope(expr, list, *negated, scope, plan_subquery, span)
+            }
 
             ExprKind::IsNull { expr, negated } => {
-                self.infer_is_null_type(expr, *negated, table, span)
+                self.infer_is_null_type_with_scope(expr, *negated, scope, plan_subquery, span)
             }
 
             ExprKind::VectorLiteral { values } => self.infer_vector_literal_type(values, span),
 
-            ExprKind::ScalarSubquery { .. } => Err(PlannerError::unsupported_feature(
-                "scalar subquery type checking",
-                "v0.6.0-subquery Phase 6",
-                span,
-            )),
-            ExprKind::InSubquery { .. } => Err(PlannerError::unsupported_feature(
-                "IN subquery type checking",
-                "v0.6.0-subquery Phase 6",
-                span,
-            )),
-            ExprKind::Exists { .. } => Err(PlannerError::unsupported_feature(
-                "EXISTS subquery type checking",
-                "v0.6.0-subquery Phase 6",
-                span,
-            )),
-            ExprKind::Quantified { .. } => Err(PlannerError::unsupported_feature(
-                "quantified subquery type checking",
-                "v0.6.0-subquery Phase 6",
-                span,
-            )),
+            ExprKind::ScalarSubquery { subquery } => {
+                let (plan, schema) = plan_subquery(subquery, scope)?;
+                let value_type = single_column_type(&schema, span)?;
+                Ok(TypedExpr {
+                    kind: TypedExprKind::ScalarSubquery(Box::new(plan)),
+                    resolved_type: value_type,
+                    span,
+                })
+            }
+            ExprKind::InSubquery {
+                expr,
+                subquery,
+                negated,
+            } => {
+                let expr_typed = self.infer_type_with_scope(expr, scope, plan_subquery)?;
+                let (plan, schema) = plan_subquery(subquery, scope)?;
+                let value_type = single_column_type(&schema, span)?;
+                self.check_comparison_op(&expr_typed.resolved_type, &value_type, span)?;
+                Ok(TypedExpr {
+                    kind: TypedExprKind::InSubquery {
+                        expr: Box::new(expr_typed),
+                        subquery: Box::new(plan),
+                        negated: *negated,
+                    },
+                    resolved_type: ResolvedType::Boolean,
+                    span,
+                })
+            }
+            ExprKind::Exists { subquery, negated } => {
+                let (plan, _schema) = plan_subquery(subquery, scope)?;
+                Ok(TypedExpr {
+                    kind: TypedExprKind::Exists {
+                        subquery: Box::new(plan),
+                        negated: *negated,
+                    },
+                    resolved_type: ResolvedType::Boolean,
+                    span,
+                })
+            }
+            ExprKind::Quantified {
+                expr,
+                op,
+                quantifier,
+                subquery,
+            } => {
+                let expr_typed = self.infer_type_with_scope(expr, scope, plan_subquery)?;
+                let (plan, schema) = plan_subquery(subquery, scope)?;
+                let value_type = single_column_type(&schema, span)?;
+                self.check_binary_op(*op, &expr_typed.resolved_type, &value_type, span)?;
+                Ok(TypedExpr {
+                    kind: TypedExprKind::Quantified {
+                        expr: Box::new(expr_typed),
+                        op: *op,
+                        quantifier: match quantifier {
+                            AstQuantifier::Any => Quantifier::Any,
+                            AstQuantifier::All => Quantifier::All,
+                        },
+                        subquery: Box::new(plan),
+                    },
+                    resolved_type: ResolvedType::Boolean,
+                    span,
+                })
+            }
         }
     }
 
@@ -173,6 +268,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     }
 
     /// Infer the type of a column reference.
+    #[allow(dead_code)]
     fn infer_column_ref_type(
         &self,
         table: &TableMetadata,
@@ -203,7 +299,34 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         })
     }
 
+    fn infer_column_ref_type_with_scope(
+        &self,
+        scope: &[ScopedTable],
+        table_qualifier: Option<&str>,
+        column_name: &str,
+        span: Span,
+    ) -> Result<TypedExpr, PlannerError> {
+        let tables = scope.iter().map(|s| &s.table).collect::<Vec<_>>();
+        let resolver = NameResolver::new(self.catalog);
+        let resolved =
+            resolver.resolve_column_with_scope(&tables, table_qualifier, column_name, span)?;
+        let scoped = scope
+            .iter()
+            .find(|s| s.table.name == resolved.table_name)
+            .ok_or_else(|| PlannerError::table_not_found(&resolved.table_name, span))?;
+        Ok(TypedExpr {
+            kind: TypedExprKind::ColumnRef {
+                table: resolved.table_name,
+                column: resolved.column_name,
+                column_index: scoped.start_index + resolved.column_index,
+            },
+            resolved_type: resolved.resolved_type,
+            span,
+        })
+    }
+
     /// Infer the type of a binary operation.
+    #[allow(dead_code)]
     fn infer_binary_op_type(
         &self,
         left: &Expr,
@@ -214,6 +337,36 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     ) -> Result<TypedExpr, PlannerError> {
         let left_typed = self.infer_type(left, table)?;
         let right_typed = self.infer_type(right, table)?;
+
+        let result_type = self.check_binary_op(
+            op,
+            &left_typed.resolved_type,
+            &right_typed.resolved_type,
+            span,
+        )?;
+
+        Ok(TypedExpr {
+            kind: TypedExprKind::BinaryOp {
+                left: Box::new(left_typed),
+                op,
+                right: Box::new(right_typed),
+            },
+            resolved_type: result_type,
+            span,
+        })
+    }
+
+    fn infer_binary_op_type_with_scope(
+        &self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+        scope: &[ScopedTable],
+        plan_subquery: &SubqueryPlanner<'_>,
+        span: Span,
+    ) -> Result<TypedExpr, PlannerError> {
+        let left_typed = self.infer_type_with_scope(left, scope, plan_subquery)?;
+        let right_typed = self.infer_type_with_scope(right, scope, plan_subquery)?;
 
         let result_type = self.check_binary_op(
             op,
@@ -321,7 +474,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     }
 
     /// Check comparison operation for compatible types.
-    fn check_comparison_op(
+    pub(crate) fn check_comparison_op(
         &self,
         left: &ResolvedType,
         right: &ResolvedType,
@@ -438,6 +591,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     }
 
     /// Infer the type of a unary operation.
+    #[allow(dead_code)]
     fn infer_unary_op_type(
         &self,
         op: UnaryOp,
@@ -493,7 +647,60 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         })
     }
 
+    fn infer_unary_op_type_with_scope(
+        &self,
+        op: UnaryOp,
+        operand: &Expr,
+        scope: &[ScopedTable],
+        plan_subquery: &SubqueryPlanner<'_>,
+        span: Span,
+    ) -> Result<TypedExpr, PlannerError> {
+        let operand_typed = self.infer_type_with_scope(operand, scope, plan_subquery)?;
+
+        let result_type = match op {
+            UnaryOp::Not => {
+                if !matches!(
+                    operand_typed.resolved_type,
+                    ResolvedType::Boolean | ResolvedType::Null
+                ) {
+                    return Err(PlannerError::TypeMismatch {
+                        expected: "Boolean".to_string(),
+                        found: operand_typed.resolved_type.type_name().to_string(),
+                        line: span.start.line,
+                        column: span.start.column,
+                    });
+                }
+                ResolvedType::Boolean
+            }
+            UnaryOp::Minus => match &operand_typed.resolved_type {
+                ResolvedType::Integer => ResolvedType::Integer,
+                ResolvedType::BigInt => ResolvedType::BigInt,
+                ResolvedType::Float => ResolvedType::Float,
+                ResolvedType::Double => ResolvedType::Double,
+                ResolvedType::Null => ResolvedType::Null,
+                other => {
+                    return Err(PlannerError::InvalidOperator {
+                        op: "unary minus".to_string(),
+                        type_name: other.type_name().to_string(),
+                        line: span.start.line,
+                        column: span.start.column,
+                    });
+                }
+            },
+        };
+
+        Ok(TypedExpr {
+            kind: TypedExprKind::UnaryOp {
+                op,
+                operand: Box::new(operand_typed),
+            },
+            resolved_type: result_type,
+            span,
+        })
+    }
+
     /// Infer the type of a function call.
+    #[allow(dead_code)]
     fn infer_function_call_type(
         &self,
         name: &str,
@@ -524,7 +731,37 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn infer_function_call_type_with_scope(
+        &self,
+        name: &str,
+        args: &[Expr],
+        distinct: bool,
+        star: bool,
+        scope: &[ScopedTable],
+        plan_subquery: &SubqueryPlanner<'_>,
+        span: Span,
+    ) -> Result<TypedExpr, PlannerError> {
+        let typed_args: Vec<TypedExpr> = args
+            .iter()
+            .map(|arg| self.infer_type_with_scope(arg, scope, plan_subquery))
+            .collect::<Result<Vec<_>, _>>()?;
+        let result_type = self.check_function_call(name, &typed_args, distinct, star, span)?;
+
+        Ok(TypedExpr {
+            kind: TypedExprKind::FunctionCall {
+                name: name.to_string(),
+                args: typed_args,
+                distinct,
+                star,
+            },
+            resolved_type: result_type,
+            span,
+        })
+    }
+
     /// Infer the type of a BETWEEN expression.
+    #[allow(dead_code)]
     fn infer_between_type(
         &self,
         expr: &Expr,
@@ -554,7 +791,37 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn infer_between_type_with_scope(
+        &self,
+        expr: &Expr,
+        low: &Expr,
+        high: &Expr,
+        negated: bool,
+        scope: &[ScopedTable],
+        plan_subquery: &SubqueryPlanner<'_>,
+        span: Span,
+    ) -> Result<TypedExpr, PlannerError> {
+        let expr_typed = self.infer_type_with_scope(expr, scope, plan_subquery)?;
+        let low_typed = self.infer_type_with_scope(low, scope, plan_subquery)?;
+        let high_typed = self.infer_type_with_scope(high, scope, plan_subquery)?;
+        self.check_comparison_op(&expr_typed.resolved_type, &low_typed.resolved_type, span)?;
+        self.check_comparison_op(&expr_typed.resolved_type, &high_typed.resolved_type, span)?;
+
+        Ok(TypedExpr {
+            kind: TypedExprKind::Between {
+                expr: Box::new(expr_typed),
+                low: Box::new(low_typed),
+                high: Box::new(high_typed),
+                negated,
+            },
+            resolved_type: ResolvedType::Boolean,
+            span,
+        })
+    }
+
     /// Infer the type of a LIKE expression.
+    #[allow(dead_code)]
     fn infer_like_type(
         &self,
         expr: &Expr,
@@ -620,7 +887,73 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn infer_like_type_with_scope(
+        &self,
+        expr: &Expr,
+        pattern: &Expr,
+        escape: Option<&Expr>,
+        negated: bool,
+        scope: &[ScopedTable],
+        plan_subquery: &SubqueryPlanner<'_>,
+        span: Span,
+    ) -> Result<TypedExpr, PlannerError> {
+        let expr_typed = self.infer_type_with_scope(expr, scope, plan_subquery)?;
+        let pattern_typed = self.infer_type_with_scope(pattern, scope, plan_subquery)?;
+
+        if !matches!(
+            expr_typed.resolved_type,
+            ResolvedType::Text | ResolvedType::Null
+        ) {
+            return Err(PlannerError::TypeMismatch {
+                expected: "Text".to_string(),
+                found: expr_typed.resolved_type.type_name().to_string(),
+                line: expr.span.start.line,
+                column: expr.span.start.column,
+            });
+        }
+
+        if !matches!(
+            pattern_typed.resolved_type,
+            ResolvedType::Text | ResolvedType::Null
+        ) {
+            return Err(PlannerError::TypeMismatch {
+                expected: "Text".to_string(),
+                found: pattern_typed.resolved_type.type_name().to_string(),
+                line: pattern.span.start.line,
+                column: pattern.span.start.column,
+            });
+        }
+
+        let escape_typed = if let Some(esc) = escape {
+            let typed = self.infer_type_with_scope(esc, scope, plan_subquery)?;
+            if !matches!(typed.resolved_type, ResolvedType::Text | ResolvedType::Null) {
+                return Err(PlannerError::TypeMismatch {
+                    expected: "Text".to_string(),
+                    found: typed.resolved_type.type_name().to_string(),
+                    line: esc.span.start.line,
+                    column: esc.span.start.column,
+                });
+            }
+            Some(Box::new(typed))
+        } else {
+            None
+        };
+
+        Ok(TypedExpr {
+            kind: TypedExprKind::Like {
+                expr: Box::new(expr_typed),
+                pattern: Box::new(pattern_typed),
+                escape: escape_typed,
+                negated,
+            },
+            resolved_type: ResolvedType::Boolean,
+            span,
+        })
+    }
+
     /// Infer the type of an IN list expression.
+    #[allow(dead_code)]
     fn infer_in_list_type(
         &self,
         expr: &Expr,
@@ -656,7 +989,43 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         })
     }
 
+    fn infer_in_list_type_with_scope(
+        &self,
+        expr: &Expr,
+        list: &[Expr],
+        negated: bool,
+        scope: &[ScopedTable],
+        plan_subquery: &SubqueryPlanner<'_>,
+        span: Span,
+    ) -> Result<TypedExpr, PlannerError> {
+        let expr_typed = self.infer_type_with_scope(expr, scope, plan_subquery)?;
+
+        let typed_list: Vec<TypedExpr> = list
+            .iter()
+            .map(|item| {
+                let typed = self.infer_type_with_scope(item, scope, plan_subquery)?;
+                self.check_comparison_op(
+                    &expr_typed.resolved_type,
+                    &typed.resolved_type,
+                    item.span,
+                )?;
+                Ok(typed)
+            })
+            .collect::<Result<Vec<_>, PlannerError>>()?;
+
+        Ok(TypedExpr {
+            kind: TypedExprKind::InList {
+                expr: Box::new(expr_typed),
+                list: typed_list,
+                negated,
+            },
+            resolved_type: ResolvedType::Boolean,
+            span,
+        })
+    }
+
     /// Infer the type of an IS NULL expression.
+    #[allow(dead_code)]
     fn infer_is_null_type(
         &self,
         expr: &Expr,
@@ -665,6 +1034,26 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         span: Span,
     ) -> Result<TypedExpr, PlannerError> {
         let expr_typed = self.infer_type(expr, table)?;
+
+        Ok(TypedExpr {
+            kind: TypedExprKind::IsNull {
+                expr: Box::new(expr_typed),
+                negated,
+            },
+            resolved_type: ResolvedType::Boolean,
+            span,
+        })
+    }
+
+    fn infer_is_null_type_with_scope(
+        &self,
+        expr: &Expr,
+        negated: bool,
+        scope: &[ScopedTable],
+        plan_subquery: &SubqueryPlanner<'_>,
+        span: Span,
+    ) -> Result<TypedExpr, PlannerError> {
+        let expr_typed = self.infer_type_with_scope(expr, scope, plan_subquery)?;
 
         Ok(TypedExpr {
             kind: TypedExprKind::IsNull {
@@ -1625,6 +2014,22 @@ fn aggregate_signature_from_call(
 
 fn typed_expr_signature(expr: &TypedExpr) -> String {
     format!("{:?}", expr.kind)
+}
+
+fn single_column_type(schema: &[ColumnMetadata], span: Span) -> Result<ResolvedType, PlannerError> {
+    match schema {
+        [column] => Ok(column.data_type.clone()),
+        [] => Err(PlannerError::type_mismatch(
+            "one-column subquery",
+            "zero-column subquery",
+            span,
+        )),
+        _ => Err(PlannerError::type_mismatch(
+            "one-column subquery",
+            format!("{} columns", schema.len()),
+            span,
+        )),
+    }
 }
 
 // Tests are in type_checker/tests.rs

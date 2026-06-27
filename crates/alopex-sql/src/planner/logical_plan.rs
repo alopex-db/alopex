@@ -47,6 +47,16 @@ use crate::catalog::{IndexMetadata, TableMetadata};
 use crate::planner::aggregate_expr::AggregateExpr;
 use crate::planner::typed_expr::{Projection, SortExpr, TypedAssignment, TypedExpr};
 
+/// JOIN type for logical and physical execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinType {
+    Inner,
+    Left,
+    Right,
+    Full,
+    Cross,
+}
+
 /// Logical query plan representation.
 ///
 /// This enum represents all possible logical operations that can be performed.
@@ -77,6 +87,32 @@ pub enum LogicalPlan {
         input: Box<LogicalPlan>,
         /// Filter predicate (must evaluate to Boolean).
         predicate: TypedExpr,
+    },
+
+    /// Projection boundary.
+    ///
+    /// Scan keeps the legacy single-table projection path; this node is used
+    /// when a relation-producing input such as JOIN or a derived table must be
+    /// materialized before being consumed by a parent query.
+    Project {
+        /// Input plan to project.
+        input: Box<LogicalPlan>,
+        /// Projection to apply.
+        projection: Projection,
+    },
+
+    /// JOIN operation.
+    Join {
+        /// Left input.
+        left: Box<LogicalPlan>,
+        /// Right input.
+        right: Box<LogicalPlan>,
+        /// Join type.
+        join_type: JoinType,
+        /// Optional ON condition.
+        condition: Option<TypedExpr>,
+        /// Optional USING columns.
+        using: Option<Vec<String>>,
     },
 
     /// Aggregate operation (GROUP BY / aggregation).
@@ -204,6 +240,8 @@ impl LogicalPlan {
         match self {
             LogicalPlan::Scan { .. }
             | LogicalPlan::Filter { .. }
+            | LogicalPlan::Project { .. }
+            | LogicalPlan::Join { .. }
             | LogicalPlan::Aggregate { .. }
             | LogicalPlan::Sort { .. }
             | LogicalPlan::Limit { .. } => "SELECT",
@@ -227,6 +265,31 @@ impl LogicalPlan {
         LogicalPlan::Filter {
             input: Box::new(input),
             predicate,
+        }
+    }
+
+    /// Creates a new Project plan.
+    pub fn project(input: LogicalPlan, projection: Projection) -> Self {
+        LogicalPlan::Project {
+            input: Box::new(input),
+            projection,
+        }
+    }
+
+    /// Creates a new Join plan.
+    pub fn join(
+        left: LogicalPlan,
+        right: LogicalPlan,
+        join_type: JoinType,
+        condition: Option<TypedExpr>,
+        using: Option<Vec<String>>,
+    ) -> Self {
+        LogicalPlan::Join {
+            left: Box::new(left),
+            right: Box::new(right),
+            join_type,
+            condition,
+            using,
         }
     }
 
@@ -327,6 +390,8 @@ impl LogicalPlan {
         match self {
             LogicalPlan::Scan { .. } => "Scan",
             LogicalPlan::Filter { .. } => "Filter",
+            LogicalPlan::Project { .. } => "Project",
+            LogicalPlan::Join { .. } => "Join",
             LogicalPlan::Aggregate { .. } => "Aggregate",
             LogicalPlan::Sort { .. } => "Sort",
             LogicalPlan::Limit { .. } => "Limit",
@@ -346,6 +411,8 @@ impl LogicalPlan {
             self,
             LogicalPlan::Scan { .. }
                 | LogicalPlan::Filter { .. }
+                | LogicalPlan::Project { .. }
+                | LogicalPlan::Join { .. }
                 | LogicalPlan::Aggregate { .. }
                 | LogicalPlan::Sort { .. }
                 | LogicalPlan::Limit { .. }
@@ -375,9 +442,11 @@ impl LogicalPlan {
     pub fn input(&self) -> Option<&LogicalPlan> {
         match self {
             LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. } => Some(input),
+            LogicalPlan::Join { .. } => None,
             _ => None,
         }
     }
@@ -394,9 +463,11 @@ impl LogicalPlan {
             LogicalPlan::CreateIndex { index, .. } => Some(&index.table),
             LogicalPlan::DropIndex { .. } => None,
             LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. } => input.table_name(),
+            LogicalPlan::Join { .. } => None,
         }
     }
 }

@@ -24,9 +24,9 @@ mod planner_tests;
 pub use aggregate_expr::{AggregateExpr, AggregateFunction};
 pub use error::PlannerError;
 pub use knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
-pub use logical_plan::LogicalPlan;
+pub use logical_plan::{JoinType, LogicalPlan};
 pub use name_resolver::{NameResolver, ResolvedColumn};
-pub use type_checker::TypeChecker;
+pub use type_checker::{ScopedTable, TypeChecker};
 pub use typed_expr::{
     ProjectedColumn, Projection, SortExpr, TypedAssignment, TypedExpr, TypedExprKind,
 };
@@ -44,9 +44,10 @@ use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::{DataSourceFormat, TableType};
 use std::collections::HashMap;
 
-struct SingleTableFrom<'a> {
-    name: &'a str,
-    span: crate::ast::Span,
+struct PlannedRelation {
+    plan: LogicalPlan,
+    schema: Vec<ColumnMetadata>,
+    scope: Vec<ScopedTable>,
 }
 
 /// The SQL query planner.
@@ -336,15 +337,22 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     /// Builds a logical plan tree: Scan -> Filter -> Sort -> Limit
     /// Each layer is optional and only added if the corresponding clause is present.
     fn plan_select(&self, stmt: &Select) -> Result<LogicalPlan, PlannerError> {
-        let from = self.single_table_from(stmt)?;
-        // 1. Resolve the FROM table
-        let literal_table;
-        let table = if from.name == LITERAL_TABLE {
-            literal_table = TableMetadata::new(LITERAL_TABLE, Vec::new());
-            &literal_table
-        } else {
-            self.name_resolver.resolve_table(from.name, from.span)?
-        };
+        self.plan_select_relation(stmt, &[])
+            .map(|relation| relation.plan)
+    }
+
+    fn plan_select_relation(
+        &self,
+        stmt: &Select,
+        outer_scope: &[ScopedTable],
+    ) -> Result<PlannedRelation, PlannerError> {
+        let mut relation = self.plan_from_items(&stmt.from, stmt.span, outer_scope)?;
+        let expr_scope = relation
+            .scope
+            .iter()
+            .cloned()
+            .chain(offset_scope(outer_scope, relation.schema.len()))
+            .collect::<Vec<_>>();
 
         let has_group_by = stmt
             .group_by
@@ -354,22 +362,15 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let distinct_only =
             stmt.distinct && !has_group_by && !has_aggregate && stmt.having.is_none();
 
-        let scan_projection =
-            if has_group_by || has_aggregate || stmt.having.is_some() || stmt.distinct {
-                Projection::All(table.column_names().into_iter().map(String::from).collect())
-            } else {
-                self.build_projection(&stmt.projection, table)?
-            };
-
-        // 2. Create the base Scan plan
-        let mut plan = LogicalPlan::Scan {
-            table: from.name.to_string(),
-            projection: scan_projection,
-        };
+        let final_projection =
+            self.build_projection_with_scope(&stmt.projection, &relation.schema, &expr_scope)?;
+        install_base_projection(&mut relation.plan, &final_projection);
+        let needs_project_boundary = !matches!(relation.plan, LogicalPlan::Scan { .. });
+        let mut plan = relation.plan;
 
         // 3. Add Filter if WHERE clause is present
         if let Some(ref selection) = stmt.selection {
-            let predicate = self.type_checker.infer_type(selection, table)?;
+            let predicate = self.infer_expr_with_scope(selection, &expr_scope)?;
 
             // Verify predicate returns Boolean
             if predicate.resolved_type != ResolvedType::Boolean {
@@ -394,14 +395,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             }
 
             let (group_keys, projected) = if distinct_only {
-                let projected =
-                    self.build_projected_columns_for_distinct(&stmt.projection, table)?;
+                let projected = self.build_projected_columns_for_distinct_with_scope(
+                    &stmt.projection,
+                    &relation.schema,
+                    &expr_scope,
+                )?;
                 let group_keys = projected.iter().map(|col| col.expr.clone()).collect();
                 (group_keys, projected)
             } else {
-                let group_keys = self.build_group_keys(stmt, table)?;
-                let projected =
-                    self.build_projected_columns_for_aggregate(&stmt.projection, table)?;
+                let group_keys = self.build_group_keys_with_scope(stmt, &expr_scope)?;
+                let projected = self.build_projected_columns_for_aggregate_with_scope(
+                    &stmt.projection,
+                    &expr_scope,
+                )?;
                 (group_keys, projected)
             };
             let mut aggregates = Vec::new();
@@ -412,7 +418,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             }
 
             let having_typed = if let Some(having) = &stmt.having {
-                let typed = self.type_checker.infer_type(having, table)?;
+                let typed = self.infer_expr_with_scope(having, &expr_scope)?;
                 if typed.resolved_type != ResolvedType::Boolean {
                     return Err(PlannerError::type_mismatch(
                         "Boolean",
@@ -429,7 +435,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             let mut order_by = Vec::new();
             if !stmt.order_by.is_empty() {
                 for order_expr in &stmt.order_by {
-                    let typed = self.type_checker.infer_type(&order_expr.expr, table)?;
+                    let typed = self.infer_expr_with_scope(&order_expr.expr, &expr_scope)?;
                     self.collect_aggregates_from_typed_expr(&typed, &mut aggregates, &mut agg_map)?;
                     let asc = order_expr.asc.unwrap_or(true);
                     let nulls_first = order_expr.nulls_first.unwrap_or(false);
@@ -476,6 +482,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 })
                 .collect::<Result<Vec<_>, PlannerError>>()?;
 
+            let schema = projection_schema(&projection, &output_schema);
             plan = LogicalPlan::Aggregate {
                 input: Box::new(plan),
                 group_keys,
@@ -501,12 +508,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 };
             }
 
-            return Ok(plan);
+            return Ok(PlannedRelation {
+                plan,
+                schema: schema.clone(),
+                scope: vec![ScopedTable::new(
+                    TableMetadata::new(LITERAL_TABLE, schema),
+                    0,
+                )],
+            });
         }
 
         // Non-aggregate path: ORDER BY + LIMIT/OFFSET
         if !stmt.order_by.is_empty() {
-            let order_by = self.build_sort_exprs(&stmt.order_by, table)?;
+            let order_by = self.build_sort_exprs_with_scope(&stmt.order_by, &expr_scope)?;
             plan = LogicalPlan::Sort {
                 input: Box::new(plan),
                 order_by,
@@ -523,40 +537,270 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             };
         }
 
-        Ok(plan)
-    }
-
-    fn single_table_from<'b>(&self, stmt: &'b Select) -> Result<SingleTableFrom<'b>, PlannerError> {
-        match stmt.from.as_slice() {
-            [] => Ok(SingleTableFrom {
-                name: LITERAL_TABLE,
-                span: stmt.span,
-            }),
-            [FromItem::Table { name, span, .. }] => Ok(SingleTableFrom {
-                name: name.as_str(),
-                span: *span,
-            }),
-            [FromItem::Join { span, .. }] => Err(PlannerError::unsupported_feature(
-                "JOIN planning",
-                "v0.6.0 Phase 6",
-                *span,
-            )),
-            [FromItem::Derived { span, .. }] => Err(PlannerError::unsupported_feature(
-                "derived table planning",
-                "v0.6.0-subquery Phase 6",
-                *span,
-            )),
-            [first, ..] => Err(PlannerError::unsupported_feature(
-                "multiple FROM items",
-                "v0.6.0 Phase 6",
-                first.span(),
-            )),
+        let output_schema = projection_schema(&final_projection, &relation.schema);
+        if needs_project_boundary {
+            plan = LogicalPlan::Project {
+                input: Box::new(plan),
+                projection: final_projection,
+            };
         }
+        Ok(PlannedRelation {
+            plan,
+            schema: output_schema.clone(),
+            scope: vec![ScopedTable::new(
+                TableMetadata::new(LITERAL_TABLE, output_schema),
+                0,
+            )],
+        })
     }
 
     /// Build the projection for a SELECT statement.
     ///
     /// Handles wildcard expansion and expression type checking.
+    fn plan_from_items(
+        &self,
+        items: &[FromItem],
+        select_span: crate::ast::Span,
+        outer_scope: &[ScopedTable],
+    ) -> Result<PlannedRelation, PlannerError> {
+        match items {
+            [] => {
+                let schema = Vec::new();
+                Ok(PlannedRelation {
+                    plan: LogicalPlan::Scan {
+                        table: LITERAL_TABLE.to_string(),
+                        projection: Projection::All(Vec::new()),
+                    },
+                    schema: schema.clone(),
+                    scope: vec![ScopedTable::new(
+                        TableMetadata::new(LITERAL_TABLE, schema),
+                        0,
+                    )],
+                })
+            }
+            [single] => self.plan_from_item(single, 0, outer_scope),
+            [first, rest @ ..] => {
+                let mut relation = self.plan_from_item(first, 0, outer_scope)?;
+                for item in rest {
+                    let right = self.plan_from_item(item, relation.schema.len(), outer_scope)?;
+                    relation = self.combine_join_relation(
+                        relation,
+                        right,
+                        JoinType::Cross,
+                        None,
+                        None,
+                        select_span,
+                    )?;
+                }
+                Ok(relation)
+            }
+        }
+    }
+
+    fn plan_from_item(
+        &self,
+        item: &FromItem,
+        start_index: usize,
+        outer_scope: &[ScopedTable],
+    ) -> Result<PlannedRelation, PlannerError> {
+        match item {
+            FromItem::Table { name, alias, span } => {
+                let table = self.name_resolver.resolve_table(name, *span)?.clone();
+                let mut scope_table = table.clone();
+                if let Some(alias) = alias {
+                    scope_table.name = alias.clone();
+                }
+                let schema = table.columns.clone();
+                Ok(PlannedRelation {
+                    plan: LogicalPlan::Scan {
+                        table: name.clone(),
+                        projection: Projection::All(
+                            schema.iter().map(|col| col.name.clone()).collect(),
+                        ),
+                    },
+                    schema,
+                    scope: vec![ScopedTable::new(scope_table, start_index)],
+                })
+            }
+            FromItem::Join {
+                left,
+                right,
+                join_type,
+                condition,
+                using,
+                span,
+            } => {
+                let left_relation = self.plan_from_item(left, start_index, outer_scope)?;
+                let right_relation = self.plan_from_item(
+                    right,
+                    start_index + left_relation.schema.len(),
+                    outer_scope,
+                )?;
+                let expr_scope = left_relation
+                    .scope
+                    .iter()
+                    .cloned()
+                    .chain(right_relation.scope.iter().cloned())
+                    .chain(offset_scope(
+                        outer_scope,
+                        left_relation.schema.len() + right_relation.schema.len(),
+                    ))
+                    .collect::<Vec<_>>();
+                let typed_condition = if let Some(expr) = condition {
+                    let typed = self.infer_expr_with_scope(expr, &expr_scope)?;
+                    if typed.resolved_type != ResolvedType::Boolean {
+                        return Err(PlannerError::type_mismatch(
+                            "Boolean",
+                            typed.resolved_type.to_string(),
+                            expr.span,
+                        ));
+                    }
+                    Some(typed)
+                } else {
+                    self.build_using_condition(
+                        using.as_deref(),
+                        &left_relation,
+                        &right_relation,
+                        *span,
+                    )?
+                };
+                self.combine_join_relation(
+                    left_relation,
+                    right_relation,
+                    map_join_type(*join_type),
+                    typed_condition,
+                    using.clone(),
+                    *span,
+                )
+            }
+            FromItem::Derived {
+                subquery,
+                alias,
+                span,
+            } => {
+                let crate::ast::StatementKind::Select(select) = &subquery.kind else {
+                    return Err(PlannerError::unsupported_feature(
+                        "non-SELECT derived table",
+                        "v0.6.0-subquery Phase 6",
+                        *span,
+                    ));
+                };
+                let mut relation = self.plan_select_relation(select, outer_scope)?;
+                let alias = alias.clone().ok_or_else(|| {
+                    PlannerError::invalid_expression("derived table requires an alias".to_string())
+                })?;
+                relation.plan = LogicalPlan::Project {
+                    input: Box::new(relation.plan),
+                    projection: Projection::All(
+                        relation.schema.iter().map(|col| col.name.clone()).collect(),
+                    ),
+                };
+                relation.scope = vec![ScopedTable::new(
+                    TableMetadata::new(alias, relation.schema.clone()),
+                    start_index,
+                )];
+                Ok(relation)
+            }
+        }
+    }
+
+    fn combine_join_relation(
+        &self,
+        left: PlannedRelation,
+        right: PlannedRelation,
+        join_type: JoinType,
+        condition: Option<TypedExpr>,
+        using: Option<Vec<String>>,
+        _span: crate::ast::Span,
+    ) -> Result<PlannedRelation, PlannerError> {
+        let mut schema = left.schema.clone();
+        schema.extend(right.schema.clone());
+        let mut scope = left.scope.clone();
+        scope.extend(right.scope.clone());
+        Ok(PlannedRelation {
+            plan: LogicalPlan::Join {
+                left: Box::new(left.plan),
+                right: Box::new(right.plan),
+                join_type,
+                condition,
+                using,
+            },
+            schema,
+            scope,
+        })
+    }
+
+    fn build_using_condition(
+        &self,
+        using: Option<&[String]>,
+        left: &PlannedRelation,
+        right: &PlannedRelation,
+        span: crate::ast::Span,
+    ) -> Result<Option<TypedExpr>, PlannerError> {
+        let Some(columns) = using else {
+            return Ok(None);
+        };
+        let mut condition = None;
+        for column in columns {
+            let left_col = find_scoped_column(&left.scope, column, span)?;
+            let right_col = find_scoped_column(&right.scope, column, span)?;
+            let left_expr = TypedExpr::column_ref(
+                left_col.table,
+                column.clone(),
+                left_col.index,
+                left_col.ty.clone(),
+                span,
+            );
+            let right_expr = TypedExpr::column_ref(
+                right_col.table,
+                column.clone(),
+                right_col.index,
+                right_col.ty.clone(),
+                span,
+            );
+            self.type_checker
+                .check_comparison_op(&left_col.ty, &right_col.ty, span)?;
+            let eq = TypedExpr::binary_op(
+                left_expr,
+                crate::ast::expr::BinaryOp::Eq,
+                right_expr,
+                ResolvedType::Boolean,
+                span,
+            );
+            condition = Some(match condition {
+                Some(prev) => TypedExpr::binary_op(
+                    prev,
+                    crate::ast::expr::BinaryOp::And,
+                    eq,
+                    ResolvedType::Boolean,
+                    span,
+                ),
+                None => eq,
+            });
+        }
+        Ok(condition)
+    }
+
+    fn infer_expr_with_scope(
+        &self,
+        expr: &crate::ast::expr::Expr,
+        scope: &[ScopedTable],
+    ) -> Result<TypedExpr, PlannerError> {
+        self.type_checker
+            .infer_type_with_scope(expr, scope, &|stmt, outer_scope| {
+                let crate::ast::StatementKind::Select(select) = &stmt.kind else {
+                    return Err(PlannerError::unsupported_feature(
+                        "non-SELECT subquery",
+                        "v0.6.0-subquery Phase 6",
+                        stmt.span(),
+                    ));
+                };
+                let relation = self.plan_select_relation(select, outer_scope)?;
+                Ok((relation.plan, relation.schema))
+            })
+    }
+
+    #[allow(dead_code)]
     fn build_projection(
         &self,
         items: &[SelectItem],
@@ -601,7 +845,51 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         Ok(Projection::Columns(projected_columns))
     }
 
+    fn build_projection_with_scope(
+        &self,
+        items: &[SelectItem],
+        schema: &[ColumnMetadata],
+        scope: &[ScopedTable],
+    ) -> Result<Projection, PlannerError> {
+        if items.len() == 1 && matches!(&items[0], SelectItem::Wildcard { .. }) {
+            return Ok(Projection::All(
+                schema.iter().map(|col| col.name.clone()).collect(),
+            ));
+        }
+
+        let mut projected_columns = Vec::new();
+        for item in items {
+            match item {
+                SelectItem::Wildcard { span } => {
+                    for scoped in scope {
+                        for (local_idx, col) in scoped.table.columns.iter().enumerate() {
+                            projected_columns.push(ProjectedColumn::new(TypedExpr::column_ref(
+                                scoped.table.name.clone(),
+                                col.name.clone(),
+                                scoped.start_index + local_idx,
+                                col.data_type.clone(),
+                                *span,
+                            )));
+                        }
+                    }
+                }
+                SelectItem::Expr { expr, alias, .. } => {
+                    let typed_expr = self.infer_expr_with_scope(expr, scope)?;
+                    let projected = if let Some(alias) = alias {
+                        ProjectedColumn::with_alias(typed_expr, alias.clone())
+                    } else {
+                        ProjectedColumn::new(typed_expr)
+                    };
+                    projected_columns.push(projected);
+                }
+            }
+        }
+
+        Ok(Projection::Columns(projected_columns))
+    }
+
     /// Build sort expressions from ORDER BY clause.
+    #[allow(dead_code)]
     fn build_sort_exprs(
         &self,
         order_by: &[OrderByExpr],
@@ -621,6 +909,21 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             sort_exprs.push(SortExpr::new(typed_expr, asc, nulls_first));
         }
 
+        Ok(sort_exprs)
+    }
+
+    fn build_sort_exprs_with_scope(
+        &self,
+        order_by: &[OrderByExpr],
+        scope: &[ScopedTable],
+    ) -> Result<Vec<SortExpr>, PlannerError> {
+        let mut sort_exprs = Vec::new();
+        for order_expr in order_by {
+            let typed_expr = self.infer_expr_with_scope(&order_expr.expr, scope)?;
+            let asc = order_expr.asc.unwrap_or(true);
+            let nulls_first = order_expr.nulls_first.unwrap_or(false);
+            sort_exprs.push(SortExpr::new(typed_expr, asc, nulls_first));
+        }
         Ok(sort_exprs)
     }
 
@@ -644,6 +947,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 .any(|order| expr_contains_aggregate(&order.expr))
     }
 
+    #[allow(dead_code)]
     fn build_group_keys(
         &self,
         stmt: &Select,
@@ -669,6 +973,32 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         Ok(keys)
     }
 
+    fn build_group_keys_with_scope(
+        &self,
+        stmt: &Select,
+        scope: &[ScopedTable],
+    ) -> Result<Vec<TypedExpr>, PlannerError> {
+        let mut keys = Vec::new();
+        if let Some(items) = &stmt.group_by {
+            for expr in items {
+                let typed = self.infer_expr_with_scope(expr, scope)?;
+                if typed_expr_contains_aggregate(&typed) {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUP BY cannot contain aggregate functions".to_string(),
+                    ));
+                }
+                if !matches!(typed.kind, TypedExprKind::ColumnRef { .. }) {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUP BY expressions must be column references".to_string(),
+                    ));
+                }
+                keys.push(typed);
+            }
+        }
+        Ok(keys)
+    }
+
+    #[allow(dead_code)]
     fn build_projected_columns_for_aggregate(
         &self,
         items: &[SelectItem],
@@ -694,6 +1024,32 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         Ok(projected)
     }
 
+    fn build_projected_columns_for_aggregate_with_scope(
+        &self,
+        items: &[SelectItem],
+        scope: &[ScopedTable],
+    ) -> Result<Vec<ProjectedColumn>, PlannerError> {
+        let mut projected = Vec::new();
+        for item in items {
+            match item {
+                SelectItem::Wildcard { .. } => {
+                    return Err(PlannerError::invalid_expression(
+                        "wildcard projection not supported with GROUP BY/aggregate".to_string(),
+                    ));
+                }
+                SelectItem::Expr { expr, alias, .. } => {
+                    let typed = self.infer_expr_with_scope(expr, scope)?;
+                    projected.push(ProjectedColumn {
+                        expr: typed,
+                        alias: alias.clone(),
+                    });
+                }
+            }
+        }
+        Ok(projected)
+    }
+
+    #[allow(dead_code)]
     fn build_projected_columns_for_distinct(
         &self,
         items: &[SelectItem],
@@ -722,6 +1078,36 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         crate::ast::Span::default(),
                     );
                     projected.push(ProjectedColumn::new(typed_expr));
+                }
+                Ok(projected)
+            }
+            Projection::Columns(columns) => Ok(columns),
+        }
+    }
+
+    fn build_projected_columns_for_distinct_with_scope(
+        &self,
+        items: &[SelectItem],
+        schema: &[ColumnMetadata],
+        scope: &[ScopedTable],
+    ) -> Result<Vec<ProjectedColumn>, PlannerError> {
+        let projection = self.build_projection_with_scope(items, schema, scope)?;
+        match projection {
+            Projection::All(columns) => {
+                let mut projected = Vec::with_capacity(columns.len());
+                for (idx, column) in columns.into_iter().enumerate() {
+                    let column_meta = schema.get(idx).ok_or_else(|| {
+                        PlannerError::invalid_expression(format!(
+                            "column '{column}' not found for DISTINCT projection"
+                        ))
+                    })?;
+                    projected.push(ProjectedColumn::new(TypedExpr::column_ref(
+                        LITERAL_TABLE.to_string(),
+                        column,
+                        idx,
+                        column_meta.data_type.clone(),
+                        crate::ast::Span::default(),
+                    )));
                 }
                 Ok(projected)
             }
@@ -1372,7 +1758,110 @@ fn typed_expr_contains_aggregate(expr: &TypedExpr) -> bool {
             typed_expr_contains_aggregate(expr) || list.iter().any(typed_expr_contains_aggregate)
         }
         TypedExprKind::IsNull { expr, .. } => typed_expr_contains_aggregate(expr),
+        TypedExprKind::InSubquery { expr, .. } => typed_expr_contains_aggregate(expr),
+        TypedExprKind::Quantified { expr, .. } => typed_expr_contains_aggregate(expr),
+        TypedExprKind::ScalarSubquery(_) | TypedExprKind::Exists { .. } => false,
         _ => false,
+    }
+}
+
+fn map_join_type(join_type: crate::ast::dml::JoinType) -> JoinType {
+    match join_type {
+        crate::ast::dml::JoinType::Inner => JoinType::Inner,
+        crate::ast::dml::JoinType::Left => JoinType::Left,
+        crate::ast::dml::JoinType::Right => JoinType::Right,
+        crate::ast::dml::JoinType::Full => JoinType::Full,
+        crate::ast::dml::JoinType::Cross => JoinType::Cross,
+    }
+}
+
+struct FoundScopedColumn {
+    table: String,
+    index: usize,
+    ty: ResolvedType,
+}
+
+fn find_scoped_column(
+    scope: &[ScopedTable],
+    column: &str,
+    span: crate::ast::Span,
+) -> Result<FoundScopedColumn, PlannerError> {
+    let mut matches = Vec::new();
+    for table in scope {
+        if let Some(local_idx) = table.table.get_column_index(column) {
+            let meta = &table.table.columns[local_idx];
+            matches.push(FoundScopedColumn {
+                table: table.table.name.clone(),
+                index: table.start_index + local_idx,
+                ty: meta.data_type.clone(),
+            });
+        }
+    }
+    match matches.len() {
+        0 => Err(PlannerError::column_not_found(column, "JOIN input", span)),
+        1 => Ok(matches.remove(0)),
+        _ => Err(PlannerError::ambiguous_column(
+            column,
+            scope.iter().map(|s| s.table.name.clone()).collect(),
+            span,
+        )),
+    }
+}
+
+fn projection_schema(
+    projection: &Projection,
+    input_schema: &[ColumnMetadata],
+) -> Vec<ColumnMetadata> {
+    match projection {
+        Projection::All(names) => names
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| {
+                let ty = input_schema
+                    .get(idx)
+                    .or_else(|| input_schema.iter().find(|col| &col.name == name))
+                    .map(|col| col.data_type.clone())
+                    .unwrap_or(ResolvedType::Null);
+                ColumnMetadata::new(name.clone(), ty)
+            })
+            .collect(),
+        Projection::Columns(columns) => columns
+            .iter()
+            .enumerate()
+            .map(|(idx, col)| {
+                let name = col
+                    .alias
+                    .clone()
+                    .or_else(|| match &col.expr.kind {
+                        TypedExprKind::ColumnRef { column, .. } => Some(column.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| format!("col_{idx}"));
+                ColumnMetadata::new(name, col.expr.resolved_type.clone())
+            })
+            .collect(),
+    }
+}
+
+fn offset_scope(scope: &[ScopedTable], offset: usize) -> Vec<ScopedTable> {
+    scope
+        .iter()
+        .cloned()
+        .map(|mut table| {
+            table.start_index += offset;
+            table
+        })
+        .collect()
+}
+
+fn install_base_projection(plan: &mut LogicalPlan, projection: &Projection) {
+    match plan {
+        LogicalPlan::Scan {
+            projection: scan_projection,
+            ..
+        } => *scan_projection = projection.clone(),
+        LogicalPlan::Filter { input, .. } => install_base_projection(input, projection),
+        _ => {}
     }
 }
 
@@ -1706,6 +2195,10 @@ fn rewrite_expr_with_maps(
                 span: expr.span,
             })
         }
+        TypedExprKind::ScalarSubquery(_)
+        | TypedExprKind::InSubquery { .. }
+        | TypedExprKind::Exists { .. }
+        | TypedExprKind::Quantified { .. } => Ok(expr.clone()),
     }
 }
 

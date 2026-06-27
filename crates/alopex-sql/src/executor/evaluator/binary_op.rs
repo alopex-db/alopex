@@ -13,6 +13,10 @@ pub fn eval_binary_op(
 ) -> Result<SqlValue> {
     let l = evaluate(left, ctx)?;
     let r = evaluate(right, ctx)?;
+    eval_binary_values(op, l, r)
+}
+
+pub(crate) fn eval_binary_values(op: &BinaryOp, l: SqlValue, r: SqlValue) -> Result<SqlValue> {
     match op {
         BinaryOp::Add => add(l, r),
         BinaryOp::Sub => sub(l, r),
