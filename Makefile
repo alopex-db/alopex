@@ -1,4 +1,5 @@
-.PHONY: act-ci act-ci-coverage act-ci-security act-clean-volumes \
+.PHONY: nim-parser \
+	act-ci act-ci-coverage act-ci-security act-clean-volumes \
 	act-compat act-compat-x86 act-compat-wasm \
 	act-compat-x86-none act-compat-x86-snappy act-compat-x86-zstd act-compat-x86-lz4 \
 	act-compat-wasm-none act-compat-wasm-snappy \
@@ -12,6 +13,9 @@ ACT_COMMON_FLAGS ?= --reuse=false --artifact-server-addr $(ACT_ARTIFACT_SERVER)
 ACT_PY_PLATFORM ?= ubuntu-latest=alopex-act-ubuntu:latest
 ACT_PY_FLAGS ?= --env ACT=true --platform $(ACT_PY_PLATFORM) --pull=false $(ACT_COMMON_FLAGS)
 ACT_CLEAN_VOLUMES ?= docker volume ls -q --filter "label=act" | xargs -r docker volume rm && docker volume ls --format "{{.Name}}" | grep -E '^act-' | xargs -r docker volume rm
+
+nim-parser:
+	cd crates/alopex-sql/nim-sql-parser && nimble lib
 
 act-ci:
 	$(ACT) -W .github/workflows/ci.yml -j fmt $(ACT_COMMON_FLAGS)

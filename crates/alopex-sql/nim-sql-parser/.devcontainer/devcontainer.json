@@ -1,0 +1,16 @@
+{
+  "name": "Alopex SQL Parser (Nim)",
+  "image": "nimlang/nim:2.2",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "nimsaem.nimvscode",
+        "saem.vscode-nim"
+      ]
+    }
+  },
+  "postCreateCommand": "nimble install -y npeg msgpack4nim",
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/workspace,type=bind"
+  ]
+}

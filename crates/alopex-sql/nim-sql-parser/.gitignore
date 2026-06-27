@@ -1,0 +1,5 @@
+# Nim build artifacts
+*.so
+nimcache/
+tests/poc_msgpack
+tests/fixtures/
