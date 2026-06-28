@@ -1437,8 +1437,7 @@ mod tests {
     use crate::MemoryKV;
     use crate::ScalarKernel;
     use std::future::Future;
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     fn encode_f32(values: &[f32]) -> EncodedColumn {
         let encoder = create_encoder(EncodingV2::ByteStreamSplit);
@@ -2046,13 +2045,8 @@ mod tests {
     }
 
     fn block_on<F: Future>(fut: F) -> F::Output {
-        struct Noop;
-        impl Wake for Noop {
-            fn wake(self: Arc<Self>) {}
-            fn wake_by_ref(self: &Arc<Self>) {}
-        }
-        let waker = Waker::from(Arc::new(Noop));
-        let mut cx = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
         let mut fut = std::pin::pin!(fut);
         loop {
             match fut.as_mut().poll(&mut cx) {

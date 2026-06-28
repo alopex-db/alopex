@@ -9,16 +9,11 @@ use crate::vector::hnsw::{HnswConfig, HnswIndex};
 use crate::vector::{Metric, VectorSearchParams, VectorStoreConfig, VectorStoreManager};
 
 use std::future::Future;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 fn block_on<F: Future>(mut fut: F) -> F::Output {
-    struct Noop;
-    impl Wake for Noop {
-        fn wake(self: Arc<Self>) {}
-    }
-    let waker: Waker = Arc::new(Noop).into();
-    let mut cx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
     // SAFETY: テスト内の単純 future のみを扱う。
     let mut fut = unsafe { std::pin::Pin::new_unchecked(&mut fut) };
     loop {
