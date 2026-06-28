@@ -53,3 +53,7 @@ harness = false
 [[bench]]
 name = "group_by_bench"
 harness = false
+
+[[bench]]
+name = "parser_exec_bench"
+harness = false
