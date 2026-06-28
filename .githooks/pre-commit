@@ -55,8 +55,15 @@ echo -e "${GREEN}Format check passed${NC}"
 
 if [ "${ALOPEX_SKIP_CLIPPY:-0}" != "1" ]; then
     echo ""
-    echo -e "${YELLOW}Running cargo clippy...${NC}"
-    if ! cargo clippy --all-targets --all-features -- -D warnings; then
+    # CI は dtolnay/rust-toolchain@stable を使うため、stable ツールチェーンが
+    # あれば stable で clippy を実行して CI とバージョンを揃える。stable 固有の
+    # lint（Rust 1.96 の result_large_err / noop_waker 等）を push 前に検知する。
+    CLIPPY_TOOLCHAIN=""
+    if rustup toolchain list 2>/dev/null | grep -q "^stable-"; then
+        CLIPPY_TOOLCHAIN="+stable"
+    fi
+    echo -e "${YELLOW}Running cargo ${CLIPPY_TOOLCHAIN:-default} clippy...${NC}"
+    if ! cargo ${CLIPPY_TOOLCHAIN} clippy --all-targets --all-features -- -D warnings; then
         echo -e "${RED}Clippy check failed!${NC}"
         echo "Fix the warnings above before committing"
         exit 1
