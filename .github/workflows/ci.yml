@@ -245,6 +245,11 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Generate coverage
+        env:
+          # cargo-llvm-cov は target/llvm-cov-target/ を使い、build.rs が設定した
+          # rpath だけでは実行時に Nim 共有ライブラリを解決できないため、
+          # Nim ライブラリのディレクトリを LD_LIBRARY_PATH に追加して解決する。
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info -- --skip e2e_
 
       - name: Upload coverage to Codecov

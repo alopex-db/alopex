@@ -43,7 +43,16 @@ fn main() {
     }
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=dylib=alopex_sql_parser");
+
+    // Windows は `raw-dylib` でリンクする。Rust が idata セクションを生成して
+    // `.dll` から直接インポートテーブルを構築するため、import library（`.lib`）が不要。
+    // 出典: Rust RFC 2627 / Rust Reference「The `link` attribute」。
+    // Linux/macOS は従来どおり共有ライブラリ（`.so`/`.dylib`）に動的リンクする。
+    if cfg!(target_os = "windows") {
+        println!("cargo:rustc-link-lib=raw-dylib=alopex_sql_parser");
+    } else {
+        println!("cargo:rustc-link-lib=dylib=alopex_sql_parser");
+    }
 
     // 実行時のライブラリ解決:
     // - Linux:   rpath を共有ライブラリのディレクトリに設定。
