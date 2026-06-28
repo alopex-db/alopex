@@ -99,6 +99,13 @@ jobs:
           cd "${NIM_SQL_PARSER_DIR}"
           nimble install -y npeg msgpack4nim
           nimble lib
+      # Windows は rpath を持たないため、テストバイナリ実行時に
+      # alopex_sql_parser.dll を見つけられるよう Nim ライブラリのディレクトリを
+      # PATH に追加する（Windows の DLL 検索は PATH を含む）。
+      - name: Add Nim library to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
       - name: Build CLI
         run: cargo build -p alopex-cli --release
 
