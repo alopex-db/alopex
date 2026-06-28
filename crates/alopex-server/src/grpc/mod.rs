@@ -90,6 +90,9 @@ where
     }
 }
 
+// tonic のインターセプタは `Result<Request<()>, tonic::Status>` を返す契約のため、
+// `Status` を縮小できない。large エラー型は tonic 側の API 制約として許容する。
+#[allow(clippy::result_large_err)]
 pub async fn serve(
     state: Arc<ServerState>,
     addr: SocketAddr,
