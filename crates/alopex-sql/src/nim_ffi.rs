@@ -20,6 +20,15 @@ pub struct CParseResult {
     pub error_len: c_int,
 }
 
+// Windows は `raw-dylib` で Nim `.dll` にリンクする。Rust が import library を
+// コンパイル時に生成するため、別途 `.lib` を用意せずに済む。
+// 出典: Rust RFC 2627 / Rust Reference「External blocks」。
+// `raw-dylib` は build script の `rustc-link-lib` では指定できないため、ここで
+// `#[link]` 属性として付与する。Linux/macOS は build.rs の `dylib` リンクに従う。
+#[cfg_attr(
+    target_os = "windows",
+    link(name = "alopex_sql_parser", kind = "raw-dylib")
+)]
 unsafe extern "C" {
     fn alopex_parser_init();
     fn alopex_parse_sql(input: *const c_char, length: c_int) -> CParseResult;
