@@ -93,6 +93,22 @@ jobs:
             -e HOME=/tmp \
             nimlang/nim:2.2 \
             sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
+      # macOS/Windows ランナーは docker で Linux コンテナを動かせないため、
+      # ネイティブ Nim ツールチェーン (2.2 固定) をセットアップして共有ライブラリを生成する。
+      # 要 CI 検証: macOS/Windows ランナー上でのみ動作確認可能（ローカル検証不可）。
+      - name: Setup Nim (macOS/Windows)
+        if: runner.os != 'Linux'
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Nim SQL parser library (macOS/Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          cd "${NIM_SQL_PARSER_DIR}"
+          nimble install -y npeg msgpack4nim
+          nimble lib
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p alopex-cli
 
