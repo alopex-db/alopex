@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 #![cfg(feature = "test-hooks")]
 
 mod common;

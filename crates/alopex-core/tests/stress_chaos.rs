@@ -1,22 +1,29 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 mod common;
 
 use alopex_core::kv::memory::MemoryTransaction;
 use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnMode};
+#[cfg(feature = "test-hooks")]
 use chrono::Utc;
-use common::replay::{gen_f64, gen_range_usize, gen_u32};
+use common::replay::gen_u32;
+#[cfg(feature = "test-hooks")]
+use common::replay::{gen_f64, gen_range_usize};
 use common::{
-    begin_op, log_path, open_store_with_fault_injector, prepare_artifacts,
-    run_full_consistency_checks, slo_presets, ChaosConfig, ChaosOperation, ChaosWorkloadGenerator,
-    ColumnarOperation, DdlOperation, DiskFullInjector, ExecutionModel, Lane, MultiModelOperation,
-    SloConfig, SqlOperation, StressStorageMode, StressTestConfig, StressTestHarness, TestResult,
-    VectorOperation, WorkloadConfig,
+    begin_op, run_full_consistency_checks, slo_presets, ChaosConfig, ChaosOperation,
+    ChaosWorkloadGenerator, ColumnarOperation, DdlOperation, ExecutionModel, Lane,
+    MultiModelOperation, SloConfig, SqlOperation, StressStorageMode, StressTestConfig,
+    StressTestHarness, TestResult, VectorOperation, WorkloadConfig,
 };
+#[cfg(feature = "test-hooks")]
+use common::{log_path, open_store_with_fault_injector, prepare_artifacts, DiskFullInjector};
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+#[cfg(feature = "test-hooks")]
 use tempfile::TempDir;
 use tokio::task::JoinSet;
 
@@ -51,6 +58,30 @@ fn pad_chaos_metrics(ctx: &common::TestContext, count: usize) {
     for _ in 0..count {
         ctx.metrics.record_success();
     }
+}
+
+fn scoped_db_path(base: &Path, label: &str, tid: usize) -> PathBuf {
+    let parent = base.parent().unwrap_or_else(|| Path::new("."));
+    let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
+    match base.extension().and_then(|s| s.to_str()) {
+        Some(ext) => parent.join(format!("{stem}-{label}-{tid}.{ext}")),
+        None => parent.join(format!("{stem}-{label}-{tid}")),
+    }
+}
+
+fn context_with_db_path(ctx: &common::TestContext, db_path: PathBuf) -> common::TestContext {
+    let mut scoped = ctx.clone();
+    scoped.db_path = db_path;
+    scoped
+}
+
+fn run_dedicated_consistency_checks(
+    ctx: &common::TestContext,
+    label: &str,
+    tid: usize,
+) -> CoreResult<()> {
+    let scoped = context_with_db_path(ctx, scoped_db_path(&ctx.db_path, label, tid));
+    run_full_consistency_checks(&scoped, std::slice::from_ref(&StressStorageMode::Memory))
 }
 
 fn encode_row(row: &[(String, Vec<u8>)]) -> Vec<u8> {
@@ -572,10 +603,7 @@ fn run_chaos_mix(
                     ctx.metrics.record_latency(start.elapsed());
                 }
                 if post_consistency {
-                    run_full_consistency_checks(
-                        ctx,
-                        std::slice::from_ref(&StressStorageMode::Memory),
-                    )?;
+                    run_dedicated_consistency_checks(ctx, "chaos-consistency", tid)?;
                 }
                 pad_chaos_metrics(ctx, batches * batch_size * 3);
                 Ok(())
@@ -656,9 +684,10 @@ fn run_chaos_mix(
                                 ctx_clone.metrics.record_latency(start.elapsed());
                             }
                             if post_consistency {
-                                run_full_consistency_checks(
+                                run_dedicated_consistency_checks(
                                     &ctx_clone,
-                                    std::slice::from_ref(&StressStorageMode::Memory),
+                                    "chaos-consistency",
+                                    tid,
                                 )?;
                             }
                             pad_chaos_metrics(&ctx_clone, batches * batch_size * 3);
@@ -981,27 +1010,27 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
             pad_chaos_metrics(ctx, batches * batch_size * 3);
             Ok(())
         }),
-        ExecutionModel::SyncMulti => {
+        ExecutionModel::SyncMulti => harness.run_concurrent(move |tid, ctx| {
+            let ctx =
+                context_with_db_path(ctx, scoped_db_path(&ctx.db_path, "persistent-crash", tid));
             let tables = Arc::new(Mutex::new(HashSet::new()));
-            harness.run_concurrent(move |tid, ctx| {
-                let mut cfg_local = chaos_cfg.clone();
-                cfg_local.workload.seed ^= tid as u64 + 0x51;
-                cfg_local.multi_model.workload.seed ^= tid as u64 + 0x71;
-                cfg_local.ddl_seed = cfg_local.ddl_seed.wrapping_add(tid as u64);
-                cfg_local.invalid_seed = cfg_local.invalid_seed.wrapping_add(tid as u64);
-                let mut store = Arc::new(open_persistent_store(&ctx.db_path)?);
-                seed_persistent_baseline(&store, &tables)?;
-                let mut gen = ChaosWorkloadGenerator::new(cfg_local);
-                for _ in 0..batches {
-                    run_persistent_batch(ctx, &mut store, &tables, &mut gen, batch_size)?;
-                }
-                verify_persistent_state(&store, &tables)?;
-                drop(store);
-                run_full_consistency_checks(ctx, std::slice::from_ref(&StressStorageMode::Memory))?;
-                pad_chaos_metrics(ctx, batches * batch_size * 3);
-                Ok(())
-            })
-        }
+            let mut cfg_local = chaos_cfg.clone();
+            cfg_local.workload.seed ^= tid as u64 + 0x51;
+            cfg_local.multi_model.workload.seed ^= tid as u64 + 0x71;
+            cfg_local.ddl_seed = cfg_local.ddl_seed.wrapping_add(tid as u64);
+            cfg_local.invalid_seed = cfg_local.invalid_seed.wrapping_add(tid as u64);
+            let mut store = Arc::new(open_persistent_store(&ctx.db_path)?);
+            seed_persistent_baseline(&store, &tables)?;
+            let mut gen = ChaosWorkloadGenerator::new(cfg_local);
+            for _ in 0..batches {
+                run_persistent_batch(&ctx, &mut store, &tables, &mut gen, batch_size)?;
+            }
+            verify_persistent_state(&store, &tables)?;
+            drop(store);
+            run_dedicated_consistency_checks(&ctx, "persistent-consistency", tid)?;
+            pad_chaos_metrics(&ctx, batches * batch_size * 3);
+            Ok(())
+        }),
         ExecutionModel::AsyncSingle => {
             let chaos_async = chaos_cfg.clone();
             harness.run_async(move |ctx| {
@@ -1026,34 +1055,33 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
             })
         }
         ExecutionModel::AsyncMulti => {
-            let tables = Arc::new(Mutex::new(HashSet::new()));
             let workers = concurrency;
             let chaos_outer = chaos_cfg.clone();
             harness.run_async(move |ctx| {
-                let tables_outer = tables.clone();
                 let chaos_cfg_outer = chaos_outer.clone();
                 async move {
-                    let store = Arc::new(open_persistent_store(&ctx.db_path)?);
-                    // Seed baseline once before worker fan-out to avoid concurrent TxnConflict on the same table.
-                    seed_persistent_baseline(&store, &tables_outer)?;
                     let mut set = JoinSet::new();
                     for tid in 0..workers {
-                        let ctx_clone = ctx.clone();
-                        let tables_clone = tables_outer.clone();
+                        let ctx_clone = context_with_db_path(
+                            &ctx,
+                            scoped_db_path(&ctx.db_path, "persistent-crash", tid),
+                        );
                         let mut cfg_local = chaos_cfg_outer.clone();
                         cfg_local.workload.seed ^= tid as u64 + 0x59;
                         cfg_local.multi_model.workload.seed ^= tid as u64 + 0x7b;
                         cfg_local.ddl_seed = cfg_local.ddl_seed.wrapping_add(tid as u64);
                         cfg_local.invalid_seed = cfg_local.invalid_seed.wrapping_add(tid as u64);
-                        let store_clone = store.clone();
                         set.spawn(async move {
-                            let mut store_handle = store_clone;
+                            let tables = Arc::new(Mutex::new(HashSet::new()));
+                            let mut store_handle =
+                                Arc::new(open_persistent_store(&ctx_clone.db_path)?);
+                            seed_persistent_baseline(&store_handle, &tables)?;
                             let mut gen = ChaosWorkloadGenerator::new(cfg_local);
                             for _ in 0..batches {
                                 match run_persistent_batch(
                                     &ctx_clone,
                                     &mut store_handle,
-                                    &tables_clone,
+                                    &tables,
                                     &mut gen,
                                     batch_size,
                                 ) {
@@ -1065,11 +1093,12 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
                                     Err(e) => return Err(e),
                                 }
                             }
-                            verify_persistent_state(&store_handle, &tables_clone)?;
+                            verify_persistent_state(&store_handle, &tables)?;
                             drop(store_handle);
-                            run_full_consistency_checks(
+                            run_dedicated_consistency_checks(
                                 &ctx_clone,
-                                std::slice::from_ref(&StressStorageMode::Memory),
+                                "persistent-consistency",
+                                tid,
                             )?;
                             pad_chaos_metrics(&ctx_clone, batches * batch_size * 3);
                             Ok::<_, CoreError>(())
@@ -1088,6 +1117,7 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 struct ChaosMatrixConfig {
     nodes: usize,
     zones: usize,
@@ -1103,6 +1133,7 @@ struct ChaosMatrixConfig {
     disk_full_rate: f64,
 }
 
+#[cfg(feature = "test-hooks")]
 impl ChaosMatrixConfig {
     fn from_env() -> Self {
         Self {
@@ -1122,6 +1153,7 @@ impl ChaosMatrixConfig {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 #[derive(Clone, Debug)]
 struct ChaosLink {
     latency_ms: u64,
@@ -1129,6 +1161,7 @@ struct ChaosLink {
     partitioned: bool,
 }
 
+#[cfg(feature = "test-hooks")]
 struct ChaosNode {
     id: usize,
     zone: usize,
@@ -1137,6 +1170,7 @@ struct ChaosNode {
     disk_full: Arc<DiskFullInjector>,
 }
 
+#[cfg(feature = "test-hooks")]
 struct ChaosMatrix {
     nodes: Vec<ChaosNode>,
     links: Vec<Vec<ChaosLink>>,
@@ -1144,6 +1178,7 @@ struct ChaosMatrix {
     timeline_path: Option<PathBuf>,
 }
 
+#[cfg(feature = "test-hooks")]
 impl ChaosMatrix {
     fn new(cfg: &ChaosMatrixConfig, timeline_path: Option<PathBuf>) -> CoreResult<Self> {
         let temp_dir = TempDir::new().map_err(CoreError::Io)?;
@@ -1403,19 +1438,13 @@ impl ChaosMatrix {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 fn open_matrix_store(path: &Path, injector: Arc<DiskFullInjector>) -> CoreResult<Arc<MemoryKV>> {
-    #[cfg(feature = "test-hooks")]
-    {
-        let hook: Arc<dyn common::FaultInjector> = injector;
-        open_store_with_fault_injector(path, hook).map(Arc::new)
-    }
-    #[cfg(not(feature = "test-hooks"))]
-    {
-        let _ = injector;
-        MemoryKV::open(path).map(Arc::new)
-    }
+    let hook: Arc<dyn common::FaultInjector> = injector;
+    open_store_with_fault_injector(path, hook).map(Arc::new)
 }
 
+#[cfg(feature = "test-hooks")]
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)
         .ok()
@@ -1423,6 +1452,7 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+#[cfg(feature = "test-hooks")]
 fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key)
         .ok()
@@ -1430,6 +1460,7 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+#[cfg(feature = "test-hooks")]
 fn env_f64(key: &str, default: f64) -> f64 {
     std::env::var(key)
         .ok()
@@ -1437,6 +1468,7 @@ fn env_f64(key: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+#[cfg(feature = "test-hooks")]
 fn run_chaos_matrix(model: ExecutionModel) -> Vec<(usize, TestResult)> {
     let chaos_cfg = ChaosConfig {
         crash_ratio: 0.0,
@@ -1486,6 +1518,7 @@ fn run_chaos_matrix(model: ExecutionModel) -> Vec<(usize, TestResult)> {
     results
 }
 
+#[cfg(feature = "test-hooks")]
 fn chaos_matrix_scales() -> Vec<usize> {
     let raw = std::env::var("STRESS_CHAOS_MATRIX_SCALES").unwrap_or_else(|_| "3,5,7".to_string());
     let mut values: Vec<usize> = raw
@@ -1539,6 +1572,7 @@ chaos_test!(
     run_persistent_crash_reopen
 );
 
+#[cfg(feature = "test-hooks")]
 #[cfg_attr(not(feature = "lane_nightly"), ignore)]
 #[test]
 fn test_chaos_matrix_short_interval() {

@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 mod common;
 
 use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnManager, TxnMode};
