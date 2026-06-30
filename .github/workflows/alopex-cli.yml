@@ -72,7 +72,7 @@ jobs:
       # build.rs の rpath だけでは解決できない実行経路（テストバイナリや
       # 直接起動するバイナリ）のため、Nim 共有ライブラリのディレクトリを
       # LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効、他 OS では未使用）。
-      LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+      LD_LIBRARY_PATH: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
     strategy:
       fail-fast: false
       matrix:
@@ -240,7 +240,7 @@ jobs:
       # build.rs の rpath だけでは解決できない実行経路（テストバイナリや
       # 直接起動するバイナリ）のため、Nim 共有ライブラリのディレクトリを
       # LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効、他 OS では未使用）。
-      LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+      LD_LIBRARY_PATH: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -311,7 +311,7 @@ jobs:
       # build.rs の rpath だけでは解決できない実行経路（テストバイナリや
       # 直接起動するバイナリ）のため、Nim 共有ライブラリのディレクトリを
       # LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効、他 OS では未使用）。
-      LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+      LD_LIBRARY_PATH: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -375,7 +375,7 @@ jobs:
       # build.rs の rpath だけでは解決できない実行経路（テストバイナリや
       # 直接起動するバイナリ）のため、Nim 共有ライブラリのディレクトリを
       # LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効、他 OS では未使用）。
-      LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+      LD_LIBRARY_PATH: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
