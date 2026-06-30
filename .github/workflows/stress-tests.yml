@@ -41,6 +41,7 @@ jobs:
           RUST_BACKTRACE: 1
           STRESS_TEST_TIMEOUT: 120
           STRESS_REPORT_DIR: target/stress-reports # set empty string to skip artifact upload
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           cargo test --features test-hooks,lane_ci --test stress_* -- --test-threads=1
 
@@ -114,6 +115,7 @@ jobs:
           RUST_BACKTRACE: 1
           STRESS_REPORT_DIR: target/stress-reports/${{ matrix.sanitizer }}
           STRESS_ARTIFACTS_DIR: target/stress-artifacts/${{ matrix.sanitizer }}
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           ./scripts/run-sanitizer-lane.sh ${{ matrix.sanitizer }}
 
@@ -163,6 +165,7 @@ jobs:
       - name: Run SQL fuzz target (24h)
         env:
           STRESS_REPORT_DIR: target/stress-reports/fuzz/sql_parser
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           cd crates/alopex-sql/fuzz
           export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
@@ -171,6 +174,7 @@ jobs:
       - name: Run DataFrame fuzz target (24h)
         env:
           STRESS_REPORT_DIR: target/stress-reports/fuzz/dataframe_conversion
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           cd crates/alopex-dataframe/fuzz
           export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
@@ -225,6 +229,7 @@ jobs:
           STRESS_BASELINE_DIR: target/stress-baselines
           STRESS_REPORT_DIR: target/stress-reports/perf
           STRESS_ARTIFACTS_DIR: target/stress-artifacts/perf
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           cargo test --features lane_perf --test stress_perf_baseline -- --test-threads=1
 

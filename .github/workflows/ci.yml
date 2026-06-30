@@ -166,9 +166,16 @@ jobs:
         run: echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
 
       - name: Run tests
+        env:
+          # テストバイナリ（target/debug/deps 配下）は build.rs の rpath だけでは
+          # Nim 共有ライブラリを解決できないため、ライブラリのディレクトリを
+          # LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効）。
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: cargo test --all-features --workspace
 
       - name: Run doc tests
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: cargo test --doc --workspace
 
   coverage:

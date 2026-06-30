@@ -45,6 +45,11 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
         # Exclude alopex-py as it requires numpy and has its own CI workflow
+        env:
+          # ワークスペースのテストバイナリは build.rs の rpath だけでは Nim 共有
+          # ライブラリを解決できないため、ライブラリのディレクトリを
+          # LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効）。
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: cargo test --workspace --all-features --exclude alopex-py
 
   build-release:

@@ -54,6 +54,11 @@ jobs:
         run: cargo clippy -p alopex-cli -- -D warnings
 
       - name: Unit tests
+        env:
+          # cargo test のテストバイナリは build.rs の rpath だけでは Nim 共有
+          # ライブラリを解決できないため、ライブラリのディレクトリを
+          # LD_LIBRARY_PATH に追加して実行時解決する。
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: cargo test -p alopex-cli
 
   # ============================================================================
@@ -63,6 +68,11 @@ jobs:
     name: Functional Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     needs: cli-check
+    env:
+      # build.rs の rpath だけでは解決できない実行経路（テストバイナリや
+      # 直接起動するバイナリ）のため、Nim 共有ライブラリのディレクトリを
+      # LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効、他 OS では未使用）。
+      LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
     strategy:
       fail-fast: false
       matrix:
@@ -226,6 +236,11 @@ jobs:
     name: Streaming Fallback Test (10,000+ rows)
     runs-on: ubuntu-latest
     needs: cli-check
+    env:
+      # build.rs の rpath だけでは解決できない実行経路（テストバイナリや
+      # 直接起動するバイナリ）のため、Nim 共有ライブラリのディレクトリを
+      # LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効、他 OS では未使用）。
+      LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -292,6 +307,11 @@ jobs:
     name: Signal Handling Test (Ctrl-C)
     runs-on: ubuntu-latest
     needs: cli-check
+    env:
+      # build.rs の rpath だけでは解決できない実行経路（テストバイナリや
+      # 直接起動するバイナリ）のため、Nim 共有ライブラリのディレクトリを
+      # LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効、他 OS では未使用）。
+      LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -351,6 +371,11 @@ jobs:
     name: S3 Compatibility Test (MinIO)
     runs-on: ubuntu-latest
     needs: cli-check
+    env:
+      # build.rs の rpath だけでは解決できない実行経路（テストバイナリや
+      # 直接起動するバイナリ）のため、Nim 共有ライブラリのディレクトリを
+      # LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効、他 OS では未使用）。
+      LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

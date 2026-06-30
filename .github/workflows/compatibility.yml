@@ -91,6 +91,10 @@ jobs:
       - name: Run compatibility tests
         env:
           ALOPEX_COMPAT_COMPRESSION: ${{ matrix.compression }}
+          # alopex-core のテストバイナリは alopex-sql 経由で Nim 共有ライブラリを
+          # ロードする。build.rs の rpath だけでは解決できないため、ライブラリの
+          # ディレクトリを LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効）。
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: cargo test -p alopex-core --tests format_compatibility_test $FEATURE_FLAGS
 
   wasm:
