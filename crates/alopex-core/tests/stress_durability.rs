@@ -45,7 +45,7 @@ fn inject_power_loss(root: &std::path::Path) -> CoreResult<(u64, u64)> {
         .open(&wal_path)?;
     let mut header_bytes = [0u8; WAL_SECTION_HEADER_SIZE];
     file.read_exact(&mut header_bytes)?;
-    let section = WalSectionHeader::from_bytes(&header_bytes);
+    let section = WalSectionHeader::from_bytes(&header_bytes)?;
 
     let cfg = alopex_core::lsm::LsmKVConfig::default();
     let max_segments = cfg.wal.max_segments as u64;

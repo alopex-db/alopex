@@ -156,7 +156,9 @@ pub mod recovery {
     use std::io::{Read, Seek, SeekFrom, Write};
 
     use crate::kv::{KVStore, KVTransaction};
-    use crate::lsm::wal::{SyncMode, WalConfig, WalEntry, WalReader, WalSectionHeader};
+    use crate::lsm::wal::{
+        SyncMode, WalConfig, WalEntry, WalReader, WalSectionHeader, WAL_SECTION_HEADER_SIZE,
+    };
     use crate::lsm::{LsmKV, LsmKVConfig, MemTableConfig};
     use crate::types::TxnMode;
 
@@ -202,26 +204,35 @@ pub mod recovery {
                 .open(&wal_path)
                 .unwrap();
 
-            let mut hdr = [0u8; 16];
+            let mut hdr = [0u8; WAL_SECTION_HEADER_SIZE];
             file.seek(SeekFrom::Start(0)).unwrap();
             file.read_exact(&mut hdr).unwrap();
-            let mut section = WalSectionHeader::from_bytes(&hdr);
+            let mut section = WalSectionHeader::from_bytes(&hdr).unwrap();
             section.end_offset = section.end_offset.saturating_add(bogus_len);
+            section.refresh_crc();
             file.seek(SeekFrom::Start(0)).unwrap();
             file.write_all(&section.to_bytes()).unwrap();
             file.flush().unwrap();
         }
 
-        // 3) reopen: reader は末尾で停止しつつ、先頭のエントリは復元される
-        let (store, _recovery) = LsmKV::open_with_config(dir.path(), cfg.clone()).expect("reopen");
-        let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
-        assert_eq!(ro.get(&b"k1".to_vec()).unwrap(), Some(b"v1".to_vec()));
-        assert_eq!(ro.get(&b"k2".to_vec()).unwrap(), None);
-
         // reader 側でも stop_reason が出る（ただしエラーにはしない）
         let mut reader = WalReader::open(&wal_path, cfg.wal.clone()).unwrap();
         let replay = reader.replay().unwrap();
         assert!(replay.stop_reason.is_some());
+        assert_eq!(replay.entries.len(), 1);
+
+        // 3) reopen: 先頭のエントリは復元され、壊れた末尾は repair される。
+        let (store, recovery) = LsmKV::open_with_config(dir.path(), cfg.clone()).expect("reopen");
+        assert_eq!(recovery.entries_recovered, 1);
+        assert_eq!(recovery.last_lsn, 2);
+        let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(ro.get(&b"k1".to_vec()).unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(ro.get(&b"k2".to_vec()).unwrap(), None);
+
+        // repair 後は同じ WAL を再読しても正常な prefix だけになる。
+        let mut reader = WalReader::open(&wal_path, cfg.wal.clone()).unwrap();
+        let replay = reader.replay().unwrap();
+        assert!(replay.stop_reason.is_none());
         assert_eq!(replay.entries.len(), 1);
     }
 }

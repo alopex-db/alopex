@@ -52,9 +52,12 @@ pub fn run_full_consistency_checks(
 ) -> CoreResult<()> {
     for mode in modes {
         kv_storage_consistency(ctx, *mode)?;
+        ctx.watchdog.report_progress();
         sql_storage_consistency(ctx, *mode)?;
+        ctx.watchdog.report_progress();
     }
     dataframe_consistency(ctx)?;
+    ctx.watchdog.report_progress();
     Ok(())
 }
 

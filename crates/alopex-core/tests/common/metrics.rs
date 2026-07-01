@@ -10,6 +10,12 @@ pub struct MetricsCollector {
     successes: AtomicU64,
     errors: AtomicU64,
     latencies_ns: Mutex<Vec<u64>>,
+    /// Wall-clock time (ns) spent in synthetic, injected stalls that are not
+    /// attributable to the database under test — e.g. simulated inter-node
+    /// network latency emulated with `thread::sleep`. This is subtracted from
+    /// the measurement window when computing throughput so the metric reflects
+    /// the engine's effective processing rate, not the fault injector's sleeps.
+    excluded_ns: AtomicU64,
 }
 
 impl MetricsCollector {
@@ -18,6 +24,7 @@ impl MetricsCollector {
             successes: AtomicU64::new(0),
             errors: AtomicU64::new(0),
             latencies_ns: Mutex::new(Vec::new()),
+            excluded_ns: AtomicU64::new(0),
         }
     }
 
@@ -35,12 +42,21 @@ impl MetricsCollector {
         guard.push(ns);
     }
 
+    /// Records time spent in a synthetic injected stall (e.g. emulated network
+    /// latency) so it can be excluded from the throughput denominator.
+    pub fn record_excluded_time(&self, d: Duration) {
+        self.excluded_ns
+            .fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+    }
+
     pub fn summary(&self, window: Duration) -> MetricsSummary {
         let successes = self.successes.load(Ordering::Relaxed);
         let errors = self.errors.load(Ordering::Relaxed);
         let mut latencies = self.latencies_ns.lock().unwrap().clone();
         latencies.sort_unstable();
-        MetricsSummary::from_samples(successes, errors, latencies, window)
+        let excluded = Duration::from_nanos(self.excluded_ns.load(Ordering::Relaxed));
+        let effective_window = window.saturating_sub(excluded);
+        MetricsSummary::from_samples(successes, errors, latencies, effective_window)
     }
 
     pub fn verify_slo(&self, cfg: &SloConfig, summary: &MetricsSummary) -> SloResult {

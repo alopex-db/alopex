@@ -88,7 +88,7 @@ impl CrashSimulator {
         let mut file = OpenOptions::new().read(true).write(true).open(&wal_path)?;
         let mut header_bytes = [0u8; WAL_SECTION_HEADER_SIZE];
         file.read_exact(&mut header_bytes)?;
-        let section = WalSectionHeader::from_bytes(&header_bytes);
+        let section = WalSectionHeader::from_bytes(&header_bytes)?;
 
         let max_segments = self.config.wal.max_segments as u64;
         if max_segments == 0 {

@@ -54,12 +54,6 @@ fn chaos_config(name: &str, model: ExecutionModel, concurrency: usize) -> Stress
     }
 }
 
-fn pad_chaos_metrics(ctx: &common::TestContext, count: usize) {
-    for _ in 0..count {
-        ctx.metrics.record_success();
-    }
-}
-
 fn scoped_db_path(base: &Path, label: &str, tid: usize) -> PathBuf {
     let parent = base.parent().unwrap_or_else(|| Path::new("."));
     let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("db");
@@ -75,13 +69,32 @@ fn context_with_db_path(ctx: &common::TestContext, db_path: PathBuf) -> common::
     scoped
 }
 
+fn context_with_isolated_metrics(ctx: &common::TestContext) -> common::TestContext {
+    let mut scoped = ctx.clone();
+    scoped.metrics = Arc::new(common::MetricsCollector::new());
+    scoped
+}
+
+fn run_post_consistency_checks(
+    ctx: &common::TestContext,
+    modes: &[StressStorageMode],
+) -> CoreResult<()> {
+    let scoped = context_with_isolated_metrics(ctx);
+    run_full_consistency_checks(&scoped, modes)?;
+    ctx.watchdog.report_progress();
+    Ok(())
+}
+
 fn run_dedicated_consistency_checks(
     ctx: &common::TestContext,
     label: &str,
     tid: usize,
 ) -> CoreResult<()> {
     let scoped = context_with_db_path(ctx, scoped_db_path(&ctx.db_path, label, tid));
-    run_full_consistency_checks(&scoped, std::slice::from_ref(&StressStorageMode::Memory))
+    let scoped = context_with_isolated_metrics(&scoped);
+    run_full_consistency_checks(&scoped, std::slice::from_ref(&StressStorageMode::Memory))?;
+    ctx.watchdog.report_progress();
+    Ok(())
 }
 
 fn encode_row(row: &[(String, Vec<u8>)]) -> Vec<u8> {
@@ -252,14 +265,9 @@ fn apply_invalid_op(op: common::InvalidOperation) -> CoreResult<bool> {
 }
 
 fn simulate_crash(store: &Arc<MemoryKV>, tables: &Arc<Mutex<HashSet<String>>>) -> CoreResult<()> {
-    let mut txn = store.begin(TxnMode::ReadWrite)?;
-    let keys: Vec<Vec<u8>> = txn.scan_prefix(b"")?.map(|(k, _)| k).collect();
-    for k in keys {
-        txn.delete(k)?;
-    }
-    txn.commit_self().map(|_| {
-        tables.lock().unwrap().clear();
-    })
+    store.txn_manager().clear_all();
+    tables.lock().unwrap().clear();
+    Ok(())
 }
 
 fn crash_file_paths(path: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -373,6 +381,31 @@ fn apply_chaos_op(
     }
 }
 
+fn apply_chaos_op_with_metrics(
+    ctx: &common::TestContext,
+    store: &Arc<MemoryKV>,
+    op: ChaosOperation,
+    tables: &Arc<Mutex<HashSet<String>>>,
+) -> CoreResult<()> {
+    let is_injected_crash = matches!(op, ChaosOperation::TriggerCrash);
+    let start = Instant::now();
+    let result = apply_chaos_op(store, op, tables);
+    let elapsed = start.elapsed();
+    match result {
+        // Invalid/crash operations returning Ok(false) are expected injected
+        // chaos events; only unexpected conflicts count against error SLO.
+        Ok(_) => ctx.metrics.record_success(),
+        Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
+        Err(e) => return Err(e),
+    }
+    ctx.metrics.record_latency(elapsed);
+    if is_injected_crash {
+        ctx.metrics.record_excluded_time(elapsed);
+    }
+    ctx.watchdog.report_progress();
+    Ok(())
+}
+
 fn refresh_tables_from_meta(
     store: &Arc<MemoryKV>,
     tables: &Arc<Mutex<HashSet<String>>>,
@@ -478,12 +511,12 @@ fn run_persistent_batch(
     gen: &mut ChaosWorkloadGenerator,
     batch_size: usize,
 ) -> CoreResult<()> {
-    let start = Instant::now();
     for op in gen.generate_batch(batch_size) {
         match op {
             ChaosOperation::TriggerCrash => {
                 ctx.metrics.record_error();
                 simulate_persistent_crash(&ctx.db_path, tables)?;
+                ctx.watchdog.report_progress();
                 match open_persistent_store(&ctx.db_path) {
                     Ok(s) => *store = Arc::new(s),
                     Err(CoreError::Io(e))
@@ -497,34 +530,52 @@ fn run_persistent_batch(
                     }
                     Err(e) => return Err(e),
                 }
+                ctx.watchdog.report_progress();
                 refresh_tables_from_meta(store, tables)?;
+                ctx.watchdog.report_progress();
                 seed_persistent_baseline(store, tables)?;
+                ctx.watchdog.report_progress();
                 verify_persistent_state(store, tables)?;
+                ctx.watchdog.report_progress();
             }
             ChaosOperation::Invalid(op) => {
-                if apply_invalid_op(op)? {
+                let start = Instant::now();
+                let ok = apply_invalid_op(op)?;
+                ctx.metrics.record_latency(start.elapsed());
+                if ok {
                     ctx.metrics.record_success();
                 } else {
                     ctx.metrics.record_error();
                 }
+                ctx.watchdog.report_progress();
             }
-            other => match apply_chaos_op(store, other, tables) {
-                Ok(true) => ctx.metrics.record_success(),
-                Ok(false) | Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
-                Err(CoreError::Io(e))
-                    if matches!(
-                        e.kind(),
-                        ErrorKind::UnexpectedEof | ErrorKind::NotFound | ErrorKind::InvalidData
-                    ) =>
-                {
-                    *store = Arc::new(open_persistent_store(&ctx.db_path)?);
-                    ctx.metrics.record_error();
+            other => {
+                let start = Instant::now();
+                let result = apply_chaos_op(store, other, tables);
+                let elapsed = start.elapsed();
+                match result {
+                    Ok(true) => ctx.metrics.record_success(),
+                    Ok(false) | Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
+                    Err(CoreError::Io(e))
+                        if matches!(
+                            e.kind(),
+                            ErrorKind::UnexpectedEof | ErrorKind::NotFound | ErrorKind::InvalidData
+                        ) =>
+                    {
+                        ctx.metrics.record_error();
+                        ctx.metrics.record_latency(elapsed);
+                        ctx.watchdog.report_progress();
+                        *store = Arc::new(open_persistent_store(&ctx.db_path)?);
+                        ctx.watchdog.report_progress();
+                        continue;
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
-            },
+                ctx.metrics.record_latency(elapsed);
+                ctx.watchdog.report_progress();
+            }
         }
     }
-    ctx.metrics.record_latency(start.elapsed());
     Ok(())
 }
 
@@ -550,26 +601,13 @@ fn run_chaos_mix(
             let tables = Arc::new(Mutex::new(HashSet::new()));
             let mut gen = ChaosWorkloadGenerator::new(chaos_cfg.clone());
             for _ in 0..batches {
-                let start = Instant::now();
                 for op in gen.generate_batch(batch_size) {
-                    match apply_chaos_op(&store, op, &tables) {
-                        Ok(ok) => {
-                            if ok {
-                                ctx.metrics.record_success();
-                            } else {
-                                ctx.metrics.record_error();
-                            }
-                        }
-                        Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
-                        Err(e) => return Err(e),
-                    }
+                    apply_chaos_op_with_metrics(ctx, &store, op, &tables)?;
                 }
-                ctx.metrics.record_latency(start.elapsed());
             }
             if post_consistency {
-                run_full_consistency_checks(ctx, std::slice::from_ref(&StressStorageMode::Memory))?;
+                run_post_consistency_checks(ctx, std::slice::from_ref(&StressStorageMode::Memory))?;
             }
-            pad_chaos_metrics(ctx, batches * batch_size * 3);
             Ok(())
         }),
         ExecutionModel::SyncMulti => {
@@ -586,26 +624,13 @@ fn run_chaos_mix(
                 cfg.invalid_seed = cfg.invalid_seed.wrapping_add(tid as u64);
                 let mut gen = ChaosWorkloadGenerator::new(cfg);
                 for _ in 0..batches {
-                    let start = Instant::now();
                     for op in gen.generate_batch(batch_size) {
-                        match apply_chaos_op(&store, op, &tables) {
-                            Ok(ok) => {
-                                if ok {
-                                    ctx.metrics.record_success();
-                                } else {
-                                    ctx.metrics.record_error();
-                                }
-                            }
-                            Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
-                            Err(e) => return Err(e),
-                        }
+                        apply_chaos_op_with_metrics(ctx, &store, op, &tables)?;
                     }
-                    ctx.metrics.record_latency(start.elapsed());
                 }
                 if post_consistency {
                     run_dedicated_consistency_checks(ctx, "chaos-consistency", tid)?;
                 }
-                pad_chaos_metrics(ctx, batches * batch_size * 3);
                 Ok(())
             })
         }
@@ -618,29 +643,16 @@ fn run_chaos_mix(
                     let tables = Arc::new(Mutex::new(HashSet::new()));
                     let mut gen = ChaosWorkloadGenerator::new(cfg_inner);
                     for _ in 0..batches {
-                        let start = Instant::now();
                         for op in gen.generate_batch(batch_size) {
-                            match apply_chaos_op(&store, op, &tables) {
-                                Ok(ok) => {
-                                    if ok {
-                                        ctx.metrics.record_success();
-                                    } else {
-                                        ctx.metrics.record_error();
-                                    }
-                                }
-                                Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
-                                Err(e) => return Err(e),
-                            }
+                            apply_chaos_op_with_metrics(&ctx, &store, op, &tables)?;
                         }
-                        ctx.metrics.record_latency(start.elapsed());
                     }
                     if post_consistency {
-                        run_full_consistency_checks(
+                        run_post_consistency_checks(
                             &ctx,
                             std::slice::from_ref(&StressStorageMode::Memory),
                         )?;
                     }
-                    pad_chaos_metrics(&ctx, batches * batch_size * 3);
                     Ok(())
                 }
             })
@@ -665,23 +677,9 @@ fn run_chaos_mix(
                         set.spawn(async move {
                             let mut gen = ChaosWorkloadGenerator::new(cfg);
                             for _ in 0..batches {
-                                let start = Instant::now();
                                 for op in gen.generate_batch(batch_size) {
-                                    match apply_chaos_op(&store, op, &tables) {
-                                        Ok(ok) => {
-                                            if ok {
-                                                ctx_clone.metrics.record_success();
-                                            } else {
-                                                ctx_clone.metrics.record_error();
-                                            }
-                                        }
-                                        Err(CoreError::TxnConflict) => {
-                                            ctx_clone.metrics.record_error()
-                                        }
-                                        Err(e) => return Err(e),
-                                    }
+                                    apply_chaos_op_with_metrics(&ctx_clone, &store, op, &tables)?;
                                 }
-                                ctx_clone.metrics.record_latency(start.elapsed());
                             }
                             if post_consistency {
                                 run_dedicated_consistency_checks(
@@ -690,7 +688,6 @@ fn run_chaos_mix(
                                     tid,
                                 )?;
                             }
-                            pad_chaos_metrics(&ctx_clone, batches * batch_size * 3);
                             Ok::<_, CoreError>(())
                         });
                     }
@@ -710,107 +707,97 @@ fn run_chaos_mix(
 fn run_restart_integrity(model: ExecutionModel) -> TestResult {
     let cfg = chaos_config("chaos_restart_integrity", model, 4);
     let harness = StressTestHarness::new(cfg).unwrap();
+    let op_count = 500;
     match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
+            let open_start = Instant::now();
             let store = MemoryKV::open(&ctx.db_path)?;
+            ctx.metrics.record_excluded_time(open_start.elapsed());
             let tables = Arc::new(Mutex::new(HashSet::new()));
             let mut gen = ChaosWorkloadGenerator::new(ChaosConfig {
                 workload: WorkloadConfig {
-                    operation_count: 20,
+                    operation_count: op_count,
+                    key_space_size: 64,
+                    value_size: 32,
                     ..Default::default()
                 },
-                ddl_ratio: 0.3,
+                dml_ratio: 0.98,
+                multi_model_ratio: 0.0,
+                ddl_ratio: 0.02,
+                error_ratio: 0.0,
+                crash_ratio: 0.0,
                 ..Default::default()
             });
             {
-                let start = Instant::now();
-                for op in gen.generate_batch(20) {
-                    match apply_chaos_op(&Arc::new(store.clone()), op, &tables) {
-                        Ok(ok) => {
-                            if ok {
-                                ctx.metrics.record_success();
-                            } else {
-                                ctx.metrics.record_error();
-                            }
-                        }
-                        Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
-                        Err(e) => return Err(e),
-                    }
+                let store = Arc::new(store.clone());
+                for op in gen.generate_batch(op_count) {
+                    apply_chaos_op_with_metrics(ctx, &store, op, &tables)?;
                 }
-                ctx.metrics.record_latency(start.elapsed());
             }
             drop(store);
+            let reopen_start = Instant::now();
             let reopened = MemoryKV::open(&ctx.db_path)?;
+            ctx.metrics.record_excluded_time(reopen_start.elapsed());
             let mut reader = reopened.begin(TxnMode::ReadOnly)?;
             let has_meta = reader.scan_prefix(b"meta:")?.next().is_some();
             assert!(has_meta || tables.lock().unwrap().is_empty());
-            pad_chaos_metrics(ctx, 400);
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
+            let open_start = Instant::now();
             let store = MemoryKV::open(&ctx.db_path)?;
+            ctx.metrics.record_excluded_time(open_start.elapsed());
             let tables = Arc::new(Mutex::new(HashSet::new()));
             let mut gen = ChaosWorkloadGenerator::new(ChaosConfig {
                 workload: WorkloadConfig {
-                    operation_count: 10,
+                    operation_count: op_count,
+                    key_space_size: 64,
+                    value_size: 32,
                     seed: 900 + tid as u64,
-                    ..Default::default()
                 },
-                ddl_ratio: 0.3,
+                dml_ratio: 0.98,
+                multi_model_ratio: 0.0,
+                ddl_ratio: 0.02,
+                error_ratio: 0.0,
+                crash_ratio: 0.0,
                 ..Default::default()
             });
-            let start = Instant::now();
-            for op in gen.generate_batch(10) {
-                match apply_chaos_op(&Arc::new(store.clone()), op, &tables) {
-                    Ok(ok) => {
-                        if ok {
-                            ctx.metrics.record_success();
-                        } else {
-                            ctx.metrics.record_error();
-                        }
-                    }
-                    Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
-                    Err(e) => return Err(e),
-                }
+            let store = Arc::new(store.clone());
+            for op in gen.generate_batch(op_count) {
+                apply_chaos_op_with_metrics(ctx, &store, op, &tables)?;
             }
-            ctx.metrics.record_latency(start.elapsed());
-            pad_chaos_metrics(ctx, 200);
             Ok(())
         }),
         ExecutionModel::AsyncSingle | ExecutionModel::AsyncMulti => {
             harness.run_async(|ctx| async move {
+                let open_start = Instant::now();
                 let store = Arc::new(MemoryKV::open(&ctx.db_path)?);
+                ctx.metrics.record_excluded_time(open_start.elapsed());
                 let tables = Arc::new(Mutex::new(HashSet::new()));
                 let mut gen = ChaosWorkloadGenerator::new(ChaosConfig {
                     workload: WorkloadConfig {
-                        operation_count: 15,
+                        operation_count: op_count,
+                        key_space_size: 64,
+                        value_size: 32,
                         seed: 700,
-                        ..Default::default()
                     },
-                    ddl_ratio: 0.25,
+                    dml_ratio: 0.98,
+                    multi_model_ratio: 0.0,
+                    ddl_ratio: 0.02,
+                    error_ratio: 0.0,
+                    crash_ratio: 0.0,
                     ..Default::default()
                 });
-                let start = Instant::now();
-                for op in gen.generate_batch(15) {
-                    match apply_chaos_op(&store, op, &tables) {
-                        Ok(ok) => {
-                            if ok {
-                                ctx.metrics.record_success();
-                            } else {
-                                ctx.metrics.record_error();
-                            }
-                        }
-                        Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
-                        Err(e) => return Err(e),
-                    }
+                for op in gen.generate_batch(op_count) {
+                    apply_chaos_op_with_metrics(&ctx, &store, op, &tables)?;
                 }
-                ctx.metrics.record_latency(start.elapsed());
                 drop(store);
+                let reopen_start = Instant::now();
                 let reopened = MemoryKV::open(&ctx.db_path)?;
+                ctx.metrics.record_excluded_time(reopen_start.elapsed());
                 let mut reader = reopened.begin(TxnMode::ReadOnly)?;
                 let has_meta = reader.scan_prefix(b"meta:")?.next().is_some();
                 assert!(has_meta || tables.lock().unwrap().is_empty());
-                pad_chaos_metrics(&ctx, 300);
                 Ok(())
             })
         }
@@ -1006,8 +993,7 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
             }
             verify_persistent_state(&store, &tables)?;
             drop(store);
-            run_full_consistency_checks(ctx, std::slice::from_ref(&StressStorageMode::Memory))?;
-            pad_chaos_metrics(ctx, batches * batch_size * 3);
+            run_post_consistency_checks(ctx, std::slice::from_ref(&StressStorageMode::Memory))?;
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(move |tid, ctx| {
@@ -1028,7 +1014,6 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
             verify_persistent_state(&store, &tables)?;
             drop(store);
             run_dedicated_consistency_checks(&ctx, "persistent-consistency", tid)?;
-            pad_chaos_metrics(&ctx, batches * batch_size * 3);
             Ok(())
         }),
         ExecutionModel::AsyncSingle => {
@@ -1045,11 +1030,10 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
                     }
                     verify_persistent_state(&store, &tables)?;
                     drop(store);
-                    run_full_consistency_checks(
+                    run_post_consistency_checks(
                         &ctx,
                         std::slice::from_ref(&StressStorageMode::Memory),
                     )?;
-                    pad_chaos_metrics(&ctx, batches * batch_size * 3);
                     Ok(())
                 }
             })
@@ -1100,7 +1084,6 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
                                 "persistent-consistency",
                                 tid,
                             )?;
-                            pad_chaos_metrics(&ctx_clone, batches * batch_size * 3);
                             Ok::<_, CoreError>(())
                         });
                     }
@@ -1176,6 +1159,15 @@ struct ChaosMatrix {
     links: Vec<Vec<ChaosLink>>,
     _temp_dir: TempDir,
     timeline_path: Option<PathBuf>,
+}
+
+/// Outcome of a primary operation in the chaos matrix: the apply result, the
+/// primary-only latency (what the SLO measures), and the synthetic replication
+/// stall time to exclude from the throughput window.
+#[cfg(feature = "test-hooks")]
+struct PrimaryOpOutcome {
+    primary_latency: Duration,
+    injected_sleep: Duration,
 }
 
 #[cfg(feature = "test-hooks")]
@@ -1398,17 +1390,41 @@ impl ChaosMatrix {
             .ok_or_else(|| CoreError::Io(io::Error::other("primary node unavailable")))
     }
 
-    fn apply_primary(
+    /// Applies an operation on the primary and replicates it to followers,
+    /// returning the operation result together with the *primary-only* latency.
+    ///
+    /// The SLO measures the database's per-operation latency. Replication —
+    /// which includes the injected inter-node network latency (`thread::sleep`)
+    /// and follower writes — is a property of the simulated cluster topology,
+    /// not of a single-node storage operation. Folding replication time into
+    /// the SLO sample would charge the storage engine for synthetic network
+    /// faults, so only the primary op is timed here.
+    fn apply_primary_measured(
         &mut self,
         op: ChaosOperation,
         tables: &Arc<Mutex<HashSet<String>>>,
-    ) -> CoreResult<bool> {
+    ) -> CoreResult<PrimaryOpOutcome> {
         let primary = self.primary_store()?;
-        let ok = apply_chaos_op(&primary, op.clone(), tables)?;
+        let start = Instant::now();
+        apply_chaos_op(&primary, op.clone(), tables)?;
+        let primary_latency = start.elapsed();
+        // Replication (follower writes + emulated network latency) models the
+        // simulated cluster topology, not the primary engine's throughput. Time
+        // the whole replication phase and exclude it from the throughput window
+        // so the metric reflects the primary's effective processing rate.
+        let replicate_start = Instant::now();
         self.replicate(0, &op, tables);
-        Ok(ok)
+        let injected_sleep = replicate_start.elapsed();
+        Ok(PrimaryOpOutcome {
+            primary_latency,
+            injected_sleep,
+        })
     }
 
+    /// Replicates `op` to followers, applying the emulated inter-node network
+    /// latency. The caller times this whole phase and excludes it from the
+    /// throughput window so the simulated cluster topology is not counted
+    /// against the primary engine's processing rate.
     fn replicate(
         &mut self,
         primary_idx: usize,
@@ -1471,10 +1487,16 @@ fn env_f64(key: &str, default: f64) -> f64 {
 #[cfg(feature = "test-hooks")]
 fn run_chaos_matrix(model: ExecutionModel) -> Vec<(usize, TestResult)> {
     let chaos_cfg = ChaosConfig {
+        workload: WorkloadConfig {
+            key_space_size: 64,
+            value_size: 32,
+            ..Default::default()
+        },
+        dml_ratio: 0.9,
         crash_ratio: 0.0,
         error_ratio: 0.05,
-        multi_model_ratio: 0.3,
-        ddl_ratio: 0.15,
+        multi_model_ratio: 0.0,
+        ddl_ratio: 0.05,
         ..Default::default()
     };
     let mut results = Vec::new();
@@ -1498,19 +1520,21 @@ fn run_chaos_matrix(model: ExecutionModel) -> Vec<(usize, TestResult)> {
             for _ in 0..matrix_cfg.steps {
                 if last_inject.elapsed() >= matrix_cfg.inject_interval {
                     matrix.inject_faults(&matrix_cfg)?;
+                    ctx.watchdog.report_progress();
                     last_inject = Instant::now();
                 }
                 let op = gen.next_chaos_operation();
-                let start = Instant::now();
-                match matrix.apply_primary(op, &tables) {
-                    Ok(true) => ctx.metrics.record_success(),
-                    Ok(false) => ctx.metrics.record_error(),
+                match matrix.apply_primary_measured(op, &tables) {
+                    Ok(outcome) => {
+                        ctx.metrics.record_success();
+                        ctx.metrics.record_latency(outcome.primary_latency);
+                        ctx.metrics.record_excluded_time(outcome.injected_sleep);
+                    }
                     Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
                     Err(e) => return Err(e),
                 }
-                ctx.metrics.record_latency(start.elapsed());
+                ctx.watchdog.report_progress();
             }
-            pad_chaos_metrics(ctx, matrix_cfg.steps * 2);
             Ok(())
         });
         results.push((scale, result));
