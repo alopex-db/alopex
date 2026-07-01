@@ -15,13 +15,8 @@
 //! composed into a pipeline that processes rows one at a time.
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Write};
 use std::marker::PhantomData;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::path::PathBuf;
 
 use crate::catalog::{ColumnMetadata, TableMetadata};
 use crate::executor::evaluator::EvalContext;
@@ -29,6 +24,10 @@ use crate::executor::memory::{MemoryPolicy, MemoryTracker};
 use crate::executor::{ExecutorError, Result, Row};
 use crate::planner::typed_expr::{SortExpr, TypedExpr};
 use crate::storage::{RowCodec, SqlValue, TableScanIterator};
+use alopex_core::Error as CoreError;
+use alopex_core::sql::spill::{
+    SpillMergeIterator, spill_io_error as core_spill_io_error, spill_run as core_spill_run,
+};
 
 /// A trait for row-producing iterators in the query execution pipeline.
 ///
@@ -275,256 +274,65 @@ impl<I: RowIterator> RowIterator for SortIterator<I> {
     }
 }
 
-static SPILL_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 fn spill_run(
     entries: &mut Vec<(Row, Vec<SqlValue>)>,
     order_by: &[SortExpr],
     policy: &MemoryPolicy,
 ) -> Result<PathBuf> {
-    let directory = policy
-        .spill_directory()
-        .ok_or_else(|| ExecutorError::InvalidOperation {
-            operation: "sort spill".into(),
-            reason: "spill directory not configured".into(),
-        })?;
-    ensure_spill_dir(directory)?;
-    let (path, file) = create_spill_file(directory, "sort-run")?;
-    let mut writer = BufWriter::new(file);
-
-    entries.sort_by(|a, b| compare_key_values(&a.1, &b.1, order_by));
-
-    let mut bytes_written = 0u64;
-    for (row, keys) in entries.iter() {
-        let key_bytes = RowCodec::encode(keys);
-        let row_bytes = RowCodec::encode(&row.values);
-        let key_len =
-            u32::try_from(key_bytes.len()).map_err(|_| ExecutorError::InvalidOperation {
-                operation: "sort spill".into(),
-                reason: "sort key size exceeds u32::MAX".into(),
-            })?;
-        let row_len =
-            u32::try_from(row_bytes.len()).map_err(|_| ExecutorError::InvalidOperation {
-                operation: "sort spill".into(),
-                reason: "row size exceeds u32::MAX".into(),
-            })?;
-
-        writer
-            .write_all(&row.row_id.to_le_bytes())
-            .map_err(|err| spill_io_error("sort spill", err))?;
-        writer
-            .write_all(&key_len.to_le_bytes())
-            .map_err(|err| spill_io_error("sort spill", err))?;
-        writer
-            .write_all(&row_len.to_le_bytes())
-            .map_err(|err| spill_io_error("sort spill", err))?;
-        writer
-            .write_all(&key_bytes)
-            .map_err(|err| spill_io_error("sort spill", err))?;
-        writer
-            .write_all(&row_bytes)
-            .map_err(|err| spill_io_error("sort spill", err))?;
-        bytes_written = bytes_written
-            .saturating_add(8)
-            .saturating_add(4)
-            .saturating_add(4)
-            .saturating_add(key_bytes.len() as u64)
-            .saturating_add(row_bytes.len() as u64);
-    }
-
-    writer
-        .flush()
-        .map_err(|err| spill_io_error("sort spill", err))?;
-    policy.record_spill(bytes_written, 1);
-    entries.clear();
-
-    Ok(path)
-}
-
-fn ensure_spill_dir(directory: &Path) -> Result<()> {
-    fs::create_dir_all(directory).map_err(|err| spill_io_error("sort spill", err))?;
-    Ok(())
-}
-
-fn create_spill_file(directory: &Path, prefix: &str) -> Result<(PathBuf, File)> {
-    for _ in 0..16 {
-        let counter = SPILL_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let path = directory.join(format!("{prefix}-{timestamp}-{counter}.bin"));
-        match OpenOptions::new().create_new(true).write(true).open(&path) {
-            Ok(file) => return Ok((path, file)),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(spill_io_error("sort spill", err)),
-        }
-    }
-    Err(ExecutorError::InvalidOperation {
-        operation: "sort spill".into(),
-        reason: "failed to allocate spill file".into(),
-    })
-}
-
-fn spill_io_error(operation: &str, err: impl std::fmt::Display) -> ExecutorError {
-    ExecutorError::InvalidOperation {
-        operation: operation.into(),
-        reason: err.to_string(),
-    }
-}
-
-struct SpillEntry {
-    row: Row,
-    keys: Vec<SqlValue>,
-}
-
-struct SpillRunReader {
-    path: PathBuf,
-    reader: BufReader<File>,
-}
-
-impl SpillRunReader {
-    fn open(path: PathBuf) -> Result<Self> {
-        let file = File::open(&path).map_err(|err| spill_io_error("sort spill", err))?;
-        Ok(Self {
-            path,
-            reader: BufReader::new(file),
-        })
-    }
-
-    fn next_entry(&mut self) -> Result<Option<SpillEntry>> {
-        let mut row_id_buf = [0u8; 8];
-        match self.reader.read_exact(&mut row_id_buf) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(err) => return Err(spill_io_error("sort spill", err)),
-        }
-        let row_id = u64::from_le_bytes(row_id_buf);
-        let key_len = self.read_u32()?;
-        let row_len = self.read_u32()?;
-
-        let mut key_bytes = vec![0u8; key_len as usize];
-        self.reader
-            .read_exact(&mut key_bytes)
-            .map_err(|err| spill_io_error("sort spill", err))?;
-        let mut row_bytes = vec![0u8; row_len as usize];
-        self.reader
-            .read_exact(&mut row_bytes)
-            .map_err(|err| spill_io_error("sort spill", err))?;
-
-        let keys = RowCodec::decode(&key_bytes).map_err(ExecutorError::Storage)?;
-        let values = RowCodec::decode(&row_bytes).map_err(ExecutorError::Storage)?;
-
-        Ok(Some(SpillEntry {
-            row: Row::new(row_id, values),
-            keys,
-        }))
-    }
-
-    fn read_u32(&mut self) -> Result<u32> {
-        let mut buf = [0u8; 4];
-        self.reader
-            .read_exact(&mut buf)
-            .map_err(|err| spill_io_error("sort spill", err))?;
-        Ok(u32::from_le_bytes(buf))
-    }
-}
-
-impl Drop for SpillRunReader {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
+    core_spill_run(
+        entries,
+        policy,
+        "sort-run",
+        |left, right| compare_key_values(left, right, order_by),
+        |row| row.row_id,
+        |keys| RowCodec::encode(keys),
+        |row| RowCodec::encode(&row.values),
+    )
+    .map_err(map_core_spill_error)
 }
 
 struct ExternalSortState {
-    order_by: Arc<Vec<SortExpr>>,
-    readers: Vec<SpillRunReader>,
-    heap: BinaryHeap<SpillHeapItem>,
+    iter: SpillMergeIterator<Row, Vec<SqlValue>>,
 }
 
 impl ExternalSortState {
     fn new(order_by: Vec<SortExpr>, runs: Vec<PathBuf>) -> Result<Self> {
-        let order_by = Arc::new(order_by);
-        let mut readers = Vec::with_capacity(runs.len());
-        let mut heap = BinaryHeap::new();
+        let iter = SpillMergeIterator::new(
+            runs,
+            move |left, right| compare_key_values(left, right, &order_by),
+            |row: &Row| row.row_id,
+            decode_spill_values,
+            |row_id, bytes| decode_spill_values(bytes).map(|values| Row::new(row_id, values)),
+        )
+        .map_err(map_core_spill_error)?;
 
-        for (idx, path) in runs.into_iter().enumerate() {
-            let mut reader = SpillRunReader::open(path)?;
-            if let Some(entry) = reader.next_entry()? {
-                heap.push(SpillHeapItem {
-                    run_idx: idx,
-                    row: entry.row,
-                    keys: entry.keys,
-                    order_by: Arc::clone(&order_by),
-                });
-            }
-            readers.push(reader);
-        }
-
-        Ok(Self {
-            order_by,
-            readers,
-            heap,
-        })
+        Ok(Self { iter })
     }
 
     fn next_row(&mut self) -> Option<Result<Row>> {
-        let item = self.heap.pop()?;
-        let row = item.row;
-        let run_idx = item.run_idx;
-
-        match self.readers[run_idx].next_entry() {
-            Ok(Some(entry)) => {
-                self.heap.push(SpillHeapItem {
-                    run_idx,
-                    row: entry.row,
-                    keys: entry.keys,
-                    order_by: Arc::clone(&self.order_by),
-                });
-            }
-            Ok(None) => {}
-            Err(err) => return Some(Err(err)),
-        }
-
-        Some(Ok(row))
+        self.iter
+            .next_item()
+            .map(|result| result.map_err(map_core_spill_error))
     }
 }
 
-#[derive(Clone)]
-struct SpillHeapItem {
-    run_idx: usize,
-    row: Row,
-    keys: Vec<SqlValue>,
-    order_by: Arc<Vec<SortExpr>>,
+fn decode_spill_values(bytes: &[u8]) -> alopex_core::Result<Vec<SqlValue>> {
+    RowCodec::decode(bytes).map_err(|err| CoreError::SpillFailed {
+        reason: format!("sort spill: {err}"),
+    })
 }
 
-impl PartialEq for SpillHeapItem {
-    fn eq(&self, other: &Self) -> bool {
-        compare_key_values(&self.keys, &other.keys, &self.order_by) == Ordering::Equal
-            && self.run_idx == other.run_idx
-            && self.row.row_id == other.row.row_id
-    }
-}
-
-impl Eq for SpillHeapItem {}
-
-impl PartialOrd for SpillHeapItem {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for SpillHeapItem {
-    fn cmp(&self, other: &Self) -> Ordering {
-        let order = compare_key_values(&self.keys, &other.keys, &self.order_by);
-        let order = if order == Ordering::Equal {
-            self.run_idx
-                .cmp(&other.run_idx)
-                .then_with(|| self.row.row_id.cmp(&other.row.row_id))
-        } else {
-            order
-        };
-        order.reverse()
+fn map_core_spill_error(err: CoreError) -> ExecutorError {
+    match err {
+        CoreError::SpillFailed { reason } => ExecutorError::InvalidOperation {
+            operation: "sort spill".into(),
+            reason,
+        },
+        CoreError::Io(err) => ExecutorError::InvalidOperation {
+            operation: "sort spill".into(),
+            reason: core_spill_io_error("sort spill", err).to_string(),
+        },
+        other => ExecutorError::Core(other),
     }
 }
 

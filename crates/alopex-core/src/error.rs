@@ -96,6 +96,13 @@ pub enum Error {
         requested: usize,
     },
 
+    /// External spill operation failed.
+    #[error("spill failed: {reason}")]
+    SpillFailed {
+        /// Stable failure description.
+        reason: String,
+    },
+
     /// The provided path already exists and cannot be overwritten.
     #[error("path exists: {0}")]
     PathExists(PathBuf),
