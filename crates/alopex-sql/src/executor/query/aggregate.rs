@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::catalog::ColumnMetadata;
 use crate::executor::evaluator::EvalContext;
-use crate::executor::memory::{MemoryPolicy, MemoryTracker};
+use crate::executor::memory::{MemoryPolicy, MemoryTracker, map_core_memory_error};
 use crate::executor::{ExecutorError, Result};
 use crate::planner::aggregate_expr::{AggregateExpr, AggregateFunction};
 use crate::planner::typed_expr::TypedExpr;
@@ -564,10 +564,14 @@ impl<'a> AggregateIterator<'a> {
                     });
                 }
                 if let Some(tracker) = &mut self.memory_tracker {
-                    tracker.add_values(&key_values)?;
-                    tracker.add_bytes(
-                        self.aggregates.len() as u64 * AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES,
-                    )?;
+                    tracker
+                        .add_values(&key_values)
+                        .map_err(map_core_memory_error)?;
+                    tracker
+                        .add_bytes(
+                            self.aggregates.len() as u64 * AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES,
+                        )
+                        .map_err(map_core_memory_error)?;
                 }
                 let accumulators = self
                     .aggregates
@@ -597,7 +601,9 @@ impl<'a> AggregateIterator<'a> {
                         )
                         && let Some(value_ref) = value.as_ref()
                     {
-                        tracker.add_value(value_ref)?;
+                        tracker
+                            .add_value(value_ref)
+                            .map_err(map_core_memory_error)?;
                     }
                     group.accumulators[idx].update(value)?;
                 }
@@ -606,9 +612,9 @@ impl<'a> AggregateIterator<'a> {
 
         if table.is_empty() && self.group_keys.is_empty() {
             if let Some(tracker) = &mut self.memory_tracker {
-                tracker.add_bytes(
-                    self.aggregates.len() as u64 * AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES,
-                )?;
+                tracker
+                    .add_bytes(self.aggregates.len() as u64 * AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES)
+                    .map_err(map_core_memory_error)?;
             }
             let accumulators = self
                 .aggregates
@@ -634,7 +640,9 @@ impl<'a> AggregateIterator<'a> {
             let row = Row::new(next_row_id, values);
             next_row_id += 1;
             if let Some(tracker) = &mut self.memory_tracker {
-                tracker.add_row(&row.values)?;
+                tracker
+                    .add_row(&row.values)
+                    .map_err(map_core_memory_error)?;
             }
 
             if let Some(having) = &self.having {

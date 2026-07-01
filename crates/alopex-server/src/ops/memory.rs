@@ -2,6 +2,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use alopex_core::sql::stream::DEFAULT_SPILL_THRESHOLD_BYTES;
 use alopex_sql::executor::memory::{MemoryPolicy, SpillMetricsSink, SpillPolicy as SqlSpillPolicy};
 
 use crate::error::{Result, ServerError};
@@ -24,7 +25,8 @@ impl MemoryControlPolicy {
     pub fn from_env() -> Self {
         let limit_bytes = env::var("ALOPEX_MEMORY_LIMIT_BYTES")
             .ok()
-            .and_then(|val| val.parse::<u64>().ok());
+            .and_then(|val| val.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_SPILL_THRESHOLD_BYTES);
 
         let policy = env::var("ALOPEX_MEMORY_SPILL_POLICY")
             .unwrap_or_else(|_| "fail_fast".to_string())
@@ -39,7 +41,7 @@ impl MemoryControlPolicy {
         };
 
         Self {
-            limit_bytes,
+            limit_bytes: Some(limit_bytes),
             spill_policy,
             metrics: None,
         }
@@ -117,5 +119,58 @@ struct MetricsSpillSink {
 impl SpillMetricsSink for MetricsSpillSink {
     fn record_spill(&self, bytes: u64, files: u64) {
         self.metrics.record_spill(bytes, files);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alopex_core::sql::stream::DEFAULT_SPILL_THRESHOLD_BYTES;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        value: Option<String>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl EnvVarGuard {
+        fn unset(key: &'static str) -> Self {
+            let lock = ENV_LOCK.lock().unwrap();
+            let value = env::var(key).ok();
+            // SAFETY: This test module serializes all mutations of this env var with ENV_LOCK.
+            unsafe {
+                env::remove_var(key);
+            }
+            Self {
+                key,
+                value,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: The guard still holds ENV_LOCK, so restoration is serialized.
+            unsafe {
+                if let Some(value) = &self.value {
+                    env::set_var(self.key, value);
+                } else {
+                    env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn from_env_uses_default_spill_threshold_when_limit_is_unset() {
+        let _guard = EnvVarGuard::unset("ALOPEX_MEMORY_LIMIT_BYTES");
+
+        let policy = MemoryControlPolicy::from_env();
+
+        assert_eq!(policy.limit_bytes(), Some(DEFAULT_SPILL_THRESHOLD_BYTES));
     }
 }

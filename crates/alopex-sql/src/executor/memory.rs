@@ -1,10 +1,22 @@
 use alopex_core::sql::stream::ByteSized;
 
+use crate::executor::ExecutorError;
 use crate::storage::SqlValue;
 
 pub use alopex_core::sql::stream::{
     DEFAULT_SPILL_THRESHOLD_BYTES, MemoryPolicy, MemoryTracker, SpillMetricsSink, SpillPolicy,
 };
+
+pub(crate) fn map_core_memory_error(err: alopex_core::Error) -> ExecutorError {
+    match err {
+        alopex_core::Error::MemoryLimitExceeded { limit, requested } => {
+            ExecutorError::ResourceExhausted {
+                message: format!("query memory limit exceeded: {requested} bytes (limit {limit})"),
+            }
+        }
+        other => ExecutorError::Core(other),
+    }
+}
 
 impl ByteSized for SqlValue {
     fn estimated_bytes(&self) -> u64 {

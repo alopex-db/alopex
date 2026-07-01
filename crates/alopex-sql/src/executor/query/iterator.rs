@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use crate::catalog::{ColumnMetadata, TableMetadata};
 use crate::executor::evaluator::EvalContext;
-use crate::executor::memory::{MemoryPolicy, MemoryTracker};
+use crate::executor::memory::{MemoryPolicy, MemoryTracker, map_core_memory_error};
 use crate::executor::{ExecutorError, Result, Row};
 use crate::planner::typed_expr::{SortExpr, TypedExpr};
 use crate::storage::{RowCodec, SqlValue, TableScanIterator};
@@ -185,7 +185,9 @@ impl<I: RowIterator> SortIterator<I> {
                 rows.push(result?);
                 if let Some(tracker) = &mut tracker {
                     let row = rows.last().expect("row just pushed");
-                    tracker.add_row(&row.values)?;
+                    tracker
+                        .add_row(&row.values)
+                        .map_err(map_core_memory_error)?;
                 }
             }
             return Ok(Self {
@@ -210,8 +212,10 @@ impl<I: RowIterator> SortIterator<I> {
                 keys.push(crate::executor::evaluator::evaluate(&expr.expr, &ctx)?);
             }
             if let Some(tracker) = &mut tracker {
-                tracker.add_row(&row.values)?;
-                tracker.add_values(&keys)?;
+                tracker
+                    .add_row(&row.values)
+                    .map_err(map_core_memory_error)?;
+                tracker.add_values(&keys).map_err(map_core_memory_error)?;
             }
             keyed.push((row, keys));
 
@@ -331,6 +335,9 @@ fn map_core_spill_error(err: CoreError) -> ExecutorError {
         CoreError::Io(err) => ExecutorError::InvalidOperation {
             operation: "sort spill".into(),
             reason: core_spill_io_error("sort spill", err).to_string(),
+        },
+        CoreError::MemoryLimitExceeded { limit, requested } => ExecutorError::ResourceExhausted {
+            message: format!("query memory limit exceeded: {requested} bytes (limit {limit})"),
         },
         other => ExecutorError::Core(other),
     }
@@ -666,6 +673,23 @@ mod tests {
         assert_eq!(results[0].values[0], SqlValue::Integer(1));
         assert_eq!(results[1].values[0], SqlValue::Integer(2));
         assert_eq!(results[2].values[0], SqlValue::Integer(3));
+    }
+
+    #[test]
+    fn sort_iterator_memory_limit_exceeded_returns_resource_exhausted() {
+        use crate::executor::memory::SpillPolicy;
+
+        let rows = sample_rows();
+        let schema = sample_schema();
+        let input = VecIterator::new(rows, schema);
+        let policy = MemoryPolicy::new(Some(1), SpillPolicy::FailFast);
+
+        let err = match SortIterator::new_with_policy(input, &[], Some(policy)) {
+            Ok(_) => panic!("expected sort iterator memory limit error"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, ExecutorError::ResourceExhausted { .. }));
     }
 
     #[test]
