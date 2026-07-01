@@ -12,6 +12,7 @@ pub mod kv;
 pub mod log;
 pub mod lsm;
 pub mod obs;
+pub mod sql;
 pub mod storage;
 pub mod txn;
 pub mod types;

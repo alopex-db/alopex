@@ -1,10 +1,21 @@
-use std::collections::{HashMap, HashSet};
-
 use crate::executor::evaluator::EvalContext;
 use crate::executor::{ExecutorError, Result, Row};
 use crate::planner::logical_plan::JoinType;
 use crate::planner::typed_expr::{TypedExpr, TypedExprKind};
 use crate::storage::SqlValue;
+use alopex_core::sql::join::{
+    RowLike, combine_rows as core_combine_rows, hash_join as core_hash_join,
+    nested_loop_join as core_nested_loop_join, pad_left as core_pad_left,
+    pad_right as core_pad_right,
+};
+
+impl RowLike for Row {
+    type Value = SqlValue;
+
+    fn values(&self) -> &[Self::Value] {
+        &self.values
+    }
+}
 
 /// Execute JOIN operation.
 pub fn execute_join(
@@ -94,33 +105,17 @@ fn nested_loop_join_with_widths(
     left_width: usize,
     right_width: usize,
 ) -> Result<Vec<Row>> {
-    let mut output = Vec::new();
-    let mut matched_right = HashSet::new();
-
-    for left_row in left {
-        let mut matched_left = false;
-        for (right_idx, right_row) in right.iter().enumerate() {
-            let joined = combine_rows(left_row, right_row, output.len() as u64);
-            if condition_matches(condition, &joined)? {
-                matched_left = true;
-                matched_right.insert(right_idx);
-                output.push(joined);
-            }
-        }
-        if !matched_left && matches!(join_type, JoinType::Left | JoinType::Full) {
-            output.push(pad_right(left_row, right_width, output.len() as u64));
-        }
-    }
-
-    if matches!(join_type, JoinType::Right | JoinType::Full) {
-        for (right_idx, right_row) in right.iter().enumerate() {
-            if !matched_right.contains(&right_idx) {
-                output.push(pad_left(right_row, left_width, output.len() as u64));
-            }
-        }
-    }
-
-    Ok(output)
+    let pairs = core_nested_loop_join(
+        left,
+        right,
+        matches!(join_type, JoinType::Left | JoinType::Full),
+        matches!(join_type, JoinType::Right | JoinType::Full),
+        |left_row, right_row| {
+            let joined = core_combine_rows(left_row, right_row, 0, Row::new);
+            condition_matches(condition, &joined)
+        },
+    )?;
+    Ok(materialize_join_pairs(pairs, left_width, right_width))
 }
 
 /// Hash join implementation for equi-joins.
@@ -153,48 +148,56 @@ fn hash_join_with_widths(
     left_width: usize,
     right_width: usize,
 ) -> Result<Vec<Row>> {
-    let mut buckets: HashMap<String, Vec<(usize, &Row)>> = HashMap::new();
-    for (idx, right_row) in right.iter().enumerate() {
-        let key = right_row
-            .get(right_key)
-            .map(hash_key)
-            .ok_or(ExecutorError::Evaluation(
-                crate::executor::EvaluationError::InvalidColumnRef { index: right_key },
-            ))?;
-        buckets.entry(key).or_default().push((idx, right_row));
-    }
+    let pairs = core_hash_join(
+        left,
+        right,
+        matches!(join_type, JoinType::Left | JoinType::Full),
+        matches!(join_type, JoinType::Right | JoinType::Full),
+        |row| {
+            row.get(left_key).map(hash_key).ok_or({
+                ExecutorError::Evaluation(crate::executor::EvaluationError::InvalidColumnRef {
+                    index: left_key,
+                })
+            })
+        },
+        |row| {
+            row.get(right_key).map(hash_key).ok_or({
+                ExecutorError::Evaluation(crate::executor::EvaluationError::InvalidColumnRef {
+                    index: right_key,
+                })
+            })
+        },
+    )?;
+    Ok(materialize_join_pairs(pairs, left_width, right_width))
+}
 
-    let mut output = Vec::new();
-    let mut matched_right = HashSet::new();
-    for left_row in left {
-        let key = left_row
-            .get(left_key)
-            .map(hash_key)
-            .ok_or(ExecutorError::Evaluation(
-                crate::executor::EvaluationError::InvalidColumnRef { index: left_key },
-            ))?;
-        let mut matched_left = false;
-        if let Some(matches) = buckets.get(&key) {
-            for (right_idx, right_row) in matches {
-                matched_left = true;
-                matched_right.insert(*right_idx);
-                output.push(combine_rows(left_row, right_row, output.len() as u64));
-            }
-        }
-        if !matched_left && matches!(join_type, JoinType::Left | JoinType::Full) {
-            output.push(pad_right(left_row, right_width, output.len() as u64));
-        }
-    }
-
-    if matches!(join_type, JoinType::Right | JoinType::Full) {
-        for (right_idx, right_row) in right.iter().enumerate() {
-            if !matched_right.contains(&right_idx) {
-                output.push(pad_left(right_row, left_width, output.len() as u64));
-            }
-        }
-    }
-
-    Ok(output)
+fn materialize_join_pairs(
+    pairs: Vec<(Option<Row>, Option<Row>)>,
+    left_width: usize,
+    right_width: usize,
+) -> Vec<Row> {
+    pairs
+        .into_iter()
+        .enumerate()
+        .map(|(row_id, (left, right))| match (left, right) {
+            (Some(left), Some(right)) => core_combine_rows(&left, &right, row_id as u64, Row::new),
+            (Some(left), None) => core_pad_right(
+                &left,
+                right_width,
+                row_id as u64,
+                || SqlValue::Null,
+                Row::new,
+            ),
+            (None, Some(right)) => core_pad_left(
+                &right,
+                left_width,
+                row_id as u64,
+                || SqlValue::Null,
+                Row::new,
+            ),
+            (None, None) => unreachable!("core join never emits an empty join pair"),
+        })
+        .collect()
 }
 
 fn condition_matches(condition: Option<&TypedExpr>, row: &Row) -> Result<bool> {
@@ -206,27 +209,6 @@ fn condition_matches(condition: Option<&TypedExpr>, row: &Row) -> Result<bool> {
         SqlValue::Boolean(true) => Ok(true),
         _ => Ok(false),
     }
-}
-
-fn combine_rows(left: &Row, right: &Row, row_id: u64) -> Row {
-    let mut values = Vec::with_capacity(left.len() + right.len());
-    values.extend(left.values.clone());
-    values.extend(right.values.clone());
-    Row::new(row_id, values)
-}
-
-fn pad_right(left: &Row, right_width: usize, row_id: u64) -> Row {
-    let mut values = Vec::with_capacity(left.len() + right_width);
-    values.extend(left.values.clone());
-    values.extend(std::iter::repeat_n(SqlValue::Null, right_width));
-    Row::new(row_id, values)
-}
-
-fn pad_left(right: &Row, left_width: usize, row_id: u64) -> Row {
-    let mut values = Vec::with_capacity(left_width + right.len());
-    values.extend(std::iter::repeat_n(SqlValue::Null, left_width));
-    values.extend(right.values.clone());
-    Row::new(row_id, values)
 }
 
 fn equi_join_keys(condition: &TypedExpr, left_width: usize) -> Option<(usize, usize)> {

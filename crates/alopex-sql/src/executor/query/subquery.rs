@@ -1,4 +1,5 @@
 use alopex_core::kv::KVStore;
+use alopex_core::sql::subquery::{materialize_cache, nested_scan, semi_join_probe};
 
 use crate::catalog::Catalog;
 use crate::executor::evaluator::EvalContext;
@@ -27,14 +28,14 @@ pub(crate) fn execute_scalar_subquery_with_outer<
     subquery: &LogicalPlan,
     outer: Option<&Row>,
 ) -> Result<SqlValue> {
-    let result = super::execute_query_result_with_outer(txn, catalog, subquery.clone(), outer)?;
-    if result.rows.len() > 1 {
+    let rows = execute_subquery_rows_with_outer(txn, catalog, subquery, outer)?;
+    if rows.len() > 1 {
         return Err(ExecutorError::InvalidOperation {
             operation: "execute_scalar_subquery".into(),
             reason: "scalar subquery returned multiple rows".into(),
         });
     }
-    let Some(row) = result.rows.first() else {
+    let Some(row) = rows.first() else {
         return Ok(SqlValue::Null);
     };
     if row.len() != 1 {
@@ -70,21 +71,17 @@ pub(crate) fn execute_in_subquery_with_outer<
     negated: bool,
     outer: Option<&Row>,
 ) -> Result<bool> {
-    let result = super::execute_query_result_with_outer(txn, catalog, subquery.clone(), outer)?;
-    let mut matched = false;
-    for row in result.rows {
+    let rows = execute_subquery_rows_with_outer(txn, catalog, subquery, outer)?;
+    let matched = semi_join_probe(&rows, |row| {
         let Some(candidate) = row.first() else {
-            continue;
+            return Ok(false);
         };
-        if compare_values(
+        compare_values(
             crate::ast::expr::BinaryOp::Eq,
             value.clone(),
             candidate.clone(),
-        )? {
-            matched = true;
-            break;
-        }
-    }
+        )
+    })?;
     Ok(if negated { !matched } else { matched })
 }
 
@@ -109,8 +106,8 @@ pub(crate) fn execute_exists_with_outer<
     negated: bool,
     outer: Option<&Row>,
 ) -> Result<bool> {
-    let result = super::execute_query_result_with_outer(txn, catalog, subquery.clone(), outer)?;
-    let exists = !result.rows.is_empty();
+    let rows = execute_subquery_rows_with_outer(txn, catalog, subquery, outer)?;
+    let exists = semi_join_probe(&rows, |_| Ok::<bool, ExecutorError>(true))?;
     Ok(if negated { !exists } else { exists })
 }
 
@@ -222,26 +219,53 @@ fn execute_quantified_with_outer<
     subquery: &LogicalPlan,
     outer: Option<&Row>,
 ) -> Result<bool> {
-    let result = super::execute_query_result_with_outer(txn, catalog, subquery.clone(), outer)?;
-    if result.rows.is_empty() {
+    let rows = execute_subquery_rows_with_outer(txn, catalog, subquery, outer)?;
+    if rows.is_empty() {
         return Ok(matches!(quantifier, Quantifier::All));
     }
-    let mut any_true = false;
-    for row in result.rows {
-        let Some(candidate) = row.first() else {
-            continue;
-        };
-        let comparison = compare_values(op, value.clone(), candidate.clone())?;
-        match quantifier {
-            Quantifier::Any if comparison => return Ok(true),
-            Quantifier::All if !comparison => return Ok(false),
-            Quantifier::Any => any_true = any_true || comparison,
-            Quantifier::All => {}
-        }
-    }
     Ok(match quantifier {
-        Quantifier::Any => any_true,
-        Quantifier::All => true,
+        Quantifier::Any => semi_join_probe(&rows, |row| {
+            let Some(candidate) = row.first() else {
+                return Ok::<bool, ExecutorError>(false);
+            };
+            compare_values(op, value.clone(), candidate.clone())
+        })?,
+        Quantifier::All => {
+            let has_non_match = semi_join_probe(&rows, |row| {
+                let Some(candidate) = row.first() else {
+                    return Ok::<bool, ExecutorError>(false);
+                };
+                Ok(!compare_values(op, value.clone(), candidate.clone())?)
+            })?;
+            !has_non_match
+        }
+    })
+}
+
+fn execute_subquery_rows_with_outer<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    subquery: &LogicalPlan,
+    outer: Option<&Row>,
+) -> Result<Vec<Vec<SqlValue>>> {
+    if outer.is_none() {
+        let mut cache = materialize_cache();
+        return cache.get_or_try_insert_with((), || {
+            nested_scan(|| {
+                super::execute_query_result_with_outer(txn, catalog, subquery.clone(), outer)
+                    .map(|result| result.rows)
+            })
+        });
+    }
+
+    nested_scan(|| {
+        super::execute_query_result_with_outer(txn, catalog, subquery.clone(), outer)
+            .map(|result| result.rows)
     })
 }
 
