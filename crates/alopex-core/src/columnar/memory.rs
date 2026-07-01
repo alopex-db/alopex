@@ -10,7 +10,7 @@ use std::sync::RwLock;
 use crate::columnar::error::{ColumnarError, Result};
 use crate::columnar::kvs_bridge::ColumnarKvsBridge;
 use crate::columnar::segment_v2::{
-    ColumnSegmentV2, InMemorySegmentSource, RecordBatch, SegmentReaderV2,
+    ColumnSegmentV2, InMemorySegmentSource, RecordBatch, Schema, SegmentReaderV2,
 };
 use crate::storage::format::{AlopexFileWriter, ColumnarSectionWriter};
 
@@ -149,6 +149,15 @@ impl InMemorySegmentStore {
             .get(&(table_id, segment_id))
             .ok_or(ColumnarError::NotFound)?;
         Ok(segment.meta.schema.column_count())
+    }
+
+    /// スキーマを返す（メタデータから取得）。
+    pub fn schema(&self, table_id: u32, segment_id: u64) -> Result<Schema> {
+        let guard = self.segments.read().unwrap();
+        let segment = guard
+            .get(&(table_id, segment_id))
+            .ok_or(ColumnarError::NotFound)?;
+        Ok(segment.meta.schema.clone())
     }
 
     /// すべてのセグメント (table_id, segment_id) を返す。
