@@ -4,7 +4,8 @@ use std::fmt::{self, Display};
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
-use pyo3::PyErr;
+use pyo3::types::PyAnyMethods;
+use pyo3::{PyErr, Python};
 
 /// Python-visible base exception for Alopex bindings.
 ///
@@ -18,6 +19,34 @@ use pyo3::PyErr;
 /// Raises:
 ///     AlopexError: Raised when an operation fails with a generic error.
 create_exception!(crate::error, PyAlopexError, PyException);
+
+/// Public stable error codes for the Python bindings.
+///
+/// `ALOPEX-P` is already used by the SQL parser, so Python binding-specific
+/// envelope codes use `ALOPEX-PY###` to avoid collisions across crates.
+pub const ERROR_CODES: &[&str] = &[
+    "ALOPEX-PY001",
+    "ALOPEX-PY002",
+    "ALOPEX-PY003",
+    "ALOPEX-PY004",
+    "ALOPEX-PY005",
+    "ALOPEX-PY006",
+    "ALOPEX-PY007",
+    "ALOPEX-PY008",
+    "ALOPEX-PY009",
+    "ALOPEX-PY010",
+    "ALOPEX-PY011",
+    "ALOPEX-PY012",
+    "ALOPEX-PY013",
+    "ALOPEX-PY014",
+    "ALOPEX-PY101",
+    "ALOPEX-PY102",
+    "ALOPEX-PY103",
+    "ALOPEX-PY104",
+    "ALOPEX-PY999",
+];
+
+const GENERIC_ERROR_CODE: &str = "ALOPEX-PY999";
 
 /// Internal error enum for Alopex Python bindings.
 ///
@@ -110,17 +139,59 @@ impl Display for AlopexError {
 
 impl std::error::Error for AlopexError {}
 
+impl AlopexError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            AlopexError::CatalogNotFound(_) => "ALOPEX-PY001",
+            AlopexError::NamespaceNotFound(_) => "ALOPEX-PY002",
+            AlopexError::TableNotFound(_) => "ALOPEX-PY003",
+            AlopexError::ParentNotFound(_) => "ALOPEX-PY004",
+            AlopexError::CatalogAlreadyExists(_) => "ALOPEX-PY005",
+            AlopexError::NamespaceAlreadyExists(_) => "ALOPEX-PY006",
+            AlopexError::TableExists(_) => "ALOPEX-PY007",
+            AlopexError::WriteTargetNotFound(_) => "ALOPEX-PY008",
+            AlopexError::StorageLocationRequired => "ALOPEX-PY009",
+            AlopexError::PrimaryKeyRequired => "ALOPEX-PY010",
+            AlopexError::UnsupportedFormat(_) => "ALOPEX-PY011",
+            AlopexError::PolarsNotInstalled => "ALOPEX-PY012",
+            AlopexError::CloudAuthFailed { .. } => "ALOPEX-PY013",
+            AlopexError::TypeConversionError { .. } => "ALOPEX-PY014",
+        }
+    }
+}
+
+fn core_error_code(err: &alopex_core::Error) -> &'static str {
+    match err {
+        alopex_core::Error::NotFound => "ALOPEX-PY101",
+        alopex_core::Error::TxnClosed => "ALOPEX-PY102",
+        alopex_core::Error::TxnReadOnly => "ALOPEX-PY103",
+        alopex_core::Error::TxnConflict => "ALOPEX-PY104",
+        _ => GENERIC_ERROR_CODE,
+    }
+}
+
+fn with_code(err: PyErr, code: &'static str) -> PyErr {
+    Python::with_gil(|py| {
+        err.value(py)
+            .setattr("code", code)
+            .expect("Python exception instances must accept stable code attributes");
+    });
+    err
+}
+
 impl From<AlopexError> for PyErr {
     fn from(err: AlopexError) -> PyErr {
+        let code = err.code();
+        let message = err.to_string();
         match &err {
             AlopexError::CatalogNotFound(_)
             | AlopexError::NamespaceNotFound(_)
             | AlopexError::TableNotFound(_)
-            | AlopexError::ParentNotFound(_) => PyValueError::new_err(err.to_string()),
+            | AlopexError::ParentNotFound(_) => with_code(PyValueError::new_err(message), code),
             AlopexError::CatalogAlreadyExists(_) | AlopexError::NamespaceAlreadyExists(_) => {
-                PyRuntimeError::new_err(err.to_string())
+                with_code(PyRuntimeError::new_err(message), code)
             }
-            _ => PyAlopexError::new_err(err.to_string()),
+            _ => with_code(PyAlopexError::new_err(message), code),
         }
     }
 }
@@ -143,7 +214,7 @@ impl From<AlopexError> for PyErr {
 ///     AlopexError: Raised in Python with the provided message.
 #[allow(dead_code)]
 pub fn to_py_err<E: Display>(err: E) -> PyErr {
-    PyAlopexError::new_err(err.to_string())
+    with_code(PyAlopexError::new_err(err.to_string()), GENERIC_ERROR_CODE)
 }
 
 /// Convert embedded catalog errors into Python exceptions.
@@ -183,7 +254,8 @@ pub fn embedded_err(err: alopex_embedded::Error) -> PyErr {
         alopex_embedded::Error::UnsupportedDataSourceFormat(format) => {
             AlopexError::UnsupportedFormat(format).into()
         }
-        other => PyAlopexError::new_err(other.to_string()),
+        alopex_embedded::Error::Core(err) => core_err(err),
+        other => to_py_err(other),
     }
 }
 
@@ -205,5 +277,6 @@ pub fn embedded_err(err: alopex_embedded::Error) -> PyErr {
 ///     AlopexError: Raised in Python with the provided message.
 #[allow(dead_code)]
 pub fn core_err(err: alopex_core::Error) -> PyErr {
-    to_py_err(err)
+    let code = core_error_code(&err);
+    with_code(PyAlopexError::new_err(err.to_string()), code)
 }
