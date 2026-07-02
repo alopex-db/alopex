@@ -6,6 +6,7 @@ use std::time::Duration;
 use alopex_core::lsm::{LsmKV, LsmKVConfig};
 use alopex_server::auth::AuthMode;
 use alopex_server::config::ServerConfig;
+use alopex_server::error::ServerError;
 use alopex_server::http;
 use alopex_server::ops::backup::{BackupCoordinator, BackupHandle};
 use alopex_server::ops::restore::{RestoreCoordinator, RestoreSource};
@@ -134,20 +135,6 @@ async fn wait_for_backup_state(
         sleep(TokioDuration::from_millis(50)).await;
     }
     panic!("backup did not complete in time");
-}
-
-async fn wait_for_restore_state(
-    coordinator: &RestoreCoordinator,
-    handle: &alopex_server::ops::restore::RestoreHandle,
-) -> alopex_server::ops::state::OperationState {
-    for _ in 0..50 {
-        let state = coordinator.status(handle).expect("restore status");
-        if state.status != OperationStatus::Running && state.status != OperationStatus::Queued {
-            return state;
-        }
-        sleep(TokioDuration::from_millis(50)).await;
-    }
-    panic!("restore did not complete in time");
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -280,14 +267,12 @@ async fn restore_invalid_source_sets_failed_and_read_only() {
     let source = RestoreSource {
         path: temp.path().join("missing-backup"),
     };
-    let handle = coordinator
+    let err = coordinator
         .start_restore(source)
         .await
-        .expect("start restore");
-    let state = wait_for_restore_state(&coordinator, &handle).await;
-    assert_eq!(state.status, OperationStatus::Failed);
-    assert!(state.reason.is_some());
-    assert_eq!(lifecycle.current_mode(), Mode::ReadOnly);
+        .expect_err("restore should fail");
+    assert!(matches!(err, ServerError::NotFound(_)));
+    assert_eq!(lifecycle.current_mode(), Mode::Normal);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

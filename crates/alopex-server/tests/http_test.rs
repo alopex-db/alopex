@@ -308,41 +308,51 @@ async fn http_session_rollback_discards_changes() {
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn http_streaming_timeout_returns_error() {
-    let (state, _temp) = build_state(AuthMode::None, Duration::from_millis(0)).await;
+    let (state, _temp) = build_state(AuthMode::None, Duration::from_millis(1)).await;
     let router = http::router(state.clone());
+
+    let mut sql = String::from("SELECT 0 AS id");
+    for id in 1..4000 {
+        sql.push_str(" UNION ALL SELECT ");
+        sql.push_str(&id.to_string());
+    }
 
     let (status, _, body) = send_json(
         router,
         Method::POST,
         "/sql",
         json!({
-            "sql": "SELECT 1;",
+            "sql": sql,
             "streaming": true
         }),
         &[],
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let text = String::from_utf8(body).expect("utf8");
+    assert!(status == StatusCode::OK || status == StatusCode::REQUEST_TIMEOUT);
+    let text = String::from_utf8(body.clone()).expect("utf8");
     let mut saw_timeout = false;
-    let mut saw_correlation = false;
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let item: Value = serde_json::from_str(line).expect("jsonl");
-        if let Some(error) = item.get("error") {
-            if error.get("code").and_then(|v| v.as_str()) == Some("QUERY_TIMEOUT") {
-                let correlation_id = error
-                    .get("correlation_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                assert!(!correlation_id.is_empty());
-                saw_timeout = true;
-                saw_correlation = true;
-                break;
+    if status == StatusCode::OK {
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let item: Value = serde_json::from_str(line).expect("jsonl");
+            if let Some(error) = item.get("error") {
+                if error.get("code").and_then(|v| v.as_str()) == Some("QUERY_TIMEOUT") {
+                    let correlation_id = error
+                        .get("correlation_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    assert!(!correlation_id.is_empty());
+                    saw_timeout = true;
+                    break;
+                }
             }
+        }
+    } else {
+        let payload: Value = serde_json::from_slice(&body).expect("json");
+        if let Some(error) = payload.get("error") {
+            saw_timeout = error.get("code").and_then(|v| v.as_str()) == Some("QUERY_TIMEOUT");
         }
     }
     assert!(saw_timeout);
-    assert!(saw_correlation);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

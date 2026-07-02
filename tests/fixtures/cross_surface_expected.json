@@ -1,0 +1,15 @@
+{
+  "sql_rows": [
+    {
+      "id": 1,
+      "name": "alpha"
+    },
+    {
+      "id": 2,
+      "name": "beta"
+    }
+  ],
+  "kv_value": "shared-value",
+  "vector_top_id": 1,
+  "python_vector_top_key": "vec-a"
+}

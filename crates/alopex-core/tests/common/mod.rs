@@ -13,6 +13,7 @@ pub mod lane;
 pub mod metrics;
 pub mod replay;
 pub mod tracing_setup;
+pub mod v06_baseline;
 pub mod watchdog;
 pub mod workload;
 
@@ -27,6 +28,7 @@ pub use lane::*;
 pub use metrics::*;
 pub use replay::*;
 pub use tracing_setup::*;
+pub use v06_baseline::*;
 pub use watchdog::*;
 pub use workload::*;
 

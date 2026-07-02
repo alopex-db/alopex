@@ -22,6 +22,8 @@ pub enum ServerError {
     Timeout(String),
     #[error("session expired: {0}")]
     SessionExpired(String),
+    #[error("restore integrity mismatch: {0}")]
+    RestoreIntegrityMismatch(String),
     #[error("sql error: {0}")]
     Sql(#[from] alopex_sql::SqlError),
     #[error("core error: {0}")]
@@ -47,6 +49,7 @@ impl ServerError {
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
             Self::SessionExpired(_) => StatusCode::GONE,
+            Self::RestoreIntegrityMismatch(_) => StatusCode::CONFLICT,
             Self::Core(_) | Self::Catalog(_) | Self::Io(_) | Self::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -65,6 +68,7 @@ impl ServerError {
             Self::PayloadTooLarge(_) => "PAYLOAD_TOO_LARGE".to_string(),
             Self::Timeout(_) => "QUERY_TIMEOUT".to_string(),
             Self::SessionExpired(_) => "SESSION_EXPIRED".to_string(),
+            Self::RestoreIntegrityMismatch(_) => "RESTORE_INTEGRITY_MISMATCH".to_string(),
             Self::Core(_) | Self::Catalog(_) | Self::Io(_) | Self::Internal(_) => {
                 "INTERNAL".to_string()
             }
