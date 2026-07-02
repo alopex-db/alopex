@@ -7,6 +7,7 @@ pub mod async_runtime;
 pub mod async_util;
 pub mod columnar;
 pub mod compaction;
+pub mod dataframe;
 pub mod error;
 pub mod kv;
 pub mod log;

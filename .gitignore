@@ -40,3 +40,8 @@ crates/alopex-core/artifacts/
 
 # Stress/chaos test harness scratch output (STRESS_ARTIFACTS_DIR default)
 /artifacts/
+
+# spec-workflow MCP auto-init inside this repo (the real .spec-workflow is
+# one level up at the alopex-db root, in its own git repo); this nested copy
+# recurs whenever a tool initializes spec-workflow with cwd=alopex/
+/.spec-workflow/
