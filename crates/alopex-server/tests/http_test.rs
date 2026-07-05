@@ -308,21 +308,63 @@ async fn http_session_rollback_discards_changes() {
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn http_streaming_timeout_returns_error() {
-    let (state, _temp) = build_state(AuthMode::None, Duration::from_millis(1)).await;
-    let router = http::router(state.clone());
+    let temp = tempdir().expect("tempdir");
+    {
+        let config = ServerConfig {
+            data_dir: temp.path().to_path_buf(),
+            auth_mode: AuthMode::None,
+            query_timeout: Duration::from_secs(5),
+            audit_log_enabled: false,
+            ..ServerConfig::default()
+        };
+        let server = Server::new(config).expect("server");
+        let router = http::router(server.state.clone());
 
-    let mut sql = String::from("SELECT 0 AS id");
-    for id in 1..4000 {
-        sql.push_str(" UNION ALL SELECT ");
-        sql.push_str(&id.to_string());
+        let (status, _, _) = send_json(
+            router.clone(),
+            Method::POST,
+            "/sql",
+            json!({ "sql": "CREATE TABLE items (id INT PRIMARY KEY, value TEXT);" }),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let mut values = String::new();
+        for id in 0..2000 {
+            if !values.is_empty() {
+                values.push_str(", ");
+            }
+            values.push_str(&format!("({id}, 'v{id}')"));
+        }
+        let insert_sql = format!("INSERT INTO items (id, value) VALUES {values};");
+        let (status, _, _) = send_json(
+            router,
+            Method::POST,
+            "/sql",
+            json!({ "sql": insert_sql }),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
     }
+
+    let config = ServerConfig {
+        data_dir: temp.path().to_path_buf(),
+        auth_mode: AuthMode::None,
+        query_timeout: Duration::from_millis(1),
+        audit_log_enabled: false,
+        ..ServerConfig::default()
+    };
+    let server = Server::new(config).expect("server");
+    let router = http::router(server.state.clone());
 
     let (status, _, body) = send_json(
         router,
         Method::POST,
         "/sql",
         json!({
-            "sql": sql,
+            "sql": "SELECT id FROM items ORDER BY id;",
             "streaming": true
         }),
         &[],
