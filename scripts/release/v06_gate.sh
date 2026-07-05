@@ -135,7 +135,7 @@ main() {
     run_step "SQL: library tests" \
         cargo test -p alopex-core --lib 'sql::'
     run_step "Server: full server package tests" \
-        cargo test -p alopex-server --features lane_ci
+        cargo test -p alopex-server --features lane_ci -- --test-threads=1
     run_step_in_dir "Python: maturin develop release build" \
         "${PROJECT_ROOT}/crates/alopex-py" \
         maturin develop --release
