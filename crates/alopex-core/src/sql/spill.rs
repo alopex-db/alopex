@@ -327,7 +327,7 @@ impl<T, K> Ord for SpillHeapItem<T, K> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::{spill_io_error, spill_run, SpillMergeIterator, SpillRunReader};
     use crate::sql::stream::{MemoryPolicy, SpillPolicy};
