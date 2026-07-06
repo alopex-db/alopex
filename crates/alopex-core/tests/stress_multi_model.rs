@@ -95,7 +95,7 @@ fn multi_model_config(name: &str, model: ExecutionModel, concurrency: usize) -> 
             "rapid_api_switch" => Some(199.0),
             "columnar_scan_kv_update" => Some(250.0),
             "cross_model_rollback" => Some(333.0),
-            "cache_coherency" => Some(334.0),
+            "cache_coherency" => Some(167.0),
             "columnar_kv_flush_consistency" => Some(334.0),
             "vector_metadata_sync" => Some(334.0),
             "cross_model_crash_recovery" => Some(336.0),
