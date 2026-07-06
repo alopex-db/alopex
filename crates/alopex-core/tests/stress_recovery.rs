@@ -103,6 +103,7 @@ fn damage_wal_tail_for_mode(
     }
 }
 
+#[cfg(feature = "test-hooks")]
 fn truncate_wal_tail_for_mode(
     base_wal_path: &Path,
     mode: StressStorageMode,

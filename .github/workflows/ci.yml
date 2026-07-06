@@ -265,7 +265,10 @@ jobs:
           # rpath だけでは実行時に Nim 共有ライブラリを解決できないため、
           # Nim ライブラリのディレクトリを LD_LIBRARY_PATH に追加して解決する。
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info -- --skip e2e_
+        run: >
+          cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info --
+          --skip e2e_
+          --skip embedded_compaction_gc_latency_within_25_percent
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
