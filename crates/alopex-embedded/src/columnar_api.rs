@@ -12,11 +12,16 @@ use alopex_core::{StorageFactory, StorageMode as CoreStorageMode};
 use crate::{Database, Error, Result, SegmentConfigV2, Transaction, TxnMode};
 
 #[cfg(test)]
-static LAST_READ_COLUMN_INDICES: std::sync::Mutex<Option<Vec<usize>>> = std::sync::Mutex::new(None);
+thread_local! {
+    static LAST_READ_COLUMN_INDICES: std::cell::RefCell<Option<Vec<usize>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 #[cfg(test)]
 fn record_read_column_indices(indices: &[usize]) {
-    *LAST_READ_COLUMN_INDICES.lock().unwrap() = Some(indices.to_vec());
+    LAST_READ_COLUMN_INDICES.with(|last| {
+        *last.borrow_mut() = Some(indices.to_vec());
+    });
 }
 
 /// セグメント統計情報。
@@ -950,15 +955,17 @@ mod tests {
     }
 
     fn reset_last_read_column_indices() {
-        *LAST_READ_COLUMN_INDICES.lock().unwrap() = None;
+        LAST_READ_COLUMN_INDICES.with(|last| {
+            *last.borrow_mut() = None;
+        });
     }
 
     fn last_read_column_indices() -> Vec<usize> {
-        LAST_READ_COLUMN_INDICES
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("read_columnar_segment should record read indices")
+        LAST_READ_COLUMN_INDICES.with(|last| {
+            last.borrow()
+                .clone()
+                .expect("read_columnar_segment should record read indices")
+        })
     }
 
     #[test]
