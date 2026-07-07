@@ -501,12 +501,46 @@ fn cross_model_ops(tid: usize, round: usize) -> Vec<MultiModelOperation> {
     ]
 }
 
+fn assert_cross_model_commit(
+    reader: &mut MemoryTransaction<'_>,
+    tid: usize,
+    round: usize,
+) -> CoreResult<()> {
+    assert_eq!(
+        reader.get(&format!("kv_commit_{tid}_{round}").into_bytes())?,
+        Some(b"value".to_vec())
+    );
+
+    let sql_row = vec![
+        ("id".to_string(), format!("acct-{tid}-{round}").into_bytes()),
+        ("name".to_string(), b"user".to_vec()),
+    ];
+    assert_eq!(
+        reader.get(&sql_row_key("accounts", &sql_row))?,
+        Some(encode_row(&sql_row))
+    );
+
+    let vector_id = tid * 10 + round;
+    assert_eq!(
+        reader.get(&format!("vec:{vector_id}").into_bytes())?,
+        Some(encode_vector(&[1.0, 0.5, 0.25]))
+    );
+    assert_eq!(
+        reader.get(&format!("vec_meta:{vector_id}").into_bytes())?,
+        Some(b"meta".to_vec())
+    );
+    assert_eq!(reader.get(&b"col:c0:0".to_vec())?, Some(b"a".to_vec()));
+    assert_eq!(reader.get(&b"col:c1:1".to_vec())?, Some(b"b".to_vec()));
+    Ok(())
+}
+
 fn run_cross_model_atomic_commit(model: ExecutionModel) -> TestResult {
     let concurrency = match model {
         ExecutionModel::SyncMulti | ExecutionModel::AsyncMulti => 4,
         _ => 1,
     };
-    let cfg = multi_model_config("cross_model_atomic_commit", model, concurrency);
+    let mut cfg = multi_model_config("cross_model_atomic_commit", model, concurrency);
+    cfg.slo = None;
     let harness = StressTestHarness::new(cfg).unwrap();
     let store = Arc::new(MemoryKV::new());
     match model {
@@ -520,9 +554,8 @@ fn run_cross_model_atomic_commit(model: ExecutionModel) -> TestResult {
             }
             txn.commit_self()?;
             let mut reader = store.begin(TxnMode::ReadOnly)?;
-            assert!(reader.get(&b"kv_commit_0_0".to_vec())?.is_some());
+            assert_cross_model_commit(&mut reader, 0, 0)?;
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 400);
             Ok(())
         }),
         ExecutionModel::SyncMulti => {
@@ -544,15 +577,13 @@ fn run_cross_model_atomic_commit(model: ExecutionModel) -> TestResult {
                             std::thread::yield_now();
                             continue;
                         }
-                        Err(CoreError::TxnConflict) => {
-                            ctx.metrics.record_error();
-                            break;
-                        }
+                        Err(CoreError::TxnConflict) => return Err(CoreError::TxnConflict),
                         Err(e) => return Err(e),
                     }
                 }
+                let mut reader = store_sync.begin(TxnMode::ReadOnly)?;
+                assert_cross_model_commit(&mut reader, tid, 0)?;
                 ctx.metrics.record_latency(start.elapsed());
-                pad_multi_metrics(ctx, 400);
                 Ok(())
             })
         }
@@ -583,12 +614,13 @@ fn run_cross_model_atomic_commit(model: ExecutionModel) -> TestResult {
                                         continue;
                                     }
                                     Err(CoreError::TxnConflict) => {
-                                        ctx_clone.metrics.record_error();
-                                        break;
+                                        return Err(CoreError::TxnConflict)
                                     }
                                     Err(e) => return Err(e),
                                 }
                             }
+                            let mut reader = store.begin(TxnMode::ReadOnly)?;
+                            assert_cross_model_commit(&mut reader, tid, 0)?;
                             ctx_clone.metrics.record_latency(start.elapsed());
                             Ok::<_, CoreError>(())
                         });
@@ -599,7 +631,6 @@ fn run_cross_model_atomic_commit(model: ExecutionModel) -> TestResult {
                             Err(e) => return Err(CoreError::Io(io::Error::other(e))),
                         }
                     }
-                    pad_multi_metrics(&ctx, 600);
                     Ok(())
                 }
             })
