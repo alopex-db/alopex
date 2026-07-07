@@ -268,7 +268,6 @@ jobs:
         run: >
           cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info --
           --skip e2e_
-          --skip embedded_compaction_gc_latency_within_25_percent
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4

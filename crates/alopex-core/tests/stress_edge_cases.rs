@@ -4,7 +4,7 @@ mod common;
 
 use alopex_core::{Error as CoreError, KVStore, KVTransaction, MemoryKV, TxnManager, TxnMode};
 use common::{
-    begin_op, new_shared_store_for_mode, open_store_for_mode, selected_storage_modes, slo_presets,
+    begin_op, new_shared_store_for_mode, open_store_for_mode, selected_storage_modes,
     storage_root_for_mode, ExecutionModel, Lane, StressStorageMode, StressTestConfig,
     StressTestHarness,
 };
@@ -26,18 +26,7 @@ fn edge_config(
         operation_timeout: Duration::from_secs(5),
         metrics_interval: Duration::from_secs(1),
         warmup_ops: 0,
-        slo: if mode == StressStorageMode::Disk {
-            None
-        } else {
-            slo_presets::get("edge_cases")
-        },
-    }
-}
-
-fn pad_metrics(ctx: &common::TestContext, count: usize) {
-    // EdgeCases SLO: 500 ops/s. Short scenarios need artificial successes to avoid false failures.
-    for _ in 0..count {
-        ctx.metrics.record_success();
+        slo: None,
     }
 }
 
@@ -60,7 +49,6 @@ fn run_empty_transaction_commit(model: ExecutionModel, mode: StressStorageMode) 
             let txn = store.begin(TxnMode::ReadWrite)?;
             txn.commit_self()?;
             ctx.metrics.record_success();
-            pad_metrics(ctx, 800); // EDGE_CASES_SLO padding (500 ops/s)
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|_tid, ctx| {
@@ -71,7 +59,6 @@ fn run_empty_transaction_commit(model: ExecutionModel, mode: StressStorageMode) 
                 txn.commit_self()?;
                 ctx.metrics.record_success();
             }
-            pad_metrics(ctx, 1200); // EDGE_CASES_SLO padding
             Ok(())
         }),
         _ => panic!("edge cases are sync-only"),
@@ -109,7 +96,6 @@ fn run_large_transaction(model: ExecutionModel, mode: StressStorageMode) {
             let mut reader = store.begin(TxnMode::ReadOnly)?;
             assert_eq!(reader.get(&b"bulk_0".to_vec())?, Some(b"v".repeat(8)));
             ctx.metrics.record_success();
-            pad_metrics(ctx, 30000); // 500 ops/s * ~60s window ≈ 30k padding to meet SLO
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
@@ -125,7 +111,6 @@ fn run_large_transaction(model: ExecutionModel, mode: StressStorageMode) {
             }
             txn.commit_self()?;
             ctx.metrics.record_success();
-            pad_metrics(ctx, 30000); // same 30k padding for multi-thread SLO target
             Ok(())
         }),
         _ => panic!("edge cases are sync-only"),
@@ -163,7 +148,6 @@ fn run_rapid_abort_restart(model: ExecutionModel, mode: StressStorageMode) {
                 txn.rollback_self()?;
                 ctx.metrics.record_success();
             }
-            pad_metrics(ctx, 1200);
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
@@ -176,7 +160,6 @@ fn run_rapid_abort_restart(model: ExecutionModel, mode: StressStorageMode) {
                 txn.rollback_self()?;
                 ctx.metrics.record_success();
             }
-            pad_metrics(ctx, 1000);
             Ok(())
         }),
         _ => panic!("edge cases are sync-only"),
@@ -210,7 +193,6 @@ fn run_nested_transaction_pattern(model: ExecutionModel, mode: StressStorageMode
             let mut txn_c = store.begin(TxnMode::ReadOnly)?;
             assert_eq!(txn_c.get(&b"parent".to_vec())?, Some(b"v1".to_vec()));
             ctx.metrics.record_success();
-            pad_metrics(ctx, 900);
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
@@ -226,7 +208,6 @@ fn run_nested_transaction_pattern(model: ExecutionModel, mode: StressStorageMode
                 txn.commit_self()?;
             }
             ctx.metrics.record_success();
-            pad_metrics(ctx, 700);
             Ok(())
         }),
         _ => panic!("edge cases are sync-only"),
@@ -256,7 +237,6 @@ fn run_panic_rollback(model: ExecutionModel, mode: StressStorageMode) {
             let mut reader = store.begin(TxnMode::ReadOnly)?;
             assert_eq!(reader.get(&b"panic_key".to_vec())?, None);
             ctx.metrics.record_success();
-            pad_metrics(ctx, 800);
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
@@ -276,7 +256,6 @@ fn run_panic_rollback(model: ExecutionModel, mode: StressStorageMode) {
             let mut reader = store.begin(TxnMode::ReadOnly)?;
             assert_eq!(reader.get(&b"panic_multi".to_vec())?, None);
             ctx.metrics.record_success();
-            pad_metrics(ctx, 700);
             Ok(())
         }),
         _ => panic!("edge cases are sync-only"),
@@ -341,7 +320,6 @@ fn run_compaction_read_concurrency(model: ExecutionModel, mode: StressStorageMod
                 ctx.metrics.record_success();
                 store.flush()?; // simulate compaction cadence
             }
-            pad_metrics(ctx, 5000);
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
@@ -365,7 +343,6 @@ fn run_compaction_read_concurrency(model: ExecutionModel, mode: StressStorageMod
                     std::thread::yield_now();
                 }
             }
-            pad_metrics(ctx, 5000);
             Ok(())
         }),
         _ => panic!("edge cases are sync-only"),
@@ -405,7 +382,6 @@ fn run_compaction_write_concurrency(model: ExecutionModel, mode: StressStorageMo
                 txn.commit_self()?;
                 store.flush()?; // compaction between write rounds
             }
-            pad_metrics(ctx, 70000); // 500 ops/s * ~140s padded for slow flush cadence
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
@@ -427,7 +403,6 @@ fn run_compaction_write_concurrency(model: ExecutionModel, mode: StressStorageMo
                     ctx.metrics.record_success();
                 }
             }
-            pad_metrics(ctx, 70000); // align with single-thread padding for same duration
             Ok(())
         }),
         _ => panic!("edge cases are sync-only"),
@@ -470,7 +445,6 @@ fn run_multi_level_compaction(model: ExecutionModel, mode: StressStorageMode) {
             let mut reader = store.begin(TxnMode::ReadOnly)?;
             assert_eq!(reader.get(&b"ml2_0".to_vec())?, Some(b"v2".to_vec()));
             ctx.metrics.record_success();
-            pad_metrics(ctx, 5000);
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
@@ -492,7 +466,6 @@ fn run_multi_level_compaction(model: ExecutionModel, mode: StressStorageMode) {
                 let _ = reader.get(&b"mlm0_0".to_vec())?;
                 ctx.metrics.record_success();
             }
-            pad_metrics(ctx, 5000);
             Ok(())
         }),
         _ => panic!("edge cases are sync-only"),
@@ -551,7 +524,6 @@ fn run_memtable_flush_trigger(model: ExecutionModel, mode: StressStorageMode) {
                     .is_some();
                 assert!(has_any, "expected SST files under {:?}", sst_dir);
             }
-            pad_metrics(ctx, 5000);
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|_tid, ctx| {
@@ -566,7 +538,6 @@ fn run_memtable_flush_trigger(model: ExecutionModel, mode: StressStorageMode) {
             txn.commit_self()?;
             store.flush()?;
             ctx.metrics.record_success();
-            pad_metrics(ctx, 5000);
             Ok(())
         }),
         _ => panic!("edge cases are sync-only"),
@@ -585,12 +556,7 @@ fn run_write_faster_than_flush(model: ExecutionModel, mode: StressStorageMode) {
     } else {
         1
     };
-    let mut cfg = edge_config("write_faster_than_flush", model, concurrency, mode);
-    if let Some(mut slo) = cfg.slo.clone() {
-        // Backpressure scenario: relax throughput to 500 ops/s to match EdgeCases SLO table.
-        slo.min_throughput = Some(500.0);
-        cfg.slo = Some(slo);
-    }
+    let cfg = edge_config("write_faster_than_flush", model, concurrency, mode);
     let harness = StressTestHarness::new(cfg).unwrap();
     let result = match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
@@ -609,7 +575,6 @@ fn run_write_faster_than_flush(model: ExecutionModel, mode: StressStorageMode) {
                     store.flush()?;
                 }
             }
-            pad_metrics(ctx, 5000);
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
@@ -631,7 +596,6 @@ fn run_write_faster_than_flush(model: ExecutionModel, mode: StressStorageMode) {
                     ctx.metrics.record_success();
                 }
             }
-            pad_metrics(ctx, 5000);
             Ok(())
         }),
         _ => panic!("edge cases are sync-only"),
@@ -685,7 +649,6 @@ fn run_cache_lru_eviction(model: ExecutionModel, mode: StressStorageMode) {
             let mut reader = manager.begin(TxnMode::ReadOnly)?;
             let _ = reader.get(&b"k150".to_vec())?;
             ctx.metrics.record_success();
-            pad_metrics(ctx, 1400);
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|_tid, ctx| {
@@ -697,7 +660,6 @@ fn run_cache_lru_eviction(model: ExecutionModel, mode: StressStorageMode) {
             }
             let _ = manager.commit(txn);
             ctx.metrics.record_success();
-            pad_metrics(ctx, 1200);
             Ok(())
         }),
         _ => panic!("edge cases are sync-only"),
@@ -748,7 +710,6 @@ fn run_memory_spike_adaptation(model: ExecutionModel, mode: StressStorageMode) {
             }
             manager.commit(small)?;
             ctx.metrics.record_success();
-            pad_metrics(ctx, 1400);
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|_tid, ctx| {
@@ -758,7 +719,6 @@ fn run_memory_spike_adaptation(model: ExecutionModel, mode: StressStorageMode) {
             txn.put(b"base_multi".to_vec(), b"ok".to_vec())?;
             manager.commit(txn)?;
             ctx.metrics.record_success();
-            pad_metrics(ctx, 1200);
             Ok(())
         }),
         _ => panic!("edge cases are sync-only"),

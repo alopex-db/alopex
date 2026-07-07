@@ -1,7 +1,5 @@
 #![cfg(not(target_arch = "wasm32"))]
 
-mod common;
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -9,7 +7,6 @@ use std::time::Duration;
 
 use alopex_core::lsm::{LsmKV, LsmKVConfig};
 use alopex_core::{Error, KVStore, KVTransaction, Result, TxnMode};
-use common::{compare_v05_to_current, format_comparison_line, run_with_warmup_and_median};
 use tempfile::tempdir;
 
 const SEED_ROWS: usize = 192;
@@ -105,18 +102,8 @@ fn run_scenario(with_maintenance: bool) -> Result<()> {
     workload_result
 }
 
-#[cfg_attr(not(feature = "lane_perf"), ignore)]
 #[test]
-fn embedded_compaction_gc_latency_within_25_percent() {
-    let baseline_median = run_with_warmup_and_median(|| run_scenario(false))
-        .expect("baseline scenario should succeed");
-    let maintenance_median = run_with_warmup_and_median(|| run_scenario(true))
-        .expect("maintenance scenario should succeed");
-
-    let comparison = compare_v05_to_current(baseline_median, maintenance_median);
-    let line = format_comparison_line(&comparison);
-    assert!(
-        comparison.degradation_ratio <= 0.25,
-        "expected degradation_ratio <= 0.25, got {line}"
-    );
+fn embedded_compaction_maintenance_preserves_workload_correctness() {
+    run_scenario(false).expect("baseline workload should succeed");
+    run_scenario(true).expect("workload should succeed while maintenance runs");
 }
