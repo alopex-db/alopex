@@ -216,41 +216,35 @@ jobs:
           EOF
           chmod +x publish-crate.sh
 
+      - name: Publish alopex-dataframe
+        run: ./publish-crate.sh alopex-dataframe
+
+      - name: Wait for crates.io index update
+        run: sleep 30
+
       - name: Publish alopex-core
         run: ./publish-crate.sh alopex-core
-        continue-on-error: true
 
       - name: Wait for crates.io index update
         run: sleep 30
 
       - name: Publish alopex-sql
         run: ./publish-crate.sh alopex-sql
-        continue-on-error: true
-
-      - name: Wait for crates.io index update
-        run: sleep 30
-
-      - name: Publish alopex-dataframe
-        run: ./publish-crate.sh alopex-dataframe
-        continue-on-error: true
 
       - name: Wait for crates.io index update
         run: sleep 30
 
       - name: Publish alopex-embedded
         run: ./publish-crate.sh alopex-embedded
-        continue-on-error: true
 
       - name: Wait for crates.io index update
         run: sleep 30
 
       - name: Publish alopex-server
         run: ./publish-crate.sh alopex-server
-        continue-on-error: true
 
       - name: Wait for crates.io index update
         run: sleep 30
 
       - name: Publish alopex-cli
         run: ./publish-crate.sh alopex-cli
-        continue-on-error: true
