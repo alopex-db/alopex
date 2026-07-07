@@ -1291,17 +1291,17 @@ fn run_cache_coherency(model: ExecutionModel) -> TestResult {
     match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
             let start = Instant::now();
+            let key = b"cache:key:single".to_vec();
+            let value = b"v".to_vec();
             let mut txn = store.begin(TxnMode::ReadWrite)?;
-            txn.put(b"cache:key".to_vec(), b"v".to_vec())?;
-            kv_cache
-                .lock()
-                .unwrap()
-                .insert(b"cache:key".to_vec(), b"v".to_vec());
-            sql_cache
-                .lock()
-                .unwrap()
-                .insert(b"cache:key".to_vec(), b"v".to_vec());
+            txn.put(key.clone(), value.clone())?;
             txn.commit_self()?;
+            kv_cache.lock().unwrap().insert(key.clone(), value.clone());
+            sql_cache.lock().unwrap().insert(key.clone(), value.clone());
+            let mut reader = store.begin(TxnMode::ReadOnly)?;
+            assert_eq!(reader.get(&key)?, Some(value.clone()));
+            assert_eq!(kv_cache.lock().unwrap().get(&key), Some(&value));
+            assert_eq!(sql_cache.lock().unwrap().get(&key), Some(&value));
             ctx.metrics.record_success();
             ctx.metrics.record_latency(start.elapsed());
             Ok(())
@@ -1310,19 +1310,20 @@ fn run_cache_coherency(model: ExecutionModel) -> TestResult {
             let store_sync = store.clone();
             let kv_cache = kv_cache.clone();
             let sql_cache = sql_cache.clone();
-            harness.run_concurrent(move |_tid, ctx| {
+            harness.run_concurrent(move |tid, ctx| {
                 let start = Instant::now();
-                let mut txn = store_sync.begin(TxnMode::ReadWrite)?;
-                txn.put(b"cache:key".to_vec(), b"v2".to_vec())?;
-                kv_cache
-                    .lock()
-                    .unwrap()
-                    .insert(b"cache:key".to_vec(), b"v2".to_vec());
-                sql_cache
-                    .lock()
-                    .unwrap()
-                    .insert(b"cache:key".to_vec(), b"v2".to_vec());
-                txn.commit_self()?;
+                let key = format!("cache:key:{tid}").into_bytes();
+                let value = format!("v{tid}").into_bytes();
+                commit_retry_sync(&store_sync, |txn| {
+                    txn.put(key.clone(), value.clone())?;
+                    Ok(())
+                })?;
+                kv_cache.lock().unwrap().insert(key.clone(), value.clone());
+                sql_cache.lock().unwrap().insert(key.clone(), value.clone());
+                let mut reader = store_sync.begin(TxnMode::ReadOnly)?;
+                assert_eq!(reader.get(&key)?, Some(value.clone()));
+                assert_eq!(kv_cache.lock().unwrap().get(&key), Some(&value));
+                assert_eq!(sql_cache.lock().unwrap().get(&key), Some(&value));
                 ctx.metrics.record_success();
                 ctx.metrics.record_latency(start.elapsed());
                 Ok(())
@@ -1338,17 +1339,17 @@ fn run_cache_coherency(model: ExecutionModel) -> TestResult {
                 let sql_cache = sql_cache.clone();
                 async move {
                     let start = Instant::now();
+                    let key = b"cache:key:async".to_vec();
+                    let value = b"v3".to_vec();
                     let mut txn = store.begin(TxnMode::ReadWrite)?;
-                    txn.put(b"cache:key".to_vec(), b"v3".to_vec())?;
-                    kv_cache
-                        .lock()
-                        .unwrap()
-                        .insert(b"cache:key".to_vec(), b"v3".to_vec());
-                    sql_cache
-                        .lock()
-                        .unwrap()
-                        .insert(b"cache:key".to_vec(), b"v3".to_vec());
+                    txn.put(key.clone(), value.clone())?;
                     txn.commit_self()?;
+                    kv_cache.lock().unwrap().insert(key.clone(), value.clone());
+                    sql_cache.lock().unwrap().insert(key.clone(), value.clone());
+                    let mut reader = store.begin(TxnMode::ReadOnly)?;
+                    assert_eq!(reader.get(&key)?, Some(value.clone()));
+                    assert_eq!(kv_cache.lock().unwrap().get(&key), Some(&value));
+                    assert_eq!(sql_cache.lock().unwrap().get(&key), Some(&value));
                     ctx.metrics.record_success();
                     ctx.metrics.record_latency(start.elapsed());
                     Ok(())
