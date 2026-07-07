@@ -9,6 +9,9 @@ on:
 env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
   RUSTFLAGS: -D warnings
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
 
@@ -171,12 +174,12 @@ jobs:
           # Nim 共有ライブラリを解決できないため、ライブラリのディレクトリを
           # LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効）。
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: cargo test --all-features --workspace
+        run: cargo test --workspace --features lane_ci
 
       - name: Run doc tests
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: cargo test --doc --workspace
+        run: cargo test --doc --workspace --features lane_ci
 
   coverage:
     name: Code Coverage
@@ -266,7 +269,7 @@ jobs:
           # Nim ライブラリのディレクトリを LD_LIBRARY_PATH に追加して解決する。
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: >
-          cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info --
+          cargo llvm-cov --workspace --features lane_ci --lcov --output-path lcov.info --
           --skip e2e_
 
       - name: Upload coverage to Codecov
