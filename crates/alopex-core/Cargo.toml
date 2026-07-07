@@ -65,8 +65,8 @@ serde_json = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
 libc = "0.2"
-alopex-sql.workspace = true
-alopex-dataframe.workspace = true
+alopex-sql = { path = "../alopex-sql" }
+alopex-dataframe = { path = "../alopex-dataframe" }
 arrow = "53"
 
 # jemalloc doesn't support Windows
