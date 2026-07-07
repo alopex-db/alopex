@@ -1,0 +1,152 @@
+use std::sync::{Arc, RwLock};
+
+use alopex_core::kv::memory::MemoryKV;
+use alopex_sql::catalog::MemoryCatalog;
+use alopex_sql::dialect::AlopexDialect;
+use alopex_sql::executor::query::join::{hash_join, nested_loop_join};
+use alopex_sql::executor::{ExecutionResult, Executor, Row};
+use alopex_sql::parser::Parser;
+use alopex_sql::planner::logical_plan::JoinType;
+use alopex_sql::planner::typed_expr::TypedExpr;
+use alopex_sql::planner::{Planner, ResolvedType};
+use alopex_sql::storage::SqlValue;
+
+fn run_sql(sql: &str) -> Vec<ExecutionResult> {
+    let dialect = AlopexDialect;
+    let statements = Parser::parse_sql(&dialect, sql).expect("parse sql");
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let store = Arc::new(MemoryKV::new());
+    let mut executor = Executor::new(store, catalog.clone());
+    let mut results = Vec::new();
+    for stmt in statements {
+        let guard = catalog.read().unwrap();
+        let plan = Planner::new(&*guard).plan(&stmt).expect("plan");
+        drop(guard);
+        results.push(executor.execute(plan).expect("execute"));
+    }
+    results
+}
+
+fn last_query(sql: &str) -> alopex_sql::executor::QueryResult {
+    run_sql(sql)
+        .into_iter()
+        .rev()
+        .find_map(|result| match result {
+            ExecutionResult::Query(query) => Some(query),
+            _ => None,
+        })
+        .expect("query result")
+}
+
+fn setup_sql(select: &str) -> String {
+    format!(
+        r#"
+        CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
+        CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, total INT);
+        INSERT INTO users (id, name) VALUES (1, 'alice'), (2, 'bob'), (3, 'carol');
+        INSERT INTO orders (id, user_id, total) VALUES (10, 1, 50), (11, 1, 75), (12, 2, 20), (13, 9, 99);
+        {select};
+        "#
+    )
+}
+
+#[test]
+fn inner_join_uses_equi_condition() {
+    let query = last_query(&setup_sql(
+        "SELECT users.name, orders.total FROM users JOIN orders ON users.id = orders.user_id ORDER BY orders.id",
+    ));
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Text("alice".into()), SqlValue::Integer(50)],
+            vec![SqlValue::Text("alice".into()), SqlValue::Integer(75)],
+            vec![SqlValue::Text("bob".into()), SqlValue::Integer(20)],
+        ]
+    );
+}
+
+#[test]
+fn outer_and_cross_joins_cover_unmatched_rows() {
+    let left = last_query(&setup_sql(
+        "SELECT users.id, orders.total FROM users LEFT JOIN orders ON users.id = orders.user_id ORDER BY users.id, orders.total",
+    ));
+    assert!(
+        left.rows
+            .contains(&vec![SqlValue::Integer(3), SqlValue::Null])
+    );
+
+    let right = last_query(&setup_sql(
+        "SELECT users.id, orders.total FROM users RIGHT JOIN orders ON users.id = orders.user_id ORDER BY orders.id",
+    ));
+    assert!(
+        right
+            .rows
+            .contains(&vec![SqlValue::Null, SqlValue::Integer(99)])
+    );
+
+    let full = last_query(&setup_sql(
+        "SELECT users.id, orders.total FROM users FULL JOIN orders ON users.id = orders.user_id ORDER BY users.id, orders.id",
+    ));
+    assert!(
+        full.rows
+            .contains(&vec![SqlValue::Integer(3), SqlValue::Null])
+    );
+    assert!(
+        full.rows
+            .contains(&vec![SqlValue::Null, SqlValue::Integer(99)])
+    );
+
+    let cross = last_query(&setup_sql(
+        "SELECT users.id, orders.id FROM users CROSS JOIN orders",
+    ));
+    assert_eq!(cross.rows.len(), 12);
+}
+
+#[test]
+fn empty_and_skewed_join_inputs_are_handled() {
+    let query = last_query(
+        r#"
+        CREATE TABLE lefts (id INT PRIMARY KEY, k INT);
+        CREATE TABLE rights (id INT PRIMARY KEY, k INT);
+        INSERT INTO lefts (id, k) VALUES (1, 7), (2, 7), (3, 7), (4, 8);
+        SELECT lefts.id, rights.id FROM lefts LEFT JOIN rights ON lefts.k = rights.k ORDER BY lefts.id;
+        "#,
+    );
+    assert_eq!(query.rows.len(), 4);
+    assert!(query.rows.iter().all(|row| row[1] == SqlValue::Null));
+}
+
+#[test]
+fn nested_loop_and_hash_join_match_for_equi_join() {
+    let left = vec![
+        Row::new(0, vec![SqlValue::Integer(1), SqlValue::Text("a".into())]),
+        Row::new(1, vec![SqlValue::Integer(2), SqlValue::Text("b".into())]),
+    ];
+    let right = vec![
+        Row::new(0, vec![SqlValue::Integer(1), SqlValue::Integer(10)]),
+        Row::new(1, vec![SqlValue::Integer(3), SqlValue::Integer(30)]),
+    ];
+    let condition = TypedExpr::binary_op(
+        TypedExpr::column_ref(
+            "l".into(),
+            "id".into(),
+            0,
+            ResolvedType::Integer,
+            Default::default(),
+        ),
+        alopex_sql::ast::expr::BinaryOp::Eq,
+        TypedExpr::column_ref(
+            "r".into(),
+            "id".into(),
+            2,
+            ResolvedType::Integer,
+            Default::default(),
+        ),
+        ResolvedType::Boolean,
+        Default::default(),
+    );
+
+    let nested = nested_loop_join(&left, &right, &condition, JoinType::Inner).unwrap();
+    let hashed = hash_join(&left, &right, 0, 0, JoinType::Inner).unwrap();
+    assert_eq!(nested, hashed);
+}

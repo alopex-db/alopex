@@ -9,6 +9,7 @@ on:
 env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
+  NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
 
 jobs:
   native:
@@ -76,9 +77,24 @@ jobs:
             *) echo "FEATURE_FLAGS=" >> $GITHUB_ENV ;;
           esac
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Run compatibility tests
         env:
           ALOPEX_COMPAT_COMPRESSION: ${{ matrix.compression }}
+          # alopex-core のテストバイナリは alopex-sql 経由で Nim 共有ライブラリを
+          # ロードする。build.rs の rpath だけでは解決できないため、ライブラリの
+          # ディレクトリを LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効）。
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: cargo test -p alopex-core --tests format_compatibility_test $FEATURE_FLAGS
 
   wasm:

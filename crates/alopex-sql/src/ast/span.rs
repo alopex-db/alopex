@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 /// A location in source text (1-based line/column).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct Location {
     /// Line number (1-based). Zero represents an unknown location.
     pub line: u64,
@@ -20,7 +22,7 @@ impl Location {
 }
 
 /// A span covering a start and end location (inclusive).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Span {
     pub start: Location,
     pub end: Location,

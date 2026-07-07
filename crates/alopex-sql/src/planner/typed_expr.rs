@@ -15,6 +15,7 @@
 
 use crate::ast::expr::{BinaryOp, Literal, UnaryOp};
 use crate::ast::span::Span;
+use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::types::ResolvedType;
 
 /// A type-checked expression with resolved type information.
@@ -150,6 +151,46 @@ pub enum TypedExprKind {
 
     /// A vector literal.
     VectorLiteral(Vec<f64>),
+
+    /// A scalar subquery.
+    ScalarSubquery(Box<LogicalPlan>),
+
+    /// An IN subquery.
+    InSubquery {
+        /// Expression to test.
+        expr: Box<TypedExpr>,
+        /// Planned subquery.
+        subquery: Box<LogicalPlan>,
+        /// Whether this is NOT IN.
+        negated: bool,
+    },
+
+    /// An EXISTS subquery.
+    Exists {
+        /// Planned subquery.
+        subquery: Box<LogicalPlan>,
+        /// Whether this is NOT EXISTS.
+        negated: bool,
+    },
+
+    /// A quantified comparison subquery.
+    Quantified {
+        /// Expression to compare.
+        expr: Box<TypedExpr>,
+        /// Comparison operator.
+        op: BinaryOp,
+        /// ANY/ALL quantifier.
+        quantifier: Quantifier,
+        /// Planned subquery.
+        subquery: Box<LogicalPlan>,
+    },
+}
+
+/// Quantifier for quantified subquery comparisons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quantifier {
+    Any,
+    All,
 }
 
 /// A sort expression for ORDER BY clauses.

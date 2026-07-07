@@ -222,6 +222,15 @@ impl SstableReader {
     pub fn open(path: &Path) -> Result<Self> {
         let mut file = OpenOptions::new().read(true).open(path)?;
         let file_len = file.metadata()?.len();
+        // Validate the minimum file size before any fixed-width read. A truncated or
+        // empty file (e.g. an SSTable that was cut by a crash, or an empty file just
+        // recreated during recovery) would otherwise make `read_header`'s `read_exact`
+        // fail with a raw `UnexpectedEof` ("failed to fill whole buffer") that callers
+        // cannot distinguish from an I/O fault. Surface it as a structured
+        // `InvalidFormat` instead, matching the footer-size check below.
+        if file_len < HEADER_SIZE + FOOTER_SIZE {
+            return Err(Error::InvalidFormat("file too small for SSTable".into()));
+        }
         let header_entries = read_header(&mut file)?;
         let (footer_entries, checksum) = read_footer(&mut file, file_len)?;
 
@@ -358,6 +367,12 @@ mod tests {
         s.as_bytes().to_vec()
     }
 
+    fn write_single_entry_sstable(path: &Path) {
+        let mut writer = SstableWriter::create(path).unwrap();
+        writer.append(&key("a"), &value("1")).unwrap();
+        writer.finish().unwrap();
+    }
+
     #[test]
     fn writes_and_reads_sorted_entries() {
         let dir = tempdir().unwrap();
@@ -424,5 +439,123 @@ mod tests {
 
         let err = SstableReader::open(&path).unwrap_err();
         assert!(matches!(err, Error::ChecksumMismatch));
+    }
+
+    #[test]
+    fn header_magic_corruption_returns_invalid_format() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("table.sst");
+        write_single_entry_sstable(&path);
+
+        {
+            let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+            file.seek(SeekFrom::Start(0)).unwrap();
+            file.write_all(b"BAD!").unwrap();
+            file.sync_all().unwrap();
+        }
+
+        let err = SstableReader::open(&path).unwrap_err();
+        match err {
+            Error::InvalidFormat(msg) => assert!(msg.contains("invalid SSTable header magic")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn footer_magic_corruption_returns_invalid_format() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("table.sst");
+        write_single_entry_sstable(&path);
+
+        {
+            let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+            let file_len = file.metadata().unwrap().len();
+            file.seek(SeekFrom::Start(file_len - FOOTER_SIZE)).unwrap();
+            file.write_all(b"BAD!").unwrap();
+            file.sync_all().unwrap();
+        }
+
+        let err = SstableReader::open(&path).unwrap_err();
+        match err {
+            Error::InvalidFormat(msg) => assert!(msg.contains("invalid SSTable footer magic")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn data_block_size_corruption_returns_invalid_format() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("table.sst");
+        write_single_entry_sstable(&path);
+
+        {
+            let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+            file.seek(SeekFrom::Start(HEADER_SIZE)).unwrap();
+            file.write_all(&u32::MAX.to_le_bytes()).unwrap();
+            file.sync_all().unwrap();
+        }
+
+        let err = SstableReader::open(&path).unwrap_err();
+        assert!(
+            !matches!(&err, Error::ChecksumMismatch),
+            "size corruption should fail format validation before checksum comparison"
+        );
+        match err {
+            Error::InvalidFormat(msg) => {
+                assert!(msg.contains("entry extends beyond footer boundary"))
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn header_footer_entry_count_mismatch_returns_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("table.sst");
+        write_single_entry_sstable(&path);
+
+        {
+            let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+            file.seek(SeekFrom::Start(8)).unwrap();
+            file.write_all(&2u64.to_le_bytes()).unwrap();
+            file.sync_all().unwrap();
+        }
+
+        let err = SstableReader::open(&path).unwrap_err();
+        match err {
+            Error::InvalidFormat(msg) => {
+                assert!(msg.contains("header/footer entry counts do not match"))
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_smaller_than_minimum_size_returns_invalid_format() {
+        let dir = tempdir().unwrap();
+        let sizes = [0, 1, HEADER_SIZE - 1, HEADER_SIZE + FOOTER_SIZE - 1];
+
+        for size in sizes {
+            let path = dir.path().join(format!("table-{size}.sst"));
+            {
+                let file = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&path)
+                    .unwrap();
+                file.set_len(size).unwrap();
+                file.sync_all().unwrap();
+            }
+
+            let err = SstableReader::open(&path).unwrap_err();
+            match err {
+                Error::InvalidFormat(msg) => assert!(
+                    msg.contains("file too small for SSTable"),
+                    "unexpected message for size {size}: {msg}"
+                ),
+                other => panic!("unexpected error for size {size}: {other:?}"),
+            }
+        }
     }
 }

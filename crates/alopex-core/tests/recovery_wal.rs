@@ -102,7 +102,7 @@ fn recovery_stops_on_corrupted_wal_byte() -> Result<()> {
     let mut file = OpenOptions::new().read(true).open(&wal_path)?;
     let mut header_bytes = [0u8; WAL_SECTION_HEADER_SIZE];
     file.read_exact(&mut header_bytes)?;
-    let section = WalSectionHeader::from_bytes(&header_bytes);
+    let section = WalSectionHeader::from_bytes(&header_bytes)?;
 
     let segment_size = sim.config_mut().wal.segment_size as u64;
     let segment_data_len = segment_size - (WAL_SEGMENT_HEADER_SIZE as u64);

@@ -7,6 +7,9 @@ on:
     - cron: "0 2 * * *"
     - cron: "0 3 * * 0"
 
+env:
+  NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
+
 jobs:
   stress-tests:
     runs-on: ubuntu-latest
@@ -22,11 +25,23 @@ jobs:
           override: true
           profile: minimal
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Run stress tests (short)
         env:
           RUST_BACKTRACE: 1
           STRESS_TEST_TIMEOUT: 120
           STRESS_REPORT_DIR: target/stress-reports # set empty string to skip artifact upload
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           cargo test --features test-hooks,lane_ci --test stress_* -- --test-threads=1
 
@@ -68,11 +83,39 @@ jobs:
           override: true
           profile: minimal
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
+      # macOS/Windows ランナーは docker で Linux コンテナを動かせないため、
+      # ネイティブ Nim ツールチェーン (2.2 固定) をセットアップして共有ライブラリを生成する。
+      # 要 CI 検証: macOS/Windows ランナー上でのみ動作確認可能（ローカル検証不可）。
+      - name: Setup Nim (macOS/Windows)
+        if: runner.os != 'Linux'
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Nim SQL parser library (macOS/Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          cd "${NIM_SQL_PARSER_DIR}"
+          nimble install -y npeg msgpack4nim
+          nimble lib
       - name: Run sanitizer lane
         env:
           RUST_BACKTRACE: 1
           STRESS_REPORT_DIR: target/stress-reports/${{ matrix.sanitizer }}
           STRESS_ARTIFACTS_DIR: target/stress-artifacts/${{ matrix.sanitizer }}
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           ./scripts/run-sanitizer-lane.sh ${{ matrix.sanitizer }}
 
@@ -105,12 +148,24 @@ jobs:
           override: true
           profile: minimal
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
       - name: Run SQL fuzz target (24h)
         env:
           STRESS_REPORT_DIR: target/stress-reports/fuzz/sql_parser
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           cd crates/alopex-sql/fuzz
           export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
@@ -119,6 +174,7 @@ jobs:
       - name: Run DataFrame fuzz target (24h)
         env:
           STRESS_REPORT_DIR: target/stress-reports/fuzz/dataframe_conversion
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           cd crates/alopex-dataframe/fuzz
           export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
@@ -155,6 +211,17 @@ jobs:
             gh run download "$run_id" -n perf-baselines -D target/stress-baselines || true
           fi
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Run perf baseline checks
         env:
           RUST_BACKTRACE: 1
@@ -162,6 +229,7 @@ jobs:
           STRESS_BASELINE_DIR: target/stress-baselines
           STRESS_REPORT_DIR: target/stress-reports/perf
           STRESS_ARTIFACTS_DIR: target/stress-artifacts/perf
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           cargo test --features lane_perf --test stress_perf_baseline -- --test-threads=1
 

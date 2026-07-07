@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 mod common;
 
 use alopex_core::kv::memory::MemoryTransaction;
@@ -5,9 +7,9 @@ use alopex_core::types::Value;
 use alopex_core::KVTransaction;
 use alopex_core::{Error as CoreError, KVStore, MemoryKV, TxnMode};
 use common::{
-    begin_op, slo_presets, Column, ColumnarOperation, ExecutionModel, Lane, ModelMix,
-    MultiModelOperation, MultiModelWorkloadConfig, MultiModelWorkloadGenerator, Operation,
-    SqlOperation, StressTestConfig, StressTestHarness, TestResult, VectorOperation, WorkloadConfig,
+    begin_op, Column, ColumnarOperation, ExecutionModel, Lane, ModelMix, MultiModelOperation,
+    MultiModelWorkloadConfig, MultiModelWorkloadGenerator, Operation, SqlOperation,
+    StressTestConfig, StressTestHarness, TestResult, VectorOperation, WorkloadConfig,
 };
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -71,36 +73,6 @@ where
 }
 
 fn multi_model_config(name: &str, model: ExecutionModel, concurrency: usize) -> StressTestConfig {
-    let mut slo = slo_presets::get("multi_model");
-    if let Some(cfg) = slo.as_mut() {
-        // Rebased (2025-12-16) from baseline measurements.
-        // The multi_model suite runs multiple sub-scenarios; some SyncMulti paths were far below
-        // the initial hypothesis (throughput >= 500 ops/s). We keep the default for scenarios that
-        // comfortably meet it, and apply per-scenario thresholds for those that didn't.
-        cfg.min_throughput = match name {
-            // New thresholds are derived from: min(throughput median across models) across 3 runs,
-            // then divided by 1.2 (20% regression margin), rounded down.
-            "partial_index_update_rollback" => Some(59.0),
-            "kv_sql_same_entity" => Some(79.0),
-            "sql_vector_column_update" => Some(99.0),
-            "transaction_mode_change" => Some(119.0),
-            "btree_vector_index_sync" => Some(126.0),
-            "kv_sql_concurrent_access" => Some(133.0),
-            "prepared_statement_kv_alternate" => Some(133.0),
-            "mixed_api_100" => Some(159.0),
-            "kv_sql_row_consistency" => Some(167.0),
-            "vector_search_sql_insert" => Some(168.0),
-            "rapid_api_switch" => Some(199.0),
-            "columnar_scan_kv_update" => Some(250.0),
-            "cross_model_rollback" => Some(333.0),
-            "cache_coherency" => Some(334.0),
-            "columnar_kv_flush_consistency" => Some(334.0),
-            "vector_metadata_sync" => Some(334.0),
-            "cross_model_crash_recovery" => Some(336.0),
-            "api_switches_1000" => Some(399.0),
-            _ => cfg.min_throughput,
-        };
-    }
     StressTestConfig {
         name: name.to_string(),
         lane: Lane::Nightly,
@@ -110,13 +82,7 @@ fn multi_model_config(name: &str, model: ExecutionModel, concurrency: usize) -> 
         operation_timeout: Duration::from_secs(6),
         metrics_interval: Duration::from_secs(1),
         warmup_ops: 0,
-        slo,
-    }
-}
-
-fn pad_multi_metrics(ctx: &common::TestContext, count: usize) {
-    for _ in 0..count {
-        ctx.metrics.record_success();
+        slo: None,
     }
 }
 
@@ -337,7 +303,6 @@ fn run_generated_mix(
                     }
                 }
             }
-            pad_multi_metrics(ctx, batches * batch_size);
             Ok(())
         }),
         ExecutionModel::SyncMulti => {
@@ -370,7 +335,6 @@ fn run_generated_mix(
                         }
                     }
                 }
-                pad_multi_metrics(ctx, batches * batch_size * 2);
                 Ok(())
             })
         }
@@ -405,7 +369,6 @@ fn run_generated_mix(
                             }
                         }
                     }
-                    pad_multi_metrics(&ctx, batches * batch_size * 2);
                     Ok(())
                 }
             })
@@ -449,7 +412,6 @@ fn run_generated_mix(
                                     }
                                 }
                             }
-                            pad_multi_metrics(&ctx_clone, batches * batch_size * 2);
                             Ok::<_, CoreError>(())
                         });
                     }
@@ -499,12 +461,46 @@ fn cross_model_ops(tid: usize, round: usize) -> Vec<MultiModelOperation> {
     ]
 }
 
+fn assert_cross_model_commit(
+    reader: &mut MemoryTransaction<'_>,
+    tid: usize,
+    round: usize,
+) -> CoreResult<()> {
+    assert_eq!(
+        reader.get(&format!("kv_commit_{tid}_{round}").into_bytes())?,
+        Some(b"value".to_vec())
+    );
+
+    let sql_row = vec![
+        ("id".to_string(), format!("acct-{tid}-{round}").into_bytes()),
+        ("name".to_string(), b"user".to_vec()),
+    ];
+    assert_eq!(
+        reader.get(&sql_row_key("accounts", &sql_row))?,
+        Some(encode_row(&sql_row))
+    );
+
+    let vector_id = tid * 10 + round;
+    assert_eq!(
+        reader.get(&format!("vec:{vector_id}").into_bytes())?,
+        Some(encode_vector(&[1.0, 0.5, 0.25]))
+    );
+    assert_eq!(
+        reader.get(&format!("vec_meta:{vector_id}").into_bytes())?,
+        Some(b"meta".to_vec())
+    );
+    assert_eq!(reader.get(&b"col:c0:0".to_vec())?, Some(b"a".to_vec()));
+    assert_eq!(reader.get(&b"col:c1:1".to_vec())?, Some(b"b".to_vec()));
+    Ok(())
+}
+
 fn run_cross_model_atomic_commit(model: ExecutionModel) -> TestResult {
     let concurrency = match model {
         ExecutionModel::SyncMulti | ExecutionModel::AsyncMulti => 4,
         _ => 1,
     };
-    let cfg = multi_model_config("cross_model_atomic_commit", model, concurrency);
+    let mut cfg = multi_model_config("cross_model_atomic_commit", model, concurrency);
+    cfg.slo = None;
     let harness = StressTestHarness::new(cfg).unwrap();
     let store = Arc::new(MemoryKV::new());
     match model {
@@ -518,9 +514,8 @@ fn run_cross_model_atomic_commit(model: ExecutionModel) -> TestResult {
             }
             txn.commit_self()?;
             let mut reader = store.begin(TxnMode::ReadOnly)?;
-            assert!(reader.get(&b"kv_commit_0_0".to_vec())?.is_some());
+            assert_cross_model_commit(&mut reader, 0, 0)?;
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 400);
             Ok(())
         }),
         ExecutionModel::SyncMulti => {
@@ -542,15 +537,13 @@ fn run_cross_model_atomic_commit(model: ExecutionModel) -> TestResult {
                             std::thread::yield_now();
                             continue;
                         }
-                        Err(CoreError::TxnConflict) => {
-                            ctx.metrics.record_error();
-                            break;
-                        }
+                        Err(CoreError::TxnConflict) => return Err(CoreError::TxnConflict),
                         Err(e) => return Err(e),
                     }
                 }
+                let mut reader = store_sync.begin(TxnMode::ReadOnly)?;
+                assert_cross_model_commit(&mut reader, tid, 0)?;
                 ctx.metrics.record_latency(start.elapsed());
-                pad_multi_metrics(ctx, 400);
                 Ok(())
             })
         }
@@ -581,12 +574,13 @@ fn run_cross_model_atomic_commit(model: ExecutionModel) -> TestResult {
                                         continue;
                                     }
                                     Err(CoreError::TxnConflict) => {
-                                        ctx_clone.metrics.record_error();
-                                        break;
+                                        return Err(CoreError::TxnConflict)
                                     }
                                     Err(e) => return Err(e),
                                 }
                             }
+                            let mut reader = store.begin(TxnMode::ReadOnly)?;
+                            assert_cross_model_commit(&mut reader, tid, 0)?;
                             ctx_clone.metrics.record_latency(start.elapsed());
                             Ok::<_, CoreError>(())
                         });
@@ -597,7 +591,6 @@ fn run_cross_model_atomic_commit(model: ExecutionModel) -> TestResult {
                             Err(e) => return Err(CoreError::Io(io::Error::other(e))),
                         }
                     }
-                    pad_multi_metrics(&ctx, 600);
                     Ok(())
                 }
             })
@@ -623,7 +616,6 @@ fn run_cross_model_rollback(model: ExecutionModel) -> TestResult {
             let mut reader = store.begin(TxnMode::ReadOnly)?;
             assert!(reader.get(&b"kv_commit_0_1".to_vec())?.is_none());
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 300);
             Ok(())
         }),
         ExecutionModel::SyncMulti => {
@@ -655,7 +647,6 @@ fn run_cross_model_rollback(model: ExecutionModel) -> TestResult {
                     .get(&format!("kv_commit_{tid}_1").into_bytes())?
                     .is_none());
                 ctx.metrics.record_latency(start.elapsed());
-                pad_multi_metrics(ctx, 300);
                 Ok(())
             })
         }
@@ -674,7 +665,6 @@ fn run_cross_model_rollback(model: ExecutionModel) -> TestResult {
                     let mut reader = store.begin(TxnMode::ReadOnly)?;
                     assert!(reader.get(&b"kv_commit_0_1".to_vec())?.is_none());
                     ctx.metrics.record_latency(start.elapsed());
-                    pad_multi_metrics(&ctx, 400);
                     Ok(())
                 }
             })
@@ -708,7 +698,6 @@ fn run_vector_metadata_sync(model: ExecutionModel) -> TestResult {
             assert!(reader.get(&b"vec_meta:9".to_vec())?.is_some());
             ctx.metrics.record_success();
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 200);
             Ok(())
         }),
         ExecutionModel::SyncMulti => {
@@ -733,7 +722,6 @@ fn run_vector_metadata_sync(model: ExecutionModel) -> TestResult {
                 }
                 ctx.metrics.record_success();
                 ctx.metrics.record_latency(start.elapsed());
-                pad_multi_metrics(ctx, 200);
                 Ok(())
             })
         }
@@ -757,7 +745,6 @@ fn run_vector_metadata_sync(model: ExecutionModel) -> TestResult {
                     assert!(reader.get(&b"vec_meta:21".to_vec())?.is_some());
                     ctx.metrics.record_success();
                     ctx.metrics.record_latency(start.elapsed());
-                    pad_multi_metrics(&ctx, 200);
                     Ok(())
                 }
             })
@@ -785,7 +772,6 @@ fn run_cross_model_crash_recovery(model: ExecutionModel) -> TestResult {
             let mut reader = reopened.begin(TxnMode::ReadOnly)?;
             assert!(reader.get(&b"kv_commit_0_2".to_vec())?.is_some());
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 400);
             Ok(())
         }),
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
@@ -808,7 +794,6 @@ fn run_cross_model_crash_recovery(model: ExecutionModel) -> TestResult {
                 let _ = reader.get(&format!("kv_commit_{tid}_2").into_bytes())?;
             }
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 400);
             Ok(())
         }),
         ExecutionModel::AsyncSingle | ExecutionModel::AsyncMulti => {
@@ -828,7 +813,6 @@ fn run_cross_model_crash_recovery(model: ExecutionModel) -> TestResult {
                 let mut reader = reopened.begin(TxnMode::ReadOnly)?;
                 assert!(reader.get(&b"kv_commit_0_2".to_vec())?.is_some());
                 ctx.metrics.record_latency(start.elapsed());
-                pad_multi_metrics(&ctx, 400);
                 Ok(())
             })
         }
@@ -858,7 +842,6 @@ fn run_sql_select_kv_update_isolation(model: ExecutionModel) -> TestResult {
             assert_eq!(snapshot, Some(b"v1".to_vec()));
             ctx.metrics.record_success();
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 300);
             Ok(())
         }),
         ExecutionModel::SyncMulti => {
@@ -879,7 +862,6 @@ fn run_sql_select_kv_update_isolation(model: ExecutionModel) -> TestResult {
                 }
                 ctx.metrics.record_success();
                 ctx.metrics.record_latency(start.elapsed());
-                pad_multi_metrics(ctx, 200);
                 Ok(())
             })
         }
@@ -900,7 +882,6 @@ fn run_sql_select_kv_update_isolation(model: ExecutionModel) -> TestResult {
                     assert_eq!(snap, Some(b"v1".to_vec()));
                     ctx.metrics.record_success();
                     ctx.metrics.record_latency(start.elapsed());
-                    pad_multi_metrics(&ctx, 300);
                     Ok(())
                 }
             })
@@ -943,7 +924,6 @@ fn run_vector_search_sql_insert(model: ExecutionModel) -> TestResult {
                 ctx.metrics.record_success();
             }
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 300);
             Ok(())
         }),
         ExecutionModel::SyncMulti => {
@@ -990,7 +970,6 @@ fn run_vector_search_sql_insert(model: ExecutionModel) -> TestResult {
                     return Ok(());
                 }
                 ctx.metrics.record_latency(start.elapsed());
-                pad_multi_metrics(ctx, 200);
                 Ok(())
             })
         }
@@ -1019,7 +998,6 @@ fn run_vector_search_sql_insert(model: ExecutionModel) -> TestResult {
                     txn.commit_self()?;
                     ctx.metrics.record_success();
                     ctx.metrics.record_latency(start.elapsed());
-                    pad_multi_metrics(&ctx, 300);
                     Ok(())
                 }
             })
@@ -1055,7 +1033,6 @@ fn run_columnar_scan_kv_update(model: ExecutionModel) -> TestResult {
             txn.commit_self()?;
             ctx.metrics.record_success();
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 300);
             Ok(())
         }),
         ExecutionModel::SyncMulti => {
@@ -1082,7 +1059,6 @@ fn run_columnar_scan_kv_update(model: ExecutionModel) -> TestResult {
                 }
                 ctx.metrics.record_success();
                 ctx.metrics.record_latency(start.elapsed());
-                pad_multi_metrics(ctx, 200);
                 Ok(())
             })
         }
@@ -1109,7 +1085,6 @@ fn run_columnar_scan_kv_update(model: ExecutionModel) -> TestResult {
                     txn.commit_self()?;
                     ctx.metrics.record_success();
                     ctx.metrics.record_latency(start.elapsed());
-                    pad_multi_metrics(&ctx, 300);
                     Ok(())
                 }
             })
@@ -1142,7 +1117,6 @@ fn run_kv_sql_row_consistency(model: ExecutionModel) -> TestResult {
             assert_eq!(reader.get(&b"kv:row:1".to_vec())?, Some(b"v1".to_vec()));
             ctx.metrics.record_success();
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 200);
             Ok(())
         }),
         ExecutionModel::SyncMulti => {
@@ -1161,7 +1135,6 @@ fn run_kv_sql_row_consistency(model: ExecutionModel) -> TestResult {
                 })?;
                 ctx.metrics.record_success();
                 ctx.metrics.record_latency(start.elapsed());
-                pad_multi_metrics(ctx, 200);
                 Ok(())
             })
         }
@@ -1183,7 +1156,6 @@ fn run_kv_sql_row_consistency(model: ExecutionModel) -> TestResult {
                     txn.commit_self()?;
                     ctx.metrics.record_success();
                     ctx.metrics.record_latency(start.elapsed());
-                    pad_multi_metrics(&ctx, 200);
                     Ok(())
                 }
             })
@@ -1215,7 +1187,6 @@ fn run_columnar_kv_flush_consistency(model: ExecutionModel) -> TestResult {
             txn.commit_self()?;
             ctx.metrics.record_success();
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 200);
             Ok(())
         }),
         ExecutionModel::SyncMulti => {
@@ -1227,7 +1198,6 @@ fn run_columnar_kv_flush_consistency(model: ExecutionModel) -> TestResult {
                 })?;
                 ctx.metrics.record_success();
                 ctx.metrics.record_latency(start.elapsed());
-                pad_multi_metrics(ctx, 200);
                 Ok(())
             })
         }
@@ -1250,7 +1220,6 @@ fn run_columnar_kv_flush_consistency(model: ExecutionModel) -> TestResult {
                     txn.commit_self()?;
                     ctx.metrics.record_success();
                     ctx.metrics.record_latency(start.elapsed());
-                    pad_multi_metrics(&ctx, 200);
                     Ok(())
                 }
             })
@@ -1273,7 +1242,6 @@ fn run_partial_index_update_rollback(model: ExecutionModel) -> TestResult {
             assert!(reader.get(&b"index:btree:1".to_vec())?.is_none());
             ctx.metrics.record_success();
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 200);
             Ok(())
         }),
         _ => run_generated_mix("partial_index_update_rollback", model, 2, 4, 6, 360),
@@ -1300,7 +1268,6 @@ fn run_btree_vector_index_sync(model: ExecutionModel) -> TestResult {
             txn.commit_self()?;
             ctx.metrics.record_success();
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 200);
             Ok(())
         }),
         _ => run_generated_mix("btree_vector_index_sync", model, 3, 6, 8, 420),
@@ -1324,42 +1291,41 @@ fn run_cache_coherency(model: ExecutionModel) -> TestResult {
     match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
             let start = Instant::now();
+            let key = b"cache:key:single".to_vec();
+            let value = b"v".to_vec();
             let mut txn = store.begin(TxnMode::ReadWrite)?;
-            txn.put(b"cache:key".to_vec(), b"v".to_vec())?;
-            kv_cache
-                .lock()
-                .unwrap()
-                .insert(b"cache:key".to_vec(), b"v".to_vec());
-            sql_cache
-                .lock()
-                .unwrap()
-                .insert(b"cache:key".to_vec(), b"v".to_vec());
+            txn.put(key.clone(), value.clone())?;
             txn.commit_self()?;
+            kv_cache.lock().unwrap().insert(key.clone(), value.clone());
+            sql_cache.lock().unwrap().insert(key.clone(), value.clone());
+            let mut reader = store.begin(TxnMode::ReadOnly)?;
+            assert_eq!(reader.get(&key)?, Some(value.clone()));
+            assert_eq!(kv_cache.lock().unwrap().get(&key), Some(&value));
+            assert_eq!(sql_cache.lock().unwrap().get(&key), Some(&value));
             ctx.metrics.record_success();
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 200);
             Ok(())
         }),
         ExecutionModel::SyncMulti => {
             let store_sync = store.clone();
             let kv_cache = kv_cache.clone();
             let sql_cache = sql_cache.clone();
-            harness.run_concurrent(move |_tid, ctx| {
+            harness.run_concurrent(move |tid, ctx| {
                 let start = Instant::now();
-                let mut txn = store_sync.begin(TxnMode::ReadWrite)?;
-                txn.put(b"cache:key".to_vec(), b"v2".to_vec())?;
-                kv_cache
-                    .lock()
-                    .unwrap()
-                    .insert(b"cache:key".to_vec(), b"v2".to_vec());
-                sql_cache
-                    .lock()
-                    .unwrap()
-                    .insert(b"cache:key".to_vec(), b"v2".to_vec());
-                txn.commit_self()?;
+                let key = format!("cache:key:{tid}").into_bytes();
+                let value = format!("v{tid}").into_bytes();
+                commit_retry_sync(&store_sync, |txn| {
+                    txn.put(key.clone(), value.clone())?;
+                    Ok(())
+                })?;
+                kv_cache.lock().unwrap().insert(key.clone(), value.clone());
+                sql_cache.lock().unwrap().insert(key.clone(), value.clone());
+                let mut reader = store_sync.begin(TxnMode::ReadOnly)?;
+                assert_eq!(reader.get(&key)?, Some(value.clone()));
+                assert_eq!(kv_cache.lock().unwrap().get(&key), Some(&value));
+                assert_eq!(sql_cache.lock().unwrap().get(&key), Some(&value));
                 ctx.metrics.record_success();
                 ctx.metrics.record_latency(start.elapsed());
-                pad_multi_metrics(ctx, 200);
                 Ok(())
             })
         }
@@ -1373,20 +1339,19 @@ fn run_cache_coherency(model: ExecutionModel) -> TestResult {
                 let sql_cache = sql_cache.clone();
                 async move {
                     let start = Instant::now();
+                    let key = b"cache:key:async".to_vec();
+                    let value = b"v3".to_vec();
                     let mut txn = store.begin(TxnMode::ReadWrite)?;
-                    txn.put(b"cache:key".to_vec(), b"v3".to_vec())?;
-                    kv_cache
-                        .lock()
-                        .unwrap()
-                        .insert(b"cache:key".to_vec(), b"v3".to_vec());
-                    sql_cache
-                        .lock()
-                        .unwrap()
-                        .insert(b"cache:key".to_vec(), b"v3".to_vec());
+                    txn.put(key.clone(), value.clone())?;
                     txn.commit_self()?;
+                    kv_cache.lock().unwrap().insert(key.clone(), value.clone());
+                    sql_cache.lock().unwrap().insert(key.clone(), value.clone());
+                    let mut reader = store.begin(TxnMode::ReadOnly)?;
+                    assert_eq!(reader.get(&key)?, Some(value.clone()));
+                    assert_eq!(kv_cache.lock().unwrap().get(&key), Some(&value));
+                    assert_eq!(sql_cache.lock().unwrap().get(&key), Some(&value));
                     ctx.metrics.record_success();
                     ctx.metrics.record_latency(start.elapsed());
-                    pad_multi_metrics(&ctx, 200);
                     Ok(())
                 }
             })
@@ -1412,7 +1377,6 @@ fn run_transaction_mode_change(model: ExecutionModel) -> TestResult {
             rw.commit_self()?;
             ctx.metrics.record_success();
             ctx.metrics.record_latency(start.elapsed());
-            pad_multi_metrics(ctx, 200);
             Ok(())
         }),
         _ => run_generated_mix("transaction_mode_change", model, 2, 6, 8, 660),

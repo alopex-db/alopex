@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
@@ -12,6 +13,7 @@ pub mod lane;
 pub mod metrics;
 pub mod replay;
 pub mod tracing_setup;
+pub mod v06_baseline;
 pub mod watchdog;
 pub mod workload;
 
@@ -26,6 +28,7 @@ pub use lane::*;
 pub use metrics::*;
 pub use replay::*;
 pub use tracing_setup::*;
+pub use v06_baseline::*;
 pub use watchdog::*;
 pub use workload::*;
 
@@ -87,7 +90,7 @@ impl CrashSimulator {
         let mut file = OpenOptions::new().read(true).write(true).open(&wal_path)?;
         let mut header_bytes = [0u8; WAL_SECTION_HEADER_SIZE];
         file.read_exact(&mut header_bytes)?;
-        let section = WalSectionHeader::from_bytes(&header_bytes);
+        let section = WalSectionHeader::from_bytes(&header_bytes)?;
 
         let max_segments = self.config.wal.max_segments as u64;
         if max_segments == 0 {

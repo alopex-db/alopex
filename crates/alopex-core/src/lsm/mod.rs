@@ -299,6 +299,7 @@ impl LsmKV {
                 warn!(stop_reason = %reason, "WAL recovery stopped early");
             }
 
+            let stopped_at = replay.stopped_at;
             let recovery = RecoveryResult {
                 entries_recovered: entries.len(),
                 last_lsn,
@@ -313,13 +314,11 @@ impl LsmKV {
                 duration_ms,
                 "WAL recovery completed"
             );
-            (
-                WalWriter::open(&wal_path, config.wal.clone())?,
-                mem,
-                next,
-                recovery,
-                last_checkpoint_ms,
-            )
+            let mut wal_writer = WalWriter::open(&wal_path, config.wal.clone())?;
+            if let Some(valid_end) = stopped_at {
+                wal_writer.truncate_tail_to(valid_end)?;
+            }
+            (wal_writer, mem, next, recovery, last_checkpoint_ms)
         } else {
             (
                 WalWriter::create(&wal_path, config.wal.clone(), 1, 1)?,
@@ -1629,6 +1628,31 @@ mod recovery_tests {
         }
     }
 
+    fn create_corrupted_tail_wal(dir: &Path, wal_cfg: WalConfig) {
+        let wal_path = dir.join("lsm.wal");
+        let mut writer = WalWriter::create(&wal_path, wal_cfg, 1, 1).unwrap();
+        let e1 = WalEntry::put(1, b"a".to_vec(), b"1".to_vec());
+        let e2 = WalEntry::put(2, b"b".to_vec(), b"2".to_vec());
+        let _off1 = writer.append(&e1).unwrap();
+        let off2 = writer.append(&e2).unwrap();
+        let e2_bytes = e2.encode().unwrap();
+        drop(writer);
+
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&wal_path)
+            .unwrap();
+        let corrupt_offset = off2 + (e2_bytes.len() as u64).saturating_sub(1);
+        file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+        let mut buf = [0u8; 1];
+        file.read_exact(&mut buf).unwrap();
+        buf[0] ^= 0xFF;
+        file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+        file.write_all(&buf).unwrap();
+        file.flush().unwrap();
+    }
+
     #[test]
     fn recovery_uses_checkpoint_lsn_when_present() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1673,32 +1697,12 @@ mod recovery_tests {
     #[test]
     fn recovery_stops_on_corrupted_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let wal_path = dir.path().join("lsm.wal");
         let wal_cfg = WalConfig {
             segment_size: 4096,
             max_segments: 1,
             sync_mode: SyncMode::NoSync,
         };
-
-        let mut writer = WalWriter::create(&wal_path, wal_cfg.clone(), 1, 1).unwrap();
-        let e1 = WalEntry::put(1, b"a".to_vec(), b"1".to_vec());
-        let e2 = WalEntry::put(2, b"b".to_vec(), b"2".to_vec());
-        let _off1 = writer.append(&e1).unwrap();
-        let off2 = writer.append(&e2).unwrap();
-        let e2_bytes = e2.encode().unwrap();
-
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&wal_path)
-            .unwrap();
-        let corrupt_offset = off2 + (e2_bytes.len() as u64).saturating_sub(1);
-        file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
-        let mut buf = [0u8; 1];
-        file.read_exact(&mut buf).unwrap();
-        buf[0] ^= 0xFF;
-        file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
-        file.write_all(&buf).unwrap();
+        create_corrupted_tail_wal(dir.path(), wal_cfg.clone());
 
         let cfg = LsmKVConfig {
             wal: wal_cfg,
@@ -1707,9 +1711,58 @@ mod recovery_tests {
         let (store, recovery) = LsmKV::open_with_config(dir.path(), cfg).expect("reopen");
         assert!(recovery.stop_reason.is_some());
         assert_eq!(recovery.entries_recovered, 1);
+        assert_eq!(recovery.last_lsn, 1);
 
         let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
         assert_eq!(ro.get(&b"a".to_vec()).unwrap(), Some(b"1".to_vec()));
+    }
+
+    #[test]
+    fn recovery_is_idempotent_across_reopens() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_cfg = WalConfig {
+            segment_size: 4096,
+            max_segments: 1,
+            sync_mode: SyncMode::NoSync,
+        };
+        create_corrupted_tail_wal(dir.path(), wal_cfg.clone());
+
+        let cfg = LsmKVConfig {
+            wal: wal_cfg,
+            ..Default::default()
+        };
+
+        let (first_recovery, first_data) = {
+            let (store, recovery) =
+                LsmKV::open_with_config(dir.path(), cfg.clone()).expect("first reopen");
+            let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
+            let data = (
+                ro.get(&b"a".to_vec()).unwrap(),
+                ro.get(&b"b".to_vec()).unwrap(),
+            );
+            (recovery, data)
+        };
+
+        let (second_recovery, second_data) = {
+            let (store, recovery) =
+                LsmKV::open_with_config(dir.path(), cfg).expect("second reopen");
+            let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
+            let data = (
+                ro.get(&b"a".to_vec()).unwrap(),
+                ro.get(&b"b".to_vec()).unwrap(),
+            );
+            (recovery, data)
+        };
+
+        assert_eq!(
+            first_recovery.entries_recovered,
+            second_recovery.entries_recovered
+        );
+        assert_eq!(first_recovery.last_lsn, second_recovery.last_lsn);
+        assert_eq!(first_recovery.entries_recovered, 1);
+        assert_eq!(first_recovery.last_lsn, 1);
+        assert_eq!(first_data, second_data);
+        assert_eq!(first_data, (Some(b"1".to_vec()), None));
     }
 }
 

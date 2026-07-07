@@ -1,6 +1,6 @@
 use alopex_sql::{
-    Assignment, CreateIndex, CreateTable, Delete, Insert, OrderByExpr, Select, SelectItem, Span,
-    Spanned, Statement, StatementKind, TableRef, Update,
+    Assignment, CreateIndex, CreateTable, Delete, FromItem, Insert, OrderByExpr, Select,
+    SelectItem, Span, Spanned, Statement, StatementKind, Update,
 };
 
 fn span(line: u64, col: u64) -> Span {
@@ -41,17 +41,19 @@ fn dml_nodes_carry_spans() {
     let select = Select {
         distinct: false,
         projection: vec![SelectItem::Wildcard { span: span(1, 1) }],
-        from: TableRef {
+        from: vec![FromItem::Table {
             name: "t".into(),
             alias: None,
             span: span(1, 10),
-        },
+        }],
         selection: None,
         group_by: None,
         having: None,
         order_by: vec![OrderByExpr {
             expr: alopex_sql::Expr::new(
-                alopex_sql::ExprKind::Literal(alopex_sql::Literal::Number("1".into())),
+                alopex_sql::ExprKind::Literal {
+                    literal: alopex_sql::Literal::Number("1".into()),
+                },
                 span(1, 20),
             ),
             asc: Some(true),
@@ -77,7 +79,9 @@ fn dml_nodes_carry_spans() {
         assignments: vec![Assignment {
             column: "c".into(),
             value: alopex_sql::Expr::new(
-                alopex_sql::ExprKind::Literal(alopex_sql::Literal::Null),
+                alopex_sql::ExprKind::Literal {
+                    literal: alopex_sql::Literal::Null,
+                },
                 span(3, 10),
             ),
             span: span(3, 5),

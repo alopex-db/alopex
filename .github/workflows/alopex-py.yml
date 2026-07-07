@@ -19,6 +19,9 @@ defaults:
   run:
     shell: bash
 
+env:
+  NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
+
 jobs:
   rust-check:
     name: rust-check
@@ -30,6 +33,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Cargo fmt
         run: cargo fmt --all -- --check
       - name: Cargo clippy
@@ -111,6 +125,40 @@ jobs:
           fi
           apt-get update
           apt-get install -y patchelf
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
+      # macOS/Windows ランナーは docker で Linux コンテナを動かせないため、
+      # ネイティブ Nim ツールチェーン (2.2 固定) をセットアップして共有ライブラリを生成する。
+      # 要 CI 検証: macOS/Windows ランナー上でのみ動作確認可能（ローカル検証不可）。
+      - name: Setup Nim (macOS/Windows)
+        if: runner.os != 'Linux'
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Nim SQL parser library (macOS/Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          cd "${NIM_SQL_PARSER_DIR}"
+          nimble install -y npeg msgpack4nim
+          nimble lib
+      # Windows は rpath を持たないため、拡張のビルドと import 時に
+      # alopex_sql_parser.dll を見つけられるよう Nim ライブラリのディレクトリを
+      # PATH に追加する（Windows の DLL 検索は PATH を含む）。
+      - name: Add Nim library to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
       - name: Maturin develop
         if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         run: |
@@ -211,6 +259,17 @@ jobs:
           fi
           apt-get update
           apt-get install -y patchelf
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Maturin develop
         run: |
           maturin develop -m crates/alopex-py/Cargo.toml
@@ -305,6 +364,17 @@ jobs:
           fi
           apt-get update
           apt-get install -y patchelf
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Maturin develop (numpy)
         run: |
           maturin develop -m crates/alopex-py/Cargo.toml --features numpy

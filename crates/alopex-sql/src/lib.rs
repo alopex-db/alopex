@@ -2,8 +2,7 @@
 //!
 //! This crate provides:
 //!
-//! - **Tokenizer**: Lexical analysis of SQL strings
-//! - **Parser**: SQL parsing into an AST
+//! - **Parser**: SQL parsing into an AST via the Nim FFI parser
 //! - **Catalog**: Table and index metadata management
 //! - **Planner**: AST to logical plan conversion with type checking
 //!
@@ -34,10 +33,11 @@ pub mod columnar;
 pub mod dialect;
 pub mod error;
 pub mod executor;
+mod nim_bridge;
+mod nim_ffi;
 pub mod parser;
 pub mod planner;
 pub mod storage;
-pub mod tokenizer;
 #[cfg(all(feature = "tokio", not(target_arch = "wasm32")))]
 pub mod tokio_adapter;
 pub mod unified_error;
@@ -55,9 +55,6 @@ pub use ast::{
 pub use dialect::{AlopexDialect, Dialect};
 pub use error::{ParserError, Result};
 pub use parser::Parser;
-pub use tokenizer::Tokenizer;
-pub use tokenizer::keyword::Keyword;
-pub use tokenizer::token::{Token, TokenWithSpan, Word};
 pub use unified_error::SqlError;
 
 // Catalog types (re-exported for convenience)

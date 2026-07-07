@@ -288,7 +288,7 @@ impl<'a, C: Catalog + ?Sized> NameResolver<'a, C> {
                 Ok(())
             }
 
-            ExprKind::Literal(_) | ExprKind::VectorLiteral(_) => {
+            ExprKind::Literal { .. } | ExprKind::VectorLiteral { .. } => {
                 // Literals don't need resolution
                 Ok(())
             }
@@ -340,6 +340,14 @@ impl<'a, C: Catalog + ?Sized> NameResolver<'a, C> {
             }
 
             ExprKind::IsNull { expr: e, .. } => self.resolve_expr_recursive(e, table),
+            ExprKind::ScalarSubquery { .. }
+            | ExprKind::InSubquery { .. }
+            | ExprKind::Exists { .. }
+            | ExprKind::Quantified { .. } => Err(PlannerError::unsupported_feature(
+                "subquery name resolution",
+                "v0.6.0-subquery Phase 6",
+                expr.span,
+            )),
         }
     }
 }

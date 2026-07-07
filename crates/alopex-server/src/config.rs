@@ -10,6 +10,9 @@ use crate::auth::AuthMode;
 use crate::error::{Result, ServerError};
 use crate::tls::TlsConfig;
 
+const MAX_ADMISSION_LIMIT: usize = 100_000;
+const MAX_QUERY_TIMEOUT_MS: u128 = 300_000;
+
 /// Server configuration options.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
@@ -33,12 +36,15 @@ pub struct ServerConfig {
     /// Query timeout.
     #[serde(with = "humantime_serde")]
     pub query_timeout: Duration,
+    /// Maximum number of concurrent requests admitted.
+    #[serde(alias = "max_connections")]
+    pub max_concurrency: usize,
+    /// Maximum number of queued requests under backpressure.
+    pub max_queue_len: usize,
     /// Max request size in bytes.
     pub max_request_size: usize,
     /// Max response size in bytes.
     pub max_response_size: usize,
-    /// Max concurrent connections.
-    pub max_connections: usize,
     /// Session TTL.
     #[serde(with = "humantime_serde")]
     pub session_ttl: Duration,
@@ -64,9 +70,10 @@ impl Default for ServerConfig {
             auth_mode: AuthMode::None,
             tls: None,
             query_timeout: Duration::from_secs(30),
+            max_concurrency: 64,
+            max_queue_len: 256,
             max_request_size: 100 * 1024 * 1024,
             max_response_size: 100 * 1024 * 1024,
-            max_connections: 1000,
             session_ttl: Duration::from_secs(300),
             metrics_enabled: true,
             tracing_enabled: true,
@@ -119,10 +126,36 @@ impl ServerConfig {
                 "max_request_size must be greater than 0".into(),
             ));
         }
-        if self.max_connections == 0 {
+        if self.max_concurrency == 0 {
             return Err(ServerError::InvalidConfig(
-                "max_connections must be greater than 0".into(),
+                "max_concurrency must be greater than 0".into(),
             ));
+        }
+        if self.max_concurrency > MAX_ADMISSION_LIMIT {
+            return Err(ServerError::InvalidConfig(format!(
+                "max_concurrency must be <= {MAX_ADMISSION_LIMIT}"
+            )));
+        }
+        if self.max_queue_len == 0 {
+            return Err(ServerError::InvalidConfig(
+                "max_queue_len must be greater than 0".into(),
+            ));
+        }
+        if self.max_queue_len > MAX_ADMISSION_LIMIT {
+            return Err(ServerError::InvalidConfig(format!(
+                "max_queue_len must be <= {MAX_ADMISSION_LIMIT}"
+            )));
+        }
+        let query_timeout_ms = self.query_timeout.as_millis();
+        if query_timeout_ms == 0 {
+            return Err(ServerError::InvalidConfig(
+                "query_timeout must be greater than 0ms".into(),
+            ));
+        }
+        if query_timeout_ms > MAX_QUERY_TIMEOUT_MS {
+            return Err(ServerError::InvalidConfig(format!(
+                "query_timeout must be <= {MAX_QUERY_TIMEOUT_MS}ms"
+            )));
         }
         Ok(())
     }
@@ -136,5 +169,90 @@ impl ServerConfig {
             }
         }
         self.validate()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_admission_control_values_match_v06_policy() {
+        let cfg = ServerConfig::default();
+        assert_eq!(cfg.max_concurrency, 64);
+        assert_eq!(cfg.max_queue_len, 256);
+        assert_eq!(cfg.query_timeout.as_millis(), 30_000);
+    }
+
+    #[test]
+    fn validate_rejects_zero_or_excessive_admission_values() {
+        let cfg = ServerConfig {
+            max_concurrency: 0,
+            ..ServerConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        let cfg = ServerConfig {
+            max_queue_len: 0,
+            ..ServerConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        let cfg = ServerConfig {
+            max_concurrency: MAX_ADMISSION_LIMIT + 1,
+            ..ServerConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        let cfg = ServerConfig {
+            max_queue_len: MAX_ADMISSION_LIMIT + 1,
+            ..ServerConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        let cfg = ServerConfig {
+            query_timeout: Duration::from_millis(0),
+            ..ServerConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        let cfg = ServerConfig {
+            query_timeout: Duration::from_millis((MAX_QUERY_TIMEOUT_MS + 1) as u64),
+            ..ServerConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn load_supports_legacy_max_connections_alias() {
+        let raw = r#"
+http_bind = "127.0.0.1:8080"
+grpc_bind = "127.0.0.1:9090"
+admin_bind = "127.0.0.1:8081"
+data_dir = "./data"
+api_prefix = ""
+query_timeout = "30s"
+max_connections = 77
+max_queue_len = 256
+max_request_size = 1048576
+max_response_size = 1048576
+session_ttl = "300s"
+metrics_enabled = true
+tracing_enabled = true
+audit_log_enabled = false
+
+[auth_mode]
+type = "none"
+
+[audit_log_output]
+type = "stdout"
+"#;
+
+        let built = config::Config::builder()
+            .add_source(config::File::from_str(raw, config::FileFormat::Toml))
+            .build()
+            .expect("build config");
+        let cfg: ServerConfig = built.try_deserialize().expect("deserialize");
+        assert_eq!(cfg.max_concurrency, 77);
     }
 }

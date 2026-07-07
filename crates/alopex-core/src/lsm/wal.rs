@@ -51,7 +51,7 @@ pub const WAL_VERSION: u16 = WAL_FORMAT_VERSION;
 /// Fixed segment header size (bytes).
 pub const WAL_SEGMENT_HEADER_SIZE: usize = 28;
 /// WAL section header size (bytes) for circular buffer start/end offsets.
-pub const WAL_SECTION_HEADER_SIZE: usize = 16;
+pub const WAL_SECTION_HEADER_SIZE: usize = 20;
 /// Fixed overhead for an entry before payload bytes (LSN + length).
 pub const WAL_ENTRY_FIXED_HEADER: usize = 8 + 4;
 
@@ -771,7 +771,7 @@ fn load_section_header(file: &mut File, offset: u64) -> Result<WalSectionHeader>
     file.seek(SeekFrom::Start(offset))?;
     let mut bytes = [0u8; WAL_SECTION_HEADER_SIZE];
     file.read_exact(&mut bytes)?;
-    Ok(WalSectionHeader::from_bytes(&bytes))
+    WalSectionHeader::from_bytes(&bytes)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -797,7 +797,28 @@ mod tests {
         let mut header = WalSegmentHeader::new(1, 1).to_bytes();
         header[0] ^= 0xFF; // break magic
         let err = WalSegmentHeader::from_bytes(&header).unwrap_err();
-        matches!(err, Error::InvalidFormat(_));
+        assert!(matches!(err, Error::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn segment_header_version_mismatch() {
+        let mut header = WalSegmentHeader::new(1, 1).to_bytes();
+        // Corrupt only the version field (bytes 4..6); magic and crc32 remain as originally
+        // computed, so the version check must fail before the CRC check is reached.
+        let corrupted_version = WAL_VERSION.wrapping_add(1);
+        header[4..6].copy_from_slice(&corrupted_version.to_le_bytes());
+        let err = WalSegmentHeader::from_bytes(&header).unwrap_err();
+        assert!(matches!(err, Error::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn segment_header_crc_field_only_corruption() {
+        let mut header = WalSegmentHeader::new(1, 1).to_bytes();
+        // Corrupt only the crc32 field (bytes 22..26); magic/version/segment_id/first_lsn stay
+        // valid, isolating the failure to the checksum comparison.
+        header[22] ^= 0xFF;
+        let err = WalSegmentHeader::from_bytes(&header).unwrap_err();
+        assert!(matches!(err, Error::ChecksumMismatch));
     }
 
     #[test]
@@ -824,7 +845,7 @@ mod tests {
         let mut encoded = entry.encode().unwrap();
         *encoded.last_mut().unwrap() ^= 0x10;
         let err = WalEntry::decode(&encoded).unwrap_err();
-        matches!(err, Error::ChecksumMismatch);
+        assert!(matches!(err, Error::ChecksumMismatch));
     }
 
     #[test]
@@ -854,7 +875,7 @@ mod tests {
         let mut encoded = entry.encode().unwrap();
         encoded[0] ^= 0xFF; // corrupt LSN byte
         let err = WalEntry::decode(&encoded).unwrap_err();
-        matches!(err, Error::ChecksumMismatch);
+        assert!(matches!(err, Error::ChecksumMismatch));
     }
 
     #[test]
@@ -862,9 +883,8 @@ mod tests {
         let entry = WalEntry::put(30, b"key".to_vec(), Vec::new());
         let encoded = entry.encode().unwrap();
         let (decoded, _) = WalEntry::decode(&encoded).unwrap();
-        matches!(decoded.payload, WalEntryPayload::Put { .. });
         if let WalEntryPayload::Put { value, .. } = decoded.payload {
-            assert_eq!(value.len(), 0);
+            assert_eq!(value, Vec::<u8>::new());
         } else {
             panic!("expected Put payload");
         }
@@ -893,14 +913,30 @@ mod tests {
 
     #[test]
     fn wal_section_header_roundtrip() {
-        let header = WalSectionHeader {
-            start_offset: 128,
-            end_offset: 4096,
-            is_full: false,
-        };
+        let header = WalSectionHeader::new(128, 4096, false);
         let bytes = header.to_bytes();
-        let decoded = WalSectionHeader::from_bytes(&bytes);
+        let decoded = WalSectionHeader::from_bytes(&bytes).unwrap();
         assert_eq!(decoded, header);
+    }
+
+    #[test]
+    fn wal_section_header_crc_field_only_corruption() {
+        let mut bytes = WalSectionHeader::new(128, 4096, false).to_bytes();
+        // Corrupt only the crc32 field (bytes 16..20); start_offset/end_offset payload data
+        // stays untouched, isolating the failure to the checksum comparison itself.
+        bytes[16] ^= 0xFF;
+        let err = WalSectionHeader::from_bytes(&bytes).unwrap_err();
+        assert!(matches!(err, Error::ChecksumMismatch));
+    }
+
+    #[test]
+    fn wal_section_header_data_corruption_detected_by_crc() {
+        let mut bytes = WalSectionHeader::new(128, 4096, false).to_bytes();
+        // Corrupt the CRC-covered payload (start_offset within bytes 0..8) while leaving the
+        // stored crc32 field untouched, so the mismatch is detected on the data side.
+        bytes[0] ^= 0xFF;
+        let err = WalSectionHeader::from_bytes(&bytes).unwrap_err();
+        assert!(matches!(err, Error::ChecksumMismatch));
     }
 
     #[test]
@@ -925,7 +961,7 @@ mod tests {
         let mut file = File::open(&path).unwrap();
         let mut hdr = [0u8; WAL_SECTION_HEADER_SIZE];
         file.read_exact(&mut hdr).unwrap();
-        let section = WalSectionHeader::from_bytes(&hdr);
+        let section = WalSectionHeader::from_bytes(&hdr).unwrap();
         assert_eq!(section.start_offset, 0);
         assert_eq!(section.end_offset, encoded_len);
         assert!(!section.is_full);
@@ -986,7 +1022,7 @@ mod tests {
         let mut file = File::open(&path).unwrap();
         let mut hdr = [0u8; WAL_SECTION_HEADER_SIZE];
         file.read_exact(&mut hdr).unwrap();
-        let section = WalSectionHeader::from_bytes(&hdr);
+        let section = WalSectionHeader::from_bytes(&hdr).unwrap();
         assert_eq!(section.end_offset, entry_len);
         assert!(!section.is_full);
 
@@ -1041,13 +1077,9 @@ mod tests {
 
     #[test]
     fn wal_section_header_can_represent_full_buffer() {
-        let header = WalSectionHeader {
-            start_offset: 0,
-            end_offset: 0,
-            is_full: true,
-        };
+        let header = WalSectionHeader::new(0, 0, true);
         let bytes = header.to_bytes();
-        let decoded = WalSectionHeader::from_bytes(&bytes);
+        let decoded = WalSectionHeader::from_bytes(&bytes).unwrap();
         assert_eq!(decoded, header);
     }
 
@@ -1070,7 +1102,7 @@ mod tests {
         let mut file = File::open(&path).unwrap();
         let mut hdr = [0u8; WAL_SECTION_HEADER_SIZE];
         file.read_exact(&mut hdr).unwrap();
-        let section = WalSectionHeader::from_bytes(&hdr);
+        let section = WalSectionHeader::from_bytes(&hdr).unwrap();
         assert!(section.is_full);
         assert_eq!(section.start_offset, 0);
         assert_eq!(section.end_offset, 0);
@@ -1158,6 +1190,9 @@ mod tests {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalSectionHeader {
     /// Read pointer offset (inclusive), as a logical ring offset.
+    ///
+    /// The serialized form stores a validity marker in the MSB, so the logical offset is masked
+    /// with [`WalSectionHeader::OFFSET_MASK`] when persisted and decoded.
     pub start_offset: u64,
     /// Write pointer offset (exclusive), as a logical ring offset.
     pub end_offset: u64,
@@ -1166,35 +1201,80 @@ pub struct WalSectionHeader {
     /// This is persisted by storing a flag in the MSB of the serialized `end_offset`. Therefore,
     /// the ring length must stay within [`WalSectionHeader::OFFSET_MASK`].
     pub is_full: bool,
+    /// CRC32 for bytes [0..16).
+    pub crc32: u32,
 }
 
 impl WalSectionHeader {
     const FULL_FLAG: u64 = 1u64 << 63;
     const OFFSET_MASK: u64 = !Self::FULL_FLAG;
 
-    /// Serialize to 16 bytes (start/end offsets).
+    /// Create a new section header with computed CRC.
+    pub fn new(start_offset: u64, end_offset: u64, is_full: bool) -> Self {
+        let crc32 = Self::compute_crc(start_offset, end_offset, is_full);
+        Self {
+            start_offset,
+            end_offset,
+            is_full,
+            crc32,
+        }
+    }
+
+    /// Serialize to 20 bytes (start/end offsets + CRC32).
     pub fn to_bytes(&self) -> [u8; WAL_SECTION_HEADER_SIZE] {
         let mut buf = [0u8; WAL_SECTION_HEADER_SIZE];
-        buf[0..8].copy_from_slice(&self.start_offset.to_le_bytes());
+        let start = (self.start_offset & Self::OFFSET_MASK) | Self::FULL_FLAG;
+        buf[0..8].copy_from_slice(&start.to_le_bytes());
         let mut end = self.end_offset & Self::OFFSET_MASK;
         if self.is_full {
             end |= Self::FULL_FLAG;
         }
         buf[8..16].copy_from_slice(&end.to_le_bytes());
+        let crc32 = crc32fast::hash(&buf[0..16]);
+        buf[16..20].copy_from_slice(&crc32.to_le_bytes());
         buf
     }
 
-    /// Deserialize from 16 bytes.
-    pub fn from_bytes(bytes: &[u8; WAL_SECTION_HEADER_SIZE]) -> Self {
-        let start_offset = u64::from_le_bytes(bytes[0..8].try_into().expect("fixed slice length"));
+    /// Deserialize from 20 bytes and validate CRC32.
+    pub fn from_bytes(bytes: &[u8; WAL_SECTION_HEADER_SIZE]) -> Result<Self> {
+        let raw_start = u64::from_le_bytes(bytes[0..8].try_into().expect("fixed slice length"));
+        if (raw_start & Self::FULL_FLAG) == 0 {
+            return Err(Error::InvalidFormat(
+                "WAL section header valid marker missing".into(),
+            ));
+        }
+        let start_offset = raw_start & Self::OFFSET_MASK;
         let raw_end = u64::from_le_bytes(bytes[8..16].try_into().expect("fixed slice length"));
+        let stored_crc = u32::from_le_bytes(bytes[16..20].try_into().expect("fixed slice length"));
+        let computed_crc = crc32fast::hash(&bytes[0..16]);
+        if stored_crc != computed_crc {
+            return Err(Error::ChecksumMismatch);
+        }
+
         let is_full = (raw_end & Self::FULL_FLAG) != 0;
         let end_offset = raw_end & Self::OFFSET_MASK;
-        Self {
+        Ok(Self {
             start_offset,
             end_offset,
             is_full,
+            crc32: stored_crc,
+        })
+    }
+
+    fn compute_crc(start_offset: u64, end_offset: u64, is_full: bool) -> u32 {
+        let mut buf = [0u8; 16];
+        let start = (start_offset & Self::OFFSET_MASK) | Self::FULL_FLAG;
+        buf[0..8].copy_from_slice(&start.to_le_bytes());
+        let mut end = end_offset & Self::OFFSET_MASK;
+        if is_full {
+            end |= Self::FULL_FLAG;
         }
+        buf[8..16].copy_from_slice(&end.to_le_bytes());
+        crc32fast::hash(&buf)
+    }
+
+    pub(crate) fn refresh_crc(&mut self) {
+        self.crc32 = Self::compute_crc(self.start_offset, self.end_offset, self.is_full);
     }
 }
 
@@ -1259,11 +1339,7 @@ impl WalWriter {
             .ok_or_else(|| Error::InvalidFormat("WAL section size overflow".into()))?;
         file.set_len(wal_section_size)?;
 
-        let section_header = WalSectionHeader {
-            start_offset: 0,
-            end_offset: 0,
-            is_full: false,
-        };
+        let section_header = WalSectionHeader::new(0, 0, false);
         persist_section_header(&mut file, 0, &section_header)?;
 
         for segment_index in 0..max_segments {
@@ -1295,7 +1371,7 @@ impl WalWriter {
 
         let mut header_bytes = [0u8; WAL_SECTION_HEADER_SIZE];
         file.read_exact(&mut header_bytes)?;
-        let section_header = WalSectionHeader::from_bytes(&header_bytes);
+        let section_header = WalSectionHeader::from_bytes(&header_bytes)?;
 
         if section_header.start_offset >= ring_len {
             return Err(Error::InvalidFormat(
@@ -1377,7 +1453,30 @@ impl WalWriter {
             self.section_header.is_full = false;
         }
 
+        self.section_header.refresh_crc();
         persist_section_header(&mut self.file, 0, &self.section_header)?;
+        Ok(())
+    }
+
+    /// Truncate the logical WAL tail after recovery stopped at the last valid boundary.
+    ///
+    /// CORE-5.2 recovery replays the valid prefix and stops on a corrupt/incomplete
+    /// tail entry. Persisting the repaired end offset keeps future appends from
+    /// landing behind that corrupt tail, which would otherwise hide newly-written
+    /// records on the next replay.
+    pub fn truncate_tail_to(&mut self, new_end: u64) -> Result<()> {
+        if new_end >= self.ring_len {
+            return Err(Error::InvalidFormat(
+                "WAL end offset exceeds ring length".into(),
+            ));
+        }
+
+        self.section_header.end_offset = new_end;
+        self.section_header.is_full = false;
+        self.used_bytes = ring_distance(self.section_header.start_offset, new_end, self.ring_len);
+        self.section_header.refresh_crc();
+        persist_section_header(&mut self.file, 0, &self.section_header)?;
+        sync_file(&self.file)?;
         Ok(())
     }
 
@@ -1418,6 +1517,7 @@ impl WalWriter {
         self.section_header.end_offset = new_end % self.ring_len;
         self.used_bytes += entry_len;
         self.section_header.is_full = self.used_bytes == self.ring_len;
+        self.section_header.refresh_crc();
         persist_section_header(&mut self.file, 0, &self.section_header)?;
 
         let sync_duration_ms = self.maybe_sync_with_stats(encoded.len())?;

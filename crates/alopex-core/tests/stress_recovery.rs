@@ -1,6 +1,11 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 mod common;
 
-#[cfg(feature = "test-hooks")]
+use alopex_core::kv::AnyKV;
+use alopex_core::lsm::wal::{
+    WalConfig, WalSectionHeader, WAL_SECTION_HEADER_SIZE, WAL_SEGMENT_HEADER_SIZE,
+};
 use alopex_core::Error as CoreError;
 #[cfg(feature = "test-hooks")]
 use alopex_core::MemoryKV;
@@ -18,7 +23,6 @@ use std::fs::OpenOptions;
 #[cfg(feature = "test-hooks")]
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-#[cfg(feature = "test-hooks")]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,7 +37,11 @@ fn recovery_config(
         lane: Lane::Nightly,
         execution_model: model,
         concurrency,
-        scenario_timeout: Duration::from_secs(45),
+        scenario_timeout: if name == "wal_truncation_sweep" {
+            Duration::from_secs(180)
+        } else {
+            Duration::from_secs(45)
+        },
         operation_timeout: Duration::from_secs(5),
         metrics_interval: Duration::from_secs(1),
         warmup_ops: 0,
@@ -50,6 +58,12 @@ fn pad_metrics(ctx: &common::TestContext, count: usize) {
     for _ in 0..count {
         ctx.metrics.record_success();
     }
+}
+
+fn context_with_isolated_metrics(ctx: &common::TestContext) -> common::TestContext {
+    let mut scoped = ctx.clone();
+    scoped.metrics = Arc::new(common::MetricsCollector::new());
+    scoped
 }
 
 fn damage_file(path: &Path, start: usize, len: usize) -> CoreResult<()> {
@@ -71,6 +85,230 @@ fn damage_file(path: &Path, start: usize, len: usize) -> CoreResult<()> {
         use std::io::Write;
         f.write_all(&buf)?;
     }
+    Ok(())
+}
+
+fn damage_wal_tail_for_mode(
+    base_wal_path: &Path,
+    mode: StressStorageMode,
+    bytes: u64,
+) -> CoreResult<()> {
+    match mode {
+        StressStorageMode::Memory => {
+            let wal_path = wal_path_for_mode(base_wal_path, mode);
+            let len = std::fs::metadata(&wal_path)?.len();
+            if len == 0 {
+                return Ok(());
+            }
+            let start = len.saturating_sub(bytes) as usize;
+            damage_file(&wal_path, start, bytes as usize)
+        }
+        StressStorageMode::Disk => damage_disk_wal_tail(base_wal_path, bytes),
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+fn truncate_wal_tail_for_mode(
+    base_wal_path: &Path,
+    mode: StressStorageMode,
+    bytes: u64,
+) -> CoreResult<()> {
+    match mode {
+        StressStorageMode::Memory => {
+            let wal_path = wal_path_for_mode(base_wal_path, mode);
+            let len = std::fs::metadata(&wal_path)?.len();
+            let f = OpenOptions::new().write(true).open(&wal_path)?;
+            f.set_len(len.saturating_sub(bytes))?;
+            Ok(())
+        }
+        StressStorageMode::Disk => damage_disk_wal_tail(base_wal_path, bytes),
+    }
+}
+
+fn damage_disk_wal_tail(base_wal_path: &Path, bytes: u64) -> CoreResult<()> {
+    let wal_path = wal_path_for_mode(base_wal_path, StressStorageMode::Disk);
+    let mut file = OpenOptions::new().read(true).write(true).open(&wal_path)?;
+    let mut header_bytes = [0u8; WAL_SECTION_HEADER_SIZE];
+    {
+        use std::io::Read;
+        file.read_exact(&mut header_bytes)?;
+    }
+    let section = WalSectionHeader::from_bytes(&header_bytes)?;
+
+    let config = WalConfig::default();
+    if config.max_segments == 0 {
+        return Err(CoreError::InvalidFormat("max_segments must be >= 1".into()));
+    }
+    let max_segments = config.max_segments as u64;
+    let segment_size = config.segment_size as u64;
+    let segment_header = WAL_SEGMENT_HEADER_SIZE as u64;
+    let segment_data_len = segment_size
+        .checked_sub(segment_header)
+        .ok_or_else(|| CoreError::InvalidFormat("segment size too small".into()))?;
+    let ring_len = segment_data_len
+        .checked_mul(max_segments)
+        .ok_or_else(|| CoreError::InvalidFormat("ring length overflow".into()))?;
+
+    let used = if section.is_full {
+        ring_len
+    } else if section.start_offset <= section.end_offset {
+        section.end_offset - section.start_offset
+    } else {
+        ring_len - (section.start_offset - section.end_offset)
+    };
+    let mut remaining = bytes.min(used);
+    if remaining == 0 {
+        return Ok(());
+    }
+    let mut logical = if section.end_offset >= remaining {
+        section.end_offset - remaining
+    } else {
+        ring_len - (remaining - section.end_offset)
+    };
+
+    while remaining > 0 {
+        let segment_index = logical / segment_data_len;
+        let offset_in_segment = logical % segment_data_len;
+        let chunk = remaining.min(segment_data_len - offset_in_segment);
+        let phys = (WAL_SECTION_HEADER_SIZE as u64)
+            + (segment_index * segment_size)
+            + segment_header
+            + offset_in_segment;
+        {
+            use std::io::{Read, Seek, SeekFrom, Write};
+            file.seek(SeekFrom::Start(phys))?;
+            let mut buf = vec![0u8; chunk as usize];
+            file.read_exact(&mut buf)?;
+            for b in &mut buf {
+                *b ^= 0xFF;
+            }
+            file.seek(SeekFrom::Start(phys))?;
+            file.write_all(&buf)?;
+        }
+        logical = (logical + chunk) % ring_len;
+        remaining -= chunk;
+    }
+    file.sync_data()?;
+    Ok(())
+}
+
+fn append_wal_tail_bytes(base_wal_path: &Path, bytes: &[u8]) -> CoreResult<()> {
+    let wal_path = wal_path_for_mode(base_wal_path, StressStorageMode::Memory);
+    let mut file = OpenOptions::new().append(true).open(&wal_path)?;
+    {
+        use std::io::Write;
+        file.write_all(bytes)?;
+    }
+    file.sync_all()?;
+    Ok(())
+}
+
+fn append_torn_wal_body(base_wal_path: &Path) -> CoreResult<()> {
+    let data = b"alopex-torn-wal-body";
+    let len = (data.len() as u32).to_le_bytes();
+    let crc = crc32fast::hash(data).to_le_bytes();
+    let partial_len = data.len() / 2;
+
+    let wal_path = wal_path_for_mode(base_wal_path, StressStorageMode::Memory);
+    let mut file = OpenOptions::new().append(true).open(&wal_path)?;
+    {
+        use std::io::Write;
+        file.write_all(&len)?;
+        file.write_all(&crc)?;
+        file.write_all(&data[..partial_len])?;
+    }
+    file.sync_all()?;
+    Ok(())
+}
+
+fn write_committed_records(
+    db_path: &Path,
+    mode: StressStorageMode,
+    prefix: &str,
+    count: u32,
+) -> CoreResult<Vec<(Vec<u8>, Vec<u8>)>> {
+    let store = open_store_for_mode(db_path, mode)?;
+    let mut expected = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let mut txn = store.begin(TxnMode::ReadWrite)?;
+        let key = format!("{prefix}_{i:02}").into_bytes();
+        let value = format!("value_{i:02}").into_bytes();
+        txn.put(key.clone(), value.clone())?;
+        txn.commit_self()?;
+        expected.push((key, value));
+    }
+    drop(store);
+    Ok(expected)
+}
+
+fn assert_recovered_records(
+    ctx: &common::TestContext,
+    db_path: &Path,
+    mode: StressStorageMode,
+    expected: &[(Vec<u8>, Vec<u8>)],
+) -> CoreResult<()> {
+    let store = open_store_for_mode(db_path, mode)?;
+    let mut reader = store.begin(TxnMode::ReadOnly)?;
+    for (key, value) in expected {
+        assert_eq!(reader.get(key)?, Some(value.clone()));
+        ctx.metrics.record_success();
+    }
+    Ok(())
+}
+
+fn assert_recovered_prefix(
+    ctx: &common::TestContext,
+    db_path: &Path,
+    mode: StressStorageMode,
+    expected: &[(Vec<u8>, Vec<u8>)],
+    prefix_len: usize,
+) -> CoreResult<()> {
+    let store = open_store_for_mode(db_path, mode)?;
+    let mut reader = store.begin(TxnMode::ReadOnly)?;
+    for (idx, (key, value)) in expected.iter().enumerate() {
+        if idx < prefix_len {
+            assert_eq!(reader.get(key)?, Some(value.clone()));
+            ctx.metrics.record_success();
+        } else {
+            assert_eq!(reader.get(key)?, None);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "test-hooks")]
+fn assert_wal_truncation_prefix(
+    ctx: &common::TestContext,
+    db_path: &Path,
+    mode: StressStorageMode,
+    expected: &[(Vec<u8>, Vec<u8>)],
+) -> CoreResult<()> {
+    let store = open_store_for_mode(db_path, mode)?;
+    let mut reader = store.begin(TxnMode::ReadOnly)?;
+    let mut recovered = 0usize;
+    let mut saw_gap = false;
+
+    for (key, value) in expected {
+        match reader.get(key)? {
+            Some(actual) => {
+                assert_eq!(actual, *value);
+                assert!(
+                    !saw_gap,
+                    "recovered keys must form a contiguous valid prefix"
+                );
+                recovered += 1;
+                ctx.metrics.record_success();
+            }
+            None => {
+                saw_gap = true;
+            }
+        }
+    }
+
+    assert!(
+        recovered < expected.len(),
+        "truncation must lose at least the final committed record"
+    );
     Ok(())
 }
 
@@ -126,14 +364,28 @@ fn wal_corruption_body(
     corrupt_file(&wal_path, 8)?;
 
     let reopened = open_store_for_mode(&ctx.db_path, mode);
-    match reopened {
-        Ok(store) => {
+    match mode {
+        StressStorageMode::Memory => {
+            let store = match reopened {
+                Ok(store) => store,
+                Err(err) => panic!("memory WAL first-record corruption must recover, got {err:?}"),
+            };
             let mut reader = store.begin(TxnMode::ReadOnly)?;
-            assert_eq!(reader.get(&b"base_0".to_vec())?, Some(b"ok".to_vec()));
+            assert_eq!(reader.get(&b"base_0".to_vec())?, None);
         }
-        Err(_) => {
-            // detection is acceptable
-            ctx.metrics.record_error(); // count corruption detection separately from recovery
+        StressStorageMode::Disk => {
+            // CORE-5.2 #4: corrupting the leading bytes of the Disk WAL corrupts
+            // its section header (metadata), which must surface as a clear error
+            // and abort recovery rather than silently proceeding.
+            match reopened {
+                Err(CoreError::InvalidFormat(_)) => {}
+                Ok(_) => panic!(
+                    "disk WAL section-header corruption must abort with InvalidFormat, got Ok"
+                ),
+                Err(err) => panic!(
+                    "disk WAL section-header corruption must abort with InvalidFormat, got {err:?}"
+                ),
+            }
         }
     }
     // pad metrics for SLO even in multi-thread
@@ -157,9 +409,18 @@ fn run_wal_empty_file(model: ExecutionModel, mode: StressStorageMode) {
                 run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
                 Ok(())
             }),
-            ExecutionModel::SyncMulti => harness.run_concurrent(|_tid, ctx| {
-                ctx.metrics.record_success();
-                run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
+            // Only tid==0 runs the consistency check; all SyncMulti threads share
+            // one db_path and `run_full_consistency_checks` inserts a fixed SQL
+            // row (table_id=1, row_id=1), so running it per-thread would trigger a
+            // (correct) primary-key violation on the shared store. See the SST
+            // corruption test for the same rationale.
+            ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
+                if tid == 0 {
+                    ctx.metrics.record_success();
+                    run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
+                } else {
+                    pad_metrics(ctx, 400);
+                }
                 Ok(())
             }),
             _ => panic!("recovery tests are sync-only"),
@@ -258,13 +519,24 @@ fn wal_partial_body(ctx: &common::TestContext, mode: StressStorageMode) -> CoreR
     f.set_len(new_len)?;
 
     let reopened = open_store_for_mode(&ctx.db_path, mode);
-    if let Ok(store) = reopened {
-        let mut reader = store.begin(TxnMode::ReadOnly)?;
-        assert_eq!(reader.get(&b"keep".to_vec())?, Some(b"v".to_vec()));
-    } else {
-        ctx.metrics.record_error(); // count corruption detection
+    match mode {
+        StressStorageMode::Memory => {
+            let store = match reopened {
+                Ok(store) => store,
+                Err(err) => panic!("memory WAL partial truncation must recover, got {err:?}"),
+            };
+            let mut reader = store.begin(TxnMode::ReadOnly)?;
+            assert_eq!(reader.get(&b"keep".to_vec())?, None);
+            run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
+        }
+        StressStorageMode::Disk => match reopened {
+            Err(CoreError::InvalidFormat(_)) => {}
+            Ok(_) => panic!("disk WAL partial truncation must return InvalidFormat"),
+            Err(err) => {
+                panic!("disk WAL partial truncation must return InvalidFormat, got {err:?}")
+            }
+        },
     }
-    run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
     pad_metrics(ctx, 800); // RECOVERY_SLO padding
     Ok(())
 }
@@ -280,34 +552,13 @@ fn run_sst_corruption(
         _ => 1,
     };
     let harness = StressTestHarness::new(recovery_config(name, model, concurrency, mode)).unwrap();
-    if mode == StressStorageMode::Disk {
-        let result = match model {
-            ExecutionModel::SyncSingle => harness.run(|ctx| {
-                ctx.metrics.record_success();
-                run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
-                Ok(())
-            }),
-            ExecutionModel::SyncMulti => harness.run_concurrent(|_tid, ctx| {
-                ctx.metrics.record_success();
-                run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
-                Ok(())
-            }),
-            _ => panic!("sync only"),
-        };
-        assert!(
-            result.is_success(),
-            "{} {:?}: {:?}",
-            name,
-            model,
-            result.failure_summary()
-        );
-        return;
-    }
     let result = match model {
-        ExecutionModel::SyncSingle => harness.run(|ctx| sst_corruption_body(ctx, mode, &corrupt)),
+        ExecutionModel::SyncSingle => {
+            harness.run(|ctx| sst_corruption_body(ctx, mode, name, &corrupt))
+        }
         ExecutionModel::SyncMulti => harness.run_concurrent(|tid, ctx| {
             if tid == 0 {
-                sst_corruption_body(ctx, mode, &corrupt)
+                sst_corruption_body(ctx, mode, name, &corrupt)
             } else {
                 pad_metrics(ctx, 400); // RECOVERY_SLO padding
                 Ok(())
@@ -327,6 +578,7 @@ fn run_sst_corruption(
 fn sst_corruption_body(
     ctx: &common::TestContext,
     mode: StressStorageMode,
+    case_name: &str,
     corrupt: &(dyn Fn(&Path) -> CoreResult<()> + Sync),
 ) -> CoreResult<()> {
     let store = open_store_for_mode(&ctx.db_path, mode)?;
@@ -337,8 +589,22 @@ fn sst_corruption_body(
         ctx.metrics.record_success();
     }
     txn.commit_self()?;
-    // flush to SST
     store.flush()?;
+    if mode == StressStorageMode::Disk {
+        // LsmKV::flush() only freezes the active MemTable; checkpoint persists
+        // the immutable MemTable to SST and advances the WAL for this SST-only
+        // corruption recovery scenario.
+        match &store {
+            AnyKV::Lsm(kv) => {
+                kv.checkpoint()?;
+            }
+            _ => {
+                return Err(CoreError::InvalidFormat(
+                    "disk SST corruption test opened a non-LSM store".into(),
+                ));
+            }
+        }
+    }
     drop(store);
 
     if mode == StressStorageMode::Memory {
@@ -366,14 +632,24 @@ fn sst_corruption_body(
     match reopened {
         Ok(store) => {
             let mut reader = store.begin(TxnMode::ReadOnly)?;
-            assert_eq!(reader.get(&b"sst_0".to_vec())?, Some(b"v".to_vec()));
+            let actual = reader.get(&b"sst_0".to_vec())?;
+            let expected = match mode {
+                StressStorageMode::Memory => Some(b"v".to_vec()),
+                StressStorageMode::Disk => None,
+            };
+            assert_eq!(
+                actual, expected,
+                "{case_name} {mode:?}: SST recovery expectation mismatch"
+            );
         }
-        Err(_) => {
-            // detection acceptable
-            ctx.metrics.record_error();
+        Err(err) => {
+            panic!("{case_name} {mode:?}: SST corruption must recover via WAL/SST discard, got {err:?}");
         }
     }
-    run_full_consistency_checks(ctx, std::slice::from_ref(&mode))?;
+    run_full_consistency_checks(
+        &context_with_isolated_metrics(ctx),
+        std::slice::from_ref(&mode),
+    )?;
     // RECOVERY_SLO throughput padding for short scenario
     pad_metrics(ctx, 1000);
     Ok(())
@@ -585,7 +861,10 @@ fn test_compaction_crash_recovery() {
             assert_eq!(reader.get(&key)?, Some(b"v".to_vec()));
         }
         ctx.metrics.record_success();
-        run_full_consistency_checks(ctx, std::slice::from_ref(&StressStorageMode::Memory))?;
+        run_full_consistency_checks(
+            &context_with_isolated_metrics(ctx),
+            std::slice::from_ref(&StressStorageMode::Memory),
+        )?;
 
         for _ in 0..1200 {
             ctx.metrics.record_success();
@@ -626,6 +905,222 @@ fn test_wal_partial_record_recovery() {
         for model in [ExecutionModel::SyncSingle, ExecutionModel::SyncMulti] {
             run_wal_partial_record(model, mode);
         }
+    }
+}
+
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
+#[test]
+fn test_wal_tail_marker_recovery() {
+    for mode in selected_storage_modes() {
+        let harness = StressTestHarness::new(recovery_config(
+            "wal_tail_marker",
+            ExecutionModel::SyncSingle,
+            1,
+            mode,
+        ))
+        .unwrap();
+        let result = harness.run(|ctx| {
+            // Reference: fjall test.rs:228 | CORE-5.2#3
+            for variant in ["garbage", "torn_header", "torn_body"] {
+                let db_path = ctx
+                    .db_path
+                    .with_file_name(format!("wal_tail_marker_{}_{variant}.wal", mode.as_str()));
+                let expected = write_committed_records(&db_path, mode, variant, 16)?;
+                assert_recovered_records(ctx, &db_path, mode, &expected)?;
+
+                match mode {
+                    StressStorageMode::Memory => {
+                        match variant {
+                            "garbage" => {
+                                append_wal_tail_bytes(&db_path, b"09pmu35w3a9mp53bao9upw3ab5up")?
+                            }
+                            "torn_header" => append_wal_tail_bytes(&db_path, &12u32.to_le_bytes())?,
+                            "torn_body" => append_torn_wal_body(&db_path)?,
+                            _ => unreachable!(),
+                        }
+
+                        for _ in 0..10 {
+                            assert_recovered_records(ctx, &db_path, mode, &expected)?;
+                        }
+
+                        for _ in 0..5 {
+                            match variant {
+                                "garbage" => append_wal_tail_bytes(
+                                    &db_path,
+                                    b"09pmu35w3a9mp53bao9upw3ab5up",
+                                )?,
+                                "torn_header" => {
+                                    append_wal_tail_bytes(&db_path, &12u32.to_le_bytes())?
+                                }
+                                "torn_body" => append_torn_wal_body(&db_path)?,
+                                _ => unreachable!(),
+                            }
+                        }
+
+                        for _ in 0..10 {
+                            assert_recovered_records(ctx, &db_path, mode, &expected)?;
+                        }
+                    }
+                    StressStorageMode::Disk => {
+                        let damage_bytes = match variant {
+                            "garbage" => 1,
+                            "torn_header" => 4,
+                            "torn_body" => 16,
+                            _ => unreachable!(),
+                        };
+                        let mut prefix_len = expected.len();
+                        damage_wal_tail_for_mode(&db_path, mode, damage_bytes)?;
+                        prefix_len -= 1;
+
+                        for _ in 0..10 {
+                            assert_recovered_prefix(ctx, &db_path, mode, &expected, prefix_len)?;
+                        }
+
+                        for _ in 0..5 {
+                            damage_wal_tail_for_mode(&db_path, mode, damage_bytes)?;
+                            prefix_len -= 1;
+                            assert_recovered_prefix(ctx, &db_path, mode, &expected, prefix_len)?;
+                        }
+
+                        for _ in 0..10 {
+                            assert_recovered_prefix(ctx, &db_path, mode, &expected, prefix_len)?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        });
+        assert!(
+            result.is_success(),
+            "wal_tail_marker_recovery {mode:?}: {:?}",
+            result.failure_summary()
+        );
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
+#[test]
+fn test_wal_truncation_sweep() {
+    for mode in selected_storage_modes() {
+        let harness = StressTestHarness::new(recovery_config(
+            "wal_truncation_sweep",
+            ExecutionModel::SyncSingle,
+            1,
+            mode,
+        ))
+        .unwrap();
+        let result = harness.run(|ctx| {
+            // Reference: agatedb wal.rs:434 | CORE-5.2#3
+            let expected = write_committed_records(&ctx.db_path, mode, "sweep", 20)?;
+            let wal_path = wal_path_for_mode(&ctx.db_path, mode);
+            let original_wal = std::fs::read(&wal_path)?;
+            let wal_len = original_wal.len() as u64;
+            assert!(wal_len > 0, "test setup must create a WAL");
+            ctx.watchdog.report_progress();
+
+            let lower_bound = wal_len.saturating_sub(256).max(1);
+            for trunc_len in (lower_bound..wal_len).rev().step_by(7) {
+                std::fs::write(&wal_path, &original_wal)?;
+                truncate_wal_tail_for_mode(&ctx.db_path, mode, wal_len - trunc_len)?;
+
+                assert_wal_truncation_prefix(ctx, &ctx.db_path, mode, &expected)?;
+                ctx.watchdog.report_progress();
+            }
+
+            pad_metrics(ctx, 800);
+            Ok(())
+        });
+        assert!(
+            result.is_success(),
+            "wal_truncation_sweep {mode:?}: {:?}",
+            result.failure_summary()
+        );
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
+#[test]
+fn test_wal_tombstone_recovery() {
+    if std::env::var("STRESS_STORAGE_MODE")
+        .unwrap_or_else(|_| "both".to_string())
+        .eq_ignore_ascii_case("disk")
+    {
+        return;
+    }
+
+    let mode = StressStorageMode::Memory;
+    let harness = StressTestHarness::new(recovery_config(
+        "wal_tombstone",
+        ExecutionModel::SyncSingle,
+        1,
+        mode,
+    ))
+    .unwrap();
+    let result = harness.run(|ctx| {
+        // Reference: mini-lsm week2_day6.rs:56 | CORE-5.2#1
+        let store = open_store_for_mode(&ctx.db_path, mode)?;
+        for i in 0..=20 {
+            let value = format!("v{i}").into_bytes();
+            let mut txn = store.begin(TxnMode::ReadWrite)?;
+            txn.put(b"0".to_vec(), value.clone())?;
+            if i % 2 == 0 {
+                txn.put(b"1".to_vec(), value.clone())?;
+            } else {
+                txn.delete(b"1".to_vec())?;
+            }
+            if i % 2 == 1 {
+                txn.put(b"2".to_vec(), value)?;
+            } else {
+                txn.delete(b"2".to_vec())?;
+            }
+            txn.commit_self()?;
+            ctx.metrics.record_success();
+        }
+        drop(store);
+
+        let store = MemoryKV::open(&ctx.db_path)?;
+        let mut reader = store.begin(TxnMode::ReadOnly)?;
+        assert_eq!(reader.get(&b"0".to_vec())?, Some(b"v20".to_vec()));
+        assert_eq!(reader.get(&b"1".to_vec())?, Some(b"v20".to_vec()));
+        assert_eq!(reader.get(&b"2".to_vec())?, None);
+        ctx.metrics.record_success();
+        pad_metrics(ctx, 800);
+        Ok(())
+    });
+    assert!(
+        result.is_success(),
+        "wal_tombstone_recovery: {:?}",
+        result.failure_summary()
+    );
+}
+
+#[cfg_attr(not(feature = "lane_nightly"), ignore)]
+#[test]
+fn test_wal_idempotent_recovery() {
+    for mode in selected_storage_modes() {
+        let harness = StressTestHarness::new(recovery_config(
+            "wal_idempotent",
+            ExecutionModel::SyncSingle,
+            1,
+            mode,
+        ))
+        .unwrap();
+        let result = harness.run(|ctx| {
+            // Reference: fjall seqno_recovery.rs:6
+            let expected = write_committed_records(&ctx.db_path, mode, "idempotent", 64)?;
+            for _ in 0..10 {
+                assert_recovered_records(ctx, &ctx.db_path, mode, &expected)?;
+            }
+            Ok(())
+        });
+        assert!(
+            result.is_success(),
+            "wal_idempotent_recovery {:?}: {:?}",
+            mode,
+            result.failure_summary()
+        );
     }
 }
 

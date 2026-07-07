@@ -397,6 +397,10 @@ impl MemoryTxnManager {
                 self.append_wal_record(&mut wal, &record)?;
             }
             self.append_wal_record(&mut wal, &WalRecord::Commit(txn_id))?;
+            // Durability point: fsync once at the commit boundary so the whole
+            // transaction (Begin..Commit) reaches stable storage together. The
+            // commit is only acknowledged after this returns (CORE-5.1).
+            wal.sync()?;
         }
         Ok(())
     }
@@ -552,7 +556,31 @@ impl MemoryTxnManager {
             return Ok(());
         }
 
-        let mut reader = SstableReader::open(path)?;
+        let mut reader = match SstableReader::open(path) {
+            Ok(reader) => reader,
+            // Crash-recovery tolerance: a truncated or corrupt SSTable means the
+            // durable segment was torn by a crash and its contents are
+            // unrecoverable. Discard the unreadable segment and continue recovery
+            // from the WAL — this mirrors `WalReader`'s torn-tail handling. Only
+            // corruption signatures are tolerated; genuine I/O faults still
+            // propagate so real failures are not masked.
+            Err(e @ (Error::InvalidFormat(_) | Error::ChecksumMismatch)) => {
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "discarding unreadable SSTable during recovery; replaying WAL only"
+                );
+                return Ok(());
+            }
+            Err(Error::Io(io)) if io.kind() == std::io::ErrorKind::UnexpectedEof => {
+                warn!(
+                    path = %path.display(),
+                    "discarding truncated SSTable during recovery; replaying WAL only"
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
         let mut data = self.state.data.write().unwrap();
         let mut version = self.state.commit_version.load(Ordering::Acquire);
 
@@ -1084,6 +1112,59 @@ mod tests {
         s.as_bytes().to_vec()
     }
 
+    fn committed_value_after_reopen(wal_path: &Path, key: Key) -> Option<Value> {
+        let reopened = MemoryKV::open(wal_path).unwrap();
+        let manager = reopened.txn_manager();
+        let mut txn = manager.begin(TxnMode::ReadOnly).unwrap();
+        txn.get(&key).unwrap()
+    }
+
+    fn write_flush_and_corrupt_sstable<F>(corrupt: F) -> (tempfile::TempDir, PathBuf)
+    where
+        F: FnOnce(&Path),
+    {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("wal.log");
+        {
+            let store = MemoryKV::open(&wal_path).unwrap();
+            let manager = store.txn_manager();
+            let mut txn = manager.begin(TxnMode::ReadWrite).unwrap();
+            txn.put(key("k1"), value("v1")).unwrap();
+            manager.commit(txn).unwrap();
+            store.flush().unwrap();
+        }
+
+        corrupt(&wal_path.with_extension("sst"));
+        (dir, wal_path)
+    }
+
+    #[cfg(feature = "test-hooks")]
+    struct FailsBeforeFsync;
+
+    #[cfg(feature = "test-hooks")]
+    impl IoHooks for FailsBeforeFsync {
+        fn before_fsync(&self) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected WAL fsync failure"))
+        }
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn commit_self_wal_fsync_failure_does_not_ack_or_apply() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("wal.log");
+        let store = MemoryKV::open_with_io_hooks(&wal_path, Arc::new(FailsBeforeFsync)).unwrap();
+        let manager = store.txn_manager();
+
+        let mut txn = manager.begin(TxnMode::ReadWrite).unwrap();
+        txn.put(key("not-acked"), value("value")).unwrap();
+        let result = txn.commit_self();
+        assert!(matches!(result, Err(Error::Io(_))));
+
+        let mut read_txn = manager.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(read_txn.get(&key("not-acked")).unwrap(), None);
+    }
+
     #[test]
     fn test_put_and_get_transient() {
         let store = MemoryKV::new();
@@ -1189,6 +1270,94 @@ mod tests {
         let manager = reopened.txn_manager();
         let mut txn = manager.begin(TxnMode::ReadOnly).unwrap();
         assert_eq!(txn.get(&key("k1")).unwrap(), Some(value("v1")));
+    }
+
+    #[test]
+    fn corrupt_sstable_header_is_discarded_and_wal_recovers() {
+        let (_dir, wal_path) = write_flush_and_corrupt_sstable(|sst_path| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(sst_path)
+                .unwrap();
+            use std::io::{Seek, Write};
+            file.seek(std::io::SeekFrom::Start(0)).unwrap();
+            file.write_all(b"BAD!").unwrap();
+            file.sync_all().unwrap();
+        });
+        let err = SstableReader::open(&wal_path.with_extension("sst")).unwrap_err();
+        assert!(matches!(err, Error::InvalidFormat(_)));
+
+        assert_eq!(
+            committed_value_after_reopen(&wal_path, key("k1")),
+            Some(value("v1"))
+        );
+    }
+
+    #[test]
+    fn corrupt_sstable_payload_checksum_is_discarded_and_wal_recovers() {
+        let (_dir, wal_path) = write_flush_and_corrupt_sstable(|sst_path| {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(sst_path)
+                .unwrap();
+            use std::io::{Read, Seek, Write};
+            file.seek(std::io::SeekFrom::Start(16 + 8 + key("k1").len() as u64))
+                .unwrap();
+            let mut byte = [0u8; 1];
+            file.read_exact(&mut byte).unwrap();
+            file.seek(std::io::SeekFrom::Current(-1)).unwrap();
+            file.write_all(&[byte[0] ^ 0xFF]).unwrap();
+            file.sync_all().unwrap();
+        });
+        let err = SstableReader::open(&wal_path.with_extension("sst")).unwrap_err();
+        assert!(matches!(err, Error::ChecksumMismatch));
+
+        assert_eq!(
+            committed_value_after_reopen(&wal_path, key("k1")),
+            Some(value("v1"))
+        );
+    }
+
+    #[test]
+    fn truncated_sstable_is_discarded_and_wal_recovers() {
+        let (_dir, wal_path) = write_flush_and_corrupt_sstable(|sst_path| {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(sst_path)
+                .unwrap();
+            file.set_len(16).unwrap();
+            file.sync_all().unwrap();
+        });
+        let err = SstableReader::open(&wal_path.with_extension("sst")).unwrap_err();
+        assert!(matches!(err, Error::InvalidFormat(_)));
+
+        assert_eq!(
+            committed_value_after_reopen(&wal_path, key("k1")),
+            Some(value("v1"))
+        );
+    }
+
+    #[test]
+    fn wal_recovers_committed_tombstone_on_reopen() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("wal.log");
+        {
+            let store = MemoryKV::open(&wal_path).unwrap();
+            let manager = store.txn_manager();
+            let mut put_txn = manager.begin(TxnMode::ReadWrite).unwrap();
+            put_txn.put(key("deleted"), value("value")).unwrap();
+            manager.commit(put_txn).unwrap();
+
+            let mut delete_txn = manager.begin(TxnMode::ReadWrite).unwrap();
+            delete_txn.delete(key("deleted")).unwrap();
+            manager.commit(delete_txn).unwrap();
+        }
+
+        assert_eq!(
+            committed_value_after_reopen(&wal_path, key("deleted")),
+            None
+        );
     }
 
     #[test]

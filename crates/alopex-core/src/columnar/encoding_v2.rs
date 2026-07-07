@@ -2477,7 +2477,7 @@ mod tests {
                 .or_insert(0usize) += 1;
         }
         let mut top = msb_counts.into_iter().collect::<Vec<_>>();
-        top.sort_by(|a, b| b.1.cmp(&a.1));
+        top.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
         println!("Top MSB bytes: {:?}", &top[..5.min(top.len())]);
 
         let col = Column::Float32(values.clone());

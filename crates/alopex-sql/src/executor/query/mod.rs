@@ -4,7 +4,7 @@ use crate::ast::LITERAL_TABLE;
 use crate::catalog::{Catalog, StorageType};
 use crate::executor::evaluator::EvalContext;
 use crate::executor::memory::MemoryPolicy;
-use crate::executor::{ExecutionResult, ExecutorError, QueryRowIterator, Result};
+use crate::executor::{ExecutionResult, ExecutorError, QueryResult, QueryRowIterator, Result};
 use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::typed_expr::{Projection, SortExpr};
 use crate::storage::{SqlTxn, SqlValue};
@@ -14,9 +14,11 @@ use super::{ColumnInfo, Row};
 pub mod aggregate;
 pub mod columnar_scan;
 pub mod iterator;
+pub mod join;
 mod knn;
 mod project;
 mod scan;
+pub mod subquery;
 
 pub use columnar_scan::{ColumnarScanIterator, create_columnar_scan_iterator};
 pub use iterator::{FilterIterator, LimitIterator, RowIterator, ScanIterator, SortIterator};
@@ -56,16 +58,43 @@ pub fn execute_query_with_policy<
         return knn::execute_knn_query(txn, catalog, &pattern, &projection, filter.as_ref());
     }
 
-    let (mut iter, projection, schema) = build_iterator_pipeline(txn, catalog, plan, memory)?;
+    let result = execute_query_result_with_outer_and_policy(txn, catalog, plan, None, memory)?;
+    Ok(ExecutionResult::Query(result))
+}
 
-    // Collect rows from iterator and apply projection
+pub(crate) fn execute_query_result_with_outer<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    plan: LogicalPlan,
+    outer: Option<&Row>,
+) -> Result<QueryResult> {
+    execute_query_result_with_outer_and_policy(txn, catalog, plan, outer, None)
+}
+
+fn execute_query_result_with_outer_and_policy<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    plan: LogicalPlan,
+    outer: Option<&Row>,
+    memory: Option<&MemoryPolicy>,
+) -> Result<QueryResult> {
+    let (mut iter, projection, schema) =
+        build_iterator_pipeline_with_outer(txn, catalog, plan, memory, outer)?;
     let mut rows = Vec::new();
     while let Some(result) = iter.next_row() {
         rows.push(result?);
     }
-
-    let result = project::execute_project(rows, &projection, &schema)?;
-    Ok(ExecutionResult::Query(result))
+    execute_project_with_subqueries(txn, catalog, rows, &projection, &schema, outer)
 }
 
 /// Execute a SELECT logical plan and return a streaming query result.
@@ -153,6 +182,25 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
     Projection,
     Vec<crate::catalog::ColumnMetadata>,
 )> {
+    build_iterator_pipeline_with_outer(txn, catalog, plan, memory, None)
+}
+
+fn build_iterator_pipeline_with_outer<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    plan: LogicalPlan,
+    memory: Option<&MemoryPolicy>,
+    outer: Option<&Row>,
+) -> Result<(
+    Box<dyn RowIterator>,
+    Projection,
+    Vec<crate::catalog::ColumnMetadata>,
+)> {
     match plan {
         LogicalPlan::Scan { table, projection } => {
             if table == LITERAL_TABLE {
@@ -199,10 +247,84 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
                 let iter = iterator::VecIterator::new(rows, schema.clone());
                 return Ok((Box::new(iter), projection.clone(), schema));
             }
-            let (input_iter, projection, schema) =
-                build_iterator_pipeline(txn, catalog, *input, memory)?;
+            let (mut input_iter, projection, schema) =
+                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer)?;
+            if outer.is_some() || subquery::contains_subquery(&predicate) {
+                let mut rows = Vec::new();
+                while let Some(result) = input_iter.next_row() {
+                    let row = result?;
+                    let eval_row = combine_outer_for_eval(&row, outer);
+                    if let SqlValue::Boolean(true) = subquery::evaluate_expr_with_subqueries(
+                        txn, catalog, &predicate, &eval_row,
+                    )? {
+                        rows.push(row);
+                    }
+                }
+                let iter = iterator::VecIterator::new(rows, schema.clone());
+                return Ok((Box::new(iter), projection, schema));
+            }
             let filter_iter = FilterIterator::new(input_iter, predicate);
             Ok((Box::new(filter_iter), projection, schema))
+        }
+        LogicalPlan::Project { input, projection } => {
+            let (mut input_iter, _input_projection, schema) =
+                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer)?;
+            let mut rows = Vec::new();
+            while let Some(result) = input_iter.next_row() {
+                rows.push(result?);
+            }
+            let projected =
+                execute_project_with_subqueries(txn, catalog, rows, &projection, &schema, outer)?;
+            let output_schema = projected
+                .columns
+                .iter()
+                .map(|col| crate::catalog::ColumnMetadata::new(&col.name, col.data_type.clone()))
+                .collect::<Vec<_>>();
+            let rows = projected
+                .rows
+                .into_iter()
+                .enumerate()
+                .map(|(idx, values)| Row::new(idx as u64, values))
+                .collect::<Vec<_>>();
+            let output_projection =
+                Projection::All(output_schema.iter().map(|col| col.name.clone()).collect());
+            let iter = iterator::VecIterator::new(rows, output_schema.clone());
+            Ok((Box::new(iter), output_projection, output_schema))
+        }
+        LogicalPlan::Join {
+            left,
+            right,
+            join_type,
+            condition,
+            using: _,
+        } => {
+            let (mut left_iter, _left_projection, left_schema) =
+                build_iterator_pipeline_with_outer(txn, catalog, *left, memory, outer)?;
+            let (mut right_iter, _right_projection, right_schema) =
+                build_iterator_pipeline_with_outer(txn, catalog, *right, memory, outer)?;
+            let mut left_rows = Vec::new();
+            while let Some(result) = left_iter.next_row() {
+                left_rows.push(result?);
+            }
+            let mut right_rows = Vec::new();
+            while let Some(result) = right_iter.next_row() {
+                right_rows.push(result?);
+            }
+            let left_width = left_schema.len();
+            let right_width = right_schema.len();
+            let rows = join::execute_join_with_widths(
+                left_rows,
+                right_rows,
+                join_type,
+                condition.as_ref(),
+                left_width,
+                right_width,
+            )?;
+            let mut schema = left_schema;
+            schema.extend(right_schema);
+            let projection = Projection::All(schema.iter().map(|col| col.name.clone()).collect());
+            let iter = iterator::VecIterator::new(rows, schema.clone());
+            Ok((Box::new(iter), projection, schema))
         }
         LogicalPlan::Aggregate {
             input,
@@ -212,7 +334,7 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
             projection,
         } => {
             let (input_iter, _projection, _schema) =
-                build_iterator_pipeline(txn, catalog, *input, memory)?;
+                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer)?;
             let schema = aggregate::build_aggregate_schema(&group_keys, &aggregates);
             if let Some(policy) = memory
                 && policy.spill_directory().is_some()
@@ -262,7 +384,7 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
         }
         LogicalPlan::Sort { input, order_by } => {
             let (input_iter, projection, schema) =
-                build_iterator_pipeline(txn, catalog, *input, memory)?;
+                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer)?;
             let sort_iter = if let Some(policy) = memory {
                 SortIterator::new_with_policy(input_iter, &order_by, Some(policy.clone()))?
             } else {
@@ -276,7 +398,7 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
             offset,
         } => {
             let (input_iter, projection, schema) =
-                build_iterator_pipeline(txn, catalog, *input, memory)?;
+                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer)?;
             let limit_iter = LimitIterator::new(input_iter, limit, offset);
             Ok((Box::new(limit_iter), projection, schema))
         }
@@ -399,6 +521,64 @@ fn build_streaming_pipeline_inner<
             let filter_iter = FilterIterator::new(input_iter, predicate);
             Ok((Box::new(filter_iter), projection, schema))
         }
+        LogicalPlan::Project { input, projection } => {
+            let (mut input_iter, _input_projection, schema) =
+                build_streaming_pipeline_inner(txn, catalog, *input, memory)?;
+            let mut rows = Vec::new();
+            while let Some(result) = input_iter.next_row() {
+                rows.push(result?);
+            }
+            let projected = project::execute_project(rows, &projection, &schema)?;
+            let output_schema = projected
+                .columns
+                .iter()
+                .map(|col| crate::catalog::ColumnMetadata::new(&col.name, col.data_type.clone()))
+                .collect::<Vec<_>>();
+            let rows = projected
+                .rows
+                .into_iter()
+                .enumerate()
+                .map(|(idx, values)| Row::new(idx as u64, values))
+                .collect::<Vec<_>>();
+            let output_projection =
+                Projection::All(output_schema.iter().map(|col| col.name.clone()).collect());
+            let iter = iterator::VecIterator::new(rows, output_schema.clone());
+            Ok((Box::new(iter), output_projection, output_schema))
+        }
+        LogicalPlan::Join {
+            left,
+            right,
+            join_type,
+            condition,
+            using: _,
+        } => {
+            let (mut left_iter, _left_projection, left_schema) =
+                build_streaming_pipeline_inner(txn, catalog, *left, memory)?;
+            let mut left_rows = Vec::new();
+            while let Some(result) = left_iter.next_row() {
+                left_rows.push(result?);
+            }
+            drop(left_iter);
+            let (mut right_iter, _right_projection, right_schema) =
+                build_streaming_pipeline_inner(txn, catalog, *right, memory)?;
+            let mut right_rows = Vec::new();
+            while let Some(result) = right_iter.next_row() {
+                right_rows.push(result?);
+            }
+            let rows = join::execute_join_with_widths(
+                left_rows,
+                right_rows,
+                join_type,
+                condition.as_ref(),
+                left_schema.len(),
+                right_schema.len(),
+            )?;
+            let mut schema = left_schema;
+            schema.extend(right_schema);
+            let projection = Projection::All(schema.iter().map(|col| col.name.clone()).collect());
+            let iter = iterator::VecIterator::new(rows, schema.clone());
+            Ok((Box::new(iter), projection, schema))
+        }
         LogicalPlan::Aggregate {
             input,
             group_keys,
@@ -485,6 +665,56 @@ fn build_streaming_pipeline_inner<
 fn eval_expr(expr: &crate::planner::typed_expr::TypedExpr, row: &Row) -> Result<SqlValue> {
     let ctx = EvalContext::new(&row.values);
     crate::executor::evaluator::evaluate(expr, &ctx)
+}
+
+fn combine_outer_for_eval(row: &Row, outer: Option<&Row>) -> Row {
+    let Some(outer) = outer else {
+        return row.clone();
+    };
+    let mut values = Vec::with_capacity(row.len() + outer.len());
+    values.extend(row.values.clone());
+    values.extend(outer.values.clone());
+    Row::new(row.row_id, values)
+}
+
+fn execute_project_with_subqueries<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    rows: Vec<Row>,
+    projection: &Projection,
+    schema: &[crate::catalog::ColumnMetadata],
+    outer: Option<&Row>,
+) -> Result<QueryResult> {
+    match projection {
+        Projection::All(_) => project::execute_project(rows, projection, schema),
+        Projection::Columns(cols)
+            if outer.is_some() || cols.iter().any(|c| subquery::contains_subquery(&c.expr)) =>
+        {
+            let columns: Vec<_> = cols
+                .iter()
+                .enumerate()
+                .map(|(i, c)| column_info_from_projection(c, i))
+                .collect();
+            let mut projected_rows = Vec::with_capacity(rows.len());
+            for row in rows {
+                let eval_row = combine_outer_for_eval(&row, outer);
+                let mut values = Vec::with_capacity(cols.len());
+                for col in cols {
+                    values.push(subquery::evaluate_expr_with_subqueries(
+                        txn, catalog, &col.expr, &eval_row,
+                    )?);
+                }
+                projected_rows.push(values);
+            }
+            Ok(QueryResult::new(columns, projected_rows))
+        }
+        Projection::Columns(_) => project::execute_project(rows, projection, schema),
+    }
 }
 
 /// Build column info name using alias fallback.

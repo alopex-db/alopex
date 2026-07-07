@@ -9,6 +9,9 @@ defaults:
   run:
     shell: bash
 
+env:
+  NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
+
 jobs:
   linux:
     name: linux (${{ matrix.target }})
@@ -27,6 +30,41 @@ jobs:
           manylinux: auto
           args: -m crates/alopex-py/Cargo.toml --release --out dist
           target: ${{ matrix.target }}
+          # `before-script-linux` は maturin-action 公式入力 (action.yml で確認済み):
+          #   "Script to run before maturin command on Linux."
+          # manylinux: auto では maturin-action が manylinux コンテナ内でビルドするため、
+          # このスクリプトも同コンテナ内 (AlmaLinux ベース) で cargo build 前に実行される。
+          # ここで Nim 2.2 をセットアップし、alopex-sql の build.rs が要求する
+          # libalopex_sql_parser.so を crates/alopex-sql/nim-sql-parser/ に生成する。
+          #
+          # Nim 公式は aarch64 向けプリビルドバイナリ tar.xz を配布していない
+          # (x64 のみ。https://nim-lang.org/download/ で確認)。そのため両ターゲットで
+          # 確実に動くソースからのブートストラップ (csources 同梱) を採用する。
+          # manylinux には gcc/make があるためソースビルドが可能。
+          #
+          # 要 CI 検証:
+          #   - aarch64 ターゲットは maturin-action が QEMU エミュレーションの
+          #     aarch64 コンテナで実行する可能性が高く、ソースビルドは動作するが
+          #     低速。実際の所要時間・成否は CI 上でのみ確認可能。
+          #   - manylinux コンテナ内の curl/xz/gcc 可用性は CI 上で要確認。
+          before-script-linux: |
+            set -euxo pipefail
+            NIM_VERSION=2.2.4
+            curl -fsSL "https://nim-lang.org/download/nim-${NIM_VERSION}.tar.xz" -o /tmp/nim.tar.xz
+            mkdir -p /opt/nim-src
+            tar -xJf /tmp/nim.tar.xz -C /opt/nim-src --strip-components=1
+            cd /opt/nim-src
+            sh build.sh
+            bin/nim c --skipUserCfg --skipParentCfg koch
+            ./koch boot -d:release
+            ./koch tools
+            export PATH="/opt/nim-src/bin:${HOME}/.nimble/bin:${PATH}"
+            # env (NIM_SQL_PARSER_DIR) のコンテナ内伝播は不確実なためパスを直書き。
+            # CWD は repo ルート (maturin-action がマウント) を前提。
+            # 要 CI 検証: コンテナ内 CWD が repo ルートか確認。
+            cd crates/alopex-sql/nim-sql-parser
+            nimble install -y npeg msgpack4nim
+            nimble lib
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -43,6 +81,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      # ネイティブ Nim ツールチェーン (2.2 固定) をホスト上でセットアップ。
+      # 他ワークフロー (alopex-py.yml 等) の macOS/Windows パターンと整合。
+      # 要 CI 検証: macos-latest は arm64 ホスト。x86_64 ターゲットは
+      # クロスコンパイルになるが、Nim 共有ライブラリ (.dylib) は build.rs の
+      # リンク用であり、最終的なアーキ整合は CI 上でのみ確認可能。
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Nim SQL parser library
+        run: |
+          cd "${NIM_SQL_PARSER_DIR}"
+          nimble install -y npeg msgpack4nim
+          nimble lib
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -61,6 +114,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      # ネイティブ Nim ツールチェーン (2.2 固定) をホスト上でセットアップ。
+      # 他ワークフロー (alopex-py.yml 等) の macOS/Windows パターンと整合。
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Nim SQL parser library
+        run: |
+          cd "${NIM_SQL_PARSER_DIR}"
+          nimble install -y npeg msgpack4nim
+          nimble lib
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:

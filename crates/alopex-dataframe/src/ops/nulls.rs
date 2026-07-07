@@ -974,7 +974,7 @@ where
         sum += v;
         count += 1;
     }
-    let mean = if count == 0 { None } else { Some(sum / count) };
+    let mean = sum.checked_div(count);
     (min, max, mean)
 }
 
@@ -992,7 +992,7 @@ where
         sum += v;
         count += 1;
     }
-    let mean = if count == 0 { None } else { Some(sum / count) };
+    let mean = sum.checked_div(count);
     (min, max, mean)
 }
 

@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use alopex_core::kv::any::AnyKV;
 use axum::extract::{Extension, Path as AxumPath};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -10,7 +11,7 @@ use uuid::Uuid;
 
 use crate::auth::AuthMode;
 use crate::http::{error_response, RequestContext};
-use crate::ops::backup::BackupHandle;
+use crate::ops::backup::{export_snapshot, BackupHandle};
 use crate::ops::restore::{RestoreHandle, RestoreSource};
 use crate::ops::state::{OperationState, RestoreMetadata};
 use crate::ops::status::StatusReporter;
@@ -63,6 +64,12 @@ pub struct AdminRestoreRequest {
 struct AdminLifecycleResponse {
     status: &'static str,
     message: String,
+}
+
+#[derive(Serialize)]
+struct AdminExportResponse {
+    status: &'static str,
+    location: String,
 }
 
 #[derive(Serialize)]
@@ -139,6 +146,26 @@ pub async fn start_backup(
             Ok(response) => Json(response).into_response(),
             Err(err) => error_response(err, &ctx),
         },
+        Err(err) => error_response(err, &ctx),
+    }
+}
+
+pub async fn export(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+) -> Response {
+    let export_state = state.clone();
+    let result = tokio::task::spawn_blocking(move || perform_export(export_state.as_ref()))
+        .await
+        .map_err(|err| crate::error::ServerError::Internal(err.to_string()))
+        .and_then(|res| res);
+
+    match result {
+        Ok(location) => Json(AdminExportResponse {
+            status: "OK",
+            location,
+        })
+        .into_response(),
         Err(err) => error_response(err, &ctx),
     }
 }
@@ -332,6 +359,28 @@ fn perform_lifecycle_action(action: &str, data_dir: &Path) -> Result<String, Str
         }
         _ => Err("Unknown lifecycle action.".to_string()),
     }
+}
+
+fn perform_export(state: &ServerState) -> crate::error::Result<String> {
+    match state.store.as_ref() {
+        AnyKV::Lsm(kv) => {
+            let _ = kv.checkpoint()?;
+        }
+        _ => {
+            return Err(crate::error::ServerError::BadRequest(
+                "checkpoint unsupported for current storage engine".to_string(),
+            ));
+        }
+    }
+    let data_dir = state.config.data_dir.as_path();
+    let lifecycle_root = data_dir.join(".lifecycle");
+    std::fs::create_dir_all(&lifecycle_root)?;
+    let dest = lifecycle_root.join("export").join(timestamp_dir());
+    std::fs::create_dir_all(&dest)?;
+    export_snapshot(data_dir, &dest)?;
+    write_latest_marker(&lifecycle_root.join("export"), &dest)
+        .map_err(crate::error::ServerError::Internal)?;
+    Ok(dest.display().to_string())
 }
 
 fn timestamp_dir() -> String {

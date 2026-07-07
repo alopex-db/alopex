@@ -9,7 +9,11 @@ on:
 env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
   RUSTFLAGS: -D warnings
+  NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
 
 jobs:
   fmt:
@@ -31,6 +35,17 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
@@ -117,11 +132,54 @@ jobs:
       - name: Install Python deps
         run: python -m pip install --upgrade pip numpy
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
+      # macOS/Windows ランナーは docker で Linux コンテナを動かせないため、
+      # ネイティブ Nim ツールチェーン (2.2 固定) をセットアップして共有ライブラリを生成する。
+      # 要 CI 検証: macOS/Windows ランナー上でのみ動作確認可能（ローカル検証不可）。
+      - name: Setup Nim (macOS/Windows)
+        if: runner.os != 'Linux'
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Nim SQL parser library (macOS/Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          cd "${NIM_SQL_PARSER_DIR}"
+          nimble install -y npeg msgpack4nim
+          nimble lib
+
+      # Windows は rpath を持たないため、テストバイナリ実行時に
+      # alopex_sql_parser.dll を見つけられるよう Nim ライブラリのディレクトリを
+      # PATH に追加する（Windows の DLL 検索は PATH を含む）。
+      - name: Add Nim library to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
+
       - name: Run tests
-        run: cargo test --all-features --workspace
+        env:
+          # テストバイナリ（target/debug/deps 配下）は build.rs の rpath だけでは
+          # Nim 共有ライブラリを解決できないため、ライブラリのディレクトリを
+          # LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効）。
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+        run: cargo test --workspace --features lane_ci
 
       - name: Run doc tests
-        run: cargo test --doc --workspace
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+        run: cargo test --doc --workspace --features lane_ci
 
   coverage:
     name: Code Coverage
@@ -190,11 +248,29 @@ jobs:
       - name: Install Python deps
         run: python -m pip install --upgrade pip numpy
 
+      - name: Build Nim SQL parser library
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
+
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Generate coverage
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info -- --skip e2e_
+        env:
+          # cargo-llvm-cov は target/llvm-cov-target/ を使い、build.rs が設定した
+          # rpath だけでは実行時に Nim 共有ライブラリを解決できないため、
+          # Nim ライブラリのディレクトリを LD_LIBRARY_PATH に追加して解決する。
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+        run: >
+          cargo llvm-cov --workspace --features lane_ci --lcov --output-path lcov.info --
+          --skip e2e_
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -234,6 +310,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Build Nim SQL parser library
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
+      # macOS/Windows ランナーは docker で Linux コンテナを動かせないため、
+      # ネイティブ Nim ツールチェーン (2.2 固定) をセットアップして共有ライブラリを生成する。
+      # 要 CI 検証: macOS/Windows ランナー上でのみ動作確認可能（ローカル検証不可）。
+      - name: Setup Nim (macOS/Windows)
+        if: runner.os != 'Linux'
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Nim SQL parser library (macOS/Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          cd "${NIM_SQL_PARSER_DIR}"
+          nimble install -y npeg msgpack4nim
+          nimble lib
+
       - name: Build
         run: cargo build --release --all-features
 
@@ -245,9 +349,47 @@ jobs:
             target/release/alopex-cli
             target/release/alopex-cli.exe
 
+  v06-release-gate:
+    name: v0.6 Release Gate
+    runs-on: ubuntu-latest
+    env:
+      PYO3_PYTHON: python
+      PYTHON_SYS_EXECUTABLE: python
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Python deps
+        run: python -m pip install --upgrade pip maturin pytest numpy
+      - name: Build Nim SQL parser library
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
+      - name: Run v0.6 release gate
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+        run: bash scripts/release/v06_gate.sh
+
   ci-success:
     name: CI Success
-    needs: [fmt, clippy, test, coverage, security-audit, build]
+    needs: [fmt, clippy, test, coverage, security-audit, build, v06-release-gate]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -256,8 +398,16 @@ jobs:
           if [[ "${{ needs.fmt.result }}" != "success" ]] || \
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
-             [[ "${{ needs.build.result }}" != "success" ]]; then
+             [[ "${{ needs.build.result }}" != "success" ]] || \
+             [[ "${{ needs['v06-release-gate'].result }}" != "success" ]]; then
             echo "One or more jobs failed"
+            echo "fmt: ${{ needs.fmt.result }}"
+            echo "clippy: ${{ needs.clippy.result }}"
+            echo "test: ${{ needs.test.result }}"
+            echo "coverage: ${{ needs.coverage.result }}"
+            echo "security-audit: ${{ needs['security-audit'].result }}"
+            echo "build: ${{ needs.build.result }}"
+            echo "v06-release-gate: ${{ needs['v06-release-gate'].result }}"
             exit 1
           fi
           echo "All CI jobs passed!"

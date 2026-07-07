@@ -1,5 +1,7 @@
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
+ALOPEX_ERROR_CODES: Tuple[str, ...]
+
 
 class polars:
     class DataFrame:
@@ -10,7 +12,7 @@ class polars:
 
 
 class AlopexError(Exception):
-    ...
+    code: str
 
 
 class TxnMode:

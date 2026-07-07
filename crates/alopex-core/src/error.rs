@@ -96,6 +96,24 @@ pub enum Error {
         requested: usize,
     },
 
+    /// External spill operation failed.
+    #[error("spill failed: {reason}")]
+    SpillFailed {
+        /// Stable failure description.
+        reason: String,
+    },
+
+    /// A DataFrame scalar cast failed.
+    #[error("cast failed: from={from_type}, to={to_type}, reason={reason}")]
+    CastFailed {
+        /// Source type name.
+        from_type: String,
+        /// Target type name.
+        to_type: String,
+        /// Stable failure code.
+        reason: String,
+    },
+
     /// The provided path already exists and cannot be overwritten.
     #[error("path exists: {0}")]
     PathExists(PathBuf),

@@ -6,10 +6,11 @@ pub mod span;
 pub use ddl::*;
 pub use dml::*;
 pub use expr::*;
+use serde::{Deserialize, Serialize};
 pub use span::{Location, Span, Spanned};
 
 /// Top-level SQL statement wrapper with span information.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Statement {
     pub kind: StatementKind,
     pub span: Span,
@@ -21,7 +22,8 @@ impl Spanned for Statement {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
 #[allow(clippy::large_enum_variant)]
 pub enum StatementKind {
     // DDL

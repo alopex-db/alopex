@@ -1,0 +1,438 @@
+use std::collections::HashSet;
+use std::fs;
+use std::io::Read;
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use alopex_cli::batch::{BatchMode, BatchModeSource};
+use alopex_cli::cli::SqlCommand;
+use alopex_cli::commands::{kv as cli_kv, sql as cli_sql};
+use alopex_cli::output::jsonl::JsonlFormatter;
+use alopex_cli::streaming::StreamingWriter;
+use alopex_cli::ui::mode::UiMode;
+use alopex_embedded::Database;
+use hyper::header::CONTENT_TYPE;
+use hyper::{Body, Client, Method, Request, StatusCode};
+use serde_json::{json, Value};
+use tempfile::tempdir;
+use tokio::time::sleep;
+
+struct ChildGuard {
+    child: Option<Child>,
+}
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child.as_mut().expect("child missing")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn reserve_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind port");
+    listener.local_addr().expect("local addr").port()
+}
+
+fn reserve_unique_port(used: &mut HashSet<u16>) -> u16 {
+    loop {
+        let port = reserve_port();
+        if used.insert(port) {
+            return port;
+        }
+    }
+}
+
+fn toml_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "\\\\")
+}
+
+fn write_config(dir: &Path, http_port: u16, admin_port: u16, grpc_port: u16) -> PathBuf {
+    let config_path = dir.join("alopex.toml");
+    let contents = format!(
+        "\
+http_bind = \"127.0.0.1:{http_port}\"
+grpc_bind = \"127.0.0.1:{grpc_port}\"
+admin_bind = \"127.0.0.1:{admin_port}\"
+data_dir = \"{data_dir}\"
+metrics_enabled = false
+tracing_enabled = false
+audit_log_enabled = false
+",
+        data_dir = toml_path(dir),
+    );
+    fs::write(&config_path, contents).expect("write config");
+    config_path
+}
+
+fn read_stderr(child: &mut Child) -> String {
+    let mut stderr_output = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = stderr.read_to_string(&mut stderr_output);
+    }
+    stderr_output
+}
+
+async fn send_json(
+    client: &Client<hyper::client::HttpConnector>,
+    method: Method,
+    url: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let bytes = serde_json::to_vec(&body).expect("serialize json");
+    let request = Request::builder()
+        .method(method)
+        .uri(url)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(bytes))
+        .expect("request");
+    let response = client.request(request).await.expect("response");
+    let status = response.status();
+    let body = hyper::body::to_bytes(response.into_body())
+        .await
+        .expect("body");
+    let value: Value = serde_json::from_slice(&body)
+        .unwrap_or_else(|err| panic!("invalid json ({err}): {}", String::from_utf8_lossy(&body)));
+    (status, value)
+}
+
+async fn try_send_empty(
+    client: &Client<hyper::client::HttpConnector>,
+    method: Method,
+    url: &str,
+) -> Option<StatusCode> {
+    let request = Request::builder()
+        .method(method)
+        .uri(url)
+        .body(Body::empty())
+        .ok()?;
+    let response = client.request(request).await.ok()?;
+    Some(response.status())
+}
+
+fn default_batch_mode() -> BatchMode {
+    BatchMode {
+        is_batch: true,
+        is_tty: false,
+        source: BatchModeSource::Explicit,
+    }
+}
+
+fn parse_jsonl(output: &[u8]) -> Vec<Value> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("jsonl row"))
+        .collect()
+}
+
+fn extract_sql_scalar(value: &Value) -> Value {
+    if let Some(obj) = value.as_object() {
+        if let Some(v) = obj.get("Integer") {
+            return v.clone();
+        }
+        if let Some(v) = obj.get("Text") {
+            return v.clone();
+        }
+        if let Some(v) = obj.get("Float") {
+            return v.clone();
+        }
+    }
+    value.clone()
+}
+
+fn normalize_sql_rows(rows: &Value) -> Value {
+    let Some(items) = rows.as_array() else {
+        return Value::Array(Vec::new());
+    };
+    let normalized = items
+        .iter()
+        .map(|row| {
+            if let Some(obj) = row.as_object() {
+                if obj.contains_key("id") && obj.contains_key("name") {
+                    return json!({
+                        "id": extract_sql_scalar(obj.get("id").unwrap_or(&Value::Null)),
+                        "name": extract_sql_scalar(obj.get("name").unwrap_or(&Value::Null)),
+                    });
+                }
+            }
+            if let Some(values) = row.as_array() {
+                if values.len() >= 2 {
+                    return json!({
+                        "id": extract_sql_scalar(&values[0]),
+                        "name": extract_sql_scalar(&values[1]),
+                    });
+                }
+            }
+            row.clone()
+        })
+        .collect::<Vec<_>>();
+    Value::Array(normalized)
+}
+
+fn run_cli_sql_rows(db: &Database, query: &str) -> Vec<Value> {
+    let cmd = SqlCommand {
+        query: Some(query.to_string()),
+        file: None,
+        fetch_size: None,
+        max_rows: None,
+        deadline: None,
+        tui: false,
+    };
+    let mut output = Vec::new();
+    cli_sql::execute_with_formatter(
+        db,
+        cmd,
+        &default_batch_mode(),
+        UiMode::Batch,
+        &mut output,
+        Box::new(JsonlFormatter::new()),
+        None,
+        None,
+        true,
+    )
+    .expect("cli sql");
+    parse_jsonl(&output)
+}
+
+fn run_cli_kv_get(db: &Database, key: &str) -> String {
+    let columns = cli_kv::kv_columns();
+    let mut output = Vec::new();
+    let mut writer =
+        StreamingWriter::new(&mut output, Box::new(JsonlFormatter::new()), columns, None);
+    cli_kv::execute(
+        db,
+        alopex_cli::cli::KvCommand::Get {
+            key: key.to_string(),
+        },
+        &mut writer,
+    )
+    .expect("cli kv get");
+    let rows = parse_jsonl(&output);
+    rows.first()
+        .and_then(|v| v.get("value"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn diff_values(path: &str, expected: &Value, actual: &Value, diffs: &mut Vec<String>) {
+    match (expected, actual) {
+        (Value::Object(e), Value::Object(a)) => {
+            let keys: std::collections::BTreeSet<&String> = e.keys().chain(a.keys()).collect();
+            for key in keys {
+                let next = if path.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{path}.{key}")
+                };
+                match (e.get(key), a.get(key)) {
+                    (Some(ev), Some(av)) => diff_values(&next, ev, av, diffs),
+                    (Some(_), None) => diffs.push(format!("{next}: missing in actual")),
+                    (None, Some(_)) => diffs.push(format!("{next}: unexpected in actual")),
+                    (None, None) => {}
+                }
+            }
+        }
+        (Value::Array(e), Value::Array(a)) => {
+            if e.len() != a.len() {
+                diffs.push(format!(
+                    "{path}: length expected={} actual={}",
+                    e.len(),
+                    a.len()
+                ));
+            }
+            for i in 0..e.len().min(a.len()) {
+                diff_values(&format!("{path}[{i}]"), &e[i], &a[i], diffs);
+            }
+        }
+        _ => {
+            if expected != actual {
+                diffs.push(format!("{path}: expected={expected} actual={actual}"));
+            }
+        }
+    }
+}
+
+fn assert_json_eq_with_diff(label: &str, expected: &Value, actual: &Value) {
+    if expected == actual {
+        return;
+    }
+    let mut diffs = Vec::new();
+    diff_values("", expected, actual, &mut diffs);
+    let joined = diffs
+        .into_iter()
+        .take(20)
+        .collect::<Vec<_>>()
+        .join("\n  - ");
+    panic!("{label} mismatch\nexpected: {expected}\nactual: {actual}\ndiff:\n  - {joined}");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn cross_surface_consistency_cli_and_server_share_expected_results() {
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/cross_surface_expected.json");
+    let expected: Value = serde_json::from_slice(&fs::read(&fixture_path).expect("fixture bytes"))
+        .expect("fixture json");
+
+    let temp = tempdir().expect("tempdir");
+    let mut used = HashSet::new();
+    let http_port = reserve_unique_port(&mut used);
+    let admin_port = reserve_unique_port(&mut used);
+    let grpc_port = reserve_unique_port(&mut used);
+    let config_path = write_config(temp.path(), http_port, admin_port, grpc_port);
+    let http_url = format!("http://127.0.0.1:{http_port}");
+    let admin_url = format!("http://127.0.0.1:{admin_port}");
+
+    let child = Command::new(env!("CARGO_BIN_EXE_alopex-server"))
+        .arg("--config")
+        .arg(&config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn server");
+    let mut guard = ChildGuard::new(child);
+
+    let client = Client::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut ready = false;
+    while Instant::now() < deadline {
+        if let Ok(Some(status)) = guard.child_mut().try_wait() {
+            let stderr_output = read_stderr(guard.child_mut());
+            panic!("alopex-server exited early ({status}). stderr:\n{stderr_output}");
+        }
+        if let Some(status) =
+            try_send_empty(&client, Method::GET, &format!("{admin_url}/healthz")).await
+        {
+            if status == StatusCode::OK {
+                ready = true;
+                break;
+            }
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    if !ready {
+        let stderr_output = read_stderr(guard.child_mut());
+        panic!("alopex-server failed health check. stderr:\n{stderr_output}");
+    }
+
+    let (status, _) = send_json(
+        &client,
+        Method::POST,
+        &format!("{http_url}/sql"),
+        json!({
+            "sql": "CREATE TABLE surface_items (id INT PRIMARY KEY, name TEXT, embedding VECTOR(2, L2));"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send_json(
+        &client,
+        Method::POST,
+        &format!("{http_url}/sql"),
+        json!({
+            "sql": "INSERT INTO surface_items (id, name, embedding) VALUES (1, 'alpha', [0.0, 0.0]), (2, 'beta', [1.0, 0.0]);"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send_json(
+        &client,
+        Method::POST,
+        &format!("{http_url}/kv/put"),
+        json!({ "key": "shared-key", "value": [115, 104, 97, 114, 101, 100, 45, 118, 97, 108, 117, 101] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, sql_result) = send_json(
+        &client,
+        Method::POST,
+        &format!("{http_url}/sql"),
+        json!({ "sql": "SELECT id, name FROM surface_items ORDER BY id;" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, kv_result) = send_json(
+        &client,
+        Method::POST,
+        &format!("{http_url}/kv/get"),
+        json!({ "key": "shared-key" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, vector_result) = send_json(
+        &client,
+        Method::POST,
+        &format!("{http_url}/vector/search"),
+        json!({
+            "table": "surface_items",
+            "vector": [0.1, 0.0],
+            "k": 1
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let server_actual = json!({
+        "sql_rows": normalize_sql_rows(sql_result.get("rows").unwrap_or(&Value::Null)),
+        "kv_value": String::from_utf8(
+            kv_result
+                .get("value")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|v| v.as_u64().map(|x| x as u8))
+                .collect::<Vec<u8>>()
+        ).unwrap_or_default(),
+        "vector_top_id": vector_result
+            .get("results")
+            .and_then(Value::as_array)
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.get("id"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    });
+
+    drop(guard);
+
+    let db = Database::open(temp.path()).expect("open db");
+    let cli_sql_rows = run_cli_sql_rows(&db, "SELECT id, name FROM surface_items ORDER BY id;");
+    let cli_vector_row = run_cli_sql_rows(
+        &db,
+        "SELECT id FROM surface_items ORDER BY vector_similarity(embedding, [0.1, 0.0], 'l2') ASC LIMIT 1;",
+    );
+    let cli_actual = json!({
+        "sql_rows": normalize_sql_rows(&Value::Array(cli_sql_rows)),
+        "kv_value": run_cli_kv_get(&db, "shared-key"),
+        "vector_top_id": cli_vector_row
+            .first()
+            .and_then(|v| v.get("id"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    });
+
+    let expected_common = json!({
+        "sql_rows": expected.get("sql_rows").cloned().unwrap_or(Value::Null),
+        "kv_value": expected.get("kv_value").cloned().unwrap_or(Value::Null),
+        "vector_top_id": expected.get("vector_top_id").cloned().unwrap_or(Value::Null),
+    });
+
+    assert_json_eq_with_diff("server", &expected_common, &server_actual);
+    assert_json_eq_with_diff("cli", &expected_common, &cli_actual);
+}

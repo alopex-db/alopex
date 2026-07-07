@@ -11,6 +11,19 @@ use alopex_core::{StorageFactory, StorageMode as CoreStorageMode};
 
 use crate::{Database, Error, Result, SegmentConfigV2, Transaction, TxnMode};
 
+#[cfg(test)]
+thread_local! {
+    static LAST_READ_COLUMN_INDICES: std::cell::RefCell<Option<Vec<usize>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn record_read_column_indices(indices: &[usize]) {
+    LAST_READ_COLUMN_INDICES.with(|last| {
+        *last.borrow_mut() = Some(indices.to_vec());
+    });
+}
+
 /// セグメント統計情報。
 #[derive(Debug, Clone)]
 pub struct ColumnarSegmentStats {
@@ -210,46 +223,54 @@ impl Database {
         columns: Option<&[&str]>,
     ) -> Result<Vec<RecordBatch>> {
         let table_id = table_id(table)?;
-        let column_count = match self.columnar_mode {
-            StorageMode::Disk => self
-                .columnar_bridge
-                .column_count(table_id, segment_id)
-                .map_err(|e| Error::Core(e.into()))?,
-            StorageMode::InMemory => self
-                .columnar_memory
-                .as_ref()
-                .ok_or_else(|| {
+        match self.columnar_mode {
+            StorageMode::Disk => {
+                let read_indices: Vec<usize> = if let Some(names) = columns {
+                    let segment = self
+                        .columnar_bridge
+                        .read_segment_raw(table_id, segment_id)
+                        .map_err(|e| Error::Core(e.into()))?;
+                    resolve_indices_from_schema(&segment.meta.schema, names)?
+                } else {
+                    let column_count = self
+                        .columnar_bridge
+                        .column_count(table_id, segment_id)
+                        .map_err(|e| Error::Core(e.into()))?;
+                    (0..column_count).collect()
+                };
+
+                #[cfg(test)]
+                record_read_column_indices(&read_indices);
+
+                self.columnar_bridge
+                    .read_segment(table_id, segment_id, &read_indices)
+                    .map_err(|e| Error::Core(e.into()))
+            }
+            StorageMode::InMemory => {
+                let store = self.columnar_memory.as_ref().ok_or_else(|| {
                     Error::Core(alopex_core::Error::InvalidFormat(
                         "in-memory columnar store is not initialized".into(),
                     ))
-                })?
-                .column_count(table_id, segment_id)
-                .map_err(|e| Error::Core(e.into()))?,
-        };
-        let all_indices: Vec<usize> = (0..column_count).collect();
+                })?;
+                let read_indices: Vec<usize> = if let Some(names) = columns {
+                    let schema = store
+                        .schema(table_id, segment_id)
+                        .map_err(|e| Error::Core(e.into()))?;
+                    resolve_indices_from_schema(&schema, names)?
+                } else {
+                    let column_count = store
+                        .column_count(table_id, segment_id)
+                        .map_err(|e| Error::Core(e.into()))?;
+                    (0..column_count).collect()
+                };
 
-        let batches_full = match self.columnar_mode {
-            StorageMode::Disk => self
-                .columnar_bridge
-                .read_segment(table_id, segment_id, &all_indices)
-                .map_err(|e| Error::Core(e.into()))?,
-            StorageMode::InMemory => self
-                .columnar_memory
-                .as_ref()
-                .ok_or_else(|| {
-                    Error::Core(alopex_core::Error::InvalidFormat(
-                        "in-memory columnar store is not initialized".into(),
-                    ))
-                })?
-                .read_segment(table_id, segment_id, &all_indices)
-                .map_err(|e| Error::Core(e.into()))?,
-        };
+                #[cfg(test)]
+                record_read_column_indices(&read_indices);
 
-        if let Some(names) = columns {
-            let indices = resolve_indices(&batches_full, names)?;
-            project_batches(batches_full, &indices)
-        } else {
-            Ok(batches_full)
+                store
+                    .read_segment(table_id, segment_id, &read_indices)
+                    .map_err(|e| Error::Core(e.into()))
+            }
         }
     }
 
@@ -598,16 +619,13 @@ fn table_id(table: &str) -> Result<u32> {
     Ok((hasher.finish() & 0xffff_ffff) as u32)
 }
 
-fn resolve_indices(batches: &[RecordBatch], names: &[&str]) -> Result<Vec<usize>> {
-    let Some(first) = batches.first() else {
-        return Err(Error::Core(alopex_core::Error::InvalidFormat(
-            "segment is empty".into(),
-        )));
-    };
+fn resolve_indices_from_schema(
+    schema: &alopex_core::columnar::segment_v2::Schema,
+    names: &[&str],
+) -> Result<Vec<usize>> {
     let mut indices = Vec::with_capacity(names.len());
     for name in names {
-        let pos = first
-            .schema
+        let pos = schema
             .columns
             .iter()
             .position(|c| c.name == *name)
@@ -619,36 +637,6 @@ fn resolve_indices(batches: &[RecordBatch], names: &[&str]) -> Result<Vec<usize>
         indices.push(pos);
     }
     Ok(indices)
-}
-
-fn project_batches(batches: Vec<RecordBatch>, indices: &[usize]) -> Result<Vec<RecordBatch>> {
-    let mut projected = Vec::with_capacity(batches.len());
-    for batch in batches {
-        let mut cols = Vec::with_capacity(indices.len());
-        let mut bitmaps = Vec::with_capacity(indices.len());
-        for &idx in indices {
-            let col = batch
-                .columns
-                .get(idx)
-                .ok_or_else(|| {
-                    Error::Core(alopex_core::Error::InvalidFormat(
-                        "column index out of bounds".into(),
-                    ))
-                })?
-                .clone();
-            let bitmap = batch.null_bitmaps.get(idx).cloned().unwrap_or(None);
-            cols.push(col);
-            bitmaps.push(bitmap);
-        }
-        let schema = alopex_core::columnar::segment_v2::Schema {
-            columns: indices
-                .iter()
-                .map(|&idx| batch.schema.columns[idx].clone())
-                .collect(),
-        };
-        projected.push(RecordBatch::new(schema, cols, bitmaps));
-    }
-    Ok(projected)
 }
 
 const COLUMNAR_INDEX_PREFIX: &str = "__alopex_columnar_index__:";
@@ -836,8 +824,11 @@ impl Iterator for ColumnarRowIterator {
 mod tests {
     use super::*;
     use alopex_core::columnar::encoding::{Column, LogicalType};
-    use alopex_core::columnar::segment_v2::{ColumnSchema, Schema};
+    use alopex_core::columnar::error::{ColumnarError, Result as ColumnarResult};
+    use alopex_core::columnar::segment_v2::{ColumnSchema, Schema, SegmentReaderV2, SegmentSource};
     use alopex_core::storage::format::{AlopexFileWriter, FileFlags, FileVersion};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     fn make_batch() -> RecordBatch {
@@ -867,6 +858,116 @@ mod tests {
         )
     }
 
+    fn make_wide_batch(column_count: usize, row_count: usize) -> RecordBatch {
+        let schema = Schema {
+            columns: (0..column_count)
+                .map(|idx| ColumnSchema {
+                    name: format!("c{idx}"),
+                    logical_type: LogicalType::Int64,
+                    nullable: false,
+                    fixed_len: None,
+                })
+                .collect(),
+        };
+        let columns = (0..column_count)
+            .map(|idx| {
+                Column::Int64(
+                    (0..row_count)
+                        .map(|row| (idx as i64 * 1_000_000) + row as i64)
+                        .collect(),
+                )
+            })
+            .collect();
+        RecordBatch::new(schema, columns, vec![None; column_count])
+    }
+
+    fn decoded_payload_bytes(batches: &[RecordBatch]) -> usize {
+        batches
+            .iter()
+            .flat_map(|batch| batch.columns.iter())
+            .map(|column| match column {
+                Column::Int64(values) => values.len() * std::mem::size_of::<i64>(),
+                Column::Float32(values) => values.len() * std::mem::size_of::<f32>(),
+                Column::Float64(values) => values.len() * std::mem::size_of::<f64>(),
+                Column::Bool(values) => values.len() * std::mem::size_of::<bool>(),
+                Column::Binary(values) => values.iter().map(Vec::len).sum(),
+                Column::Fixed { values, .. } => values.iter().map(Vec::len).sum(),
+            })
+            .sum()
+    }
+
+    #[derive(Debug, Clone)]
+    struct CountingSegmentSource {
+        data: Arc<Vec<u8>>,
+        bytes: Arc<AtomicU64>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingSegmentSource {
+        fn new(data: Vec<u8>) -> Self {
+            Self {
+                data: Arc::new(data),
+                bytes: Arc::new(AtomicU64::new(0)),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn reset(&self) {
+            self.bytes.store(0, Ordering::Relaxed);
+            self.calls.store(0, Ordering::Relaxed);
+        }
+
+        fn bytes(&self) -> u64 {
+            self.bytes.load(Ordering::Relaxed)
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::Relaxed)
+        }
+    }
+
+    impl SegmentSource for CountingSegmentSource {
+        fn read_range(&self, offset: u64, len: u64) -> ColumnarResult<Vec<u8>> {
+            self.bytes.fetch_add(len, Ordering::Relaxed);
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let start = offset as usize;
+            let end = start + len as usize;
+            if end > self.data.len() {
+                return Err(ColumnarError::InvalidFormat("range out of bounds".into()));
+            }
+            Ok(self.data[start..end].to_vec())
+        }
+
+        fn total_size(&self) -> u64 {
+            self.data.len() as u64
+        }
+    }
+
+    fn measured_segment_read(data: Vec<u8>, columns: &[usize]) -> ColumnarResult<(u64, usize)> {
+        let source = CountingSegmentSource::new(data);
+        let reader = SegmentReaderV2::open(Box::new(source.clone()))?;
+        source.reset();
+        let batches = reader.read_columns(columns)?;
+        if batches.is_empty() {
+            return Err(ColumnarError::InvalidFormat("segment is empty".into()));
+        }
+        Ok((source.bytes(), source.calls()))
+    }
+
+    fn reset_last_read_column_indices() {
+        LAST_READ_COLUMN_INDICES.with(|last| {
+            *last.borrow_mut() = None;
+        });
+    }
+
+    fn last_read_column_indices() -> Vec<usize> {
+        LAST_READ_COLUMN_INDICES.with(|last| {
+            last.borrow()
+                .clone()
+                .expect("read_columnar_segment should record read indices")
+        })
+    }
+
     #[test]
     fn write_read_disk_mode() {
         let dir = tempdir().unwrap();
@@ -894,6 +995,83 @@ mod tests {
         } else {
             panic!("expected int64");
         }
+    }
+
+    #[test]
+    fn disk_projection_pushes_selected_columns_to_segment_reader() {
+        let dir = tempdir().unwrap();
+        let wal = dir.path().join("wal.log");
+        let cfg = EmbeddedConfig::disk(wal);
+        let db = Database::open_with_config(cfg).unwrap();
+        let seg_id = db
+            .write_columnar_segment("wide_tbl", make_wide_batch(12, 4096))
+            .unwrap();
+        let table_id = table_id("wide_tbl").unwrap();
+        let raw = db
+            .columnar_bridge
+            .read_segment_raw(table_id, seg_id)
+            .unwrap();
+
+        let all_indices: Vec<usize> = (0..12).collect();
+        let projection = [2, 7, 10];
+        let (full_read_bytes, full_read_calls) =
+            measured_segment_read(raw.data.clone(), &all_indices).unwrap();
+        let (projected_read_bytes, projected_read_calls) =
+            measured_segment_read(raw.data, &projection).unwrap();
+
+        reset_last_read_column_indices();
+        let full_batches = db.read_columnar_segment("wide_tbl", seg_id, None).unwrap();
+        assert_eq!(last_read_column_indices(), all_indices);
+
+        reset_last_read_column_indices();
+        let projected_batches = db
+            .read_columnar_segment("wide_tbl", seg_id, Some(&["c2", "c7", "c10"]))
+            .unwrap();
+        let pushed_indices = last_read_column_indices();
+        let full_payload_bytes = decoded_payload_bytes(&full_batches);
+        let projected_payload_bytes = decoded_payload_bytes(&projected_batches);
+
+        eprintln!(
+            "projection pushed_indices={pushed_indices:?} full_read_bytes={full_read_bytes} projected_read_bytes={projected_read_bytes} full_read_calls={full_read_calls} projected_read_calls={projected_read_calls} full_payload_bytes={full_payload_bytes} projected_payload_bytes={projected_payload_bytes}"
+        );
+
+        assert_eq!(pushed_indices, projection);
+        assert!(projected_read_bytes < full_read_bytes);
+        assert!(projected_payload_bytes < full_payload_bytes);
+        assert_eq!(projected_batches[0].schema.columns.len(), projection.len());
+    }
+
+    #[test]
+    fn in_memory_projection_pushes_selected_columns_to_segment_reader() {
+        let db = Database::open_with_config(EmbeddedConfig::in_memory()).unwrap();
+        let seg_id = db
+            .write_columnar_segment("wide_mem_tbl", make_wide_batch(12, 4096))
+            .unwrap();
+
+        let all_indices: Vec<usize> = (0..12).collect();
+        let projection = [2, 7, 10];
+
+        reset_last_read_column_indices();
+        let full_batches = db
+            .read_columnar_segment("wide_mem_tbl", seg_id, None)
+            .unwrap();
+        assert_eq!(last_read_column_indices(), all_indices);
+
+        reset_last_read_column_indices();
+        let projected_batches = db
+            .read_columnar_segment("wide_mem_tbl", seg_id, Some(&["c2", "c7", "c10"]))
+            .unwrap();
+        let pushed_indices = last_read_column_indices();
+        let full_payload_bytes = decoded_payload_bytes(&full_batches);
+        let projected_payload_bytes = decoded_payload_bytes(&projected_batches);
+
+        eprintln!(
+            "in_memory_projection pushed_indices={pushed_indices:?} full_payload_bytes={full_payload_bytes} projected_payload_bytes={projected_payload_bytes}"
+        );
+
+        assert_eq!(pushed_indices, projection);
+        assert!(projected_payload_bytes < full_payload_bytes);
+        assert_eq!(projected_batches[0].schema.columns.len(), projection.len());
     }
 
     #[test]

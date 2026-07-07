@@ -12,7 +12,7 @@ use crate::ast::ddl::{
     IndexMethod,
 };
 use crate::ast::dml::{
-    Assignment, Delete, Insert, OrderByExpr, Select, SelectItem, TableRef, Update,
+    Assignment, Delete, FromItem, Insert, OrderByExpr, Select, SelectItem, Update,
 };
 use crate::ast::expr::{BinaryOp, Expr, ExprKind, Literal};
 use crate::ast::span::Span;
@@ -72,7 +72,9 @@ fn stmt(kind: StatementKind) -> Statement {
 /// Create an integer literal expression.
 fn int_lit(value: i64) -> Expr {
     Expr {
-        kind: ExprKind::Literal(Literal::Number(value.to_string())),
+        kind: ExprKind::Literal {
+            literal: Literal::Number(value.to_string()),
+        },
         span: span(),
     }
 }
@@ -80,7 +82,9 @@ fn int_lit(value: i64) -> Expr {
 /// Create a string literal expression.
 fn str_lit(value: &str) -> Expr {
     Expr {
-        kind: ExprKind::Literal(Literal::String(value.to_string())),
+        kind: ExprKind::Literal {
+            literal: Literal::String(value.to_string()),
+        },
         span: span(),
     }
 }
@@ -88,7 +92,9 @@ fn str_lit(value: &str) -> Expr {
 /// Create a NULL literal expression.
 fn null_lit() -> Expr {
     Expr {
-        kind: ExprKind::Literal(Literal::Null),
+        kind: ExprKind::Literal {
+            literal: Literal::Null,
+        },
         span: span(),
     }
 }
@@ -132,13 +138,22 @@ fn test_plan_create_table() {
             ColumnDef {
                 name: "id".to_string(),
                 data_type: DataType::Integer,
-                constraints: vec![ColumnConstraint::PrimaryKey, ColumnConstraint::NotNull],
+                constraints: vec![
+                    ColumnConstraint::PrimaryKey {
+                        span: Span::empty(),
+                    },
+                    ColumnConstraint::NotNull {
+                        span: Span::empty(),
+                    },
+                ],
                 span: span(),
             },
             ColumnDef {
                 name: "name".to_string(),
                 data_type: DataType::Text,
-                constraints: vec![ColumnConstraint::NotNull],
+                constraints: vec![ColumnConstraint::NotNull {
+                    span: Span::empty(),
+                }],
                 span: span(),
             },
         ],
@@ -425,11 +440,11 @@ fn test_plan_select_wildcard() {
     let select = Select {
         distinct: false,
         projection: vec![SelectItem::Wildcard { span: span() }],
-        from: TableRef {
+        from: vec![FromItem::Table {
             name: "users".to_string(),
             alias: None,
             span: span(),
-        },
+        }],
         selection: None,
         group_by: None,
         having: None,
@@ -473,11 +488,11 @@ fn test_plan_select_columns() {
                 span: span(),
             },
         ],
-        from: TableRef {
+        from: vec![FromItem::Table {
             name: "users".to_string(),
             alias: None,
             span: span(),
-        },
+        }],
         selection: None,
         group_by: None,
         having: None,
@@ -511,11 +526,11 @@ fn test_plan_select_with_where() {
     let select = Select {
         distinct: false,
         projection: vec![SelectItem::Wildcard { span: span() }],
-        from: TableRef {
+        from: vec![FromItem::Table {
             name: "users".to_string(),
             alias: None,
             span: span(),
-        },
+        }],
         selection: Some(binary_op(col_ref(None, "age"), BinaryOp::Gt, int_lit(18))),
         group_by: None,
         having: None,
@@ -544,11 +559,11 @@ fn test_plan_select_with_order_by() {
     let select = Select {
         distinct: false,
         projection: vec![SelectItem::Wildcard { span: span() }],
-        from: TableRef {
+        from: vec![FromItem::Table {
             name: "users".to_string(),
             alias: None,
             span: span(),
-        },
+        }],
         selection: None,
         group_by: None,
         having: None,
@@ -594,11 +609,11 @@ fn test_plan_select_with_limit() {
     let select = Select {
         distinct: false,
         projection: vec![SelectItem::Wildcard { span: span() }],
-        from: TableRef {
+        from: vec![FromItem::Table {
             name: "users".to_string(),
             alias: None,
             span: span(),
-        },
+        }],
         selection: None,
         group_by: None,
         having: None,
@@ -634,11 +649,11 @@ fn test_plan_select_combined() {
     let select = Select {
         distinct: false,
         projection: vec![SelectItem::Wildcard { span: span() }],
-        from: TableRef {
+        from: vec![FromItem::Table {
             name: "users".to_string(),
             alias: None,
             span: span(),
-        },
+        }],
         selection: Some(binary_op(col_ref(None, "age"), BinaryOp::Gt, int_lit(18))),
         group_by: None,
         having: None,
@@ -681,11 +696,11 @@ fn test_plan_select_table_not_found() {
     let select = Select {
         distinct: false,
         projection: vec![SelectItem::Wildcard { span: span() }],
-        from: TableRef {
+        from: vec![FromItem::Table {
             name: "nonexistent".to_string(),
             alias: None,
             span: span(),
-        },
+        }],
         selection: None,
         group_by: None,
         having: None,
