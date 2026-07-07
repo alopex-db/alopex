@@ -64,7 +64,9 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: alopex
             asset_name: alopex-linux-x86_64
-          - os: macos-latest
+          # x86_64 macOS release builds must run on an Intel runner because
+          # the Nim SQL parser shared library is built natively before linking.
+          - os: macos-13
             target: x86_64-apple-darwin
             artifact_name: alopex
             asset_name: alopex-macos-x86_64
