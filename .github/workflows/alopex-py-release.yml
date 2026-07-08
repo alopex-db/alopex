@@ -19,7 +19,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64, aarch64]
+        # Linux aarch64 wheels are held for v0.6.0: the manylinux cross build
+        # builds the Nim SQL parser shared library as x86_64, then the
+        # aarch64 linker rejects it as incompatible. Keep x86_64 releasable
+        # while the ARM-native/shared-library build path is resolved.
+        target: [x86_64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
