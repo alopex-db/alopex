@@ -37,6 +37,9 @@ benchmark*.json
 profile*.log
 crates/*/proptest-regressions/
 crates/alopex-core/artifacts/
+crates/*/fuzz/Cargo.lock
+crates/*/fuzz/artifacts/
+crates/*/fuzz/corpus/
 
 # Stress/chaos test harness scratch output (STRESS_ARTIFACTS_DIR default)
 /artifacts/
