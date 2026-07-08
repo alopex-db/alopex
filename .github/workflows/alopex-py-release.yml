@@ -49,6 +49,7 @@ jobs:
           #   - manylinux コンテナ内の curl/xz/gcc 可用性は CI 上で要確認。
           before-script-linux: |
             set -euxo pipefail
+            REPO_ROOT="$PWD"
             NIM_VERSION=2.2.4
             curl -fsSL "https://nim-lang.org/download/nim-${NIM_VERSION}.tar.xz" -o /tmp/nim.tar.xz
             mkdir -p /opt/nim-src
@@ -60,9 +61,9 @@ jobs:
             ./koch tools
             export PATH="/opt/nim-src/bin:${HOME}/.nimble/bin:${PATH}"
             # env (NIM_SQL_PARSER_DIR) のコンテナ内伝播は不確実なためパスを直書き。
-            # CWD は repo ルート (maturin-action がマウント) を前提。
-            # 要 CI 検証: コンテナ内 CWD が repo ルートか確認。
-            cd crates/alopex-sql/nim-sql-parser
+            # maturin-action のコンテナ開始時 CWD を REPO_ROOT として保持し、
+            # Nim source build で /opt/nim-src に移動した後も repo 側へ戻れるようにする。
+            cd "${REPO_ROOT}/crates/alopex-sql/nim-sql-parser"
             nimble install -y npeg msgpack4nim
             nimble lib
       - name: Upload artifacts
