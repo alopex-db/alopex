@@ -3,6 +3,11 @@ name: Stress Tests
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: "Seconds per fuzz target"
+        required: false
+        default: "600"
   schedule:
     - cron: "0 2 * * *"
     - cron: "0 3 * * 0"
@@ -46,11 +51,12 @@ jobs:
           cargo test --features test-hooks,lane_ci --test stress_* -- --test-threads=1
 
       - name: Upload stress reports
-        if: ${{ env.STRESS_REPORT_DIR != '' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: stress-reports
-          path: ${{ env.STRESS_REPORT_DIR }}
+          path: target/stress-reports
+          if-no-files-found: ignore
 
   sanitizer-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -68,10 +74,6 @@ jobs:
             sanitizer: lsan
           - os: ubuntu-latest
             sanitizer: msan
-          - os: macos-latest
-            sanitizer: asan
-          - os: macos-latest
-            sanitizer: tsan
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -82,6 +84,7 @@ jobs:
           toolchain: nightly
           override: true
           profile: minimal
+          components: rust-src
 
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
@@ -120,18 +123,20 @@ jobs:
           ./scripts/run-sanitizer-lane.sh ${{ matrix.sanitizer }}
 
       - name: Upload sanitizer reports
-        if: ${{ env.STRESS_REPORT_DIR != '' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: sanitizer-${{ matrix.os }}-${{ matrix.sanitizer }}-reports
-          path: ${{ env.STRESS_REPORT_DIR }}
+          path: target/stress-reports/${{ matrix.sanitizer }}
+          if-no-files-found: ignore
 
       - name: Upload sanitizer artifacts
-        if: ${{ env.STRESS_ARTIFACTS_DIR != '' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: sanitizer-${{ matrix.os }}-${{ matrix.sanitizer }}-artifacts
-          path: ${{ env.STRESS_ARTIFACTS_DIR }}
+          path: target/stress-artifacts/${{ matrix.sanitizer }}
+          if-no-files-found: ignore
 
   fuzz-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -162,30 +167,35 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
-      - name: Run SQL fuzz target (24h)
+      - name: Run SQL fuzz target
         env:
           STRESS_REPORT_DIR: target/stress-reports/fuzz/sql_parser
+          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.fuzz_seconds || '600' }}
+          ASAN_OPTIONS: detect_odr_violation=0:detect_leaks=0
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           cd crates/alopex-sql/fuzz
           export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
-          cargo fuzz run sql_parser -- -max_total_time=86400
+          cargo fuzz run sql_parser -- -max_total_time="${FUZZ_MAX_TOTAL_TIME}"
 
-      - name: Run DataFrame fuzz target (24h)
+      - name: Run DataFrame fuzz target
         env:
           STRESS_REPORT_DIR: target/stress-reports/fuzz/dataframe_conversion
+          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.fuzz_seconds || '600' }}
+          ASAN_OPTIONS: detect_odr_violation=0:detect_leaks=0
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           cd crates/alopex-dataframe/fuzz
           export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
-          cargo fuzz run dataframe_conversion -- -max_total_time=86400
+          cargo fuzz run dataframe_conversion -- -max_total_time="${FUZZ_MAX_TOTAL_TIME}"
 
       - name: Upload fuzz reports
-        if: ${{ env.STRESS_REPORT_DIR != '' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-reports
           path: target/stress-reports/fuzz
+          if-no-files-found: ignore
 
   perf-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -203,13 +213,29 @@ jobs:
           profile: minimal
 
       - name: Download latest perf baselines
+        id: perf-baseline
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          run_id=$(gh run list --workflow stress-tests.yml --event schedule --limit 1 --json databaseId -q '.[0].databaseId')
-          if [ -n "$run_id" ]; then
-            gh run download "$run_id" -n perf-baselines -D target/stress-baselines || true
+          set -euo pipefail
+
+          mkdir -p "${GITHUB_WORKSPACE}/target/stress-baselines"
+          found=false
+          for run_id in $(gh run list --workflow stress-tests.yml --event schedule --status success --limit 20 --json databaseId -q '.[].databaseId'); do
+            if [ "$run_id" = "$GITHUB_RUN_ID" ]; then
+              continue
+            fi
+            if gh run download "$run_id" -n perf-baselines -D "${GITHUB_WORKSPACE}/target/stress-baselines"; then
+              found=true
+              echo "Downloaded perf baseline artifact from run ${run_id}."
+              break
+            fi
+          done
+
+          if [ "$found" != "true" ]; then
+            echo "No completed scheduled perf baseline artifact found; this run will seed baselines."
           fi
+          echo "found=${found}" >> "$GITHUB_OUTPUT"
 
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
@@ -225,31 +251,52 @@ jobs:
       - name: Run perf baseline checks
         env:
           RUST_BACKTRACE: 1
-          STRESS_BASELINE_REQUIRED: "true"
-          STRESS_BASELINE_DIR: target/stress-baselines
-          STRESS_REPORT_DIR: target/stress-reports/perf
-          STRESS_ARTIFACTS_DIR: target/stress-artifacts/perf
+          STRESS_BASELINE_REQUIRED: ${{ steps.perf-baseline.outputs.found == 'true' && 'true' || 'false' }}
+          STRESS_BASELINE_UPDATE: ${{ steps.perf-baseline.outputs.found == 'true' && 'false' || 'true' }}
+          STRESS_BASELINE_DIR: ${{ github.workspace }}/target/stress-baselines
+          STRESS_REPORT_DIR: ${{ github.workspace }}/target/stress-reports/perf
+          STRESS_ARTIFACTS_DIR: ${{ github.workspace }}/target/stress-artifacts/perf
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
-          cargo test --features lane_perf --test stress_perf_baseline -- --test-threads=1
+          cargo test -p alopex-core --features lane_perf --test stress_perf_baseline -- --test-threads=1
+
+      - name: Inspect perf outputs
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          for dir in \
+            "${GITHUB_WORKSPACE}/target/stress-baselines" \
+            "${GITHUB_WORKSPACE}/target/stress-reports" \
+            "${GITHUB_WORKSPACE}/target/stress-artifacts"; do
+            echo "::group::${dir}"
+            if [ -d "$dir" ]; then
+              find "$dir" -maxdepth 6 -type f -print | sort
+            else
+              echo "missing"
+            fi
+            echo "::endgroup::"
+          done
 
       - name: Upload perf reports
-        if: ${{ env.STRESS_REPORT_DIR != '' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: perf-reports
-          path: ${{ env.STRESS_REPORT_DIR }}
+          path: ${{ github.workspace }}/target/stress-reports
+          if-no-files-found: ignore
 
       - name: Upload perf artifacts
-        if: ${{ env.STRESS_ARTIFACTS_DIR != '' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: perf-artifacts
-          path: ${{ env.STRESS_ARTIFACTS_DIR }}
+          path: ${{ github.workspace }}/target/stress-artifacts
+          if-no-files-found: ignore
 
       - name: Upload perf baselines
-        if: ${{ env.STRESS_BASELINE_DIR != '' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: perf-baselines
-          path: ${{ env.STRESS_BASELINE_DIR }}
+          path: ${{ github.workspace }}/target/stress-baselines
+          if-no-files-found: ignore

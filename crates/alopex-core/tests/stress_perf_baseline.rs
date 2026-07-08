@@ -151,6 +151,15 @@ fn write_perf_report(ctx: &common::TestContext, file: &str, report: &PerfReport)
     }
 }
 
+fn log_perf_report_on_violation(name: &str, report: &PerfReport) {
+    if report.violations.is_empty() {
+        return;
+    }
+    if let Ok(body) = serde_json::to_string_pretty(report) {
+        eprintln!("{name} perf report:\n{body}");
+    }
+}
+
 #[cfg_attr(not(feature = "lane_perf"), ignore)]
 #[test]
 fn perf_mixed_point_latency() {
@@ -235,6 +244,7 @@ fn perf_mixed_point_latency() {
         if baseline_update_mode() {
             save_baseline("perf_mixed_point_latency", &PerfBaseline { metrics });
         }
+        log_perf_report_on_violation("perf_mixed_point_latency", &report);
         if !violations.is_empty() {
             return Err(alopex_core::Error::InvalidFormat(
                 "performance regression detected".into(),
@@ -349,6 +359,7 @@ fn perf_sequential_throughput_and_amplification() {
                 &PerfBaseline { metrics },
             );
         }
+        log_perf_report_on_violation("perf_sequential_throughput_and_amplification", &report);
         if !violations.is_empty() {
             return Err(alopex_core::Error::InvalidFormat(
                 "performance regression detected".into(),

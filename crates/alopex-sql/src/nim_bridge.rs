@@ -3,6 +3,15 @@ use crate::error::{ParserError, Result};
 use crate::nim_ffi::{self, OwnedBuffer, ParseResultKind};
 
 pub fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
+    if sql.as_bytes().contains(&0) {
+        return Err(ParserError::UnexpectedToken {
+            line: 0,
+            column: 0,
+            expected: "valid SQL without interior NUL bytes".to_string(),
+            found: "interior NUL byte".to_string(),
+        });
+    }
+
     let result = nim_ffi::parse_sql(sql);
     match result.kind {
         ParseResultKind::Ok => {
