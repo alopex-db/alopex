@@ -63,6 +63,9 @@ jobs:
             # env (NIM_SQL_PARSER_DIR) のコンテナ内伝播は不確実なためパスを直書き。
             # maturin-action のコンテナ開始時 CWD を REPO_ROOT として保持し、
             # Nim source build で /opt/nim-src に移動した後も repo 側へ戻れるようにする。
+            # manylinux コンテナ内では root がマウントされた repo を読むため、
+            # nimble lib が内部で実行する git ls-files 用に safe.directory を登録する。
+            git config --global --add safe.directory "${REPO_ROOT}"
             cd "${REPO_ROOT}/crates/alopex-sql/nim-sql-parser"
             nimble install -y npeg msgpack4nim
             nimble lib
