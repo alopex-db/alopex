@@ -69,6 +69,7 @@ jobs:
             cd "${REPO_ROOT}/crates/alopex-sql/nim-sql-parser"
             nimble install -y npeg msgpack4nim
             nimble lib
+            cd "${REPO_ROOT}"
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
