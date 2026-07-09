@@ -138,6 +138,16 @@ pub enum TableReferenceAccess {
 pub enum TableReferenceSource {
     /// The existing `LogicalPlan::table_name()` single-table helper.
     TopLevelPlanTableName,
+    /// A physical table scan in a logical plan tree.
+    LogicalPlanScan,
+    /// A DML target table.
+    LogicalPlanMutationTarget,
+    /// A DDL target table.
+    LogicalPlanDdlTarget,
+    /// A table referenced by index metadata.
+    LogicalPlanIndexTarget,
+    /// A table reached through a typed subquery expression.
+    TypedExprSubquery,
 }
 
 /// Severity for planning diagnostics.
@@ -204,7 +214,12 @@ pub fn plan_statement_for_routing<C: Catalog + ?Sized>(
 
 fn routing_input_for_plan(statement_kind: &StatementKind, plan: &LogicalPlan) -> RoutingInput {
     let mut diagnostics = Vec::new();
-    let table_references = extract_minimal_table_references(statement_kind, plan, &mut diagnostics);
+    let extractor = TableReferenceExtractor::new();
+    let table_references = extractor.extract_from_logical_plan(
+        plan,
+        table_reference_access(statement_kind),
+        &mut diagnostics,
+    );
 
     RoutingInput {
         statement_kind: statement_kind.clone(),
@@ -213,35 +228,320 @@ fn routing_input_for_plan(statement_kind: &StatementKind, plan: &LogicalPlan) ->
     }
 }
 
-fn extract_minimal_table_references(
-    statement_kind: &StatementKind,
-    plan: &LogicalPlan,
-    diagnostics: &mut Vec<PlanningDiagnostic>,
-) -> Vec<TableReference> {
-    let access = table_reference_access(statement_kind);
-    match plan.table_name() {
-        Some(LITERAL_TABLE) => {
+/// Extracts physical table references from SQL-owned planner structures.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TableReferenceExtractor;
+
+impl TableReferenceExtractor {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Extract references from a logical plan tree. `root_access` is applied to
+    /// the top-level statement target; nested typed subqueries are read-only.
+    pub fn extract_from_logical_plan(
+        &self,
+        plan: &LogicalPlan,
+        root_access: TableReferenceAccess,
+        diagnostics: &mut Vec<PlanningDiagnostic>,
+    ) -> Vec<TableReference> {
+        let mut references = Vec::new();
+        self.extract_plan(
+            plan,
+            root_access,
+            TableReferenceSource::LogicalPlanScan,
+            diagnostics,
+            &mut references,
+        );
+        if references.is_empty() {
             diagnostics.push(PlanningDiagnostic::info(
                 "ALOPEX-PLAN-ROUTE-001",
                 "statement has no physical table reference",
             ));
-            Vec::new()
         }
-        Some(table_name) => vec![TableReference::new(
-            table_name,
-            access,
-            TableReferenceSource::TopLevelPlanTableName,
-        )],
-        None => {
-            diagnostics.push(PlanningDiagnostic::warning(
-                "ALOPEX-PLAN-ROUTE-002",
+        references
+    }
+
+    /// Extract references from a typed subquery plan embedded in an expression.
+    pub fn extract_from_subquery_context(
+        &self,
+        plan: &LogicalPlan,
+        diagnostics: &mut Vec<PlanningDiagnostic>,
+    ) -> Vec<TableReference> {
+        let mut references = Vec::new();
+        self.extract_plan(
+            plan,
+            TableReferenceAccess::Read,
+            TableReferenceSource::TypedExprSubquery,
+            diagnostics,
+            &mut references,
+        );
+        references
+    }
+
+    fn extract_plan(
+        &self,
+        plan: &LogicalPlan,
+        root_access: TableReferenceAccess,
+        scan_source: TableReferenceSource,
+        diagnostics: &mut Vec<PlanningDiagnostic>,
+        references: &mut Vec<TableReference>,
+    ) {
+        match plan {
+            LogicalPlan::Scan { table, projection } => {
+                if table != LITERAL_TABLE {
+                    push_table_reference(
+                        references,
+                        table,
+                        TableReferenceAccess::Read,
+                        scan_source,
+                    );
+                }
+                self.extract_projection(projection, diagnostics, references);
+            }
+            LogicalPlan::Filter { input, predicate } => {
+                self.extract_plan(input, root_access, scan_source, diagnostics, references);
+                self.extract_typed_expr(predicate, diagnostics, references);
+            }
+            LogicalPlan::Project { input, projection } => {
+                self.extract_plan(input, root_access, scan_source, diagnostics, references);
+                self.extract_projection(projection, diagnostics, references);
+            }
+            LogicalPlan::Join {
+                left,
+                right,
+                condition,
+                ..
+            } => {
+                self.extract_plan(
+                    left,
+                    TableReferenceAccess::Read,
+                    scan_source,
+                    diagnostics,
+                    references,
+                );
+                self.extract_plan(
+                    right,
+                    TableReferenceAccess::Read,
+                    scan_source,
+                    diagnostics,
+                    references,
+                );
+                if let Some(condition) = condition {
+                    self.extract_typed_expr(condition, diagnostics, references);
+                }
+            }
+            LogicalPlan::Aggregate {
+                input,
+                group_keys,
+                aggregates,
+                having,
+                projection,
+            } => {
+                self.extract_plan(input, root_access, scan_source, diagnostics, references);
+                for expr in group_keys {
+                    self.extract_typed_expr(expr, diagnostics, references);
+                }
+                for aggregate in aggregates {
+                    if let Some(arg) = &aggregate.arg {
+                        self.extract_typed_expr(arg, diagnostics, references);
+                    }
+                }
+                if let Some(having) = having {
+                    self.extract_typed_expr(having, diagnostics, references);
+                }
+                self.extract_projection(projection, diagnostics, references);
+            }
+            LogicalPlan::Sort { input, order_by } => {
+                self.extract_plan(input, root_access, scan_source, diagnostics, references);
+                for sort_expr in order_by {
+                    self.extract_typed_expr(&sort_expr.expr, diagnostics, references);
+                }
+            }
+            LogicalPlan::Limit { input, .. } => {
+                self.extract_plan(input, root_access, scan_source, diagnostics, references);
+            }
+            LogicalPlan::Insert { table, values, .. } => {
+                push_table_reference(
+                    references,
+                    table,
+                    root_access,
+                    TableReferenceSource::LogicalPlanMutationTarget,
+                );
+                for row in values {
+                    for value in row {
+                        self.extract_typed_expr(value, diagnostics, references);
+                    }
+                }
+            }
+            LogicalPlan::Update {
+                table,
+                assignments,
+                filter,
+            } => {
+                push_table_reference(
+                    references,
+                    table,
+                    root_access,
+                    TableReferenceSource::LogicalPlanMutationTarget,
+                );
+                for assignment in assignments {
+                    self.extract_typed_expr(&assignment.value, diagnostics, references);
+                }
+                if let Some(filter) = filter {
+                    self.extract_typed_expr(filter, diagnostics, references);
+                }
+            }
+            LogicalPlan::Delete { table, filter } => {
+                push_table_reference(
+                    references,
+                    table,
+                    root_access,
+                    TableReferenceSource::LogicalPlanMutationTarget,
+                );
+                if let Some(filter) = filter {
+                    self.extract_typed_expr(filter, diagnostics, references);
+                }
+            }
+            LogicalPlan::CreateTable { table, .. } => push_table_reference(
+                references,
+                &table.name,
+                root_access,
+                TableReferenceSource::LogicalPlanDdlTarget,
+            ),
+            LogicalPlan::DropTable { name, .. } => push_table_reference(
+                references,
+                name,
+                root_access,
+                TableReferenceSource::LogicalPlanDdlTarget,
+            ),
+            LogicalPlan::CreateIndex { index, .. } => push_table_reference(
+                references,
+                &index.table,
+                root_access,
+                TableReferenceSource::LogicalPlanIndexTarget,
+            ),
+            LogicalPlan::DropIndex { name, .. } => diagnostics.push(PlanningDiagnostic::warning(
+                "ALOPEX-PLAN-ROUTE-003",
                 format!(
-                    "{} table reference extraction is incomplete at the Task 5 planning boundary",
-                    plan.operation_name()
+                    "DROP INDEX {name} does not expose a target table in the current logical plan"
                 ),
-            ));
-            Vec::new()
+            )),
         }
+    }
+
+    fn extract_projection(
+        &self,
+        projection: &Projection,
+        diagnostics: &mut Vec<PlanningDiagnostic>,
+        references: &mut Vec<TableReference>,
+    ) {
+        if let Projection::Columns(columns) = projection {
+            for column in columns {
+                self.extract_typed_expr(&column.expr, diagnostics, references);
+            }
+        }
+    }
+
+    fn extract_typed_expr(
+        &self,
+        expr: &TypedExpr,
+        diagnostics: &mut Vec<PlanningDiagnostic>,
+        references: &mut Vec<TableReference>,
+    ) {
+        match &expr.kind {
+            TypedExprKind::Literal(_)
+            | TypedExprKind::ColumnRef { .. }
+            | TypedExprKind::VectorLiteral(_) => {}
+            TypedExprKind::BinaryOp { left, right, .. } => {
+                self.extract_typed_expr(left, diagnostics, references);
+                self.extract_typed_expr(right, diagnostics, references);
+            }
+            TypedExprKind::UnaryOp { operand, .. }
+            | TypedExprKind::Cast { expr: operand, .. }
+            | TypedExprKind::IsNull { expr: operand, .. } => {
+                self.extract_typed_expr(operand, diagnostics, references);
+            }
+            TypedExprKind::FunctionCall { args, .. } => {
+                for arg in args {
+                    self.extract_typed_expr(arg, diagnostics, references);
+                }
+            }
+            TypedExprKind::Between {
+                expr, low, high, ..
+            } => {
+                self.extract_typed_expr(expr, diagnostics, references);
+                self.extract_typed_expr(low, diagnostics, references);
+                self.extract_typed_expr(high, diagnostics, references);
+            }
+            TypedExprKind::Like {
+                expr,
+                pattern,
+                escape,
+                ..
+            } => {
+                self.extract_typed_expr(expr, diagnostics, references);
+                self.extract_typed_expr(pattern, diagnostics, references);
+                if let Some(escape) = escape {
+                    self.extract_typed_expr(escape, diagnostics, references);
+                }
+            }
+            TypedExprKind::InList { expr, list, .. } => {
+                self.extract_typed_expr(expr, diagnostics, references);
+                for item in list {
+                    self.extract_typed_expr(item, diagnostics, references);
+                }
+            }
+            TypedExprKind::ScalarSubquery(subquery) => self.extract_plan(
+                subquery,
+                TableReferenceAccess::Read,
+                TableReferenceSource::TypedExprSubquery,
+                diagnostics,
+                references,
+            ),
+            TypedExprKind::InSubquery { expr, subquery, .. } => {
+                self.extract_typed_expr(expr, diagnostics, references);
+                self.extract_plan(
+                    subquery,
+                    TableReferenceAccess::Read,
+                    TableReferenceSource::TypedExprSubquery,
+                    diagnostics,
+                    references,
+                );
+            }
+            TypedExprKind::Exists { subquery, .. } => self.extract_plan(
+                subquery,
+                TableReferenceAccess::Read,
+                TableReferenceSource::TypedExprSubquery,
+                diagnostics,
+                references,
+            ),
+            TypedExprKind::Quantified { expr, subquery, .. } => {
+                self.extract_typed_expr(expr, diagnostics, references);
+                self.extract_plan(
+                    subquery,
+                    TableReferenceAccess::Read,
+                    TableReferenceSource::TypedExprSubquery,
+                    diagnostics,
+                    references,
+                );
+            }
+        }
+    }
+}
+
+fn push_table_reference(
+    references: &mut Vec<TableReference>,
+    table_name: &str,
+    access: TableReferenceAccess,
+    source: TableReferenceSource,
+) {
+    if !references.iter().any(|reference| {
+        reference.table_name == table_name
+            && reference.access == access
+            && reference.source == source
+    }) {
+        references.push(TableReference::new(table_name, access, source));
     }
 }
 
