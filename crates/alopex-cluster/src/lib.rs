@@ -5,7 +5,7 @@
 //! transactions.
 
 use serde::{Deserialize, Serialize};
-use std::{error::Error, fmt};
+use std::{collections::BTreeSet, error::Error, fmt};
 
 /// Current schema version for v0.7 cluster metadata payloads.
 pub const CLUSTER_METADATA_SCHEMA_VERSION: u32 = 1;
@@ -623,6 +623,80 @@ impl CatalogTableSnapshot {
     }
 }
 
+/// SQL-planner-style access class for extracted table references.
+///
+/// This mirrors the shape of alopex-sql routing input without depending on the
+/// SQL crate or parsing SQL in the cluster layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryTableReferenceAccess {
+    Read,
+    Write,
+    Create,
+    Drop,
+    Metadata,
+}
+
+/// Source location for a table reference extracted before cluster routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryTableReferenceSource {
+    TopLevelPlanTableName,
+    LogicalPlanScan,
+    LogicalPlanMutationTarget,
+    LogicalPlanDdlTarget,
+    LogicalPlanIndexTarget,
+    TypedExprSubquery,
+}
+
+/// A table reference already extracted by the SQL planning boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct QueryTableReference {
+    pub table_ref: TableRef,
+    pub access: QueryTableReferenceAccess,
+    pub source: QueryTableReferenceSource,
+}
+
+impl QueryTableReference {
+    pub fn new(
+        table_ref: impl Into<TableRef>,
+        access: QueryTableReferenceAccess,
+        source: QueryTableReferenceSource,
+    ) -> Self {
+        Self {
+            table_ref: table_ref.into(),
+            access,
+            source,
+        }
+    }
+
+    pub fn read(table_ref: impl Into<TableRef>, source: QueryTableReferenceSource) -> Self {
+        Self::new(table_ref, QueryTableReferenceAccess::Read, source)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryRoutingRequest {
+    pub plan_id: PlanId,
+    pub catalog_snapshot: CatalogTableSnapshot,
+    #[serde(default)]
+    pub table_references: Vec<QueryTableReference>,
+}
+
+impl QueryRoutingRequest {
+    pub fn new(
+        plan_id: impl Into<PlanId>,
+        catalog_snapshot: CatalogTableSnapshot,
+        table_references: Vec<QueryTableReference>,
+    ) -> Self {
+        Self {
+            plan_id: plan_id.into(),
+            catalog_snapshot,
+            table_references,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacementCatalog {
     #[serde(default = "default_schema_version")]
@@ -810,6 +884,334 @@ impl PlacementCatalog {
                 placement.update_epoch = epoch;
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TargetEligibility {
+    role: Option<NodeRole>,
+    excluded_reason: Option<ExcludedTargetReason>,
+}
+
+#[derive(Debug)]
+pub struct QueryRouter<'a> {
+    placement_catalog: &'a PlacementCatalog,
+    membership: &'a MembershipView,
+}
+
+impl<'a> QueryRouter<'a> {
+    pub fn new(placement_catalog: &'a PlacementCatalog, membership: &'a MembershipView) -> Self {
+        Self {
+            placement_catalog,
+            membership,
+        }
+    }
+
+    pub fn route(&self, request: QueryRoutingRequest) -> RoutingDiagnostics {
+        self.route_live(request)
+    }
+
+    pub fn route_live(&self, request: QueryRoutingRequest) -> RoutingDiagnostics {
+        self.route_request(request, false)
+    }
+
+    pub fn simulate(&self, request: QueryRoutingRequest) -> RoutingDiagnostics {
+        self.route_request(request, true)
+    }
+
+    fn route_request(&self, request: QueryRoutingRequest, simulated: bool) -> RoutingDiagnostics {
+        let update_epoch = self
+            .placement_catalog
+            .update_epoch
+            .max(self.membership.update_epoch)
+            .max(request.catalog_snapshot.update_epoch);
+        let mut targets = Vec::new();
+        let mut excluded_targets = Vec::new();
+        let mut roles = Vec::new();
+        let mut fallback_reasons = Vec::new();
+
+        for table_reference in unique_query_table_references(request.table_references) {
+            let Some(current_table_id) = request
+                .catalog_snapshot
+                .table_id_for(&table_reference.table_ref)
+            else {
+                push_unique_diagnostic_reason(
+                    &mut fallback_reasons,
+                    StableDiagnosticCode::PlacementAbsent,
+                );
+                continue;
+            };
+
+            match self
+                .placement_catalog
+                .active_placement_for(&table_reference.table_ref, current_table_id)
+            {
+                Some(placement) => {
+                    let mut eligible_target_found = false;
+                    for target in placement.targets.iter().filter(|target| {
+                        target.table_ref == table_reference.table_ref
+                            && target.table_id == current_table_id
+                    }) {
+                        let eligibility = self.target_eligibility(&target.node_id);
+                        if let Some(role) = eligibility.role {
+                            push_unique_role(&mut roles, role);
+                        }
+
+                        if let Some(reason) = eligibility.excluded_reason {
+                            push_unique_excluded_target(
+                                &mut excluded_targets,
+                                target.clone(),
+                                reason,
+                            );
+                        } else {
+                            eligible_target_found = true;
+                            push_unique_target(&mut targets, target.clone());
+                        }
+                    }
+
+                    if !eligible_target_found {
+                        push_unique_diagnostic_reason(
+                            &mut fallback_reasons,
+                            StableDiagnosticCode::PlacementTargetIneligible,
+                        );
+                    }
+                }
+                None => {
+                    let stale_placements = stale_placements_for(
+                        self.placement_catalog,
+                        &table_reference.table_ref,
+                        current_table_id,
+                    );
+                    if stale_placements.is_empty() {
+                        push_unique_diagnostic_reason(
+                            &mut fallback_reasons,
+                            StableDiagnosticCode::PlacementAbsent,
+                        );
+                    } else {
+                        for placement in stale_placements {
+                            for target in &placement.targets {
+                                if target.table_ref == table_reference.table_ref {
+                                    push_unique_excluded_target(
+                                        &mut excluded_targets,
+                                        target.clone(),
+                                        ExcludedTargetReason::PlacementStale,
+                                    );
+                                }
+                            }
+                        }
+                        push_unique_diagnostic_reason(
+                            &mut fallback_reasons,
+                            StableDiagnosticCode::PlacementStale,
+                        );
+                    }
+                }
+            }
+        }
+
+        sort_targets(&mut targets);
+        sort_excluded_targets(&mut excluded_targets);
+
+        let unique_target_nodes = targets
+            .iter()
+            .map(|target| target.node_id.clone())
+            .collect::<BTreeSet<_>>();
+        let reason = routing_reason(unique_target_nodes.len(), &fallback_reasons);
+        let decision = match (simulated, unique_target_nodes.len()) {
+            (true, count) if count > 1 => RoutingDecisionKind::ScatterGatherSimulated,
+            (false, count) if count > 1 => RoutingDecisionKind::FutureDistributedExecutionRequired,
+            _ => RoutingDecisionKind::LocalOnly,
+        };
+        let reason = match decision {
+            RoutingDecisionKind::FutureDistributedExecutionRequired => {
+                StableDiagnosticCode::FutureDistributedExecutionRequired
+            }
+            RoutingDecisionKind::ScatterGatherSimulated => {
+                StableDiagnosticCode::ScatterGatherSimulated
+            }
+            RoutingDecisionKind::LocalOnly => reason,
+        };
+
+        let mut diagnostics =
+            RoutingDiagnostics::new(decision, reason, request.plan_id, update_epoch);
+        diagnostics.roles = roles;
+        diagnostics.targets = targets;
+        diagnostics.excluded_targets = excluded_targets;
+        diagnostics
+    }
+
+    fn target_eligibility(&self, node_id: &NodeId) -> TargetEligibility {
+        let Some(member) = self
+            .membership
+            .members
+            .iter()
+            .find(|member| &member.identity.node_id == node_id)
+        else {
+            return TargetEligibility {
+                role: None,
+                excluded_reason: Some(ExcludedTargetReason::MemberUnknown),
+            };
+        };
+
+        if member.derived_state != NodeState::Active {
+            return TargetEligibility {
+                role: Some(member.identity.role),
+                excluded_reason: Some(ExcludedTargetReason::MemberInactive),
+            };
+        }
+
+        if member.identity.role != NodeRole::Worker {
+            return TargetEligibility {
+                role: Some(member.identity.role),
+                excluded_reason: Some(ExcludedTargetReason::RoleNotWorker),
+            };
+        }
+
+        TargetEligibility {
+            role: Some(member.identity.role),
+            excluded_reason: None,
+        }
+    }
+}
+
+fn unique_query_table_references(
+    table_references: Vec<QueryTableReference>,
+) -> Vec<QueryTableReference> {
+    let mut seen = BTreeSet::new();
+    let mut unique = Vec::new();
+
+    for table_reference in table_references {
+        let key = (
+            table_reference.table_ref.clone(),
+            table_reference.access,
+            table_reference.source,
+        );
+        if seen.insert(key) {
+            unique.push(table_reference);
+        }
+    }
+
+    unique
+}
+
+fn stale_placements_for<'a>(
+    catalog: &'a PlacementCatalog,
+    table_ref: &TableRef,
+    current_table_id: TableId,
+) -> Vec<&'a PlacementMetadata> {
+    catalog
+        .placements()
+        .iter()
+        .filter(|placement| {
+            &placement.table_ref == table_ref
+                && (placement.table_id != current_table_id
+                    || placement.lifecycle_state != PlacementLifecycleState::Active)
+        })
+        .collect()
+}
+
+fn push_unique_role(roles: &mut Vec<NodeRole>, role: NodeRole) {
+    if !roles.contains(&role) {
+        roles.push(role);
+    }
+}
+
+fn push_unique_target(targets: &mut Vec<RoutingTarget>, target: RoutingTarget) {
+    if !targets.contains(&target) {
+        targets.push(target);
+    }
+}
+
+fn push_unique_excluded_target(
+    excluded_targets: &mut Vec<ExcludedRoutingTarget>,
+    target: RoutingTarget,
+    reason: ExcludedTargetReason,
+) {
+    let excluded = ExcludedRoutingTarget { target, reason };
+    if !excluded_targets.contains(&excluded) {
+        excluded_targets.push(excluded);
+    }
+}
+
+fn push_unique_diagnostic_reason(
+    reasons: &mut Vec<StableDiagnosticCode>,
+    reason: StableDiagnosticCode,
+) {
+    if !reasons.contains(&reason) {
+        reasons.push(reason);
+    }
+}
+
+fn routing_reason(
+    target_node_count: usize,
+    fallback_reasons: &[StableDiagnosticCode],
+) -> StableDiagnosticCode {
+    if fallback_reasons.contains(&StableDiagnosticCode::PlacementTargetIneligible) {
+        return StableDiagnosticCode::PlacementTargetIneligible;
+    }
+    if fallback_reasons.contains(&StableDiagnosticCode::PlacementStale) {
+        return StableDiagnosticCode::PlacementStale;
+    }
+    if fallback_reasons.contains(&StableDiagnosticCode::PlacementAbsent) {
+        return if target_node_count > 0 {
+            StableDiagnosticCode::MixedPlacementFallback
+        } else {
+            StableDiagnosticCode::PlacementAbsent
+        };
+    }
+
+    match target_node_count {
+        0 => StableDiagnosticCode::PlanningInputUnavailable,
+        1 => StableDiagnosticCode::SingleResolvedTarget,
+        _ => StableDiagnosticCode::FutureDistributedExecutionRequired,
+    }
+}
+
+fn sort_targets(targets: &mut [RoutingTarget]) {
+    targets.sort_by(|left, right| {
+        (
+            &left.node_id,
+            &left.table_ref,
+            left.table_id,
+            &left.shard_id,
+            &left.range_id,
+        )
+            .cmp(&(
+                &right.node_id,
+                &right.table_ref,
+                right.table_id,
+                &right.shard_id,
+                &right.range_id,
+            ))
+    });
+}
+
+fn sort_excluded_targets(excluded_targets: &mut [ExcludedRoutingTarget]) {
+    excluded_targets.sort_by(|left, right| {
+        (
+            &left.target.node_id,
+            &left.target.table_ref,
+            left.target.table_id,
+            &left.target.shard_id,
+            &left.target.range_id,
+            excluded_reason_order(left.reason),
+        )
+            .cmp(&(
+                &right.target.node_id,
+                &right.target.table_ref,
+                right.target.table_id,
+                &right.target.shard_id,
+                &right.target.range_id,
+                excluded_reason_order(right.reason),
+            ))
+    });
+}
+
+fn excluded_reason_order(reason: ExcludedTargetReason) -> u8 {
+    match reason {
+        ExcludedTargetReason::MemberInactive => 0,
+        ExcludedTargetReason::MemberUnknown => 1,
+        ExcludedTargetReason::RoleNotWorker => 2,
+        ExcludedTargetReason::PlacementStale => 3,
     }
 }
 
@@ -1237,6 +1639,63 @@ mod tests {
         placement
     }
 
+    fn placement_with_targets(
+        table_ref: &str,
+        table_id: TableId,
+        update_epoch: UpdateEpoch,
+        node_ids: &[&str],
+    ) -> PlacementMetadata {
+        let mut placement = PlacementMetadata::new(table_ref, table_id, update_epoch);
+        placement.targets.extend(
+            node_ids
+                .iter()
+                .map(|node_id| RoutingTarget::table(*node_id, table_ref, table_id)),
+        );
+        placement
+    }
+
+    fn member_status(node_id: &str, role: NodeRole, derived_state: NodeState) -> MemberStatus {
+        MemberStatus {
+            identity: MemberIdentity {
+                node_id: NodeId::new(node_id),
+                cluster_id: Some(ClusterId::new("cluster-a")),
+                advertised_endpoint: Some(Endpoint::new(format!("127.0.0.1:7{}", node_id))),
+                role,
+            },
+            raw_reachability_state: None,
+            derived_state,
+            transition_reason: Some("test".to_string()),
+        }
+    }
+
+    fn membership_with(members: Vec<MemberStatus>) -> MembershipView {
+        let mut membership = MembershipView::new(MembershipSource::Persisted, 5);
+        membership.members = members;
+        membership
+    }
+
+    fn read_ref(table_ref: &str, source: QueryTableReferenceSource) -> QueryTableReference {
+        QueryTableReference::read(table_ref, source)
+    }
+
+    fn catalog_snapshot(tables: &[(&str, TableId)]) -> CatalogTableSnapshot {
+        CatalogTableSnapshot::from_tables(
+            6,
+            tables
+                .iter()
+                .map(|(table_ref, table_id)| CatalogTableRef::new(*table_ref, *table_id))
+                .collect(),
+        )
+    }
+
+    fn routing_request(
+        plan_id: &str,
+        tables: &[(&str, TableId)],
+        table_references: Vec<QueryTableReference>,
+    ) -> QueryRoutingRequest {
+        QueryRoutingRequest::new(plan_id, catalog_snapshot(tables), table_references)
+    }
+
     #[test]
     fn node_role_serializes_as_stable_snake_case() {
         assert_eq!(
@@ -1339,6 +1798,327 @@ mod tests {
 
         let decoded: RoutingDiagnostics = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, diagnostics);
+    }
+
+    #[test]
+    fn query_router_returns_mixed_fallback_for_partial_missing_placement() {
+        let catalog = PlacementCatalog::from_placements(
+            3,
+            vec![placement_with_targets(
+                "default.public.orders",
+                8,
+                3,
+                &["node-a"],
+            )],
+        );
+        let membership = membership_with(vec![member_status(
+            "node-a",
+            NodeRole::Worker,
+            NodeState::Active,
+        )]);
+        let router = QueryRouter::new(&catalog, &membership);
+
+        let diagnostics = router.route(routing_request(
+            "plan-missing",
+            &[("default.public.orders", 8)],
+            vec![
+                read_ref(
+                    "default.public.users",
+                    QueryTableReferenceSource::LogicalPlanScan,
+                ),
+                read_ref(
+                    "default.public.orders",
+                    QueryTableReferenceSource::LogicalPlanScan,
+                ),
+            ],
+        ));
+
+        assert_eq!(diagnostics.decision, RoutingDecisionKind::LocalOnly);
+        assert_eq!(
+            diagnostics.reason,
+            StableDiagnosticCode::MixedPlacementFallback
+        );
+        assert_eq!(diagnostics.targets.len(), 1);
+        assert!(diagnostics.excluded_targets.is_empty());
+    }
+
+    #[test]
+    fn query_router_returns_stale_placement_with_excluded_stale_targets() {
+        let mut placement = placement_with_targets("default.public.users", 7, 3, &["node-a"]);
+        placement.lifecycle_state = PlacementLifecycleState::Stale;
+        let catalog = PlacementCatalog::from_placements(3, vec![placement]);
+        let membership = membership_with(vec![member_status(
+            "node-a",
+            NodeRole::Worker,
+            NodeState::Active,
+        )]);
+        let router = QueryRouter::new(&catalog, &membership);
+
+        let diagnostics = router.route(routing_request(
+            "plan-stale",
+            &[("default.public.users", 7)],
+            vec![read_ref(
+                "default.public.users",
+                QueryTableReferenceSource::LogicalPlanScan,
+            )],
+        ));
+
+        assert_eq!(diagnostics.reason, StableDiagnosticCode::PlacementStale);
+        assert!(diagnostics.targets.is_empty());
+        assert_eq!(diagnostics.excluded_targets.len(), 1);
+        assert_eq!(
+            diagnostics.excluded_targets[0].reason,
+            ExcludedTargetReason::PlacementStale
+        );
+    }
+
+    #[test]
+    fn query_router_resolves_single_eligible_target() {
+        let catalog = PlacementCatalog::from_placements(3, vec![users_placement(7, 3)]);
+        let membership = membership_with(vec![member_status(
+            "node-a",
+            NodeRole::Worker,
+            NodeState::Active,
+        )]);
+        let router = QueryRouter::new(&catalog, &membership);
+
+        let diagnostics = router.route(routing_request(
+            "plan-single",
+            &[("default.public.users", 7)],
+            vec![read_ref(
+                "default.public.users",
+                QueryTableReferenceSource::LogicalPlanScan,
+            )],
+        ));
+
+        assert_eq!(diagnostics.decision, RoutingDecisionKind::LocalOnly);
+        assert_eq!(
+            diagnostics.reason,
+            StableDiagnosticCode::SingleResolvedTarget
+        );
+        assert_eq!(diagnostics.targets.len(), 1);
+        assert_eq!(diagnostics.targets[0].node_id, NodeId::new("node-a"));
+        assert!(diagnostics.excluded_targets.is_empty());
+    }
+
+    #[test]
+    fn query_router_marks_multi_node_targets_as_future_distributed() {
+        let catalog = PlacementCatalog::from_placements(
+            3,
+            vec![placement_with_targets(
+                "default.public.users",
+                7,
+                3,
+                &["node-a", "node-b"],
+            )],
+        );
+        let membership = membership_with(vec![
+            member_status("node-a", NodeRole::Worker, NodeState::Active),
+            member_status("node-b", NodeRole::Worker, NodeState::Active),
+        ]);
+        let router = QueryRouter::new(&catalog, &membership);
+
+        let diagnostics = router.route(routing_request(
+            "plan-distributed",
+            &[("default.public.users", 7)],
+            vec![read_ref(
+                "default.public.users",
+                QueryTableReferenceSource::LogicalPlanScan,
+            )],
+        ));
+
+        assert_eq!(
+            diagnostics.decision,
+            RoutingDecisionKind::FutureDistributedExecutionRequired
+        );
+        assert_eq!(
+            diagnostics.reason,
+            StableDiagnosticCode::FutureDistributedExecutionRequired
+        );
+        assert_eq!(diagnostics.targets.len(), 2);
+        assert!(diagnostics.excluded_targets.is_empty());
+    }
+
+    #[test]
+    fn query_router_simulates_scatter_gather_for_multi_node_targets() {
+        let catalog = PlacementCatalog::from_placements(
+            3,
+            vec![placement_with_targets(
+                "default.public.users",
+                7,
+                3,
+                &["node-a", "node-b"],
+            )],
+        );
+        let membership = membership_with(vec![
+            member_status("node-a", NodeRole::Worker, NodeState::Active),
+            member_status("node-b", NodeRole::Worker, NodeState::Active),
+        ]);
+        let router = QueryRouter::new(&catalog, &membership);
+
+        let diagnostics = router.simulate(routing_request(
+            "plan-simulated",
+            &[("default.public.users", 7)],
+            vec![read_ref(
+                "default.public.users",
+                QueryTableReferenceSource::LogicalPlanScan,
+            )],
+        ));
+
+        assert_eq!(
+            diagnostics.decision,
+            RoutingDecisionKind::ScatterGatherSimulated
+        );
+        assert_eq!(
+            diagnostics.reason,
+            StableDiagnosticCode::ScatterGatherSimulated
+        );
+        assert_eq!(diagnostics.targets.len(), 2);
+    }
+
+    #[test]
+    fn query_router_excludes_role_unknown_and_inactive_targets() {
+        let catalog = PlacementCatalog::from_placements(
+            3,
+            vec![placement_with_targets(
+                "default.public.users",
+                7,
+                3,
+                &["node-a", "node-gateway", "node-missing", "node-down"],
+            )],
+        );
+        let membership = membership_with(vec![
+            member_status("node-a", NodeRole::Worker, NodeState::Active),
+            member_status("node-gateway", NodeRole::Gateway, NodeState::Active),
+            member_status("node-down", NodeRole::Worker, NodeState::Unreachable),
+        ]);
+        let router = QueryRouter::new(&catalog, &membership);
+
+        let diagnostics = router.route(routing_request(
+            "plan-exclusions",
+            &[("default.public.users", 7)],
+            vec![read_ref(
+                "default.public.users",
+                QueryTableReferenceSource::LogicalPlanScan,
+            )],
+        ));
+
+        assert_eq!(
+            diagnostics.reason,
+            StableDiagnosticCode::SingleResolvedTarget
+        );
+        assert_eq!(diagnostics.targets.len(), 1);
+        assert_eq!(diagnostics.excluded_targets.len(), 3);
+        assert!(diagnostics.excluded_targets.iter().any(|excluded| {
+            excluded.target.node_id == NodeId::new("node-gateway")
+                && excluded.reason == ExcludedTargetReason::RoleNotWorker
+        }));
+        assert!(diagnostics.excluded_targets.iter().any(|excluded| {
+            excluded.target.node_id == NodeId::new("node-missing")
+                && excluded.reason == ExcludedTargetReason::MemberUnknown
+        }));
+        assert!(diagnostics.excluded_targets.iter().any(|excluded| {
+            excluded.target.node_id == NodeId::new("node-down")
+                && excluded.reason == ExcludedTargetReason::MemberInactive
+        }));
+    }
+
+    #[test]
+    fn query_router_returns_placement_target_ineligible_when_no_target_can_run() {
+        let catalog = PlacementCatalog::from_placements(
+            3,
+            vec![placement_with_targets(
+                "default.public.users",
+                7,
+                3,
+                &["node-gateway"],
+            )],
+        );
+        let membership = membership_with(vec![member_status(
+            "node-gateway",
+            NodeRole::Gateway,
+            NodeState::Active,
+        )]);
+        let router = QueryRouter::new(&catalog, &membership);
+
+        let diagnostics = router.route(routing_request(
+            "plan-ineligible",
+            &[("default.public.users", 7)],
+            vec![read_ref(
+                "default.public.users",
+                QueryTableReferenceSource::LogicalPlanScan,
+            )],
+        ));
+
+        assert_eq!(
+            diagnostics.reason,
+            StableDiagnosticCode::PlacementTargetIneligible
+        );
+        assert!(diagnostics.targets.is_empty());
+        assert_eq!(diagnostics.excluded_targets.len(), 1);
+        assert_eq!(
+            diagnostics.excluded_targets[0].reason,
+            ExcludedTargetReason::RoleNotWorker
+        );
+    }
+
+    #[test]
+    fn query_router_composes_join_and_subquery_style_table_references() {
+        let catalog = PlacementCatalog::from_placements(
+            3,
+            vec![
+                placement_with_targets("default.public.users", 7, 3, &["node-a"]),
+                placement_with_targets("default.public.orders", 8, 3, &["node-a"]),
+                placement_with_targets("default.public.audit_log", 9, 3, &["node-b"]),
+            ],
+        );
+        let membership = membership_with(vec![
+            member_status("node-a", NodeRole::Worker, NodeState::Active),
+            member_status("node-b", NodeRole::Worker, NodeState::Active),
+        ]);
+        let router = QueryRouter::new(&catalog, &membership);
+
+        let diagnostics = router.route(routing_request(
+            "plan-join-subquery",
+            &[
+                ("default.public.users", 7),
+                ("default.public.orders", 8),
+                ("default.public.audit_log", 9),
+            ],
+            vec![
+                read_ref(
+                    "default.public.users",
+                    QueryTableReferenceSource::LogicalPlanScan,
+                ),
+                read_ref(
+                    "default.public.orders",
+                    QueryTableReferenceSource::LogicalPlanScan,
+                ),
+                read_ref(
+                    "default.public.audit_log",
+                    QueryTableReferenceSource::TypedExprSubquery,
+                ),
+            ],
+        ));
+
+        assert_eq!(
+            diagnostics.decision,
+            RoutingDecisionKind::FutureDistributedExecutionRequired
+        );
+        assert_eq!(diagnostics.targets.len(), 3);
+        for table_ref in [
+            "default.public.users",
+            "default.public.orders",
+            "default.public.audit_log",
+        ] {
+            assert!(
+                diagnostics
+                    .targets
+                    .iter()
+                    .any(|target| target.table_ref == TableRef::new(table_ref)),
+                "missing target for {table_ref}"
+            );
+        }
     }
 
     #[test]
