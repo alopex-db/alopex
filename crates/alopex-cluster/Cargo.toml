@@ -9,6 +9,17 @@ keywords = ["database", "cluster", "distributed"]
 categories = ["database-implementations"]
 
 [features]
+default = []
 lane_ci = []
+chirps = ["dep:alopex-chirps-gossip-swim"]
 
 [dependencies]
+serde = { workspace = true, features = ["derive"] }
+
+# Optional adapter source for v0.7 Chirps reachability input.
+# Kept behind the `chirps` feature so default Alopex builds do not depend on
+# the sibling Chirps workspace.
+alopex-chirps-gossip-swim = { path = "../../../../chirps/crates/chirps-gossip-swim", optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
