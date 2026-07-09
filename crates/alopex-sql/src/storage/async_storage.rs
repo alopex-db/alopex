@@ -15,7 +15,7 @@ use crate::dialect::AlopexDialect;
 use crate::executor::memory::MemoryPolicy;
 use crate::executor::{ExecutionResult, ExecutorError, Result as ExecResult, Row, ddl, dml, query};
 use crate::parser::Parser;
-use crate::planner::{LogicalPlan, Planner};
+use crate::planner::{LogicalPlan, PlannedStatement, Planner, plan_sql_for_routing};
 use crate::storage::bridge::HnswTxnEntry;
 use crate::storage::error::{Result as StorageResult, StorageError};
 use crate::storage::{KeyEncoder, RowCodec};
@@ -88,6 +88,35 @@ where
     /// Returns the transaction mode.
     pub fn mode(&self) -> TxnMode {
         self.mode
+    }
+
+    /// Parse and plan SQL for routing analysis without executing it.
+    ///
+    /// This uses the same catalog handle configured on the transaction bridge
+    /// and leaves the underlying KV transaction untouched.
+    pub fn async_plan_for_routing<'a>(
+        &'a self,
+        sql: &'a str,
+    ) -> BoxFuture<'a, ExecResult<Vec<PlannedStatement>>> {
+        let catalog = match self.catalog.clone() {
+            Some(catalog) => catalog,
+            None => {
+                return Box::pin(async move {
+                    Err(ExecutorError::InvalidOperation {
+                        operation: "async_plan_for_routing".into(),
+                        reason: "catalog not configured".into(),
+                    })
+                });
+            }
+        };
+        let sql = sql.to_string();
+        Box::pin(async move {
+            let guard = catalog.read().expect("catalog lock poisoned");
+            plan_sql_for_routing(&*guard, &sql).map_err(|err| ExecutorError::InvalidOperation {
+                operation: "async_plan_for_routing".into(),
+                reason: err.to_string(),
+            })
+        })
     }
 
     /// Fetch a row by row id.
