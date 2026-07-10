@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use alopex_cluster::ClusterStatusSnapshot;
 use alopex_core::kv::any::AnyKV;
 use axum::extract::{Extension, Path as AxumPath};
 use axum::http::StatusCode;
@@ -11,6 +12,7 @@ use uuid::Uuid;
 
 use crate::auth::AuthMode;
 use crate::http::{error_response, RequestContext};
+use crate::metrics::ClusterMetricsSurface;
 use crate::ops::backup::{export_snapshot, BackupHandle};
 use crate::ops::restore::{RestoreHandle, RestoreSource};
 use crate::ops::state::{OperationState, RestoreMetadata};
@@ -30,6 +32,7 @@ struct AdminStatusResponse {
     uptime_secs: Option<u64>,
     connections: Option<u64>,
     queries_per_second: Option<f64>,
+    cluster: ClusterStatusSnapshot,
     #[serde(flatten)]
     status: StatusView,
 }
@@ -41,12 +44,16 @@ struct AdminMetricsResponse {
     p99_latency_ms: Option<f64>,
     memory_usage_mb: Option<u64>,
     active_connections: Option<u64>,
+    cluster: ClusterStatusSnapshot,
+    cluster_metrics: ClusterMetricsSurface,
 }
 
 #[derive(Serialize)]
 struct AdminHealthResponse {
     status: &'static str,
     message: &'static str,
+    degraded: bool,
+    cluster: ClusterStatusSnapshot,
 }
 
 #[derive(Deserialize)]
@@ -100,34 +107,71 @@ pub async fn capabilities(Extension(state): Extension<Arc<ServerState>>) -> impl
     })
 }
 
-pub async fn status(Extension(state): Extension<Arc<ServerState>>) -> impl IntoResponse {
+pub async fn status(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+) -> Response {
     let uptime = state.start_time.elapsed().as_secs();
     let reporter = StatusReporter::new(state.lifecycle_state.clone(), state.recovery_info.clone());
     let status = reporter.status_view();
+    let cluster = match state.cluster_status_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(err) => return error_response(err, &ctx),
+    };
+    state.metrics.record_cluster_status(&cluster);
     Json(AdminStatusResponse {
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
         uptime_secs: Some(uptime),
         connections: None,
         queries_per_second: None,
+        cluster,
         status,
     })
+    .into_response()
 }
 
-pub async fn metrics(Extension(_state): Extension<Arc<ServerState>>) -> impl IntoResponse {
+pub async fn metrics(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+) -> Response {
+    let cluster = match state.cluster_status_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(err) => return error_response(err, &ctx),
+    };
+    state.metrics.record_cluster_status(&cluster);
     Json(AdminMetricsResponse {
         qps: None,
         avg_latency_ms: None,
         p99_latency_ms: None,
         memory_usage_mb: None,
         active_connections: None,
+        cluster_metrics: ClusterMetricsSurface::from(&cluster),
+        cluster,
     })
+    .into_response()
 }
 
-pub async fn health() -> impl IntoResponse {
+pub async fn health(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+) -> Response {
+    let cluster = match state.cluster_status_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(err) => return error_response(err, &ctx),
+    };
+    state.metrics.record_cluster_status(&cluster);
+    let (status, message) = if cluster.degraded {
+        ("degraded", "cluster status degraded")
+    } else {
+        ("ok", "ready")
+    };
     Json(AdminHealthResponse {
-        status: "ok",
-        message: "ready",
+        status,
+        message,
+        degraded: cluster.degraded,
+        cluster,
     })
+    .into_response()
 }
 
 pub async fn compaction() -> impl IntoResponse {

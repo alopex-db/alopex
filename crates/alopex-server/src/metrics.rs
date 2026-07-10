@@ -1,13 +1,34 @@
 use std::time::Duration;
 
-use prometheus::{
-    Encoder, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
-    TextEncoder,
+use alopex_cluster::{
+    ClusterMetricsSource, ClusterMetricsSummary, ClusterMode, ClusterStatusSnapshot,
 };
+use prometheus::{
+    Encoder, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Registry, TextEncoder,
+};
+use serde::Serialize;
 
 use crate::error::{Result, ServerError};
 use crate::ops::recovery::{RecoveryInfo, RecoveryOutcome};
 use crate::ops::state::{OperationState, OperationStatus};
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ClusterMetricsSurface {
+    pub source: ClusterMetricsSource,
+    pub summary: ClusterMetricsSummary,
+    pub degraded: bool,
+}
+
+impl From<&ClusterStatusSnapshot> for ClusterMetricsSurface {
+    fn from(snapshot: &ClusterStatusSnapshot) -> Self {
+        Self {
+            source: snapshot.metrics_summary.source,
+            summary: snapshot.metrics_summary.clone(),
+            degraded: snapshot.degraded,
+        }
+    }
+}
 
 /// Prometheus metrics registry.
 #[derive(Clone)]
@@ -28,6 +49,10 @@ pub struct Metrics {
     restore_progress_percent: IntGauge,
     spill_bytes: IntCounter,
     spill_files: IntCounter,
+    cluster_mode: IntGaugeVec,
+    cluster_degraded: IntGauge,
+    cluster_metrics_source: IntGaugeVec,
+    cluster_member_metrics_source: IntGaugeVec,
 }
 
 impl Metrics {
@@ -93,6 +118,30 @@ impl Metrics {
         let spill_files =
             IntCounter::with_opts(Opts::new("spill_files_total", "Total spill files"))
                 .map_err(|err| ServerError::Internal(err.to_string()))?;
+        let cluster_mode = IntGaugeVec::new(
+            Opts::new("cluster_mode", "Current cluster mode as one-hot labels"),
+            &["mode"],
+        )
+        .map_err(|err| ServerError::Internal(err.to_string()))?;
+        let cluster_degraded =
+            IntGauge::with_opts(Opts::new("cluster_degraded", "Cluster degraded status"))
+                .map_err(|err| ServerError::Internal(err.to_string()))?;
+        let cluster_metrics_source = IntGaugeVec::new(
+            Opts::new(
+                "cluster_metrics_source",
+                "Cluster metrics source as one-hot labels",
+            ),
+            &["source"],
+        )
+        .map_err(|err| ServerError::Internal(err.to_string()))?;
+        let cluster_member_metrics_source = IntGaugeVec::new(
+            Opts::new(
+                "cluster_member_metrics_source",
+                "Observed per-member cluster metrics source by node",
+            ),
+            &["node_id", "source"],
+        )
+        .map_err(|err| ServerError::Internal(err.to_string()))?;
 
         registry
             .register(Box::new(query_count.clone()))
@@ -139,6 +188,18 @@ impl Metrics {
         registry
             .register(Box::new(spill_files.clone()))
             .map_err(|err| ServerError::Internal(err.to_string()))?;
+        registry
+            .register(Box::new(cluster_mode.clone()))
+            .map_err(|err| ServerError::Internal(err.to_string()))?;
+        registry
+            .register(Box::new(cluster_degraded.clone()))
+            .map_err(|err| ServerError::Internal(err.to_string()))?;
+        registry
+            .register(Box::new(cluster_metrics_source.clone()))
+            .map_err(|err| ServerError::Internal(err.to_string()))?;
+        registry
+            .register(Box::new(cluster_member_metrics_source.clone()))
+            .map_err(|err| ServerError::Internal(err.to_string()))?;
 
         Ok(Self {
             registry,
@@ -157,6 +218,10 @@ impl Metrics {
             restore_progress_percent,
             spill_bytes,
             spill_files,
+            cluster_mode,
+            cluster_degraded,
+            cluster_metrics_source,
+            cluster_member_metrics_source,
         })
     }
 
@@ -217,6 +282,33 @@ impl Metrics {
             .set(progress_percent(restore) as i64);
     }
 
+    /// Record cluster status summary metrics without inventing unobserved remote values.
+    pub fn record_cluster_status(&self, snapshot: &ClusterStatusSnapshot) {
+        for mode in [ClusterMode::SingleNode, ClusterMode::ClusterAware] {
+            self.cluster_mode
+                .with_label_values(&[cluster_mode_label(mode)])
+                .set((snapshot.mode == mode) as i64);
+        }
+        self.cluster_degraded.set(snapshot.degraded as i64);
+        for source in [
+            ClusterMetricsSource::LiveStatusSurface,
+            ClusterMetricsSource::SimulatedHarness,
+        ] {
+            self.cluster_metrics_source
+                .with_label_values(&[cluster_metrics_source_label(source)])
+                .set((snapshot.metrics_summary.source == source) as i64);
+        }
+        self.cluster_member_metrics_source.reset();
+        for member in &snapshot.metrics_summary.members {
+            self.cluster_member_metrics_source
+                .with_label_values(&[
+                    member.node_id.as_str(),
+                    cluster_metrics_source_label(member.source),
+                ])
+                .set(1);
+        }
+    }
+
     /// Render metrics in Prometheus text format.
     pub fn expose_prometheus(&self) -> Result<String> {
         let mut buffer = Vec::new();
@@ -253,4 +345,18 @@ fn progress_percent(state: &OperationState) -> u8 {
         .as_ref()
         .and_then(|progress| progress.percent)
         .unwrap_or(0)
+}
+
+fn cluster_mode_label(mode: ClusterMode) -> &'static str {
+    match mode {
+        ClusterMode::SingleNode => "single_node",
+        ClusterMode::ClusterAware => "cluster_aware",
+    }
+}
+
+fn cluster_metrics_source_label(source: ClusterMetricsSource) -> &'static str {
+    match source {
+        ClusterMetricsSource::LiveStatusSurface => "live_status_surface",
+        ClusterMetricsSource::SimulatedHarness => "simulated_harness",
+    }
 }

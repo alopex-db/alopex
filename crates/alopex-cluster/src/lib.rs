@@ -1944,7 +1944,7 @@ impl ClusterManager {
             membership: self.membership.clone(),
             placement: self.placement.placement_view(),
             routing_capabilities: self.routing_capabilities.clone(),
-            metrics_summary: self.metrics_summary.clone(),
+            metrics_summary: self.status_metrics_summary(),
             degraded: self.degraded,
             diagnostics: self.diagnostics.clone(),
         }
@@ -2049,6 +2049,37 @@ impl ClusterManager {
         }
 
         Ok(manager)
+    }
+
+    fn status_metrics_summary(&self) -> ClusterMetricsSummary {
+        match self.metrics_summary.source {
+            ClusterMetricsSource::SimulatedHarness => self.metrics_summary.clone(),
+            ClusterMetricsSource::LiveStatusSurface => {
+                let members = self
+                    .membership
+                    .members
+                    .iter()
+                    .map(|member| {
+                        self.metrics_summary
+                            .members
+                            .iter()
+                            .find(|metrics| metrics.node_id == member.identity.node_id)
+                            .cloned()
+                            .unwrap_or_else(|| MemberMetricsSummary {
+                                node_id: member.identity.node_id.clone(),
+                                source: ClusterMetricsSource::LiveStatusSurface,
+                                latency_ms: None,
+                                load: None,
+                                error_count: None,
+                            })
+                    })
+                    .collect();
+                ClusterMetricsSummary {
+                    source: ClusterMetricsSource::LiveStatusSurface,
+                    members,
+                }
+            }
+        }
     }
 
     fn next_epoch(&mut self) -> UpdateEpoch {

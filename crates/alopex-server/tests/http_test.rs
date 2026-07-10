@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use alopex_cluster::{ClusterMode, NodeRole, NodeState};
 use alopex_server::auth::AuthMode;
-use alopex_server::config::ServerConfig;
+use alopex_server::config::{ClusterServerConfig, ServerConfig};
 use alopex_server::http;
 use alopex_server::server::ServerState;
 use alopex_server::Server;
@@ -22,6 +23,30 @@ async fn build_state(
         auth_mode,
         query_timeout,
         audit_log_enabled: false,
+        ..ServerConfig::default()
+    };
+    let server = Server::new(config).expect("server");
+    (server.state, temp)
+}
+
+async fn build_cluster_aware_state(
+    membership_source_available: bool,
+) -> (Arc<ServerState>, tempfile::TempDir) {
+    let temp = tempdir().expect("tempdir");
+    let config = ServerConfig {
+        data_dir: temp.path().to_path_buf(),
+        auth_mode: AuthMode::None,
+        audit_log_enabled: false,
+        cluster: ClusterServerConfig {
+            mode: ClusterMode::ClusterAware,
+            node_id: Some("node-a".to_string()),
+            cluster_id: Some("cluster-a".to_string()),
+            advertised_endpoint: Some("127.0.0.1:7001".to_string()),
+            role: NodeRole::Worker,
+            lifecycle_state: NodeState::Active,
+            membership_source_available,
+            ..ClusterServerConfig::default()
+        },
         ..ServerConfig::default()
     };
     let server = Server::new(config).expect("server");
@@ -87,6 +112,21 @@ async fn admin_api_endpoints_return_expected_payloads() {
     let value: Value = serde_json::from_slice(&body).expect("status json");
     assert!(value.get("version").and_then(|v| v.as_str()).is_some());
     assert!(value.get("uptime_secs").and_then(|v| v.as_u64()).is_some());
+    assert_eq!(value["cluster"]["schema_version"].as_u64(), Some(1));
+    assert_eq!(value["cluster"]["mode"].as_str(), Some("single_node"));
+    assert_eq!(
+        value["cluster"]["identity"]["node_id"].as_str(),
+        Some("local")
+    );
+    assert_eq!(
+        value["cluster"]["routing_capabilities"]["local_only"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(value["cluster"]["degraded"].as_bool(), Some(false));
+    assert_eq!(
+        value["cluster"]["metrics_summary"]["source"].as_str(),
+        Some("live_status_surface")
+    );
 
     let (status, _, body) = send_empty(router.clone(), Method::GET, "/api/admin/metrics").await;
     assert_eq!(status, StatusCode::OK);
@@ -96,12 +136,27 @@ async fn admin_api_endpoints_return_expected_payloads() {
     assert!(value.get("p99_latency_ms").is_some());
     assert!(value.get("memory_usage_mb").is_some());
     assert!(value.get("active_connections").is_some());
+    assert_eq!(value["cluster"]["mode"].as_str(), Some("single_node"));
+    assert_eq!(
+        value["cluster_metrics"]["source"].as_str(),
+        Some("live_status_surface")
+    );
+    assert_eq!(value["cluster_metrics"]["degraded"].as_bool(), Some(false));
+    assert_eq!(
+        value["cluster_metrics"]["summary"]["members"]
+            .as_array()
+            .expect("member metrics")
+            .len(),
+        0
+    );
 
     let (status, _, body) = send_empty(router.clone(), Method::GET, "/api/admin/health").await;
     assert_eq!(status, StatusCode::OK);
     let value: Value = serde_json::from_slice(&body).expect("health json");
     assert_eq!(value.get("status").and_then(|v| v.as_str()), Some("ok"));
     assert_eq!(value.get("message").and_then(|v| v.as_str()), Some("ready"));
+    assert_eq!(value["degraded"].as_bool(), Some(false));
+    assert_eq!(value["cluster"]["mode"].as_str(), Some("single_node"));
 
     let (status, _, body) = send_json(
         router.clone(),
@@ -115,6 +170,89 @@ async fn admin_api_endpoints_return_expected_payloads() {
     let value: Value = serde_json::from_slice(&body).expect("compaction json");
     assert_eq!(value.get("success").and_then(|v| v.as_bool()), Some(false));
     assert!(value.get("message").and_then(|v| v.as_str()).is_some());
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn admin_cluster_aware_degraded_status_health_and_metrics_payloads() {
+    let (state, _temp) = build_cluster_aware_state(false).await;
+    let router = http::router(state.clone());
+
+    let (status, _, body) = send_empty(router.clone(), Method::GET, "/api/admin/status").await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("status json");
+    assert_eq!(value["cluster"]["mode"].as_str(), Some("cluster_aware"));
+    assert_eq!(
+        value["cluster"]["identity"]["node_id"].as_str(),
+        Some("node-a")
+    );
+    assert_eq!(
+        value["cluster"]["membership"]["members"][0]["raw_reachability_state"],
+        Value::Null
+    );
+    assert_eq!(
+        value["cluster"]["membership"]["members"][0]["derived_state"].as_str(),
+        Some("active")
+    );
+    assert_eq!(value["cluster"]["degraded"].as_bool(), Some(true));
+    assert_eq!(
+        value["cluster"]["diagnostics"][0]["code"].as_str(),
+        Some("chirps_unavailable")
+    );
+
+    let (status, _, body) = send_empty(router.clone(), Method::GET, "/api/admin/health").await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("health json");
+    assert_eq!(value["status"].as_str(), Some("degraded"));
+    assert_eq!(value["message"].as_str(), Some("cluster status degraded"));
+    assert_eq!(value["degraded"].as_bool(), Some(true));
+
+    let (status, _, body) = send_empty(router.clone(), Method::GET, "/api/admin/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("metrics json");
+    assert_eq!(value["cluster"]["mode"].as_str(), Some("cluster_aware"));
+    assert_eq!(
+        value["cluster"]["metrics_summary"]["members"][0]["node_id"].as_str(),
+        Some("node-a")
+    );
+    assert_eq!(
+        value["cluster"]["metrics_summary"]["members"][0]["source"].as_str(),
+        Some("live_status_surface")
+    );
+    assert_eq!(
+        value["cluster"]["metrics_summary"]["members"][0]["latency_ms"],
+        Value::Null
+    );
+    assert_eq!(
+        value["cluster_metrics"]["source"].as_str(),
+        Some("live_status_surface")
+    );
+    assert_eq!(value["cluster_metrics"]["degraded"].as_bool(), Some(true));
+    assert_eq!(
+        value["cluster_metrics"]["summary"]["members"]
+            .as_array()
+            .expect("member metrics")
+            .len(),
+        1
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn prometheus_metrics_include_cluster_source_without_remote_observations() {
+    let (state, _temp) = build_cluster_aware_state(false).await;
+    let router = http::admin::router(state);
+
+    let (status, _, body) = send_empty(router, Method::GET, "/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    let text = String::from_utf8(body).expect("metrics utf8");
+    assert!(text.contains("cluster_mode{mode=\"cluster_aware\"} 1"));
+    assert!(text.contains("cluster_degraded 1"));
+    assert!(text.contains("cluster_metrics_source{source=\"live_status_surface\"} 1"));
+    assert!(text.contains(
+        "cluster_member_metrics_source{node_id=\"node-a\",source=\"live_status_surface\"} 1"
+    ));
+    assert!(!text.contains("cluster_member_latency"));
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
