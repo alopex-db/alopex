@@ -2,7 +2,12 @@
 
 use std::sync::Arc;
 
-use alopex_server::config::ServerConfig;
+use alopex_cluster::{
+    ClusterId, ClusterIdentity, ClusterManager, ClusterManagerConfig, Endpoint, MemberIdentity,
+    MemberStatus, MembershipSource, MembershipView, NodeId, NodeRole, NodeState, PlacementMetadata,
+    RoutingTarget,
+};
+use alopex_server::config::{ClusterServerConfig, ServerConfig};
 use alopex_server::http;
 use alopex_server::server::ServerState;
 use alopex_server::Server;
@@ -19,6 +24,28 @@ fn test_state() -> (Arc<ServerState>, tempfile::TempDir) {
         audit_log_enabled: false,
         tracing_enabled: false,
         metrics_enabled: false,
+        ..ServerConfig::default()
+    };
+    let server = Server::new(config).expect("server");
+    (server.state.clone(), temp_dir)
+}
+
+fn cluster_aware_test_state() -> (Arc<ServerState>, tempfile::TempDir) {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let config = ServerConfig {
+        data_dir: temp_dir.path().join("data"),
+        audit_log_enabled: false,
+        tracing_enabled: false,
+        metrics_enabled: false,
+        cluster: ClusterServerConfig {
+            mode: alopex_cluster::ClusterMode::ClusterAware,
+            node_id: Some("node-a".to_string()),
+            cluster_id: Some("cluster-a".to_string()),
+            advertised_endpoint: Some("127.0.0.1:7001".to_string()),
+            role: NodeRole::Worker,
+            lifecycle_state: NodeState::Active,
+            ..ClusterServerConfig::default()
+        },
         ..ServerConfig::default()
     };
     let server = Server::new(config).expect("server");
@@ -50,6 +77,178 @@ async fn send_empty(app: &axum::Router, uri: &str) -> (StatusCode, String) {
     let bytes = to_bytes(response.into_body()).await.expect("body");
     let body = String::from_utf8(bytes.to_vec()).expect("utf8");
     (status, body)
+}
+
+fn table_ref_and_id(state: &ServerState, table_name: &str) -> (String, u32) {
+    let guard = state.catalog.read().expect("catalog lock");
+    let table = guard
+        .list_tables()
+        .into_iter()
+        .find(|table| table.name == table_name)
+        .expect("table metadata");
+    (
+        format!(
+            "{}.{}.{}",
+            table.catalog_name, table.namespace_name, table.name
+        ),
+        table.table_id,
+    )
+}
+
+fn install_multi_node_placement(state: &ServerState, table_ref: &str, table_id: u32) {
+    let mut placement = PlacementMetadata::new(table_ref, table_id, 7);
+    placement
+        .targets
+        .push(RoutingTarget::table("node-a", table_ref, table_id));
+    placement
+        .targets
+        .push(RoutingTarget::table("node-b", table_ref, table_id));
+
+    let identity = ClusterIdentity {
+        cluster_id: Some(ClusterId::new("cluster-a")),
+        advertised_endpoint: Some(Endpoint::new("127.0.0.1:7001")),
+        ..ClusterIdentity::new("node-a", NodeRole::Worker, NodeState::Active)
+    };
+    let mut membership = MembershipView::new(MembershipSource::Persisted, 7);
+    membership.members.push(member("node-a"));
+    membership.members.push(member("node-b"));
+
+    let mut config = ClusterManagerConfig::cluster_aware(identity);
+    config.membership_source = MembershipSource::Persisted;
+    config.initial_membership = Some(membership);
+    config.initial_placements = vec![placement];
+
+    let manager = ClusterManager::new(config).expect("cluster manager");
+    *state.cluster_manager.write().expect("cluster manager lock") = manager;
+}
+
+fn member(node_id: &str) -> MemberStatus {
+    let endpoint = match node_id {
+        "node-a" => "127.0.0.1:7001",
+        "node-b" => "127.0.0.1:7002",
+        _ => "127.0.0.1:7999",
+    };
+    MemberStatus {
+        identity: MemberIdentity {
+            node_id: NodeId::new(node_id),
+            cluster_id: Some(ClusterId::new("cluster-a")),
+            advertised_endpoint: Some(Endpoint::new(endpoint)),
+            role: NodeRole::Worker,
+        },
+        raw_reachability_state: None,
+        derived_state: NodeState::Active,
+        transition_reason: Some("test".to_string()),
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn non_session_sql_returns_local_only_routing_diagnostics() {
+    let (state, _temp_dir) = test_state();
+    let app = http::router(state);
+
+    let create = serde_json::json!({
+        "sql": "CREATE TABLE route_users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        "streaming": false
+    });
+    let (status, _) = send_json(&app, "/sql", create).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let select = serde_json::json!({
+        "sql": "SELECT id, name FROM route_users",
+        "streaming": false
+    });
+    let (status, body) = send_json(&app, "/sql", select).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let response = serde_json::from_str::<Value>(&body).expect("select");
+    let diagnostics = response["routing_diagnostics"]
+        .as_array()
+        .expect("routing diagnostics");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0]["decision"], "local_only");
+    assert_eq!(diagnostics[0]["reason"], "placement_absent");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn non_session_sql_rejects_future_distributed_routing() {
+    let (state, _temp_dir) = cluster_aware_test_state();
+    let app = http::router(state.clone());
+
+    let create = serde_json::json!({
+        "sql": "CREATE TABLE distributed_users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        "streaming": false
+    });
+    let (status, _) = send_json(&app, "/sql", create).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (table_ref, table_id) = table_ref_and_id(&state, "distributed_users");
+    install_multi_node_placement(&state, &table_ref, table_id);
+
+    let select = serde_json::json!({
+        "sql": "SELECT id, name FROM distributed_users",
+        "streaming": false
+    });
+    let (status, body) = send_json(&app, "/sql", select).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+
+    let response = serde_json::from_str::<Value>(&body).expect("error");
+    assert_eq!(
+        response["error"]["code"],
+        "FUTURE_DISTRIBUTED_EXECUTION_REQUIRED"
+    );
+    assert!(response["error"]["message"]
+        .as_str()
+        .expect("message")
+        .contains("FutureDistributedExecutionRequired"));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn future_distributed_write_is_rejected_before_local_execution() {
+    let (state, _temp_dir) = cluster_aware_test_state();
+    let app = http::router(state.clone());
+
+    let create = serde_json::json!({
+        "sql": "CREATE TABLE distributed_writes (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        "streaming": false
+    });
+    let (status, _) = send_json(&app, "/sql", create).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (table_ref, table_id) = table_ref_and_id(&state, "distributed_writes");
+    install_multi_node_placement(&state, &table_ref, table_id);
+
+    let insert = serde_json::json!({
+        "sql": "INSERT INTO distributed_writes (id, name) VALUES (1, 'blocked')",
+        "streaming": false
+    });
+    let (status, body) = send_json(&app, "/sql", insert).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    let response = serde_json::from_str::<Value>(&body).expect("error");
+    assert_eq!(
+        response["error"]["code"],
+        "FUTURE_DISTRIBUTED_EXECUTION_REQUIRED"
+    );
+
+    let (status, body) = send_empty(&app, "/session/begin").await;
+    assert_eq!(status, StatusCode::OK);
+    let session = serde_json::from_str::<Value>(&body).expect("session");
+    let session_id = session["session_id"].as_str().expect("session_id");
+
+    let select = serde_json::json!({
+        "sql": "SELECT id, name FROM distributed_writes",
+        "session_id": session_id,
+        "streaming": false
+    });
+    let (status, body) = send_json(&app, "/sql", select).await;
+    assert_eq!(status, StatusCode::OK);
+    let response = serde_json::from_str::<Value>(&body).expect("select");
+    assert_eq!(response["rows"].as_array().expect("rows").len(), 0);
+
+    let (status, _) = send_empty(&app, &format!("/session/{session_id}/rollback")).await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
