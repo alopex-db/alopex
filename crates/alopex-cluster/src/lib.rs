@@ -301,6 +301,36 @@ impl RoutingTarget {
             range_id: None,
         }
     }
+
+    pub fn shard(
+        node_id: impl Into<NodeId>,
+        table_ref: impl Into<TableRef>,
+        table_id: TableId,
+        shard_id: impl Into<ShardId>,
+    ) -> Self {
+        Self {
+            node_id: node_id.into(),
+            table_ref: table_ref.into(),
+            table_id,
+            shard_id: Some(shard_id.into()),
+            range_id: None,
+        }
+    }
+
+    pub fn range(
+        node_id: impl Into<NodeId>,
+        table_ref: impl Into<TableRef>,
+        table_id: TableId,
+        range_id: impl Into<RangeId>,
+    ) -> Self {
+        Self {
+            node_id: node_id.into(),
+            table_ref: table_ref.into(),
+            table_id,
+            shard_id: None,
+            range_id: Some(range_id.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -327,6 +357,7 @@ pub enum StableDiagnosticCode {
     ConflictingNodeIdentity,
     PlanningInputUnavailable,
     RetryScheduled,
+    RetryExhausted,
     SubRequestCancelled,
 }
 
@@ -351,6 +382,16 @@ pub struct RetryPolicySummary {
     pub max_backoff_ms: u64,
     #[serde(default)]
     pub cancellation_state: Option<String>,
+}
+
+impl RetryPolicySummary {
+    pub fn new(max_attempts: u32, max_backoff_ms: u64) -> Self {
+        Self {
+            max_attempts,
+            max_backoff_ms,
+            cancellation_state: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1213,6 +1254,530 @@ fn excluded_reason_order(reason: ExcludedTargetReason) -> u8 {
         ExcludedTargetReason::RoleNotWorker => 2,
         ExcludedTargetReason::PlacementStale => 3,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulatedRetryPolicy {
+    pub max_attempts: u32,
+    pub base_backoff_ms: u64,
+    pub max_backoff_ms: u64,
+}
+
+impl Default for SimulatedRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            base_backoff_ms: 100,
+            max_backoff_ms: 1_000,
+        }
+    }
+}
+
+impl SimulatedRetryPolicy {
+    pub fn bounded(max_attempts: u32, base_backoff_ms: u64, max_backoff_ms: u64) -> Self {
+        Self {
+            max_attempts: max_attempts.max(1),
+            base_backoff_ms: base_backoff_ms.min(max_backoff_ms),
+            max_backoff_ms,
+        }
+    }
+
+    pub fn backoff_for_attempt(&self, attempt: u32) -> u64 {
+        if attempt <= 1 {
+            return 0;
+        }
+        let multiplier = 1_u64
+            .checked_shl(attempt.saturating_sub(2))
+            .unwrap_or(u64::MAX);
+        self.base_backoff_ms
+            .saturating_mul(multiplier)
+            .min(self.max_backoff_ms)
+    }
+
+    fn summary(&self, cancellation_state: Option<String>) -> RetryPolicySummary {
+        RetryPolicySummary {
+            max_attempts: self.max_attempts,
+            max_backoff_ms: self.max_backoff_ms,
+            cancellation_state,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimulatedTargetBehavior {
+    Succeed,
+    RetryThenSucceed { failed_attempts: u32 },
+    CancelAfterAttempts { attempts: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimulatedSubRequestState {
+    Scheduled,
+    RetryScheduled,
+    Completed,
+    RetryExhausted,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulatedTargetOutcome {
+    pub node_id: NodeId,
+    pub behavior: SimulatedTargetBehavior,
+}
+
+impl SimulatedTargetOutcome {
+    pub fn new(node_id: impl Into<NodeId>, behavior: SimulatedTargetBehavior) -> Self {
+        Self {
+            node_id: node_id.into(),
+            behavior,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulatedSubRequest {
+    pub request_id: String,
+    pub target: RoutingTarget,
+    pub attempt: u32,
+    pub idempotency_key: String,
+    pub backoff_ms: u64,
+    pub state: SimulatedSubRequestState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulatedClusterFixture {
+    pub local_node_id: NodeId,
+    pub entry_role: NodeRole,
+    pub members: MembershipView,
+    pub placements: Vec<PlacementMetadata>,
+    pub routing_request: QueryRoutingRequest,
+    pub retry_policy: SimulatedRetryPolicy,
+    #[serde(default)]
+    pub target_outcomes: Vec<SimulatedTargetOutcome>,
+    pub expected_decision: RoutingDecisionKind,
+    #[serde(default)]
+    pub expected_diagnostics: Vec<StableDiagnosticCode>,
+}
+
+impl SimulatedClusterFixture {
+    pub fn new(
+        local_node_id: impl Into<NodeId>,
+        entry_role: NodeRole,
+        members: MembershipView,
+        placements: Vec<PlacementMetadata>,
+        routing_request: QueryRoutingRequest,
+        expected_decision: RoutingDecisionKind,
+        expected_diagnostics: Vec<StableDiagnosticCode>,
+    ) -> Self {
+        Self {
+            local_node_id: local_node_id.into(),
+            entry_role,
+            members,
+            placements,
+            routing_request,
+            retry_policy: SimulatedRetryPolicy::default(),
+            target_outcomes: Vec::new(),
+            expected_decision,
+            expected_diagnostics,
+        }
+    }
+
+    pub fn with_retry_policy(mut self, retry_policy: SimulatedRetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
+        self
+    }
+
+    pub fn with_target_outcome(mut self, outcome: SimulatedTargetOutcome) -> Self {
+        self.target_outcomes.push(outcome);
+        self
+    }
+
+    pub fn fixed_three_node_scatter_gather() -> Self {
+        let mut members = MembershipView::new(MembershipSource::Simulated, 10);
+        members.members = vec![
+            simulated_member("node-a", NodeRole::Gateway, NodeState::Active),
+            simulated_member("node-b", NodeRole::Worker, NodeState::Active),
+            simulated_member("node-c", NodeRole::Worker, NodeState::Active),
+        ];
+
+        let placements = vec![
+            placement_for_nodes("default.public.users", 7, 10, &["node-b"]),
+            placement_for_nodes("default.public.orders", 8, 10, &["node-c"]),
+        ];
+        let routing_request = QueryRoutingRequest::new(
+            "simulated-three-node-scatter",
+            CatalogTableSnapshot::from_tables(
+                10,
+                vec![
+                    CatalogTableRef::new("default.public.users", 7),
+                    CatalogTableRef::new("default.public.orders", 8),
+                ],
+            ),
+            vec![
+                QueryTableReference::read(
+                    "default.public.users",
+                    QueryTableReferenceSource::LogicalPlanScan,
+                ),
+                QueryTableReference::read(
+                    "default.public.orders",
+                    QueryTableReferenceSource::TypedExprSubquery,
+                ),
+            ],
+        );
+
+        Self::new(
+            "node-a",
+            NodeRole::Gateway,
+            members,
+            placements,
+            routing_request,
+            RoutingDecisionKind::ScatterGatherSimulated,
+            vec![
+                StableDiagnosticCode::ScatterGatherSimulated,
+                StableDiagnosticCode::RetryScheduled,
+                StableDiagnosticCode::SubRequestCancelled,
+            ],
+        )
+        .with_retry_policy(SimulatedRetryPolicy::bounded(3, 100, 1_000))
+        .with_target_outcome(SimulatedTargetOutcome::new(
+            "node-c",
+            SimulatedTargetBehavior::CancelAfterAttempts { attempts: 2 },
+        ))
+    }
+
+    pub fn fixed_three_node_shard_range() -> Self {
+        let mut members = MembershipView::new(MembershipSource::Simulated, 11);
+        members.members = vec![
+            simulated_member("node-a", NodeRole::Gateway, NodeState::Active),
+            simulated_member("node-b", NodeRole::Worker, NodeState::Active),
+            simulated_member("node-c", NodeRole::Worker, NodeState::Active),
+        ];
+
+        let placements = vec![placement_with_explicit_targets(
+            "default.public.events",
+            11,
+            11,
+            vec![
+                RoutingTarget::range("node-b", "default.public.events", 11, "range-a"),
+                RoutingTarget::shard("node-c", "default.public.events", 11, "shard-b"),
+            ],
+        )];
+        let routing_request = QueryRoutingRequest::new(
+            "simulated-three-node-shard-range",
+            CatalogTableSnapshot::from_tables(
+                11,
+                vec![CatalogTableRef::new("default.public.events", 11)],
+            ),
+            vec![QueryTableReference::read(
+                "default.public.events",
+                QueryTableReferenceSource::LogicalPlanScan,
+            )],
+        );
+
+        Self::new(
+            "node-a",
+            NodeRole::Gateway,
+            members,
+            placements,
+            routing_request,
+            RoutingDecisionKind::ScatterGatherSimulated,
+            vec![StableDiagnosticCode::ScatterGatherSimulated],
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SimulatedClusterRun {
+    pub diagnostics: RoutingDiagnostics,
+    pub metrics_summary: ClusterMetricsSummary,
+    #[serde(default)]
+    pub diagnostic_codes: Vec<StableDiagnosticCode>,
+    #[serde(default)]
+    pub sub_requests: Vec<SimulatedSubRequest>,
+}
+
+impl SimulatedClusterRun {
+    pub fn validate_expected(&self, fixture: &SimulatedClusterFixture) -> Result<(), ClusterError> {
+        if self.diagnostics.decision != fixture.expected_decision {
+            return Err(ClusterError::new(
+                StableDiagnosticCode::PlanningInputUnavailable,
+                format!(
+                    "expected simulated decision {:?}, got {:?}",
+                    fixture.expected_decision, self.diagnostics.decision
+                ),
+                "update the fixture expectation or routing inputs so simulated routing is deterministic",
+            ));
+        }
+
+        for expected in &fixture.expected_diagnostics {
+            if !self.diagnostic_codes.contains(expected) {
+                return Err(ClusterError::new(
+                    StableDiagnosticCode::PlanningInputUnavailable,
+                    format!("missing expected simulated diagnostic {:?}", expected),
+                    "update the simulated fixture or expected diagnostics contract",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SimulatedClusterHarness;
+
+impl SimulatedClusterHarness {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn run(&self, fixture: &SimulatedClusterFixture) -> SimulatedClusterRun {
+        let placement_catalog = PlacementCatalog::from_placements(
+            fixture.routing_request.catalog_snapshot.update_epoch,
+            fixture.placements.clone(),
+        );
+        let router = QueryRouter::new(&placement_catalog, &fixture.members);
+        let mut diagnostics = router.simulate(fixture.routing_request.clone());
+        push_unique_role(&mut diagnostics.roles, fixture.entry_role);
+
+        let mut diagnostic_codes = vec![diagnostics.reason];
+        let sub_requests =
+            simulate_sub_requests(&diagnostics.targets, fixture, &mut diagnostic_codes);
+        let cancellation_state = sub_requests
+            .iter()
+            .rev()
+            .find(|request| request.state == SimulatedSubRequestState::Cancelled)
+            .map(|request| format!("cancelled_after_{}_attempts", request.attempt));
+        diagnostics.retry_summary = Some(fixture.retry_policy.summary(cancellation_state));
+
+        SimulatedClusterRun {
+            diagnostics,
+            metrics_summary: simulated_metrics_summary(&sub_requests),
+            diagnostic_codes,
+            sub_requests,
+        }
+    }
+}
+
+fn simulate_sub_requests(
+    targets: &[RoutingTarget],
+    fixture: &SimulatedClusterFixture,
+    diagnostic_codes: &mut Vec<StableDiagnosticCode>,
+) -> Vec<SimulatedSubRequest> {
+    let mut sub_requests = Vec::new();
+    for target in targets {
+        let behavior = fixture
+            .target_outcomes
+            .iter()
+            .find(|outcome| outcome.node_id == target.node_id)
+            .map(|outcome| outcome.behavior)
+            .unwrap_or(SimulatedTargetBehavior::Succeed);
+        simulate_target_requests(
+            target,
+            behavior,
+            fixture,
+            diagnostic_codes,
+            &mut sub_requests,
+        );
+    }
+    sub_requests
+}
+
+fn simulate_target_requests(
+    target: &RoutingTarget,
+    behavior: SimulatedTargetBehavior,
+    fixture: &SimulatedClusterFixture,
+    diagnostic_codes: &mut Vec<StableDiagnosticCode>,
+    sub_requests: &mut Vec<SimulatedSubRequest>,
+) {
+    let max_attempts = fixture.retry_policy.max_attempts.max(1);
+    match behavior {
+        SimulatedTargetBehavior::Succeed => {
+            push_simulated_request(
+                sub_requests,
+                target,
+                &fixture.routing_request.plan_id,
+                1,
+                0,
+                SimulatedSubRequestState::Completed,
+            );
+        }
+        SimulatedTargetBehavior::RetryThenSucceed { failed_attempts } => {
+            if failed_attempts >= max_attempts {
+                for attempt in 1..max_attempts {
+                    push_unique_diagnostic_reason(
+                        diagnostic_codes,
+                        StableDiagnosticCode::RetryScheduled,
+                    );
+                    push_simulated_request(
+                        sub_requests,
+                        target,
+                        &fixture.routing_request.plan_id,
+                        attempt,
+                        fixture.retry_policy.backoff_for_attempt(attempt + 1),
+                        SimulatedSubRequestState::RetryScheduled,
+                    );
+                }
+                push_unique_diagnostic_reason(
+                    diagnostic_codes,
+                    StableDiagnosticCode::RetryExhausted,
+                );
+                push_simulated_request(
+                    sub_requests,
+                    target,
+                    &fixture.routing_request.plan_id,
+                    max_attempts,
+                    fixture.retry_policy.backoff_for_attempt(max_attempts),
+                    SimulatedSubRequestState::RetryExhausted,
+                );
+                return;
+            }
+
+            for attempt in 1..=failed_attempts {
+                push_unique_diagnostic_reason(
+                    diagnostic_codes,
+                    StableDiagnosticCode::RetryScheduled,
+                );
+                push_simulated_request(
+                    sub_requests,
+                    target,
+                    &fixture.routing_request.plan_id,
+                    attempt,
+                    fixture.retry_policy.backoff_for_attempt(attempt + 1),
+                    SimulatedSubRequestState::RetryScheduled,
+                );
+            }
+            push_simulated_request(
+                sub_requests,
+                target,
+                &fixture.routing_request.plan_id,
+                failed_attempts + 1,
+                0,
+                SimulatedSubRequestState::Completed,
+            );
+        }
+        SimulatedTargetBehavior::CancelAfterAttempts { attempts } => {
+            let attempts = attempts.clamp(1, max_attempts);
+            for attempt in 1..attempts {
+                push_unique_diagnostic_reason(
+                    diagnostic_codes,
+                    StableDiagnosticCode::RetryScheduled,
+                );
+                push_simulated_request(
+                    sub_requests,
+                    target,
+                    &fixture.routing_request.plan_id,
+                    attempt,
+                    fixture.retry_policy.backoff_for_attempt(attempt + 1),
+                    SimulatedSubRequestState::RetryScheduled,
+                );
+            }
+            push_unique_diagnostic_reason(
+                diagnostic_codes,
+                StableDiagnosticCode::SubRequestCancelled,
+            );
+            push_simulated_request(
+                sub_requests,
+                target,
+                &fixture.routing_request.plan_id,
+                attempts,
+                fixture.retry_policy.backoff_for_attempt(attempts),
+                SimulatedSubRequestState::Cancelled,
+            );
+        }
+    }
+}
+
+fn push_simulated_request(
+    sub_requests: &mut Vec<SimulatedSubRequest>,
+    target: &RoutingTarget,
+    plan_id: &PlanId,
+    attempt: u32,
+    backoff_ms: u64,
+    state: SimulatedSubRequestState,
+) {
+    let request_id = format!(
+        "{}:{}:{}:{}",
+        plan_id.as_str(),
+        target.node_id.as_str(),
+        target.table_ref.as_str(),
+        attempt
+    );
+    sub_requests.push(SimulatedSubRequest {
+        idempotency_key: format!(
+            "{}:{}:{}:{}",
+            plan_id.as_str(),
+            target.node_id.as_str(),
+            target.table_ref.as_str(),
+            target.table_id
+        ),
+        request_id,
+        target: target.clone(),
+        attempt,
+        backoff_ms,
+        state,
+    });
+}
+
+fn simulated_metrics_summary(sub_requests: &[SimulatedSubRequest]) -> ClusterMetricsSummary {
+    let node_ids = sub_requests
+        .iter()
+        .map(|request| request.target.node_id.clone())
+        .collect::<BTreeSet<_>>();
+    ClusterMetricsSummary {
+        source: ClusterMetricsSource::SimulatedHarness,
+        members: node_ids
+            .iter()
+            .map(|node_id| MemberMetricsSummary {
+                node_id: node_id.clone(),
+                source: ClusterMetricsSource::SimulatedHarness,
+                latency_ms: None,
+                load: None,
+                error_count: None,
+            })
+            .collect(),
+    }
+}
+
+fn simulated_member(node_id: &str, role: NodeRole, state: NodeState) -> MemberStatus {
+    MemberStatus {
+        identity: MemberIdentity {
+            node_id: NodeId::new(node_id),
+            cluster_id: Some(ClusterId::new("simulated-cluster")),
+            advertised_endpoint: Some(Endpoint::new(format!("simulated://{node_id}"))),
+            role,
+        },
+        raw_reachability_state: None,
+        derived_state: state,
+        transition_reason: Some("simulated_fixture".to_string()),
+    }
+}
+
+fn placement_for_nodes(
+    table_ref: &str,
+    table_id: TableId,
+    update_epoch: UpdateEpoch,
+    node_ids: &[&str],
+) -> PlacementMetadata {
+    let mut placement = PlacementMetadata::new(table_ref, table_id, update_epoch);
+    placement.targets = node_ids
+        .iter()
+        .map(|node_id| RoutingTarget::table(*node_id, table_ref, table_id))
+        .collect();
+    placement
+}
+
+fn placement_with_explicit_targets(
+    table_ref: &str,
+    table_id: TableId,
+    update_epoch: UpdateEpoch,
+    targets: Vec<RoutingTarget>,
+) -> PlacementMetadata {
+    let mut placement = PlacementMetadata::new(table_ref, table_id, update_epoch);
+    placement.targets = targets;
+    placement
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
