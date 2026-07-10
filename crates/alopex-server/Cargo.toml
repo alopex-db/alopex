@@ -12,6 +12,7 @@ categories = ["database-implementations"]
 lane_ci = []
 
 [dependencies]
+alopex-cluster = { workspace = true }
 alopex-core = { workspace = true, features = ["async", "tokio"] }
 alopex-sql = { workspace = true, features = ["tokio"] }
 anyhow = { workspace = true }

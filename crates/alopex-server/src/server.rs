@@ -3,6 +3,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
+use alopex_cluster::{
+    ClusterManager, ClusterMode, ClusterStatusSnapshot, MembershipSource, NodeRole, NodeState,
+};
 use alopex_core::kv::any::AnyKV;
 use alopex_core::kv::async_adapter::{AsyncKVStoreAdapter, AsyncKVTransactionAdapter};
 use alopex_core::kv::AsyncKVStore;
@@ -32,6 +35,7 @@ pub struct Server {
 
 pub struct ServerState {
     pub config: ServerConfig,
+    pub cluster_manager: Arc<RwLock<ClusterManager>>,
     pub store: Arc<AnyKV>,
     pub catalog: Arc<RwLock<dyn Catalog + Send + Sync>>,
     pub async_store: Arc<AsyncKVStoreAdapter<AnyKV>>,
@@ -48,9 +52,29 @@ pub struct ServerState {
     pub admission_waiters: AtomicUsize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClusterStartupDiagnostics {
+    pub metadata_schema_version: u32,
+    pub mode: ClusterMode,
+    pub node_id: String,
+    pub cluster_id: Option<String>,
+    pub advertised_endpoint: Option<String>,
+    pub role: NodeRole,
+    pub lifecycle_state: NodeState,
+    pub membership_source: MembershipSource,
+    pub degraded: bool,
+    pub http_bind: SocketAddr,
+    pub grpc_bind: SocketAddr,
+    pub admin_bind: SocketAddr,
+}
+
 impl Server {
     pub fn new(config: ServerConfig) -> Result<Self> {
         config.validate()?;
+        let cluster_manager = Arc::new(RwLock::new(
+            ClusterManager::new(config.cluster_manager_config()?)
+                .map_err(|err| ServerError::InvalidConfig(err.to_string()))?,
+        ));
         let (store, recovery_info) = RecoveryCoordinator::open_store(&config.data_dir)?;
         let lifecycle_state = Arc::new(LifecycleStateManager::new(Mode::Normal));
         RecoveryCoordinator::apply_initial_mode(&lifecycle_state, &recovery_info);
@@ -93,6 +117,7 @@ impl Server {
         Ok(Self {
             state: Arc::new(ServerState {
                 config,
+                cluster_manager,
                 store,
                 catalog,
                 async_store,
@@ -115,6 +140,7 @@ impl Server {
         if self.state.config.tracing_enabled {
             init_tracing();
         }
+        emit_cluster_startup_diagnostics(&self.state)?;
         info!(
             max_concurrency = self.state.config.max_concurrency,
             max_queue_len = self.state.config.max_queue_len,
@@ -166,6 +192,19 @@ impl Server {
 }
 
 impl ServerState {
+    pub fn cluster_status_snapshot(&self) -> Result<ClusterStatusSnapshot> {
+        let snapshot = self
+            .cluster_manager
+            .read()
+            .map_err(|err| ServerError::Internal(format!("cluster manager lock poisoned: {err}")))?
+            .status_snapshot();
+        Ok(snapshot)
+    }
+
+    pub fn cluster_startup_diagnostics(&self) -> Result<ClusterStartupDiagnostics> {
+        ClusterStartupDiagnostics::from_state(self)
+    }
+
     pub async fn begin_sql_txn(
         &self,
     ) -> Result<AsyncTxnBridge<'static, AsyncKVTransactionAdapter>> {
@@ -176,6 +215,54 @@ impl ServerState {
         bridge.set_memory_policy(policy);
         Ok(bridge)
     }
+}
+
+impl ClusterStartupDiagnostics {
+    fn from_state(state: &ServerState) -> Result<Self> {
+        let snapshot = state.cluster_status_snapshot()?;
+        let identity = &snapshot.identity;
+
+        Ok(Self {
+            metadata_schema_version: snapshot.schema_version,
+            mode: snapshot.mode,
+            node_id: identity.node_id.as_str().to_string(),
+            cluster_id: identity
+                .cluster_id
+                .as_ref()
+                .map(|cluster_id| cluster_id.as_str().to_string()),
+            advertised_endpoint: identity
+                .advertised_endpoint
+                .as_ref()
+                .map(|endpoint| endpoint.as_str().to_string()),
+            role: identity.role,
+            lifecycle_state: identity.lifecycle_state,
+            membership_source: snapshot.membership.source,
+            degraded: snapshot.degraded,
+            http_bind: state.config.http_bind,
+            grpc_bind: state.config.grpc_bind,
+            admin_bind: state.config.admin_bind,
+        })
+    }
+}
+
+fn emit_cluster_startup_diagnostics(state: &ServerState) -> Result<()> {
+    let diagnostics = state.cluster_startup_diagnostics()?;
+    info!(
+        metadata_schema_version = diagnostics.metadata_schema_version,
+        cluster_mode = ?diagnostics.mode,
+        node_id = %diagnostics.node_id,
+        cluster_id = ?diagnostics.cluster_id,
+        advertised_endpoint = ?diagnostics.advertised_endpoint,
+        role = ?diagnostics.role,
+        lifecycle_state = ?diagnostics.lifecycle_state,
+        membership_source = ?diagnostics.membership_source,
+        degraded = diagnostics.degraded,
+        http_bind = %diagnostics.http_bind,
+        grpc_bind = %diagnostics.grpc_bind,
+        admin_bind = %diagnostics.admin_bind,
+        "Cluster startup configuration applied"
+    );
+    Ok(())
 }
 
 fn build_txn_factory(
@@ -321,4 +408,103 @@ fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ClusterServerConfig;
+
+    #[test]
+    fn server_state_exposes_default_single_node_cluster_manager() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = Server::new(ServerConfig {
+            data_dir: temp.path().to_path_buf(),
+            ..ServerConfig::default()
+        })
+        .unwrap();
+
+        let snapshot = server.state.cluster_status_snapshot().unwrap();
+        assert_eq!(snapshot.mode, ClusterMode::SingleNode);
+        assert_eq!(snapshot.identity.node_id.as_str(), "local");
+        assert_eq!(snapshot.identity.lifecycle_state, NodeState::Unconfigured);
+        assert_eq!(snapshot.membership.source, MembershipSource::LocalDefault);
+        assert!(!snapshot.degraded);
+
+        let diagnostics = server.state.cluster_startup_diagnostics().unwrap();
+        assert_eq!(diagnostics.mode, ClusterMode::SingleNode);
+        assert_eq!(diagnostics.node_id, "local");
+        assert_eq!(diagnostics.cluster_id, None);
+        assert_eq!(
+            diagnostics.membership_source,
+            MembershipSource::LocalDefault
+        );
+        assert_eq!(
+            diagnostics.metadata_schema_version,
+            alopex_cluster::CLUSTER_METADATA_SCHEMA_VERSION
+        );
+        assert!(!diagnostics.degraded);
+    }
+
+    #[test]
+    fn server_state_exposes_cluster_aware_configured_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = Server::new(ServerConfig {
+            data_dir: temp.path().to_path_buf(),
+            cluster: ClusterServerConfig {
+                mode: ClusterMode::ClusterAware,
+                node_id: Some("node-a".to_string()),
+                cluster_id: Some("cluster-a".to_string()),
+                advertised_endpoint: Some("127.0.0.1:7001".to_string()),
+                role: NodeRole::Worker,
+                lifecycle_state: NodeState::Active,
+                membership_source_available: false,
+                ..ClusterServerConfig::default()
+            },
+            ..ServerConfig::default()
+        })
+        .unwrap();
+
+        let snapshot = server.state.cluster_status_snapshot().unwrap();
+        assert_eq!(snapshot.mode, ClusterMode::ClusterAware);
+        assert_eq!(snapshot.identity.node_id.as_str(), "node-a");
+        assert_eq!(snapshot.identity.role, NodeRole::Worker);
+        assert_eq!(snapshot.identity.lifecycle_state, NodeState::Active);
+        assert_eq!(snapshot.membership.source, MembershipSource::Chirps);
+        assert_eq!(snapshot.membership.members.len(), 1);
+        assert!(snapshot.degraded);
+
+        let diagnostics = server.state.cluster_startup_diagnostics().unwrap();
+        assert_eq!(diagnostics.mode, ClusterMode::ClusterAware);
+        assert_eq!(diagnostics.node_id, "node-a");
+        assert_eq!(diagnostics.cluster_id.as_deref(), Some("cluster-a"));
+        assert_eq!(
+            diagnostics.advertised_endpoint.as_deref(),
+            Some("127.0.0.1:7001")
+        );
+        assert_eq!(diagnostics.role, NodeRole::Worker);
+        assert_eq!(diagnostics.membership_source, MembershipSource::Chirps);
+        assert!(diagnostics.degraded);
+    }
+
+    #[test]
+    fn server_new_rejects_invalid_cluster_identity_before_store_open() {
+        let result = Server::new(ServerConfig {
+            cluster: ClusterServerConfig {
+                mode: ClusterMode::ClusterAware,
+                node_id: Some("node-a".to_string()),
+                cluster_id: Some("cluster-a".to_string()),
+                advertised_endpoint: Some("127.0.0.1:7001".to_string()),
+                lifecycle_state: NodeState::Unconfigured,
+                ..ClusterServerConfig::default()
+            },
+            ..ServerConfig::default()
+        });
+
+        let err = match result {
+            Ok(_) => panic!("invalid cluster identity should fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("unconfigured lifecycle state"));
+    }
 }
