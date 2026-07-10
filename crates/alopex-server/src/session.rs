@@ -1,8 +1,11 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use alopex_cluster::TableLifecycleEffect;
 use alopex_core::async_runtime::{BoxFuture, BoxStream};
+use alopex_sql::catalog::TableMetadata;
 use alopex_sql::executor::{ExecutionResult, ExecutorError, Row};
+use alopex_sql::planner::PlannedStatement;
 use alopex_sql::storage::erased::ErasedAsyncSqlTransaction;
 use dashmap::DashMap;
 use futures::StreamExt;
@@ -68,8 +71,16 @@ pub struct TxnHandle {
     inner: Arc<TxnHandleInner>,
 }
 
+#[derive(Clone)]
+pub enum CatalogRollbackEffect {
+    DropTable { table_name: String },
+    CreateTable { table: Box<TableMetadata> },
+}
+
 struct TxnHandleInner {
     txn: tokio::sync::Mutex<Option<Box<dyn ErasedAsyncSqlTransaction>>>,
+    pending_table_lifecycle_effects: tokio::sync::Mutex<Vec<TableLifecycleEffect>>,
+    pending_catalog_rollback_effects: tokio::sync::Mutex<Vec<CatalogRollbackEffect>>,
     created_at: SystemTime,
 }
 
@@ -78,6 +89,8 @@ impl TxnHandle {
         Self {
             inner: Arc::new(TxnHandleInner {
                 txn: tokio::sync::Mutex::new(Some(txn)),
+                pending_table_lifecycle_effects: tokio::sync::Mutex::new(Vec::new()),
+                pending_catalog_rollback_effects: tokio::sync::Mutex::new(Vec::new()),
                 created_at: SystemTime::now(),
             }),
         }
@@ -130,7 +143,45 @@ impl TxnHandle {
         Box::pin(ReceiverStream::new(receiver))
     }
 
-    pub async fn commit(self) -> alopex_sql::executor::Result<()> {
+    pub fn plan_for_routing<'a>(
+        &'a self,
+        sql: &'a str,
+    ) -> BoxFuture<'a, alopex_sql::executor::Result<Vec<PlannedStatement>>> {
+        Box::pin(async move {
+            let guard = self.inner.txn.lock().await;
+            let txn = guard
+                .as_ref()
+                .ok_or_else(|| ExecutorError::InvalidOperation {
+                    operation: "plan_for_routing".into(),
+                    reason: "transaction is closed".into(),
+                })?;
+            txn.plan_for_routing(sql).await
+        })
+    }
+
+    pub async fn buffer_table_lifecycle_effects(&self, effects: Vec<TableLifecycleEffect>) {
+        if effects.is_empty() {
+            return;
+        }
+        self.inner
+            .pending_table_lifecycle_effects
+            .lock()
+            .await
+            .extend(effects);
+    }
+
+    pub async fn buffer_catalog_rollback_effects(&self, effects: Vec<CatalogRollbackEffect>) {
+        if effects.is_empty() {
+            return;
+        }
+        self.inner
+            .pending_catalog_rollback_effects
+            .lock()
+            .await
+            .extend(effects);
+    }
+
+    pub async fn commit(self) -> alopex_sql::executor::Result<Vec<TableLifecycleEffect>> {
         let mut guard = self.inner.txn.lock().await;
         let txn = guard
             .take()
@@ -138,10 +189,12 @@ impl TxnHandle {
                 operation: "commit".into(),
                 reason: "transaction is closed".into(),
             })?;
-        txn.commit_boxed().await
+        txn.commit_boxed().await?;
+        let mut effects = self.inner.pending_table_lifecycle_effects.lock().await;
+        Ok(std::mem::take(&mut *effects))
     }
 
-    pub async fn rollback(self) -> alopex_sql::executor::Result<()> {
+    pub async fn rollback(self) -> alopex_sql::executor::Result<Vec<CatalogRollbackEffect>> {
         let mut guard = self.inner.txn.lock().await;
         let txn = guard
             .take()
@@ -149,7 +202,15 @@ impl TxnHandle {
                 operation: "rollback".into(),
                 reason: "transaction is closed".into(),
             })?;
-        txn.rollback_boxed().await
+        let result = txn.rollback_boxed().await;
+        self.inner
+            .pending_table_lifecycle_effects
+            .lock()
+            .await
+            .clear();
+        result?;
+        let mut effects = self.inner.pending_catalog_rollback_effects.lock().await;
+        Ok(std::mem::take(&mut *effects))
     }
 }
 
@@ -288,22 +349,22 @@ impl SessionManager {
             .map_err(|err| ServerError::Sql(err.into()))
     }
 
-    pub async fn commit(&self, id: &SessionId) -> Result<()> {
+    pub async fn commit(&self, id: &SessionId) -> Result<Vec<TableLifecycleEffect>> {
         let handle = self.take_handle(id, SessionState::Committing)?;
-        handle
+        let effects = handle
             .commit()
             .await
             .map_err(|err| ServerError::Sql(err.into()))?;
-        Ok(())
+        Ok(effects)
     }
 
-    pub async fn rollback(&self, id: &SessionId) -> Result<()> {
+    pub async fn rollback(&self, id: &SessionId) -> Result<Vec<CatalogRollbackEffect>> {
         let handle = self.take_handle(id, SessionState::RollingBack)?;
-        handle
+        let effects = handle
             .rollback()
             .await
             .map_err(|err| ServerError::Sql(err.into()))?;
-        Ok(())
+        Ok(effects)
     }
 
     pub fn cleanup_expired(&self) {

@@ -288,6 +288,10 @@ where
 pub trait AsyncSqlTransaction<'txn>: MaybeSend {
     fn async_execute<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, ExecResult<ExecutionResult>>;
     fn async_query<'a>(&'a self, sql: &'a str) -> BoxStream<'a, ExecResult<Row>>;
+    fn async_plan_for_routing<'a>(
+        &'a self,
+        sql: &'a str,
+    ) -> BoxFuture<'a, ExecResult<Vec<PlannedStatement>>>;
     fn async_commit(self) -> BoxFuture<'txn, ExecResult<()>>;
     fn async_rollback(self) -> BoxFuture<'txn, ExecResult<()>>;
 }
@@ -407,6 +411,13 @@ where
         });
 
         Box::pin(ReceiverStream { receiver })
+    }
+
+    fn async_plan_for_routing<'a>(
+        &'a self,
+        sql: &'a str,
+    ) -> BoxFuture<'a, ExecResult<Vec<PlannedStatement>>> {
+        AsyncTxnBridge::async_plan_for_routing(self, sql)
     }
 
     fn async_commit(self) -> BoxFuture<'txn, ExecResult<()>> {

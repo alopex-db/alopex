@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use alopex_cluster::{
     ClusterId, ClusterIdentity, ClusterManager, ClusterManagerConfig, Endpoint, MemberIdentity,
-    MemberStatus, MembershipSource, MembershipView, NodeId, NodeRole, NodeState, PlacementMetadata,
-    RoutingTarget,
+    MemberStatus, MembershipSource, MembershipView, NodeId, NodeRole, NodeState,
+    PlacementLifecycleState, PlacementMetadata, RoutingTarget, TableLifecycleEffect, TableRef,
 };
 use alopex_server::config::{ClusterServerConfig, ServerConfig};
 use alopex_server::http;
@@ -96,13 +96,20 @@ fn table_ref_and_id(state: &ServerState, table_name: &str) -> (String, u32) {
 }
 
 fn install_multi_node_placement(state: &ServerState, table_ref: &str, table_id: u32) {
+    install_placement(state, table_ref, table_id, &["node-a", "node-b"]);
+}
+
+fn install_single_node_placement(state: &ServerState, table_ref: &str, table_id: u32) {
+    install_placement(state, table_ref, table_id, &["node-a"]);
+}
+
+fn install_placement(state: &ServerState, table_ref: &str, table_id: u32, nodes: &[&str]) {
     let mut placement = PlacementMetadata::new(table_ref, table_id, 7);
-    placement
-        .targets
-        .push(RoutingTarget::table("node-a", table_ref, table_id));
-    placement
-        .targets
-        .push(RoutingTarget::table("node-b", table_ref, table_id));
+    for node in nodes {
+        placement
+            .targets
+            .push(RoutingTarget::table(*node, table_ref, table_id));
+    }
 
     let identity = ClusterIdentity {
         cluster_id: Some(ClusterId::new("cluster-a")),
@@ -110,8 +117,9 @@ fn install_multi_node_placement(state: &ServerState, table_ref: &str, table_id: 
         ..ClusterIdentity::new("node-a", NodeRole::Worker, NodeState::Active)
     };
     let mut membership = MembershipView::new(MembershipSource::Persisted, 7);
-    membership.members.push(member("node-a"));
-    membership.members.push(member("node-b"));
+    for node in nodes {
+        membership.members.push(member(node));
+    }
 
     let mut config = ClusterManagerConfig::cluster_aware(identity);
     config.membership_source = MembershipSource::Persisted;
@@ -120,6 +128,20 @@ fn install_multi_node_placement(state: &ServerState, table_ref: &str, table_id: 
 
     let manager = ClusterManager::new(config).expect("cluster manager");
     *state.cluster_manager.write().expect("cluster manager lock") = manager;
+}
+
+fn placement_state(state: &ServerState, table_ref: &str, table_id: u32) -> PlacementLifecycleState {
+    state
+        .cluster_status_snapshot()
+        .expect("cluster status")
+        .placement
+        .placements
+        .into_iter()
+        .find(|placement| {
+            placement.table_ref.as_str() == table_ref && placement.table_id == table_id
+        })
+        .expect("placement")
+        .lifecycle_state
 }
 
 fn member(node_id: &str) -> MemberStatus {
@@ -243,9 +265,12 @@ async fn future_distributed_write_is_rejected_before_local_execution() {
         "streaming": false
     });
     let (status, body) = send_json(&app, "/sql", select).await;
-    assert_eq!(status, StatusCode::OK);
-    let response = serde_json::from_str::<Value>(&body).expect("select");
-    assert_eq!(response["rows"].as_array().expect("rows").len(), 0);
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    let response = serde_json::from_str::<Value>(&body).expect("error");
+    assert_eq!(
+        response["error"]["code"],
+        "FUTURE_DISTRIBUTED_EXECUTION_REQUIRED"
+    );
 
     let (status, _) = send_empty(&app, &format!("/session/{session_id}/rollback")).await;
     assert_eq!(status, StatusCode::OK);
@@ -315,6 +340,136 @@ async fn http_session_commit_and_rollback() {
     let response = serde_json::from_str::<Value>(&body).expect("select");
     let rows = response["rows"].as_array().expect("rows");
     assert_eq!(rows.len(), 1);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn session_ddl_then_select_uses_same_transaction_catalog_view() {
+    let (state, _temp_dir) = test_state();
+    let app = http::router(state);
+
+    let (status, body) = send_empty(&app, "/session/begin").await;
+    assert_eq!(status, StatusCode::OK);
+    let session = serde_json::from_str::<Value>(&body).expect("session");
+    let session_id = session["session_id"].as_str().expect("session_id");
+
+    let create = serde_json::json!({
+        "sql": "CREATE TABLE session_ddl_users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        "session_id": session_id,
+        "streaming": false
+    });
+    let (status, _) = send_json(&app, "/sql", create).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let select = serde_json::json!({
+        "sql": "SELECT id, name FROM session_ddl_users",
+        "session_id": session_id,
+        "streaming": false
+    });
+    let (status, body) = send_json(&app, "/sql", select).await;
+    assert_eq!(status, StatusCode::OK);
+    let response = serde_json::from_str::<Value>(&body).expect("select");
+    assert_eq!(response["rows"].as_array().expect("rows").len(), 0);
+    assert_eq!(response["routing_diagnostics"][0]["decision"], "local_only");
+
+    let (status, _) = send_empty(&app, &format!("/session/{session_id}/commit")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn session_ddl_commit_applies_placement_effects_idempotently() {
+    let (state, _temp_dir) = cluster_aware_test_state();
+    let app = http::router(state.clone());
+
+    let create = serde_json::json!({
+        "sql": "CREATE TABLE lifecycle_commit_users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        "streaming": false
+    });
+    let (status, _) = send_json(&app, "/sql", create).await;
+    assert_eq!(status, StatusCode::OK);
+    let (table_ref, table_id) = table_ref_and_id(&state, "lifecycle_commit_users");
+    install_single_node_placement(&state, &table_ref, table_id);
+
+    let (status, body) = send_empty(&app, "/session/begin").await;
+    assert_eq!(status, StatusCode::OK);
+    let session = serde_json::from_str::<Value>(&body).expect("session");
+    let session_id = session["session_id"].as_str().expect("session_id");
+
+    let drop_table = serde_json::json!({
+        "sql": "DROP TABLE lifecycle_commit_users",
+        "session_id": session_id,
+        "streaming": false
+    });
+    let (status, _) = send_json(&app, "/sql", drop_table).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        placement_state(&state, &table_ref, table_id),
+        PlacementLifecycleState::Active
+    );
+
+    let (status, _) = send_empty(&app, &format!("/session/{session_id}/commit")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        placement_state(&state, &table_ref, table_id),
+        PlacementLifecycleState::Tombstoned
+    );
+
+    state
+        .apply_table_lifecycle_effects(vec![TableLifecycleEffect::Dropped {
+            table_ref: TableRef::new(table_ref.clone()),
+            table_id,
+        }])
+        .expect("repeat lifecycle effect");
+    assert_eq!(
+        placement_state(&state, &table_ref, table_id),
+        PlacementLifecycleState::Tombstoned
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn session_ddl_rollback_discards_placement_effects() {
+    let (state, _temp_dir) = cluster_aware_test_state();
+    let app = http::router(state.clone());
+
+    let create = serde_json::json!({
+        "sql": "CREATE TABLE lifecycle_rollback_users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        "streaming": false
+    });
+    let (status, _) = send_json(&app, "/sql", create).await;
+    assert_eq!(status, StatusCode::OK);
+    let (table_ref, table_id) = table_ref_and_id(&state, "lifecycle_rollback_users");
+    install_single_node_placement(&state, &table_ref, table_id);
+
+    let (status, body) = send_empty(&app, "/session/begin").await;
+    assert_eq!(status, StatusCode::OK);
+    let session = serde_json::from_str::<Value>(&body).expect("session");
+    let session_id = session["session_id"].as_str().expect("session_id");
+
+    let drop_table = serde_json::json!({
+        "sql": "DROP TABLE lifecycle_rollback_users",
+        "session_id": session_id,
+        "streaming": false
+    });
+    let (status, _) = send_json(&app, "/sql", drop_table).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send_empty(&app, &format!("/session/{session_id}/rollback")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        placement_state(&state, &table_ref, table_id),
+        PlacementLifecycleState::Active
+    );
+
+    let select = serde_json::json!({
+        "sql": "SELECT id, name FROM lifecycle_rollback_users",
+        "streaming": false
+    });
+    let (status, body) = send_json(&app, "/sql", select).await;
+    assert_eq!(status, StatusCode::OK);
+    let response = serde_json::from_str::<Value>(&body).expect("select");
+    assert_eq!(response["rows"].as_array().expect("rows").len(), 0);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

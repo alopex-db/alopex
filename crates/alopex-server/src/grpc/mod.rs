@@ -18,6 +18,10 @@ use tower::{Layer, Service};
 use uuid::Uuid;
 
 use crate::error::{Result, ServerError};
+use crate::http::sql::{
+    execute_non_session_statement_with_routing, execute_session_statement_with_routing,
+    route_session_statement_for_execution, sync_catalog_to_store,
+};
 use crate::metrics::Metrics;
 use crate::ops::memory::MemoryControlPolicy;
 use crate::server::ServerState;
@@ -222,7 +226,20 @@ impl AlopexService for AlopexServiceImpl {
             let mut success = true;
             let mut source = match session_id {
                 Some(id) => match state.session_manager.get_transaction(&id).await {
-                    Ok(handle) => StreamSource::Handle(handle),
+                    Ok(handle) => {
+                        if let Err(err) = route_session_statement_for_execution(
+                            &state,
+                            &handle,
+                            &sql,
+                            &correlation_id,
+                        )
+                        .await
+                        {
+                            let _ = sender.send(Err(map_status(err, &correlation_id))).await;
+                            return;
+                        }
+                        StreamSource::Handle(handle)
+                    }
                     Err(err) => {
                         let _ = sender.send(Err(map_status(err, &correlation_id))).await;
                         return;
@@ -364,15 +381,16 @@ impl AlopexService for AlopexServiceImpl {
                     return Err(Status::invalid_argument("invalid session_id"));
                 }
             };
-            let fut = self
-                .state
-                .session_manager
-                .execute_in_session(&session_id, &req.sql);
-            let exec_result = match tokio::time::timeout(self.state.config.query_timeout, fut).await
-            {
-                Ok(result) => result.map_err(|err| map_status(err, &ctx.correlation_id)),
-                Err(_) => Err(Status::deadline_exceeded("query timeout")),
-            };
+            let exec_result = execute_session_statement_with_routing(
+                &self.state,
+                &session_id,
+                &req.sql,
+                &ctx.correlation_id,
+                self.state.config.query_timeout,
+            )
+            .await
+            .map(|(result, _)| result)
+            .map_err(|err| map_status(err, &ctx.correlation_id));
             match exec_result {
                 Ok(result) => result,
                 Err(err) => {
@@ -381,48 +399,33 @@ impl AlopexService for AlopexServiceImpl {
                 }
             }
         } else {
-            let mut txn = match self.state.begin_sql_txn().await {
-                Ok(txn) => txn,
+            match execute_non_session_statement_with_routing(
+                &self.state,
+                &req.sql,
+                &ctx.correlation_id,
+                self.state.config.query_timeout,
+            )
+            .await
+            {
+                Ok((result, _)) => result,
                 Err(err) => {
                     let status = map_status(err, &ctx.correlation_id);
                     self.state.metrics.record_query(start.elapsed(), false);
                     return Err(status);
                 }
-            };
-            let exec_result =
-                tokio::time::timeout(self.state.config.query_timeout, txn.async_execute(&req.sql))
-                    .await;
-            let exec_result = match exec_result {
-                Ok(result) => match result {
-                    Ok(result) => {
-                        if let Err(err) = txn.async_commit().await {
-                            let status =
-                                map_status(ServerError::Sql(err.into()), &ctx.correlation_id);
-                            self.state.metrics.record_query(start.elapsed(), false);
-                            return Err(status);
-                        }
-                        result
-                    }
-                    Err(err) => {
-                        let _ = txn.async_rollback().await;
-                        let status = map_status(ServerError::Sql(err.into()), &ctx.correlation_id);
-                        self.state.metrics.record_query(start.elapsed(), false);
-                        return Err(status);
-                    }
-                },
-                Err(_) => {
-                    let _ = txn.async_rollback().await;
-                    self.state.metrics.record_query(start.elapsed(), false);
-                    return Err(Status::deadline_exceeded("query timeout"));
-                }
-            };
-            exec_result
+            }
         };
 
         if self.state.config.audit_log_enabled {
             self.state
                 .audit
                 .log_ddl(&req.sql, ctx.actor.as_deref(), &ctx.correlation_id);
+        }
+        if req.session_id.is_empty() {
+            if let Err(err) = sync_catalog_to_store(&self.state) {
+                self.state.metrics.record_query(start.elapsed(), false);
+                return Err(map_status(err, &ctx.correlation_id));
+            }
         }
         self.state.metrics.record_query(start.elapsed(), true);
         match exec_result {
@@ -455,15 +458,16 @@ impl AlopexService for AlopexServiceImpl {
                     return Err(Status::invalid_argument("invalid session_id"));
                 }
             };
-            let fut = self
-                .state
-                .session_manager
-                .execute_in_session(&session_id, &req.sql);
-            let exec_result = match tokio::time::timeout(self.state.config.query_timeout, fut).await
-            {
-                Ok(result) => result.map_err(|err| map_status(err, &ctx.correlation_id)),
-                Err(_) => Err(Status::deadline_exceeded("query timeout")),
-            };
+            let exec_result = execute_session_statement_with_routing(
+                &self.state,
+                &session_id,
+                &req.sql,
+                &ctx.correlation_id,
+                self.state.config.query_timeout,
+            )
+            .await
+            .map(|(result, _)| result)
+            .map_err(|err| map_status(err, &ctx.correlation_id));
             match exec_result {
                 Ok(result) => result,
                 Err(err) => {
@@ -472,42 +476,21 @@ impl AlopexService for AlopexServiceImpl {
                 }
             }
         } else {
-            let mut txn = match self.state.begin_sql_txn().await {
-                Ok(txn) => txn,
+            match execute_non_session_statement_with_routing(
+                &self.state,
+                &req.sql,
+                &ctx.correlation_id,
+                self.state.config.query_timeout,
+            )
+            .await
+            {
+                Ok((result, _)) => result,
                 Err(err) => {
                     let status = map_status(err, &ctx.correlation_id);
                     self.state.metrics.record_query(start.elapsed(), false);
                     return Err(status);
                 }
-            };
-            let exec_result =
-                tokio::time::timeout(self.state.config.query_timeout, txn.async_execute(&req.sql))
-                    .await;
-            let exec_result = match exec_result {
-                Ok(result) => match result {
-                    Ok(result) => {
-                        if let Err(err) = txn.async_commit().await {
-                            let status =
-                                map_status(ServerError::Sql(err.into()), &ctx.correlation_id);
-                            self.state.metrics.record_query(start.elapsed(), false);
-                            return Err(status);
-                        }
-                        result
-                    }
-                    Err(err) => {
-                        let _ = txn.async_rollback().await;
-                        let status = map_status(ServerError::Sql(err.into()), &ctx.correlation_id);
-                        self.state.metrics.record_query(start.elapsed(), false);
-                        return Err(status);
-                    }
-                },
-                Err(_) => {
-                    let _ = txn.async_rollback().await;
-                    self.state.metrics.record_query(start.elapsed(), false);
-                    return Err(Status::deadline_exceeded("query timeout"));
-                }
-            };
-            exec_result
+            }
         };
 
         self.state.metrics.record_query(start.elapsed(), true);
@@ -566,11 +549,19 @@ impl AlopexService for AlopexServiceImpl {
             .session_id
             .parse::<SessionId>()
             .map_err(|_| Status::invalid_argument("invalid session_id"))?;
-        self.state
+        let effects = self
+            .state
             .session_manager
             .commit(&session_id)
             .await
             .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        if !effects.is_empty() {
+            self.state
+                .apply_table_lifecycle_effects(effects)
+                .map_err(|err| map_status(err, &ctx.correlation_id))?;
+            sync_catalog_to_store(&self.state)
+                .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        }
         Ok(Response::new(proto::CommitResponse { success: true }))
     }
 
@@ -585,10 +576,14 @@ impl AlopexService for AlopexServiceImpl {
             .session_id
             .parse::<SessionId>()
             .map_err(|_| Status::invalid_argument("invalid session_id"))?;
-        self.state
+        let effects = self
+            .state
             .session_manager
             .rollback(&session_id)
             .await
+            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        self.state
+            .apply_catalog_rollback_effects(effects)
             .map_err(|err| map_status(err, &ctx.correlation_id))?;
         Ok(Response::new(proto::RollbackResponse { success: true }))
     }
@@ -845,6 +840,7 @@ fn map_status(err: ServerError, correlation_id: &str) -> Status {
         axum::http::StatusCode::CONFLICT => tonic::Code::Aborted,
         axum::http::StatusCode::REQUEST_TIMEOUT => tonic::Code::DeadlineExceeded,
         axum::http::StatusCode::PAYLOAD_TOO_LARGE => tonic::Code::ResourceExhausted,
+        axum::http::StatusCode::NOT_IMPLEMENTED => tonic::Code::Unimplemented,
         axum::http::StatusCode::GONE => tonic::Code::NotFound,
         _ => tonic::Code::Internal,
     };

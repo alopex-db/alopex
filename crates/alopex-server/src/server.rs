@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use alopex_cluster::{
     ClusterManager, ClusterMode, ClusterStatusSnapshot, MembershipSource, NodeRole, NodeState,
+    TableLifecycleEffect,
 };
 use alopex_core::kv::any::AnyKV;
 use alopex_core::kv::async_adapter::{AsyncKVStoreAdapter, AsyncKVTransactionAdapter};
@@ -26,7 +27,7 @@ use crate::ops::memory::MemoryControlPolicy;
 use crate::ops::recovery::{RecoveryCoordinator, RecoveryInfo};
 use crate::ops::restore::RestoreCoordinator;
 use crate::ops::state::{LifecycleStateManager, Mode};
-use crate::session::{SessionConfig, SessionManager, TransactionFactory};
+use crate::session::{CatalogRollbackEffect, SessionConfig, SessionManager, TransactionFactory};
 use crate::tls;
 
 pub struct Server {
@@ -203,6 +204,53 @@ impl ServerState {
 
     pub fn cluster_startup_diagnostics(&self) -> Result<ClusterStartupDiagnostics> {
         ClusterStartupDiagnostics::from_state(self)
+    }
+
+    pub fn apply_table_lifecycle_effects(&self, effects: Vec<TableLifecycleEffect>) -> Result<()> {
+        if effects.is_empty() {
+            return Ok(());
+        }
+        let mut manager = self.cluster_manager.write().map_err(|err| {
+            ServerError::Internal(format!("cluster manager lock poisoned: {err}"))
+        })?;
+        for effect in effects {
+            manager
+                .apply_table_lifecycle_effect(effect)
+                .map_err(|err| ServerError::Internal(err.to_string()))?;
+        }
+        Ok(())
+    }
+
+    pub fn apply_catalog_rollback_effects(
+        &self,
+        effects: Vec<CatalogRollbackEffect>,
+    ) -> Result<()> {
+        if effects.is_empty() {
+            return Ok(());
+        }
+        let mut catalog = self
+            .catalog
+            .write()
+            .map_err(|_| ServerError::Internal("catalog lock poisoned".into()))?;
+        for effect in effects.into_iter().rev() {
+            match effect {
+                CatalogRollbackEffect::DropTable { table_name } => {
+                    if catalog.table_exists(&table_name) {
+                        catalog
+                            .drop_table(&table_name)
+                            .map_err(|err| ServerError::Internal(err.to_string()))?;
+                    }
+                }
+                CatalogRollbackEffect::CreateTable { table } => {
+                    if !catalog.table_exists(&table.name) {
+                        catalog
+                            .create_table(*table)
+                            .map_err(|err| ServerError::Internal(err.to_string()))?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn begin_sql_txn(
