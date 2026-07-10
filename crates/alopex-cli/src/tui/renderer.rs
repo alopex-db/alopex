@@ -48,7 +48,7 @@ pub fn render_output<'a>(
 
 fn status_message_for(columns: &[Column], rows: &[Row]) -> Option<String> {
     let row = rows.first()?;
-    if rows.len() != 1 || columns.len() < 2 {
+    if rows.len() != 1 || columns.len() != 2 {
         return None;
     }
     if !column_name_eq(&columns[0].name, "status") || !column_name_eq(&columns[1].name, "message") {
@@ -132,6 +132,23 @@ mod tests {
     fn ignores_non_status_output() {
         let columns = vec![Column::new("id", DataType::Int)];
         let rows = vec![Row::new(vec![Value::Int(1)])];
+
+        let message = status_message_for(&columns, &rows);
+        assert_eq!(message, None);
+    }
+
+    #[test]
+    fn keeps_rich_health_rows_visible() {
+        let columns = vec![
+            Column::new("status", DataType::Text),
+            Column::new("message", DataType::Text),
+            Column::new("degraded", DataType::Bool),
+        ];
+        let rows = vec![Row::new(vec![
+            Value::Text("degraded".to_string()),
+            Value::Text("cluster status degraded".to_string()),
+            Value::Bool(true),
+        ])];
 
         let message = status_message_for(&columns, &rows);
         assert_eq!(message, None);
