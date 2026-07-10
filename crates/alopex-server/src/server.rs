@@ -202,6 +202,32 @@ impl ServerState {
         Ok(snapshot)
     }
 
+    pub fn cluster_join(&self) -> Result<ClusterStatusSnapshot> {
+        self.cluster_membership_transition("join")
+    }
+
+    pub fn cluster_leave(&self) -> Result<ClusterStatusSnapshot> {
+        self.cluster_membership_transition("leave")
+    }
+
+    fn cluster_membership_transition(&self, action: &str) -> Result<ClusterStatusSnapshot> {
+        let mut manager = self.cluster_manager.write().map_err(|err| {
+            ServerError::Internal(format!("cluster manager lock poisoned: {err}"))
+        })?;
+        if manager.status_snapshot().mode == ClusterMode::SingleNode {
+            return Err(ServerError::BadRequest(format!(
+                "cluster {action} requires cluster_aware mode"
+            )));
+        }
+        let snapshot = match action {
+            "join" => manager.join(),
+            "leave" => manager.leave(),
+            _ => unreachable!("cluster membership action is fixed by caller"),
+        }
+        .map_err(|err| ServerError::BadRequest(err.to_string()))?;
+        Ok(snapshot)
+    }
+
     pub fn cluster_startup_diagnostics(&self) -> Result<ClusterStartupDiagnostics> {
         ClusterStartupDiagnostics::from_state(self)
     }

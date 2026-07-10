@@ -42,6 +42,25 @@ struct ServerCompactionResponse {
     message: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ServerClusterOperationResponse {
+    action: Option<String>,
+    cluster: Option<ServerClusterStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerClusterStatus {
+    mode: Option<String>,
+    identity: Option<ServerClusterIdentity>,
+    degraded: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerClusterIdentity {
+    node_id: Option<String>,
+    lifecycle_state: Option<String>,
+}
+
 /// Execute a server management command against a remote server.
 pub async fn execute_remote<W: Write>(
     client: &HttpClient,
@@ -105,6 +124,20 @@ pub async fn execute_remote<W: Write>(
                     response.message.as_deref(),
                 )],
             )
+        }
+        ServerCommand::Join => {
+            let response = execute_cluster_operation(client, "join").await?;
+            if quiet {
+                return Ok(());
+            }
+            render_cluster_operation(writer, &response)
+        }
+        ServerCommand::Leave => {
+            let response = execute_cluster_operation(client, "leave").await?;
+            if quiet {
+                return Ok(());
+            }
+            render_cluster_operation(writer, &response)
         }
         ServerCommand::Compaction { command } => match command {
             CompactionCommand::Trigger => {
@@ -209,6 +242,38 @@ pub async fn execute_remote_tui(
                 admin_launcher,
             )
         }
+        ServerCommand::Join => {
+            let response = execute_cluster_operation(client, "join").await?;
+            if quiet {
+                return Ok(());
+            }
+            render_output(
+                server_output::cluster_operation_columns(),
+                vec![cluster_operation_row(&response)],
+                connection_label,
+                Some(server_command_context(cmd)),
+                true,
+                None,
+                output_format,
+                admin_launcher,
+            )
+        }
+        ServerCommand::Leave => {
+            let response = execute_cluster_operation(client, "leave").await?;
+            if quiet {
+                return Ok(());
+            }
+            render_output(
+                server_output::cluster_operation_columns(),
+                vec![cluster_operation_row(&response)],
+                connection_label,
+                Some(server_command_context(cmd)),
+                true,
+                None,
+                output_format,
+                admin_launcher,
+            )
+        }
         ServerCommand::Compaction { command } => match command {
             CompactionCommand::Trigger => {
                 let request = serde_json::json!({});
@@ -242,6 +307,8 @@ fn server_command_context(cmd: &ServerCommand) -> String {
         ServerCommand::Status => "server status".to_string(),
         ServerCommand::Metrics => "server metrics".to_string(),
         ServerCommand::Health => "server health".to_string(),
+        ServerCommand::Join => "server join".to_string(),
+        ServerCommand::Leave => "server leave".to_string(),
         ServerCommand::Compaction { .. } => "server compaction trigger".to_string(),
     }
 }
@@ -253,6 +320,41 @@ fn render_table<W: Write>(writer: &mut W, columns: Vec<Column>, rows: Vec<Row>) 
         formatter.write_row(writer, &row)?;
     }
     formatter.write_footer(writer)
+}
+
+async fn execute_cluster_operation(
+    client: &HttpClient,
+    action: &str,
+) -> Result<ServerClusterOperationResponse> {
+    let request = serde_json::json!({});
+    let path = format!("api/admin/cluster/{action}");
+    client
+        .post_json(&path, &request)
+        .await
+        .map_err(map_client_error)
+}
+
+fn render_cluster_operation<W: Write>(
+    writer: &mut W,
+    response: &ServerClusterOperationResponse,
+) -> Result<()> {
+    render_table(
+        writer,
+        server_output::cluster_operation_columns(),
+        vec![cluster_operation_row(response)],
+    )
+}
+
+fn cluster_operation_row(response: &ServerClusterOperationResponse) -> Row {
+    let cluster = response.cluster.as_ref();
+    let identity = cluster.and_then(|cluster| cluster.identity.as_ref());
+    server_output::cluster_operation_row(
+        response.action.as_deref(),
+        cluster.and_then(|cluster| cluster.mode.as_deref()),
+        identity.and_then(|identity| identity.node_id.as_deref()),
+        identity.and_then(|identity| identity.lifecycle_state.as_deref()),
+        cluster.and_then(|cluster| cluster.degraded),
+    )
 }
 
 fn map_client_error(err: ClientError) -> CliError {

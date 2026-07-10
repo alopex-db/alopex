@@ -84,6 +84,32 @@ pub fn compaction_row(success: Option<bool>, message: Option<&str>) -> Row {
     ])
 }
 
+pub fn cluster_operation_columns() -> Vec<Column> {
+    vec![
+        Column::new("Action", DataType::Text),
+        Column::new("Mode", DataType::Text),
+        Column::new("Node", DataType::Text),
+        Column::new("Lifecycle", DataType::Text),
+        Column::new("Degraded", DataType::Text),
+    ]
+}
+
+pub fn cluster_operation_row(
+    action: Option<&str>,
+    mode: Option<&str>,
+    node_id: Option<&str>,
+    lifecycle_state: Option<&str>,
+    degraded: Option<bool>,
+) -> Row {
+    Row::new(vec![
+        Value::Text(opt_text(action)),
+        Value::Text(opt_text(mode)),
+        Value::Text(opt_text(node_id)),
+        Value::Text(opt_text(lifecycle_state)),
+        Value::Text(opt_bool(degraded)),
+    ])
+}
+
 fn opt_text(value: Option<&str>) -> String {
     value.unwrap_or("N/A").to_string()
 }
@@ -97,5 +123,11 @@ fn opt_u64(value: Option<u64>) -> String {
 fn opt_f64(value: Option<f64>) -> String {
     value
         .map(|value| format!("{:.2}", value))
+        .unwrap_or_else(|| "N/A".to_string())
+}
+
+fn opt_bool(value: Option<bool>) -> String {
+    value
+        .map(|value| value.to_string())
         .unwrap_or_else(|| "N/A".to_string())
 }

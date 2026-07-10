@@ -56,6 +56,12 @@ struct AdminHealthResponse {
     cluster: ClusterStatusSnapshot,
 }
 
+#[derive(Serialize)]
+struct AdminClusterOperationResponse {
+    action: &'static str,
+    cluster: ClusterStatusSnapshot,
+}
+
 #[derive(Deserialize)]
 pub struct AdminLifecycleRequest {
     action: String,
@@ -172,6 +178,20 @@ pub async fn health(
         cluster,
     })
     .into_response()
+}
+
+pub async fn cluster_join(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+) -> Response {
+    cluster_operation_response(&state, &ctx, "join")
+}
+
+pub async fn cluster_leave(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+) -> Response {
+    cluster_operation_response(&state, &ctx, "leave")
 }
 
 pub async fn compaction() -> impl IntoResponse {
@@ -367,8 +387,27 @@ fn capabilities_for_auth(auth: &crate::auth::AuthMiddleware) -> (&'static str, V
 
 fn all_actions() -> Vec<&'static str> {
     vec![
-        "read", "create", "update", "delete", "archive", "restore", "backup", "export",
+        "read", "create", "update", "delete", "archive", "restore", "backup", "export", "join",
+        "leave",
     ]
+}
+
+fn cluster_operation_response(
+    state: &Arc<ServerState>,
+    ctx: &RequestContext,
+    action: &'static str,
+) -> Response {
+    let cluster = match action {
+        "join" => state.cluster_join(),
+        "leave" => state.cluster_leave(),
+        _ => unreachable!("cluster membership action is fixed by route"),
+    };
+    let cluster = match cluster {
+        Ok(snapshot) => snapshot,
+        Err(err) => return error_response(err, ctx),
+    };
+    state.metrics.record_cluster_status(&cluster);
+    Json(AdminClusterOperationResponse { action, cluster }).into_response()
 }
 
 fn perform_lifecycle_action(action: &str, data_dir: &Path) -> Result<String, String> {

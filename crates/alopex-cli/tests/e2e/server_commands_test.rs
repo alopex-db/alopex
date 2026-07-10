@@ -95,6 +95,40 @@ async fn e2e_server_commands_workflow() {
         .route(
             "/api/admin/compaction",
             post(|| async { Json(json!({ "success": true, "message": "started" })) }),
+        )
+        .route(
+            "/api/admin/cluster/join",
+            post(|| async {
+                Json(json!({
+                    "action": "join",
+                    "cluster": {
+                        "schema_version": 1,
+                        "mode": "cluster_aware",
+                        "identity": {
+                            "node_id": "node-a",
+                            "lifecycle_state": "active"
+                        },
+                        "degraded": false
+                    }
+                }))
+            }),
+        )
+        .route(
+            "/api/admin/cluster/leave",
+            post(|| async {
+                Json(json!({
+                    "action": "leave",
+                    "cluster": {
+                        "schema_version": 1,
+                        "mode": "cluster_aware",
+                        "identity": {
+                            "node_id": "node-a",
+                            "lifecycle_state": "leaving"
+                        },
+                        "degraded": false
+                    }
+                }))
+            }),
         );
 
     let (base_url, shutdown) = spawn_tls_server(router).await;
@@ -134,6 +168,20 @@ async fn e2e_server_commands_workflow() {
     .expect("compaction");
     let text = String::from_utf8(std::mem::take(&mut output)).expect("utf8");
     assert!(text.contains("OK"));
+
+    execute_server_remote(&client, &ServerCommand::Join, &mut output, false)
+        .await
+        .expect("join");
+    let text = String::from_utf8(std::mem::take(&mut output)).expect("utf8");
+    assert!(text.contains("join"));
+    assert!(text.contains("active"));
+
+    execute_server_remote(&client, &ServerCommand::Leave, &mut output, false)
+        .await
+        .expect("leave");
+    let text = String::from_utf8(std::mem::take(&mut output)).expect("utf8");
+    assert!(text.contains("leave"));
+    assert!(text.contains("leaving"));
 
     let _ = shutdown.send(());
 }

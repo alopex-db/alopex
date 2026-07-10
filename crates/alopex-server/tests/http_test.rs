@@ -32,6 +32,13 @@ async fn build_state(
 async fn build_cluster_aware_state(
     membership_source_available: bool,
 ) -> (Arc<ServerState>, tempfile::TempDir) {
+    build_cluster_aware_state_with_lifecycle(membership_source_available, NodeState::Active).await
+}
+
+async fn build_cluster_aware_state_with_lifecycle(
+    membership_source_available: bool,
+    lifecycle_state: NodeState,
+) -> (Arc<ServerState>, tempfile::TempDir) {
     let temp = tempdir().expect("tempdir");
     let config = ServerConfig {
         data_dir: temp.path().to_path_buf(),
@@ -43,7 +50,7 @@ async fn build_cluster_aware_state(
             cluster_id: Some("cluster-a".to_string()),
             advertised_endpoint: Some("127.0.0.1:7001".to_string()),
             role: NodeRole::Worker,
-            lifecycle_state: NodeState::Active,
+            lifecycle_state,
             membership_source_available,
             ..ClusterServerConfig::default()
         },
@@ -253,6 +260,83 @@ async fn prometheus_metrics_include_cluster_source_without_remote_observations()
         "cluster_member_metrics_source{node_id=\"node-a\",source=\"live_status_surface\"} 1"
     ));
     assert!(!text.contains("cluster_member_latency"));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn admin_cluster_join_leave_returns_status_schema_after_transition() {
+    let (state, _temp) = build_cluster_aware_state_with_lifecycle(true, NodeState::Joining).await;
+    let router = http::router(state.clone());
+
+    let (status, _, body) = send_json(
+        router.clone(),
+        Method::POST,
+        "/api/admin/cluster/join",
+        json!({}),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("join json");
+    assert_eq!(value["action"].as_str(), Some("join"));
+    assert_eq!(value["cluster"]["schema_version"].as_u64(), Some(1));
+    assert_eq!(value["cluster"]["mode"].as_str(), Some("cluster_aware"));
+    assert_eq!(
+        value["cluster"]["identity"]["node_id"].as_str(),
+        Some("node-a")
+    );
+    assert_eq!(
+        value["cluster"]["identity"]["lifecycle_state"].as_str(),
+        Some("active")
+    );
+    assert_eq!(
+        value["cluster"]["membership"]["members"][0]["transition_reason"].as_str(),
+        Some("join_completed")
+    );
+
+    let (status, _, body) = send_json(
+        router,
+        Method::POST,
+        "/api/admin/cluster/leave",
+        json!({}),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("leave json");
+    assert_eq!(value["action"].as_str(), Some("leave"));
+    assert_eq!(value["cluster"]["schema_version"].as_u64(), Some(1));
+    assert_eq!(
+        value["cluster"]["identity"]["lifecycle_state"].as_str(),
+        Some("leaving")
+    );
+    assert_eq!(
+        value["cluster"]["membership"]["members"][0]["transition_reason"].as_str(),
+        Some("leave_requested")
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn admin_cluster_join_rejects_single_node_config() {
+    let (state, _temp) = build_state(AuthMode::None, Duration::from_secs(5)).await;
+    let router = http::router(state.clone());
+
+    let (status, _, body) = send_json(
+        router,
+        Method::POST,
+        "/api/admin/cluster/join",
+        json!({}),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let value: Value = serde_json::from_slice(&body).expect("error json");
+    assert_eq!(value["error"]["code"].as_str(), Some("INVALID_REQUEST"));
+    assert!(value["error"]["message"]
+        .as_str()
+        .expect("message")
+        .contains("cluster_aware mode"));
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -557,4 +641,33 @@ async fn http_auth_failure_includes_correlation_id() {
         .expect("correlation id");
     assert!(!correlation_id.is_empty());
     let _ = headers;
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn admin_cluster_join_uses_existing_auth_boundary() {
+    let (state, _temp) = build_state(
+        AuthMode::Dev {
+            api_key: "secret".to_string(),
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+    let router = http::router(state.clone());
+
+    let (status, _, body) = send_json(
+        router,
+        Method::POST,
+        "/api/admin/cluster/join",
+        json!({}),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let value: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(value["error"]["code"].as_str(), Some("UNAUTHORIZED"));
+    assert!(!value["error"]["correlation_id"]
+        .as_str()
+        .expect("correlation id")
+        .is_empty());
 }

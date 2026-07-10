@@ -289,6 +289,40 @@ async fn start_admin_server() -> (String, oneshot::Sender<()>, tempfile::TempDir
         .route(
             "/api/admin/compaction",
             post(|| async { Json(json!({ "success": true, "message": "started" })) }),
+        )
+        .route(
+            "/api/admin/cluster/join",
+            post(|| async {
+                Json(json!({
+                    "action": "join",
+                    "cluster": {
+                        "schema_version": 1,
+                        "mode": "cluster_aware",
+                        "identity": {
+                            "node_id": "node-a",
+                            "lifecycle_state": "active"
+                        },
+                        "degraded": false
+                    }
+                }))
+            }),
+        )
+        .route(
+            "/api/admin/cluster/leave",
+            post(|| async {
+                Json(json!({
+                    "action": "leave",
+                    "cluster": {
+                        "schema_version": 1,
+                        "mode": "cluster_aware",
+                        "identity": {
+                            "node_id": "node-a",
+                            "lifecycle_state": "leaving"
+                        },
+                        "degraded": false
+                    }
+                }))
+            }),
         );
 
     spawn_tls_server(router).await
@@ -1059,6 +1093,23 @@ async fn server_admin_commands_success() {
     assert!(text.contains("Status"));
     assert!(text.contains("OK"));
     assert!(text.contains("started"));
+
+    execute_server_remote(&client, &ServerCommand::Join, &mut output, false)
+        .await
+        .unwrap();
+    let text = String::from_utf8(std::mem::take(&mut output)).unwrap();
+    assert!(text.contains("Action"));
+    assert!(text.contains("join"));
+    assert!(text.contains("cluster_aware"));
+    assert!(text.contains("node-a"));
+    assert!(text.contains("active"));
+
+    execute_server_remote(&client, &ServerCommand::Leave, &mut output, false)
+        .await
+        .unwrap();
+    let text = String::from_utf8(std::mem::take(&mut output)).unwrap();
+    assert!(text.contains("leave"));
+    assert!(text.contains("leaving"));
 
     let _ = shutdown.send(());
 }
