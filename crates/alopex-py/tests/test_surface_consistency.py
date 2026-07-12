@@ -43,6 +43,50 @@ def _assert_with_diff(expected: dict, actual: dict) -> None:
     raise AssertionError(f"surface consistency mismatch\nexpected={expected}\nactual={actual}\ndiff:\n  - {joined}")
 
 
+def test_python_cluster_status_accessor_shape_and_embedded_compatibility():
+    db = Database.open_in_memory()
+
+    status = db.cluster_status()
+    assert status["schema_version"] == 1
+    assert status["mode"] == "single_node"
+    assert status["identity"]["node_id"] == "local"
+    assert status["identity"]["role"] == "gateway"
+    assert status["identity"]["lifecycle_state"] == "unconfigured"
+    assert status["membership"]["source"] == "local_default"
+    assert status["membership"]["members"] == []
+    assert status["routing_capabilities"] == {
+        "local_only": True,
+        "future_distributed_execution_required": True,
+        "scatter_gather_simulated": True,
+    }
+    assert status["metrics_summary"]["source"] == "live_status_surface"
+    assert status["metrics_summary"]["members"] == []
+    assert status["degraded"] is False
+    assert status["diagnostics"] == []
+
+    txn = db.begin(TxnMode.READ_WRITE)
+    txn.put(b"cluster-status-key", b"local-value")
+    txn.commit()
+
+    with db.begin(TxnMode.READ_ONLY) as txn:
+        assert txn.get(b"cluster-status-key") == b"local-value"
+
+
+def test_python_routing_diagnostics_accessor_is_read_only_local_surface():
+    db = Database.new()
+
+    diagnostics = db.routing_diagnostics()
+    assert diagnostics["schema_version"] == 1
+    assert diagnostics["update_epoch"] == 0
+    assert diagnostics["decision"] == "local_only"
+    assert diagnostics["reason"] == "single_resolved_target"
+    assert diagnostics["plan_id"] == "python_embedded_local"
+    assert diagnostics["roles"] == ["gateway"]
+    assert diagnostics["targets"] == []
+    assert diagnostics["excluded_targets"] == []
+    assert diagnostics["retry_summary"] is None
+
+
 @pytest.mark.requires_numpy
 def test_python_surface_consistency_uses_shared_expected_set(tmp_path):
     import numpy as np

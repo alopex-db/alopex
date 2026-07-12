@@ -223,6 +223,7 @@ dependencies = [
 name = "alopex-py"
 version = "0.4.0"
 dependencies = [
+ "alopex-cluster",
  "alopex-core",
  "alopex-embedded",
  "criterion",

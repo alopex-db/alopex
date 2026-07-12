@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
 mod catalog;
+pub(crate) mod cluster;
 mod config;
 mod results;
 

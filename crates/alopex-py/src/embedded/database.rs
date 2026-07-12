@@ -1,8 +1,12 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
+use alopex_cluster::{
+    ClusterManager, NodeRole, RoutingDecisionKind, RoutingDiagnostics, StableDiagnosticCode,
+    INITIAL_UPDATE_EPOCH,
+};
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyDict, PyModule};
 #[cfg(feature = "numpy")]
 use pyo3::PyObject;
 
@@ -126,6 +130,24 @@ impl PyDatabase {
             Some(stats) => Ok(PyMemoryStats::from(stats)),
             None => Ok(PyMemoryStats::with_total(0, 0)),
         }
+    }
+
+    fn cluster_status(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let _db = self.ensure_open()?;
+        let snapshot = ClusterManager::default().status_snapshot();
+        crate::types::cluster::cluster_status_to_py(py, &snapshot)
+    }
+
+    fn routing_diagnostics(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let _db = self.ensure_open()?;
+        let mut diagnostics = RoutingDiagnostics::new(
+            RoutingDecisionKind::LocalOnly,
+            StableDiagnosticCode::SingleResolvedTarget,
+            "python_embedded_local",
+            INITIAL_UPDATE_EPOCH,
+        );
+        diagnostics.roles.push(NodeRole::Gateway);
+        crate::types::cluster::routing_diagnostics_to_py(py, &diagnostics)
     }
 
     fn close(&mut self) -> PyResult<()> {
