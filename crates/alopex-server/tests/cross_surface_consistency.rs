@@ -12,12 +12,16 @@ use alopex_cli::commands::{kv as cli_kv, sql as cli_sql};
 use alopex_cli::output::jsonl::JsonlFormatter;
 use alopex_cli::streaming::StreamingWriter;
 use alopex_cli::ui::mode::UiMode;
+use alopex_cluster::{ClusterMode, NodeRole, NodeState};
 use alopex_embedded::Database;
+use alopex_server::config::{ClusterServerConfig, ServerConfig};
+use alopex_server::{http, Server};
 use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Client, Method, Request, StatusCode};
 use serde_json::{json, Value};
 use tempfile::tempdir;
 use tokio::time::sleep;
+use tower::ServiceExt;
 
 struct ChildGuard {
     child: Option<Child>,
@@ -281,13 +285,95 @@ fn assert_json_eq_with_diff(label: &str, expected: &Value, actual: &Value) {
     panic!("{label} mismatch\nexpected: {expected}\nactual: {actual}\ndiff:\n  - {joined}");
 }
 
+fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../tests/fixtures/{name}"))
+}
+
+fn load_fixture(name: &str) -> Value {
+    let path = fixture_path(name);
+    serde_json::from_slice(&fs::read(&path).expect("fixture bytes")).expect("fixture json")
+}
+
+async fn fetch_admin_cluster_status(config: ServerConfig) -> Value {
+    let server = Server::new(config).expect("server");
+    let router = http::router(server.state.clone());
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/admin/status")
+        .body(Body::empty())
+        .expect("request");
+    let response = router.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = hyper::body::to_bytes(response.into_body())
+        .await
+        .expect("body");
+    let payload: Value = serde_json::from_slice(&body).expect("admin status json");
+    stable_cluster_status_fields(&payload["cluster"])
+}
+
+fn stable_cluster_status_fields(cluster: &Value) -> Value {
+    json!({
+        "schema_version": cluster["schema_version"].clone(),
+        "mode": cluster["mode"].clone(),
+        "identity": {
+            "node_id": cluster["identity"]["node_id"].clone(),
+            "cluster_id": cluster["identity"]["cluster_id"].clone(),
+            "advertised_endpoint": cluster["identity"]["advertised_endpoint"].clone(),
+            "role": cluster["identity"]["role"].clone(),
+            "lifecycle_state": cluster["identity"]["lifecycle_state"].clone(),
+            "metadata_schema_version": cluster["identity"]["metadata_schema_version"].clone(),
+            "update_epoch": cluster["identity"]["update_epoch"].clone(),
+        },
+        "membership": {
+            "schema_version": cluster["membership"]["schema_version"].clone(),
+            "update_epoch": cluster["membership"]["update_epoch"].clone(),
+            "source": cluster["membership"]["source"].clone(),
+            "members": cluster["membership"]["members"].clone(),
+        },
+        "routing_capabilities": cluster["routing_capabilities"].clone(),
+        "metrics_summary": cluster["metrics_summary"].clone(),
+        "degraded": cluster["degraded"].clone(),
+        "diagnostics": cluster["diagnostics"].as_array().map(|diagnostics| {
+            Value::Array(diagnostics.iter().map(|diagnostic| {
+                json!({
+                    "code": diagnostic["code"].clone(),
+                    "degraded": diagnostic["degraded"].clone(),
+                })
+            }).collect())
+        }).unwrap_or_else(|| Value::Array(Vec::new())),
+    })
+}
+
+fn base_server_config(data_dir: PathBuf) -> ServerConfig {
+    ServerConfig {
+        data_dir,
+        audit_log_enabled: false,
+        tracing_enabled: false,
+        metrics_enabled: false,
+        ..ServerConfig::default()
+    }
+}
+
+fn cluster_aware_config(data_dir: PathBuf, membership_source_available: bool) -> ServerConfig {
+    ServerConfig {
+        cluster: ClusterServerConfig {
+            mode: ClusterMode::ClusterAware,
+            node_id: Some("node-a".to_string()),
+            cluster_id: Some("cluster-a".to_string()),
+            advertised_endpoint: Some("127.0.0.1:7001".to_string()),
+            role: NodeRole::Worker,
+            lifecycle_state: NodeState::Active,
+            membership_source_available,
+            ..ClusterServerConfig::default()
+        },
+        ..base_server_config(data_dir)
+    }
+}
+
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn cross_surface_consistency_cli_and_server_share_expected_results() {
-    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/cross_surface_expected.json");
-    let expected: Value = serde_json::from_slice(&fs::read(&fixture_path).expect("fixture bytes"))
-        .expect("fixture json");
+    let expected = load_fixture("cross_surface_expected.json");
 
     let temp = tempdir().expect("tempdir");
     let mut used = HashSet::new();
@@ -435,4 +521,42 @@ async fn cross_surface_consistency_cli_and_server_share_expected_results() {
 
     assert_json_eq_with_diff("server", &expected_common, &server_actual);
     assert_json_eq_with_diff("cli", &expected_common, &cli_actual);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn cluster_status_cross_surface_fixture_matches_server_admin_status() {
+    let expected = load_fixture("cluster_status_cross_surface_expected.json");
+    let expected = &expected["server_cluster_status"];
+
+    let single_node_dir = tempdir().expect("single node tempdir");
+    let single_node_actual =
+        fetch_admin_cluster_status(base_server_config(single_node_dir.path().to_path_buf())).await;
+    assert_json_eq_with_diff(
+        "server single_node cluster status",
+        &expected["single_node"],
+        &single_node_actual,
+    );
+
+    let cluster_dir = tempdir().expect("cluster aware tempdir");
+    let cluster_actual =
+        fetch_admin_cluster_status(cluster_aware_config(cluster_dir.path().to_path_buf(), true))
+            .await;
+    assert_json_eq_with_diff(
+        "server cluster_aware cluster status",
+        &expected["cluster_aware"],
+        &cluster_actual,
+    );
+
+    let degraded_dir = tempdir().expect("degraded tempdir");
+    let degraded_actual = fetch_admin_cluster_status(cluster_aware_config(
+        degraded_dir.path().to_path_buf(),
+        false,
+    ))
+    .await;
+    assert_json_eq_with_diff(
+        "server cluster_aware_degraded cluster status",
+        &expected["cluster_aware_degraded"],
+        &degraded_actual,
+    );
 }

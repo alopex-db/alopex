@@ -12,6 +12,46 @@ def _load_expected() -> dict:
         return json.load(fh)
 
 
+def _load_cluster_expected() -> dict:
+    fixture_path = (
+        Path(__file__).resolve().parents[3]
+        / "tests"
+        / "fixtures"
+        / "cluster_status_cross_surface_expected.json"
+    )
+    with fixture_path.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _stable_cluster_status_fields(status: dict) -> dict:
+    return {
+        "schema_version": status["schema_version"],
+        "mode": status["mode"],
+        "identity": {
+            "node_id": status["identity"]["node_id"],
+            "cluster_id": status["identity"]["cluster_id"],
+            "advertised_endpoint": status["identity"]["advertised_endpoint"],
+            "role": status["identity"]["role"],
+            "lifecycle_state": status["identity"]["lifecycle_state"],
+            "metadata_schema_version": status["identity"]["metadata_schema_version"],
+            "update_epoch": status["identity"]["update_epoch"],
+        },
+        "membership": {
+            "schema_version": status["membership"]["schema_version"],
+            "update_epoch": status["membership"]["update_epoch"],
+            "source": status["membership"]["source"],
+            "members": status["membership"]["members"],
+        },
+        "routing_capabilities": status["routing_capabilities"],
+        "metrics_summary": status["metrics_summary"],
+        "degraded": status["degraded"],
+        "diagnostics": [
+            {"code": item["code"], "degraded": item["degraded"]}
+            for item in status["diagnostics"]
+        ],
+    }
+
+
 def _diff_values(path: str, expected, actual, diffs: list[str]) -> None:
     if isinstance(expected, dict) and isinstance(actual, dict):
         keys = sorted(set(expected.keys()) | set(actual.keys()))
@@ -70,6 +110,15 @@ def test_python_cluster_status_accessor_shape_and_embedded_compatibility():
 
     with db.begin(TxnMode.READ_ONLY) as txn:
         assert txn.get(b"cluster-status-key") == b"local-value"
+
+
+def test_python_cluster_status_matches_cross_surface_fixture():
+    expected = _load_cluster_expected()["server_cluster_status"]["single_node"]
+    db = Database.open_in_memory()
+
+    actual = _stable_cluster_status_fields(db.cluster_status())
+
+    _assert_with_diff(expected, actual)
 
 
 def test_python_routing_diagnostics_accessor_is_read_only_local_surface():

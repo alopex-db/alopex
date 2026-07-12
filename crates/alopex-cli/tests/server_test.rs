@@ -1,5 +1,7 @@
 use std::convert::Infallible;
+use std::fs;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -482,6 +484,40 @@ fn table_id(table: &str) -> u32 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     table.hash(&mut hasher);
     (hasher.finish() & 0xffff_ffff) as u32
+}
+
+fn load_cluster_status_fixture() -> Value {
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/cluster_status_cross_surface_expected.json");
+    serde_json::from_slice(&fs::read(&fixture_path).expect("cluster status fixture bytes"))
+        .expect("cluster status fixture json")
+}
+
+fn status_row_json(fields: server_output::StatusRowFields<'_>) -> Value {
+    let columns = server_output::status_columns();
+    let row = server_output::status_row(fields);
+    let mut formatter = create_formatter(OutputFormat::Json);
+    let mut output = Vec::new();
+    formatter.write_header(&mut output, &columns).unwrap();
+    formatter.write_row(&mut output, &row).unwrap();
+    formatter.write_footer(&mut output).unwrap();
+
+    let value: Value = serde_json::from_slice(&output).expect("json");
+    value.as_array().expect("array")[0].clone()
+}
+
+fn cluster_status_row_subset(row: &Value) -> Value {
+    json!({
+        "Cluster Schema": row["Cluster Schema"].clone(),
+        "Cluster Mode": row["Cluster Mode"].clone(),
+        "Node ID": row["Node ID"].clone(),
+        "Lifecycle": row["Lifecycle"].clone(),
+        "Degraded": row["Degraded"].clone(),
+        "Local Only": row["Local Only"].clone(),
+        "Future Distributed": row["Future Distributed"].clone(),
+        "Scatter/Gather": row["Scatter/Gather"].clone(),
+        "Diagnostics": row["Diagnostics"].clone(),
+    })
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -1285,6 +1321,76 @@ fn server_status_json_output_contains_cluster_fields() {
     assert_eq!(row["Future Distributed"].as_bool(), Some(true));
     assert_eq!(row["Scatter/Gather"].as_bool(), Some(false));
     assert_eq!(row["Diagnostics"].as_str(), Some("chirps_unavailable"));
+}
+
+#[test]
+fn server_status_json_output_matches_cluster_cross_surface_fixture() {
+    let expected = load_cluster_status_fixture();
+    let expected = &expected["cli_status_rows"];
+    let cases = [
+        (
+            "single_node",
+            server_output::StatusRowFields {
+                version: Some("0.7.0"),
+                uptime_secs: Some(0),
+                connections: Some(0),
+                qps: Some(0.0),
+                cluster_schema_version: Some(1),
+                cluster_mode: Some("single_node"),
+                node_id: Some("local"),
+                lifecycle_state: Some("unconfigured"),
+                degraded: Some(false),
+                local_only: Some(true),
+                future_distributed: Some(true),
+                scatter_gather: Some(true),
+                diagnostics: None,
+            },
+        ),
+        (
+            "cluster_aware",
+            server_output::StatusRowFields {
+                version: Some("0.7.0"),
+                uptime_secs: Some(0),
+                connections: Some(0),
+                qps: Some(0.0),
+                cluster_schema_version: Some(1),
+                cluster_mode: Some("cluster_aware"),
+                node_id: Some("node-a"),
+                lifecycle_state: Some("active"),
+                degraded: Some(false),
+                local_only: Some(true),
+                future_distributed: Some(true),
+                scatter_gather: Some(true),
+                diagnostics: None,
+            },
+        ),
+        (
+            "cluster_aware_degraded",
+            server_output::StatusRowFields {
+                version: Some("0.7.0"),
+                uptime_secs: Some(0),
+                connections: Some(0),
+                qps: Some(0.0),
+                cluster_schema_version: Some(1),
+                cluster_mode: Some("cluster_aware"),
+                node_id: Some("node-a"),
+                lifecycle_state: Some("active"),
+                degraded: Some(true),
+                local_only: Some(true),
+                future_distributed: Some(true),
+                scatter_gather: Some(true),
+                diagnostics: Some("chirps_unavailable"),
+            },
+        ),
+    ];
+
+    for (label, fields) in cases {
+        let actual = cluster_status_row_subset(&status_row_json(fields));
+        assert_eq!(
+            expected[label], actual,
+            "CLI cluster status row mismatch for {label}"
+        );
+    }
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
