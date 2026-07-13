@@ -370,6 +370,154 @@ fn cluster_aware_config(data_dir: PathBuf, membership_source_available: bool) ->
     }
 }
 
+fn http_sql_value_to_i64(value: &Value) -> i64 {
+    if let Some(obj) = value.as_object() {
+        if let Some(v) = obj.get("Integer").and_then(Value::as_i64) {
+            return v;
+        }
+        if let Some(v) = obj.get("BigInt").and_then(Value::as_i64) {
+            return v;
+        }
+    }
+    panic!("unexpected http sql value: {value}");
+}
+
+fn grpc_sql_value_to_i64(value: &alopex_server::grpc::proto::Value) -> i64 {
+    use alopex_server::grpc::proto::value::Kind;
+    match &value.kind {
+        Some(Kind::IntValue(v)) => i64::from(*v),
+        Some(Kind::BigintValue(v)) => *v,
+        other => panic!("unexpected grpc sql value: {other:?}"),
+    }
+}
+
+/// gRPC ExecuteSql は HTTP `/sql` と同一の SQL 実行経路を通ること (issue #25)。
+/// SELECT リスト内スカラーサブクエリを含む SELECT が、HTTP と gRPC で
+/// 同一の結果集合を返すことを検証する。
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn grpc_execute_sql_matches_http_for_scalar_subquery_select() {
+    let temp = tempdir().expect("tempdir");
+    let mut used = HashSet::new();
+    let http_port = reserve_unique_port(&mut used);
+    let admin_port = reserve_unique_port(&mut used);
+    let grpc_port = reserve_unique_port(&mut used);
+    let config_path = write_config(temp.path(), http_port, admin_port, grpc_port);
+    let http_url = format!("http://127.0.0.1:{http_port}");
+    let admin_url = format!("http://127.0.0.1:{admin_port}");
+
+    let child = Command::new(env!("CARGO_BIN_EXE_alopex-server"))
+        .arg("--config")
+        .arg(&config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn server");
+    let mut guard = ChildGuard::new(child);
+
+    let client = Client::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut ready = false;
+    while Instant::now() < deadline {
+        if let Ok(Some(status)) = guard.child_mut().try_wait() {
+            let stderr_output = read_stderr(guard.child_mut());
+            panic!("alopex-server exited early ({status}). stderr:\n{stderr_output}");
+        }
+        if let Some(status) =
+            try_send_empty(&client, Method::GET, &format!("{admin_url}/healthz")).await
+        {
+            if status == StatusCode::OK {
+                ready = true;
+                break;
+            }
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    if !ready {
+        let stderr_output = read_stderr(guard.child_mut());
+        panic!("alopex-server failed health check. stderr:\n{stderr_output}");
+    }
+
+    for sql in [
+        "CREATE TABLE parity_items (id INT PRIMARY KEY, val INT);",
+        "CREATE TABLE parity_totals (id INT PRIMARY KEY, amount INT);",
+        "INSERT INTO parity_items (id, val) VALUES (1, 10), (2, 20);",
+        "INSERT INTO parity_totals (id, amount) VALUES (1, 100), (2, 250);",
+    ] {
+        let (status, body) = send_json(
+            &client,
+            Method::POST,
+            &format!("{http_url}/sql"),
+            json!({ "sql": sql }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "setup sql failed: {sql}: {body}");
+    }
+
+    let query = "SELECT id, (SELECT MAX(amount) FROM parity_totals) FROM parity_items ORDER BY id;";
+
+    let (status, http_result) = send_json(
+        &client,
+        Method::POST,
+        &format!("{http_url}/sql"),
+        json!({ "sql": query }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "http scalar subquery select failed: {http_result}"
+    );
+    let http_rows: Vec<Vec<i64>> = http_result
+        .get("rows")
+        .and_then(Value::as_array)
+        .expect("http rows")
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .expect("http row array")
+                .iter()
+                .map(http_sql_value_to_i64)
+                .collect()
+        })
+        .collect();
+    assert_eq!(http_rows, vec![vec![1, 250], vec![2, 250]]);
+
+    let channel = tonic::transport::Channel::from_shared(format!("http://127.0.0.1:{grpc_port}"))
+        .expect("grpc uri")
+        .connect()
+        .await
+        .expect("grpc connect");
+    let mut grpc_client =
+        alopex_server::grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+    let mut stream = grpc_client
+        .execute_sql(alopex_server::grpc::proto::SqlRequest {
+            sql: query.to_string(),
+            session_id: String::new(),
+        })
+        .await
+        .expect("grpc execute_sql call")
+        .into_inner();
+
+    let mut grpc_rows: Vec<Vec<i64>> = Vec::new();
+    loop {
+        match stream.message().await {
+            Ok(Some(row)) => {
+                grpc_rows.push(row.values.iter().map(grpc_sql_value_to_i64).collect());
+            }
+            Ok(None) => break,
+            Err(status) => panic!(
+                "grpc scalar subquery select must return rows like http, got status: {status}"
+            ),
+        }
+    }
+
+    assert_eq!(
+        grpc_rows, http_rows,
+        "gRPC ExecuteSql must return the same rows as HTTP /sql for scalar subquery SELECT"
+    );
+}
+
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn cross_surface_consistency_cli_and_server_share_expected_results() {
