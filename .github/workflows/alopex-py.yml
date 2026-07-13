@@ -157,13 +157,20 @@ jobs:
           cd "${NIM_SQL_PARSER_DIR}"
           nimble install -y npeg msgpack4nim
           nimble lib
-      # Windows は rpath を持たないため、拡張のビルドと import 時に
-      # alopex_sql_parser.dll を見つけられるよう Nim ライブラリのディレクトリを
-      # PATH に追加する（Windows の DLL 検索は PATH を含む）。
-      - name: Add Nim library to PATH (Windows)
+      # Windows は rpath を持たないため、alopex_sql_parser.dll の解決を明示的に
+      # 設定する。Python 3.8+ (bpo-36085) は拡張モジュールの依存 DLL 解決に
+      # PATH を「使わない」ため、PATH 追加だけでは `import alopex` が
+      # ImportError (DLL load failed) になる。alopex/__init__.py が参照する
+      # ALOPEX_DLL_DIR に Nim ライブラリのディレクトリを設定し、
+      # os.add_dll_directory() で登録させる。PATH への追加は Python 以外の
+      # ネイティブプロセス（DLL をプロセス起動時に解決する実行形式）向けに残す。
+      - name: Register Nim library dir for DLL resolution (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
+        run: |
+          nim_lib_dir="$(cygpath -w "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}")"
+          echo "ALOPEX_DLL_DIR=${nim_lib_dir}" >> "$GITHUB_ENV"
+          echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
       - name: Maturin develop
         if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         run: |
