@@ -102,6 +102,13 @@ fn streaming_deadline_exceeded() {
     .unwrap_err();
 
     assert!(matches!(err, CliError::Timeout(_)));
+    let stdout = String::from_utf8(output).expect("utf8");
+    if !stdout.is_empty() {
+        let value: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+            panic!("stdout must remain valid JSON on errors: {err}\nstdout:\n{stdout}")
+        });
+        assert!(value.is_array());
+    }
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -139,4 +146,11 @@ fn streaming_cancelled() {
     .unwrap_err();
 
     assert!(matches!(err, CliError::Cancelled));
+    let stdout = String::from_utf8(output).expect("utf8");
+    if !stdout.is_empty() {
+        let value: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+            panic!("stdout must remain valid JSON on errors: {err}\nstdout:\n{stdout}")
+        });
+        assert!(value.is_array());
+    }
 }

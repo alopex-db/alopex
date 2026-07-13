@@ -66,6 +66,37 @@ impl SqlOutput<'_> {
     }
 }
 
+/// Write adapter that records whether any bytes have been written.
+///
+/// Used by the JSON statement-array wrapping to decide, on error paths, how
+/// many opened arrays must be closed to keep stdout well-formed JSON.
+struct CountingWriter<W> {
+    inner: W,
+    bytes: u64,
+}
+
+impl<W: Write> CountingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, bytes: 0 }
+    }
+
+    fn bytes_written(&self) -> u64 {
+        self.bytes
+    }
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.bytes += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// Execute a SQL command with dynamic column detection.
 ///
 /// This function creates formatters internally based on the query result type,
@@ -74,7 +105,9 @@ impl SqlOutput<'_> {
 /// # Output contract
 ///
 /// - `--output json` emits an array of per-statement result sets; a single
-///   statement yields a 1-element array.
+///   statement yields a 1-element array. With `--quiet`, DDL/DML status
+///   result sets are omitted, so input consisting only of such statements
+///   yields an empty array.
 /// - Other formats emit one result block per statement, in statement order.
 ///
 /// # Arguments
@@ -205,7 +238,8 @@ fn is_select_query(sql: &str) -> Result<bool> {
 /// Execute a SQL command against a remote server using HttpClient.
 ///
 /// `--output json` emits an array of result sets (currently a single element,
-/// matching the local output contract).
+/// matching the local output contract; server-side per-statement results are
+/// tracked as issue #31).
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_remote_with_formatter<'a, W: Write>(
     client: &HttpClient,
@@ -376,7 +410,8 @@ async fn execute_remote_with_formatter_impl<W: Write>(
     };
 
     // JSON output is an array of result sets; the remote API currently
-    // returns a single result set, so the array has one element.
+    // returns a single result set, so the array has one element (server-side
+    // per-statement results are tracked as issue #31).
     let json_array = output.statement_array();
 
     if response.columns.is_empty() {
@@ -1001,23 +1036,47 @@ async fn execute_remote_streaming<W: Write>(
     };
 
     // JSON output is an array of result sets; the remote streaming API
-    // currently yields a single result set, so the array has one element.
-    let json_array = output.statement_array();
-    if json_array {
-        writeln!(writer, "[")?;
+    // currently yields a single result set, so the array has one element
+    // (server-side per-statement results are tracked as issue #31).
+    if !output.statement_array() {
+        return stream_remote_result_set(
+            client,
+            response,
+            writer,
+            output.create_block_formatter(),
+            options,
+        )
+        .await;
     }
-    stream_remote_result_set(
+
+    writeln!(writer, "[")?;
+    let mut result_set_writer = CountingWriter::new(&mut *writer);
+    let result = stream_remote_result_set(
         client,
         response,
-        writer,
+        &mut result_set_writer,
         output.create_block_formatter(),
         options,
     )
-    .await?;
-    if json_array {
-        writeln!(writer, "]")?;
+    .await;
+    let result_set_started = result_set_writer.bytes_written() > 0;
+    match result {
+        Ok(()) => {
+            writeln!(writer, "]")?;
+            Ok(())
+        }
+        Err(err) => {
+            // Keep stdout well-formed JSON on stream errors: rows are always
+            // written as complete objects, so closing the result-set array
+            // (when it was opened) and the statement array leaves valid JSON
+            // alongside the non-zero exit code.
+            if result_set_started {
+                let _ = writeln!(writer, "]");
+            }
+            let _ = writeln!(writer, "]");
+            Err(err)
+        }
     }
-    Ok(())
 }
 
 /// Stream a single remote result set (JSON array or JSONL body) to `writer`.
@@ -1762,14 +1821,34 @@ fn execute_sql_with_formatter<W: Write>(
 
     if is_single_select {
         // Single SELECT: use streaming path (FR-7).
-        let wrap_json = output.statement_array();
         let formatter = output.create_block_formatter();
-        execute_sql_select_streaming(db, sql, writer, formatter, options, wrap_json)?;
-        if wrap_json {
-            // Close the statement-result array opened by the streaming callback.
-            writeln!(writer, "]")?;
+        if !output.statement_array() {
+            return execute_sql_select_streaming(db, sql, writer, formatter, options, false);
         }
-        Ok(())
+        let mut result_set_writer = CountingWriter::new(&mut *writer);
+        let result =
+            execute_sql_select_streaming(db, sql, &mut result_set_writer, formatter, options, true);
+        let output_started = result_set_writer.bytes_written() > 0;
+        match result {
+            Ok(()) => {
+                // Close the statement-result array opened by the streaming callback.
+                writeln!(writer, "]")?;
+                Ok(())
+            }
+            Err(err) => {
+                // Keep stdout well-formed JSON on mid-stream errors: the
+                // callback opens the statement array and the result-set array
+                // together before writing rows (always complete objects), so
+                // closing both leaves valid JSON alongside the non-zero exit
+                // code. If nothing was written (e.g. planning failed), there
+                // is nothing to close.
+                if output_started {
+                    let _ = writeln!(writer, "]");
+                    let _ = writeln!(writer, "]");
+                }
+                Err(err)
+            }
+        }
     } else {
         // DDL/DML and multi-statement input: emit one result block per statement.
         execute_sql_statements(db, sql, writer, output, options)
