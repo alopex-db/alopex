@@ -115,6 +115,7 @@ dependencies = [
  "humantime",
  "hyper 0.14.32",
  "indicatif",
+ "libc",
  "parquet 52.2.0",
  "portable-pty",
  "ratatui 0.26.3",

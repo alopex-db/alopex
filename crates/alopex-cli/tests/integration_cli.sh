@@ -176,7 +176,8 @@ INSERT INTO limit_test (id) VALUES (5);
 SELECT * FROM limit_test;
 EOF
 
-OUTPUT=$($CLI --in-memory --output jsonl --limit 2 sql --file "$SQL_FILE" 2>&1 | grep -c "^{" || echo "0")
+# --quiet suppresses per-statement DDL/DML status lines so only SELECT rows are counted
+OUTPUT=$($CLI --in-memory --quiet --output jsonl --limit 2 sql --file "$SQL_FILE" 2>&1 | grep -c "^{" || echo "0")
 rm -f "$SQL_FILE"
 if [[ "$OUTPUT" -le 2 ]]; then
     pass "SQL --limit option ($OUTPUT rows)"

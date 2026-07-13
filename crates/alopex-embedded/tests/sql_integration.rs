@@ -205,3 +205,54 @@ fn sql_integration_create_then_insert_in_same_txn() {
         other => panic!("expected query result, got {other:?}"),
     }
 }
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn sql_integration_execute_sql_multi_returns_result_per_statement() {
+    let db = Database::new();
+    let results = db
+        .execute_sql_multi(
+            r#"
+            CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
+            INSERT INTO users (id, name) VALUES (1, 'alice'), (2, 'bob');
+            SELECT id FROM users ORDER BY id;
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(results.len(), 3, "one result per statement");
+    assert!(matches!(results[0], ExecutionResult::Success));
+    assert!(matches!(results[1], ExecutionResult::RowsAffected(2)));
+    match &results[2] {
+        ExecutionResult::Query(q) => {
+            assert_eq!(q.rows.len(), 2);
+            assert_eq!(q.rows[0][0], SqlValue::Integer(1));
+            assert_eq!(q.rows[1][0], SqlValue::Integer(2));
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn sql_integration_execute_sql_multi_empty_input_returns_no_results() {
+    let db = Database::new();
+    let results = db.execute_sql_multi("  ").unwrap();
+    assert!(results.is_empty());
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn sql_integration_execute_sql_multi_error_rolls_back_whole_batch() {
+    let db = Database::new();
+    let err = db.execute_sql_multi(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY); INSERT INTO missing (id) VALUES (1);",
+    );
+    assert!(err.is_err(), "failing statement must abort the batch");
+
+    // The CREATE TABLE from the failed batch must have been rolled back.
+    assert!(
+        db.execute_sql("SELECT id FROM t;").is_err(),
+        "table t should not exist after rollback"
+    );
+}

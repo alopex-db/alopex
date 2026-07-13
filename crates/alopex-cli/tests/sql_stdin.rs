@@ -34,15 +34,23 @@ SELECT * FROM stdin_test;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let value: serde_json::Value =
         serde_json::from_str(&stdout).expect("json output should be JSON");
-    let array = value.as_array().expect("json output should be array");
-    let found = array.iter().any(|row| {
+    let sets = value
+        .as_array()
+        .expect("json output should be an array of result sets");
+    assert_eq!(
+        sets.len(),
+        3,
+        "one result set per statement\nstdout:\n{stdout}"
+    );
+    let select_rows = sets[2].as_array().expect("SELECT result set");
+    let found = select_rows.iter().any(|row| {
         row.get("id")
             .and_then(|v| v.as_i64())
             .is_some_and(|id| id == 1)
     });
     assert!(
         found,
-        "expected JSON output to include id=1\nstdout:\n{}\nstderr:\n{}",
+        "expected SELECT result set to include id=1\nstdout:\n{}\nstderr:\n{}",
         stdout,
         String::from_utf8_lossy(&output.stderr)
     );

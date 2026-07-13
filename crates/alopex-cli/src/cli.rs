@@ -79,7 +79,7 @@ pub struct Cli {
 pub enum OutputFormat {
     /// Human-readable table format
     Table,
-    /// JSON array format
+    /// JSON array format (sql: array of per-statement result sets)
     Json,
     /// JSON Lines format (one JSON object per line)
     Jsonl,
@@ -277,9 +277,15 @@ pub enum KvTxnCommand {
 }
 
 /// SQL subcommand
+///
+/// Multiple `;`-separated statements are executed in a single transaction and
+/// each statement emits its own result block. With `--output json` the output
+/// is always an array of per-statement result sets (a single statement yields
+/// a 1-element array); DDL/DML statements contribute a `status`/`message`
+/// result set unless `--quiet` is set.
 #[derive(Parser, Debug)]
 pub struct SqlCommand {
-    /// SQL query to execute
+    /// SQL query to execute (may contain multiple `;`-separated statements)
     #[arg(conflicts_with = "file")]
     pub query: Option<String>,
 

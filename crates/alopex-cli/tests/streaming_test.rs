@@ -1,10 +1,9 @@
 use std::time::Duration;
 
 use alopex_cli::batch::{BatchMode, BatchModeSource};
-use alopex_cli::cli::SqlCommand;
+use alopex_cli::cli::{OutputFormat, SqlCommand};
 use alopex_cli::commands::sql::{execute_with_formatter_control, SqlExecutionOptions};
 use alopex_cli::error::CliError;
-use alopex_cli::output::formatter::create_formatter;
 use alopex_cli::streaming::{CancelSignal, Deadline};
 use alopex_cli::ui::mode::UiMode;
 use alopex_embedded::Database;
@@ -41,7 +40,6 @@ fn streaming_max_rows_limits_output() {
         tui: false,
     };
     let mut output = Vec::new();
-    let formatter = create_formatter(alopex_cli::cli::OutputFormat::Json);
     let cancel = CancelSignal::new();
     let deadline = Deadline::new(Duration::from_secs(60));
 
@@ -51,7 +49,7 @@ fn streaming_max_rows_limits_output() {
         &batch_mode(),
         UiMode::Batch,
         &mut output,
-        formatter,
+        OutputFormat::Json,
         SqlExecutionOptions {
             limit: None,
             quiet: false,
@@ -64,7 +62,9 @@ fn streaming_max_rows_limits_output() {
 
     let stdout = String::from_utf8(output).expect("utf8");
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("json");
-    let rows = value.as_array().expect("array");
+    let sets = value.as_array().expect("array of result sets");
+    assert_eq!(sets.len(), 1, "single statement yields one result set");
+    let rows = sets[0].as_array().expect("rows array");
     assert_eq!(rows.len(), 2);
 }
 
@@ -81,7 +81,6 @@ fn streaming_deadline_exceeded() {
         tui: false,
     };
     let mut output = Vec::new();
-    let formatter = create_formatter(alopex_cli::cli::OutputFormat::Json);
     let cancel = CancelSignal::new();
     let deadline = Deadline::new(Duration::from_secs(0));
 
@@ -91,7 +90,7 @@ fn streaming_deadline_exceeded() {
         &batch_mode(),
         UiMode::Batch,
         &mut output,
-        formatter,
+        OutputFormat::Json,
         SqlExecutionOptions {
             limit: None,
             quiet: false,
@@ -118,7 +117,6 @@ fn streaming_cancelled() {
         tui: false,
     };
     let mut output = Vec::new();
-    let formatter = create_formatter(alopex_cli::cli::OutputFormat::Json);
     let cancel = CancelSignal::new();
     let deadline = Deadline::new(Duration::from_secs(60));
     cancel.cancel();
@@ -129,7 +127,7 @@ fn streaming_cancelled() {
         &batch_mode(),
         UiMode::Batch,
         &mut output,
-        formatter,
+        OutputFormat::Json,
         SqlExecutionOptions {
             limit: None,
             quiet: false,
