@@ -179,10 +179,10 @@ EOF
 # --quiet suppresses per-statement DDL/DML status lines so only SELECT rows are counted
 OUTPUT=$($CLI --in-memory --quiet --output jsonl --limit 2 sql --file "$SQL_FILE" 2>&1 | grep -c "^{" || echo "0")
 rm -f "$SQL_FILE"
-if [[ "$OUTPUT" -le 2 ]]; then
+if [[ "$OUTPUT" -eq 2 ]]; then
     pass "SQL --limit option ($OUTPUT rows)"
 else
-    fail "SQL --limit option (expected <=2 rows, got $OUTPUT)"
+    fail "SQL --limit option (expected exactly 2 rows, got $OUTPUT)"
 fi
 
 echo ""

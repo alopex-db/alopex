@@ -267,9 +267,18 @@ fn alopex_batch_with_profile(profile: &str, args: &[&str]) -> std::io::Result<()
     // Lifecycle admin actions (archive/export/backup/restore) leave the shared
     // test server in maintenance mode for a short moment after the executing
     // test has already released `server_lock()`. Writes issued by the next
-    // test's seeding step are then rejected with HTTP 409
-    // ("writes are blocked in maintenance mode"). Retry only that transient
-    // rejection instead of failing the test.
+    // test's seeding step are then rejected with HTTP 409. Retry only that
+    // specific transient rejection instead of failing the test.
+    fn is_transient_maintenance_rejection(stderr: &str) -> bool {
+        // Match the exact server error (status, code, and message) so that
+        // unrelated failures are not hidden by the retry loop, e.g.:
+        // `Server error: HTTP 409 - {"error":{"code":"CONFLICT","message":
+        // "conflict: writes are blocked in maintenance mode",...}}`
+        stderr.contains("HTTP 409")
+            && stderr.contains("\"code\":\"CONFLICT\"")
+            && stderr.contains("conflict: writes are blocked in maintenance mode")
+    }
+
     let mut last_stderr = String::new();
     for _ in 0..20 {
         let mut cmd = Command::new(alopex_bin());
@@ -288,7 +297,7 @@ fn alopex_batch_with_profile(profile: &str, args: &[&str]) -> std::io::Result<()
             return Ok(());
         }
         last_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        if !last_stderr.contains("maintenance mode") {
+        if !is_transient_maintenance_rejection(&last_stderr) {
             break;
         }
         std::thread::sleep(Duration::from_millis(500));
@@ -428,6 +437,10 @@ data_dir = \"{}\"\n",
     // the test process with PR_SET_PDEATHSIG so it can never outlive the
     // tests and keep inherited fds (such as the global cargo build lock)
     // open forever.
+    //
+    // This guard is Linux-only (PR_SET_PDEATHSIG); on other platforms
+    // (e.g. macOS CI runners) a hard-killed test run can still leak the
+    // server until the runner VM is recycled.
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;

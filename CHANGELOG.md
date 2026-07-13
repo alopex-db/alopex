@@ -16,6 +16,12 @@ All notable changes to this project will be documented in this file.
   `status`/`message` result set (omitted with `--quiet`). Remote (`--server`)
   output uses the same array-of-result-sets shape.
 
+### Breaking Changes
+- CLI `sql --output json` output shape changed: previously a single result set
+  was emitted as an array of row objects; it is now always an array of
+  per-statement result sets (one extra level of nesting, even for a single
+  statement). Consumers parsing the old shape must unwrap the outer array.
+
 ## [0.7.0]
 
 ### Added
