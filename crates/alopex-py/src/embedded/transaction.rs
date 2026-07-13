@@ -348,6 +348,55 @@ impl PyTransaction {
         }
     }
 
+    /// SQL をこのトランザクション内で実行する（コミットは行わない）。
+    ///
+    /// Args:
+    ///     sql: 実行する SQL 文字列。
+    ///     params: `?` プレースホルダへ順番に割り当てる値の list / tuple。
+    ///
+    /// Returns:
+    ///     SELECT: 行の list（各行は列名 -> 値の dict、列順を保持）。
+    ///     INSERT/UPDATE/DELETE: 影響行数 (int)。
+    ///     DDL: None。
+    ///
+    /// Raises:
+    ///     ValueError: プレースホルダ数とパラメータ数の不一致、不正なパラメータ値。
+    ///     TypeError: 未対応のパラメータ型。
+    ///     NotImplementedError: bytes パラメータ（BLOB リテラルは SQL パーサー未対応）。
+    ///     AlopexError: SQL の解析・実行エラー、またはトランザクションが完了済みの場合。
+    #[pyo3(signature = (sql, params = None))]
+    fn execute_sql(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<PyObject> {
+        let bound_sql = crate::embedded::sql::bind_params(sql, params.as_ref())?;
+        self.ensure_active()?;
+
+        // NOTE: `allow_threads` 内では PyErr を生成しない（`with_code` が GIL を再取得する）。
+        // txn mutex を保持したまま GIL を待つと、GIL 保持スレッドが同じ mutex を
+        // 待っている場合にデッドロックするため、エラーは Rust 値のまま持ち出して
+        // GIL 復帰後（mutex 解放後）に Python 例外へ変換する。
+        enum ExecError {
+            LockPoisoned,
+            Closed,
+            Embedded(alopex_embedded::Error),
+        }
+
+        let result = py.allow_threads(|| {
+            let mut guard = self.inner.txn.lock().map_err(|_| ExecError::LockPoisoned)?;
+            let txn = guard.as_mut().ok_or(ExecError::Closed)?;
+            txn.execute_sql(&bound_sql).map_err(ExecError::Embedded)
+        });
+        let result = result.map_err(|err| match err {
+            ExecError::LockPoisoned => error::to_py_err("transaction lock poisoned"),
+            ExecError::Closed => error::to_py_err("transaction is closed"),
+            ExecError::Embedded(err) => error::embedded_err(err),
+        })?;
+        crate::embedded::sql::execution_result_to_py(py, result)
+    }
+
     fn commit(&self, py: Python<'_>) -> PyResult<()> {
         let mut state = self
             .inner
@@ -429,8 +478,85 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use alopex_core::TxnMode;
+    use pyo3::types::{PyAnyMethods, PyList, PyListMethods};
     use pyo3::Python;
     use std::sync::Arc;
+
+    fn query_row_count(db: &alopex_embedded::Database, sql: &str) -> usize {
+        match db.execute_sql(sql).expect("select") {
+            alopex_sql::ExecutionResult::Query(query) => query.rows.len(),
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_sql_insert_and_select_within_transaction() {
+        pyo3::prepare_freethreaded_python();
+        let db = Arc::new(alopex_embedded::Database::new());
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .expect("ddl");
+        let txn = db
+            .begin(TxnMode::ReadWrite)
+            .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
+            .expect("txn");
+        Python::with_gil(|py| {
+            let params = PyList::empty(py);
+            params.append(7i64).expect("append");
+            let affected = txn
+                .execute_sql(py, "INSERT INTO t (id) VALUES (?)", Some(params.into_any()))
+                .expect("insert");
+            assert_eq!(affected.extract::<u64>(py).expect("affected"), 1);
+
+            // 同一トランザクション内で未コミットの行が見える
+            let rows = txn
+                .execute_sql(py, "SELECT id FROM t", None)
+                .expect("select");
+            let rows = rows.bind(py).downcast::<PyList>().expect("list").clone();
+            assert_eq!(rows.len(), 1);
+
+            txn.commit(py).expect("commit");
+        });
+        assert_eq!(query_row_count(&db, "SELECT id FROM t;"), 1);
+    }
+
+    #[test]
+    fn execute_sql_rollback_discards_changes() {
+        pyo3::prepare_freethreaded_python();
+        let db = Arc::new(alopex_embedded::Database::new());
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .expect("ddl");
+        let txn = db
+            .begin(TxnMode::ReadWrite)
+            .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
+            .expect("txn");
+        Python::with_gil(|py| {
+            let params = PyList::empty(py);
+            params.append(7i64).expect("append");
+            txn.execute_sql(py, "INSERT INTO t (id) VALUES (?)", Some(params.into_any()))
+                .expect("insert");
+        });
+        txn.rollback().expect("rollback");
+        assert_eq!(query_row_count(&db, "SELECT id FROM t;"), 0);
+    }
+
+    #[test]
+    fn execute_sql_on_completed_transaction_is_error() {
+        pyo3::prepare_freethreaded_python();
+        let db = Arc::new(alopex_embedded::Database::new());
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .expect("ddl");
+        let txn = db
+            .begin(TxnMode::ReadWrite)
+            .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
+            .expect("txn");
+        txn.rollback().expect("rollback");
+        Python::with_gil(|py| {
+            let err = txn
+                .execute_sql(py, "SELECT id FROM t", None)
+                .expect_err("completed txn");
+            assert!(err.is_instance_of::<crate::error::PyAlopexError>(py));
+        });
+    }
 
     #[test]
     fn put_get_and_rollback() {
