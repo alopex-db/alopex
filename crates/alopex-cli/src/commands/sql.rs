@@ -2414,6 +2414,7 @@ mod tests {
             &mut output,
             formatter,
             &options,
+            false,
         );
         assert!(
             result.is_err(),
