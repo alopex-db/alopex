@@ -223,10 +223,13 @@ jobs:
           SELECT * FROM limit_test;
           EOF
 
-          # Verify --limit restricts output
-          OUTPUT=$($CLI --in-memory --output jsonl --limit 2 sql --file /tmp/limit_test.sql 2>&1 | grep -c "^{" || echo "0")
-          if [[ "$OUTPUT" -gt 2 ]]; then
-            echo "FAIL: --limit 2 should return at most 2 rows, got $OUTPUT"
+          # Verify --limit restricts output.
+          # Since #26 the sql command emits one result block per statement, so
+          # jsonl output includes DDL/DML status lines; --quiet suppresses
+          # them so only the SELECT rows (limited to 2) are counted.
+          OUTPUT=$($CLI --in-memory --quiet --output jsonl --limit 2 sql --file /tmp/limit_test.sql 2>&1 | grep -c "^{" || echo "0")
+          if [[ "$OUTPUT" -ne 2 ]]; then
+            echo "FAIL: --limit 2 should return exactly 2 rows, got $OUTPUT"
             exit 1
           fi
           echo "PASS: --limit option works correctly ($OUTPUT rows)"
@@ -296,8 +299,10 @@ jobs:
           done >> "$SQL_FILE"
           echo "SELECT * FROM stream_test;" >> "$SQL_FILE"
 
-          # JSONL format should stream without fallback
-          ROW_COUNT=$(timeout 180 $CLI --in-memory --output jsonl sql --file "$SQL_FILE" 2>&1 | grep -c "^{" || echo "0")
+          # JSONL format should stream without fallback.
+          # Since #26 jsonl output includes per-statement DDL/DML status
+          # lines; --quiet suppresses them so only SELECT rows are counted.
+          ROW_COUNT=$(timeout 180 $CLI --in-memory --quiet --output jsonl sql --file "$SQL_FILE" 2>&1 | grep -c "^{" || echo "0")
           if [[ "$ROW_COUNT" -ge 15000 ]]; then
             echo "PASS: JSONL streaming works for 15,000 rows"
           else
