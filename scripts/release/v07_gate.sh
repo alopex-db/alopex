@@ -195,6 +195,10 @@ main() {
         cargo clippy --all-targets --all-features --locked -- -D warnings
     run_step "Cluster: metadata, router, and simulated harness tests" \
         cargo test -p alopex-cluster --all-features --locked
+    run_step "Embedded: v0.6 compatibility regression tests" \
+        cargo test -p alopex-embedded --test v07_compatibility --all-features --locked
+    run_step "Server: v0.6 compatibility regression tests" \
+        cargo test -p alopex-server --test v07_compatibility --all-features --locked
     run_step "Server: cluster routing SQL smoke" \
         cargo test -p alopex-server --test http_sql_e2e --all-features --locked
     run_step "Server: cluster status cross-surface fixture" \
@@ -212,6 +216,7 @@ main() {
             maturin develop --release
         run_step "Python: DataFrame P3 and cluster status tests" \
             python -m pytest \
+                crates/alopex-py/tests/test_compatibility_contract.py \
                 crates/alopex-py/tests/test_dataframe_p3.py \
                 crates/alopex-py/tests/test_surface_consistency.py
     else
