@@ -20,6 +20,7 @@ alopex-core.workspace = true
 alopex-cluster.workspace = true
 alopex-dataframe.workspace = true
 alopex-embedded = { path = "../alopex-embedded" }
+alopex-sql.workspace = true
 arrow = "53"
 
 [build-dependencies]

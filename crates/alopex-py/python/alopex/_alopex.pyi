@@ -1,5 +1,5 @@
 from builtins import str as _str
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 ALOPEX_ERROR_CODES: Tuple[str, ...]
 
@@ -310,6 +310,26 @@ class Database:
     @staticmethod
     def open_with_config(config: EmbeddedConfig) -> "Database": ...
 
+    def execute_sql(
+        self,
+        sql: str,
+        params: Optional[Sequence[Any]] = None,
+    ) -> Union[List[Dict[str, Any]], int, None]:
+        """Execute SQL with optional ``?`` placeholder parameters (auto-commit).
+
+        Returns:
+            ``list[dict[str, Any]]`` for SELECT (column name -> value, in
+            column order), ``int`` (rows affected) for DML, ``None`` for DDL.
+
+        Raises:
+            ValueError: Placeholder/parameter count mismatch or invalid value.
+            TypeError: Unsupported parameter type.
+            NotImplementedError: ``bytes`` parameters (BLOB literals are not
+                supported by the SQL parser yet).
+            AlopexError: SQL parse/execution errors (``code`` carries the
+                stable ALOPEX-P/S/C/E### error code).
+        """
+        ...
     def begin(self, mode: Optional[TxnMode] = None) -> "Transaction": ...
     def flush(self) -> None: ...
     def memory_usage(self) -> MemoryStats: ...
@@ -327,6 +347,26 @@ class Database:
 
 
 class Transaction:
+    def execute_sql(
+        self,
+        sql: str,
+        params: Optional[Sequence[Any]] = None,
+    ) -> Union[List[Dict[str, Any]], int, None]:
+        """Execute SQL inside this transaction (no auto-commit).
+
+        Returns:
+            ``list[dict[str, Any]]`` for SELECT (column name -> value, in
+            column order), ``int`` (rows affected) for DML, ``None`` for DDL.
+
+        Raises:
+            ValueError: Placeholder/parameter count mismatch or invalid value.
+            TypeError: Unsupported parameter type.
+            NotImplementedError: ``bytes`` parameters (BLOB literals are not
+                supported by the SQL parser yet).
+            AlopexError: SQL parse/execution errors, or the transaction is
+                already completed.
+        """
+        ...
     def get(self, key: bytes) -> Optional[bytes]: ...
     def put(self, key: bytes, value: bytes) -> None: ...
     def delete(self, key: bytes) -> None: ...

@@ -3,7 +3,9 @@
 use std::fmt::{self, Display};
 
 use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{
+    PyException, PyNotImplementedError, PyRuntimeError, PyTypeError, PyValueError,
+};
 use pyo3::types::PyAnyMethods;
 use pyo3::{PyErr, Python};
 
@@ -39,6 +41,11 @@ pub const ERROR_CODES: &[&str] = &[
     "ALOPEX-PY012",
     "ALOPEX-PY013",
     "ALOPEX-PY014",
+    "ALOPEX-PY015",
+    "ALOPEX-PY016",
+    "ALOPEX-PY017",
+    "ALOPEX-PY018",
+    "ALOPEX-PY019",
     "ALOPEX-PY101",
     "ALOPEX-PY102",
     "ALOPEX-PY103",
@@ -55,10 +62,15 @@ const GENERIC_ERROR_CODE: &str = "ALOPEX-PY999";
 ///     - CatalogAlreadyExists, NamespaceAlreadyExists, TableExists
 ///     - WriteTargetNotFound, StorageLocationRequired, PrimaryKeyRequired
 ///     - UnsupportedFormat, PolarsNotInstalled, CloudAuthFailed, TypeConversionError
+///     - SqlParamCountMismatch, SqlParamUnsupportedType, SqlParamInvalidValue,
+///       SqlParamNotImplemented, SqlStatementInvalid
 ///
 /// Exception mapping:
 ///     - *NotFound and ParentNotFound -> ValueError
 ///     - *AlreadyExists -> RuntimeError
+///     - SqlParamCountMismatch, SqlParamInvalidValue, SqlStatementInvalid -> ValueError
+///     - SqlParamUnsupportedType -> TypeError
+///     - SqlParamNotImplemented -> NotImplementedError
 ///     - others -> AlopexError
 ///
 /// Examples:
@@ -87,6 +99,11 @@ pub enum AlopexError {
     PolarsNotInstalled,
     CloudAuthFailed { provider: String, env_var: String },
     TypeConversionError { expected: String, actual: String },
+    SqlParamCountMismatch { expected: usize, actual: usize },
+    SqlParamUnsupportedType(String),
+    SqlParamInvalidValue(String),
+    SqlParamNotImplemented(String),
+    SqlStatementInvalid(String),
 }
 
 impl Display for AlopexError {
@@ -133,6 +150,23 @@ impl Display for AlopexError {
             AlopexError::TypeConversionError { expected, actual } => {
                 write!(f, "型変換エラー: 期待={}, 実際={}", expected, actual)
             }
+            AlopexError::SqlParamCountMismatch { expected, actual } => write!(
+                f,
+                "SQL パラメータ数が一致しません: プレースホルダ {} 個に対しパラメータ {} 個",
+                expected, actual
+            ),
+            AlopexError::SqlParamUnsupportedType(detail) => {
+                write!(f, "SQL パラメータの型が未対応です: {}", detail)
+            }
+            AlopexError::SqlParamInvalidValue(detail) => {
+                write!(f, "SQL パラメータの値が不正です: {}", detail)
+            }
+            AlopexError::SqlParamNotImplemented(detail) => {
+                write!(f, "SQL パラメータは未実装の機能です: {}", detail)
+            }
+            AlopexError::SqlStatementInvalid(detail) => {
+                write!(f, "SQL 文が不正です: {}", detail)
+            }
         }
     }
 }
@@ -156,6 +190,11 @@ impl AlopexError {
             AlopexError::PolarsNotInstalled => "ALOPEX-PY012",
             AlopexError::CloudAuthFailed { .. } => "ALOPEX-PY013",
             AlopexError::TypeConversionError { .. } => "ALOPEX-PY014",
+            AlopexError::SqlParamCountMismatch { .. } => "ALOPEX-PY015",
+            AlopexError::SqlParamUnsupportedType(_) => "ALOPEX-PY016",
+            AlopexError::SqlParamInvalidValue(_) => "ALOPEX-PY017",
+            AlopexError::SqlParamNotImplemented(_) => "ALOPEX-PY018",
+            AlopexError::SqlStatementInvalid(_) => "ALOPEX-PY019",
         }
     }
 }
@@ -191,6 +230,17 @@ impl From<AlopexError> for PyErr {
             AlopexError::CatalogAlreadyExists(_) | AlopexError::NamespaceAlreadyExists(_) => {
                 with_code(PyRuntimeError::new_err(message), code)
             }
+            AlopexError::SqlParamCountMismatch { .. }
+            | AlopexError::SqlParamInvalidValue(_)
+            | AlopexError::SqlStatementInvalid(_) => {
+                with_code(PyValueError::new_err(message), code)
+            }
+            AlopexError::SqlParamUnsupportedType(_) => {
+                with_code(PyTypeError::new_err(message), code)
+            }
+            AlopexError::SqlParamNotImplemented(_) => {
+                with_code(PyNotImplementedError::new_err(message), code)
+            }
             _ => with_code(PyAlopexError::new_err(message), code),
         }
     }
@@ -223,6 +273,7 @@ pub fn to_py_err<E: Display>(err: E) -> PyErr {
 ///     - CatalogNotFound, NamespaceNotFound, TableNotFound -> ValueError
 ///     - CatalogAlreadyExists, NamespaceAlreadyExists -> RuntimeError
 ///     - TableAlreadyExists, UnsupportedDataSourceFormat -> AlopexError
+///     - Sql -> AlopexError（`code` は alopex-sql の安定コード ALOPEX-P/S/C/E###）
 ///     - other errors -> AlopexError
 ///
 /// Examples:
@@ -253,6 +304,12 @@ pub fn embedded_err(err: alopex_embedded::Error) -> PyErr {
         alopex_embedded::Error::TableAlreadyExists(name) => AlopexError::TableExists(name).into(),
         alopex_embedded::Error::UnsupportedDataSourceFormat(format) => {
             AlopexError::UnsupportedFormat(format).into()
+        }
+        // SQL エラーは alopex-sql の安定コード（ALOPEX-P/S/C/E###）をそのまま公開する。
+        // CLI / Server が表示するコードと一致させる（R1-AC2: 結果整合性）。
+        alopex_embedded::Error::Sql(err) => {
+            let code = err.code();
+            with_code(PyAlopexError::new_err(err.to_string()), code)
         }
         alopex_embedded::Error::Core(err) => core_err(err),
         other => to_py_err(other),

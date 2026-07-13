@@ -229,6 +229,7 @@ dependencies = [
  "alopex-core",
  "alopex-dataframe",
  "alopex-embedded",
+ "alopex-sql",
  "arrow",
  "criterion",
  "numpy",
