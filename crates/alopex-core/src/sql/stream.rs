@@ -178,7 +178,7 @@ fn saturating_usize(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::{ByteSized, MemoryPolicy, MemoryTracker, SpillPolicy};
     use crate::Error;

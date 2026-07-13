@@ -62,7 +62,9 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: alopex
             asset_name: alopex-linux-x86_64
-          - os: macos-latest
+          # x86_64 macOS release builds must run on an Intel runner because
+          # the Nim SQL parser shared library is built natively before linking.
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             artifact_name: alopex
             asset_name: alopex-macos-x86_64
@@ -160,6 +162,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+      NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -212,41 +215,35 @@ jobs:
           EOF
           chmod +x publish-crate.sh
 
+      - name: Publish alopex-dataframe
+        run: ./publish-crate.sh alopex-dataframe
+
+      - name: Wait for crates.io index update
+        run: sleep 30
+
       - name: Publish alopex-core
         run: ./publish-crate.sh alopex-core
-        continue-on-error: true
 
       - name: Wait for crates.io index update
         run: sleep 30
 
       - name: Publish alopex-sql
         run: ./publish-crate.sh alopex-sql
-        continue-on-error: true
-
-      - name: Wait for crates.io index update
-        run: sleep 30
-
-      - name: Publish alopex-dataframe
-        run: ./publish-crate.sh alopex-dataframe
-        continue-on-error: true
 
       - name: Wait for crates.io index update
         run: sleep 30
 
       - name: Publish alopex-embedded
         run: ./publish-crate.sh alopex-embedded
-        continue-on-error: true
 
       - name: Wait for crates.io index update
         run: sleep 30
 
       - name: Publish alopex-server
         run: ./publish-crate.sh alopex-server
-        continue-on-error: true
 
       - name: Wait for crates.io index update
         run: sleep 30
 
       - name: Publish alopex-cli
         run: ./publish-crate.sh alopex-cli
-        continue-on-error: true

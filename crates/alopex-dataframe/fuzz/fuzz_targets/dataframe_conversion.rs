@@ -2,7 +2,7 @@
 
 use alopex_dataframe::{DataFrame, Series};
 use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int32Array, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 

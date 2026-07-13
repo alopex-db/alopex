@@ -19,7 +19,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64, aarch64]
+        # Linux aarch64 wheels are held for v0.6.0: the manylinux cross build
+        # builds the Nim SQL parser shared library as x86_64, then the
+        # aarch64 linker rejects it as incompatible. Keep x86_64 releasable
+        # while the ARM-native/shared-library build path is resolved.
+        target: [x86_64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,6 +53,7 @@ jobs:
           #   - manylinux コンテナ内の curl/xz/gcc 可用性は CI 上で要確認。
           before-script-linux: |
             set -euxo pipefail
+            REPO_ROOT="$PWD"
             NIM_VERSION=2.2.4
             curl -fsSL "https://nim-lang.org/download/nim-${NIM_VERSION}.tar.xz" -o /tmp/nim.tar.xz
             mkdir -p /opt/nim-src
@@ -60,11 +65,15 @@ jobs:
             ./koch tools
             export PATH="/opt/nim-src/bin:${HOME}/.nimble/bin:${PATH}"
             # env (NIM_SQL_PARSER_DIR) のコンテナ内伝播は不確実なためパスを直書き。
-            # CWD は repo ルート (maturin-action がマウント) を前提。
-            # 要 CI 検証: コンテナ内 CWD が repo ルートか確認。
-            cd crates/alopex-sql/nim-sql-parser
+            # maturin-action のコンテナ開始時 CWD を REPO_ROOT として保持し、
+            # Nim source build で /opt/nim-src に移動した後も repo 側へ戻れるようにする。
+            # manylinux コンテナ内では root がマウントされた repo を読むため、
+            # nimble lib が内部で実行する git ls-files 用に safe.directory を登録する。
+            git config --global --add safe.directory "${REPO_ROOT}"
+            cd "${REPO_ROOT}/crates/alopex-sql/nim-sql-parser"
             nimble install -y npeg msgpack4nim
             nimble lib
+            cd "${REPO_ROOT}"
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -73,19 +82,23 @@ jobs:
 
   macos:
     name: macos (${{ matrix.target }})
-    runs-on: macos-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64, aarch64]
+        include:
+          # x86_64 macOS wheels must run on an Intel runner because the Nim SQL
+          # parser shared library is built natively before linking.
+          - os: macos-15-intel
+            target: x86_64
+          - os: macos-latest
+            target: aarch64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       # ネイティブ Nim ツールチェーン (2.2 固定) をホスト上でセットアップ。
       # 他ワークフロー (alopex-py.yml 等) の macOS/Windows パターンと整合。
-      # 要 CI 検証: macos-latest は arm64 ホスト。x86_64 ターゲットは
-      # クロスコンパイルになるが、Nim 共有ライブラリ (.dylib) は build.rs の
-      # リンク用であり、最終的なアーキ整合は CI 上でのみ確認可能。
+      # 要 CI 検証: x86_64 は Intel runner、aarch64 は macos-latest 上で検証する。
       - name: Setup Nim
         uses: jiro4989/setup-nim-action@v2
         with:

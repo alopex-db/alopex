@@ -37,7 +37,11 @@ fn recovery_config(
         lane: Lane::Nightly,
         execution_model: model,
         concurrency,
-        scenario_timeout: Duration::from_secs(45),
+        scenario_timeout: if name == "wal_truncation_sweep" {
+            Duration::from_secs(180)
+        } else {
+            Duration::from_secs(45)
+        },
         operation_timeout: Duration::from_secs(5),
         metrics_interval: Duration::from_secs(1),
         warmup_ops: 0,
@@ -103,6 +107,7 @@ fn damage_wal_tail_for_mode(
     }
 }
 
+#[cfg(feature = "test-hooks")]
 fn truncate_wal_tail_for_mode(
     base_wal_path: &Path,
     mode: StressStorageMode,

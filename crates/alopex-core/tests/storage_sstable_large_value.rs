@@ -3,7 +3,8 @@
 use alopex_core::storage::large_value::{
     LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter,
 };
-use alopex_core::{KVStore, KVTransaction, MemoryKV, TxnManager, TxnMode};
+use alopex_core::storage::sstable::SstableReader;
+use alopex_core::{Error, KVStore, KVTransaction, MemoryKV, TxnManager, TxnMode};
 use std::io::{Read, Seek, Write};
 use tempfile::tempdir;
 
@@ -49,7 +50,10 @@ fn sst_flush_reopen_discards_corrupt_sst_and_recovers_from_wal() {
         file.sync_all().unwrap();
     }
 
-    // Reopen discards the corrupt SST and replays the WAL.
+    let sstable_err = SstableReader::open(&sst_path).unwrap_err();
+    assert!(matches!(sstable_err, Error::ChecksumMismatch));
+
+    // MemoryKV recovery discards an unreadable SSTable and replays the WAL.
     let reopened = MemoryKV::open(&wal_path).unwrap();
     let mgr = reopened.txn_manager();
     let mut txn = mgr.begin(TxnMode::ReadOnly).unwrap();

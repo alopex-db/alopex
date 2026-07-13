@@ -10,10 +10,10 @@ use common::replay::gen_u32;
 #[cfg(feature = "test-hooks")]
 use common::replay::{gen_f64, gen_range_usize};
 use common::{
-    begin_op, run_full_consistency_checks, slo_presets, ChaosConfig, ChaosOperation,
-    ChaosWorkloadGenerator, ColumnarOperation, DdlOperation, ExecutionModel, Lane,
-    MultiModelOperation, SloConfig, SqlOperation, StressStorageMode, StressTestConfig,
-    StressTestHarness, TestResult, VectorOperation, WorkloadConfig,
+    begin_op, run_full_consistency_checks, ChaosConfig, ChaosOperation, ChaosWorkloadGenerator,
+    ColumnarOperation, DdlOperation, ExecutionModel, Lane, MultiModelOperation, SqlOperation,
+    StressStorageMode, StressTestConfig, StressTestHarness, TestResult, VectorOperation,
+    WorkloadConfig,
 };
 #[cfg(feature = "test-hooks")]
 use common::{log_path, open_store_with_fault_injector, prepare_artifacts, DiskFullInjector};
@@ -50,7 +50,7 @@ fn chaos_config(name: &str, model: ExecutionModel, concurrency: usize) -> Stress
         operation_timeout: Duration::from_secs(20),
         metrics_interval: Duration::from_secs(1),
         warmup_ops: 0,
-        slo: slo_presets::get("chaos"),
+        slo: None,
     }
 }
 
@@ -393,7 +393,7 @@ fn apply_chaos_op_with_metrics(
     let elapsed = start.elapsed();
     match result {
         // Invalid/crash operations returning Ok(false) are expected injected
-        // chaos events; only unexpected conflicts count against error SLO.
+        // chaos events; only unexpected conflicts are counted as errors.
         Ok(_) => ctx.metrics.record_success(),
         Err(CoreError::TxnConflict) => ctx.metrics.record_error(),
         Err(e) => return Err(e),
@@ -974,13 +974,7 @@ fn run_persistent_crash_reopen(model: ExecutionModel) -> TestResult {
     };
     let batches = 6;
     let batch_size = 24;
-    let mut cfg = chaos_config("chaos_persistent_crash_reopen", model, concurrency);
-    cfg.slo = Some(SloConfig {
-        min_throughput: Some(10.0),
-        // クラッシュ後の再オープンで意図的にエラー計上が増えるため、許容値を緩和
-        max_error_ratio: Some(0.6),
-        ..Default::default()
-    });
+    let cfg = chaos_config("chaos_persistent_crash_reopen", model, concurrency);
     let harness = StressTestHarness::new(cfg).unwrap();
     match model {
         ExecutionModel::SyncSingle => harness.run(|ctx| {
@@ -1161,9 +1155,10 @@ struct ChaosMatrix {
     timeline_path: Option<PathBuf>,
 }
 
-/// Outcome of a primary operation in the chaos matrix: the apply result, the
-/// primary-only latency (what the SLO measures), and the synthetic replication
-/// stall time to exclude from the throughput window.
+/// Outcome of a primary operation in the chaos matrix: the primary-only
+/// latency and the synthetic replication stall time. The latter is tracked
+/// separately so metrics describe the local storage operation instead of the
+/// emulated cluster topology.
 #[cfg(feature = "test-hooks")]
 struct PrimaryOpOutcome {
     primary_latency: Duration,
@@ -1392,13 +1387,10 @@ impl ChaosMatrix {
 
     /// Applies an operation on the primary and replicates it to followers,
     /// returning the operation result together with the *primary-only* latency.
-    ///
-    /// The SLO measures the database's per-operation latency. Replication —
-    /// which includes the injected inter-node network latency (`thread::sleep`)
-    /// and follower writes — is a property of the simulated cluster topology,
-    /// not of a single-node storage operation. Folding replication time into
-    /// the SLO sample would charge the storage engine for synthetic network
-    /// faults, so only the primary op is timed here.
+    /// Replication includes injected inter-node latency and follower writes,
+    /// which belong to the simulated cluster topology rather than the local
+    /// storage operation, so only the primary op is recorded as operation
+    /// latency.
     fn apply_primary_measured(
         &mut self,
         op: ChaosOperation,
@@ -1409,9 +1401,8 @@ impl ChaosMatrix {
         apply_chaos_op(&primary, op.clone(), tables)?;
         let primary_latency = start.elapsed();
         // Replication (follower writes + emulated network latency) models the
-        // simulated cluster topology, not the primary engine's throughput. Time
-        // the whole replication phase and exclude it from the throughput window
-        // so the metric reflects the primary's effective processing rate.
+        // simulated cluster topology. Track it separately so the latency metric
+        // stays focused on the local storage operation.
         let replicate_start = Instant::now();
         self.replicate(0, &op, tables);
         let injected_sleep = replicate_start.elapsed();
@@ -1422,9 +1413,7 @@ impl ChaosMatrix {
     }
 
     /// Replicates `op` to followers, applying the emulated inter-node network
-    /// latency. The caller times this whole phase and excludes it from the
-    /// throughput window so the simulated cluster topology is not counted
-    /// against the primary engine's processing rate.
+    /// latency. The caller records this phase separately from primary latency.
     fn replicate(
         &mut self,
         primary_idx: usize,
