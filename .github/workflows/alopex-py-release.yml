@@ -56,6 +56,9 @@ jobs:
           before-script-linux: |
             set -euxo pipefail
             REPO_ROOT="$PWD"
+            CHIRPS_DIR="$(dirname "$(dirname "${REPO_ROOT}")")/chirps"
+            rm -rf "${CHIRPS_DIR}"
+            git clone --depth 1 https://github.com/alopex-db/alopex-chirps.git "${CHIRPS_DIR}"
             NIM_VERSION=2.2.4
             curl -fsSL "https://nim-lang.org/download/nim-${NIM_VERSION}.tar.xz" -o /tmp/nim.tar.xz
             mkdir -p /opt/nim-src
