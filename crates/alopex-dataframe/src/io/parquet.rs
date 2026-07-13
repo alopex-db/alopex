@@ -120,6 +120,7 @@ fn collect_referenced_columns(expr: &Expr, out: &mut HashSet<String>) {
             collect_referenced_columns(right, out);
         }
         E::Agg { expr, .. } => collect_referenced_columns(expr, out),
+        E::Function { input, .. } => collect_referenced_columns(input, out),
         E::Literal(_) | E::Wildcard => {}
     }
 }

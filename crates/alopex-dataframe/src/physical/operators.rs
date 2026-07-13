@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanArray, StringArray};
+use alopex_core::dataframe as core_df;
+use arrow::array::{
+    Array, ArrayRef, BooleanArray, ListArray, StringArray, StringBuilder, UInt32Array,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
@@ -272,6 +275,194 @@ pub fn drop_nulls_batches(
 /// Count null values per column.
 pub fn null_count_batches(input: Vec<RecordBatch>) -> Result<Vec<RecordBatch>> {
     crate::ops::nulls::null_count_batches(input)
+}
+
+/// Explode one `List<Utf8>` column and duplicate all other column values per source row.
+pub fn explode_batches(input: Vec<RecordBatch>, column: &str) -> Result<Vec<RecordBatch>> {
+    let mut out = Vec::with_capacity(input.len());
+    for batch in input {
+        let idx = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| field.name() == column)
+            .ok_or_else(|| DataFrameError::column_not_found(column.to_string()))?;
+        let lists = list_utf8_to_core(batch.column(idx))?;
+        let exploded = core_df::explode_list(&lists);
+        let indices = source_rows_to_indices(&exploded.source_rows)?;
+
+        let mut arrays = Vec::with_capacity(batch.num_columns());
+        let mut fields = Vec::with_capacity(batch.num_columns());
+        for (col_idx, field) in batch.schema().fields().iter().enumerate() {
+            if col_idx == idx {
+                fields.push(Field::new(field.name(), DataType::Utf8, true));
+                arrays.push(Arc::new(StringArray::from(exploded.values.clone())) as ArrayRef);
+            } else {
+                fields.push(field.as_ref().clone());
+                arrays.push(
+                    arrow::compute::take(batch.column(col_idx).as_ref(), &indices, None)
+                        .map_err(|source| DataFrameError::Arrow { source })?,
+                );
+            }
+        }
+        let schema = Arc::new(Schema::new(fields));
+        out.push(RecordBatch::try_new(schema, arrays).map_err(|e| {
+            DataFrameError::schema_mismatch(format!("failed to build RecordBatch: {e}"))
+        })?);
+    }
+    Ok(out)
+}
+
+/// Implode UTF-8 columns into a single row of `List<Utf8>` columns.
+pub fn implode_batches(input: Vec<RecordBatch>) -> Result<Vec<RecordBatch>> {
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+    let schema = input[0].schema();
+    for (idx, batch) in input.iter().enumerate().skip(1) {
+        if batch.schema().as_ref() != schema.as_ref() {
+            return Err(DataFrameError::schema_mismatch(format!(
+                "schema mismatch between batches: batch 0 != batch {idx}"
+            )));
+        }
+    }
+
+    let mut fields = Vec::with_capacity(schema.fields().len());
+    let mut arrays = Vec::with_capacity(schema.fields().len());
+    for (col_idx, field) in schema.fields().iter().enumerate() {
+        let chunks = input
+            .iter()
+            .map(|batch| batch.column(col_idx).as_ref() as &dyn Array)
+            .collect::<Vec<_>>();
+        let array =
+            arrow::compute::concat(&chunks).map_err(|source| DataFrameError::Arrow { source })?;
+        let values = utf8_to_core(&array)?;
+        let list_values =
+            core_to_df_result(core_df::implode_by_group_lengths(&values, &[values.len()]))?;
+        fields.push(Field::new(
+            field.name(),
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        ));
+        arrays.push(list_utf8_from_core(list_values));
+    }
+
+    let schema = Arc::new(Schema::new(fields));
+    Ok(vec![RecordBatch::try_new(schema, arrays).map_err(|e| {
+        DataFrameError::schema_mismatch(format!("failed to build RecordBatch: {e}"))
+    })?])
+}
+
+fn source_rows_to_indices(source_rows: &[usize]) -> Result<UInt32Array> {
+    let values = source_rows
+        .iter()
+        .map(|idx| {
+            u32::try_from(*idx).map_err(|_| {
+                DataFrameError::invalid_operation("explode source row index exceeds u32 range")
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(UInt32Array::from(values))
+}
+
+fn utf8_to_core(input: &ArrayRef) -> Result<Vec<Option<String>>> {
+    let array = input
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            DataFrameError::type_mismatch(
+                None::<String>,
+                DataType::Utf8.to_string(),
+                input.data_type().to_string(),
+            )
+        })?;
+    Ok((0..array.len())
+        .map(|idx| {
+            if array.is_null(idx) {
+                None
+            } else {
+                Some(array.value(idx).to_string())
+            }
+        })
+        .collect())
+}
+
+fn list_utf8_to_core(input: &ArrayRef) -> Result<Vec<Option<Vec<Option<String>>>>> {
+    let array = input.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
+        DataFrameError::type_mismatch(
+            None::<String>,
+            "List<Utf8>".to_string(),
+            input.data_type().to_string(),
+        )
+    })?;
+    let DataType::List(field) = input.data_type() else {
+        return Err(DataFrameError::type_mismatch(
+            None::<String>,
+            "List<Utf8>".to_string(),
+            input.data_type().to_string(),
+        ));
+    };
+    if field.data_type() != &DataType::Utf8 {
+        return Err(DataFrameError::type_mismatch(
+            None::<String>,
+            "List<Utf8>".to_string(),
+            input.data_type().to_string(),
+        ));
+    }
+
+    let mut out = Vec::with_capacity(array.len());
+    for row in 0..array.len() {
+        if array.is_null(row) {
+            out.push(None);
+            continue;
+        }
+        let values = array.value(row);
+        let values = values
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                DataFrameError::type_mismatch(
+                    None::<String>,
+                    "StringArray".to_string(),
+                    values.data_type().to_string(),
+                )
+            })?;
+        out.push(Some(
+            (0..values.len())
+                .map(|idx| {
+                    if values.is_null(idx) {
+                        None
+                    } else {
+                        Some(values.value(idx).to_string())
+                    }
+                })
+                .collect(),
+        ));
+    }
+    Ok(out)
+}
+
+fn list_utf8_from_core(values: Vec<Option<Vec<Option<String>>>>) -> ArrayRef {
+    let mut builder = arrow::array::ListBuilder::new(StringBuilder::new());
+    for list in values {
+        match list {
+            Some(items) => {
+                for item in items {
+                    match item {
+                        Some(value) => builder.values().append_value(value),
+                        None => builder.values().append_null(),
+                    }
+                }
+                builder.append(true);
+            }
+            None => builder.append(false),
+        }
+    }
+    Arc::new(builder.finish())
+}
+
+fn core_to_df_result<T>(result: alopex_core::Result<T>) -> Result<T> {
+    result.map_err(|err| DataFrameError::invalid_operation(err.to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

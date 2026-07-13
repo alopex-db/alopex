@@ -15,10 +15,87 @@ pub enum Expr {
     UnaryOp { op: UnaryOperator, expr: Box<Expr> },
     /// Aggregation expression (only valid under `group_by().agg()`).
     Agg { func: AggFunc, expr: Box<Expr> },
+    /// Namespace function expression.
+    Function {
+        input: Box<Expr>,
+        function: ExprFunction,
+    },
     /// Expression alias (renames the resulting column).
     Alias { expr: Box<Expr>, name: String },
     /// Wildcard (`*`) that expands to all columns in projections.
     Wildcard,
+}
+
+/// Supported namespace expression functions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExprFunction {
+    /// String namespace function.
+    String(StringFunction),
+    /// Datetime namespace function.
+    Datetime(DatetimeFunction),
+    /// List namespace function.
+    List(ListFunction),
+}
+
+/// Supported `str.*` functions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StringFunction {
+    /// Convert UTF-8 strings to lowercase.
+    ToLowercase,
+    /// Convert UTF-8 strings to uppercase.
+    ToUppercase,
+    /// Regex contains.
+    Contains { pattern: String },
+    /// Regex replacement.
+    Replace {
+        pattern: String,
+        replacement: String,
+    },
+    /// Strip whitespace or the provided characters.
+    StripChars { chars: Option<String> },
+    /// Split by a literal separator.
+    Split { separator: String },
+    /// Count Unicode scalar values.
+    LenChars,
+    /// Extract a regex capture group.
+    Extract {
+        pattern: String,
+        capture_group: usize,
+    },
+}
+
+/// Supported `dt.*` functions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatetimeFunction {
+    /// Extract UTC year.
+    Year,
+    /// Extract UTC month.
+    Month,
+    /// Extract UTC day of month.
+    Day,
+    /// Extract ISO weekday.
+    Weekday,
+    /// Format as UTC text.
+    ToString,
+    /// Convert between fixed-offset time zones.
+    ConvertTimeZone {
+        from_offset: String,
+        to_offset: String,
+    },
+}
+
+/// Supported `list.*` functions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListFunction {
+    /// Join string list elements.
+    Join {
+        separator: String,
+        null_value: Option<String>,
+    },
+    /// Return list length.
+    Len,
+    /// Test whether a list contains a non-null string value.
+    Contains { value: String },
 }
 
 /// Supported binary operators.
@@ -291,11 +368,181 @@ impl Expr {
             expr: Box::new(self),
         }
     }
+
+    /// Enter the `str.*` expression namespace.
+    pub fn str(self) -> StringExpr {
+        StringExpr { input: self }
+    }
+
+    /// Enter the `dt.*` expression namespace.
+    pub fn dt(self) -> DatetimeExpr {
+        DatetimeExpr { input: self }
+    }
+
+    /// Enter the `list.*` expression namespace.
+    pub fn list(self) -> ListExpr {
+        ListExpr { input: self }
+    }
+}
+
+/// Builder for `str.*` expression functions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StringExpr {
+    input: Expr,
+}
+
+impl StringExpr {
+    fn function(self, function: StringFunction) -> Expr {
+        Expr::Function {
+            input: Box::new(self.input),
+            function: ExprFunction::String(function),
+        }
+    }
+
+    /// Convert UTF-8 strings to lowercase.
+    pub fn to_lowercase(self) -> Expr {
+        self.function(StringFunction::ToLowercase)
+    }
+
+    /// Convert UTF-8 strings to uppercase.
+    pub fn to_uppercase(self) -> Expr {
+        self.function(StringFunction::ToUppercase)
+    }
+
+    /// Return whether each string matches a regex pattern.
+    pub fn contains(self, pattern: impl Into<String>) -> Expr {
+        self.function(StringFunction::Contains {
+            pattern: pattern.into(),
+        })
+    }
+
+    /// Replace regex matches.
+    pub fn replace(self, pattern: impl Into<String>, replacement: impl Into<String>) -> Expr {
+        self.function(StringFunction::Replace {
+            pattern: pattern.into(),
+            replacement: replacement.into(),
+        })
+    }
+
+    /// Strip whitespace from both ends.
+    pub fn strip_chars(self, chars: Option<impl Into<String>>) -> Expr {
+        self.function(StringFunction::StripChars {
+            chars: chars.map(Into::into),
+        })
+    }
+
+    /// Split by a literal separator.
+    pub fn split(self, separator: impl Into<String>) -> Expr {
+        self.function(StringFunction::Split {
+            separator: separator.into(),
+        })
+    }
+
+    /// Count Unicode scalar values.
+    pub fn len_chars(self) -> Expr {
+        self.function(StringFunction::LenChars)
+    }
+
+    /// Extract a regex capture group.
+    pub fn extract(self, pattern: impl Into<String>, capture_group: usize) -> Expr {
+        self.function(StringFunction::Extract {
+            pattern: pattern.into(),
+            capture_group,
+        })
+    }
+}
+
+/// Builder for `dt.*` expression functions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DatetimeExpr {
+    input: Expr,
+}
+
+impl DatetimeExpr {
+    fn function(self, function: DatetimeFunction) -> Expr {
+        Expr::Function {
+            input: Box::new(self.input),
+            function: ExprFunction::Datetime(function),
+        }
+    }
+
+    /// Extract UTC year.
+    pub fn year(self) -> Expr {
+        self.function(DatetimeFunction::Year)
+    }
+
+    /// Extract UTC month.
+    pub fn month(self) -> Expr {
+        self.function(DatetimeFunction::Month)
+    }
+
+    /// Extract UTC day of month.
+    pub fn day(self) -> Expr {
+        self.function(DatetimeFunction::Day)
+    }
+
+    /// Extract ISO weekday.
+    pub fn weekday(self) -> Expr {
+        self.function(DatetimeFunction::Weekday)
+    }
+
+    /// Format timestamps as UTC text.
+    #[allow(clippy::inherent_to_string)]
+    pub fn to_string(self) -> Expr {
+        self.function(DatetimeFunction::ToString)
+    }
+
+    /// Convert between fixed-offset time zones.
+    pub fn convert_time_zone(
+        self,
+        from_offset: impl Into<String>,
+        to_offset: impl Into<String>,
+    ) -> Expr {
+        self.function(DatetimeFunction::ConvertTimeZone {
+            from_offset: from_offset.into(),
+            to_offset: to_offset.into(),
+        })
+    }
+}
+
+/// Builder for `list.*` expression functions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListExpr {
+    input: Expr,
+}
+
+impl ListExpr {
+    fn function(self, function: ListFunction) -> Expr {
+        Expr::Function {
+            input: Box::new(self.input),
+            function: ExprFunction::List(function),
+        }
+    }
+
+    /// Join string list elements with a separator.
+    pub fn join(self, separator: impl Into<String>, null_value: Option<impl Into<String>>) -> Expr {
+        self.function(ListFunction::Join {
+            separator: separator.into(),
+            null_value: null_value.map(Into::into),
+        })
+    }
+
+    /// Return list lengths.
+    pub fn len(self) -> Expr {
+        self.function(ListFunction::Len)
+    }
+
+    /// Return whether a string list contains `value`.
+    pub fn contains(self, value: impl Into<String>) -> Expr {
+        self.function(ListFunction::Contains {
+            value: value.into(),
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AggFunc, Expr, Operator, Scalar, UnaryOperator};
+    use super::{AggFunc, Expr, ExprFunction, Operator, Scalar, StringFunction, UnaryOperator};
     use crate::expr::{col, lit};
 
     #[test]
@@ -344,6 +591,21 @@ mod tests {
             Expr::UnaryOp {
                 op: UnaryOperator::Not,
                 expr: Box::new(Expr::Column("a".to_string()))
+            }
+        );
+    }
+
+    #[test]
+    fn namespace_builders_create_function_exprs() {
+        let expr = col("name").str().to_lowercase().alias("name_lower");
+        assert_eq!(
+            expr,
+            Expr::Alias {
+                expr: Box::new(Expr::Function {
+                    input: Box::new(Expr::Column("name".to_string())),
+                    function: ExprFunction::String(StringFunction::ToLowercase),
+                }),
+                name: "name_lower".to_string(),
             }
         );
     }

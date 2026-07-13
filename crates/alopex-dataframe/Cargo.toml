@@ -13,6 +13,7 @@ lane_ci = []
 lane_fuzz = []
 
 [dependencies]
+alopex-core.workspace = true
 arrow = "53"
 arrow-csv = "53"
 parquet = { version = "53", features = ["arrow"] }

@@ -192,6 +192,7 @@ dependencies = [
 name = "alopex-dataframe"
 version = "0.2.0"
 dependencies = [
+ "alopex-core",
  "arrow",
  "arrow-csv",
  "parquet 53.4.1",

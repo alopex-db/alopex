@@ -82,6 +82,13 @@ pub enum LogicalPlan {
     },
     /// Count nulls per column.
     NullCount { input: Box<LogicalPlan> },
+    /// Explode one list column.
+    Explode {
+        input: Box<LogicalPlan>,
+        column: String,
+    },
+    /// Implode columns into one row of list columns.
+    Implode { input: Box<LogicalPlan> },
 }
 
 impl LogicalPlan {
@@ -200,6 +207,14 @@ impl LogicalPlan {
                 out.push_str(&format!("{pad}null_count\n"));
                 input.fmt_into(out, indent + 1);
             }
+            LogicalPlan::Explode { input, column } => {
+                out.push_str(&format!("{pad}explode column={column}\n"));
+                input.fmt_into(out, indent + 1);
+            }
+            LogicalPlan::Implode { input } => {
+                out.push_str(&format!("{pad}implode\n"));
+                input.fmt_into(out, indent + 1);
+            }
         }
     }
 }
@@ -221,7 +236,10 @@ fn fmt_fill_null(fill: &FillNull) -> String {
 }
 
 fn fmt_expr(expr: &Expr) -> String {
-    use crate::expr::{AggFunc, Expr as E, Operator, Scalar, UnaryOperator};
+    use crate::expr::{
+        AggFunc, DatetimeFunction, Expr as E, ExprFunction, ListFunction, Operator, Scalar,
+        StringFunction, UnaryOperator,
+    };
 
     match expr {
         E::Column(name) => format!("col({name})"),
@@ -262,6 +280,54 @@ fn fmt_expr(expr: &Expr) -> String {
                 AggFunc::Max => "max",
             };
             format!("{f}({})", fmt_expr(expr))
+        }
+        E::Function { input, function } => {
+            let f = match function {
+                ExprFunction::String(function) => match function {
+                    StringFunction::ToLowercase => "str.to_lowercase".to_string(),
+                    StringFunction::ToUppercase => "str.to_uppercase".to_string(),
+                    StringFunction::Contains { pattern } => {
+                        format!("str.contains({pattern:?})")
+                    }
+                    StringFunction::Replace {
+                        pattern,
+                        replacement,
+                    } => format!("str.replace({pattern:?}, {replacement:?})"),
+                    StringFunction::StripChars { chars } => {
+                        format!("str.strip_chars({chars:?})")
+                    }
+                    StringFunction::Split { separator } => {
+                        format!("str.split({separator:?})")
+                    }
+                    StringFunction::LenChars => "str.len_chars".to_string(),
+                    StringFunction::Extract {
+                        pattern,
+                        capture_group,
+                    } => format!("str.extract({pattern:?}, {capture_group})"),
+                },
+                ExprFunction::Datetime(function) => match function {
+                    DatetimeFunction::Year => "dt.year".to_string(),
+                    DatetimeFunction::Month => "dt.month".to_string(),
+                    DatetimeFunction::Day => "dt.day".to_string(),
+                    DatetimeFunction::Weekday => "dt.weekday".to_string(),
+                    DatetimeFunction::ToString => "dt.to_string".to_string(),
+                    DatetimeFunction::ConvertTimeZone {
+                        from_offset,
+                        to_offset,
+                    } => format!("dt.convert_time_zone({from_offset:?}, {to_offset:?})"),
+                },
+                ExprFunction::List(function) => match function {
+                    ListFunction::Join {
+                        separator,
+                        null_value,
+                    } => format!("list.join({separator:?}, {null_value:?})"),
+                    ListFunction::Len => "list.len".to_string(),
+                    ListFunction::Contains { value } => {
+                        format!("list.contains({value:?})")
+                    }
+                },
+            };
+            format!("{f}({})", fmt_expr(input))
         }
     }
 }
