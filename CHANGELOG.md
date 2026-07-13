@@ -2,15 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.7.1]
+
+Bugfix release. All fixes were discovered by the new mode-parity verification
+suite, which is included in this release.
+
+### Fixed
+- Subqueries now execute on the CLI/streaming query path. Previously,
+  WHERE-clause subqueries failed with `ALOPEX-E999` (unsupported expression)
+  and scalar subqueries silently returned empty results on the streaming
+  path, while the embedded API and HTTP returned correct results (#23, #24).
+- `NOT IN (subquery)` now follows SQL three-valued logic: when the subquery
+  result contains NULL (or the probe value is NULL), the predicate evaluates
+  to UNKNOWN instead of raising a type error, on both streaming and
+  non-streaming paths.
+- gRPC `ExecuteSql` now delegates to the same non-streaming SQL execution
+  path as HTTP, so both server surfaces return identical results and errors
+  for the same SQL, including DML/DDL execution and routing gates (#25).
+  Response buffering was trimmed with incremental response-size checks.
+- CLI `sql` now emits one result block per statement for multi-statement
+  input instead of silently dropping all but the last result (#26). All
+  statements run in one auto-commit transaction; a mid-batch failure rolls
+  back the whole batch and exits non-zero.
+- CLI streaming JSON output no longer leaves invalid partial JSON on stdout
+  when a local or remote stream fails mid-result.
 
 ### Added
+- `Database.execute_sql` / `Transaction.execute_sql` in `alopex-py`:
+  SELECT returns `list[dict]` (column order preserved), DML returns the
+  affected-row count, DDL returns `None`. Positional `?` parameters are
+  bound client-side with quote/comment-aware substitution (#27).
 - `Database::execute_sql_multi` in `alopex-embedded`: executes all statements
   in one transaction and returns one `ExecutionResult` per statement.
+- Mode-parity verification & demo suite (`scripts/parity/`): a shared SQL
+  corpus with hand-calculated expected results, executed across the
+  embedded API (in-memory / file), CLI, HTTP, and gRPC surfaces to verify
+  the mode-parity invariants (same data directory, same SQL, same results),
+  plus a pinned verification container and a five-act demo.
 
 ### Changed
-- CLI `sql` now emits one result block per statement for multi-statement input
-  instead of silently dropping all but the last result (#26).
 - CLI `sql --output json` always emits an array of per-statement result sets;
   a single statement yields a 1-element array. DDL/DML statements contribute a
   `status`/`message` result set (omitted with `--quiet`). Remote (`--server`)
