@@ -134,6 +134,31 @@ fn streaming_iterator_scalar_subquery_executes() {
     );
 }
 
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn streaming_rows_not_in_subquery_with_null_returns_empty() {
+    let db = setup_db();
+    // Subquery result becomes {1, 1, 2, NULL}: three-valued logic makes
+    // `id NOT IN (..., NULL)` FALSE or UNKNOWN for every row, never TRUE.
+    db.execute_sql("INSERT INTO orders (id, user_id, total) VALUES (13, NULL, 5);")
+        .expect("insert NULL user_id");
+    let sql = "SELECT users.name FROM users WHERE users.id NOT IN (SELECT orders.user_id FROM orders) ORDER BY users.id;";
+
+    let (_, streaming) =
+        collect_streaming_rows(&db, sql).expect("streaming NOT IN with NULL must execute");
+    assert!(
+        streaming.is_empty(),
+        "NOT IN over a NULL-containing subquery result must return no rows, got {streaming:?}"
+    );
+
+    // Parity with the non-streaming path.
+    let non_streaming = match db.execute_sql(sql).expect("non-streaming path") {
+        alopex_sql::ExecutionResult::Query(q) => q.rows,
+        other => panic!("expected query result, got {other:?}"),
+    };
+    assert_eq!(streaming, non_streaming);
+}
+
 /// Guard against the issue #23 failure mode: a SELECT that reaches the
 /// streaming path must never yield an empty result while the non-streaming
 /// path yields rows. Whatever happens, both paths must agree.

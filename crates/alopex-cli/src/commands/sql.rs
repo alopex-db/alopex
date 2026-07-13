@@ -2020,6 +2020,44 @@ mod tests {
         }
     }
 
+    /// Regression test for issue #23: errors surfaced by `next_row` during a
+    /// streaming SELECT must propagate as `Err`, not be swallowed into a
+    /// silently-empty result set with exit code 0 (the old
+    /// `while let Ok(Some(...))` pattern did exactly that).
+    #[test]
+    fn streaming_select_row_error_propagates() {
+        let db = create_test_db();
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        db.execute_sql("INSERT INTO t (id) VALUES (1);").unwrap();
+
+        let deadline = Deadline::new(parse_deadline(None).unwrap());
+        let cancel = CancelSignal::new();
+        let options = SqlExecutionOptions {
+            limit: None,
+            quiet: false,
+            cancel: &cancel,
+            deadline: &deadline,
+            admin_launcher: None,
+        };
+
+        let mut output = Vec::new();
+        let formatter = Box::new(JsonlFormatter::new());
+        // `id / 0` fails during row evaluation (division by zero), i.e. inside
+        // the `next_row` loop of `execute_sql_select_streaming`.
+        let result = execute_sql_select_streaming(
+            &db,
+            "SELECT id / 0 AS x FROM t;",
+            &mut output,
+            formatter,
+            &options,
+        );
+        assert!(
+            result.is_err(),
+            "row evaluation errors must propagate instead of yielding an empty result"
+        );
+    }
+
     #[test]
     fn test_sql_value_conversion() {
         use alopex_sql::SqlValue;
