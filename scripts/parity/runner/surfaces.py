@@ -121,7 +121,15 @@ def split_sql_statements(text: str) -> List[str]:
     """SQL テキストを文単位に分割する。
 
     文字列リテラル(' / ")内のセミコロン、行コメント(--)、
-    ブロックコメント(/* */)を考慮する。コメントは文から除去する。
+    ブロックコメント(/* */)を考慮する。コメントは文から除去する:
+
+    - ブロックコメント 1 つは**半角スペース 1 つ**に置換する
+      (``SELECT a/* c */FROM t`` が ``SELECT aFROM t`` にトークン結合
+      するのを防ぐ)。parity_corpus.rs の Rust 移植と挙動を厳密に一致
+      させること。
+    - 行コメントは改行の手前まで読み飛ばす(改行自体は buf に残るため
+      区切り空白が保たれ、スペース挿入は不要。行コメントが EOF で終わる
+      場合もトークン結合は起きない)。
     """
     statements: List[str] = []
     buf: List[str] = []
@@ -165,6 +173,8 @@ def split_sql_statements(text: str) -> List[str]:
             end = text.find("*/", i + 2)
             if end == -1:
                 raise SurfaceError("閉じられていないブロックコメント")
+            # ブロックコメントはスペース 1 つに置換(トークン結合防止)
+            buf.append(" ")
             i = end + 2
             continue
         if ch == ";":
