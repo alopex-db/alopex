@@ -27,6 +27,7 @@ url = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.8"
+serde_json = { workspace = true }
 criterion = { workspace = true }
 rand = { workspace = true }
 

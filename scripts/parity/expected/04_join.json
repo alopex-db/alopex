@@ -1,0 +1,182 @@
+{
+  "corpus": "04_join.sql",
+  "format": {
+    "success": "DDL 文の成功 (結果セットなし)",
+    "rows_affected": "DML 文の成功 (count = 影響行数)",
+    "query": "columns = 出力列名の順序付き配列 / rows = 列名をキーとするオブジェクトの配列 / 浮動小数点は有効数字 9 桁へ丸め / NULL は JSON null"
+  },
+  "statements": [
+    {
+      "index": 1,
+      "sql": "SELECT users.name, orders.id AS order_id, orders.amount FROM users INNER JOIN orders ON users.id = orders.user_id ORDER BY orders.id",
+      "expected": {
+        "type": "query",
+        "columns": ["name", "order_id", "amount"],
+        "rows": [
+          { "name": "alice", "order_id": 10, "amount": 50.0 },
+          { "name": "alice", "order_id": 11, "amount": 75.5 },
+          { "name": "bob", "order_id": 12, "amount": 20.25 },
+          { "name": "carol", "order_id": 14, "amount": 30.0 },
+          { "name": "erin", "order_id": 16, "amount": 12.75 },
+          { "name": "carol", "order_id": 17, "amount": 60.0 }
+        ]
+      }
+    },
+    {
+      "index": 2,
+      "sql": "SELECT users.name, orders.id AS order_id FROM users JOIN orders ON users.id = orders.user_id WHERE orders.amount > 50.0 ORDER BY orders.id",
+      "expected": {
+        "type": "query",
+        "columns": ["name", "order_id"],
+        "rows": [
+          { "name": "alice", "order_id": 11 },
+          { "name": "carol", "order_id": 17 }
+        ]
+      }
+    },
+    {
+      "index": 3,
+      "sql": "SELECT users.id AS user_id, users.name, orders.id AS order_id FROM users LEFT JOIN orders ON users.id = orders.user_id ORDER BY users.id ASC, orders.id ASC NULLS LAST",
+      "expected": {
+        "type": "query",
+        "columns": ["user_id", "name", "order_id"],
+        "rows": [
+          { "user_id": 1, "name": "alice", "order_id": 10 },
+          { "user_id": 1, "name": "alice", "order_id": 11 },
+          { "user_id": 2, "name": "bob", "order_id": 12 },
+          { "user_id": 3, "name": "carol", "order_id": 14 },
+          { "user_id": 3, "name": "carol", "order_id": 17 },
+          { "user_id": 4, "name": "dave", "order_id": null },
+          { "user_id": 5, "name": "erin", "order_id": 16 },
+          { "user_id": 6, "name": "frank", "order_id": null }
+        ]
+      }
+    },
+    {
+      "index": 4,
+      "sql": "SELECT orders.id AS order_id, users.name FROM users RIGHT JOIN orders ON users.id = orders.user_id ORDER BY orders.id",
+      "expected": {
+        "type": "query",
+        "columns": ["order_id", "name"],
+        "rows": [
+          { "order_id": 10, "name": "alice" },
+          { "order_id": 11, "name": "alice" },
+          { "order_id": 12, "name": "bob" },
+          { "order_id": 14, "name": "carol" },
+          { "order_id": 15, "name": null },
+          { "order_id": 16, "name": "erin" },
+          { "order_id": 17, "name": "carol" }
+        ]
+      }
+    },
+    {
+      "index": 5,
+      "sql": "SELECT users.id AS user_id, orders.id AS order_id FROM users FULL JOIN orders ON users.id = orders.user_id ORDER BY users.id ASC NULLS LAST, orders.id ASC NULLS LAST",
+      "expected": {
+        "type": "query",
+        "columns": ["user_id", "order_id"],
+        "rows": [
+          { "user_id": 1, "order_id": 10 },
+          { "user_id": 1, "order_id": 11 },
+          { "user_id": 2, "order_id": 12 },
+          { "user_id": 3, "order_id": 14 },
+          { "user_id": 3, "order_id": 17 },
+          { "user_id": 4, "order_id": null },
+          { "user_id": 5, "order_id": 16 },
+          { "user_id": 6, "order_id": null },
+          { "user_id": null, "order_id": 15 }
+        ]
+      }
+    },
+    {
+      "index": 6,
+      "sql": "SELECT users.id AS user_id, regions.id AS region_id FROM users CROSS JOIN regions ORDER BY users.id, regions.id",
+      "expected": {
+        "type": "query",
+        "columns": ["user_id", "region_id"],
+        "rows": [
+          { "user_id": 1, "region_id": 1 },
+          { "user_id": 1, "region_id": 2 },
+          { "user_id": 1, "region_id": 3 },
+          { "user_id": 2, "region_id": 1 },
+          { "user_id": 2, "region_id": 2 },
+          { "user_id": 2, "region_id": 3 },
+          { "user_id": 3, "region_id": 1 },
+          { "user_id": 3, "region_id": 2 },
+          { "user_id": 3, "region_id": 3 },
+          { "user_id": 4, "region_id": 1 },
+          { "user_id": 4, "region_id": 2 },
+          { "user_id": 4, "region_id": 3 },
+          { "user_id": 5, "region_id": 1 },
+          { "user_id": 5, "region_id": 2 },
+          { "user_id": 5, "region_id": 3 },
+          { "user_id": 6, "region_id": 1 },
+          { "user_id": 6, "region_id": 2 },
+          { "user_id": 6, "region_id": 3 }
+        ]
+      }
+    },
+    {
+      "index": 7,
+      "sql": "SELECT users.name, regions.bonus FROM users INNER JOIN regions USING (region) ORDER BY users.id",
+      "expected": {
+        "type": "query",
+        "columns": ["name", "bonus"],
+        "rows": [
+          { "name": "alice", "bonus": 5.0 },
+          { "name": "bob", "bonus": 2.5 },
+          { "name": "carol", "bonus": 5.0 },
+          { "name": "dave", "bonus": 2.5 },
+          { "name": "frank", "bonus": 5.0 }
+        ]
+      }
+    },
+    {
+      "index": 8,
+      "sql": "SELECT users.name, regions.bonus FROM users LEFT JOIN regions USING (region) ORDER BY users.id",
+      "expected": {
+        "type": "query",
+        "columns": ["name", "bonus"],
+        "rows": [
+          { "name": "alice", "bonus": 5.0 },
+          { "name": "bob", "bonus": 2.5 },
+          { "name": "carol", "bonus": 5.0 },
+          { "name": "dave", "bonus": 2.5 },
+          { "name": "erin", "bonus": null },
+          { "name": "frank", "bonus": 5.0 }
+        ]
+      }
+    },
+    {
+      "index": 9,
+      "sql": "SELECT u.name, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id ORDER BY o.amount",
+      "expected": {
+        "type": "query",
+        "columns": ["name", "amount"],
+        "rows": [
+          { "name": "erin", "amount": 12.75 },
+          { "name": "bob", "amount": 20.25 },
+          { "name": "carol", "amount": 30.0 },
+          { "name": "alice", "amount": 50.0 },
+          { "name": "carol", "amount": 60.0 },
+          { "name": "alice", "amount": 75.5 }
+        ]
+      }
+    },
+    {
+      "index": 10,
+      "sql": "SELECT users.name, orders.id AS order_id, regions.bonus FROM users INNER JOIN orders ON users.id = orders.user_id INNER JOIN regions ON users.region = regions.region ORDER BY orders.id",
+      "expected": {
+        "type": "query",
+        "columns": ["name", "order_id", "bonus"],
+        "rows": [
+          { "name": "alice", "order_id": 10, "bonus": 5.0 },
+          { "name": "alice", "order_id": 11, "bonus": 5.0 },
+          { "name": "bob", "order_id": 12, "bonus": 2.5 },
+          { "name": "carol", "order_id": 14, "bonus": 5.0 },
+          { "name": "carol", "order_id": 17, "bonus": 5.0 }
+        ]
+      }
+    }
+  ]
+}
