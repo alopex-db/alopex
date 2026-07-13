@@ -1,0 +1,118 @@
+{
+  "corpus": "02_dml.sql",
+  "format": {
+    "success": "DDL 文の成功 (結果セットなし)",
+    "rows_affected": "DML 文の成功 (count = 影響行数)",
+    "query": "columns = 出力列名の順序付き配列 / rows = 列名をキーとするオブジェクトの配列 / 浮動小数点は有効数字 9 桁へ丸め / NULL は JSON null"
+  },
+  "statements": [
+    {
+      "index": 1,
+      "sql": "INSERT INTO users (id, name, region, age, score, active) VALUES (1, 'alice', 'east', 30, 82.5, TRUE), (2, 'bob', 'west', 25, 74.25, TRUE), (3, 'carol', 'east', 35, 90.0, FALSE), (4, 'dave', 'west', 28, NULL, TRUE), (5, 'erin', 'north', 22, 65.5, FALSE), (6, 'frank', 'east', NULL, 71.75, TRUE)",
+      "expected": { "type": "rows_affected", "count": 6 }
+    },
+    {
+      "index": 2,
+      "sql": "INSERT INTO orders (id, user_id, amount, status) VALUES (10, 1, 50.0, 'shipped'), (11, 1, 75.5, 'pending'), (12, 2, 20.25, 'shipped'), (13, 2, 99.75, 'cancelled'), (14, 3, 30.0, 'pending'), (15, 9, 45.5, 'shipped'), (16, 5, 12.5, 'shipped'), (17, 3, 60.0, 'shipped')",
+      "expected": { "type": "rows_affected", "count": 8 }
+    },
+    {
+      "index": 3,
+      "sql": "INSERT INTO products (id, category, region, price, tag) VALUES (1, 'book', 'us', 10.0, 'new'), (2, 'book', 'us', 15.0, 'sale'), (3, 'book', 'eu', 5.0, NULL), (4, 'game', 'us', 20.0, 'hit'), (5, 'game', 'eu', 7.5, 'new'), (6, 'toy', 'jp', 3.25, 'kids'), (7, 'toy', 'jp', 4.75, NULL)",
+      "expected": { "type": "rows_affected", "count": 7 }
+    },
+    {
+      "index": 4,
+      "sql": "INSERT INTO regions (id, region, bonus) VALUES (1, 'east', 5.0), (2, 'west', 2.5), (3, 'south', 1.25)",
+      "expected": { "type": "rows_affected", "count": 3 }
+    },
+    {
+      "index": 5,
+      "sql": "INSERT INTO docs (id, title, embedding) VALUES (1, 'alpha', [1.0, 0.0, 0.0]), (2, 'bravo', [0.25, 1.0, 0.0]), (3, 'charlie', [1.0, 1.5, 2.0]), (4, 'delta', [2.0, 2.0, 2.0]), (5, 'echo', [4.0, 4.0, 0.0])",
+      "expected": { "type": "rows_affected", "count": 5 }
+    },
+    {
+      "index": 6,
+      "sql": "SELECT COUNT(*) AS user_count FROM users",
+      "expected": {
+        "type": "query",
+        "columns": ["user_count"],
+        "rows": [ { "user_count": 6 } ]
+      }
+    },
+    {
+      "index": 7,
+      "sql": "SELECT COUNT(*) AS order_count FROM orders",
+      "expected": {
+        "type": "query",
+        "columns": ["order_count"],
+        "rows": [ { "order_count": 8 } ]
+      }
+    },
+    {
+      "index": 8,
+      "sql": "UPDATE products SET price = price + 1.0 WHERE category = 'book'",
+      "expected": { "type": "rows_affected", "count": 3 }
+    },
+    {
+      "index": 9,
+      "sql": "SELECT id, price FROM products WHERE category = 'book' ORDER BY id",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "price"],
+        "rows": [
+          { "id": 1, "price": 11.0 },
+          { "id": 2, "price": 16.0 },
+          { "id": 3, "price": 6.0 }
+        ]
+      }
+    },
+    {
+      "index": 10,
+      "sql": "UPDATE users SET age = 29, active = FALSE WHERE id = 4",
+      "expected": { "type": "rows_affected", "count": 1 }
+    },
+    {
+      "index": 11,
+      "sql": "SELECT id, name, age, active FROM users WHERE id = 4",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "name", "age", "active"],
+        "rows": [ { "id": 4, "name": "dave", "age": 29, "active": false } ]
+      }
+    },
+    {
+      "index": 12,
+      "sql": "UPDATE orders SET amount = amount + 0.25 WHERE id = 16",
+      "expected": { "type": "rows_affected", "count": 1 }
+    },
+    {
+      "index": 13,
+      "sql": "DELETE FROM orders WHERE status = 'cancelled'",
+      "expected": { "type": "rows_affected", "count": 1 }
+    },
+    {
+      "index": 14,
+      "sql": "DELETE FROM products WHERE category = 'toy'",
+      "expected": { "type": "rows_affected", "count": 2 }
+    },
+    {
+      "index": 15,
+      "sql": "SELECT COUNT(*) AS order_count FROM orders",
+      "expected": {
+        "type": "query",
+        "columns": ["order_count"],
+        "rows": [ { "order_count": 7 } ]
+      }
+    },
+    {
+      "index": 16,
+      "sql": "SELECT COUNT(*) AS product_count FROM products",
+      "expected": {
+        "type": "query",
+        "columns": ["product_count"],
+        "rows": [ { "product_count": 5 } ]
+      }
+    }
+  ]
+}

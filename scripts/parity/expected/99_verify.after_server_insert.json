@@ -1,0 +1,87 @@
+{
+  "corpus": "99_verify.sql",
+  "variant": "after_server_insert",
+  "precondition": "01〜07 実行後の最終状態に corpus/08_server_insert.sql (orders へ id 18/19 の 2 行 INSERT) を適用した状態で 99_verify.sql を実行した場合の期待値",
+  "format": {
+    "success": "DDL 文の成功 (結果セットなし)",
+    "rows_affected": "DML 文の成功 (count = 影響行数)",
+    "query": "columns = 出力列名の順序付き配列 / rows = 列名をキーとするオブジェクトの配列 / 浮動小数点は有効数字 9 桁へ丸め / NULL は JSON null"
+  },
+  "statements": [
+    {
+      "index": 1,
+      "sql": "SELECT COUNT(*) AS user_count FROM users",
+      "expected": {
+        "type": "query",
+        "columns": ["user_count"],
+        "rows": [ { "user_count": 6 } ]
+      }
+    },
+    {
+      "index": 2,
+      "sql": "SELECT COUNT(*) AS order_count, SUM(amount) AS order_total, AVG(amount) AS order_avg FROM orders",
+      "expected": {
+        "type": "query",
+        "columns": ["order_count", "order_total", "order_avg"],
+        "rows": [ { "order_count": 9, "order_total": 351.0, "order_avg": 39.0 } ]
+      }
+    },
+    {
+      "index": 3,
+      "sql": "SELECT COUNT(*) AS product_count, MIN(price) AS min_price, MAX(price) AS max_price FROM products",
+      "expected": {
+        "type": "query",
+        "columns": ["product_count", "min_price", "max_price"],
+        "rows": [ { "product_count": 5, "min_price": 6.0, "max_price": 20.0 } ]
+      }
+    },
+    {
+      "index": 4,
+      "sql": "SELECT COUNT(*) AS region_count FROM regions",
+      "expected": {
+        "type": "query",
+        "columns": ["region_count"],
+        "rows": [ { "region_count": 3 } ]
+      }
+    },
+    {
+      "index": 5,
+      "sql": "SELECT COUNT(*) AS doc_count FROM docs",
+      "expected": {
+        "type": "query",
+        "columns": ["doc_count"],
+        "rows": [ { "doc_count": 4 } ]
+      }
+    },
+    {
+      "index": 6,
+      "sql": "SELECT COUNT(*) AS joined_orders, SUM(orders.amount) AS joined_total FROM users INNER JOIN orders ON users.id = orders.user_id",
+      "expected": {
+        "type": "query",
+        "columns": ["joined_orders", "joined_total"],
+        "rows": [ { "joined_orders": 8, "joined_total": 305.5 } ]
+      }
+    },
+    {
+      "index": 7,
+      "sql": "SELECT category, COUNT(*) AS cnt, SUM(price) AS total_price FROM products GROUP BY category ORDER BY category",
+      "expected": {
+        "type": "query",
+        "columns": ["category", "cnt", "total_price"],
+        "rows": [
+          { "category": "book", "cnt": 3, "total_price": 33.0 },
+          { "category": "game", "cnt": 2, "total_price": 27.5 }
+        ]
+      }
+    },
+    {
+      "index": 8,
+      "sql": "SELECT docs.id FROM docs ORDER BY vector_distance(docs.embedding, [1.0, 0.0, 0.0], 'l2') ASC LIMIT 3",
+      "expected": {
+        "type": "query",
+        "columns": ["id"],
+        "rows": [ { "id": 1 }, { "id": 5 }, { "id": 2 } ]
+      }
+    }
+  ]
+}

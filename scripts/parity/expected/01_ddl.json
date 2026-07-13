@@ -1,0 +1,31 @@
+{
+  "corpus": "01_ddl.sql",
+  "format": {
+    "success": "DDL 文の成功 (結果セットなし)",
+    "rows_affected": "DML 文の成功 (count = 影響行数)",
+    "query": "columns = 出力列名の順序付き配列 / rows = 列名をキーとするオブジェクトの配列 / 浮動小数点は有効数字 9 桁へ丸め / NULL は JSON null"
+  },
+  "statements": [
+    { "index": 1, "sql": "DROP TABLE IF EXISTS users", "expected": { "type": "success" } },
+    { "index": 2, "sql": "DROP TABLE IF EXISTS orders", "expected": { "type": "success" } },
+    { "index": 3, "sql": "DROP TABLE IF EXISTS products", "expected": { "type": "success" } },
+    { "index": 4, "sql": "DROP TABLE IF EXISTS regions", "expected": { "type": "success" } },
+    { "index": 5, "sql": "DROP TABLE IF EXISTS docs", "expected": { "type": "success" } },
+    { "index": 6, "sql": "CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL, region TEXT, age INT, score DOUBLE, active BOOLEAN)", "expected": { "type": "success" } },
+    { "index": 7, "sql": "CREATE TABLE IF NOT EXISTS users (id INT PRIMARY KEY, name TEXT NOT NULL, region TEXT, age INT, score DOUBLE, active BOOLEAN)", "expected": { "type": "success" } },
+    { "index": 8, "sql": "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT NOT NULL, amount DOUBLE NOT NULL, status TEXT NOT NULL)", "expected": { "type": "success" } },
+    { "index": 9, "sql": "CREATE TABLE products (id INT PRIMARY KEY, category TEXT NOT NULL, region TEXT, price DOUBLE, tag TEXT)", "expected": { "type": "success" } },
+    { "index": 10, "sql": "CREATE TABLE regions (id INT PRIMARY KEY, region TEXT UNIQUE, bonus DOUBLE)", "expected": { "type": "success" } },
+    { "index": 11, "sql": "CREATE TABLE docs (id INT PRIMARY KEY, title TEXT, embedding VECTOR(3, L2))", "expected": { "type": "success" } },
+    { "index": 12, "sql": "CREATE INDEX idx_orders_user_id ON orders (user_id) USING BTREE", "expected": { "type": "success" } },
+    { "index": 13, "sql": "CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders (user_id) USING BTREE", "expected": { "type": "success" } },
+    { "index": 14, "sql": "CREATE INDEX idx_products_category ON products (category)", "expected": { "type": "success" } },
+    { "index": 15, "sql": "CREATE INDEX idx_docs_embedding ON docs (embedding) USING HNSW WITH (m = 8, ef_construction = 32)", "expected": { "type": "success" } },
+    { "index": 16, "sql": "CREATE TABLE scratch (id INT PRIMARY KEY, note TEXT)", "expected": { "type": "success" } },
+    { "index": 17, "sql": "DROP TABLE scratch", "expected": { "type": "success" } },
+    { "index": 18, "sql": "DROP TABLE IF EXISTS scratch", "expected": { "type": "success" } },
+    { "index": 19, "sql": "CREATE INDEX idx_users_region ON users (region)", "expected": { "type": "success" } },
+    { "index": 20, "sql": "DROP INDEX idx_users_region", "expected": { "type": "success" } },
+    { "index": 21, "sql": "DROP INDEX IF EXISTS idx_users_region", "expected": { "type": "success" } }
+  ]
+}

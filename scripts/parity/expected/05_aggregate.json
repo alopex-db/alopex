@@ -1,0 +1,146 @@
+{
+  "corpus": "05_aggregate.sql",
+  "format": {
+    "success": "DDL 文の成功 (結果セットなし)",
+    "rows_affected": "DML 文の成功 (count = 影響行数)",
+    "query": "columns = 出力列名の順序付き配列 / rows = 列名をキーとするオブジェクトの配列 / 浮動小数点は有効数字 9 桁へ丸め / NULL は JSON null"
+  },
+  "statements": [
+    {
+      "index": 1,
+      "sql": "SELECT COUNT(*) AS user_count, COUNT(score) AS score_count, COUNT(DISTINCT region) AS region_count FROM users",
+      "expected": {
+        "type": "query",
+        "columns": ["user_count", "score_count", "region_count"],
+        "rows": [ { "user_count": 6, "score_count": 5, "region_count": 3 } ]
+      }
+    },
+    {
+      "index": 2,
+      "sql": "SELECT COUNT(*) AS order_count, SUM(amount) AS total_amount, AVG(amount) AS avg_amount, MIN(amount) AS min_amount, MAX(amount) AS max_amount, TOTAL(amount) AS grand_total FROM orders",
+      "expected": {
+        "type": "query",
+        "columns": ["order_count", "total_amount", "avg_amount", "min_amount", "max_amount", "grand_total"],
+        "rows": [
+          { "order_count": 7, "total_amount": 294.0, "avg_amount": 42.0, "min_amount": 12.75, "max_amount": 75.5, "grand_total": 294.0 }
+        ]
+      }
+    },
+    {
+      "index": 3,
+      "sql": "SELECT category, COUNT(*) AS cnt, SUM(price) AS total_price, AVG(price) AS avg_price, MIN(price) AS min_price, MAX(price) AS max_price FROM products GROUP BY category ORDER BY category",
+      "expected": {
+        "type": "query",
+        "columns": ["category", "cnt", "total_price", "avg_price", "min_price", "max_price"],
+        "rows": [
+          { "category": "book", "cnt": 3, "total_price": 33.0, "avg_price": 11.0, "min_price": 6.0, "max_price": 16.0 },
+          { "category": "game", "cnt": 2, "total_price": 27.5, "avg_price": 13.75, "min_price": 7.5, "max_price": 20.0 }
+        ]
+      }
+    },
+    {
+      "index": 4,
+      "sql": "SELECT region, COUNT(*) AS cnt FROM users GROUP BY region HAVING COUNT(*) > 1 ORDER BY region",
+      "expected": {
+        "type": "query",
+        "columns": ["region", "cnt"],
+        "rows": [
+          { "region": "east", "cnt": 3 },
+          { "region": "west", "cnt": 2 }
+        ]
+      }
+    },
+    {
+      "index": 5,
+      "sql": "SELECT category FROM products GROUP BY category HAVING SUM(price) > 30.0 ORDER BY category",
+      "expected": {
+        "type": "query",
+        "columns": ["category"],
+        "rows": [ { "category": "book" } ]
+      }
+    },
+    {
+      "index": 6,
+      "sql": "SELECT category, GROUP_CONCAT(tag, '|') AS tags FROM products GROUP BY category ORDER BY category",
+      "expected": {
+        "type": "query",
+        "columns": ["category", "tags"],
+        "rows": [
+          { "category": "book", "tags": "new|sale" },
+          { "category": "game", "tags": "hit|new" }
+        ]
+      }
+    },
+    {
+      "index": 7,
+      "sql": "SELECT category, STRING_AGG(tag, '#') AS tags FROM products GROUP BY category ORDER BY category",
+      "expected": {
+        "type": "query",
+        "columns": ["category", "tags"],
+        "rows": [
+          { "category": "book", "tags": "new#sale" },
+          { "category": "game", "tags": "hit#new" }
+        ]
+      }
+    },
+    {
+      "index": 8,
+      "sql": "SELECT category, region, COUNT(*) AS cnt, SUM(price) AS total_price FROM products GROUP BY category, region ORDER BY category, region",
+      "expected": {
+        "type": "query",
+        "columns": ["category", "region", "cnt", "total_price"],
+        "rows": [
+          { "category": "book", "region": "eu", "cnt": 1, "total_price": 6.0 },
+          { "category": "book", "region": "us", "cnt": 2, "total_price": 27.0 },
+          { "category": "game", "region": "eu", "cnt": 1, "total_price": 7.5 },
+          { "category": "game", "region": "us", "cnt": 1, "total_price": 20.0 }
+        ]
+      }
+    },
+    {
+      "index": 9,
+      "sql": "SELECT COUNT(*) AS cnt, SUM(price) AS total_price, TOTAL(price) AS grand_total, AVG(price) AS avg_price, MIN(price) AS min_price FROM products WHERE price > 1000.0",
+      "expected": {
+        "type": "query",
+        "columns": ["cnt", "total_price", "grand_total", "avg_price", "min_price"],
+        "rows": [
+          { "cnt": 0, "total_price": null, "grand_total": 0.0, "avg_price": null, "min_price": null }
+        ]
+      }
+    },
+    {
+      "index": 10,
+      "sql": "SELECT category, COUNT(*) AS cnt FROM products WHERE price > 1000.0 GROUP BY category ORDER BY category",
+      "expected": {
+        "type": "query",
+        "columns": ["category", "cnt"],
+        "rows": []
+      }
+    },
+    {
+      "index": 11,
+      "sql": "SELECT users.region, SUM(orders.amount) AS region_total FROM users INNER JOIN orders ON users.id = orders.user_id GROUP BY users.region ORDER BY users.region",
+      "expected": {
+        "type": "query",
+        "columns": ["region", "region_total"],
+        "rows": [
+          { "region": "east", "region_total": 215.5 },
+          { "region": "north", "region_total": 12.75 },
+          { "region": "west", "region_total": 20.25 }
+        ]
+      }
+    },
+    {
+      "index": 12,
+      "sql": "SELECT category, COUNT(tag) AS tag_count FROM products GROUP BY category ORDER BY category",
+      "expected": {
+        "type": "query",
+        "columns": ["category", "tag_count"],
+        "rows": [
+          { "category": "book", "tag_count": 2 },
+          { "category": "game", "tag_count": 2 }
+        ]
+      }
+    }
+  ]
+}
