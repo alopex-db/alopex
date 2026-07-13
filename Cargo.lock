@@ -172,6 +172,7 @@ dependencies = [
  "object_store",
  "proptest",
  "rand 0.8.5",
+ "regex",
  "serde",
  "serde_json",
  "snap",

@@ -12,11 +12,11 @@ use common::{
 };
 
 const STABILITY_GATE_RATIO: f64 = 0.30;
-const CAST_ROWS: usize = 4_096;
+const CAST_ROWS: usize = 16_384;
 const PARTITION_BATCHES: usize = 16;
 const PARTITION_ROWS_PER_BATCH: usize = 257;
 const PARTITION_SIZE: usize = 64;
-const PARTITION_SCAN_REPEATS: usize = 16;
+const PARTITION_SCAN_REPEATS: usize = 64;
 
 fn within_stability_gate(comparison: &V06Comparison) -> bool {
     comparison.degradation_ratio.abs() <= STABILITY_GATE_RATIO

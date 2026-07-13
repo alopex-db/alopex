@@ -17,7 +17,7 @@ fn value(s: &str) -> Vec<u8> {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
-fn sst_flush_reopen_roundtrip_and_checksum() {
+fn sst_flush_reopen_discards_corrupt_sst_and_recovers_from_wal() {
     let dir = tempdir().unwrap();
     let wal_path = dir.path().join("kv.log");
     let sst_path = wal_path.with_extension("sst");
@@ -49,9 +49,12 @@ fn sst_flush_reopen_roundtrip_and_checksum() {
         file.sync_all().unwrap();
     }
 
-    // Reopen should error due to checksum mismatch.
-    let reopen_err = MemoryKV::open(&wal_path);
-    assert!(reopen_err.is_err());
+    // Reopen discards the corrupt SST and replays the WAL.
+    let reopened = MemoryKV::open(&wal_path).unwrap();
+    let mgr = reopened.txn_manager();
+    let mut txn = mgr.begin(TxnMode::ReadOnly).unwrap();
+    assert_eq!(txn.get(&key("a")).unwrap(), Some(value("1")));
+    assert_eq!(txn.get(&key("b")).unwrap(), Some(value("2")));
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
