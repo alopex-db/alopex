@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-py"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "alopex-cluster",
  "alopex-core",
