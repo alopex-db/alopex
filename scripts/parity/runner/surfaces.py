@@ -495,6 +495,30 @@ def _parse_json_documents(text: str) -> List[Any]:
     return documents
 
 
+def _parse_cli_statement_array(stdout: str, *, context: str) -> List[List[Any]]:
+    """CLI ``--output json`` の出力を「文ごとの結果集合の列」として読む。
+
+    CLI は v0.7.1(issue #26 修正)から、出力全体を単一の JSON 配列とし、
+    その各要素が 1 文分の結果集合(行オブジェクトの配列)になる。文数に
+    かかわらず外側配列はちょうど 1 個である。
+    """
+    documents = _parse_json_documents(stdout)
+    arrays = [doc for doc in documents if isinstance(doc, list)]
+    if len(arrays) != 1:
+        raise SurfaceError(
+            f"CLI 出力に文結果の外側配列がちょうど 1 個現れなかった"
+            f"(配列数={len(arrays)}): {context}"
+        )
+    outer = arrays[0]
+    bad = [i for i, item in enumerate(outer) if not isinstance(item, list)]
+    if bad:
+        raise SurfaceError(
+            "CLI 外側配列の要素が結果集合(配列)でない"
+            f"(位置={bad[:3]}): {context}"
+        )
+    return outer
+
+
 #: CLI が DDL/DML 成功時に出力するステータス結果集合の列
 #: (crates/alopex-cli/src/commands/sql.rs sql_status_columns())
 _CLI_STATUS_COLUMNS = ["status", "message"]
@@ -572,24 +596,12 @@ class CliSurface:
                 "affected_count": None,
                 "error_message": message,
             }
-        documents = _parse_json_documents(result.stdout)
-        arrays = [doc for doc in documents if isinstance(doc, list)]
-        if not arrays:
-            # CLI は成功時に必ずステータス結果集合を出す(sql.rs)。
-            # 出力なしは想定外だが、成功終了している以上 success として扱う。
-            return {
-                "sql": sql,
-                "kind": "success",
-                "columns": None,
-                "rows": None,
-                "affected_count": None,
-                "error_message": None,
-            }
-        if len(arrays) > 1:
+        result_sets = _parse_cli_statement_array(result.stdout, context=repr(sql))
+        if len(result_sets) != 1:
             raise SurfaceError(
-                f"CLI が 1 文に対して複数の結果集合を出力した: {sql!r}"
+                f"CLI が 1 文に対して結果集合を {len(result_sets)} 個出力した: {sql!r}"
             )
-        return _record_from_json_array(sql, arrays[0])
+        return _record_from_json_array(sql, result_sets[0])
 
     def run_statements(
         self, statements: Sequence[str], *, data_dir: Path
@@ -604,16 +616,10 @@ class CliSurface:
     def run_file_in_memory(self, sql_file: Path) -> List[Dict[str, Any]]:
         """SF-MEM: ``--in-memory sql -f <file>`` を単一プロセスで実行する。
 
-        **既知の製品挙動(コンテナ実測 2026-07-13、別途バグ報告予定)**:
-        CLI は複数文を 1 プロセスに渡すと**最後の文の結果のみ**を出力する。
-        インメモリはプロセスを跨げないため文単位の分割起動もできず、
-        複数文ファイルの文単位結果は本経路では取得できない。このため
-        S1 第 1 幕の SF-MEM は組み込み API 経路(EmbeddedSurface の
-        インメモリモード)を使う(demo.py act1_memory 参照)。
-
-        本メソッドは「出力配列が文と 1:1 に対応する」場合(単文ファイル、
-        または上記製品挙動が修正された場合)のみレコード列を返し、
-        それ以外は SurfaceSkip で理由を明示する(偽装完了禁止)。
+        CLI は複数文入力に対し文ごとの結果集合を文順に出力する(v0.7.1、
+        issue #26 修正)。全文は単一 auto-commit トランザクションで実行され、
+        途中失敗時は全体ロールバック + 非ゼロ exit となるため、その場合は
+        エラーを文単位に帰属できず SurfaceSkip で理由を明示する。
         """
         statements = split_sql_statements(sql_file.read_text(encoding="utf-8"))
         result = self._run(["--in-memory", "sql", "-f", str(sql_file)])
@@ -622,18 +628,17 @@ class CliSurface:
                 "CLI in-memory 経路はバッチ実行中のエラーを文単位に帰属できない"
                 f" (exit={result.returncode}):\n{_tail(result.stderr)}"
             )
-        documents = _parse_json_documents(result.stdout)
-        arrays = [doc for doc in documents if isinstance(doc, list)]
-        if len(arrays) != len(statements):
+        result_sets = _parse_cli_statement_array(
+            result.stdout, context=str(sql_file)
+        )
+        if len(result_sets) != len(statements):
             raise SurfaceSkip(
                 "CLI in-memory 出力の結果集合数が文数と一致しない"
-                f"(結果={len(arrays)} / 文={len(statements)})。"
-                " CLI は複数文入力に対し最後の文の結果のみを出力する製品挙動"
-                "のため、複数文の SF-MEM 検証は組み込み API 経路を使うこと。"
+                f"(結果={len(result_sets)} / 文={len(statements)})。"
             )
         return [
-            _record_from_json_array(sql, array)
-            for sql, array in zip(statements, arrays)
+            _record_from_json_array(sql, result_set)
+            for sql, result_set in zip(statements, result_sets)
         ]
 
 
