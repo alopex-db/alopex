@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: bash .github/scripts/checkout-chirps.sh
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
@@ -77,6 +79,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: bash .github/scripts/checkout-chirps.sh
 
       - name: Set up Rust (nightly)
         uses: actions-rs/toolchain@v1
@@ -145,6 +149,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: bash .github/scripts/checkout-chirps.sh
 
       - name: Set up Rust (nightly)
         uses: actions-rs/toolchain@v1
@@ -204,6 +210,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: bash .github/scripts/checkout-chirps.sh
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1

@@ -127,6 +127,14 @@ pub fn router(state: Arc<ServerState>) -> Router {
         .route("/api/admin/metrics", axum::routing::get(admin_api::metrics))
         .route("/api/admin/health", axum::routing::get(admin_api::health))
         .route(
+            "/api/admin/cluster/join",
+            axum::routing::post(admin_api::cluster_join),
+        )
+        .route(
+            "/api/admin/cluster/leave",
+            axum::routing::post(admin_api::cluster_leave),
+        )
+        .route(
             "/api/admin/backup",
             axum::routing::post(admin_api::start_backup),
         )

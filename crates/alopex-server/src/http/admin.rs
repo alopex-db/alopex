@@ -39,6 +39,10 @@ async fn metrics(Extension(state): Extension<Arc<ServerState>>) -> Response {
     }
     let reporter = StatusReporter::new(state.lifecycle_state.clone(), state.recovery_info.clone());
     reporter.refresh_metrics(&state.metrics);
+    match state.cluster_status_snapshot() {
+        Ok(snapshot) => state.metrics.record_cluster_status(&snapshot),
+        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
     match state.metrics.expose_prometheus() {
         Ok(body) => (
             StatusCode::OK,

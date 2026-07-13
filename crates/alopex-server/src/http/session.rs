@@ -5,6 +5,7 @@ use axum::response::Response;
 use serde::Serialize;
 
 use crate::error::{Result, ServerError};
+use crate::http::sql::sync_catalog_to_store;
 use crate::http::{error_response, json_response, RequestContext};
 use crate::server::ServerState;
 use crate::session::SessionId;
@@ -77,8 +78,17 @@ async fn session_action(
         .parse::<SessionId>()
         .map_err(|_| ServerError::BadRequest("invalid session id".into()))?;
     match action {
-        Action::Commit => state.session_manager.commit(&session_id).await?,
-        Action::Rollback => state.session_manager.rollback(&session_id).await?,
+        Action::Commit => {
+            let effects = state.session_manager.commit(&session_id).await?;
+            if !effects.is_empty() {
+                state.apply_table_lifecycle_effects(effects)?;
+                sync_catalog_to_store(&state)?;
+            }
+        }
+        Action::Rollback => {
+            let effects = state.session_manager.rollback(&session_id).await?;
+            state.apply_catalog_rollback_effects(effects)?;
+        }
     }
     Ok(SessionActionResponse { success: true })
 }

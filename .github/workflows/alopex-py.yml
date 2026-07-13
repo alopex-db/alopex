@@ -29,6 +29,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: bash .github/scripts/checkout-chirps.sh
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -65,6 +67,9 @@ jobs:
       - name: Checkout
         if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
+        run: bash .github/scripts/checkout-chirps.sh
       - name: Setup Python
         if: ${{ !env.ACT }}
         uses: actions/setup-python@v5
@@ -219,6 +224,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: bash .github/scripts/checkout-chirps.sh
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -283,6 +290,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: bash .github/scripts/checkout-chirps.sh
       - name: Setup Python
         if: ${{ !env.ACT }}
         uses: actions/setup-python@v5
@@ -324,6 +333,8 @@ jobs:
           sudo docker image prune --all --force || true
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: bash .github/scripts/checkout-chirps.sh
       - name: Setup Python
         if: ${{ !env.ACT }}
         uses: actions/setup-python@v5

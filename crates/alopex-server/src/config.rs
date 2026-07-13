@@ -3,6 +3,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use alopex_cluster::{
+    ClusterId, ClusterIdentity, ClusterManager, ClusterManagerConfig, ClusterMode, Endpoint,
+    MembershipSource, NodeId, NodeRole, NodeState,
+};
 use serde::Deserialize;
 
 use crate::audit::AuditLogOutput;
@@ -56,6 +60,8 @@ pub struct ServerConfig {
     pub audit_log_enabled: bool,
     /// Audit log output.
     pub audit_log_output: AuditLogOutput,
+    /// Cluster-aware startup configuration.
+    pub cluster: ClusterServerConfig,
 }
 
 impl Default for ServerConfig {
@@ -79,6 +85,44 @@ impl Default for ServerConfig {
             tracing_enabled: true,
             audit_log_enabled: true,
             audit_log_output: AuditLogOutput::Stdout,
+            cluster: ClusterServerConfig::default(),
+        }
+    }
+}
+
+/// Cluster-aware server configuration.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct ClusterServerConfig {
+    /// Cluster operating mode.
+    pub mode: ClusterMode,
+    /// Stable local node identity for cluster-aware mode.
+    pub node_id: Option<String>,
+    /// Stable cluster identifier shared by configured nodes.
+    pub cluster_id: Option<String>,
+    /// Endpoint advertised to other cluster members.
+    pub advertised_endpoint: Option<String>,
+    /// Local node role.
+    pub role: NodeRole,
+    /// Local lifecycle state used when cluster-aware mode is enabled.
+    pub lifecycle_state: NodeState,
+    /// Membership metadata source to report and consume.
+    pub membership_source: MembershipSource,
+    /// Whether the membership source is available at startup.
+    pub membership_source_available: bool,
+}
+
+impl Default for ClusterServerConfig {
+    fn default() -> Self {
+        Self {
+            mode: ClusterMode::SingleNode,
+            node_id: None,
+            cluster_id: None,
+            advertised_endpoint: None,
+            role: NodeRole::Gateway,
+            lifecycle_state: NodeState::Active,
+            membership_source: MembershipSource::Chirps,
+            membership_source_available: true,
         }
     }
 }
@@ -157,7 +201,15 @@ impl ServerConfig {
                 "query_timeout must be <= {MAX_QUERY_TIMEOUT_MS}ms"
             )));
         }
+        let cluster_config = self.cluster_manager_config()?;
+        ClusterManager::new(cluster_config)
+            .map_err(|err| ServerError::InvalidConfig(err.to_string()))?;
         Ok(())
+    }
+
+    /// Build cluster manager configuration from server configuration.
+    pub fn cluster_manager_config(&self) -> Result<ClusterManagerConfig> {
+        self.cluster.to_manager_config()
     }
 
     fn normalize(&mut self) -> Result<()> {
@@ -170,6 +222,55 @@ impl ServerConfig {
         }
         self.validate()
     }
+}
+
+impl ClusterServerConfig {
+    fn to_manager_config(&self) -> Result<ClusterManagerConfig> {
+        match self.mode {
+            ClusterMode::SingleNode => Ok(ClusterManagerConfig::single_node()),
+            ClusterMode::ClusterAware => {
+                let mut config =
+                    ClusterManagerConfig::cluster_aware(self.cluster_aware_identity()?);
+                config.membership_source = self.membership_source;
+                config.membership_source_available = self.membership_source_available;
+                Ok(config)
+            }
+        }
+    }
+
+    fn cluster_aware_identity(&self) -> Result<ClusterIdentity> {
+        let node_id = required_cluster_value(self.node_id.as_deref(), "cluster.node_id")?;
+        let cluster_id = required_cluster_value(self.cluster_id.as_deref(), "cluster.cluster_id")?;
+        let endpoint = required_cluster_value(
+            self.advertised_endpoint.as_deref(),
+            "cluster.advertised_endpoint",
+        )?;
+
+        Ok(ClusterIdentity {
+            node_id: NodeId::new(node_id),
+            cluster_id: Some(ClusterId::new(cluster_id)),
+            advertised_endpoint: Some(Endpoint::new(endpoint)),
+            role: self.role,
+            lifecycle_state: self.lifecycle_state,
+            metadata_schema_version: alopex_cluster::CLUSTER_METADATA_SCHEMA_VERSION,
+            update_epoch: alopex_cluster::INITIAL_UPDATE_EPOCH,
+        })
+    }
+}
+
+fn required_cluster_value(value: Option<&str>, field: &'static str) -> Result<String> {
+    let Some(value) = value else {
+        return Err(ServerError::InvalidConfig(format!(
+            "{field} is required when cluster.mode is cluster_aware"
+        )));
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ServerError::InvalidConfig(format!(
+            "{field} must be non-empty when cluster.mode is cluster_aware"
+        )));
+    }
+    Ok(trimmed.to_string())
 }
 
 #[cfg(test)]
@@ -254,5 +355,68 @@ type = "stdout"
             .expect("build config");
         let cfg: ServerConfig = built.try_deserialize().expect("deserialize");
         assert_eq!(cfg.max_concurrency, 77);
+    }
+
+    #[test]
+    fn default_cluster_config_is_single_node_non_degraded() {
+        let cfg = ServerConfig::default();
+        let manager = ClusterManager::new(cfg.cluster_manager_config().unwrap()).unwrap();
+        let snapshot = manager.status_snapshot();
+
+        assert_eq!(snapshot.mode, ClusterMode::SingleNode);
+        assert_eq!(snapshot.identity.node_id.as_str(), "local");
+        assert_eq!(snapshot.identity.lifecycle_state, NodeState::Unconfigured);
+        assert_eq!(snapshot.membership.source, MembershipSource::LocalDefault);
+        assert!(!snapshot.degraded);
+        assert!(snapshot.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn cluster_aware_config_builds_configured_identity() {
+        let cfg = ServerConfig {
+            cluster: ClusterServerConfig {
+                mode: ClusterMode::ClusterAware,
+                node_id: Some("node-a".to_string()),
+                cluster_id: Some("cluster-a".to_string()),
+                advertised_endpoint: Some("127.0.0.1:7001".to_string()),
+                role: NodeRole::Worker,
+                lifecycle_state: NodeState::Joining,
+                membership_source_available: false,
+                ..ClusterServerConfig::default()
+            },
+            ..ServerConfig::default()
+        };
+
+        let manager = ClusterManager::new(cfg.cluster_manager_config().unwrap()).unwrap();
+        let snapshot = manager.status_snapshot();
+
+        assert_eq!(snapshot.mode, ClusterMode::ClusterAware);
+        assert_eq!(snapshot.identity.node_id.as_str(), "node-a");
+        assert_eq!(snapshot.identity.cluster_id.unwrap().as_str(), "cluster-a");
+        assert_eq!(
+            snapshot.identity.advertised_endpoint.unwrap().as_str(),
+            "127.0.0.1:7001"
+        );
+        assert_eq!(snapshot.identity.role, NodeRole::Worker);
+        assert_eq!(snapshot.identity.lifecycle_state, NodeState::Joining);
+        assert_eq!(snapshot.membership.source, MembershipSource::Chirps);
+        assert!(snapshot.degraded);
+    }
+
+    #[test]
+    fn validate_rejects_invalid_cluster_identity() {
+        let cfg = ServerConfig {
+            cluster: ClusterServerConfig {
+                mode: ClusterMode::ClusterAware,
+                node_id: Some("".to_string()),
+                cluster_id: Some("cluster-a".to_string()),
+                advertised_endpoint: Some("127.0.0.1:7001".to_string()),
+                ..ClusterServerConfig::default()
+            },
+            ..ServerConfig::default()
+        };
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("cluster.node_id"));
     }
 }

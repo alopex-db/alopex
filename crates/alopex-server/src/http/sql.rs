@@ -1,10 +1,21 @@
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use alopex_cluster::{
+    CatalogTableRef, CatalogTableSnapshot, PlacementCatalog, PlanId, QueryRouter,
+    QueryRoutingRequest, QueryTableReference, QueryTableReferenceAccess, QueryTableReferenceSource,
+    RoutingDecisionKind, RoutingDiagnostics, TableLifecycleEffect, TableRef,
+};
 use alopex_core::kv::async_adapter::AsyncKVTransactionAdapter;
 use alopex_core::kv::{KVStore, KVTransaction};
+use alopex_core::storage::format::bincode_config;
 use alopex_core::types::TxnMode;
+use alopex_sql::catalog::persistent::{PersistedTableMeta, TableFqn, TABLES_PREFIX};
+use alopex_sql::catalog::TableMetadata;
+use alopex_sql::planner::{
+    LogicalPlan, PlannedStatement, TableReference, TableReferenceAccess, TableReferenceSource,
+};
 use alopex_sql::storage::async_storage::AsyncTxnBridge;
 use alopex_sql::storage::AsyncSqlTransaction;
 use alopex_sql::AlopexDialect;
@@ -21,9 +32,7 @@ use crate::error::{Result, ServerError};
 use crate::http::{error_response, json_response, RequestContext};
 use crate::ops::memory::MemoryControlPolicy;
 use crate::server::ServerState;
-use crate::session::{SessionId, TxnHandle};
-use alopex_core::storage::format::bincode_config;
-use alopex_sql::catalog::persistent::{PersistedTableMeta, TABLES_PREFIX};
+use crate::session::{CatalogRollbackEffect, SessionId, TxnHandle};
 
 #[derive(Debug, Deserialize)]
 pub struct SqlRequest {
@@ -44,6 +53,8 @@ pub struct SqlResponse {
     pub columns: Vec<ColumnInfoResponse>,
     pub rows: Vec<Vec<alopex_sql::storage::SqlValue>>,
     pub affected_rows: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub routing_diagnostics: Vec<RoutingDiagnostics>,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,6 +76,37 @@ type AsyncTxn = AsyncTxnBridge<'static, AsyncKVTransactionAdapter>;
 enum StreamSource {
     Txn(AsyncTxn),
     Handle(TxnHandle),
+}
+
+struct RoutingPlan {
+    planned: Vec<PlannedStatement>,
+    diagnostics: Vec<RoutingDiagnostics>,
+}
+
+#[derive(Clone)]
+struct TableLifecycleState {
+    table_ref: TableRef,
+    table_id: u32,
+    table: TableMetadata,
+}
+
+enum TableLifecycleCandidate {
+    Created {
+        table_name: String,
+        before: Option<TableLifecycleState>,
+    },
+    Dropped {
+        table_name: String,
+        before: Option<TableLifecycleState>,
+    },
+    CreateIndex {
+        index_name: String,
+        index_existed_before: bool,
+    },
+    DropIndex {
+        index_name: String,
+        before: Option<TableLifecycleState>,
+    },
 }
 
 pub async fn handle(
@@ -102,33 +144,30 @@ async fn execute_non_streaming(
         state.lifecycle_state.check_write_allowed()?;
     }
 
-    let exec_result: Result<alopex_sql::executor::ExecutionResult> = async {
+    let exec_result: Result<(
+        alopex_sql::executor::ExecutionResult,
+        Vec<RoutingDiagnostics>,
+    )> = async {
         if let Some(session_id) = &request.session_id {
             let session_id = session_id
                 .parse::<SessionId>()
                 .map_err(|_| ServerError::BadRequest("invalid session_id".into()))?;
-            let fut = state.session_manager.execute_in_session(&session_id, sql);
-            let result = tokio::time::timeout(state.config.query_timeout, fut)
-                .await
-                .map_err(|_| ServerError::Timeout("query timeout".into()))??;
-            Ok(result)
+            execute_session_statement_with_routing(
+                &state,
+                &session_id,
+                sql,
+                &ctx.correlation_id,
+                state.config.query_timeout,
+            )
+            .await
         } else {
-            let mut txn = state.begin_sql_txn().await?;
-            let fut = tokio::time::timeout(state.config.query_timeout, txn.async_execute(sql))
-                .await
-                .map_err(|_| ServerError::Timeout("query timeout".into()))?;
-            match fut {
-                Ok(result) => {
-                    txn.async_commit()
-                        .await
-                        .map_err(|err| ServerError::Sql(err.into()))?;
-                    Ok(result)
-                }
-                Err(err) => {
-                    let _ = txn.async_rollback().await;
-                    Err(ServerError::Sql(err.into()))
-                }
-            }
+            execute_non_session_statement_with_routing(
+                &state,
+                sql,
+                &ctx.correlation_id,
+                state.config.query_timeout,
+            )
+            .await
         }
     }
     .await;
@@ -146,16 +185,418 @@ async fn execute_non_streaming(
             .log_ddl(sql, ctx.actor.as_deref(), &ctx.correlation_id);
     }
 
-    if is_ddl {
+    if is_ddl && request.session_id.is_none() {
         sync_catalog_to_store(&state)?;
     }
 
     state.metrics.record_query(start.elapsed(), true);
 
-    Ok(map_execution_result(exec_result))
+    Ok(map_execution_result(exec_result.0, exec_result.1))
 }
 
-fn sync_catalog_to_store(state: &ServerState) -> Result<()> {
+pub(crate) async fn execute_session_statement_with_routing(
+    state: &ServerState,
+    session_id: &SessionId,
+    sql: &str,
+    correlation_id: &str,
+    timeout: Duration,
+) -> Result<(
+    alopex_sql::executor::ExecutionResult,
+    Vec<RoutingDiagnostics>,
+)> {
+    let handle = state.session_manager.get_transaction(session_id).await?;
+    let routing_plan = route_session_sql(state, &handle, sql, correlation_id).await?;
+    if let Some(diagnostic) = future_distributed_diagnostic(&routing_plan.diagnostics) {
+        return Err(future_distributed_error(diagnostic));
+    }
+    let lifecycle_candidates = table_lifecycle_candidates(state, &routing_plan.planned)?;
+    let result = tokio::time::timeout(timeout, handle.execute(sql))
+        .await
+        .map_err(|_| ServerError::Timeout("query timeout".into()))?
+        .map_err(|err| ServerError::Sql(err.into()))?;
+    let (lifecycle_effects, catalog_rollback_effects) =
+        statement_effects_after_execution(state, lifecycle_candidates)?;
+    handle
+        .buffer_table_lifecycle_effects(lifecycle_effects)
+        .await;
+    handle
+        .buffer_catalog_rollback_effects(catalog_rollback_effects)
+        .await;
+    Ok((result, routing_plan.diagnostics))
+}
+
+pub(crate) async fn execute_non_session_statement_with_routing(
+    state: &ServerState,
+    sql: &str,
+    correlation_id: &str,
+    timeout: Duration,
+) -> Result<(
+    alopex_sql::executor::ExecutionResult,
+    Vec<RoutingDiagnostics>,
+)> {
+    let mut txn = state.begin_sql_txn().await?;
+    let routing_plan = match route_non_session_sql(state, &txn, sql, correlation_id).await {
+        Ok(plan) => plan,
+        Err(err) => {
+            let _ = txn.async_rollback().await;
+            return Err(err);
+        }
+    };
+    if let Some(diagnostic) = future_distributed_diagnostic(&routing_plan.diagnostics) {
+        let _ = txn.async_rollback().await;
+        return Err(future_distributed_error(diagnostic));
+    }
+    let lifecycle_candidates = table_lifecycle_candidates(state, &routing_plan.planned)?;
+    let fut = match tokio::time::timeout(timeout, txn.async_execute(sql)).await {
+        Ok(result) => result,
+        Err(_) => {
+            let _ = txn.async_rollback().await;
+            return Err(ServerError::Timeout("query timeout".into()));
+        }
+    };
+    match fut {
+        Ok(result) => {
+            let (lifecycle_effects, _) =
+                statement_effects_after_execution(state, lifecycle_candidates)?;
+            txn.async_commit()
+                .await
+                .map_err(|err| ServerError::Sql(err.into()))?;
+            state.apply_table_lifecycle_effects(lifecycle_effects)?;
+            Ok((result, routing_plan.diagnostics))
+        }
+        Err(err) => {
+            let _ = txn.async_rollback().await;
+            Err(ServerError::Sql(err.into()))
+        }
+    }
+}
+
+pub(crate) async fn route_session_statement_for_execution(
+    state: &ServerState,
+    handle: &TxnHandle,
+    sql: &str,
+    correlation_id: &str,
+) -> Result<Vec<RoutingDiagnostics>> {
+    let routing_plan = route_session_sql(state, handle, sql, correlation_id).await?;
+    if let Some(diagnostic) = future_distributed_diagnostic(&routing_plan.diagnostics) {
+        return Err(future_distributed_error(diagnostic));
+    }
+    Ok(routing_plan.diagnostics)
+}
+
+async fn route_non_session_sql(
+    state: &ServerState,
+    txn: &AsyncTxn,
+    sql: &str,
+    correlation_id: &str,
+) -> Result<RoutingPlan> {
+    let planned = txn
+        .async_plan_for_routing(sql)
+        .await
+        .map_err(|err| ServerError::Sql(err.into()))?;
+    route_planned_sql(state, planned, correlation_id)
+}
+
+async fn route_session_sql(
+    state: &ServerState,
+    handle: &TxnHandle,
+    sql: &str,
+    correlation_id: &str,
+) -> Result<RoutingPlan> {
+    let planned = handle
+        .plan_for_routing(sql)
+        .await
+        .map_err(|err| ServerError::Sql(err.into()))?;
+    route_planned_sql(state, planned, correlation_id)
+}
+
+fn route_planned_sql(
+    state: &ServerState,
+    planned: Vec<PlannedStatement>,
+    correlation_id: &str,
+) -> Result<RoutingPlan> {
+    let cluster_snapshot = state.cluster_status_snapshot()?;
+    let placement_catalog = PlacementCatalog::from_view(cluster_snapshot.placement);
+    let membership = cluster_snapshot.membership;
+    let catalog_snapshot = catalog_table_snapshot(state, cluster_snapshot.identity.update_epoch)?;
+    let router = QueryRouter::new(&placement_catalog, &membership);
+
+    let mut diagnostics = Vec::with_capacity(planned.len());
+    for (index, statement) in planned.iter().enumerate() {
+        let plan_id = PlanId::new(format!("{correlation_id}:{index}"));
+        let request = query_routing_request(plan_id, statement, &catalog_snapshot);
+        diagnostics.push(router.route(request));
+    }
+    Ok(RoutingPlan {
+        planned,
+        diagnostics,
+    })
+}
+
+fn future_distributed_diagnostic(
+    diagnostics: &[RoutingDiagnostics],
+) -> Option<&RoutingDiagnostics> {
+    diagnostics.iter().find(|diagnostic| {
+        diagnostic.decision == RoutingDecisionKind::FutureDistributedExecutionRequired
+    })
+}
+
+fn future_distributed_error(diagnostic: &RoutingDiagnostics) -> ServerError {
+    ServerError::FutureDistributedExecutionRequired(format!(
+        "routing decision {:?} for plan {}: {:?}",
+        diagnostic.decision,
+        diagnostic.plan_id.as_str(),
+        diagnostic.reason
+    ))
+}
+
+fn query_routing_request(
+    plan_id: PlanId,
+    statement: &PlannedStatement,
+    catalog_snapshot: &CatalogTableSnapshot,
+) -> QueryRoutingRequest {
+    let table_references = statement
+        .table_references()
+        .iter()
+        .map(|reference| query_table_reference(reference, catalog_snapshot))
+        .collect();
+
+    QueryRoutingRequest::new(plan_id, catalog_snapshot.clone(), table_references)
+}
+
+fn query_table_reference(
+    reference: &TableReference,
+    catalog_snapshot: &CatalogTableSnapshot,
+) -> QueryTableReference {
+    QueryTableReference::new(
+        table_ref_for_reference(&reference.table_name, catalog_snapshot),
+        query_table_reference_access(reference.access),
+        query_table_reference_source(reference.source),
+    )
+}
+
+fn query_table_reference_access(access: TableReferenceAccess) -> QueryTableReferenceAccess {
+    match access {
+        TableReferenceAccess::Read => QueryTableReferenceAccess::Read,
+        TableReferenceAccess::Write => QueryTableReferenceAccess::Write,
+        TableReferenceAccess::Create => QueryTableReferenceAccess::Create,
+        TableReferenceAccess::Drop => QueryTableReferenceAccess::Drop,
+        TableReferenceAccess::Metadata => QueryTableReferenceAccess::Metadata,
+    }
+}
+
+fn query_table_reference_source(source: TableReferenceSource) -> QueryTableReferenceSource {
+    match source {
+        TableReferenceSource::TopLevelPlanTableName => {
+            QueryTableReferenceSource::TopLevelPlanTableName
+        }
+        TableReferenceSource::LogicalPlanScan => QueryTableReferenceSource::LogicalPlanScan,
+        TableReferenceSource::LogicalPlanMutationTarget => {
+            QueryTableReferenceSource::LogicalPlanMutationTarget
+        }
+        TableReferenceSource::LogicalPlanDdlTarget => {
+            QueryTableReferenceSource::LogicalPlanDdlTarget
+        }
+        TableReferenceSource::LogicalPlanIndexTarget => {
+            QueryTableReferenceSource::LogicalPlanIndexTarget
+        }
+        TableReferenceSource::TypedExprSubquery => QueryTableReferenceSource::TypedExprSubquery,
+    }
+}
+
+fn catalog_table_snapshot(state: &ServerState, update_epoch: u64) -> Result<CatalogTableSnapshot> {
+    let guard = state
+        .catalog
+        .read()
+        .map_err(|_| ServerError::Internal("catalog lock poisoned".into()))?;
+    let tables = guard
+        .list_tables()
+        .iter()
+        .map(|table| CatalogTableRef::new(table_fqn_string(table), table.table_id))
+        .collect();
+    Ok(CatalogTableSnapshot::from_tables(update_epoch, tables))
+}
+
+fn table_ref_for_reference(table_name: &str, snapshot: &CatalogTableSnapshot) -> TableRef {
+    snapshot
+        .tables
+        .iter()
+        .find(|table| {
+            table.table_ref.as_str() == table_name
+                || table.table_ref.as_str().rsplit('.').next() == Some(table_name)
+        })
+        .map(|table| table.table_ref.clone())
+        .unwrap_or_else(|| TableRef::new(default_table_ref(table_name)))
+}
+
+fn table_fqn_string(table: &TableMetadata) -> String {
+    let fqn = TableFqn::from(table);
+    format!("{}.{}.{}", fqn.catalog, fqn.namespace, fqn.table)
+}
+
+fn table_lifecycle_candidates(
+    state: &ServerState,
+    planned: &[PlannedStatement],
+) -> Result<Vec<TableLifecycleCandidate>> {
+    let mut candidates = Vec::new();
+    for statement in planned {
+        match &statement.plan {
+            LogicalPlan::CreateTable { table, .. } => {
+                candidates.push(TableLifecycleCandidate::Created {
+                    table_name: table.name.clone(),
+                    before: table_lifecycle_state(state, &table.name)?,
+                });
+            }
+            LogicalPlan::DropTable { name, .. } => {
+                candidates.push(TableLifecycleCandidate::Dropped {
+                    table_name: name.clone(),
+                    before: table_lifecycle_state(state, name)?,
+                });
+            }
+            LogicalPlan::CreateIndex { index, .. } => {
+                candidates.push(TableLifecycleCandidate::CreateIndex {
+                    index_name: index.name.clone(),
+                    index_existed_before: index_exists(state, &index.name)?,
+                });
+            }
+            LogicalPlan::DropIndex { name, .. } => {
+                candidates.push(TableLifecycleCandidate::DropIndex {
+                    index_name: name.clone(),
+                    before: index_table_lifecycle_state(state, name)?,
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(candidates)
+}
+
+fn statement_effects_after_execution(
+    state: &ServerState,
+    candidates: Vec<TableLifecycleCandidate>,
+) -> Result<(Vec<TableLifecycleEffect>, Vec<CatalogRollbackEffect>)> {
+    let mut lifecycle_effects = Vec::new();
+    let mut catalog_rollback_effects = Vec::new();
+    for candidate in candidates {
+        match candidate {
+            TableLifecycleCandidate::Created { table_name, before } => {
+                let after = table_lifecycle_state(state, &table_name)?;
+                if let Some(after) = after {
+                    let changed = match before.as_ref() {
+                        Some(before) => before.table_id != after.table_id,
+                        None => true,
+                    };
+                    if changed {
+                        lifecycle_effects.push(TableLifecycleEffect::Created {
+                            table_ref: after.table_ref,
+                            table_id: after.table_id,
+                        });
+                        catalog_rollback_effects.push(CatalogRollbackEffect::DropTable {
+                            table_name: after.table.name,
+                        });
+                    }
+                }
+            }
+            TableLifecycleCandidate::Dropped { table_name, before } => {
+                let after = table_lifecycle_state(state, &table_name)?;
+                if let Some(before) = before {
+                    let changed = match after.as_ref() {
+                        Some(after) => after.table_id != before.table_id,
+                        None => true,
+                    };
+                    if changed {
+                        lifecycle_effects.push(TableLifecycleEffect::Dropped {
+                            table_ref: before.table_ref.clone(),
+                            table_id: before.table_id,
+                        });
+                        catalog_rollback_effects.push(CatalogRollbackEffect::CreateTable {
+                            table: Box::new(before.table),
+                        });
+                    }
+                }
+            }
+            TableLifecycleCandidate::CreateIndex {
+                index_name,
+                index_existed_before,
+            } => {
+                if !index_existed_before {
+                    if let Some(after) = index_table_lifecycle_state(state, &index_name)? {
+                        lifecycle_effects.push(TableLifecycleEffect::SchemaChanged {
+                            table_ref: after.table_ref,
+                            table_id: after.table_id,
+                        });
+                    }
+                }
+            }
+            TableLifecycleCandidate::DropIndex { index_name, before } => {
+                if let Some(before) = before {
+                    if !index_exists(state, &index_name)? {
+                        lifecycle_effects.push(TableLifecycleEffect::SchemaChanged {
+                            table_ref: before.table_ref,
+                            table_id: before.table_id,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok((lifecycle_effects, catalog_rollback_effects))
+}
+
+fn table_lifecycle_state(
+    state: &ServerState,
+    table_name: &str,
+) -> Result<Option<TableLifecycleState>> {
+    let guard = state
+        .catalog
+        .read()
+        .map_err(|_| ServerError::Internal("catalog lock poisoned".into()))?;
+    Ok(guard
+        .get_table(table_name)
+        .map(|table| TableLifecycleState {
+            table_ref: TableRef::new(table_fqn_string(table)),
+            table_id: table.table_id,
+            table: table.clone(),
+        }))
+}
+
+fn index_table_lifecycle_state(
+    state: &ServerState,
+    index_name: &str,
+) -> Result<Option<TableLifecycleState>> {
+    let guard = state
+        .catalog
+        .read()
+        .map_err(|_| ServerError::Internal("catalog lock poisoned".into()))?;
+    let Some(index) = guard.get_index(index_name) else {
+        return Ok(None);
+    };
+    Ok(guard
+        .get_table(&index.table)
+        .map(|table| TableLifecycleState {
+            table_ref: TableRef::new(table_fqn_string(table)),
+            table_id: table.table_id,
+            table: table.clone(),
+        }))
+}
+
+fn index_exists(state: &ServerState, index_name: &str) -> Result<bool> {
+    let guard = state
+        .catalog
+        .read()
+        .map_err(|_| ServerError::Internal("catalog lock poisoned".into()))?;
+    Ok(guard.get_index(index_name).is_some())
+}
+
+fn default_table_ref(table_name: &str) -> String {
+    if table_name.matches('.').count() >= 2 {
+        table_name.to_string()
+    } else {
+        format!("default.default.{table_name}")
+    }
+}
+
+pub(crate) fn sync_catalog_to_store(state: &ServerState) -> Result<()> {
     let guard = state
         .catalog
         .read()
@@ -238,7 +679,23 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
                     }
                 };
                 match state_clone.session_manager.get_transaction(&parsed).await {
-                    Ok(handle) => StreamSource::Handle(handle),
+                    Ok(handle) => {
+                        match route_session_statement_for_execution(
+                            &state_clone,
+                            &handle,
+                            &sql,
+                            &correlation_id,
+                        )
+                        .await
+                        {
+                            Ok(_) => {}
+                            Err(err) => {
+                                let _ = sender.send(stream_item_error(err, &correlation_id)).await;
+                                return;
+                            }
+                        }
+                        StreamSource::Handle(handle)
+                    }
                     Err(err) => {
                         let _ = sender.send(stream_item_error(err, &correlation_id)).await;
                         return;
@@ -408,7 +865,10 @@ fn stream_item_error(err: ServerError, correlation_id: &str) -> StreamItem {
     }
 }
 
-fn map_execution_result(exec_result: alopex_sql::executor::ExecutionResult) -> SqlResponse {
+fn map_execution_result(
+    exec_result: alopex_sql::executor::ExecutionResult,
+    routing_diagnostics: Vec<RoutingDiagnostics>,
+) -> SqlResponse {
     match exec_result {
         alopex_sql::executor::ExecutionResult::Query(query) => SqlResponse {
             columns: query
@@ -421,16 +881,19 @@ fn map_execution_result(exec_result: alopex_sql::executor::ExecutionResult) -> S
                 .collect(),
             rows: query.rows,
             affected_rows: None,
+            routing_diagnostics,
         },
         alopex_sql::executor::ExecutionResult::RowsAffected(rows) => SqlResponse {
             columns: Vec::new(),
             rows: Vec::new(),
             affected_rows: Some(rows),
+            routing_diagnostics,
         },
         alopex_sql::executor::ExecutionResult::Success => SqlResponse {
             columns: Vec::new(),
             rows: Vec::new(),
             affected_rows: None,
+            routing_diagnostics,
         },
     }
 }

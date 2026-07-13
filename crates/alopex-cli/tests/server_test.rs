@@ -1,5 +1,7 @@
 use std::convert::Infallible;
+use std::fs;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +15,7 @@ use alopex_cli::commands::sql::execute_remote_with_formatter_control;
 use alopex_cli::commands::sql::SqlExecutionOptions;
 use alopex_cli::error::CliError;
 use alopex_cli::output::formatter::create_formatter;
+use alopex_cli::output::server as server_output;
 use alopex_cli::profile::config::ServerConfig as CliServerConfig;
 use alopex_cli::streaming::{CancelSignal, Deadline};
 use alopex_cli::ui::mode::UiMode;
@@ -266,7 +269,22 @@ async fn start_admin_server() -> (String, oneshot::Sender<()>, tempfile::TempDir
                     "version": "0.4.1",
                     "uptime_secs": 42,
                     "connections": 3,
-                    "queries_per_second": 9.3
+                    "queries_per_second": 9.3,
+                    "cluster": {
+                        "schema_version": 1,
+                        "mode": "single_node",
+                        "identity": {
+                            "node_id": "local",
+                            "lifecycle_state": "active"
+                        },
+                        "routing_capabilities": {
+                            "local_only": true,
+                            "future_distributed_execution_required": true,
+                            "scatter_gather_simulated": true
+                        },
+                        "degraded": false,
+                        "diagnostics": []
+                    }
                 }))
             }),
         )
@@ -284,11 +302,66 @@ async fn start_admin_server() -> (String, oneshot::Sender<()>, tempfile::TempDir
         )
         .route(
             "/api/admin/health",
-            get(|| async { Json(json!({ "status": "ok", "message": "ready" })) }),
+            get(|| async {
+                Json(json!({
+                    "status": "ok",
+                    "message": "ready",
+                    "degraded": false,
+                    "cluster": {
+                        "schema_version": 1,
+                        "mode": "single_node",
+                        "identity": {
+                            "node_id": "local",
+                            "lifecycle_state": "active"
+                        },
+                        "routing_capabilities": {
+                            "local_only": true,
+                            "future_distributed_execution_required": true,
+                            "scatter_gather_simulated": true
+                        },
+                        "degraded": false,
+                        "diagnostics": []
+                    }
+                }))
+            }),
         )
         .route(
             "/api/admin/compaction",
             post(|| async { Json(json!({ "success": true, "message": "started" })) }),
+        )
+        .route(
+            "/api/admin/cluster/join",
+            post(|| async {
+                Json(json!({
+                    "action": "join",
+                    "cluster": {
+                        "schema_version": 1,
+                        "mode": "cluster_aware",
+                        "identity": {
+                            "node_id": "node-a",
+                            "lifecycle_state": "active"
+                        },
+                        "degraded": false
+                    }
+                }))
+            }),
+        )
+        .route(
+            "/api/admin/cluster/leave",
+            post(|| async {
+                Json(json!({
+                    "action": "leave",
+                    "cluster": {
+                        "schema_version": 1,
+                        "mode": "cluster_aware",
+                        "identity": {
+                            "node_id": "node-a",
+                            "lifecycle_state": "leaving"
+                        },
+                        "degraded": false
+                    }
+                }))
+            }),
         );
 
     spawn_tls_server(router).await
@@ -411,6 +484,40 @@ fn table_id(table: &str) -> u32 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     table.hash(&mut hasher);
     (hasher.finish() & 0xffff_ffff) as u32
+}
+
+fn load_cluster_status_fixture() -> Value {
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/cluster_status_cross_surface_expected.json");
+    serde_json::from_slice(&fs::read(&fixture_path).expect("cluster status fixture bytes"))
+        .expect("cluster status fixture json")
+}
+
+fn status_row_json(fields: server_output::StatusRowFields<'_>) -> Value {
+    let columns = server_output::status_columns();
+    let row = server_output::status_row(fields);
+    let mut formatter = create_formatter(OutputFormat::Json);
+    let mut output = Vec::new();
+    formatter.write_header(&mut output, &columns).unwrap();
+    formatter.write_row(&mut output, &row).unwrap();
+    formatter.write_footer(&mut output).unwrap();
+
+    let value: Value = serde_json::from_slice(&output).expect("json");
+    value.as_array().expect("array")[0].clone()
+}
+
+fn cluster_status_row_subset(row: &Value) -> Value {
+    json!({
+        "Cluster Schema": row["Cluster Schema"].clone(),
+        "Cluster Mode": row["Cluster Mode"].clone(),
+        "Node ID": row["Node ID"].clone(),
+        "Lifecycle": row["Lifecycle"].clone(),
+        "Degraded": row["Degraded"].clone(),
+        "Local Only": row["Local Only"].clone(),
+        "Future Distributed": row["Future Distributed"].clone(),
+        "Scatter/Gather": row["Scatter/Gather"].clone(),
+        "Diagnostics": row["Diagnostics"].clone(),
+    })
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -1021,6 +1128,12 @@ async fn server_admin_commands_success() {
     assert!(text.contains("3"));
     assert!(text.contains("QPS"));
     assert!(text.contains("9.30"));
+    assert!(text.contains("Cluster Mode"));
+    assert!(text.contains("single_node"));
+    assert!(text.contains("Node ID"));
+    assert!(text.contains("local"));
+    assert!(text.contains("Future Distributed"));
+    assert!(text.contains("Scatter/Gather"));
 
     execute_server_remote(&client, &ServerCommand::Metrics, &mut output, false)
         .await
@@ -1044,6 +1157,8 @@ async fn server_admin_commands_success() {
     assert!(text.contains("Status"));
     assert!(text.contains("ok"));
     assert!(text.contains("ready"));
+    assert!(text.contains("Degraded"));
+    assert!(text.contains("single_node"));
 
     execute_server_remote(
         &client,
@@ -1060,7 +1175,222 @@ async fn server_admin_commands_success() {
     assert!(text.contains("OK"));
     assert!(text.contains("started"));
 
+    execute_server_remote(&client, &ServerCommand::Join, &mut output, false)
+        .await
+        .unwrap();
+    let text = String::from_utf8(std::mem::take(&mut output)).unwrap();
+    assert!(text.contains("Action"));
+    assert!(text.contains("join"));
+    assert!(text.contains("cluster_aware"));
+    assert!(text.contains("node-a"));
+    assert!(text.contains("active"));
+
+    execute_server_remote(&client, &ServerCommand::Leave, &mut output, false)
+        .await
+        .unwrap();
+    let text = String::from_utf8(std::mem::take(&mut output)).unwrap();
+    assert!(text.contains("leave"));
+    assert!(text.contains("leaving"));
+
     let _ = shutdown.send(());
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn server_admin_status_outputs_degraded_cluster_fields() {
+    let router = axum::Router::new()
+        .route(
+            "/api/admin/status",
+            get(|| async {
+                Json(json!({
+                    "version": "0.4.1",
+                    "uptime_secs": 7,
+                    "connections": 1,
+                    "queries_per_second": 0.5,
+                    "cluster": {
+                        "schema_version": 1,
+                        "mode": "cluster_aware",
+                        "identity": {
+                            "node_id": "node-a",
+                            "lifecycle_state": "active"
+                        },
+                        "routing_capabilities": {
+                            "local_only": false,
+                            "future_distributed_execution_required": true,
+                            "scatter_gather_simulated": false
+                        },
+                        "degraded": true,
+                        "diagnostics": [
+                            { "code": "chirps_unavailable" }
+                        ]
+                    }
+                }))
+            }),
+        )
+        .route(
+            "/api/admin/metrics",
+            get(|| async { Json(json!({ "qps": 0.0 })) }),
+        )
+        .route(
+            "/api/admin/health",
+            get(|| async {
+                Json(json!({
+                    "status": "degraded",
+                    "message": "cluster status degraded",
+                    "degraded": true,
+                    "cluster": {
+                        "schema_version": 1,
+                        "mode": "cluster_aware",
+                        "identity": {
+                            "node_id": "node-a",
+                            "lifecycle_state": "active"
+                        },
+                        "routing_capabilities": {
+                            "local_only": false,
+                            "future_distributed_execution_required": true,
+                            "scatter_gather_simulated": false
+                        },
+                        "degraded": true,
+                        "diagnostics": [
+                            { "code": "chirps_unavailable" }
+                        ]
+                    }
+                }))
+            }),
+        )
+        .route(
+            "/api/admin/compaction",
+            post(|| async { Json(json!({ "success": true })) }),
+        );
+
+    let (base_url, shutdown, _dir) = spawn_tls_server(router).await;
+    let client = build_test_client(&base_url);
+    let mut output = Vec::new();
+
+    execute_server_remote(&client, &ServerCommand::Status, &mut output, false)
+        .await
+        .unwrap();
+    let text = String::from_utf8(std::mem::take(&mut output)).unwrap();
+    assert!(text.contains("cluster_aware"));
+    assert!(text.contains("node-a"));
+    assert!(text.contains("chirps_unavailable"));
+    assert!(text.contains("false"));
+    assert!(text.contains("true"));
+
+    execute_server_remote(&client, &ServerCommand::Health, &mut output, false)
+        .await
+        .unwrap();
+    let text = String::from_utf8(std::mem::take(&mut output)).unwrap();
+    assert!(text.contains("degraded"));
+    assert!(text.contains("cluster_aware"));
+    assert!(text.contains("node-a"));
+
+    let _ = shutdown.send(());
+}
+
+#[test]
+fn server_status_json_output_contains_cluster_fields() {
+    let columns = server_output::status_columns();
+    let row = server_output::status_row(server_output::StatusRowFields {
+        version: Some("0.4.1"),
+        uptime_secs: Some(7),
+        connections: Some(1),
+        qps: Some(0.5),
+        cluster_schema_version: Some(1),
+        cluster_mode: Some("cluster_aware"),
+        node_id: Some("node-a"),
+        lifecycle_state: Some("active"),
+        degraded: Some(true),
+        local_only: Some(false),
+        future_distributed: Some(true),
+        scatter_gather: Some(false),
+        diagnostics: Some("chirps_unavailable"),
+    });
+    let mut formatter = create_formatter(OutputFormat::Json);
+    let mut output = Vec::new();
+    formatter.write_header(&mut output, &columns).unwrap();
+    formatter.write_row(&mut output, &row).unwrap();
+    formatter.write_footer(&mut output).unwrap();
+
+    let value: Value = serde_json::from_slice(&output).expect("json");
+    let row = &value.as_array().expect("array")[0];
+    assert_eq!(row["Cluster Mode"].as_str(), Some("cluster_aware"));
+    assert_eq!(row["Node ID"].as_str(), Some("node-a"));
+    assert_eq!(row["Degraded"].as_bool(), Some(true));
+    assert_eq!(row["Local Only"].as_bool(), Some(false));
+    assert_eq!(row["Future Distributed"].as_bool(), Some(true));
+    assert_eq!(row["Scatter/Gather"].as_bool(), Some(false));
+    assert_eq!(row["Diagnostics"].as_str(), Some("chirps_unavailable"));
+}
+
+#[test]
+fn server_status_json_output_matches_cluster_cross_surface_fixture() {
+    let expected = load_cluster_status_fixture();
+    let expected = &expected["cli_status_rows"];
+    let cases = [
+        (
+            "single_node",
+            server_output::StatusRowFields {
+                version: Some("0.7.0"),
+                uptime_secs: Some(0),
+                connections: Some(0),
+                qps: Some(0.0),
+                cluster_schema_version: Some(1),
+                cluster_mode: Some("single_node"),
+                node_id: Some("local"),
+                lifecycle_state: Some("unconfigured"),
+                degraded: Some(false),
+                local_only: Some(true),
+                future_distributed: Some(true),
+                scatter_gather: Some(true),
+                diagnostics: None,
+            },
+        ),
+        (
+            "cluster_aware",
+            server_output::StatusRowFields {
+                version: Some("0.7.0"),
+                uptime_secs: Some(0),
+                connections: Some(0),
+                qps: Some(0.0),
+                cluster_schema_version: Some(1),
+                cluster_mode: Some("cluster_aware"),
+                node_id: Some("node-a"),
+                lifecycle_state: Some("active"),
+                degraded: Some(false),
+                local_only: Some(true),
+                future_distributed: Some(true),
+                scatter_gather: Some(true),
+                diagnostics: None,
+            },
+        ),
+        (
+            "cluster_aware_degraded",
+            server_output::StatusRowFields {
+                version: Some("0.7.0"),
+                uptime_secs: Some(0),
+                connections: Some(0),
+                qps: Some(0.0),
+                cluster_schema_version: Some(1),
+                cluster_mode: Some("cluster_aware"),
+                node_id: Some("node-a"),
+                lifecycle_state: Some("active"),
+                degraded: Some(true),
+                local_only: Some(true),
+                future_distributed: Some(true),
+                scatter_gather: Some(true),
+                diagnostics: Some("chirps_unavailable"),
+            },
+        ),
+    ];
+
+    for (label, fields) in cases {
+        let actual = cluster_status_row_subset(&status_row_json(fields));
+        assert_eq!(
+            expected[label], actual,
+            "CLI cluster status row mismatch for {label}"
+        );
+    }
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

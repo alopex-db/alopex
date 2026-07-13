@@ -81,6 +81,13 @@ pub enum PhysicalPlan {
     },
     /// Null-count operator.
     NullCountExec { input: Box<PhysicalPlan> },
+    /// Explode one list column.
+    ExplodeExec {
+        input: Box<PhysicalPlan>,
+        column: String,
+    },
+    /// Implode columns into one row of list columns.
+    ImplodeExec { input: Box<PhysicalPlan> },
 }
 
 /// Compile a `LogicalPlan` into a `PhysicalPlan`.
@@ -168,6 +175,13 @@ pub fn compile(logical: &LogicalPlan) -> Result<PhysicalPlan> {
             subset: subset.clone(),
         },
         LogicalPlan::NullCount { input } => PhysicalPlan::NullCountExec {
+            input: Box::new(compile(input)?),
+        },
+        LogicalPlan::Explode { input, column } => PhysicalPlan::ExplodeExec {
+            input: Box::new(compile(input)?),
+            column: column.clone(),
+        },
+        LogicalPlan::Implode { input } => PhysicalPlan::ImplodeExec {
             input: Box::new(compile(input)?),
         },
     };

@@ -72,6 +72,14 @@ fn execute_plan(plan: &PhysicalPlan) -> Result<Vec<RecordBatch>> {
             let batches = execute_plan(input)?;
             operators::null_count_batches(batches)
         }
+        PhysicalPlan::ExplodeExec { input, column } => {
+            let batches = execute_plan(input)?;
+            operators::explode_batches(batches, column)
+        }
+        PhysicalPlan::ImplodeExec { input } => {
+            let batches = execute_plan(input)?;
+            operators::implode_batches(batches)
+        }
     }
 }
 

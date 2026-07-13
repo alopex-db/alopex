@@ -246,6 +246,16 @@ impl DataFrame {
     pub fn null_count(&self) -> Result<Self> {
         self.clone().lazy().null_count().collect()
     }
+
+    /// Explode one `List<Utf8>` column into multiple rows.
+    pub fn explode(&self, column: impl Into<String>) -> Result<Self> {
+        self.clone().lazy().explode(column).collect()
+    }
+
+    /// Implode UTF-8 columns into one row of `List<Utf8>` columns.
+    pub fn implode(&self) -> Result<Self> {
+        self.clone().lazy().implode().collect()
+    }
 }
 
 /// Eager group-by handle that delegates execution to `LazyFrame`.

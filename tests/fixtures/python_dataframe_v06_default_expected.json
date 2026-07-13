@@ -1,0 +1,36 @@
+{
+  "contract": "alopex-python-dataframe-v0.6-default",
+  "requires_optional_dependencies": false,
+  "dataframe": {
+    "columns": {
+      "name": ["alpha", null, "beta"],
+      "count": [1, null, 3]
+    },
+    "height": 3,
+    "width": 2,
+    "to_dict": {
+      "name": ["alpha", null, "beta"],
+      "count": [1, null, 3]
+    }
+  },
+  "schema_aliases": [
+    {
+      "schema": {
+        "name": "utf8",
+        "count": "int64"
+      }
+    },
+    {
+      "schema": {
+        "name": "str",
+        "count": "int"
+      }
+    },
+    {
+      "schema": {
+        "name": "string",
+        "count": "int"
+      }
+    }
+  ]
+}

@@ -130,6 +130,13 @@ fn predicate_pushdown(plan: LogicalPlan) -> LogicalPlan {
         LogicalPlan::NullCount { input } => LogicalPlan::NullCount {
             input: Box::new(predicate_pushdown(*input)),
         },
+        LogicalPlan::Explode { input, column } => LogicalPlan::Explode {
+            input: Box::new(predicate_pushdown(*input)),
+            column,
+        },
+        LogicalPlan::Implode { input } => LogicalPlan::Implode {
+            input: Box::new(predicate_pushdown(*input)),
+        },
         other => other,
     }
 }
@@ -207,6 +214,7 @@ fn collect_referenced_columns(expr: &Expr, out: &mut HashSet<String>) {
             collect_referenced_columns(right, out);
         }
         E::Agg { expr, .. } => collect_referenced_columns(expr, out),
+        E::Function { input, .. } => collect_referenced_columns(input, out),
         E::Literal(_) | E::Wildcard => {}
     }
 }
@@ -426,6 +434,25 @@ fn projection_pushdown_inner(
             let (new_input, _) = projection_pushdown_inner(*input, RequiredColumns::All);
             (
                 LogicalPlan::NullCount {
+                    input: Box::new(new_input),
+                },
+                RequiredColumns::All,
+            )
+        }
+        LogicalPlan::Explode { input, column } => {
+            let (new_input, _) = projection_pushdown_inner(*input, RequiredColumns::All);
+            (
+                LogicalPlan::Explode {
+                    input: Box::new(new_input),
+                    column,
+                },
+                RequiredColumns::All,
+            )
+        }
+        LogicalPlan::Implode { input } => {
+            let (new_input, _) = projection_pushdown_inner(*input, RequiredColumns::All);
+            (
+                LogicalPlan::Implode {
                     input: Box::new(new_input),
                 },
                 RequiredColumns::All,

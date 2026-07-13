@@ -475,6 +475,10 @@ pub enum ServerCommand {
     Metrics,
     /// Show server health check results
     Health,
+    /// Join the configured cluster membership
+    Join,
+    /// Leave the configured cluster membership
+    Leave,
     /// Server compaction management
     Compaction {
         #[command(subcommand)]
@@ -655,6 +659,25 @@ mod tests {
                 command: Some(ServerCommand::Compaction {
                     command: CompactionCommand::Trigger
                 })
+            })
+        ));
+    }
+
+    #[test]
+    fn test_parse_server_join_leave() {
+        let join = Cli::try_parse_from(vec!["alopex", "server", "join"]).unwrap();
+        assert!(matches!(
+            join.command,
+            Some(Command::Server {
+                command: Some(ServerCommand::Join)
+            })
+        ));
+
+        let leave = Cli::try_parse_from(vec!["alopex", "server", "leave"]).unwrap();
+        assert!(matches!(
+            leave.command,
+            Some(Command::Server {
+                command: Some(ServerCommand::Leave)
             })
         ));
     }

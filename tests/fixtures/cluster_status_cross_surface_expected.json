@@ -1,0 +1,174 @@
+{
+  "server_cluster_status": {
+    "single_node": {
+      "schema_version": 1,
+      "mode": "single_node",
+      "identity": {
+        "node_id": "local",
+        "cluster_id": null,
+        "advertised_endpoint": null,
+        "role": "gateway",
+        "lifecycle_state": "unconfigured",
+        "metadata_schema_version": 1,
+        "update_epoch": 0
+      },
+      "membership": {
+        "schema_version": 1,
+        "update_epoch": 0,
+        "source": "local_default",
+        "members": []
+      },
+      "routing_capabilities": {
+        "local_only": true,
+        "future_distributed_execution_required": true,
+        "scatter_gather_simulated": true
+      },
+      "metrics_summary": {
+        "source": "live_status_surface",
+        "members": []
+      },
+      "degraded": false,
+      "diagnostics": []
+    },
+    "cluster_aware": {
+      "schema_version": 1,
+      "mode": "cluster_aware",
+      "identity": {
+        "node_id": "node-a",
+        "cluster_id": "cluster-a",
+        "advertised_endpoint": "127.0.0.1:7001",
+        "role": "worker",
+        "lifecycle_state": "active",
+        "metadata_schema_version": 1,
+        "update_epoch": 0
+      },
+      "membership": {
+        "schema_version": 1,
+        "update_epoch": 0,
+        "source": "chirps",
+        "members": [
+          {
+            "identity": {
+              "node_id": "node-a",
+              "cluster_id": "cluster-a",
+              "advertised_endpoint": "127.0.0.1:7001",
+              "role": "worker"
+            },
+            "raw_reachability_state": null,
+            "derived_state": "active",
+            "transition_reason": "initialized"
+          }
+        ]
+      },
+      "routing_capabilities": {
+        "local_only": true,
+        "future_distributed_execution_required": true,
+        "scatter_gather_simulated": true
+      },
+      "metrics_summary": {
+        "source": "live_status_surface",
+        "members": [
+          {
+            "node_id": "node-a",
+            "source": "live_status_surface",
+            "latency_ms": null,
+            "load": null,
+            "error_count": null
+          }
+        ]
+      },
+      "degraded": false,
+      "diagnostics": []
+    },
+    "cluster_aware_degraded": {
+      "schema_version": 1,
+      "mode": "cluster_aware",
+      "identity": {
+        "node_id": "node-a",
+        "cluster_id": "cluster-a",
+        "advertised_endpoint": "127.0.0.1:7001",
+        "role": "worker",
+        "lifecycle_state": "active",
+        "metadata_schema_version": 1,
+        "update_epoch": 0
+      },
+      "membership": {
+        "schema_version": 1,
+        "update_epoch": 0,
+        "source": "chirps",
+        "members": [
+          {
+            "identity": {
+              "node_id": "node-a",
+              "cluster_id": "cluster-a",
+              "advertised_endpoint": "127.0.0.1:7001",
+              "role": "worker"
+            },
+            "raw_reachability_state": null,
+            "derived_state": "active",
+            "transition_reason": "initialized"
+          }
+        ]
+      },
+      "routing_capabilities": {
+        "local_only": true,
+        "future_distributed_execution_required": true,
+        "scatter_gather_simulated": true
+      },
+      "metrics_summary": {
+        "source": "live_status_surface",
+        "members": [
+          {
+            "node_id": "node-a",
+            "source": "live_status_surface",
+            "latency_ms": null,
+            "load": null,
+            "error_count": null
+          }
+        ]
+      },
+      "degraded": true,
+      "diagnostics": [
+        {
+          "code": "chirps_unavailable",
+          "degraded": true
+        }
+      ]
+    }
+  },
+  "cli_status_rows": {
+    "single_node": {
+      "Cluster Schema": "1",
+      "Cluster Mode": "single_node",
+      "Node ID": "local",
+      "Lifecycle": "unconfigured",
+      "Degraded": false,
+      "Local Only": true,
+      "Future Distributed": true,
+      "Scatter/Gather": true,
+      "Diagnostics": "N/A"
+    },
+    "cluster_aware": {
+      "Cluster Schema": "1",
+      "Cluster Mode": "cluster_aware",
+      "Node ID": "node-a",
+      "Lifecycle": "active",
+      "Degraded": false,
+      "Local Only": true,
+      "Future Distributed": true,
+      "Scatter/Gather": true,
+      "Diagnostics": "N/A"
+    },
+    "cluster_aware_degraded": {
+      "Cluster Schema": "1",
+      "Cluster Mode": "cluster_aware",
+      "Node ID": "node-a",
+      "Lifecycle": "active",
+      "Degraded": true,
+      "Local Only": true,
+      "Future Distributed": true,
+      "Scatter/Gather": true,
+      "Diagnostics": "chirps_unavailable"
+    }
+  }
+}

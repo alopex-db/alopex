@@ -66,8 +66,11 @@ pub use catalog::{
 
 // Planner types (re-exported for convenience)
 pub use planner::{
-    LogicalPlan, NameResolver, Planner, PlannerError, ProjectedColumn, Projection, ResolvedColumn,
-    ResolvedType, SortExpr, TypeChecker, TypedAssignment, TypedExpr, TypedExprKind,
+    LogicalPlan, NameResolver, PlannedStatement, Planner, PlannerError, PlanningDiagnostic,
+    PlanningDiagnosticSeverity, ProjectedColumn, Projection, ResolvedColumn, ResolvedType,
+    RoutingInput, SortExpr, TableReference, TableReferenceAccess, TableReferenceExtractor,
+    TableReferenceSource, TypeChecker, TypedAssignment, TypedExpr, TypedExprKind,
+    plan_sql_for_routing, plan_statement_for_routing,
 };
 
 // Storage types

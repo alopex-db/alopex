@@ -168,6 +168,25 @@ impl LazyFrame {
         }
     }
 
+    /// Explode one `List<Utf8>` column into multiple rows.
+    pub fn explode(self, column: impl Into<String>) -> Self {
+        Self {
+            plan: LogicalPlan::Explode {
+                input: Box::new(self.plan),
+                column: column.into(),
+            },
+        }
+    }
+
+    /// Implode UTF-8 columns into one row of `List<Utf8>` columns.
+    pub fn implode(self) -> Self {
+        Self {
+            plan: LogicalPlan::Implode {
+                input: Box::new(self.plan),
+            },
+        }
+    }
+
     /// Optimize, compile, and execute this `LazyFrame` into an eager `DataFrame`.
     pub fn collect(self) -> Result<DataFrame> {
         let optimized = Optimizer::optimize(&self.plan);

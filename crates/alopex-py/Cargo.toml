@@ -17,7 +17,10 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.24.1", features = ["abi3-py38", "extension-module"] }
 numpy = { version = "0.24", optional = true }
 alopex-core.workspace = true
+alopex-cluster.workspace = true
+alopex-dataframe.workspace = true
 alopex-embedded = { path = "../alopex-embedded" }
+arrow = "53"
 
 [build-dependencies]
 pyo3-build-config = "0.24.1"

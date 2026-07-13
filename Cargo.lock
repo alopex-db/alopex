@@ -68,6 +68,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "alopex-chirps-gossip-swim"
+version = "0.5.1"
+dependencies = [
+ "alopex-chirps-wire",
+ "async-trait",
+ "rand 0.8.5",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "alopex-chirps-wire"
+version = "0.5.1"
+dependencies = [
+ "bincode",
+ "serde",
+ "uuid",
+]
+
+[[package]]
 name = "alopex-cli"
 version = "0.6.0"
 dependencies = [
@@ -118,6 +140,11 @@ dependencies = [
 [[package]]
 name = "alopex-cluster"
 version = "0.6.0"
+dependencies = [
+ "alopex-chirps-gossip-swim",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "alopex-core"
@@ -145,6 +172,7 @@ dependencies = [
  "object_store",
  "proptest",
  "rand 0.8.5",
+ "regex",
  "serde",
  "serde_json",
  "snap",
@@ -164,6 +192,7 @@ dependencies = [
 name = "alopex-dataframe"
 version = "0.6.0"
 dependencies = [
+ "alopex-core",
  "arrow",
  "arrow-csv",
  "parquet 53.4.1",
@@ -196,8 +225,11 @@ dependencies = [
 name = "alopex-py"
 version = "0.6.0"
 dependencies = [
+ "alopex-cluster",
  "alopex-core",
+ "alopex-dataframe",
  "alopex-embedded",
+ "arrow",
  "criterion",
  "numpy",
  "proptest",
@@ -210,6 +242,7 @@ name = "alopex-server"
 version = "0.6.0"
 dependencies = [
  "alopex-cli",
+ "alopex-cluster",
  "alopex-core",
  "alopex-embedded",
  "alopex-sql",

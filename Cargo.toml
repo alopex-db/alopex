@@ -19,6 +19,7 @@ alopex-core = { version = "0.6.0", path = "crates/alopex-core", features = ["com
 alopex-sql = { version = "0.6.0", path = "crates/alopex-sql" }
 alopex-dataframe = { version = "0.6.0", path = "crates/alopex-dataframe" }
 alopex-embedded = { version = "0.6.0", path = "crates/alopex-embedded" }
+alopex-cluster = { version = "0.6.0", path = "crates/alopex-cluster" }
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
 

@@ -18,7 +18,7 @@ fn value(s: &str) -> Vec<u8> {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
-fn sst_flush_reopen_roundtrip_and_checksum() {
+fn sst_flush_reopen_discards_corrupt_sst_and_recovers_from_wal() {
     let dir = tempdir().unwrap();
     let wal_path = dir.path().join("kv.log");
     let sst_path = wal_path.with_extension("sst");
