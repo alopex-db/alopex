@@ -205,6 +205,65 @@ pub(crate) fn contains_subquery(expr: &TypedExpr) -> bool {
     }
 }
 
+/// Returns true if any expression in the query plan contains a subquery.
+///
+/// The streaming pipeline cannot evaluate subqueries because subquery
+/// execution needs transaction access, which the streaming iterators borrow
+/// exclusively. Plans containing subqueries must therefore be routed to the
+/// materializing execution path (see `build_streaming_pipeline_with_policy`).
+pub(crate) fn plan_contains_subquery(plan: &LogicalPlan) -> bool {
+    fn projection_contains_subquery(projection: &crate::planner::typed_expr::Projection) -> bool {
+        match projection {
+            crate::planner::typed_expr::Projection::All(_) => false,
+            crate::planner::typed_expr::Projection::Columns(cols) => {
+                cols.iter().any(|col| contains_subquery(&col.expr))
+            }
+        }
+    }
+
+    match plan {
+        LogicalPlan::Scan { projection, .. } => projection_contains_subquery(projection),
+        LogicalPlan::Filter { input, predicate } => {
+            contains_subquery(predicate) || plan_contains_subquery(input)
+        }
+        LogicalPlan::Project { input, projection } => {
+            projection_contains_subquery(projection) || plan_contains_subquery(input)
+        }
+        LogicalPlan::Join {
+            left,
+            right,
+            condition,
+            ..
+        } => {
+            condition.as_ref().is_some_and(contains_subquery)
+                || plan_contains_subquery(left)
+                || plan_contains_subquery(right)
+        }
+        LogicalPlan::Aggregate {
+            input,
+            group_keys,
+            aggregates,
+            having,
+            projection,
+        } => {
+            group_keys.iter().any(contains_subquery)
+                || aggregates
+                    .iter()
+                    .any(|agg| agg.arg.as_ref().is_some_and(contains_subquery))
+                || having.as_ref().is_some_and(contains_subquery)
+                || projection_contains_subquery(projection)
+                || plan_contains_subquery(input)
+        }
+        LogicalPlan::Sort { input, order_by } => {
+            order_by.iter().any(|sort| contains_subquery(&sort.expr))
+                || plan_contains_subquery(input)
+        }
+        LogicalPlan::Limit { input, .. } => plan_contains_subquery(input),
+        // DML/DDL plans are never executed through the query pipelines.
+        _ => false,
+    }
+}
+
 fn execute_quantified_with_outer<
     'txn,
     S: KVStore + 'txn,
