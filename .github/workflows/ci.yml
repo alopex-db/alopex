@@ -344,8 +344,8 @@ jobs:
             target/release/alopex-cli
             target/release/alopex-cli.exe
 
-  v06-release-gate:
-    name: v0.6 Release Gate
+  v07-release-gate:
+    name: v0.7 Release Gate
     runs-on: ubuntu-latest
     env:
       PYO3_PYTHON: python
@@ -377,14 +377,14 @@ jobs:
             -e HOME=/tmp \
             nimlang/nim:2.2 \
             sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
-      - name: Run v0.6 release gate
+      - name: Run v0.7 release gate
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: bash scripts/release/v06_gate.sh
+        run: bash scripts/release/v07_gate.sh
 
   ci-success:
     name: CI Success
-    needs: [fmt, clippy, test, coverage, security-audit, build, v06-release-gate]
+    needs: [fmt, clippy, test, coverage, security-audit, build, v07-release-gate]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -393,8 +393,10 @@ jobs:
           if [[ "${{ needs.fmt.result }}" != "success" ]] || \
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
+             [[ "${{ needs.coverage.result }}" != "success" ]] || \
+             [[ "${{ needs['security-audit'].result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
-             [[ "${{ needs['v06-release-gate'].result }}" != "success" ]]; then
+             [[ "${{ needs['v07-release-gate'].result }}" != "success" ]]; then
             echo "One or more jobs failed"
             echo "fmt: ${{ needs.fmt.result }}"
             echo "clippy: ${{ needs.clippy.result }}"
@@ -402,7 +404,7 @@ jobs:
             echo "coverage: ${{ needs.coverage.result }}"
             echo "security-audit: ${{ needs['security-audit'].result }}"
             echo "build: ${{ needs.build.result }}"
-            echo "v06-release-gate: ${{ needs['v06-release-gate'].result }}"
+            echo "v07-release-gate: ${{ needs['v07-release-gate'].result }}"
             exit 1
           fi
           echo "All CI jobs passed!"

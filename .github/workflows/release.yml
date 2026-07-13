@@ -28,6 +28,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Python deps
+        run: python -m pip install --upgrade pip maturin pytest numpy
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
         run: |
@@ -39,18 +45,10 @@ jobs:
             -e HOME=/tmp \
             nimlang/nim:2.2 \
             sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Run tests
-        # Exclude alopex-py as it requires numpy and has its own CI workflow
+      - name: Run v0.7 release gate
         env:
-          # ワークスペースのテストバイナリは build.rs の rpath だけでは Nim 共有
-          # ライブラリを解決できないため、ライブラリのディレクトリを
-          # LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効）。
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: cargo test --workspace --all-features --exclude alopex-py
+        run: bash scripts/release/v07_gate.sh
 
   build-release:
     name: Build Release (${{ matrix.target }})
