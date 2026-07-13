@@ -1153,7 +1153,7 @@ impl<'a> Transaction<'a> {
     pub fn commit(mut self) -> Result<()> {
         {
             let txn = self.inner.as_mut().ok_or(Error::TxnCompleted)?;
-            for (_, (index, state)) in self.hnsw_indices.iter_mut() {
+            for (index, state) in self.hnsw_indices.values_mut() {
                 index.commit_staged(txn, state).map_err(Error::Core)?;
             }
             let mut catalog = self.db.sql_catalog.write().expect("catalog lock poisoned");
@@ -1236,7 +1236,7 @@ impl<'a> Transaction<'a> {
     pub fn rollback_in_place(&mut self) -> Result<()> {
         let txn = self.inner.as_mut().ok_or(Error::TxnCompleted)?;
         txn.rollback_in_place().map_err(Error::Core)?;
-        for (_, (index, state)) in self.hnsw_indices.iter_mut() {
+        for (index, state) in self.hnsw_indices.values_mut() {
             let _ = index.rollback(state);
         }
         self.hnsw_indices.clear();
@@ -1248,7 +1248,7 @@ impl<'a> Transaction<'a> {
     /// Rolls back the transaction, discarding all changes.
     pub fn rollback(mut self) -> Result<()> {
         if let Some(txn) = self.inner.take() {
-            for (_, (index, state)) in self.hnsw_indices.iter_mut() {
+            for (index, state) in self.hnsw_indices.values_mut() {
                 let _ = index.rollback(state);
             }
             self.hnsw_indices.clear();
@@ -1286,7 +1286,7 @@ impl<'a> Transaction<'a> {
 impl<'a> Drop for Transaction<'a> {
     fn drop(&mut self) {
         if let Some(txn) = self.inner.take() {
-            for (_, (index, state)) in self.hnsw_indices.iter_mut() {
+            for (index, state) in self.hnsw_indices.values_mut() {
                 let _ = index.rollback(state);
             }
             self.hnsw_indices.clear();
