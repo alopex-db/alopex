@@ -6,9 +6,8 @@ use std::time::Instant;
 use futures::{future::BoxFuture, StreamExt};
 use prost::Message;
 use tokio::sync::broadcast;
-use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{async_trait, Request, Response, Status};
 use tower::{Layer, Service};
 use uuid::Uuid;
@@ -172,7 +171,8 @@ struct AlopexServiceImpl {
 
 #[async_trait]
 impl AlopexService for AlopexServiceImpl {
-    type ExecuteSqlStream = ReceiverStream<std::result::Result<proto::Row, Status>>;
+    type ExecuteSqlStream =
+        tokio_stream::Iter<std::vec::IntoIter<std::result::Result<proto::Row, Status>>>;
 
     async fn execute_sql(
         &self,
@@ -209,13 +209,20 @@ impl AlopexService for AlopexServiceImpl {
                 .await
                 .map_err(|err| map_status(err, &ctx.correlation_id))?;
 
+        // パリティのため SELECT 以外 (DML/DDL) も HTTP `/sql` と同様に実行・
+        // コミットされる。stream Row は affected_rows / success を表現できない
+        // ため、これらの結果は空ストリーム (正常終了) となる。
+        //
         // TODO(#25): proto::Row は列名メタデータを持たないため、result.columns は
-        // ここで失われる。stream Row への列名メタデータ追加は proto 変更を伴うため
-        // 別対応 (issue #25 参照)。
+        // ここで失われる。列名メタデータおよび DML/DDL の affected_rows / success
+        // の表現追加は proto 変更を伴うため別対応 (issue #25 参照)。
+        //
+        // 行の変換は元の行を消費しながら行い、累積エンコードサイズが
+        // メモリポリシーまたは max_response_size を超えた時点で即エラーを返す。
         let memory_policy = MemoryControlPolicy::from_env();
         let mut bytes_total = 0usize;
         let mut rows = Vec::with_capacity(result.rows.len());
-        for row in &result.rows {
+        for row in result.rows {
             let proto_row = proto::Row {
                 values: row.iter().map(sql_value_to_proto).collect(),
             };
@@ -229,16 +236,11 @@ impl AlopexService for AlopexServiceImpl {
                     &ctx.correlation_id,
                 ));
             }
-            rows.push(proto_row);
+            rows.push(Ok(proto_row));
         }
 
-        let (sender, receiver) = mpsc::channel(rows.len().max(1));
-        for row in rows {
-            // チャネル容量は行数分確保済みのため try_send は満杯にならない。
-            let _ = sender.try_send(Ok(row));
-        }
-        drop(sender);
-        Ok(Response::new(ReceiverStream::new(receiver)))
+        // 変換済みの Vec をそのまま応答ストリームにする (中間チャネル無し)。
+        Ok(Response::new(tokio_stream::iter(rows)))
     }
 
     async fn execute_ddl(
