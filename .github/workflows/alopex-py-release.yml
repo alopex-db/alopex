@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: .github/scripts/checkout-chirps.sh
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -96,6 +98,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: .github/scripts/checkout-chirps.sh
       # ネイティブ Nim ツールチェーン (2.2 固定) をホスト上でセットアップ。
       # 他ワークフロー (alopex-py.yml 等) の macOS/Windows パターンと整合。
       # 要 CI 検証: x86_64 は Intel runner、aarch64 は macos-latest 上で検証する。
@@ -127,6 +131,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: .github/scripts/checkout-chirps.sh
       # ネイティブ Nim ツールチェーン (2.2 固定) をホスト上でセットアップ。
       # 他ワークフロー (alopex-py.yml 等) の macOS/Windows パターンと整合。
       - name: Setup Nim
@@ -156,6 +162,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: .github/scripts/checkout-chirps.sh
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
