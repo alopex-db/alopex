@@ -1,0 +1,215 @@
+{
+  "corpus": "03_query.sql",
+  "format": {
+    "success": "DDL 文の成功 (結果セットなし)",
+    "rows_affected": "DML 文の成功 (count = 影響行数)",
+    "query": "columns = 出力列名の順序付き配列 / rows = 列名をキーとするオブジェクトの配列 / 浮動小数点は有効数字 9 桁へ丸め / NULL は JSON null"
+  },
+  "statements": [
+    {
+      "index": 1,
+      "sql": "SELECT * FROM users ORDER BY id",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "name", "region", "age", "score", "active"],
+        "rows": [
+          { "id": 1, "name": "alice", "region": "east", "age": 30, "score": 82.5, "active": true },
+          { "id": 2, "name": "bob", "region": "west", "age": 25, "score": 74.25, "active": true },
+          { "id": 3, "name": "carol", "region": "east", "age": 35, "score": 90.0, "active": false },
+          { "id": 4, "name": "dave", "region": "west", "age": 29, "score": null, "active": false },
+          { "id": 5, "name": "erin", "region": "north", "age": 22, "score": 65.5, "active": false },
+          { "id": 6, "name": "frank", "region": "east", "age": null, "score": 71.75, "active": true }
+        ]
+      }
+    },
+    {
+      "index": 2,
+      "sql": "SELECT id, name AS user_name, score FROM users WHERE score >= 70.0 AND active = TRUE ORDER BY score DESC",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "user_name", "score"],
+        "rows": [
+          { "id": 1, "user_name": "alice", "score": 82.5 },
+          { "id": 2, "user_name": "bob", "score": 74.25 },
+          { "id": 6, "user_name": "frank", "score": 71.75 }
+        ]
+      }
+    },
+    {
+      "index": 3,
+      "sql": "SELECT id, name FROM users WHERE region = 'east' OR (age IS NOT NULL AND age < 26) ORDER BY id",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "name"],
+        "rows": [
+          { "id": 1, "name": "alice" },
+          { "id": 2, "name": "bob" },
+          { "id": 3, "name": "carol" },
+          { "id": 5, "name": "erin" },
+          { "id": 6, "name": "frank" }
+        ]
+      }
+    },
+    {
+      "index": 4,
+      "sql": "SELECT id, name FROM users WHERE score IS NULL ORDER BY id",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "name"],
+        "rows": [ { "id": 4, "name": "dave" } ]
+      }
+    },
+    {
+      "index": 5,
+      "sql": "SELECT id, name FROM users WHERE age IS NOT NULL ORDER BY id",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "name"],
+        "rows": [
+          { "id": 1, "name": "alice" },
+          { "id": 2, "name": "bob" },
+          { "id": 3, "name": "carol" },
+          { "id": 4, "name": "dave" },
+          { "id": 5, "name": "erin" }
+        ]
+      }
+    },
+    {
+      "index": 6,
+      "sql": "SELECT id, score * 2.0 AS double_score FROM users WHERE score IS NOT NULL ORDER BY id",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "double_score"],
+        "rows": [
+          { "id": 1, "double_score": 165.0 },
+          { "id": 2, "double_score": 148.5 },
+          { "id": 3, "double_score": 180.0 },
+          { "id": 5, "double_score": 131.0 },
+          { "id": 6, "double_score": 143.5 }
+        ]
+      }
+    },
+    {
+      "index": 7,
+      "sql": "SELECT name || '@' || region AS label FROM users WHERE id <= 2 ORDER BY id",
+      "expected": {
+        "type": "query",
+        "columns": ["label"],
+        "rows": [
+          { "label": "alice@east" },
+          { "label": "bob@west" }
+        ]
+      }
+    },
+    {
+      "index": 8,
+      "sql": "SELECT id, name FROM users ORDER BY id DESC LIMIT 2 OFFSET 1",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "name"],
+        "rows": [
+          { "id": 5, "name": "erin" },
+          { "id": 4, "name": "dave" }
+        ]
+      }
+    },
+    {
+      "index": 9,
+      "sql": "SELECT id, age FROM users ORDER BY age ASC NULLS FIRST, id ASC",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "age"],
+        "rows": [
+          { "id": 6, "age": null },
+          { "id": 5, "age": 22 },
+          { "id": 2, "age": 25 },
+          { "id": 4, "age": 29 },
+          { "id": 1, "age": 30 },
+          { "id": 3, "age": 35 }
+        ]
+      }
+    },
+    {
+      "index": 10,
+      "sql": "SELECT id, age FROM users ORDER BY age DESC NULLS LAST, id ASC",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "age"],
+        "rows": [
+          { "id": 3, "age": 35 },
+          { "id": 1, "age": 30 },
+          { "id": 4, "age": 29 },
+          { "id": 2, "age": 25 },
+          { "id": 5, "age": 22 },
+          { "id": 6, "age": null }
+        ]
+      }
+    },
+    {
+      "index": 11,
+      "sql": "SELECT DISTINCT region FROM users ORDER BY region",
+      "expected": {
+        "type": "query",
+        "columns": ["region"],
+        "rows": [
+          { "region": "east" },
+          { "region": "north" },
+          { "region": "west" }
+        ]
+      }
+    },
+    {
+      "index": 12,
+      "sql": "SELECT DISTINCT category, region FROM products ORDER BY category, region",
+      "expected": {
+        "type": "query",
+        "columns": ["category", "region"],
+        "rows": [
+          { "category": "book", "region": "eu" },
+          { "category": "book", "region": "us" },
+          { "category": "game", "region": "eu" },
+          { "category": "game", "region": "us" }
+        ]
+      }
+    },
+    {
+      "index": 13,
+      "sql": "SELECT id, tag FROM products WHERE tag <> 'new' ORDER BY id",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "tag"],
+        "rows": [
+          { "id": 2, "tag": "sale" },
+          { "id": 4, "tag": "hit" }
+        ]
+      }
+    },
+    {
+      "index": 14,
+      "sql": "SELECT id, name FROM users WHERE NOT (region = 'east') ORDER BY id",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "name"],
+        "rows": [
+          { "id": 2, "name": "bob" },
+          { "id": 4, "name": "dave" },
+          { "id": 5, "name": "erin" }
+        ]
+      }
+    },
+    {
+      "index": 15,
+      "sql": "SELECT id, amount FROM orders WHERE amount >= 30.0 AND amount <= 60.0 ORDER BY id",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "amount"],
+        "rows": [
+          { "id": 10, "amount": 50.0 },
+          { "id": 14, "amount": 30.0 },
+          { "id": 15, "amount": 45.5 },
+          { "id": 17, "amount": 60.0 }
+        ]
+      }
+    }
+  ]
+}
