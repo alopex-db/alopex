@@ -1584,8 +1584,10 @@ fn execute_sql_select_streaming<W: Write>(
             return Err(cli_err_to_embedded(err));
         }
 
-        // Consume iterator row by row for true streaming
-        while let Ok(Some(sql_row)) = rows.next_row() {
+        // Consume iterator row by row for true streaming.
+        // Errors from `next_row` must propagate: swallowing them here would
+        // silently truncate the result set (GitHub issue #23).
+        while let Some(sql_row) = rows.next_row()? {
             if options.cancel.is_cancelled() {
                 cancel_flag.store(true, Ordering::SeqCst);
                 return Err(cli_err_to_embedded(CliError::Cancelled));
@@ -2016,6 +2018,44 @@ mod tests {
             let result = String::from_utf8(output).unwrap();
             assert!(result.contains("1"));
         }
+    }
+
+    /// Regression test for issue #23: errors surfaced by `next_row` during a
+    /// streaming SELECT must propagate as `Err`, not be swallowed into a
+    /// silently-empty result set with exit code 0 (the old
+    /// `while let Ok(Some(...))` pattern did exactly that).
+    #[test]
+    fn streaming_select_row_error_propagates() {
+        let db = create_test_db();
+        db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        db.execute_sql("INSERT INTO t (id) VALUES (1);").unwrap();
+
+        let deadline = Deadline::new(parse_deadline(None).unwrap());
+        let cancel = CancelSignal::new();
+        let options = SqlExecutionOptions {
+            limit: None,
+            quiet: false,
+            cancel: &cancel,
+            deadline: &deadline,
+            admin_launcher: None,
+        };
+
+        let mut output = Vec::new();
+        let formatter = Box::new(JsonlFormatter::new());
+        // `id / 0` fails during row evaluation (division by zero), i.e. inside
+        // the `next_row` loop of `execute_sql_select_streaming`.
+        let result = execute_sql_select_streaming(
+            &db,
+            "SELECT id / 0 AS x FROM t;",
+            &mut output,
+            formatter,
+            &options,
+        );
+        assert!(
+            result.is_err(),
+            "row evaluation errors must propagate instead of yielding an empty result"
+        );
     }
 
     #[test]
