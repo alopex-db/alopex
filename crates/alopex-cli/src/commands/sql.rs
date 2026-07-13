@@ -1584,8 +1584,10 @@ fn execute_sql_select_streaming<W: Write>(
             return Err(cli_err_to_embedded(err));
         }
 
-        // Consume iterator row by row for true streaming
-        while let Ok(Some(sql_row)) = rows.next_row() {
+        // Consume iterator row by row for true streaming.
+        // Errors from `next_row` must propagate: swallowing them here would
+        // silently truncate the result set (GitHub issue #23).
+        while let Some(sql_row) = rows.next_row()? {
             if options.cancel.is_cancelled() {
                 cancel_flag.store(true, Ordering::SeqCst);
                 return Err(cli_err_to_embedded(CliError::Cancelled));
