@@ -52,8 +52,9 @@ fn admin_dispatches_lifecycle_archive() {
         data_dir: Some(data_dir.to_path_buf()),
     };
     let mut output = Vec::new();
-    let formatter = create_formatter(OutputFormat::Json);
-    execute_local_action(&db, &batch_mode, request, &mut output, formatter).expect("archive");
+    let mut make_formatter = || create_formatter(OutputFormat::Json);
+    execute_local_action(&db, &batch_mode, request, &mut output, &mut make_formatter)
+        .expect("archive");
 
     assert!(data_dir.join(".lifecycle/archive/latest").exists());
 }

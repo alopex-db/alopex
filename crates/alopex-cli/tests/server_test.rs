@@ -446,7 +446,6 @@ async fn execute_streaming_request(
     format: OutputFormat,
 ) -> Result<String, CliError> {
     let client = build_test_client(base_url);
-    let formatter = create_formatter(format);
     let mut output = Vec::new();
     execute_remote_with_formatter_control(
         &client,
@@ -454,7 +453,7 @@ async fn execute_streaming_request(
         &batch_mode(),
         UiMode::Batch,
         &mut output,
-        formatter,
+        format,
         SqlExecutionOptions {
             limit: None,
             quiet: false,
@@ -837,7 +836,9 @@ async fn server_sql_streaming_json_array_success() {
         .await
         .expect("streaming output");
     let value: Value = serde_json::from_str(&output).expect("json array");
-    let rows = value.as_array().expect("array");
+    let sets = value.as_array().expect("array of result sets");
+    assert_eq!(sets.len(), 1, "remote sql yields one result set");
+    let rows = sets[0].as_array().expect("rows array");
     assert_eq!(rows.len(), 2);
 
     let first_obj_start = output.find('{').expect("object start");
@@ -882,7 +883,9 @@ async fn server_sql_streaming_jsonl_success() {
         .await
         .expect("streaming output");
     let value: Value = serde_json::from_str(&output).expect("json array");
-    let rows = value.as_array().expect("array");
+    let sets = value.as_array().expect("array of result sets");
+    assert_eq!(sets.len(), 1, "remote sql yields one result set");
+    let rows = sets[0].as_array().expect("rows array");
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["col1"], json!(1));
     assert_eq!(rows[0]["col2"], json!("alpha"));
@@ -912,7 +915,9 @@ async fn server_sql_streaming_empty_array_outputs_json() {
         .await
         .expect("empty output");
     let value: Value = serde_json::from_str(&output).expect("json array");
-    let rows = value.as_array().expect("array");
+    let sets = value.as_array().expect("array of result sets");
+    assert_eq!(sets.len(), 1, "remote sql yields one result set");
+    let rows = sets[0].as_array().expect("rows array");
     assert!(rows.is_empty());
 
     let _ = shutdown.send(());
@@ -1628,6 +1633,107 @@ async fn server_admin_lifecycle_invalid_json_maps_to_connection_error() {
     .await
     .expect_err("invalid json");
     assert!(matches!(err, CliError::ServerConnection(_)));
+
+    let _ = shutdown.send(());
+}
+
+/// Helper for the "stdout stays valid JSON on stream errors" tests: runs a
+/// remote streaming request and returns the error together with whatever was
+/// written to stdout before the failure.
+async fn execute_streaming_request_capturing_output(
+    base_url: &str,
+    cmd: SqlCommand,
+) -> (CliError, String) {
+    let client = build_test_client(base_url);
+    let cancel = CancelSignal::new();
+    let deadline = Deadline::new(Duration::from_secs(5));
+    let mut output = Vec::new();
+    let err = execute_remote_with_formatter_control(
+        &client,
+        &cmd,
+        &batch_mode(),
+        UiMode::Batch,
+        &mut output,
+        OutputFormat::Json,
+        SqlExecutionOptions {
+            limit: None,
+            quiet: false,
+            cancel: &cancel,
+            deadline: &deadline,
+            admin_launcher: None,
+        },
+    )
+    .await
+    .expect_err("stream error expected");
+    (err, String::from_utf8(output).expect("utf8"))
+}
+
+fn assert_stdout_is_valid_json_array(stdout: &str) {
+    let value: Value = serde_json::from_str(stdout).unwrap_or_else(|err| {
+        panic!("stdout must remain valid JSON on stream errors: {err}\nstdout:\n{stdout}")
+    });
+    assert!(value.is_array(), "stdout: {stdout}");
+}
+
+fn streaming_error_test_cmd() -> SqlCommand {
+    SqlCommand {
+        query: Some("SELECT id, name FROM items".to_string()),
+        file: None,
+        fetch_size: None,
+        max_rows: None,
+        deadline: None,
+        tui: false,
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn server_sql_streaming_jsonl_error_before_rows_keeps_stdout_valid_json() {
+    let chunks = vec![
+        r#"{"row":null,"error":{"message":"boom"},"done":false}
+"#,
+    ];
+    let (base_url, shutdown, _state, _dir) = start_jsonl_streaming_server(chunks, None).await;
+
+    let (err, stdout) =
+        execute_streaming_request_capturing_output(&base_url, streaming_error_test_cmd()).await;
+    assert!(matches!(err, CliError::InvalidArgument(_)));
+    assert_stdout_is_valid_json_array(&stdout);
+
+    let _ = shutdown.send(());
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn server_sql_streaming_jsonl_error_after_rows_keeps_stdout_valid_json() {
+    let chunks = vec![
+        r#"{"row":[{"Integer":1},{"Text":"alpha"}],"error":null,"done":false}
+"#,
+        r#"{"row":null,"error":{"message":"boom"},"done":false}
+"#,
+    ];
+    let (base_url, shutdown, _state, _dir) = start_jsonl_streaming_server(chunks, None).await;
+
+    let (err, stdout) =
+        execute_streaming_request_capturing_output(&base_url, streaming_error_test_cmd()).await;
+    assert!(matches!(err, CliError::InvalidArgument(_)));
+    assert_stdout_is_valid_json_array(&stdout);
+
+    let _ = shutdown.send(());
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn server_sql_streaming_invalid_stream_after_rows_keeps_stdout_valid_json() {
+    // Second row drops a column, which fails validation after the first row
+    // has already been streamed to stdout.
+    let chunks = vec![r#"[{"id":1,"name":"a"},{"id":2}]"#];
+    let (base_url, shutdown, _state, _dir) = start_streaming_server(chunks, None).await;
+
+    let (err, stdout) =
+        execute_streaming_request_capturing_output(&base_url, streaming_error_test_cmd()).await;
+    assert!(matches!(err, CliError::InvalidArgument(_)));
+    assert_stdout_is_valid_json_array(&stdout);
 
     let _ = shutdown.send(());
 }

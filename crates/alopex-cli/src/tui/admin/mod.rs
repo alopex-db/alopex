@@ -905,11 +905,12 @@ impl<'a> AdminApp<'a> {
             data_dir: self.backend.data_dir().map(PathBuf::from),
         };
 
-        let (formatter, state) = CaptureFormatter::new();
+        let state = CaptureFormatter::shared_state();
+        let mut make_formatter = CaptureFormatter::factory(&state);
         let mut sink = io::sink();
         let result = match &self.backend {
             AdminBackend::Local { db, batch_mode, .. } => {
-                execute_local_action(db, batch_mode, request, &mut sink, Box::new(formatter))
+                execute_local_action(db, batch_mode, request, &mut sink, &mut make_formatter)
             }
             AdminBackend::Remote {
                 client, batch_mode, ..
@@ -918,7 +919,7 @@ impl<'a> AdminApp<'a> {
                 batch_mode,
                 request,
                 &mut sink,
-                Box::new(formatter),
+                &mut make_formatter,
             ))?,
         };
 
@@ -1679,11 +1680,12 @@ fn capture_admin_command(
         output: backend.output_format(),
         data_dir: backend.data_dir().map(PathBuf::from),
     };
-    let (formatter, state) = CaptureFormatter::new();
+    let state = CaptureFormatter::shared_state();
+    let mut make_formatter = CaptureFormatter::factory(&state);
     let mut sink = io::sink();
     let result = match backend {
         AdminBackend::Local { db, batch_mode, .. } => {
-            execute_local_action(db, batch_mode, request, &mut sink, Box::new(formatter))
+            execute_local_action(db, batch_mode, request, &mut sink, &mut make_formatter)
         }
         AdminBackend::Remote {
             client, batch_mode, ..
@@ -1696,7 +1698,7 @@ fn capture_admin_command(
                 batch_mode,
                 request,
                 &mut sink,
-                Box::new(formatter),
+                &mut make_formatter,
             ))
         }
     };
@@ -3037,14 +3039,22 @@ struct CaptureFormatter {
 }
 
 impl CaptureFormatter {
-    fn new() -> (Self, Arc<Mutex<CaptureState>>) {
-        let state = Arc::new(Mutex::new(CaptureState::default()));
-        (
-            Self {
+    /// Create a fresh shared capture state.
+    fn shared_state() -> Arc<Mutex<CaptureState>> {
+        Arc::new(Mutex::new(CaptureState::default()))
+    }
+
+    /// Formatter factory producing capture formatters bound to `state`.
+    ///
+    /// The `sql` command creates one formatter per statement result block, so
+    /// admin capture hands out multiple formatters sharing one state.
+    fn factory(state: &Arc<Mutex<CaptureState>>) -> impl FnMut() -> Box<dyn Formatter> {
+        let state = Arc::clone(state);
+        move || {
+            Box::new(CaptureFormatter {
                 state: Arc::clone(&state),
-            },
-            state,
-        )
+            }) as Box<dyn Formatter>
+        }
     }
 }
 

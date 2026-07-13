@@ -4,7 +4,6 @@ use alopex_cli::batch::{BatchMode, BatchModeSource};
 use alopex_cli::cli::{OutputFormat, SqlCommand};
 use alopex_cli::commands::sql::{execute_with_formatter_control, SqlExecutionOptions};
 use alopex_cli::models::{Column, DataType, Row, Value};
-use alopex_cli::output::formatter::create_formatter;
 use alopex_cli::streaming::{CancelSignal, Deadline};
 use alopex_cli::tui::{is_tty, TuiApp};
 use alopex_cli::ui::mode::UiMode;
@@ -117,7 +116,6 @@ fn tui_falls_back_in_non_tty() {
         deadline: None,
         tui: true,
     };
-    let formatter = create_formatter(OutputFormat::Json);
     let cancel = CancelSignal::new();
     let deadline = Deadline::new(Duration::from_secs(1));
     let mut output = Vec::new();
@@ -128,7 +126,7 @@ fn tui_falls_back_in_non_tty() {
         &batch_mode(),
         UiMode::Batch,
         &mut output,
-        formatter,
+        OutputFormat::Json,
         SqlExecutionOptions {
             limit: None,
             quiet: true,
@@ -141,5 +139,7 @@ fn tui_falls_back_in_non_tty() {
 
     let text = String::from_utf8(output).expect("utf8");
     let value: serde_json::Value = serde_json::from_str(&text).expect("json");
-    assert!(value.is_array());
+    let sets = value.as_array().expect("array of result sets");
+    assert_eq!(sets.len(), 1, "single statement yields one result set");
+    assert!(sets[0].is_array());
 }
