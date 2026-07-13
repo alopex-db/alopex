@@ -48,13 +48,18 @@ pub(crate) fn execute_scalar_subquery_with_outer<
 }
 
 /// Execute IN subquery.
+///
+/// Implements SQL three-valued logic: when no row matches but the subquery
+/// result contains NULL (or the probe value itself is NULL and the result is
+/// non-empty), the comparison is UNKNOWN and `SqlValue::Null` is returned.
+/// Consequently `NOT IN` over a NULL-containing result never yields TRUE.
 pub fn execute_in_subquery<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
     txn: &mut T,
     catalog: &C,
     value: &SqlValue,
     subquery: &LogicalPlan,
     negated: bool,
-) -> Result<bool> {
+) -> Result<SqlValue> {
     execute_in_subquery_with_outer(txn, catalog, value, subquery, negated, None)
 }
 
@@ -70,19 +75,31 @@ pub(crate) fn execute_in_subquery_with_outer<
     subquery: &LogicalPlan,
     negated: bool,
     outer: Option<&Row>,
-) -> Result<bool> {
+) -> Result<SqlValue> {
     let rows = execute_subquery_rows_with_outer(txn, catalog, subquery, outer)?;
+    let mut unknown = false;
     let matched = semi_join_probe(&rows, |row| {
         let Some(candidate) = row.first() else {
             return Ok(false);
         };
+        if matches!(candidate, SqlValue::Null) || matches!(value, SqlValue::Null) {
+            unknown = true;
+            return Ok(false);
+        }
         compare_values(
             crate::ast::expr::BinaryOp::Eq,
             value.clone(),
             candidate.clone(),
         )
     })?;
-    Ok(if negated { !matched } else { matched })
+    if matched {
+        return Ok(SqlValue::Boolean(!negated));
+    }
+    if unknown {
+        // UNKNOWN stays UNKNOWN under NOT.
+        return Ok(SqlValue::Null);
+    }
+    Ok(SqlValue::Boolean(negated))
 }
 
 /// Execute EXISTS subquery.
@@ -133,7 +150,6 @@ pub(crate) fn evaluate_expr_with_subqueries<
         } => {
             let value = evaluate_expr_with_subqueries(txn, catalog, expr, row)?;
             execute_in_subquery_with_outer(txn, catalog, &value, subquery, *negated, Some(row))
-                .map(SqlValue::Boolean)
         }
         TypedExprKind::Exists { subquery, negated } => {
             execute_exists_with_outer(txn, catalog, subquery, *negated, Some(row))
@@ -335,5 +351,75 @@ fn compare_values(op: crate::ast::expr::BinaryOp, left: SqlValue, right: SqlValu
             expected: "Boolean".into(),
             actual: other.type_name().into(),
         })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_contains_subquery;
+    use crate::catalog::{Catalog, ColumnMetadata, MemoryCatalog, TableMetadata};
+    use crate::dialect::AlopexDialect;
+    use crate::parser::Parser;
+    use crate::planner::Planner;
+    use crate::planner::logical_plan::LogicalPlan;
+    use crate::planner::types::ResolvedType;
+
+    fn plan_select(sql: &str) -> LogicalPlan {
+        let mut catalog = MemoryCatalog::new();
+        catalog
+            .create_table(TableMetadata::new(
+                "users",
+                vec![
+                    ColumnMetadata::new("id", ResolvedType::Integer),
+                    ColumnMetadata::new("name", ResolvedType::Text),
+                ],
+            ))
+            .unwrap();
+        catalog
+            .create_table(TableMetadata::new(
+                "orders",
+                vec![
+                    ColumnMetadata::new("id", ResolvedType::Integer),
+                    ColumnMetadata::new("user_id", ResolvedType::Integer),
+                    ColumnMetadata::new("total", ResolvedType::Integer),
+                ],
+            ))
+            .unwrap();
+        let statements = Parser::parse_sql(&AlopexDialect, sql).expect("parse sql");
+        assert_eq!(statements.len(), 1, "expected single statement");
+        Planner::new(&catalog)
+            .plan(&statements[0])
+            .expect("plan sql")
+    }
+
+    #[test]
+    fn detects_subquery_in_join_on_condition() {
+        let plan = plan_select(
+            "SELECT users.name FROM users JOIN orders ON users.id = orders.user_id AND orders.user_id IN (SELECT orders.user_id FROM orders)",
+        );
+        assert!(plan_contains_subquery(&plan));
+    }
+
+    #[test]
+    fn detects_subquery_in_having() {
+        let plan = plan_select(
+            "SELECT orders.user_id, COUNT(*) FROM orders GROUP BY orders.user_id HAVING COUNT(*) > (SELECT MIN(orders.total) FROM orders)",
+        );
+        assert!(plan_contains_subquery(&plan));
+    }
+
+    #[test]
+    fn detects_subquery_in_order_by() {
+        let plan = plan_select(
+            "SELECT users.name FROM users ORDER BY (SELECT COUNT(*) FROM orders WHERE orders.user_id = users.id)",
+        );
+        assert!(plan_contains_subquery(&plan));
+    }
+
+    #[test]
+    fn plan_without_subquery_is_not_detected() {
+        let plan =
+            plan_select("SELECT users.name FROM users WHERE users.id = 1 ORDER BY users.name");
+        assert!(!plan_contains_subquery(&plan));
     }
 }

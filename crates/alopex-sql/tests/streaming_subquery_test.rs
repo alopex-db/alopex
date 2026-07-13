@@ -121,6 +121,74 @@ fn streaming_correlated_exists_subquery_executes() {
     );
 }
 
+/// Execute a single SELECT through the non-streaming path (`execute_query`)
+/// for parity comparison.
+fn run_non_streaming(
+    store: &Arc<MemoryKV>,
+    catalog: &Arc<RwLock<MemoryCatalog>>,
+    select: &str,
+) -> Result<Vec<Vec<SqlValue>>, ExecutorError> {
+    let dialect = AlopexDialect;
+    let stmts = Parser::parse_sql(&dialect, select).expect("parse select");
+    assert_eq!(stmts.len(), 1, "expected single SELECT statement");
+    let guard = catalog.read().unwrap();
+    let plan = Planner::new(&*guard).plan(&stmts[0]).expect("plan select");
+    let bridge = TxnBridge::new(store.clone());
+    let mut txn = bridge.begin_read().expect("begin read txn");
+    match alopex_sql::executor::query::execute_query(&mut txn, &*guard, plan)? {
+        alopex_sql::executor::ExecutionResult::Query(q) => Ok(q.rows),
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn streaming_not_in_subquery_executes() {
+    let (store, catalog) = setup();
+    // {1, 1, 2} contains no NULL: NOT IN behaves two-valued and returns carol.
+    let (_, rows) = run_streaming(
+        &store,
+        &catalog,
+        "SELECT users.name FROM users WHERE users.id NOT IN (SELECT orders.user_id FROM orders) ORDER BY users.id",
+    )
+    .expect("streaming NOT IN subquery must execute");
+    assert_eq!(rows, vec![vec![SqlValue::Text("carol".into())]]);
+}
+
+#[test]
+fn streaming_not_in_subquery_with_null_returns_empty() {
+    let (store, catalog) = setup();
+    {
+        // Add an order whose user_id is NULL: the subquery result becomes
+        // {1, 1, 2, NULL}.
+        let dialect = AlopexDialect;
+        let stmts = Parser::parse_sql(
+            &dialect,
+            "INSERT INTO orders (id, user_id, total) VALUES (13, NULL, 5)",
+        )
+        .expect("parse insert");
+        let mut executor = Executor::new(store.clone(), catalog.clone());
+        let guard = catalog.read().unwrap();
+        let plan = Planner::new(&*guard).plan(&stmts[0]).expect("plan insert");
+        drop(guard);
+        executor.execute(plan).expect("insert NULL user_id");
+    }
+
+    // Three-valued logic: `id NOT IN (..., NULL)` is FALSE for matching ids
+    // and UNKNOWN otherwise, so no row may be returned.
+    let sql = "SELECT users.name FROM users WHERE users.id NOT IN (SELECT orders.user_id FROM orders) ORDER BY users.id";
+    let (_, streaming_rows) =
+        run_streaming(&store, &catalog, sql).expect("streaming NOT IN with NULL must execute");
+    assert!(
+        streaming_rows.is_empty(),
+        "NOT IN over a NULL-containing subquery result must return no rows, got {streaming_rows:?}"
+    );
+
+    // Parity: the non-streaming path must agree.
+    let non_streaming_rows =
+        run_non_streaming(&store, &catalog, sql).expect("non-streaming NOT IN with NULL");
+    assert_eq!(streaming_rows, non_streaming_rows);
+}
+
 #[test]
 fn streaming_quantified_any_subquery_executes() {
     let (store, catalog) = setup();

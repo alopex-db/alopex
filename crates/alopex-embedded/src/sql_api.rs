@@ -271,10 +271,12 @@ impl Database {
     /// db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);").unwrap();
     /// db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob');").unwrap();
     ///
-    /// // Process rows with streaming - transaction stays alive during callback
+    /// // Process rows with streaming - transaction stays alive during callback.
+    /// // Propagate `next_row` errors with `?`; swallowing them (e.g. with
+    /// // `while let Ok(Some(...))`) silently truncates the result set.
     /// let result = db.execute_sql_with_rows("SELECT * FROM users;", |mut rows| {
     ///     let mut names = Vec::new();
-    ///     while let Ok(Some(row)) = rows.next_row() {
+    ///     while let Some(row) = rows.next_row()? {
     ///         if let Some(alopex_sql::storage::SqlValue::Text(name)) = row.get(1) {
     ///             names.push(name.clone());
     ///         }
@@ -370,18 +372,23 @@ impl Database {
     /// # Examples
     ///
     /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// use alopex_embedded::{Database, SqlStreamingResult};
     ///
     /// let db = Database::new();
-    /// db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);").unwrap();
-    /// db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice');").unwrap();
+    /// db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+    /// db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
     ///
-    /// let result = db.execute_sql_streaming("SELECT * FROM users;").unwrap();
+    /// // Propagate `next_row` errors with `?`; swallowing them (e.g. with
+    /// // `while let Ok(Some(...))`) silently truncates the result set.
+    /// let result = db.execute_sql_streaming("SELECT * FROM users;")?;
     /// if let SqlStreamingResult::Query(mut iter) = result {
-    ///     while let Ok(Some(row)) = iter.next_row() {
+    ///     while let Some(row) = iter.next_row()? {
     ///         println!("{:?}", row);
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn execute_sql_streaming(&self, sql: &str) -> Result<SqlStreamingResult> {
         let stmts = parse_sql(sql)?;
