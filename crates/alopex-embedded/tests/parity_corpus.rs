@@ -43,8 +43,10 @@ use serde_json::{json, Map, Value};
 /// SQL テキストを文単位に分割する。
 ///
 /// 文字列リテラル(' / ")内のセミコロン、行コメント(--)、
-/// ブロックコメント(/* */)を考慮する。コメントは文から除去する。
-/// Python 実装(surfaces.split_sql_statements)と同一の出力になること。
+/// ブロックコメント(/* */)を考慮する。行コメントは除去し(直後の改行は
+/// 残る)、ブロックコメントは前後トークンの結合を防ぐため半角スペース
+/// 1 つに置換する。Python 実装(surfaces.split_sql_statements)と同一の
+/// 出力になること。
 fn split_sql_statements(text: &str) -> Result<Vec<String>, String> {
     let bytes = text.as_bytes();
     let n = bytes.len();
@@ -109,6 +111,8 @@ fn split_sql_statements(text: &str) -> Result<Vec<String>, String> {
         if ch == b'/' && bytes.get(i + 1) == Some(&b'*') {
             match text[i + 2..].find("*/") {
                 Some(end) => {
+                    // コメント 1 つを半角スペース 1 つに置換(トークン結合の防止)
+                    buf.push(b' ');
                     i = i + 2 + end + 2;
                     continue;
                 }
@@ -517,15 +521,9 @@ fn parity_corpus() {
         }
     }
 
-    // file モードの writer は CLI(crates/alopex-cli/src/main.rs)と同じく
-    // 実行後に flush して永続化する(reader が別プロセスで開く前提)。
-    if role == "writer" && data_dir.is_some() {
-        db.flush()
-            .unwrap_or_else(|e| panic!("環境エラー: flush 失敗: {e}"));
-    }
-    drop(db);
-
-    // 不一致の有無に関わらず、実測の正規化 JSON を必ず書き出す。
+    // 不一致の有無に関わらず、全文実行が完了した時点で実測の正規化 JSON を
+    // 必ず書き出す(以降の flush 等が panic しても実行結果が失われないよう、
+    // 出力を flush より前に行う)。
     if let Some(path) = &output_path {
         let doc = json!({
             "corpus": corpus_names.join(","),
@@ -536,6 +534,14 @@ fn parity_corpus() {
         fs::write(path, serialized)
             .unwrap_or_else(|e| panic!("環境エラー: PARITY_OUTPUT へ書けない ({path}): {e}"));
     }
+
+    // file モードの writer は CLI(crates/alopex-cli/src/main.rs)と同じく
+    // 実行後に flush して永続化する(reader が別プロセスで開く前提)。
+    if role == "writer" && data_dir.is_some() {
+        db.flush()
+            .unwrap_or_else(|e| panic!("環境エラー: flush 失敗: {e}"));
+    }
+    drop(db);
 
     println!("[parity] role={role} corpus={}", corpus_names.join(","));
     for line in &summary {
@@ -560,6 +566,16 @@ fn split_sql_statements_handles_quotes_and_comments() {
     let text = "SELECT ';' AS a; -- comment; with semicolon\nSELECT 1;\n/* block; comment */ SELECT 'it''s';\n";
     let stmts = split_sql_statements(text).unwrap();
     assert_eq!(stmts, vec!["SELECT ';' AS a", "SELECT 1", "SELECT 'it''s'"]);
+}
+
+#[test]
+fn split_sql_statements_block_comment_becomes_single_space() {
+    // ブロックコメントが空白なしでトークンに挟まれても結合しない
+    let stmts = split_sql_statements("SELECT a/* c */FROM t;").unwrap();
+    assert_eq!(stmts, vec!["SELECT a FROM t"]);
+    // 文頭・文末のコメントは trim で消える
+    let stmts = split_sql_statements("/* head */SELECT 1; SELECT 2/* tail */;").unwrap();
+    assert_eq!(stmts, vec!["SELECT 1", "SELECT 2"]);
 }
 
 #[test]
