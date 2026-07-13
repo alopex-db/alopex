@@ -36,6 +36,8 @@ jobs:
           # required, and re-enable native ARM after the runner lane is stable.
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: bash .github/scripts/checkout-chirps.sh
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -97,6 +99,8 @@ jobs:
         compression: [none, snappy]
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: bash .github/scripts/checkout-chirps.sh
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master

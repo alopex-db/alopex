@@ -24,6 +24,8 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force || true
       - uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: bash .github/scripts/checkout-chirps.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -79,6 +81,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: bash .github/scripts/checkout-chirps.sh
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -141,6 +145,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: bash .github/scripts/checkout-chirps.sh
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -165,6 +171,8 @@ jobs:
       NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout Chirps dependency
+        run: bash .github/scripts/checkout-chirps.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
