@@ -264,22 +264,38 @@ fn alopex_batch(args: &[&str]) -> std::io::Result<()> {
 }
 
 fn alopex_batch_with_profile(profile: &str, args: &[&str]) -> std::io::Result<()> {
-    let mut cmd = Command::new(alopex_bin());
-    cmd.env("ALOPEX_TEST_TTY", "1");
-    cmd.env("ALOPEX_MODE", "tui");
-    if let Ok(home) = std::env::var("ALOPEX_TEST_SERVER_HOME") {
-        cmd.env("HOME", home);
+    // Lifecycle admin actions (archive/export/backup/restore) leave the shared
+    // test server in maintenance mode for a short moment after the executing
+    // test has already released `server_lock()`. Writes issued by the next
+    // test's seeding step are then rejected with HTTP 409
+    // ("writes are blocked in maintenance mode"). Retry only that transient
+    // rejection instead of failing the test.
+    let mut last_stderr = String::new();
+    for _ in 0..20 {
+        let mut cmd = Command::new(alopex_bin());
+        cmd.env("ALOPEX_TEST_TTY", "1");
+        cmd.env("ALOPEX_MODE", "tui");
+        if let Ok(home) = std::env::var("ALOPEX_TEST_SERVER_HOME") {
+            cmd.env("HOME", home);
+        }
+        let output = cmd
+            .arg("--profile")
+            .arg(profile)
+            .arg("--batch")
+            .args(args)
+            .output()?;
+        if output.status.success() {
+            return Ok(());
+        }
+        last_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if !last_stderr.contains("maintenance mode") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
     }
-    let status = cmd
-        .arg("--profile")
-        .arg(profile)
-        .arg("--batch")
-        .args(args)
-        .status()?;
-    if !status.success() {
-        return Err(std::io::Error::other("alopex batch command failed"));
-    }
-    Ok(())
+    Err(std::io::Error::other(format!(
+        "alopex batch command failed: {last_stderr}"
+    )))
 }
 
 fn alopex_output(
@@ -400,12 +416,38 @@ data_dir = \"{}\"\n",
     );
     fs::write(&config_path, config)?;
 
-    let child = Command::new(alopex_server_bin())
+    let mut server_cmd = Command::new(alopex_server_bin());
+    server_cmd
         .arg("--config")
         .arg(&config_path)
         .stdout(Stdio::from(fs::File::create(&log_path)?))
-        .stderr(Stdio::from(fs::File::create(&log_path)?))
-        .spawn()?;
+        .stderr(Stdio::from(fs::File::create(&log_path)?));
+    // The server is cached in a `static OnceLock`, so `TestServer::drop` never
+    // runs for the shared instance, and a SIGKILL of the test binary (e.g. a
+    // CI timeout) would bypass `Drop` anyway. Bind the server's lifetime to
+    // the test process with PR_SET_PDEATHSIG so it can never outlive the
+    // tests and keep inherited fds (such as the global cargo build lock)
+    // open forever.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: prctl/getppid/_exit are async-signal-safe; no allocation
+        // happens between fork and exec.
+        unsafe {
+            server_cmd.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // If the parent already died before prctl took effect, exit
+                // immediately instead of running as an orphan.
+                if libc::getppid() == 1 {
+                    libc::_exit(1);
+                }
+                Ok(())
+            });
+        }
+    }
+    let child = spawn_process_lifetime_bound(server_cmd)?;
 
     wait_for_server(http_port)?;
 
@@ -436,6 +478,31 @@ data_dir = \"{}\"\n",
         http_port,
         child,
     })
+}
+
+/// Spawn `cmd` from a thread that lives for the rest of the test process.
+///
+/// PR_SET_PDEATHSIG delivers the death signal when the *forking thread*
+/// terminates, and libtest runs every test on its own short-lived thread.
+/// Spawning from a parked keeper thread ties the child's lifetime to the
+/// whole test process instead of the first test that touched the server.
+fn spawn_process_lifetime_bound(mut cmd: Command) -> Result<std::process::Child> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("e2e-server-keeper".to_string())
+        .spawn(move || {
+            let _ = tx.send(cmd.spawn());
+            // Keep the forking thread alive for the process lifetime so the
+            // PDEATHSIG configured in pre_exec only fires when the whole
+            // test process exits.
+            loop {
+                std::thread::park();
+            }
+        })?;
+    let child = rx
+        .recv()
+        .map_err(|err| std::io::Error::other(format!("server spawn thread failed: {err}")))??;
+    Ok(child)
 }
 
 fn pick_ports() -> Result<(u16, u16, u16)> {

@@ -6,7 +6,6 @@ use alopex_cli::batch::{BatchMode, BatchModeSource};
 use alopex_cli::client::http::HttpClient;
 use alopex_cli::cli::{OutputFormat, SqlCommand};
 use alopex_cli::commands::sql::{execute_remote_with_formatter_control, SqlExecutionOptions};
-use alopex_cli::output::formatter::create_formatter;
 use alopex_cli::profile::config::ServerConfig as CliServerConfig;
 use alopex_cli::ui::mode::UiMode;
 use alopex_cli::streaming::{CancelSignal, Deadline};
@@ -133,7 +132,6 @@ async fn e2e_streaming_large_dataset() {
         tui: false,
     };
 
-    let formatter = create_formatter(OutputFormat::Json);
     let cancel = CancelSignal::new();
     let deadline = Deadline::new(Duration::from_secs(10));
     let mut output = Vec::new();
@@ -144,7 +142,7 @@ async fn e2e_streaming_large_dataset() {
         &batch_mode(),
         UiMode::Batch,
         &mut output,
-        formatter,
+        OutputFormat::Json,
         SqlExecutionOptions {
             limit: None,
             quiet: false,
@@ -157,7 +155,9 @@ async fn e2e_streaming_large_dataset() {
     .expect("streaming");
 
     let value: serde_json::Value = serde_json::from_slice(&output).expect("json");
-    let rows = value.as_array().expect("array");
+    let sets = value.as_array().expect("array of result sets");
+    assert_eq!(sets.len(), 1, "remote sql yields one result set");
+    let rows = sets[0].as_array().expect("rows array");
     assert_eq!(rows.len(), 500);
     assert_eq!(rows[0]["id"], json!(0));
     assert_eq!(rows[499]["id"], json!(499));

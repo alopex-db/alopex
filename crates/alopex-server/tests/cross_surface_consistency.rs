@@ -7,7 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use alopex_cli::batch::{BatchMode, BatchModeSource};
-use alopex_cli::cli::SqlCommand;
+use alopex_cli::cli::{OutputFormat, SqlCommand};
 use alopex_cli::commands::{kv as cli_kv, sql as cli_sql};
 use alopex_cli::output::jsonl::JsonlFormatter;
 use alopex_cli::streaming::StreamingWriter;
@@ -203,7 +203,7 @@ fn run_cli_sql_rows(db: &Database, query: &str) -> Vec<Value> {
         &default_batch_mode(),
         UiMode::Batch,
         &mut output,
-        Box::new(JsonlFormatter::new()),
+        OutputFormat::Jsonl,
         None,
         None,
         true,

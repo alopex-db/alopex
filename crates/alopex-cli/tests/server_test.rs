@@ -446,7 +446,6 @@ async fn execute_streaming_request(
     format: OutputFormat,
 ) -> Result<String, CliError> {
     let client = build_test_client(base_url);
-    let formatter = create_formatter(format);
     let mut output = Vec::new();
     execute_remote_with_formatter_control(
         &client,
@@ -454,7 +453,7 @@ async fn execute_streaming_request(
         &batch_mode(),
         UiMode::Batch,
         &mut output,
-        formatter,
+        format,
         SqlExecutionOptions {
             limit: None,
             quiet: false,
@@ -837,7 +836,9 @@ async fn server_sql_streaming_json_array_success() {
         .await
         .expect("streaming output");
     let value: Value = serde_json::from_str(&output).expect("json array");
-    let rows = value.as_array().expect("array");
+    let sets = value.as_array().expect("array of result sets");
+    assert_eq!(sets.len(), 1, "remote sql yields one result set");
+    let rows = sets[0].as_array().expect("rows array");
     assert_eq!(rows.len(), 2);
 
     let first_obj_start = output.find('{').expect("object start");
@@ -882,7 +883,9 @@ async fn server_sql_streaming_jsonl_success() {
         .await
         .expect("streaming output");
     let value: Value = serde_json::from_str(&output).expect("json array");
-    let rows = value.as_array().expect("array");
+    let sets = value.as_array().expect("array of result sets");
+    assert_eq!(sets.len(), 1, "remote sql yields one result set");
+    let rows = sets[0].as_array().expect("rows array");
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["col1"], json!(1));
     assert_eq!(rows[0]["col2"], json!("alpha"));
@@ -912,7 +915,9 @@ async fn server_sql_streaming_empty_array_outputs_json() {
         .await
         .expect("empty output");
     let value: Value = serde_json::from_str(&output).expect("json array");
-    let rows = value.as_array().expect("array");
+    let sets = value.as_array().expect("array of result sets");
+    assert_eq!(sets.len(), 1, "remote sql yields one result set");
+    let rows = sets[0].as_array().expect("rows array");
     assert!(rows.is_empty());
 
     let _ = shutdown.send(());

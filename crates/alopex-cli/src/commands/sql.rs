@@ -9,11 +9,11 @@ use std::io::{self, Read, Write};
 use alopex_embedded::Database;
 
 use crate::batch::BatchMode;
-use crate::cli::SqlCommand;
+use crate::cli::{OutputFormat, SqlCommand};
 use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
-use crate::output::formatter::Formatter;
+use crate::output::formatter::{create_formatter, Formatter};
 use crate::streaming::timeout::parse_deadline;
 use crate::streaming::{CancelSignal, Deadline, StreamingWriter, WriteStatus};
 use crate::tui::{is_tty, TuiApp};
@@ -30,19 +30,61 @@ pub struct SqlExecutionOptions<'a> {
     pub admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
 }
 
+/// Source of formatters for SQL result output.
+///
+/// The `sql` command emits one result block per statement, so a single
+/// invocation may need more than one formatter instance.
+enum SqlOutput<'a> {
+    /// Create formatters from an output format. `OutputFormat::Json` also
+    /// wraps the output in an array of per-statement result sets.
+    Format(OutputFormat),
+    /// Obtain formatters from a caller-supplied factory (e.g. the admin TUI
+    /// capture formatter). No statement-array wrapping is applied.
+    Custom(&'a mut dyn FnMut() -> Box<dyn Formatter>),
+}
+
+impl SqlOutput<'_> {
+    /// Create a formatter for the next result block.
+    fn create_block_formatter(&mut self) -> Box<dyn Formatter> {
+        match self {
+            SqlOutput::Format(format) => create_formatter(*format),
+            SqlOutput::Custom(factory) => factory(),
+        }
+    }
+
+    /// Whether output must be wrapped in an array of per-statement result sets.
+    fn statement_array(&self) -> bool {
+        matches!(self, SqlOutput::Format(OutputFormat::Json))
+    }
+
+    /// Whether the produced formatters support streaming output.
+    fn supports_streaming(&mut self) -> bool {
+        match self {
+            SqlOutput::Format(format) => format.supports_streaming(),
+            SqlOutput::Custom(factory) => factory().supports_streaming(),
+        }
+    }
+}
+
 /// Execute a SQL command with dynamic column detection.
 ///
-/// This function creates the StreamingWriter internally based on the query result type,
+/// This function creates formatters internally based on the query result type,
 /// ensuring that SELECT queries use the correct column headers.
+///
+/// # Output contract
+///
+/// - `--output json` emits an array of per-statement result sets; a single
+///   statement yields a 1-element array.
+/// - Other formats emit one result block per statement, in statement order.
 ///
 /// # Arguments
 ///
 /// * `db` - The database instance.
 /// * `cmd` - The SQL command to execute.
 /// * `writer` - The output writer.
-/// * `formatter` - The formatter to use.
+/// * `output_format` - The output format to use.
 /// * `limit` - Optional row limit.
-/// * `quiet` - Whether to suppress warnings.
+/// * `quiet` - Whether to suppress warnings and status result sets.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_with_formatter<'a, W: Write>(
     db: &Database,
@@ -50,7 +92,7 @@ pub fn execute_with_formatter<'a, W: Write>(
     batch_mode: &BatchMode,
     ui_mode: UiMode,
     writer: &mut W,
-    formatter: Box<dyn Formatter>,
+    output_format: OutputFormat,
     admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
     limit: Option<usize>,
     quiet: bool,
@@ -64,7 +106,46 @@ pub fn execute_with_formatter<'a, W: Write>(
         batch_mode,
         ui_mode,
         writer,
-        formatter,
+        output_format,
+        SqlExecutionOptions {
+            limit,
+            quiet,
+            cancel: &cancel,
+            deadline: &deadline,
+            admin_launcher,
+        },
+    )
+}
+
+/// Execute a SQL command using formatters supplied by `make_formatter`.
+///
+/// One formatter is created per result block (a multi-statement input emits
+/// one block per statement). No JSON statement-array wrapping is applied;
+/// this entry point is intended for callers that capture results with a
+/// custom formatter (e.g. the admin TUI).
+#[allow(clippy::too_many_arguments)]
+pub fn execute_with_formatter_factory<'a, W: Write>(
+    db: &Database,
+    cmd: SqlCommand,
+    batch_mode: &BatchMode,
+    ui_mode: UiMode,
+    writer: &mut W,
+    make_formatter: &mut dyn FnMut() -> Box<dyn Formatter>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    let deadline = Deadline::new(parse_deadline(cmd.deadline.as_deref())?);
+    let cancel = CancelSignal::new();
+    let mut output = SqlOutput::Custom(make_formatter);
+
+    execute_with_output_control(
+        db,
+        cmd,
+        batch_mode,
+        ui_mode,
+        writer,
+        &mut output,
         SqlExecutionOptions {
             limit,
             quiet,
@@ -82,7 +163,20 @@ pub fn execute_with_formatter_control<W: Write>(
     batch_mode: &BatchMode,
     ui_mode: UiMode,
     writer: &mut W,
-    formatter: Box<dyn Formatter>,
+    output_format: OutputFormat,
+    options: SqlExecutionOptions<'_>,
+) -> Result<()> {
+    let mut output = SqlOutput::Format(output_format);
+    execute_with_output_control(db, cmd, batch_mode, ui_mode, writer, &mut output, options)
+}
+
+fn execute_with_output_control<W: Write>(
+    db: &Database,
+    cmd: SqlCommand,
+    batch_mode: &BatchMode,
+    ui_mode: UiMode,
+    writer: &mut W,
+    output: &mut SqlOutput<'_>,
     mut options: SqlExecutionOptions<'_>,
 ) -> Result<()> {
     let sql = cmd.resolve_query(batch_mode)?;
@@ -90,10 +184,10 @@ pub fn execute_with_formatter_control<W: Write>(
     options.limit = effective_limit;
 
     if ui_mode == UiMode::Tui {
-        return execute_tui_local_or_fallback(db, &sql, writer, formatter, options);
+        return execute_tui_local_or_fallback(db, &sql, writer, output, options);
     }
 
-    execute_sql_with_formatter(db, &sql, writer, formatter, &options)
+    execute_sql_with_formatter(db, &sql, writer, output, &options)
 }
 
 fn is_select_query(sql: &str) -> Result<bool> {
@@ -109,6 +203,9 @@ fn is_select_query(sql: &str) -> Result<bool> {
 }
 
 /// Execute a SQL command against a remote server using HttpClient.
+///
+/// `--output json` emits an array of result sets (currently a single element,
+/// matching the local output contract).
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_remote_with_formatter<'a, W: Write>(
     client: &HttpClient,
@@ -116,7 +213,7 @@ pub async fn execute_remote_with_formatter<'a, W: Write>(
     batch_mode: &BatchMode,
     ui_mode: UiMode,
     writer: &mut W,
-    formatter: Box<dyn Formatter>,
+    output_format: OutputFormat,
     admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
     limit: Option<usize>,
     quiet: bool,
@@ -133,7 +230,13 @@ pub async fn execute_remote_with_formatter<'a, W: Write>(
     };
 
     execute_remote_with_formatter_control(
-        client, cmd, batch_mode, ui_mode, writer, formatter, options,
+        client,
+        cmd,
+        batch_mode,
+        ui_mode,
+        writer,
+        output_format,
+        options,
     )
     .await
 }
@@ -149,6 +252,44 @@ fn sql_context_message(sql: &str) -> String {
     }
 }
 
+/// Execute a remote SQL command using formatters supplied by `make_formatter`.
+///
+/// See [`execute_with_formatter_factory`] for the output contract.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_remote_with_formatter_factory<'a, W: Write>(
+    client: &HttpClient,
+    cmd: &SqlCommand,
+    batch_mode: &BatchMode,
+    ui_mode: UiMode,
+    writer: &mut W,
+    make_formatter: &mut dyn FnMut() -> Box<dyn Formatter>,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    let effective_limit = merge_limit(limit, cmd.max_rows);
+    let deadline = Deadline::new(parse_deadline(cmd.deadline.as_deref())?);
+    let cancel = CancelSignal::new();
+    let options = SqlExecutionOptions {
+        limit: effective_limit,
+        quiet,
+        cancel: &cancel,
+        deadline: &deadline,
+        admin_launcher,
+    };
+    let mut output = SqlOutput::Custom(make_formatter);
+    execute_remote_with_output_control(
+        client,
+        cmd,
+        batch_mode,
+        ui_mode,
+        writer,
+        &mut output,
+        options,
+    )
+    .await
+}
+
 #[doc(hidden)]
 pub async fn execute_remote_with_formatter_control<W: Write>(
     client: &HttpClient,
@@ -156,14 +297,36 @@ pub async fn execute_remote_with_formatter_control<W: Write>(
     batch_mode: &BatchMode,
     ui_mode: UiMode,
     writer: &mut W,
-    formatter: Box<dyn Formatter>,
+    output_format: OutputFormat,
+    options: SqlExecutionOptions<'_>,
+) -> Result<()> {
+    let mut output = SqlOutput::Format(output_format);
+    execute_remote_with_output_control(
+        client,
+        cmd,
+        batch_mode,
+        ui_mode,
+        writer,
+        &mut output,
+        options,
+    )
+    .await
+}
+
+async fn execute_remote_with_output_control<W: Write>(
+    client: &HttpClient,
+    cmd: &SqlCommand,
+    batch_mode: &BatchMode,
+    ui_mode: UiMode,
+    writer: &mut W,
+    output: &mut SqlOutput<'_>,
     options: SqlExecutionOptions<'_>,
 ) -> Result<()> {
     let sql = cmd.resolve_query(batch_mode)?;
     if ui_mode == UiMode::Tui {
-        return execute_tui_remote_or_fallback(client, &sql, cmd, writer, formatter, options).await;
+        return execute_tui_remote_or_fallback(client, &sql, cmd, writer, output, options).await;
     }
-    execute_remote_with_formatter_impl(client, &sql, cmd, writer, formatter, &options).await
+    execute_remote_with_formatter_impl(client, &sql, cmd, writer, output, &options).await
 }
 
 async fn execute_remote_with_formatter_impl<W: Write>(
@@ -171,15 +334,15 @@ async fn execute_remote_with_formatter_impl<W: Write>(
     sql: &str,
     cmd: &SqlCommand,
     writer: &mut W,
-    formatter: Box<dyn Formatter>,
+    output: &mut SqlOutput<'_>,
     options: &SqlExecutionOptions<'_>,
 ) -> Result<()> {
-    if is_select_query(sql)? && formatter.supports_streaming() {
+    if is_select_query(sql)? && output.supports_streaming() {
         return execute_remote_streaming(
             client,
             sql,
             writer,
-            formatter,
+            output,
             options,
             cmd.fetch_size,
             cmd.max_rows,
@@ -212,21 +375,43 @@ async fn execute_remote_with_formatter_impl<W: Write>(
         }
     };
 
+    // JSON output is an array of result sets; the remote API currently
+    // returns a single result set, so the array has one element.
+    let json_array = output.statement_array();
+
     if response.columns.is_empty() {
         if options.quiet {
+            if json_array {
+                writeln!(writer, "[")?;
+                writeln!(writer, "]")?;
+            }
             return Ok(());
         }
         let message = match response.affected_rows {
             Some(count) => format!("{count} row(s) affected"),
             None => "Operation completed successfully".to_string(),
         };
+        if json_array {
+            writeln!(writer, "[")?;
+        }
         let columns = sql_status_columns();
-        let mut streaming_writer = StreamingWriter::new(writer, formatter, columns, options.limit)
+        {
+            let mut streaming_writer = StreamingWriter::new(
+                &mut *writer,
+                output.create_block_formatter(),
+                columns,
+                options.limit,
+            )
             .with_quiet(options.quiet);
-        streaming_writer.prepare(Some(1))?;
-        let row = Row::new(vec![Value::Text("OK".to_string()), Value::Text(message)]);
-        streaming_writer.write_row(row)?;
-        return streaming_writer.finish();
+            streaming_writer.prepare(Some(1))?;
+            let row = Row::new(vec![Value::Text("OK".to_string()), Value::Text(message)]);
+            streaming_writer.write_row(row)?;
+            streaming_writer.finish()?;
+        }
+        if json_array {
+            writeln!(writer, "]")?;
+        }
+        return Ok(());
     }
 
     let columns: Vec<Column> = response
@@ -234,36 +419,50 @@ async fn execute_remote_with_formatter_impl<W: Write>(
         .iter()
         .map(|col| Column::new(&col.name, data_type_from_string(&col.data_type)))
         .collect();
-    let mut streaming_writer =
-        StreamingWriter::new(writer, formatter, columns, options.limit).with_quiet(options.quiet);
-    streaming_writer.prepare(Some(response.rows.len()))?;
-    for row in response.rows {
-        if options.cancel.is_cancelled() {
-            let _ = send_cancel_request(client).await;
-            return Err(CliError::Cancelled);
-        }
-        options.deadline.check()?;
-        let values = row.into_iter().map(remote_value_to_value).collect();
-        match streaming_writer.write_row(Row::new(values))? {
-            WriteStatus::LimitReached => break,
-            WriteStatus::Continue => {}
-        }
+    if json_array {
+        writeln!(writer, "[")?;
     }
-    streaming_writer.finish()
+    {
+        let mut streaming_writer = StreamingWriter::new(
+            &mut *writer,
+            output.create_block_formatter(),
+            columns,
+            options.limit,
+        )
+        .with_quiet(options.quiet);
+        streaming_writer.prepare(Some(response.rows.len()))?;
+        for row in response.rows {
+            if options.cancel.is_cancelled() {
+                let _ = send_cancel_request(client).await;
+                return Err(CliError::Cancelled);
+            }
+            options.deadline.check()?;
+            let values = row.into_iter().map(remote_value_to_value).collect();
+            match streaming_writer.write_row(Row::new(values))? {
+                WriteStatus::LimitReached => break,
+                WriteStatus::Continue => {}
+            }
+        }
+        streaming_writer.finish()?;
+    }
+    if json_array {
+        writeln!(writer, "]")?;
+    }
+    Ok(())
 }
 
 fn execute_tui_local_or_fallback<'a, W: Write>(
     db: &Database,
     sql: &str,
     writer: &mut W,
-    formatter: Box<dyn Formatter>,
+    output: &mut SqlOutput<'_>,
     mut options: SqlExecutionOptions<'a>,
 ) -> Result<()> {
     if !is_tty() {
         if !options.quiet {
             eprintln!("Warning: --tui requires a TTY, falling back to batch output.");
         }
-        return execute_sql_with_formatter(db, sql, writer, formatter, &options);
+        return execute_sql_with_formatter(db, sql, writer, output, &options);
     }
 
     let admin_launcher = options.admin_launcher.take();
@@ -273,7 +472,7 @@ fn execute_tui_local_or_fallback<'a, W: Write>(
             if !options.quiet {
                 eprintln!("Warning: TUI failed ({err}); falling back to batch output.");
             }
-            execute_sql_with_formatter(db, sql, writer, formatter, &options)
+            execute_sql_with_formatter(db, sql, writer, output, &options)
         }
     }
 }
@@ -336,14 +535,14 @@ async fn execute_tui_remote_or_fallback<'a, W: Write>(
     sql: &str,
     cmd: &SqlCommand,
     writer: &mut W,
-    formatter: Box<dyn Formatter>,
+    output: &mut SqlOutput<'_>,
     mut options: SqlExecutionOptions<'a>,
 ) -> Result<()> {
     if !is_tty() {
         if !options.quiet {
             eprintln!("Warning: --tui requires a TTY, falling back to batch output.");
         }
-        return execute_remote_with_formatter_impl(client, sql, cmd, writer, formatter, &options)
+        return execute_remote_with_formatter_impl(client, sql, cmd, writer, output, &options)
             .await;
     }
 
@@ -354,7 +553,7 @@ async fn execute_tui_remote_or_fallback<'a, W: Write>(
             if !options.quiet {
                 eprintln!("Warning: TUI failed ({err}); falling back to batch output.");
             }
-            execute_remote_with_formatter_impl(client, sql, cmd, writer, formatter, &options).await
+            execute_remote_with_formatter_impl(client, sql, cmd, writer, output, &options).await
         }
     }
 }
@@ -770,7 +969,7 @@ async fn execute_remote_streaming<W: Write>(
     client: &HttpClient,
     sql: &str,
     writer: &mut W,
-    formatter: Box<dyn Formatter>,
+    output: &mut SqlOutput<'_>,
     options: &SqlExecutionOptions<'_>,
     fetch_size: Option<usize>,
     max_rows: Option<usize>,
@@ -801,6 +1000,34 @@ async fn execute_remote_streaming<W: Write>(
         }
     };
 
+    // JSON output is an array of result sets; the remote streaming API
+    // currently yields a single result set, so the array has one element.
+    let json_array = output.statement_array();
+    if json_array {
+        writeln!(writer, "[")?;
+    }
+    stream_remote_result_set(
+        client,
+        response,
+        writer,
+        output.create_block_formatter(),
+        options,
+    )
+    .await?;
+    if json_array {
+        writeln!(writer, "]")?;
+    }
+    Ok(())
+}
+
+/// Stream a single remote result set (JSON array or JSONL body) to `writer`.
+async fn stream_remote_result_set<W: Write>(
+    client: &HttpClient,
+    response: Response,
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    options: &SqlExecutionOptions<'_>,
+) -> Result<()> {
     if let Some(content_type) = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -1499,11 +1726,14 @@ fn execute_sql<W: Write>(db: &Database, sql: &str, writer: &mut StreamingWriter<
     Ok(())
 }
 
-/// Execute SQL with formatter, dynamically determining columns from query result.
+/// Execute SQL locally, emitting one result block per statement.
 ///
-/// This function executes the SQL using the streaming API for FR-7 compliance,
-/// then creates the StreamingWriter with the correct columns based on the result type
-/// (status columns for DDL/DML, query result columns for SELECT).
+/// - A single SELECT statement uses the streaming path (FR-7).
+/// - Everything else (DDL/DML and multi-statement input) executes all
+///   statements in one transaction via [`Database::execute_sql_multi`] and
+///   emits each statement's result in order.
+/// - For `--output json` the output is always an array of per-statement
+///   result sets (a single statement yields a 1-element array).
 ///
 /// FR-7 Compliance: Uses SQL parser to detect SELECT queries instead of heuristic.
 /// This properly handles:
@@ -1514,7 +1744,7 @@ fn execute_sql_with_formatter<W: Write>(
     db: &Database,
     sql: &str,
     writer: &mut W,
-    formatter: Box<dyn Formatter>,
+    output: &mut SqlOutput<'_>,
     options: &SqlExecutionOptions<'_>,
 ) -> Result<()> {
     use alopex_sql::{AlopexDialect, Parser, StatementKind};
@@ -1524,18 +1754,25 @@ fn execute_sql_with_formatter<W: Write>(
     let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(&dialect, sql).map_err(|e| CliError::Parse(format!("{}", e)))?;
 
-    let is_select = stmts.len() == 1
+    let is_single_select = stmts.len() == 1
         && matches!(
             stmts.first().map(|s| &s.kind),
             Some(StatementKind::Select(_))
         );
 
-    if is_select {
-        // SELECT: use streaming path (FR-7)
-        execute_sql_select_streaming(db, sql, writer, formatter, options)
+    if is_single_select {
+        // Single SELECT: use streaming path (FR-7).
+        let wrap_json = output.statement_array();
+        let formatter = output.create_block_formatter();
+        execute_sql_select_streaming(db, sql, writer, formatter, options, wrap_json)?;
+        if wrap_json {
+            // Close the statement-result array opened by the streaming callback.
+            writeln!(writer, "]")?;
+        }
+        Ok(())
     } else {
-        // DDL/DML: use standard path
-        execute_sql_ddl_dml(db, sql, writer, formatter, options)
+        // DDL/DML and multi-statement input: emit one result block per statement.
+        execute_sql_statements(db, sql, writer, output, options)
     }
 }
 
@@ -1544,12 +1781,17 @@ fn execute_sql_with_formatter<W: Write>(
 /// This function uses `execute_sql_with_rows` for true streaming output.
 /// The callback receives rows one at a time from the iterator, and the
 /// transaction is kept alive during streaming.
+///
+/// When `open_statement_array` is true (JSON output), the callback writes the
+/// opening `[` of the statement-result array before streaming; the caller is
+/// responsible for writing the closing `]` after this function returns.
 fn execute_sql_select_streaming<W: Write>(
     db: &Database,
     sql: &str,
     writer: &mut W,
     formatter: Box<dyn Formatter>,
     options: &SqlExecutionOptions<'_>,
+    open_statement_array: bool,
 ) -> Result<()> {
     use alopex_embedded::StreamingQueryResult;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1571,6 +1813,11 @@ fn execute_sql_select_streaming<W: Write>(
     let result = db.execute_sql_with_rows(sql, |mut rows| {
         // FR-7: SELECT result - stream rows directly from iterator while transaction is alive
         let columns = columns_from_streaming_rows(&rows);
+        // The prefix is written here (not by the caller) so that planning
+        // errors do not leave a dangling `[` on stdout.
+        if open_statement_array {
+            writeln!(writer, "[").map_err(|e| cli_err_to_embedded(CliError::Io(e)))?;
+        }
         let mut streaming_writer = StreamingWriter::new(writer, formatter, columns, options.limit)
             .with_quiet(options.quiet);
 
@@ -1708,77 +1955,115 @@ fn merge_limit(limit: Option<usize>, max_rows: Option<usize>) -> Option<usize> {
     }
 }
 
-/// Execute DDL/DML query (non-SELECT statements).
+/// Execute DDL/DML/multi-statement SQL and emit one result block per statement.
 ///
-/// This function handles CREATE, DROP, INSERT, UPDATE, DELETE and other
-/// non-SELECT statements. It outputs status messages (OK, rows affected).
-fn execute_sql_ddl_dml<W: Write>(
+/// All statements run in a single auto-commit transaction
+/// ([`Database::execute_sql_multi`]); if any statement fails, the whole batch
+/// is rolled back and an error is returned (non-zero exit code).
+///
+/// Output contract:
+/// - `--output json`: an array of per-statement result sets. DDL/DML
+///   statements contribute a status result set (`status`/`message` columns);
+///   `--quiet` omits status result sets.
+/// - Other formats: one result block per statement, in statement order
+///   (status blocks are suppressed by `--quiet`).
+fn execute_sql_statements<W: Write>(
     db: &Database,
     sql: &str,
     writer: &mut W,
-    formatter: Box<dyn Formatter>,
+    output: &mut SqlOutput<'_>,
     options: &SqlExecutionOptions<'_>,
 ) -> Result<()> {
     use alopex_sql::ExecutionResult;
 
     options.deadline.check()?;
-    let result = db.execute_sql(sql)?;
+    let results = db.execute_sql_multi(sql)?;
     options.deadline.check()?;
 
-    match result {
-        ExecutionResult::Success => {
-            // DDL success - suppress status output in quiet mode
-            if !options.quiet {
-                let columns = sql_status_columns();
-                let mut streaming_writer =
-                    StreamingWriter::new(writer, formatter, columns, options.limit)
-                        .with_quiet(options.quiet);
-                streaming_writer.prepare(Some(1))?;
-                let row = Row::new(vec![
-                    Value::Text("OK".to_string()),
-                    Value::Text("Operation completed successfully".to_string()),
-                ]);
-                streaming_writer.write_row(row)?;
-                streaming_writer.finish()?;
-            }
+    let json_array = output.statement_array();
+    if json_array {
+        writeln!(writer, "[")?;
+    }
+    let mut first = true;
+    for result in results {
+        let is_status = !matches!(result, ExecutionResult::Query(_));
+        if is_status && options.quiet {
+            continue;
         }
+        if json_array && !first {
+            writeln!(writer, ",")?;
+        }
+        first = false;
+        emit_execution_result(result, writer, output, options)?;
+    }
+    if json_array {
+        writeln!(writer, "]")?;
+    }
+    Ok(())
+}
+
+/// Emit a single statement's execution result as one result block.
+fn emit_execution_result<W: Write>(
+    result: alopex_sql::ExecutionResult,
+    writer: &mut W,
+    output: &mut SqlOutput<'_>,
+    options: &SqlExecutionOptions<'_>,
+) -> Result<()> {
+    use alopex_sql::ExecutionResult;
+
+    match result {
+        ExecutionResult::Success => emit_status_result(
+            writer,
+            output,
+            options,
+            "Operation completed successfully".to_string(),
+        ),
         ExecutionResult::RowsAffected(count) => {
-            // DML success - suppress status output in quiet mode
-            if !options.quiet {
-                let columns = sql_status_columns();
-                let mut streaming_writer =
-                    StreamingWriter::new(writer, formatter, columns, options.limit)
-                        .with_quiet(options.quiet);
-                streaming_writer.prepare(Some(1))?;
-                let row = Row::new(vec![
-                    Value::Text("OK".to_string()),
-                    Value::Text(format!("{} row(s) affected", count)),
-                ]);
-                streaming_writer.write_row(row)?;
-                streaming_writer.finish()?;
-            }
+            emit_status_result(writer, output, options, format!("{count} row(s) affected"))
         }
         ExecutionResult::Query(query_result) => {
-            // Unexpected: non-SELECT should not return Query result
-            // But handle it gracefully by outputting the result
             let columns = columns_from_query_result(&query_result);
-            let mut streaming_writer =
-                StreamingWriter::new(writer, formatter, columns, options.limit)
-                    .with_quiet(options.quiet);
+            let mut streaming_writer = StreamingWriter::new(
+                &mut *writer,
+                output.create_block_formatter(),
+                columns,
+                options.limit,
+            )
+            .with_quiet(options.quiet);
             streaming_writer.prepare(Some(query_result.rows.len()))?;
             for sql_row in query_result.rows {
                 let values: Vec<Value> = sql_row.into_iter().map(sql_value_to_value).collect();
-                let row = Row::new(values);
-                match streaming_writer.write_row(row)? {
+                match streaming_writer.write_row(Row::new(values))? {
                     WriteStatus::LimitReached => break,
                     WriteStatus::Continue => {}
                 }
             }
-            streaming_writer.finish()?;
+            streaming_writer.finish()
         }
     }
+}
 
-    Ok(())
+/// Emit an `OK` status result set (`status`/`message` columns).
+fn emit_status_result<W: Write>(
+    writer: &mut W,
+    output: &mut SqlOutput<'_>,
+    options: &SqlExecutionOptions<'_>,
+    message: String,
+) -> Result<()> {
+    let columns = sql_status_columns();
+    let mut streaming_writer = StreamingWriter::new(
+        &mut *writer,
+        output.create_block_formatter(),
+        columns,
+        options.limit,
+    )
+    .with_quiet(options.quiet);
+    streaming_writer.prepare(Some(1))?;
+    streaming_writer.write_row(Row::new(vec![
+        Value::Text("OK".to_string()),
+        Value::Text(message),
+    ]))?;
+    streaming_writer.finish()
 }
 
 /// Convert alopex_sql::SqlValue to our Value type.
@@ -1855,7 +2140,6 @@ fn sql_column_to_column(col: &alopex_sql::executor::ColumnInfo) -> Column {
 }
 
 /// Create columns from SQL query result.
-#[allow(dead_code)] // Used by tests with legacy execute_sql function
 fn columns_from_query_result(query_result: &alopex_sql::executor::QueryResult) -> Vec<Column> {
     query_result
         .columns
