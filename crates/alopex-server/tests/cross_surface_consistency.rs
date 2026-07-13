@@ -64,7 +64,13 @@ fn toml_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "\\\\")
 }
 
-fn write_config(dir: &Path, http_port: u16, admin_port: u16, grpc_port: u16) -> PathBuf {
+fn write_config_with_extra(
+    dir: &Path,
+    http_port: u16,
+    admin_port: u16,
+    grpc_port: u16,
+    extra: &str,
+) -> PathBuf {
     let config_path = dir.join("alopex.toml");
     let contents = format!(
         "\
@@ -75,11 +81,15 @@ data_dir = \"{data_dir}\"
 metrics_enabled = false
 tracing_enabled = false
 audit_log_enabled = false
-",
+{extra}",
         data_dir = toml_path(dir),
     );
     fs::write(&config_path, contents).expect("write config");
     config_path
+}
+
+fn write_config(dir: &Path, http_port: u16, admin_port: u16, grpc_port: u16) -> PathBuf {
+    write_config_with_extra(dir, http_port, admin_port, grpc_port, "")
 }
 
 fn read_stderr(child: &mut Child) -> String {
@@ -370,6 +380,61 @@ fn cluster_aware_config(data_dir: PathBuf, membership_source_available: bool) ->
     }
 }
 
+/// サーバーバイナリを起動し、admin と HTTP API 両方の readiness を待つ。
+/// (v0.7 以降は surface ごとに起動タイミングが異なるため両方を確認する)
+async fn spawn_server_and_wait(
+    config_path: &Path,
+    http_url: &str,
+    admin_url: &str,
+) -> (ChildGuard, Client<hyper::client::HttpConnector>) {
+    let child = Command::new(env!("CARGO_BIN_EXE_alopex-server"))
+        .arg("--config")
+        .arg(config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn server");
+    let mut guard = ChildGuard::new(child);
+
+    let client = Client::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut admin_ready = false;
+    let mut api_ready = false;
+    while Instant::now() < deadline {
+        if let Ok(Some(status)) = guard.child_mut().try_wait() {
+            let stderr_output = read_stderr(guard.child_mut());
+            panic!("alopex-server exited early ({status}). stderr:\n{stderr_output}");
+        }
+        if !admin_ready {
+            if let Some(status) =
+                try_send_empty(&client, Method::GET, &format!("{admin_url}/healthz")).await
+            {
+                admin_ready = status == StatusCode::OK;
+            }
+        }
+        if !api_ready {
+            if let Some(status) = try_send_empty(
+                &client,
+                Method::GET,
+                &format!("{http_url}/api/admin/health"),
+            )
+            .await
+            {
+                api_ready = status == StatusCode::OK;
+            }
+        }
+        if admin_ready && api_ready {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    if !(admin_ready && api_ready) {
+        let stderr_output = read_stderr(guard.child_mut());
+        panic!("alopex-server failed health check. stderr:\n{stderr_output}");
+    }
+    (guard, client)
+}
+
 fn http_sql_value_to_i64(value: &Value) -> i64 {
     if let Some(obj) = value.as_object() {
         if let Some(v) = obj.get("Integer").and_then(Value::as_i64) {
@@ -405,38 +470,7 @@ async fn grpc_execute_sql_matches_http_for_scalar_subquery_select() {
     let config_path = write_config(temp.path(), http_port, admin_port, grpc_port);
     let http_url = format!("http://127.0.0.1:{http_port}");
     let admin_url = format!("http://127.0.0.1:{admin_port}");
-
-    let child = Command::new(env!("CARGO_BIN_EXE_alopex-server"))
-        .arg("--config")
-        .arg(&config_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn server");
-    let mut guard = ChildGuard::new(child);
-
-    let client = Client::new();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let mut ready = false;
-    while Instant::now() < deadline {
-        if let Ok(Some(status)) = guard.child_mut().try_wait() {
-            let stderr_output = read_stderr(guard.child_mut());
-            panic!("alopex-server exited early ({status}). stderr:\n{stderr_output}");
-        }
-        if let Some(status) =
-            try_send_empty(&client, Method::GET, &format!("{admin_url}/healthz")).await
-        {
-            if status == StatusCode::OK {
-                ready = true;
-                break;
-            }
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    if !ready {
-        let stderr_output = read_stderr(guard.child_mut());
-        panic!("alopex-server failed health check. stderr:\n{stderr_output}");
-    }
+    let (_guard, client) = spawn_server_and_wait(&config_path, &http_url, &admin_url).await;
 
     for sql in [
         "CREATE TABLE parity_items (id INT PRIMARY KEY, val INT);",
@@ -516,6 +550,78 @@ async fn grpc_execute_sql_matches_http_for_scalar_subquery_select() {
         grpc_rows, http_rows,
         "gRPC ExecuteSql must return the same rows as HTTP /sql for scalar subquery SELECT"
     );
+}
+
+/// max_response_size 超過時、HTTP `/sql` と gRPC ExecuteSql が同一経路で
+/// 同様にサイズ上限エラーを返すこと (issue #25 統一経路の回帰ガード)。
+/// HTTP は 413 PAYLOAD_TOO_LARGE、gRPC はその写像である ResourceExhausted。
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn grpc_execute_sql_enforces_max_response_size_like_http() {
+    let temp = tempdir().expect("tempdir");
+    let mut used = HashSet::new();
+    let http_port = reserve_unique_port(&mut used);
+    let admin_port = reserve_unique_port(&mut used);
+    let grpc_port = reserve_unique_port(&mut used);
+    // v0.7 以降の SqlResponse は routing_diagnostics を含むため、セットアップ
+    // 応答 (CREATE/INSERT) が上限に触れない程度の余裕を持たせつつ、
+    // 大きな行を返す SELECT だけが確実に超過するサイズに設定する。
+    let config_path = write_config_with_extra(
+        temp.path(),
+        http_port,
+        admin_port,
+        grpc_port,
+        "max_response_size = 8192\n",
+    );
+    let http_url = format!("http://127.0.0.1:{http_port}");
+    let admin_url = format!("http://127.0.0.1:{admin_port}");
+    let (_guard, client) = spawn_server_and_wait(&config_path, &http_url, &admin_url).await;
+
+    let payload = "x".repeat(32 * 1024);
+    for sql in [
+        "CREATE TABLE limit_items (id INT PRIMARY KEY, payload TEXT);".to_string(),
+        format!("INSERT INTO limit_items (id, payload) VALUES (1, '{payload}');"),
+    ] {
+        let (status, body) = send_json(
+            &client,
+            Method::POST,
+            &format!("{http_url}/sql"),
+            json!({ "sql": sql }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "setup sql failed: {body}");
+    }
+
+    let query = "SELECT payload FROM limit_items;";
+
+    let (status, http_result) = send_json(
+        &client,
+        Method::POST,
+        &format!("{http_url}/sql"),
+        json!({ "sql": query }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "http must reject oversized response: {http_result}"
+    );
+
+    let channel = tonic::transport::Channel::from_shared(format!("http://127.0.0.1:{grpc_port}"))
+        .expect("grpc uri")
+        .connect()
+        .await
+        .expect("grpc connect");
+    let mut grpc_client =
+        alopex_server::grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+    let err = grpc_client
+        .execute_sql(alopex_server::grpc::proto::SqlRequest {
+            sql: query.to_string(),
+            session_id: String::new(),
+        })
+        .await
+        .expect_err("grpc must reject oversized response");
+    assert_eq!(err.code(), tonic::Code::ResourceExhausted);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
