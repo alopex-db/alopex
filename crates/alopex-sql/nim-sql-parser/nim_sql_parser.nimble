@@ -29,5 +29,16 @@ task lib, "Build shared library":
       "libalopex_sql_parser.dylib"
     else:
       "libalopex_sql_parser.so"
-  exec "nim c -d:release --app:lib --mm:orc --opt:speed -o:" & outName &
-    " src/alopex_sql_parser.nim"
+  # Windows: MinGW ランタイム (libgcc_s_seh-1.dll / libwinpthread-1.dll 等) を
+  # DLL へ静的リンクし、DLL を自己完結にする。Python の os.add_dll_directory()
+  # は登録ディレクトリから推移的依存も解決するが、MinGW ランタイム DLL は
+  # ビルド環境固有で配置が保証されないため、動的リンクのままだと
+  # `import alopex` が DLL load failed になる (PR #32)。DLL 同梱 (issue #33) の
+  # 布石として静的リンクを採用する。Linux/macOS のフラグは不変。
+  let staticFlags =
+    when defined(windows):
+      " --passL:-static --passL:-static-libgcc"
+    else:
+      ""
+  exec "nim c -d:release --app:lib --mm:orc --opt:speed" & staticFlags &
+    " -o:" & outName & " src/alopex_sql_parser.nim"

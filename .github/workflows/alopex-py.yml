@@ -157,6 +157,41 @@ jobs:
           cd "${NIM_SQL_PARSER_DIR}"
           nimble install -y npeg msgpack4nim
           nimble lib
+      # 診断専用ステップ (fail させない): DLL の推移的依存と単体ロード可否を
+      # CI ログへ出力する。静的リンク (nim_sql_parser.nimble) が不十分な場合、
+      # 次の CI 実行でどの依存 DLL が残っているかをここで特定できる。
+      - name: Diagnose Nim parser DLL dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          dll_unix="${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}/alopex_sql_parser.dll"
+          echo "=== DLL file ==="
+          ls -la "$dll_unix" || true
+          echo "=== Import table (objdump -p | DLL Name) ==="
+          if command -v objdump >/dev/null 2>&1; then
+            objdump -p "$dll_unix" | grep "DLL Name" || true
+          else
+            echo "objdump not available on this runner"
+          fi
+          echo "=== ctypes.WinDLL load test ==="
+          python - <<'PY' || true
+          import ctypes
+          import os
+          import traceback
+
+          dll = os.path.join(
+              os.environ["GITHUB_WORKSPACE"],
+              *os.environ["NIM_SQL_PARSER_DIR"].split("/"),
+              "alopex_sql_parser.dll",
+          )
+          print("loading:", dll)
+          try:
+              ctypes.WinDLL(dll)
+              print("WinDLL load: OK")
+          except Exception:
+              traceback.print_exc()
+          PY
+          exit 0
       # Windows は rpath を持たないため、alopex_sql_parser.dll の解決を明示的に
       # 設定する。Python 3.8+ (bpo-36085) は拡張モジュールの依存 DLL 解決に
       # PATH を「使わない」ため、PATH 追加だけでは `import alopex` が
