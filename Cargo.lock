@@ -227,7 +227,9 @@ version = "0.4.0"
 dependencies = [
  "alopex-cluster",
  "alopex-core",
+ "alopex-dataframe",
  "alopex-embedded",
+ "arrow",
  "criterion",
  "numpy",
  "proptest",

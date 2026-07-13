@@ -4,12 +4,14 @@ use pyo3::types::PyModule;
 mod catalog;
 pub(crate) mod cluster;
 mod config;
+mod dataframe;
 mod results;
 
 pub use catalog::{PyCatalogInfo, PyColumnInfo, PyNamespaceInfo, PyTableInfo};
 pub use config::{
     PyDatabaseOptions, PyEmbeddedConfig, PyHnswConfig, PyMetric, PyStorageMode, PyTxnMode,
 };
+pub use dataframe::{PyDataFrame, PyDatetimeNamespace, PyListNamespace, PyStringNamespace};
 pub use results::{PyHnswStats, PyMemoryStats, PySearchResult};
 
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -19,6 +21,10 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyHnswConfig>()?;
     m.add_class::<PyEmbeddedConfig>()?;
     m.add_class::<PyDatabaseOptions>()?;
+    m.add_class::<PyDataFrame>()?;
+    m.add_class::<PyStringNamespace>()?;
+    m.add_class::<PyDatetimeNamespace>()?;
+    m.add_class::<PyListNamespace>()?;
     m.add_class::<PySearchResult>()?;
     m.add_class::<PyHnswStats>()?;
     m.add_class::<PyMemoryStats>()?;
