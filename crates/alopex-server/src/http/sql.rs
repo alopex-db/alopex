@@ -132,7 +132,12 @@ pub async fn handle(
     }
 }
 
-async fn execute_non_streaming(
+/// SQL を非ストリーミングで実行する共有経路。
+///
+/// HTTP `/sql` と gRPC `ExecuteSql` (issue #25) の両方から呼ばれる。
+/// SQL の実行セマンティクス (タイムアウト・コミット/ロールバック・
+/// 監査ログ・カタログ同期・メトリクス) はこの関数に集約する。
+pub(crate) async fn execute_non_streaming(
     state: Arc<ServerState>,
     request: &SqlRequest,
     ctx: &RequestContext,

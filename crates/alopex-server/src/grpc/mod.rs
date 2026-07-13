@@ -3,16 +3,11 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
-use alopex_core::kv::async_adapter::AsyncKVTransactionAdapter;
-use alopex_sql::parser::Parser;
-use alopex_sql::storage::AsyncSqlTransaction;
-use alopex_sql::AlopexDialect;
 use futures::{future::BoxFuture, StreamExt};
 use prost::Message;
 use tokio::sync::broadcast;
-use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{async_trait, Request, Response, Status};
 use tower::{Layer, Service};
 use uuid::Uuid;
@@ -20,12 +15,12 @@ use uuid::Uuid;
 use crate::error::{Result, ServerError};
 use crate::http::sql::{
     execute_non_session_statement_with_routing, execute_session_statement_with_routing,
-    route_session_statement_for_execution, sync_catalog_to_store,
+    sync_catalog_to_store,
 };
 use crate::metrics::Metrics;
 use crate::ops::memory::MemoryControlPolicy;
 use crate::server::ServerState;
-use crate::session::{SessionId, TxnHandle};
+use crate::session::SessionId;
 use crate::tls;
 
 pub mod proto {
@@ -174,17 +169,10 @@ struct AlopexServiceImpl {
     state: Arc<ServerState>,
 }
 
-type AsyncTxn =
-    alopex_sql::storage::async_storage::AsyncTxnBridge<'static, AsyncKVTransactionAdapter>;
-
-enum StreamSource {
-    Txn(AsyncTxn),
-    Handle(TxnHandle),
-}
-
 #[async_trait]
 impl AlopexService for AlopexServiceImpl {
-    type ExecuteSqlStream = ReceiverStream<std::result::Result<proto::Row, Status>>;
+    type ExecuteSqlStream =
+        tokio_stream::Iter<std::vec::IntoIter<std::result::Result<proto::Row, Status>>>;
 
     async fn execute_sql(
         &self,
@@ -197,166 +185,62 @@ impl AlopexService for AlopexServiceImpl {
         if req.sql.trim().is_empty() {
             return Err(Status::invalid_argument("sql must not be empty"));
         }
-        if is_write_sql(&req.sql) {
-            if let Err(err) = self.state.lifecycle_state.check_write_allowed() {
-                return Err(map_status(err, &ctx.correlation_id));
+
+        // issue #25: HTTP `/sql` (非ストリーミング) と同一の実行経路に統一する。
+        // 旧来のストリーミング専用経路 (async_query) は SELECT リスト内の
+        // スカラーサブクエリ等を実行できず、同一 SQL でも HTTP と結果が
+        // 分岐していた。書き込み許可チェック・タイムアウト・コミット/
+        // ロールバック・監査ログ・メトリクスは execute_non_streaming に集約する。
+        let http_request = crate::http::sql::SqlRequest {
+            sql: req.sql,
+            session_id: if req.session_id.is_empty() {
+                None
+            } else {
+                Some(req.session_id)
+            },
+            streaming: false,
+        };
+        let http_ctx = crate::http::RequestContext {
+            correlation_id: ctx.correlation_id.clone(),
+            actor: ctx.actor.clone(),
+        };
+        let result =
+            crate::http::sql::execute_non_streaming(self.state.clone(), &http_request, &http_ctx)
+                .await
+                .map_err(|err| map_status(err, &ctx.correlation_id))?;
+
+        // パリティのため SELECT 以外 (DML/DDL) も HTTP `/sql` と同様に実行・
+        // コミットされる。stream Row は affected_rows / success を表現できない
+        // ため、これらの結果は空ストリーム (正常終了) となる。
+        //
+        // TODO(#25): proto::Row は列名メタデータを持たないため、result.columns は
+        // ここで失われる。列名メタデータおよび DML/DDL の affected_rows / success
+        // の表現追加は proto 変更を伴うため別対応 (issue #25 参照)。
+        //
+        // 行の変換は元の行を消費しながら行い、累積エンコードサイズが
+        // メモリポリシーまたは max_response_size を超えた時点で即エラーを返す。
+        let memory_policy = MemoryControlPolicy::from_env();
+        let mut bytes_total = 0usize;
+        let mut rows = Vec::with_capacity(result.rows.len());
+        for row in result.rows {
+            let proto_row = proto::Row {
+                values: row.iter().map(sql_value_to_proto).collect(),
+            };
+            bytes_total = bytes_total.saturating_add(proto_row.encoded_len());
+            memory_policy
+                .enforce_output_bytes(bytes_total as u64)
+                .map_err(|err| map_status(err, &ctx.correlation_id))?;
+            if bytes_total > self.state.config.max_response_size {
+                return Err(map_status(
+                    ServerError::PayloadTooLarge("response size exceeds limit".into()),
+                    &ctx.correlation_id,
+                ));
             }
+            rows.push(Ok(proto_row));
         }
 
-        let (sender, receiver) = mpsc::channel(32);
-        let sql = req.sql;
-        let session_id = if req.session_id.is_empty() {
-            None
-        } else {
-            Some(
-                req.session_id
-                    .parse::<SessionId>()
-                    .map_err(|_| Status::invalid_argument("invalid session_id"))?,
-            )
-        };
-        let state = self.state.clone();
-        let correlation_id = ctx.correlation_id.clone();
-        let span = ctx.span.clone();
-        let memory_policy = MemoryControlPolicy::from_env();
-        tokio::spawn(async move {
-            let _enter = span.enter();
-            let start = Instant::now();
-            let deadline = start + state.config.query_timeout;
-            let mut bytes_sent = 0usize;
-            let mut success = true;
-            let mut source = match session_id {
-                Some(id) => match state.session_manager.get_transaction(&id).await {
-                    Ok(handle) => {
-                        if let Err(err) = route_session_statement_for_execution(
-                            &state,
-                            &handle,
-                            &sql,
-                            &correlation_id,
-                        )
-                        .await
-                        {
-                            let _ = sender.send(Err(map_status(err, &correlation_id))).await;
-                            return;
-                        }
-                        StreamSource::Handle(handle)
-                    }
-                    Err(err) => {
-                        let _ = sender.send(Err(map_status(err, &correlation_id))).await;
-                        return;
-                    }
-                },
-                None => match state.begin_sql_txn().await {
-                    Ok(txn) => StreamSource::Txn(txn),
-                    Err(err) => {
-                        let _ = sender.send(Err(map_status(err, &correlation_id))).await;
-                        return;
-                    }
-                },
-            };
-
-            let mut stream = match &mut source {
-                StreamSource::Handle(handle) => handle.query(&sql),
-                StreamSource::Txn(txn) => txn.async_query(&sql),
-            };
-            loop {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    let _ = sender
-                        .send(Err(map_status(
-                            ServerError::Timeout("query timeout".into()),
-                            &correlation_id,
-                        )))
-                        .await;
-                    success = false;
-                    break;
-                }
-
-                tokio::select! {
-                    _ = sender.closed() => {
-                        success = false;
-                        break;
-                    }
-                    item = tokio::time::timeout(remaining, stream.next()) => {
-                        let next = match item {
-                            Ok(value) => value,
-                            Err(_) => {
-                                let _ = sender
-                                    .send(Err(map_status(
-                                        ServerError::Timeout("query timeout".into()),
-                                        &correlation_id,
-                                    )))
-                                    .await;
-                                success = false;
-                                break;
-                            }
-                        };
-
-                        match next {
-                            Some(Ok(row)) => {
-                                let proto_row = proto::Row {
-                                    values: row.values.iter().map(sql_value_to_proto).collect(),
-                                };
-                                bytes_sent = bytes_sent.saturating_add(proto_row.encoded_len());
-                                if let Err(err) =
-                                    memory_policy.enforce_output_bytes(bytes_sent as u64)
-                                {
-                                    let _ = sender
-                                        .send(Err(map_status(err, &correlation_id)))
-                                        .await;
-                                    success = false;
-                                    break;
-                                }
-                                if bytes_sent > state.config.max_response_size {
-                                    let _ = sender
-                                        .send(Err(map_status(
-                                            ServerError::PayloadTooLarge(
-                                                "response size exceeds limit".into(),
-                                            ),
-                                            &correlation_id,
-                                        )))
-                                        .await;
-                                    success = false;
-                                    break;
-                                }
-                                match sender.try_send(Ok(proto_row)) {
-                                    Ok(()) => {}
-                                    Err(mpsc::error::TrySendError::Full(item)) => {
-                                        state.metrics.record_backpressure();
-                                        if sender.send(item).await.is_err() {
-                                            success = false;
-                                            break;
-                                        }
-                                    }
-                                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                                        success = false;
-                                        break;
-                                    }
-                                }
-                            }
-                            Some(Err(err)) => {
-                                let _ = sender
-                                    .send(Err(map_status(
-                                        ServerError::Sql(err.into()),
-                                        &correlation_id,
-                                    )))
-                                    .await;
-                                success = false;
-                                break;
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-
-            drop(stream);
-            if let StreamSource::Txn(txn) = source {
-                let _ = txn.async_rollback().await;
-            }
-            state.metrics.record_query(start.elapsed(), success);
-        });
-
-        Ok(Response::new(ReceiverStream::new(receiver)))
+        // 変換済みの Vec をそのまま応答ストリームにする (中間チャネル無し)。
+        Ok(Response::new(tokio_stream::iter(rows)))
     }
 
     async fn execute_ddl(
@@ -850,13 +734,4 @@ fn map_status(err: ServerError, correlation_id: &str) -> Status {
         format!("{} (correlation_id={})", err, correlation_id)
     };
     Status::new(code, message)
-}
-
-fn is_write_sql(sql: &str) -> bool {
-    let Ok(statements) = Parser::parse_sql(&AlopexDialect, sql) else {
-        return false;
-    };
-    statements
-        .iter()
-        .any(|stmt| !matches!(stmt.kind, alopex_sql::ast::StatementKind::Select(_)))
 }
