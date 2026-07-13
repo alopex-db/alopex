@@ -6,7 +6,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 NIM_SQL_PARSER_DIR="${NIM_SQL_PARSER_DIR:-crates/alopex-sql/nim-sql-parser}"
-NIM_SQL_PARSER_ABS="${PROJECT_ROOT}/${NIM_SQL_PARSER_DIR}"
+if [[ "${NIM_SQL_PARSER_DIR}" = /* ]]; then
+    NIM_SQL_PARSER_ABS="${NIM_SQL_PARSER_DIR}"
+else
+    NIM_SQL_PARSER_ABS="${PROJECT_ROOT}/${NIM_SQL_PARSER_DIR}"
+fi
 V07_GATE_VENV_DIR="${V07_GATE_VENV_DIR:-${TMPDIR:-/tmp}/alopex-v07-gate-venv}"
 V07_GATE_CACHE_DIR="${V07_GATE_CACHE_DIR:-${TMPDIR:-/tmp}/alopex-v07-gate-cache}"
 V07_GATE_RUN_V06="${V07_GATE_RUN_V06:-1}"
@@ -87,6 +91,7 @@ configure_environment() {
     export UV_CACHE_DIR="${V07_GATE_CACHE_DIR}/uv"
     export PIP_CACHE_DIR="${V07_GATE_CACHE_DIR}/pip"
     export XDG_CACHE_HOME="${V07_GATE_CACHE_DIR}/xdg"
+    export NIM_SQL_PARSER_LIB_DIR="${NIM_SQL_PARSER_ABS}"
     export LD_LIBRARY_PATH="${NIM_SQL_PARSER_ABS}:${LD_LIBRARY_PATH:-}"
     export DYLD_LIBRARY_PATH="${NIM_SQL_PARSER_ABS}:${DYLD_LIBRARY_PATH:-}"
     export PATH="${NIM_SQL_PARSER_ABS}:${PATH}"
@@ -113,6 +118,12 @@ configure_python_environment() {
     export PATH="${VIRTUAL_ENV}/bin:${PATH}"
     export PYO3_PYTHON="${VIRTUAL_ENV}/bin/python"
     export PYTHON_SYS_EXECUTABLE="${VIRTUAL_ENV}/bin/python"
+    local python_lib_dir
+    python_lib_dir="$("${PYTHON_SYS_EXECUTABLE}" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+    if [[ -n "${python_lib_dir}" ]]; then
+        export LD_LIBRARY_PATH="${python_lib_dir}:${LD_LIBRARY_PATH:-}"
+        export DYLD_LIBRARY_PATH="${python_lib_dir}:${DYLD_LIBRARY_PATH:-}"
+    fi
 
     log_info "Python executable: ${PYTHON_SYS_EXECUTABLE}"
 }

@@ -395,23 +395,39 @@ async fn cross_surface_consistency_cli_and_server_share_expected_results() {
 
     let client = Client::new();
     let deadline = Instant::now() + Duration::from_secs(15);
-    let mut ready = false;
+    let mut admin_ready = false;
+    let mut api_ready = false;
     while Instant::now() < deadline {
         if let Ok(Some(status)) = guard.child_mut().try_wait() {
             let stderr_output = read_stderr(guard.child_mut());
             panic!("alopex-server exited early ({status}). stderr:\n{stderr_output}");
         }
-        if let Some(status) =
-            try_send_empty(&client, Method::GET, &format!("{admin_url}/healthz")).await
-        {
-            if status == StatusCode::OK {
-                ready = true;
-                break;
+
+        if !admin_ready {
+            if let Some(status) =
+                try_send_empty(&client, Method::GET, &format!("{admin_url}/healthz")).await
+            {
+                admin_ready = status == StatusCode::OK;
             }
+        }
+        if !api_ready {
+            if let Some(status) = try_send_empty(
+                &client,
+                Method::GET,
+                &format!("{http_url}/api/admin/health"),
+            )
+            .await
+            {
+                api_ready = status == StatusCode::OK;
+            }
+        }
+
+        if admin_ready && api_ready {
+            break;
         }
         sleep(Duration::from_millis(100)).await;
     }
-    if !ready {
+    if !(admin_ready && api_ready) {
         let stderr_output = read_stderr(guard.child_mut());
         panic!("alopex-server failed health check. stderr:\n{stderr_output}");
     }
