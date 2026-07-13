@@ -23,12 +23,16 @@
 #     セキュリティ追随を優先する(個別ピンは bookworm のポイントリリースで
 #     壊れやすく、保守コストに見合わない)。
 #
-# リポジトリはビルド時に COPY せず、実行時にマウントして使う:
+# リポジトリはビルド時に COPY せず、実行時にマウントして使う。
+# v0.7.0 以降、alopex-cluster が chirps リポジトリへのパス依存
+# (../../../../chirps、optional でも manifest 読込は必須)を持つため、
+# chirps の checkout を /chirps に読み取り専用でマウントする:
 #
 #   docker build -t alopex-parity -f scripts/parity/Dockerfile scripts/parity
 #   docker run --rm -it \
 #     --user "$(id -u):$(id -g)" -e HOME=/home/parity \
-#     -v "$PWD":/workspace -w /workspace \
+#     -v "$PWD":/workspace -v <path-to-chirps>:/chirps:ro \
+#     -w /workspace \
 #     alopex-parity \
 #     python3 scripts/parity/verify.py \
 #       --corpus scripts/parity/corpus --expected scripts/parity/expected

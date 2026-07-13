@@ -111,9 +111,9 @@ def gate_corpus_errors(act_label: str, records: Sequence[Dict[str, Any]]) -> Non
         for record in read_only:
             print(f"     - sql: {_one_line(record['sql'], 80)}")
             print(f"       err: {_one_line(record['error_message'] or '')}")
-        print("     注記: これらは verify.py の S2-a が INV-2 違反として検出する")
-        print("           既知のサーフェス逸脱(CLI ストリーミング経路のサブクエリ")
-        print("           未対応)。幕の合否は幕末検証(期待値一致)のみで判定する。")
+        print("     注記: 読み取り専用文のエラーはサーフェス逸脱の兆候であり、")
+        print("           verify.py の S2-a が INV-2 違反として検出・報告する。")
+        print("           幕の合否は幕末検証(期待値一致)のみで判定する。")
 
     if state_changing:
         first = state_changing[0]
@@ -194,11 +194,10 @@ def act1_memory(
 ) -> None:
     banner(1, "SF-MEM", "ライブラリ(インメモリ)— 永続化なしで全コーパスを実行")
     # SF-MEM は仕様上「alopex-embedded API / CLI --in-memory」の両経路を許容
-    # する。CLI --in-memory は複数文を 1 プロセスに渡すと最後の文の結果のみを
-    # 出力する製品挙動(別途バグ報告予定)のため、第 1 幕は組み込み API
-    # (インメモリ)経路で実行する。
-    print("  補足: CLI --in-memory は複数文入力に対し最後の文の結果のみを出力する"
-          "製品挙動のため、本幕は組み込み API(インメモリ)で実行する。")
+    # する。第 1 幕は「ライブラリ」フォームファクタの実演であるため、
+    # 組み込み API(インメモリ)経路で実行する。
+    print("  補足: 本幕は「ライブラリ」フォームファクタの実演として"
+          "組み込み API(インメモリ)で実行する。")
 
     # インメモリは永続化がなく全文を単一プロセスで実行する必要がある。
     # parity_corpus.rs の writer ロールは「先頭数字 1〜7 の *.sql を名前順に
