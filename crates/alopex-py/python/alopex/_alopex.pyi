@@ -333,6 +333,27 @@ class Database:
     def begin(self, mode: Optional[TxnMode] = None) -> "Transaction": ...
     def flush(self) -> None: ...
     def memory_usage(self) -> MemoryStats: ...
+    def cluster_status(self) -> Dict[str, Any]:
+        """Return a cluster status snapshot as a dict.
+
+        For the embedded engine this reflects a single local node.
+
+        Raises:
+            AlopexError: If the database is closed.
+        """
+        ...
+    def routing_diagnostics(self) -> Dict[str, Any]:
+        """Return routing diagnostics as a dict.
+
+        Read-only surface: the embedded engine always reports local
+        execution (``local_only`` decision, ``python_embedded_local``
+        target). Values are static placeholders until real routing is
+        wired up (issue #35).
+
+        Raises:
+            AlopexError: If the database is closed.
+        """
+        ...
     def close(self) -> None: ...
     def create_hnsw_index(self, name: str, config: HnswConfig) -> None: ...
     def search_hnsw(
