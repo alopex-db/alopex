@@ -14,6 +14,7 @@ requires "msgpack4nim"
 task test, "Run tests":
   exec "nim c -r tests/test_parser.nim"
   exec "nim c -r tests/test_msgpack_output.nim"
+  exec "nim c -r tests/test_ffi_boundary.nim"
 
 task lib, "Build shared library":
   # OS 別に build.rs が探す正確なファイル名で出力する。

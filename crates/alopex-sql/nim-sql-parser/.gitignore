@@ -3,3 +3,6 @@
 nimcache/
 tests/poc_msgpack
 tests/fixtures/
+tests/test_parser
+tests/test_msgpack_output
+tests/test_ffi_boundary

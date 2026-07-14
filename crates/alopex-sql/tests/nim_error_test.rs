@@ -21,6 +21,21 @@ fn invalid_sql_returns_parser_error_with_span() {
 }
 
 #[test]
+fn parse_failure_does_not_poison_subsequent_parses() {
+    // issue #40: 非 ParseError 例外 (ここでは parseBiggestInt の桁あふれによる
+    // ValueError) が FFI から漏れると、--exceptions:goto のスレッドローカルな
+    // エラーフラグが立ったままになり、同一スレッドの後続呼び出しがゼロ初期化の
+    // CParseResult (prkOk + 空バッファ = "failed to fill whole buffer") で
+    // 巻き込まれて失敗する (desync)。
+    Parser::parse_sql(&AlopexDialect, "SELECT 99999999999999999999999999")
+        .expect_err("oversized integer literal should fail");
+    for i in 0..3 {
+        Parser::parse_sql(&AlopexDialect, "SELECT 1")
+            .unwrap_or_else(|err| panic!("parse #{i} after failure must succeed, got {err}"));
+    }
+}
+
+#[test]
 fn nul_byte_input_returns_parser_error_without_panic() {
     let err = Parser::parse_sql(&AlopexDialect, "\0\x03J").expect_err("invalid SQL");
     match err {

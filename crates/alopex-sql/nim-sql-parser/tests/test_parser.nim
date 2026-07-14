@@ -415,7 +415,7 @@ suite "DML — INSERT":
     # children: table, col-list, values-row
     check ast.children[0].kind == nkIdentifier
     check ast.children[0].strVal == "users"
-    check ast.children[1].kind == nkExprList  # column list
+    check ast.children[1].kind == nkColumnList  # column list
     check ast.children[1].children.len == 2
     check ast.children[2].kind == nkExprList  # values row
     check ast.children[2].children.len == 2
@@ -436,10 +436,22 @@ suite "DML — INSERT":
     check ast.kind == nkInsert
     # children: table, col-list, row1, row2, row3
     check ast.children[0].strVal == "users"
-    check ast.children[1].kind == nkExprList  # col list
+    check ast.children[1].kind == nkColumnList  # col list
     check ast.children[2].kind == nkExprList  # row 1
     check ast.children[3].kind == nkExprList  # row 2
     check ast.children[4].kind == nkExprList  # row 3
+
+  test "INSERT multi-row without column list (issue #40)":
+    let ast = parseSql("INSERT INTO t1 VALUES (1, 'a'), (2, 'b')")
+    check ast.kind == nkInsert
+    # children: table, row1, row2 — the first row must NOT look like a column list
+    check ast.children.len == 3
+    check ast.children[0].strVal == "t1"
+    check ast.children[1].kind == nkExprList  # row 1
+    check ast.children[1].children.len == 2
+    check ast.children[1].children[0].kind == nkIntLit
+    check ast.children[2].kind == nkExprList  # row 2
+    check ast.children[2].children.len == 2
 
 # ---------------------------------------------------------------------------
 # DML tests — UPDATE

@@ -16,6 +16,20 @@ pub fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
     match result.kind {
         ParseResultKind::Ok => {
             let buffer = OwnedBuffer::new(result.buffer_ptr, result.buffer_len);
+            // 正常時の payload は最低でも MessagePack の配列ヘッダ 1 バイトを
+            // 含む。空 payload はゼロ初期化された CParseResult、つまり Nim 側
+            // から例外が漏れた事故 (issue #40 の desync 経路) を意味するため、
+            // 汎用の decode エラーではなく原因が特定できるエラーにする。
+            if buffer.as_slice().is_empty() {
+                return Err(ParserError::UnexpectedToken {
+                    line: 0,
+                    column: 0,
+                    expected: "MessagePack AST matching docs/ffi-ast-contract.md".to_string(),
+                    found: "empty payload from Nim parser (leaked exception at FFI boundary; \
+                            see issue #40)"
+                        .to_string(),
+                });
+            }
             rmp_serde::from_slice::<Vec<Statement>>(buffer.as_slice()).map_err(|err| {
                 ParserError::UnexpectedToken {
                     line: 0,
