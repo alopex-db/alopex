@@ -299,6 +299,15 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # RUSTSEC-2026-0194/0195 (quick-xml, alopex コードから直接使用なし、
+          # object_store の推移依存)。object_store 0.14.0 (crates.io 最新) は
+          # quick-xml を ^0.40.1 に固定しており修正版 (>=0.41.0) を引けない。
+          # 修正自体は object_store の v0.14.1-rc1 タグで完了済みだが
+          # crates.io へ未リリース (upstream: apache/arrow-rs-object-store#761,
+          # target 2026-08)。追跡: alopex-db/alopex#42。正式リリース後は
+          # この ignore を外し `cargo update -p object_store -p quick-xml`
+          # で解消すること。
+          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
         continue-on-error: true  # Advisory: don't fail CI on new vulnerabilities
 
   build:
