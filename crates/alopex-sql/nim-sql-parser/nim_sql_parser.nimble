@@ -17,6 +17,21 @@ task test, "Run tests":
   exec "nim c -r tests/test_ffi_boundary.nim"
 
 task lib, "Build shared library":
+  # 前提 (issue #40 対応時に Nim 2.2.10 / alopex-parity コンテナで実測検証済み):
+  # このタスクは `--panics` / `--exceptions` を明示指定しない。Nim 2.2 の
+  # 既定は `--panics:off` (Defect は Exception 階層に属し catchable) と
+  # `--exceptions:goto` であり、`-d:release --mm:orc --opt:speed` を付けても
+  # 変わらない。`alopex_sql_parser.nim` の `alopex_parse_sql` は
+  # `except CatchableError` に加えて `except Defect` で IndexDefect/
+  # FieldDefect 等の内部不変条件違反を捕捉して prkError に変換しており、
+  # これは `--panics:off` (Defect が catchable) 前提で成立する。将来
+  # `--panics:on` (Defect が回復不能な fatal abort になる、Nim 3 相当の
+  # 動作) へ切り替える場合は、この except 節が到達不能になり FFI 境界の
+  # no-throw 保証が崩れるため、alopex_sql_parser.nim 側の設計も併せて
+  # 見直すこと。フラグを明示追加しない理由: `--exceptions:goto` を明示すると
+  # Windows MinGW ターゲットでのコード生成差分を検証していないため、
+  # 既定値への暗黙依存よりリスクが高いと判断した。
+  #
   # OS 別に build.rs が探す正確なファイル名で出力する。
   #   Linux:   libalopex_sql_parser.so   (lib 接頭辞 + .so)
   #   macOS:   libalopex_sql_parser.dylib(lib 接頭辞 + .dylib)

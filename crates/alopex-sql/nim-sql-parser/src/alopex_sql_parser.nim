@@ -891,6 +891,18 @@ proc writeStatement(s: MsgStream; node: SqlNode) =
 
 proc astToMsgPack*(statements: seq[SqlNode]): string =
   ## Encode parsed statements into the FFI MessagePack contract.
+  ##
+  ## Precondition: each `SqlNode` must be a tree produced by this module's
+  ## own `parser.nim` (i.e. via `parseSqlStatements`/`parseSql`), where an
+  ## INSERT's column list is `nkColumnList` and each VALUES row is
+  ## `nkExprList` (see issue #40). A hand-built `nkInsert` tree that still
+  ## uses `nkExprList` for the column list — the pre-fix representation —
+  ## is structurally indistinguishable from a column-list-omitted,
+  ## single-row INSERT (`table, row1` vs. `table, columns`) and
+  ## `writeInsertKind` cannot reject it loudly; it will silently
+  ## misinterpret the first child as either a values row or a column list.
+  ## Callers outside `parseSqlStatements` must ensure this invariant
+  ## themselves.
   var s = MsgStream.init()
   s.pack_array(statements.len)
   for statement in statements:
@@ -926,6 +938,8 @@ proc errorResult(message: string): CParseResult =
     error_len: cint(message.len),
   )
 
+const internalDefectPrefix = "internal parser defect (this is a parser bug, not invalid SQL): "
+
 proc alopex_parse_sql*(input: cstring, length: cint): CParseResult {.exportc, dynlib, cdecl.} =
   ## Parse SQL and return MessagePack-serialized AST bytes.
   ## Caller must free buffer_ptr with alopex_free_buffer.
@@ -934,8 +948,16 @@ proc alopex_parse_sql*(input: cstring, length: cint): CParseResult {.exportc, dy
   ## (--exceptions:goto では) スレッドのエラーフラグが立ったまま C 側へ
   ## 戻り、この呼び出しはゼロ初期化の CParseResult (= prkOk + 空バッファ)
   ## を返し、さらに同一スレッドの後続呼び出しも同じ経路で失敗し続ける
-  ## ストリーム desync になる (issue #40)。そのため ParseError に限らず
-  ## CatchableError / Defect を全て prkError へ写像する。
+  ## ストリーム desync になる (issue #40)。そのため ParseError (通常の
+  ## 構文エラー) に限らず CatchableError / Defect (パーサー内部の不変条件
+  ## 違反、例: IndexDefect/FieldDefect) も全て prkError へ写像する。
+  ##
+  ## ただし両者は運用上の意味が異なる (前者はユーザー入力の誤り、後者は
+  ## パーサーのバグ) ため、Defect のメッセージには `internalDefectPrefix`
+  ## を付与し、Rust 側 (nim_bridge.rs) が機械的に ALOPEX-P007
+  ## (InternalParserDefect) として区別できるようにする。MessagePack の
+  ## ワイヤ契約 (docs/ffi-ast-contract.md) はエラー経路には及ばないため
+  ## 不変。
   try:
     let sql = if length > 0: ($input)[0 ..< length] else: $input
     let payload = encodeSqlToMsgPack(sql)
@@ -946,8 +968,10 @@ proc alopex_parse_sql*(input: cstring, length: cint): CParseResult {.exportc, dy
       error_ptr: nil,
       error_len: 0,
     )
-  except CatchableError, Defect:
+  except CatchableError:
     result = errorResult(getCurrentExceptionMsg())
+  except Defect:
+    result = errorResult(internalDefectPrefix & getCurrentExceptionMsg())
 
 proc alopex_free_buffer*(p: pointer) {.exportc, dynlib, cdecl.} =
   ## Free a buffer returned by alopex_parse_sql.

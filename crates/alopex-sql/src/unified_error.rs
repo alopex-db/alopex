@@ -209,6 +209,13 @@ impl From<ParserError> for SqlError {
                 location: ErrorLocation::default(),
                 code: "ALOPEX-P006",
             },
+            ParserError::InternalParserDefect { message } => Self::Parse {
+                message: format!(
+                    "internal parser defect (this is a parser bug, not invalid SQL): {message}"
+                ),
+                location: ErrorLocation::default(),
+                code: "ALOPEX-P007",
+            },
         }
     }
 }

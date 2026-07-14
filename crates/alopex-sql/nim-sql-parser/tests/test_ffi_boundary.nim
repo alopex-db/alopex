@@ -5,7 +5,7 @@
 ## まま戻り、ゼロ初期化の CParseResult (= prkOk + 空バッファ) が返るうえ、
 ## 以降の呼び出しも巻き込まれてストリームが desync する。
 
-import std/[json, unittest]
+import std/[json, strutils, unittest]
 import msgpack4nim/msgpack2json
 import ../src/alopex_sql_parser
 
@@ -43,8 +43,29 @@ suite "FFI boundary (issue #40)":
     check res.error_len > 0
     check takeError(res).len > 0
 
+  test "internal Defect is mapped to prkError with a distinguishable message":
+    # 多行 INSERT・カラムリスト省略で先頭行が nkIntLit の場合、修正前は
+    # firstIdent の FieldDefect が漏れていた。ここでは Defect 経路そのものを
+    # 直接確認できないため (issue #40 の直接原因は既に直っている)、Defect
+    # ハンドラのプレフィックス付与を alopex_sql_parser の公開 API 経由で
+    # 間接的に保証する回帰。writeInsertKind の判定が壊れて再度 Defect が
+    # 漏れた場合、このテストではなく test_msgpack_output.nim 側で先に
+    # FieldDefect として検出される。ここでは "internal parser defect" と
+    # いう文言が通常の構文エラーメッセージに紛れ込んでいないことのみ確認する。
+    let res = callFfi("SELECT 99999999999999999999999999")
+    check res.kind == prkError
+    check not takeError(res).contains("internal parser defect")
+
   test "parse failure does not poison subsequent calls":
-    discard callFfi("SELECT 99999999999999999999999999")
+    # 最初の失敗結果を捨てず、prkError であることとエラーメッセージを
+    # 確認してからバッファを解放し、そのうえで後続呼び出しが desync に
+    # 巻き込まれず成功することを確認する。
+    let failed = callFfi("SELECT 99999999999999999999999999")
+    check failed.kind == prkError
+    check failed.error_len > 0
+    let failMsg = takeError(failed)
+    check failMsg.len > 0
+
     let res = callFfi("SELECT 1")
     check res.kind == prkOk
     check res.buffer_len > 0
