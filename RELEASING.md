@@ -21,18 +21,19 @@ version = "0.3.0"  # ← ここを変更すると全クレートに反映
 |---------|------|---------|
 | `alopex-core` | コアストレージエンジン | なし（最初に公開） |
 | `alopex-sql` | SQL パーサー | alopex-core |
-| `alopex-embedded` | 組み込みDB インターフェース | alopex-core |
-| `alopex-server` | サーバーコンポーネント | （未実装） |
-| `alopex-cli` | CLI ツール | （未実装） |
-| `alopex-cluster` | 分散クラスター | （未実装） |
-| `alopex-tools` | 開発ツール | （未実装） |
+| `alopex-dataframe` | DataFrame エンジン | alopex-core |
+| `alopex-embedded` | 組み込みDB インターフェース | alopex-core, alopex-sql, alopex-dataframe |
+| `alopex-cluster` | クラスタメタデータ契約（cluster-aware foundation） | なし（chirps は optional feature） |
+| `alopex-server` | サーバーコンポーネント | alopex-core, alopex-sql, alopex-cluster |
+| `alopex-cli` | CLI ツール | alopex-core, alopex-embedded |
+| `alopex-tools` | 開発ツール | （crates.io 非公開） |
 
 ### 公開順序
 
-依存関係により、以下の順序で公開する必要があります：
+依存関係により、以下の順序で公開する必要があります（`.github/workflows/release.yml` の `publish-crates` ジョブと一致させること）：
 
 ```
-alopex-core → alopex-sql → alopex-embedded → alopex-server → alopex-cli
+alopex-core → alopex-sql → alopex-dataframe → alopex-embedded → alopex-cluster → alopex-server → alopex-cli
 ```
 
 ## リリースワークフロー
