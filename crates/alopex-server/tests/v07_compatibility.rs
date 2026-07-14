@@ -9,7 +9,6 @@ use alopex_server::server::ServerState;
 use alopex_server::Server;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use hyper::body::to_bytes;
 use serde_json::{json, Value};
 use tempfile::tempdir;
 use tower::ServiceExt;
@@ -59,7 +58,9 @@ async fn send_json(app: &axum::Router, uri: &str, body: Value) -> (StatusCode, V
         .expect("request");
     let response = app.clone().oneshot(request).await.expect("response");
     let status = response.status();
-    let bytes = to_bytes(response.into_body()).await.expect("body");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
     let body = serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|err| {
         panic!(
             "invalid json response ({err}): {}",
@@ -77,7 +78,9 @@ async fn send_empty(app: &axum::Router, method: Method, uri: &str) -> (StatusCod
         .expect("request");
     let response = app.clone().oneshot(request).await.expect("response");
     let status = response.status();
-    let bytes = to_bytes(response.into_body()).await.expect("body");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
     let body = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
     (status, body)
 }

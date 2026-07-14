@@ -850,7 +850,7 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
         Ok::<axum::body::Bytes, Infallible>(axum::body::Bytes::from(json + "\n"))
     });
 
-    let body = axum::body::boxed(axum::body::Body::wrap_stream(stream));
+    let body = axum::body::Body::from_stream(stream);
     axum::response::Response::builder()
         .status(axum::http::StatusCode::OK)
         .header(axum::http::header::CONTENT_TYPE, "application/jsonl")

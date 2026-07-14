@@ -30,7 +30,7 @@ use alopex_core::storage::format::bincode_config;
 use alopex_server::config::ServerConfig;
 use alopex_server::http;
 use alopex_server::server::Server;
-use axum::body::{boxed, Body, Bytes};
+use axum::body::{Body, Bytes};
 use axum::extract::{Json, Path, State};
 use axum::http::{header, Request, StatusCode};
 use axum::response::Response;
@@ -63,7 +63,7 @@ async fn send_json(router: axum::Router, path: &str, body: Value) -> (StatusCode
         .expect("request");
     let response = router.oneshot(request).await.expect("response");
     let status = response.status();
-    let bytes = hyper::body::to_bytes(response.into_body())
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
     let json = if bytes.is_empty() {
@@ -111,6 +111,13 @@ struct StreamServerState {
 async fn spawn_tls_server(
     router: axum::Router,
 ) -> (String, oneshot::Sender<()>, tempfile::TempDir) {
+    // rustls 0.23: axum-server's `tls-rustls-no-provider` feature does not
+    // auto-install a process-level CryptoProvider (unlike `tls-rustls`,
+    // which hardcodes aws-lc-rs). Install `ring` explicitly so
+    // `RustlsConfig::from_pem_file` (which calls `ServerConfig::builder()`
+    // internally) doesn't panic. Ignore the error if another codepath
+    // (e.g. reqwest) already installed a provider first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let dir = tempfile::tempdir().expect("tempdir");
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("cert");
     let cert_path = dir.path().join("cert.pem");
@@ -170,7 +177,7 @@ async fn streaming_handler(
     drop(guard);
 
     let stream = build_chunk_stream(state.chunks.clone(), state.delay);
-    let body = boxed(Body::wrap_stream(stream));
+    let body = Body::from_stream(stream);
     let mut response = Response::new(body);
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
@@ -189,7 +196,7 @@ async fn streaming_jsonl_handler(
     drop(guard);
 
     let stream = build_chunk_stream(state.chunks.clone(), state.delay);
-    let body = boxed(Body::wrap_stream(stream));
+    let body = Body::from_stream(stream);
     let mut response = Response::new(body);
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(

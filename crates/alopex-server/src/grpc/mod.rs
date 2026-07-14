@@ -1,13 +1,17 @@
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use futures::{future::BoxFuture, StreamExt};
 use prost::Message;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::transport::server::{Connected, TcpConnectInfo};
 use tonic::{async_trait, Request, Response, Status};
 use tower::{Layer, Service};
 use uuid::Uuid;
@@ -22,6 +26,57 @@ use crate::ops::memory::MemoryControlPolicy;
 use crate::server::ServerState;
 use crate::session::SessionId;
 use crate::tls;
+
+/// Thin newtype wrapper around a [`tokio_rustls::server::TlsStream`] over a
+/// plain TCP connection.
+///
+/// This exists solely so we can implement tonic's [`Connected`] trait
+/// locally: neither `tokio_rustls::server::TlsStream` nor `Connected` are
+/// defined in this crate, so a direct impl would violate the orphan rule.
+/// (Previously this bridging impl was provided by tonic's own `tls` feature,
+/// but that feature pulls in tonic's bundled rustls 0.21 stack, which is
+/// exactly the vulnerable dependency chain this migration removes.)
+struct TlsIo(tokio_rustls::server::TlsStream<TcpStream>);
+
+impl AsyncRead for TlsIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for TlsIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
+    }
+}
+
+impl Connected for TlsIo {
+    type ConnectInfo = TcpConnectInfo;
+
+    fn connect_info(&self) -> Self::ConnectInfo {
+        let (tcp, _session) = self.0.get_ref();
+        TcpConnectInfo {
+            local_addr: tcp.local_addr().ok(),
+            remote_addr: tcp.peer_addr().ok(),
+        }
+    }
+}
 
 pub mod proto {
     tonic::include_proto!("alopex.v0");
@@ -138,7 +193,11 @@ pub async fn serve(
             let acceptor = acceptor.clone();
             async move {
                 let stream = conn?;
-                acceptor.accept(stream).await.map_err(std::io::Error::other)
+                acceptor
+                    .accept(stream)
+                    .await
+                    .map(TlsIo)
+                    .map_err(std::io::Error::other)
             }
         });
         server

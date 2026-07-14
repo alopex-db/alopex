@@ -3,7 +3,7 @@ use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rustls::{Certificate, PrivateKey};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::Deserialize;
 
 use crate::error::{Result, ServerError};
@@ -27,6 +27,11 @@ pub enum TlsVersion {
 }
 
 /// Build a rustls server config from TLS settings.
+///
+/// Uses the `ring` [`rustls::crypto::CryptoProvider`] explicitly (matching the
+/// provider already selected process-wide via `object_store`'s TLS stack), so
+/// this does not depend on `CryptoProvider::install_default()` having been
+/// called elsewhere.
 pub fn build_rustls_config(config: &TlsConfig) -> Result<Arc<rustls::ServerConfig>> {
     let certs = load_certs(&config.cert_path)?;
     let key = load_key(&config.key_path)?;
@@ -34,9 +39,8 @@ pub fn build_rustls_config(config: &TlsConfig) -> Result<Arc<rustls::ServerConfi
         TlsVersion::Tls12 => vec![&rustls::version::TLS13, &rustls::version::TLS12],
         TlsVersion::Tls13 => vec![&rustls::version::TLS13],
     };
-    let builder = rustls::ServerConfig::builder()
-        .with_safe_default_cipher_suites()
-        .with_safe_default_kx_groups()
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&versions)
         .map_err(|err| ServerError::InvalidConfig(err.to_string()))?;
     let mut server_config = if let Some(ca_path) = &config.ca_path {
@@ -44,12 +48,15 @@ pub fn build_rustls_config(config: &TlsConfig) -> Result<Arc<rustls::ServerConfi
         let ca_certs = load_certs(ca_path)?;
         for cert in ca_certs {
             roots
-                .add(&cert)
+                .add(cert)
                 .map_err(|_| ServerError::InvalidConfig("invalid CA certificate".into()))?;
         }
-        let verifier = rustls::server::AllowAnyAuthenticatedClient::new(roots);
+        let verifier =
+            rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+                .build()
+                .map_err(|err| ServerError::InvalidConfig(err.to_string()))?;
         builder
-            .with_client_cert_verifier(Arc::new(verifier))
+            .with_client_cert_verifier(verifier)
             .with_single_cert(certs, key)
             .map_err(|err| ServerError::InvalidConfig(err.to_string()))?
     } else {
@@ -62,32 +69,31 @@ pub fn build_rustls_config(config: &TlsConfig) -> Result<Arc<rustls::ServerConfi
     Ok(Arc::new(server_config))
 }
 
-fn load_certs(path: &PathBuf) -> Result<Vec<Certificate>> {
+fn load_certs(path: &PathBuf) -> Result<Vec<CertificateDer<'static>>> {
     let file = File::open(path).map_err(ServerError::Io)?;
     let mut reader = BufReader::new(file);
-    let certs = rustls_pemfile::certs(&mut reader)
-        .map_err(|_| ServerError::InvalidConfig("invalid certificate file".into()))?
-        .into_iter()
-        .map(Certificate)
-        .collect();
-    Ok(certs)
+    rustls_pemfile::certs(&mut reader)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| ServerError::InvalidConfig("invalid certificate file".into()))
 }
 
-fn load_key(path: &PathBuf) -> Result<PrivateKey> {
+fn load_key(path: &PathBuf) -> Result<PrivateKeyDer<'static>> {
     let file = File::open(path).map_err(ServerError::Io)?;
     let mut reader = BufReader::new(file);
-    let keys = rustls_pemfile::pkcs8_private_keys(&mut reader)
+    let keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut reader)
+        .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|_| ServerError::InvalidConfig("invalid private key file".into()))?;
-    if let Some(key) = keys.first() {
-        return Ok(PrivateKey(key.clone()));
+    if let Some(key) = keys.into_iter().next() {
+        return Ok(PrivateKeyDer::Pkcs8(key));
     }
 
     let file = File::open(path).map_err(ServerError::Io)?;
     let mut reader = BufReader::new(file);
-    let keys = rustls_pemfile::rsa_private_keys(&mut reader)
+    let keys: Vec<_> = rustls_pemfile::rsa_private_keys(&mut reader)
+        .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|_| ServerError::InvalidConfig("invalid private key file".into()))?;
-    keys.first()
-        .cloned()
-        .map(PrivateKey)
+    keys.into_iter()
+        .next()
+        .map(PrivateKeyDer::Pkcs1)
         .ok_or_else(|| ServerError::InvalidConfig("private key not found".into()))
 }

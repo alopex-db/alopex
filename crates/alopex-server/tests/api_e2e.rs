@@ -11,8 +11,12 @@ use alopex_core::columnar::segment_v2::{
 };
 use alopex_core::storage::format::bincode_config;
 use bincode::config::Options;
+use http_body_util::BodyExt;
 use hyper::header::CONTENT_TYPE;
-use hyper::{Body, Client, Method, Request, StatusCode};
+use hyper::{Method, Request, StatusCode};
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::TokioExecutor;
 use serde_json::{json, Value};
 use tempfile::tempdir;
 use tokio::time::sleep;
@@ -85,7 +89,7 @@ fn read_stderr(child: &mut Child) -> String {
 }
 
 async fn send_json(
-    client: &Client<hyper::client::HttpConnector>,
+    client: &Client<HttpConnector, http_body_util::Full<axum::body::Bytes>>,
     method: Method,
     url: &str,
     body: Value,
@@ -95,49 +99,55 @@ async fn send_json(
         .method(method)
         .uri(url)
         .header(CONTENT_TYPE, "application/json")
-        .body(Body::from(bytes))
+        .body(http_body_util::Full::new(axum::body::Bytes::from(bytes)))
         .expect("request");
     let response = client.request(request).await.expect("response");
     let status = response.status();
-    let body = hyper::body::to_bytes(response.into_body())
+    let body = response
+        .into_body()
+        .collect()
         .await
-        .expect("body");
+        .expect("body")
+        .to_bytes();
     let value: Value = serde_json::from_slice(&body)
         .unwrap_or_else(|err| panic!("invalid json ({err}): {}", String::from_utf8_lossy(&body)));
     (status, value)
 }
 
 async fn send_empty(
-    client: &Client<hyper::client::HttpConnector>,
+    client: &Client<HttpConnector, http_body_util::Full<axum::body::Bytes>>,
     method: Method,
     url: &str,
 ) -> (StatusCode, Vec<u8>) {
     let request = Request::builder()
         .method(method)
         .uri(url)
-        .body(Body::empty())
+        .body(http_body_util::Full::new(axum::body::Bytes::new()))
         .expect("request");
     let response = client.request(request).await.expect("response");
     let status = response.status();
-    let body = hyper::body::to_bytes(response.into_body())
+    let body = response
+        .into_body()
+        .collect()
         .await
-        .expect("body");
+        .expect("body")
+        .to_bytes();
     (status, body.to_vec())
 }
 
 async fn try_send_empty(
-    client: &Client<hyper::client::HttpConnector>,
+    client: &Client<HttpConnector, http_body_util::Full<axum::body::Bytes>>,
     method: Method,
     url: &str,
 ) -> Option<(StatusCode, Vec<u8>)> {
     let request = Request::builder()
         .method(method)
         .uri(url)
-        .body(Body::empty())
+        .body(http_body_util::Full::new(axum::body::Bytes::new()))
         .ok()?;
     let response = client.request(request).await.ok()?;
     let status = response.status();
-    let body = hyper::body::to_bytes(response.into_body()).await.ok()?;
+    let body = response.into_body().collect().await.ok()?.to_bytes();
     Some((status, body.to_vec()))
 }
 
@@ -178,7 +188,7 @@ async fn server_binary_exposes_all_http_apis() {
         .expect("spawn server");
     let mut guard = ChildGuard::new(child);
 
-    let client = Client::new();
+    let client = Client::builder(TokioExecutor::new()).build_http();
     let deadline = Instant::now() + Duration::from_secs(10);
     let admin_url = format!("http://127.0.0.1:{admin_port}");
     let http_url = format!("http://127.0.0.1:{http_port}");

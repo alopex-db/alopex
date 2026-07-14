@@ -68,13 +68,14 @@ async fn spawn_http_server(router: Router) -> (String, oneshot::Sender<()>) {
     listener.set_nonblocking(true).expect("nonblocking");
     let addr = listener.local_addr().expect("addr");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let server = axum::Server::from_tcp(listener)
-        .expect("server")
-        .serve(router.into_make_service())
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_rx.await;
-        });
-    tokio::spawn(server);
+    let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router.into_make_service())
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
     (format!("http://{}", addr), shutdown_tx)
 }
 

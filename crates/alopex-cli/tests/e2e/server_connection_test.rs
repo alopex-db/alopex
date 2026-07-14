@@ -43,6 +43,14 @@ async fn auth_status_handler(
 }
 
 async fn spawn_tls_server(router: axum::Router) -> (String, oneshot::Sender<()>) {
+    // rustls 0.23: axum-server's `tls-rustls-no-provider` feature does not
+    // auto-install a process-level CryptoProvider (unlike `tls-rustls`,
+    // which hardcodes aws-lc-rs). Install `ring` explicitly so
+    // `RustlsConfig::from_pem_file` (which calls `ServerConfig::builder()`
+    // internally) doesn't panic. Ignore the error if another codepath
+    // (e.g. reqwest) already installed a provider first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cert = generate_simple_self_signed(vec!["localhost".to_string()]).expect("cert");
     let dir = tempfile::tempdir().expect("tempdir");
     let cert_path = dir.path().join("cert.pem");
