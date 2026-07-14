@@ -73,7 +73,20 @@ fn empty_expression_error() -> ParserError {
     }
 }
 
+// nim-sql-parser/src/alopex_sql_parser.nim の `internalDefectPrefix` と
+// 一致させる。Nim 側の `except Defect` 節が付与する接頭辞で、パーサー
+// 内部の不変条件違反 (通常の構文エラーではない) を機械的に区別するための
+// マーカー。ワイヤ契約 (MessagePack AST) には影響しない、エラー文言のみの
+// 合意。
+const INTERNAL_DEFECT_PREFIX: &str =
+    "internal parser defect (this is a parser bug, not invalid SQL): ";
+
 fn parser_error_from_nim(message: &str) -> ParserError {
+    if let Some(defect_message) = message.strip_prefix(INTERNAL_DEFECT_PREFIX) {
+        return ParserError::InternalParserDefect {
+            message: defect_message.to_string(),
+        };
+    }
     let (line, column) = parse_nim_line_col(message).unwrap_or((0, 0));
     ParserError::UnexpectedToken {
         line,
