@@ -57,10 +57,10 @@ async fn metrics(Extension(state): Extension<Arc<ServerState>>) -> Response {
     }
 }
 
-async fn allowlist_middleware<B>(
+async fn allowlist_middleware(
     Extension(state): Extension<Arc<ServerState>>,
-    req: axum::http::Request<B>,
-    next: middleware::Next<B>,
+    req: axum::extract::Request,
+    next: middleware::Next,
 ) -> Response {
     if state.config.admin_bind.ip().is_loopback() {
         return next.run(req).await;

@@ -132,7 +132,12 @@ pub async fn handle(
     }
 }
 
-async fn execute_non_streaming(
+/// SQL を非ストリーミングで実行する共有経路。
+///
+/// HTTP `/sql` と gRPC `ExecuteSql` (issue #25) の両方から呼ばれる。
+/// SQL の実行セマンティクス (タイムアウト・コミット/ロールバック・
+/// 監査ログ・カタログ同期・メトリクス) はこの関数に集約する。
+pub(crate) async fn execute_non_streaming(
     state: Arc<ServerState>,
     request: &SqlRequest,
     ctx: &RequestContext,
@@ -845,7 +850,7 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
         Ok::<axum::body::Bytes, Infallible>(axum::body::Bytes::from(json + "\n"))
     });
 
-    let body = axum::body::boxed(axum::body::Body::wrap_stream(stream));
+    let body = axum::body::Body::from_stream(stream);
     axum::response::Response::builder()
         .status(axum::http::StatusCode::OK)
         .header(axum::http::header::CONTENT_TYPE, "application/jsonl")

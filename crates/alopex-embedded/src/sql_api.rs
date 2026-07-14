@@ -181,6 +181,8 @@ impl Database {
     ///
     /// - DDL/DML は ReadWrite トランザクションで実行し、成功時に自動コミットする。
     /// - SELECT は ReadOnly トランザクションで実行する。
+    /// - 複数文はすべて同一トランザクションで実行し、最後の文の結果を返す。
+    ///   文ごとの結果が必要な場合は [`Database::execute_sql_multi`] を使用する。
     ///
     /// # Examples
     ///
@@ -195,9 +197,36 @@ impl Database {
     /// assert!(matches!(result, ExecutionResult::Success));
     /// ```
     pub fn execute_sql(&self, sql: &str) -> Result<SqlResult> {
+        Ok(self
+            .execute_sql_multi(sql)?
+            .pop()
+            .unwrap_or(alopex_sql::ExecutionResult::Success))
+    }
+
+    /// SQL を実行し、文ごとの実行結果を返す（auto-commit）。
+    ///
+    /// すべての文を同一トランザクションで実行し、成功時に自動コミットする。
+    /// いずれかの文が失敗した場合はトランザクション全体がロールバックされ、
+    /// エラーを返す。入力に文が含まれない場合は空の `Vec` を返す。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use alopex_embedded::Database;
+    /// use alopex_sql::ExecutionResult;
+    ///
+    /// let db = Database::new();
+    /// let results = db.execute_sql_multi(
+    ///     "CREATE TABLE users (id INTEGER PRIMARY KEY); INSERT INTO users (id) VALUES (1);",
+    /// ).unwrap();
+    /// assert_eq!(results.len(), 2);
+    /// assert!(matches!(results[0], ExecutionResult::Success));
+    /// assert!(matches!(results[1], ExecutionResult::RowsAffected(1)));
+    /// ```
+    pub fn execute_sql_multi(&self, sql: &str) -> Result<Vec<SqlResult>> {
         let stmts = parse_sql(sql)?;
         if stmts.is_empty() {
-            return Ok(alopex_sql::ExecutionResult::Success);
+            return Ok(Vec::new());
         }
 
         let requires_write = stmts.iter().any(stmt_requires_write);
@@ -215,7 +244,7 @@ impl Database {
         let mut executor: Executor<_, _> =
             Executor::new(self.store.clone(), self.sql_catalog.clone());
 
-        let mut last = alopex_sql::ExecutionResult::Success;
+        let mut results = Vec::with_capacity(stmts.len());
         for stmt in &stmts {
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
@@ -223,9 +252,11 @@ impl Database {
                 plan_stmt(&*catalog, &*overlay, stmt)?
             };
 
-            last = executor
-                .execute_in_txn(plan, &mut borrowed)
-                .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?;
+            results.push(
+                executor
+                    .execute_in_txn(plan, &mut borrowed)
+                    .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?,
+            );
         }
 
         drop(borrowed);
@@ -248,7 +279,7 @@ impl Database {
                 .expect("vector cache lock poisoned");
             *vector_cache = None;
         }
-        Ok(last)
+        Ok(results)
     }
 
     /// Execute SQL with callback-based streaming for SELECT queries (FR-7).
@@ -271,10 +302,12 @@ impl Database {
     /// db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);").unwrap();
     /// db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob');").unwrap();
     ///
-    /// // Process rows with streaming - transaction stays alive during callback
+    /// // Process rows with streaming - transaction stays alive during callback.
+    /// // Propagate `next_row` errors with `?`; swallowing them (e.g. with
+    /// // `while let Ok(Some(...))`) silently truncates the result set.
     /// let result = db.execute_sql_with_rows("SELECT * FROM users;", |mut rows| {
     ///     let mut names = Vec::new();
-    ///     while let Ok(Some(row)) = rows.next_row() {
+    ///     while let Some(row) = rows.next_row()? {
     ///         if let Some(alopex_sql::storage::SqlValue::Text(name)) = row.get(1) {
     ///             names.push(name.clone());
     ///         }
@@ -370,18 +403,23 @@ impl Database {
     /// # Examples
     ///
     /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// use alopex_embedded::{Database, SqlStreamingResult};
     ///
     /// let db = Database::new();
-    /// db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);").unwrap();
-    /// db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice');").unwrap();
+    /// db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+    /// db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
     ///
-    /// let result = db.execute_sql_streaming("SELECT * FROM users;").unwrap();
+    /// // Propagate `next_row` errors with `?`; swallowing them (e.g. with
+    /// // `while let Ok(Some(...))`) silently truncates the result set.
+    /// let result = db.execute_sql_streaming("SELECT * FROM users;")?;
     /// if let SqlStreamingResult::Query(mut iter) = result {
-    ///     while let Ok(Some(row)) = iter.next_row() {
+    ///     while let Some(row) = iter.next_row()? {
     ///         println!("{:?}", row);
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn execute_sql_streaming(&self, sql: &str) -> Result<SqlStreamingResult> {
         let stmts = parse_sql(sql)?;

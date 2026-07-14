@@ -52,6 +52,7 @@ type
     nkDataTypeVector
     nkConstraint
     nkExprList
+    nkColumnList  ## INSERT のカラムリスト。VALUES 行 (nkExprList) と区別する。
     nkWithOptions
     nkIndexOption
     nkVectorLiteral

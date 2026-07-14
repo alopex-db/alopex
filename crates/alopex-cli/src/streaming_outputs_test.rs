@@ -1,5 +1,5 @@
 use crate::batch::{BatchMode, BatchModeSource};
-use crate::cli::{ColumnarCommand, SqlCommand, VectorCommand};
+use crate::cli::{ColumnarCommand, OutputFormat, SqlCommand, VectorCommand};
 use crate::commands::{columnar, sql, vector};
 use crate::output::csv::CsvFormatter;
 use crate::output::formatter::Formatter;
@@ -62,7 +62,7 @@ fn setup_sql_data(db: &Database) {
         .unwrap();
 }
 
-fn run_sql_with_formatter(db: &Database, formatter: Box<dyn Formatter>) -> String {
+fn run_sql_with_formatter(db: &Database, output_format: OutputFormat) -> String {
     let cmd = SqlCommand {
         query: Some("SELECT * FROM stream_test;".to_string()),
         file: None,
@@ -78,7 +78,7 @@ fn run_sql_with_formatter(db: &Database, formatter: Box<dyn Formatter>) -> Strin
         &default_batch_mode(),
         UiMode::Batch,
         &mut output,
-        formatter,
+        output_format,
         None,
         None,
         true,
@@ -92,13 +92,13 @@ fn sql_streaming_outputs() {
     let db = Database::open_in_memory().unwrap();
     setup_sql_data(&db);
 
-    let output = run_sql_with_formatter(&db, Box::new(JsonlFormatter::new()));
+    let output = run_sql_with_formatter(&db, OutputFormat::Jsonl);
     assert_jsonl_rows(&output, 2, &["id", "name"]);
 
-    let output = run_sql_with_formatter(&db, Box::new(CsvFormatter::new()));
+    let output = run_sql_with_formatter(&db, OutputFormat::Csv);
     assert_delimited_rows(&output, 2, &["id", "name"], ',');
 
-    let output = run_sql_with_formatter(&db, Box::new(TsvFormatter::new()));
+    let output = run_sql_with_formatter(&db, OutputFormat::Tsv);
     assert_delimited_rows(&output, 2, &["id", "name"], '\t');
 }
 

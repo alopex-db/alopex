@@ -1,0 +1,15 @@
+# alopex mode-parity 検証ハーネスの Python 依存(バージョン固定)
+# 仕様: docs-public/specs/alopex-mode-parity-spec.md「parity-runner」
+#
+# --- 直接依存 ---
+grpcio==1.69.0        # SF-GRPC: AlopexService.ExecuteSql クライアント
+grpcio-tools==1.69.0  # crates/alopex-server/proto/alopex.proto から実行時にスタブ生成
+protobuf==5.29.3      # 生成スタブのランタイム
+requests==2.32.3      # SF-HTTP: SQL 実行 + /healthz ポーリング
+#
+# --- 推移的依存(ビルド決定性のため固定) ---
+certifi==2024.12.14
+charset-normalizer==3.4.0
+idna==3.10
+urllib3==2.2.3
+setuptools==75.8.0    # grpc_tools.protoc の proto include 解決に使用

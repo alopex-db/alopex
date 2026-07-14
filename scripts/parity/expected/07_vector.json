@@ -1,0 +1,119 @@
+{
+  "corpus": "07_vector.sql",
+  "format": {
+    "success": "DDL 文の成功 (結果セットなし)",
+    "rows_affected": "DML 文の成功 (count = 影響行数)",
+    "query": "columns = 出力列名の順序付き配列 / rows = 列名をキーとするオブジェクトの配列 / 浮動小数点は有効数字 9 桁へ丸め / NULL は JSON null"
+  },
+  "statements": [
+    {
+      "index": 1,
+      "sql": "SELECT vector_similarity([1.0, 0.0], [0.0, 1.0], 'cosine') AS cos_orthogonal, vector_similarity([1.0, 2.0, 2.0], [2.0, 4.0, 4.0], 'cosine') AS cos_parallel, vector_similarity([1.0, 2.0, 2.0], [-1.0, -2.0, -2.0], 'cosine') AS cos_opposite",
+      "expected": {
+        "type": "query",
+        "columns": ["cos_orthogonal", "cos_parallel", "cos_opposite"],
+        "rows": [ { "cos_orthogonal": 0.0, "cos_parallel": 1.0, "cos_opposite": -1.0 } ]
+      }
+    },
+    {
+      "index": 2,
+      "sql": "SELECT vector_distance([0.0, 0.0], [3.0, 4.0], 'l2') AS l2_dist, vector_similarity([1.0, 2.0, 3.0], [4.0, 5.0, 6.0], 'inner') AS inner_product, vector_dims([1.0, 2.0, 3.0]) AS dims, vector_norm([3.0, 4.0]) AS norm",
+      "expected": {
+        "type": "query",
+        "columns": ["l2_dist", "inner_product", "dims", "norm"],
+        "rows": [ { "l2_dist": 5.0, "inner_product": 32.0, "dims": 3, "norm": 5.0 } ]
+      }
+    },
+    {
+      "index": 3,
+      "sql": "SELECT docs.id, docs.title, vector_distance(docs.embedding, [1.0, 0.0, 0.0], 'l2') AS dist FROM docs ORDER BY docs.id",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "title", "dist"],
+        "rows": [
+          { "id": 1, "title": "alpha", "dist": 0.0 },
+          { "id": 2, "title": "bravo", "dist": 1.25 },
+          { "id": 3, "title": "charlie", "dist": 2.5 },
+          { "id": 4, "title": "delta", "dist": 3.0 },
+          { "id": 5, "title": "echo", "dist": 5.0 }
+        ]
+      }
+    },
+    {
+      "index": 4,
+      "sql": "SELECT docs.id FROM docs ORDER BY vector_distance(docs.embedding, [1.0, 0.0, 0.0], 'l2') ASC LIMIT 3",
+      "expected": {
+        "type": "query",
+        "columns": ["id"],
+        "rows": [ { "id": 1 }, { "id": 2 }, { "id": 3 } ]
+      }
+    },
+    {
+      "index": 5,
+      "sql": "SELECT docs.id, vector_distance(docs.embedding, [1.0, 0.0, 0.0], 'l2') AS dist FROM docs ORDER BY vector_distance(docs.embedding, [1.0, 0.0, 0.0], 'l2') ASC LIMIT 2",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "dist"],
+        "rows": [
+          { "id": 1, "dist": 0.0 },
+          { "id": 2, "dist": 1.25 }
+        ]
+      }
+    },
+    {
+      "index": 6,
+      "sql": "SELECT docs.id FROM docs WHERE vector_distance(docs.embedding, [1.0, 0.0, 0.0], 'l2') <= 2.5 ORDER BY docs.id",
+      "expected": {
+        "type": "query",
+        "columns": ["id"],
+        "rows": [ { "id": 1 }, { "id": 2 }, { "id": 3 } ]
+      }
+    },
+    {
+      "index": 7,
+      "sql": "SELECT docs.id, vector_norm(docs.embedding) AS norm FROM docs WHERE docs.id = 1",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "norm"],
+        "rows": [ { "id": 1, "norm": 1.0 } ]
+      }
+    },
+    {
+      "index": 8,
+      "sql": "UPDATE docs SET embedding = [1.0, 0.25, 0.0] WHERE id = 5",
+      "expected": { "type": "rows_affected", "count": 1 }
+    },
+    {
+      "index": 9,
+      "sql": "DELETE FROM docs WHERE id = 4",
+      "expected": { "type": "rows_affected", "count": 1 }
+    },
+    {
+      "index": 10,
+      "sql": "SELECT docs.id FROM docs ORDER BY vector_distance(docs.embedding, [1.0, 0.0, 0.0], 'l2') ASC LIMIT 3",
+      "expected": {
+        "type": "query",
+        "columns": ["id"],
+        "rows": [ { "id": 1 }, { "id": 5 }, { "id": 2 } ]
+      }
+    },
+    {
+      "index": 11,
+      "sql": "SELECT COUNT(*) AS doc_count FROM docs",
+      "expected": {
+        "type": "query",
+        "columns": ["doc_count"],
+        "rows": [ { "doc_count": 4 } ]
+      }
+    },
+    {
+      "index": 12,
+      "sql": "SELECT docs.id FROM docs ORDER BY vector_similarity(docs.embedding, [1.0, 0.0, 0.0], 'cosine') DESC, docs.id ASC LIMIT 3",
+      "expected": {
+        "type": "query",
+        "columns": ["id"],
+        "rows": [ { "id": 1 }, { "id": 5 }, { "id": 3 } ]
+      }
+    }
+  ]
+}

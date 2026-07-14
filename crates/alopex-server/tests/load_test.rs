@@ -36,7 +36,7 @@ async fn send_json(router: axum::Router, path: &str, body: Value) -> (StatusCode
         .expect("request");
     let response = router.oneshot(request).await.expect("response");
     let status = response.status();
-    let body = hyper::body::to_bytes(response.into_body())
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
     (status, body.to_vec())
@@ -156,7 +156,7 @@ async fn load_test_backpressure_with_slow_client() {
     let after = parse_metric(&metrics_after, "stream_backpressure").unwrap_or(0.0);
     assert!(after > before);
 
-    let _ = hyper::body::to_bytes(response.into_body())
+    let _ = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
 }

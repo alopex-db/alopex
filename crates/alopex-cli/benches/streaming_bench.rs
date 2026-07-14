@@ -8,7 +8,7 @@ use alopex_cli::output::json::JsonFormatter;
 use alopex_cli::output::table::TableFormatter;
 use alopex_cli::profile::config::ServerConfig as CliServerConfig;
 use alopex_cli::streaming::{StreamingWriter, WriteStatus, DEFAULT_BUFFER_LIMIT};
-use axum::body::{boxed, Body, Bytes};
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::routing::get;
 use axum::Router;
@@ -105,6 +105,14 @@ fn tui_responsiveness(c: &mut Criterion) {
 }
 
 async fn spawn_tls_server(router: Router) -> (String, oneshot::Sender<()>) {
+    // rustls 0.23: axum-server's `tls-rustls-no-provider` feature does not
+    // auto-install a process-level CryptoProvider (unlike `tls-rustls`,
+    // which hardcodes aws-lc-rs). Install `ring` explicitly so
+    // `RustlsConfig::from_pem_file` (which calls `ServerConfig::builder()`
+    // internally) doesn't panic. Ignore the error if another codepath
+    // (e.g. reqwest) already installed a provider first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cert = generate_simple_self_signed(vec!["localhost".to_string()]).expect("cert");
     let dir = tempfile::tempdir().expect("tempdir");
     let cert_path = dir.path().join("cert.pem");
@@ -149,7 +157,7 @@ fn connection_overhead(c: &mut Criterion) {
                             let rows = payload.as_ref().clone();
                             let stream =
                                 stream::iter(rows.into_iter().map(Ok::<Bytes, Infallible>));
-                            let body = boxed(Body::wrap_stream(stream));
+                            let body = Body::from_stream(stream);
                             let mut response = axum::response::Response::new(body);
                             *response.status_mut() = axum::http::StatusCode::OK;
                             response

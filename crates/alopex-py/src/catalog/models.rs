@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 /// Examples:
 ///     >>> from alopex import CatalogInfo
 ///     >>> CatalogInfo("main")
-#[pyclass(name = "CatalogInfo")]
+#[pyclass(name = "CatalogInfo", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyCatalogInfo {
     #[pyo3(get)]
@@ -71,7 +71,7 @@ impl From<alopex_embedded::catalog::CatalogInfo> for PyCatalogInfo {
 /// Examples:
 ///     >>> from alopex import NamespaceInfo
 ///     >>> NamespaceInfo("default", "main")
-#[pyclass(name = "NamespaceInfo")]
+#[pyclass(name = "NamespaceInfo", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyNamespaceInfo {
     #[pyo3(get)]
@@ -143,7 +143,7 @@ impl From<alopex_embedded::catalog::NamespaceInfo> for PyNamespaceInfo {
 /// Examples:
 ///     >>> from alopex import ColumnInfo
 ///     >>> ColumnInfo("id", "INTEGER", 0, False)
-#[pyclass(name = "ColumnInfo")]
+#[pyclass(name = "ColumnInfo", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyColumnInfo {
     #[pyo3(get)]
@@ -225,7 +225,7 @@ impl From<alopex_embedded::catalog::ColumnInfo> for PyColumnInfo {
 /// Examples:
 ///     >>> from alopex import TableInfo
 ///     >>> TableInfo("users", "main", "default")
-#[pyclass(name = "TableInfo")]
+#[pyclass(name = "TableInfo", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyTableInfo {
     #[pyo3(get)]

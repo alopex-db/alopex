@@ -2,6 +2,90 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.1]
+
+Bugfix release. All fixes were discovered by the new mode-parity verification
+suite, which is included in this release.
+
+### Fixed
+- Subqueries now execute on the CLI/streaming query path. Previously,
+  WHERE-clause subqueries failed with `ALOPEX-E999` (unsupported expression)
+  and scalar subqueries silently returned empty results on the streaming
+  path, while the embedded API and HTTP returned correct results (#23, #24).
+- `NOT IN (subquery)` now follows SQL three-valued logic: when the subquery
+  result contains NULL (or the probe value is NULL), the predicate evaluates
+  to UNKNOWN instead of raising a type error, on both streaming and
+  non-streaming paths.
+- gRPC `ExecuteSql` now delegates to the same non-streaming SQL execution
+  path as HTTP, so both server surfaces return identical results and errors
+  for the same SQL, including DML/DDL execution and routing gates (#25).
+  Response buffering was trimmed with incremental response-size checks.
+- CLI `sql` now emits one result block per statement for multi-statement
+  input instead of silently dropping all but the last result (#26). All
+  statements run in one auto-commit transaction; a mid-batch failure rolls
+  back the whole batch and exits non-zero.
+- CLI streaming JSON output no longer leaves invalid partial JSON on stdout
+  when a local or remote stream fails mid-result.
+- Multi-row `INSERT ... VALUES (...), (...)` without an explicit column list
+  no longer fails with `ALOPEX-P001` (Nim parser AST ambiguity between the
+  column list and the first value row) and no longer desyncs the Nim FFI
+  boundary for subsequent statements on the same thread (#40).
+- Windows: the Nim SQL parser DLL no longer fails to load for `alopex-py`
+  (`ImportError: DLL load failed`) — the MinGW runtime is now statically
+  linked into the DLL, and `ALOPEX_DLL_DIR` resolves the dependency
+  explicitly instead of relying on PATH search (Python 3.8+ does not use
+  PATH for extension-module dependency resolution).
+
+### Security
+- Updated dependencies to resolve 15 of 17 RustSec advisories found in the
+  v0.7.0 dependency tree: `pyo3` 0.24.2 → 0.29.0 (RUSTSEC-2026-0176,
+  RUSTSEC-2026-0177), `rustls` 0.21 → 0.23 chain including `axum`/`axum-server`
+  and `alopex-cli`'s `reqwest` client (RUSTSEC-2026-0104, RUSTSEC-2026-0099,
+  RUSTSEC-2026-0098; the native-tls/openssl chain was also removed from
+  `alopex-cli`, which had been silently linked despite the `rustls-tls`
+  feature being requested), plus semver-compatible patch bumps for `bytes`,
+  `crossbeam-epoch`, `lz4_flex`, `quinn-proto`, `rustls-webpki`, and `time`.
+  `object_store` was updated 0.11 → 0.14, but the two remaining advisories
+  (RUSTSEC-2026-0194, RUSTSEC-2026-0195, both in the transitive `quick-xml`
+  dependency, not used directly by alopex code) are blocked on an upstream
+  `object_store` release not yet on crates.io; tracked in #42 and
+  suppressed in CI via `rustsec/audit-check`'s `ignore` input until then.
+
+### Added
+- `Database.execute_sql` / `Transaction.execute_sql` in `alopex-py`:
+  SELECT returns `list[dict]` (column order preserved), DML returns the
+  affected-row count, DDL returns `None`. Positional `?` parameters are
+  bound client-side with quote/comment-aware substitution (#27).
+- `Database::execute_sql_multi` in `alopex-embedded`: executes all statements
+  in one transaction and returns one `ExecutionResult` per statement.
+- Mode-parity verification & demo suite (`scripts/parity/`): a shared SQL
+  corpus with hand-calculated expected results, executed across the
+  embedded API (in-memory / file), CLI, HTTP, gRPC, and now cluster-aware
+  server surfaces to verify the mode-parity invariants (same data
+  directory, same SQL, same results), plus a pinned verification container
+  and a five-act demo (SF-CLUSTER, the fifth act, is no longer skipped).
+- v0.7 feature demo suite (`scripts/demo/v07/`): cluster status
+  cross-surface verification (HTTP/CLI, membership lifecycle, degraded
+  fallback), routing transparency (live `local_only` decisions plus the
+  simulated scatter-gather harness contract), and DataFrame P3
+  (`str`/`dt`/`list` namespaces, `explode`/`implode`) with hand-calculated
+  expected results and determinism checks.
+- `_alopex.pyi` now declares `Database.cluster_status()` and
+  `Database.routing_diagnostics()`, which were implemented but had no type
+  stubs.
+
+### Changed
+- CLI `sql --output json` always emits an array of per-statement result sets;
+  a single statement yields a 1-element array. DDL/DML statements contribute a
+  `status`/`message` result set (omitted with `--quiet`). Remote (`--server`)
+  output uses the same array-of-result-sets shape.
+
+### Breaking Changes
+- CLI `sql --output json` output shape changed: previously a single result set
+  was emitted as an array of row objects; it is now always an array of
+  per-statement result sets (one extra level of nesting, even for a single
+  statement). Consumers parsing the old shape must unwrap the outer array.
+
 ## [0.7.0]
 
 ### Added

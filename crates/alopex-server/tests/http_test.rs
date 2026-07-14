@@ -83,7 +83,7 @@ async fn send_json(
     let response = router.oneshot(request).await.expect("response");
     let status = response.status();
     let headers = response.headers().clone();
-    let body = hyper::body::to_bytes(response.into_body())
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
     (status, headers, body.to_vec())
@@ -102,7 +102,7 @@ async fn send_empty(
     let response = router.oneshot(request).await.expect("response");
     let status = response.status();
     let headers = response.headers().clone();
-    let body = hyper::body::to_bytes(response.into_body())
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
     (status, headers, body.to_vec())

@@ -7,8 +7,6 @@ use alopex_cluster::{
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
-#[cfg(feature = "numpy")]
-use pyo3::PyObject;
 
 use crate::embedded::transaction::{PyTransaction, PyTransactionInner};
 use crate::error;
@@ -95,6 +93,37 @@ impl PyDatabase {
         Ok(Self::from_db(db, alopex_embedded::StorageMode::InMemory))
     }
 
+    /// SQL を実行する（auto-commit）。
+    ///
+    /// Args:
+    ///     sql: 実行する SQL 文字列。
+    ///     params: `?` プレースホルダへ順番に割り当てる値の list / tuple。
+    ///
+    /// Returns:
+    ///     SELECT: 行の list（各行は列名 -> 値の dict、列順を保持）。
+    ///     INSERT/UPDATE/DELETE: 影響行数 (int)。
+    ///     DDL: None。
+    ///
+    /// Raises:
+    ///     ValueError: プレースホルダ数とパラメータ数の不一致、不正なパラメータ値。
+    ///     TypeError: 未対応のパラメータ型。
+    ///     NotImplementedError: bytes パラメータ（BLOB リテラルは SQL パーサー未対応）。
+    ///     AlopexError: SQL の解析・実行エラー（`code` に ALOPEX-P/S/C/E### を設定）。
+    #[pyo3(signature = (sql, params = None))]
+    fn execute_sql(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let db = self.ensure_open()?;
+        let bound_sql = crate::embedded::sql::bind_params(sql, params.as_ref())?;
+        let result = py
+            .detach(move || db.execute_sql(&bound_sql))
+            .map_err(error::embedded_err)?;
+        crate::embedded::sql::execution_result_to_py(py, result)
+    }
+
     #[pyo3(signature = (mode = None))]
     fn begin(&self, mode: Option<PyTxnMode>) -> PyResult<PyTransaction> {
         let db = self.ensure_open()?;
@@ -113,7 +142,7 @@ impl PyDatabase {
         let db = self.ensure_open()?;
         match self.mode {
             alopex_embedded::StorageMode::Disk => {
-                py.allow_threads(|| db.flush()).map_err(error::embedded_err)
+                py.detach(|| db.flush()).map_err(error::embedded_err)
             }
             alopex_embedded::StorageMode::InMemory => {
                 Err(error::to_py_err("flush is only supported in disk mode"))
@@ -223,7 +252,7 @@ impl PyDatabase {
         &self,
         py: Python<'_>,
         name: &str,
-        query: PyObject,
+        query: Py<PyAny>,
         k: usize,
         ef_search: Option<usize>,
     ) -> PyResult<(Vec<PySearchResult>, PyHnswStats)> {
@@ -237,14 +266,14 @@ impl PyDatabase {
                 SliceOrOwned::Borrowed { ptr, len, _guard } => {
                     let _guard = _guard;
                     let ptr = ptr as usize;
-                    py.allow_threads(move || {
+                    py.detach(move || {
                         let ptr = ptr as *const f32;
                         let values = unsafe { std::slice::from_raw_parts(ptr, len) };
                         db_clone.search_hnsw(&name_clone, values, k, ef_search)
                     })
                 }
                 SliceOrOwned::Owned(vec) => {
-                    py.allow_threads(move || db_clone.search_hnsw(&name_clone, &vec, k, ef_search))
+                    py.detach(move || db_clone.search_hnsw(&name_clone, &vec, k, ef_search))
                 }
             }
             .map_err(error::embedded_err)?;
@@ -276,8 +305,166 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use pyo3::prelude::*;
+    use pyo3::types::{PyDict, PyList};
+    use pyo3::IntoPyObjectExt;
+
     use super::inject_rollback_failure_once;
     use super::PyDatabase;
+
+    fn with_py<F: FnOnce(Python<'_>)>(f: F) {
+        pyo3::Python::initialize();
+        Python::attach(f);
+    }
+
+    #[test]
+    fn execute_sql_ddl_dml_select_end_to_end() {
+        with_py(|py| {
+            let db = PyDatabase::new().expect("db");
+
+            let ddl = db
+                .execute_sql(
+                    py,
+                    "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)",
+                    None,
+                )
+                .expect("ddl");
+            assert!(ddl.is_none(py));
+
+            let params = PyList::empty(py);
+            params.append(1i64).expect("append id");
+            params.append("Alice").expect("append name");
+            let affected = db
+                .execute_sql(
+                    py,
+                    "INSERT INTO users (id, name) VALUES (?, ?)",
+                    Some(params.into_any()),
+                )
+                .expect("insert");
+            assert_eq!(affected.extract::<u64>(py).expect("affected"), 1);
+
+            let params = PyList::empty(py);
+            params.append(1i64).expect("append id");
+            let rows = db
+                .execute_sql(
+                    py,
+                    "SELECT id, name FROM users WHERE id = ?",
+                    Some(params.into_any()),
+                )
+                .expect("select");
+            let rows = rows.bind(py).cast::<PyList>().expect("list").clone();
+            assert_eq!(rows.len(), 1);
+            let row = rows.get_item(0).expect("row");
+            let row = row.cast::<PyDict>().expect("dict");
+            let id = row.get_item("id").expect("get id").expect("id present");
+            assert_eq!(id.extract::<i64>().expect("id int"), 1);
+            let name = row
+                .get_item("name")
+                .expect("get name")
+                .expect("name present");
+            assert_eq!(name.extract::<String>().expect("name str"), "Alice");
+        });
+    }
+
+    #[test]
+    fn execute_sql_select_empty_returns_empty_list() {
+        with_py(|py| {
+            let db = PyDatabase::new().expect("db");
+            db.execute_sql(py, "CREATE TABLE t (id INTEGER PRIMARY KEY)", None)
+                .expect("ddl");
+            let rows = db
+                .execute_sql(py, "SELECT id FROM t", None)
+                .expect("select");
+            let rows = rows.bind(py).cast::<PyList>().expect("list").clone();
+            assert_eq!(rows.len(), 0);
+        });
+    }
+
+    #[test]
+    fn execute_sql_parse_error_maps_to_alopex_error_with_sql_code() {
+        with_py(|py| {
+            let db = PyDatabase::new().expect("db");
+            let err = db
+                .execute_sql(py, "SELEKT 1 FRUM nowhere", None)
+                .expect_err("parse error");
+            assert!(err.is_instance_of::<crate::error::PyAlopexError>(py));
+            let code: String = err
+                .value(py)
+                .getattr("code")
+                .expect("code attr")
+                .extract()
+                .expect("code str");
+            assert!(code.starts_with("ALOPEX-"), "unexpected code: {code}");
+        });
+    }
+
+    #[test]
+    fn execute_sql_on_closed_database_is_error() {
+        with_py(|py| {
+            let mut db = PyDatabase::new().expect("db");
+            db.close().expect("close");
+            let err = db.execute_sql(py, "SELECT 1", None).expect_err("closed");
+            assert!(err.is_instance_of::<crate::error::PyAlopexError>(py));
+        });
+    }
+
+    #[test]
+    fn execute_sql_vector_param_roundtrip() {
+        with_py(|py| {
+            let db = PyDatabase::new().expect("db");
+            db.execute_sql(
+                py,
+                "CREATE TABLE docs (id INTEGER PRIMARY KEY, embedding VECTOR(3))",
+                None,
+            )
+            .expect("ddl");
+
+            let vector = PyList::new(py, [0.25f64, -1.5, 2.0]).expect("vector");
+            let params = PyList::empty(py);
+            params.append(1i64).expect("append id");
+            params.append(vector).expect("append vector");
+            db.execute_sql(
+                py,
+                "INSERT INTO docs (id, embedding) VALUES (?, ?)",
+                Some(params.into_any()),
+            )
+            .expect("insert");
+
+            let params = PyList::empty(py);
+            params.append(1i64).expect("append id");
+            let rows = db
+                .execute_sql(
+                    py,
+                    "SELECT embedding FROM docs WHERE id = ?",
+                    Some(params.into_any()),
+                )
+                .expect("select");
+            let rows = rows.bind(py).cast::<PyList>().expect("list").clone();
+            assert_eq!(rows.len(), 1);
+            let row = rows.get_item(0).expect("row");
+            let row = row.cast::<PyDict>().expect("dict");
+            let embedding = row
+                .get_item("embedding")
+                .expect("get embedding")
+                .expect("embedding present");
+            let embedding: Vec<f64> = embedding.extract().expect("vec f64");
+            assert_eq!(embedding, vec![0.25, -1.5, 2.0]);
+        });
+    }
+
+    #[test]
+    fn execute_sql_rejects_scalar_params() {
+        with_py(|py| {
+            let db = PyDatabase::new().expect("db");
+            db.execute_sql(py, "CREATE TABLE t (id INTEGER PRIMARY KEY)", None)
+                .expect("ddl");
+            let scalar = 1i64.into_bound_py_any(py).expect("int");
+            let err = db
+                .execute_sql(py, "SELECT id FROM t WHERE id = ?", Some(scalar))
+                .expect_err("scalar params");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+        });
+    }
 
     #[test]
     fn close_rolls_back_tracked_transactions_and_cleans_up() {

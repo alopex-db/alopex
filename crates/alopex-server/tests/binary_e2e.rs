@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use hyper::{Body, Client, Method, Request, StatusCode};
+use hyper::{Method, Request, StatusCode};
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::TokioExecutor;
 use tempfile::tempdir;
 use tokio::time::sleep;
 
@@ -46,13 +49,13 @@ audit_log_enabled = false
 }
 
 async fn get_status(
-    client: &Client<hyper::client::HttpConnector>,
+    client: &Client<HttpConnector, http_body_util::Full<axum::body::Bytes>>,
     url: &str,
 ) -> Option<StatusCode> {
     let request = Request::builder()
         .method(Method::GET)
         .uri(url)
-        .body(Body::empty())
+        .body(http_body_util::Full::new(axum::body::Bytes::new()))
         .ok()?;
     let response = client.request(request).await.ok()?;
     Some(response.status())
@@ -76,7 +79,7 @@ async fn server_binary_starts_and_serves_health() {
         .spawn()
         .expect("spawn server");
 
-    let client = Client::new();
+    let client = Client::builder(TokioExecutor::new()).build_http();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut admin_ok = false;
     let mut api_ok = false;

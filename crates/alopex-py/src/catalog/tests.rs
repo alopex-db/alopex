@@ -3,7 +3,7 @@ use std::env;
 use std::sync::Mutex;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
-use pyo3::{prepare_freethreaded_python, Python};
+use pyo3::Python;
 
 use super::credentials::{auto_resolve_credentials, mask_sensitive_values};
 use super::{validate_identifier, validate_storage_location, PyCatalogInfo, PyColumnInfo};
@@ -13,7 +13,7 @@ use crate::error::{AlopexError, PyAlopexError};
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn init_python() {
-    prepare_freethreaded_python();
+    Python::initialize();
 }
 
 fn set_env(key: &str, value: Option<&str>) -> Option<String> {
@@ -208,7 +208,7 @@ fn test_validate_storage_location() {
 #[test]
 fn test_error_conversion_value_error() {
     init_python();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let err: pyo3::PyErr = AlopexError::CatalogNotFound("missing".to_string()).into();
         assert!(err.is_instance_of::<PyValueError>(py));
     });
@@ -217,7 +217,7 @@ fn test_error_conversion_value_error() {
 #[test]
 fn test_error_conversion_runtime_error() {
     init_python();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let err: pyo3::PyErr = AlopexError::CatalogAlreadyExists("dup".to_string()).into();
         assert!(err.is_instance_of::<PyRuntimeError>(py));
     });
@@ -226,7 +226,7 @@ fn test_error_conversion_runtime_error() {
 #[test]
 fn test_error_conversion_custom_error() {
     init_python();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let err: pyo3::PyErr = AlopexError::UnsupportedFormat("CSV".to_string()).into();
         assert!(err.is_instance_of::<PyAlopexError>(py));
     });

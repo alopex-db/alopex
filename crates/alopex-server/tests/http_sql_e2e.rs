@@ -13,7 +13,6 @@ use alopex_server::server::ServerState;
 use alopex_server::Server;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use hyper::body::to_bytes;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -61,7 +60,9 @@ async fn send_json(app: &axum::Router, uri: &str, body: Value) -> (StatusCode, S
         .expect("request");
     let response = app.clone().oneshot(request).await.expect("response");
     let status = response.status();
-    let bytes = to_bytes(response.into_body()).await.expect("body");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
     let body = String::from_utf8(bytes.to_vec()).expect("utf8");
     (status, body)
 }
@@ -74,7 +75,9 @@ async fn send_empty(app: &axum::Router, uri: &str) -> (StatusCode, String) {
         .expect("request");
     let response = app.clone().oneshot(request).await.expect("response");
     let status = response.status();
-    let bytes = to_bytes(response.into_body()).await.expect("body");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
     let body = String::from_utf8(bytes.to_vec()).expect("utf8");
     (status, body)
 }

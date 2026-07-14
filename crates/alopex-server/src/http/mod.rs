@@ -175,13 +175,19 @@ pub fn router(state: Arc<ServerState>) -> Router {
     let middleware = middleware::from_fn(context_middleware);
     let connection_middleware = middleware::from_fn(connection_middleware);
     let admission_middleware = middleware::from_fn(admission_middleware);
+    // `RequestBodyLimitLayer` rewraps the request body as `Limited<Body>`, so
+    // it must be the innermost layer (applied last): the `from_fn`
+    // middlewares above are typed against the plain `axum::extract::Request`
+    // (`Request<Body>`) and would not satisfy `Service<Request<Limited<Body>>>`
+    // if body-limiting ran before them (axum 0.7 middleware is no longer
+    // generic over the body type).
     api.layer(
         ServiceBuilder::new()
-            .layer(RequestBodyLimitLayer::new(state.config.max_request_size))
             .layer(TraceLayer::new_for_http().make_span_with(make_trace_span))
             .layer(admission_middleware)
             .layer(middleware)
-            .layer(connection_middleware),
+            .layer(connection_middleware)
+            .layer(RequestBodyLimitLayer::new(state.config.max_request_size)),
     )
     .layer(axum::Extension(state))
 }
@@ -190,10 +196,10 @@ pub fn admin_router(state: Arc<ServerState>) -> Router {
     admin::router(state)
 }
 
-pub async fn context_middleware<B>(
+pub async fn context_middleware(
     axum::extract::Extension(state): axum::extract::Extension<Arc<ServerState>>,
-    mut req: axum::http::Request<B>,
-    next: middleware::Next<B>,
+    mut req: axum::extract::Request,
+    next: middleware::Next,
 ) -> Response {
     let correlation_id =
         extract_correlation_id(req.headers()).unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -228,10 +234,10 @@ pub async fn context_middleware<B>(
     res
 }
 
-pub async fn connection_middleware<B>(
+pub async fn connection_middleware(
     axum::extract::Extension(state): axum::extract::Extension<Arc<ServerState>>,
-    req: axum::http::Request<B>,
-    next: middleware::Next<B>,
+    req: axum::extract::Request,
+    next: middleware::Next,
 ) -> Response {
     state.metrics.record_connection(1);
     let res = next.run(req).await;
@@ -239,10 +245,10 @@ pub async fn connection_middleware<B>(
     res
 }
 
-pub async fn admission_middleware<B>(
+pub async fn admission_middleware(
     axum::extract::Extension(state): axum::extract::Extension<Arc<ServerState>>,
-    req: axum::http::Request<B>,
-    next: middleware::Next<B>,
+    req: axum::extract::Request,
+    next: middleware::Next,
 ) -> Response {
     if let Ok(permit) = state.admission_permits.clone().try_acquire_owned() {
         let res = next.run(req).await;

@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-#[pyclass(name = "SearchResult")]
+#[pyclass(name = "SearchResult", skip_from_py_object)]
 pub struct PySearchResult {
     #[pyo3(get, set)]
     pub key: Vec<u8>,
@@ -11,7 +11,7 @@ pub struct PySearchResult {
     /// ベクトルデータ（`return_vectors=True` の場合のみ設定）
     /// NumPy ndarray[float32] または None
     #[pyo3(get)]
-    pub vector: Option<PyObject>,
+    pub vector: Option<Py<PyAny>>,
 }
 
 impl Clone for PySearchResult {
@@ -23,7 +23,7 @@ impl Clone for PySearchResult {
             vector: self
                 .vector
                 .as_ref()
-                .map(|obj| Python::with_gil(|py| obj.clone_ref(py))),
+                .map(|obj| Python::attach(|py| obj.clone_ref(py))),
         }
     }
 }
@@ -43,7 +43,7 @@ impl std::fmt::Debug for PySearchResult {
 impl PySearchResult {
     #[new]
     #[pyo3(signature = (key, score, metadata = None, vector = None))]
-    fn new(key: Vec<u8>, score: f32, metadata: Option<Vec<u8>>, vector: Option<PyObject>) -> Self {
+    fn new(key: Vec<u8>, score: f32, metadata: Option<Vec<u8>>, vector: Option<Py<PyAny>>) -> Self {
         Self {
             key,
             score,
@@ -90,7 +90,7 @@ impl PySearchResult {
         key: Vec<u8>,
         score: f32,
         metadata: Option<Vec<u8>>,
-        vector: Option<PyObject>,
+        vector: Option<Py<PyAny>>,
     ) -> Self {
         Self {
             key,
@@ -101,7 +101,7 @@ impl PySearchResult {
     }
 }
 
-#[pyclass(name = "HnswStats")]
+#[pyclass(name = "HnswStats", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyHnswStats {
     #[pyo3(get, set)]
@@ -155,7 +155,7 @@ impl PyHnswStats {
     }
 }
 
-#[pyclass(name = "MemoryStats")]
+#[pyclass(name = "MemoryStats", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyMemoryStats {
     #[pyo3(get, set)]

@@ -1,6 +1,6 @@
 [package]
 name = "alopex-py"
-version = "0.7.0"
+version = "0.7.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -14,16 +14,17 @@ name = "_alopex"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.24.1", features = ["abi3-py38", "extension-module"] }
-numpy = { version = "0.24", optional = true }
+pyo3 = { version = "0.29.0", features = ["abi3-py38", "extension-module"] }
+numpy = { version = "0.29.0", optional = true }
 alopex-core.workspace = true
 alopex-cluster.workspace = true
 alopex-dataframe.workspace = true
 alopex-embedded = { path = "../alopex-embedded" }
+alopex-sql.workspace = true
 arrow = "53"
 
 [build-dependencies]
-pyo3-build-config = "0.24.1"
+pyo3-build-config = "0.29.0"
 
 [dev-dependencies]
 criterion = { workspace = true }

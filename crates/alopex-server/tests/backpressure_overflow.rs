@@ -41,7 +41,7 @@ async fn send_post(router: Router, path: &str) -> (StatusCode, Vec<u8>) {
         .expect("request");
     let response = router.oneshot(request).await.expect("response");
     let status = response.status();
-    let body = hyper::body::to_bytes(response.into_body())
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
     (status, body.to_vec())

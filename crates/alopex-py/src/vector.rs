@@ -1,11 +1,8 @@
+use crate::error;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use pyo3::types::PyModule;
 use pyo3::Bound;
-#[allow(deprecated)]
-use pyo3::ToPyObject;
-
-use crate::error;
 
 use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1};
 
@@ -84,13 +81,13 @@ where
 /// vector::with_ndarray_f32_gil_safe(array, |slice_or_owned| {
 ///     match slice_or_owned {
 ///         SliceOrOwned::Borrowed { ptr, len, _guard } => {
-///             py.allow_threads(|| {
+///             py.detach(|| {
 ///                 let values = unsafe { std::slice::from_raw_parts(ptr, len) };
 ///                 // use values...
 ///             })
 ///         }
 ///         SliceOrOwned::Owned(vec) => {
-///             py.allow_threads(|| {
+///             py.detach(|| {
 ///                 // use &vec...
 ///             })
 ///         }
@@ -154,7 +151,7 @@ where
 /// `PyArray1::from_vec` を使用して所有権を Python 側に移譲する。
 /// 返された配列は Python の GC によって管理される。
 #[allow(dead_code)]
-pub fn owned_vec_to_ndarray(py: Python<'_>, values: Vec<f32>) -> PyResult<PyObject> {
+pub fn owned_vec_to_ndarray(py: Python<'_>, values: Vec<f32>) -> PyResult<Py<PyAny>> {
     Ok(PyArray1::from_vec(py, values)
         .into_pyobject(py)?
         .into_any()
@@ -165,7 +162,7 @@ pub fn owned_vec_to_ndarray(py: Python<'_>, values: Vec<f32>) -> PyResult<PyObje
 ///
 /// Box を Vec に変換してから `PyArray1::from_vec` を使用する。
 #[allow(dead_code)]
-pub fn owned_to_ndarray(py: Python<'_>, values: Box<[f32]>) -> PyResult<PyObject> {
+pub fn owned_to_ndarray(py: Python<'_>, values: Box<[f32]>) -> PyResult<Py<PyAny>> {
     let vec: Vec<f32> = values.into_vec();
     owned_vec_to_ndarray(py, vec)
 }
@@ -174,7 +171,7 @@ pub fn owned_to_ndarray(py: Python<'_>, values: Box<[f32]>) -> PyResult<PyObject
 ///
 /// 検索結果の `vector` フィールド用。
 #[allow(dead_code)]
-pub fn vec_to_ndarray_opt(py: Python<'_>, values: Option<Vec<f32>>) -> PyResult<Option<PyObject>> {
+pub fn vec_to_ndarray_opt(py: Python<'_>, values: Option<Vec<f32>>) -> PyResult<Option<Py<PyAny>>> {
     match values {
         Some(v) => Ok(Some(owned_vec_to_ndarray(py, v)?)),
         None => Ok(None),
@@ -186,9 +183,11 @@ pub fn vec_to_ndarray_opt(py: Python<'_>, values: Option<Vec<f32>>) -> PyResult<
 /// `zero_copy_return=False` の場合に使用。
 /// `PyArray1::from_slice` を使用してデータをコピーする。
 #[allow(dead_code)]
-#[allow(deprecated)]
-pub fn vec_to_ndarray_copy(py: Python<'_>, values: &[f32]) -> PyResult<PyObject> {
-    Ok(PyArray1::from_slice(py, values).to_object(py))
+pub fn vec_to_ndarray_copy(py: Python<'_>, values: &[f32]) -> PyResult<Py<PyAny>> {
+    PyArray1::from_slice(py, values)
+        .into_pyobject(py)
+        .map(|b| b.into_any().unbind())
+        .map_err(Into::into)
 }
 
 /// Option<Vec<f32>> を Option<ndarray> に変換（コピー）
@@ -198,7 +197,7 @@ pub fn vec_to_ndarray_copy(py: Python<'_>, values: &[f32]) -> PyResult<PyObject>
 pub fn vec_to_ndarray_opt_copy(
     py: Python<'_>,
     values: Option<&[f32]>,
-) -> PyResult<Option<PyObject>> {
+) -> PyResult<Option<Py<PyAny>>> {
     match values {
         Some(v) => Ok(Some(vec_to_ndarray_copy(py, v)?)),
         None => Ok(None),
@@ -206,9 +205,11 @@ pub fn vec_to_ndarray_opt_copy(
 }
 
 #[allow(dead_code)]
-#[allow(deprecated)]
-pub fn vec_to_ndarray<'py>(py: Python<'py>, values: &[f32]) -> PyResult<PyObject> {
-    Ok(PyArray1::from_slice(py, values).to_object(py))
+pub fn vec_to_ndarray<'py>(py: Python<'py>, values: &[f32]) -> PyResult<Py<PyAny>> {
+    PyArray1::from_slice(py, values)
+        .into_pyobject(py)
+        .map(|b| b.into_any().unbind())
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -239,8 +240,8 @@ mod tests {
     where
         F: for<'py> FnOnce(Python<'py>) -> R,
     {
-        PY_INIT.call_once(pyo3::prepare_freethreaded_python);
-        Python::with_gil(f)
+        PY_INIT.call_once(pyo3::Python::initialize);
+        Python::attach(f)
     }
 
     fn tc_fail(msg: impl Into<String>) -> TestCaseError {
@@ -444,7 +445,7 @@ mod tests {
                 require_numpy_tc(py)?;
                 let obj = tc_py(owned_to_ndarray(py, values.clone().into_boxed_slice()))?;
                 let bound = obj.bind(py);
-                let arr = tc_py(bound.extract::<numpy::PyReadonlyArray1<'_, f32>>())?;
+                let arr = tc_py(bound.extract::<numpy::PyReadonlyArray1<'_, f32>>().map_err(pyo3::PyErr::from))?;
                 let slice = arr.as_slice().map_err(|e| tc_fail(format!("{e}")))?;
                 prop_assert_eq!(slice.len(), values.len());
                 for (a, b) in slice.iter().copied().zip(values.iter().copied()) {
@@ -461,7 +462,7 @@ mod tests {
                 let obj = tc_py(vec_to_ndarray_opt_copy(py, Some(values.as_slice())))?
                     .expect("some");
                 let bound = obj.bind(py);
-                let arr = tc_py(bound.extract::<numpy::PyReadonlyArray1<'_, f32>>())?;
+                let arr = tc_py(bound.extract::<numpy::PyReadonlyArray1<'_, f32>>().map_err(pyo3::PyErr::from))?;
                 let slice = arr.as_slice().map_err(|e| tc_fail(format!("{e}")))?;
                 prop_assert_eq!(slice.len(), values.len());
                 for (a, b) in slice.iter().copied().zip(values.iter().copied()) {

@@ -1,0 +1,126 @@
+{
+  "corpus": "06_subquery.sql",
+  "note": "本ファイルの期待値は SQL 意味論からの手計算値である (02_dml.sql 完了後の状態が前提)。v0.7.1 で CLI のサブクエリ逸脱 (issues #23/#24: WHERE 句で ALOPEX-E999、スカラーで黙って空結果) と gRPC の経路差 (issue #25) が修正され、全サーフェスが本期待値と一致する。サーフェス間の不一致は S2-a のペア間 diff で INV-2 違反として検出・報告される。",
+  "format": {
+    "success": "DDL 文の成功 (結果セットなし)",
+    "rows_affected": "DML 文の成功 (count = 影響行数)",
+    "query": "columns = 出力列名の順序付き配列 / rows = 列名をキーとするオブジェクトの配列 / 浮動小数点は有効数字 9 桁へ丸め / NULL は JSON null"
+  },
+  "statements": [
+    {
+      "index": 1,
+      "sql": "SELECT users.name, (SELECT COUNT(*) FROM orders WHERE orders.user_id = users.id) AS order_count FROM users ORDER BY users.id",
+      "expected": {
+        "type": "query",
+        "columns": ["name", "order_count"],
+        "rows": [
+          { "name": "alice", "order_count": 2 },
+          { "name": "bob", "order_count": 1 },
+          { "name": "carol", "order_count": 2 },
+          { "name": "dave", "order_count": 0 },
+          { "name": "erin", "order_count": 1 },
+          { "name": "frank", "order_count": 0 }
+        ]
+      }
+    },
+    {
+      "index": 2,
+      "sql": "SELECT orders.id AS order_id, orders.amount FROM orders WHERE orders.amount > (SELECT AVG(orders.amount) FROM orders) ORDER BY orders.id",
+      "expected": {
+        "type": "query",
+        "columns": ["order_id", "amount"],
+        "rows": [
+          { "order_id": 10, "amount": 50.0 },
+          { "order_id": 11, "amount": 75.5 },
+          { "order_id": 15, "amount": 45.5 },
+          { "order_id": 17, "amount": 60.0 }
+        ]
+      }
+    },
+    {
+      "index": 3,
+      "sql": "SELECT users.name FROM users WHERE users.id IN (SELECT orders.user_id FROM orders) ORDER BY users.id",
+      "expected": {
+        "type": "query",
+        "columns": ["name"],
+        "rows": [
+          { "name": "alice" },
+          { "name": "bob" },
+          { "name": "carol" },
+          { "name": "erin" }
+        ]
+      }
+    },
+    {
+      "index": 4,
+      "sql": "SELECT users.name FROM users WHERE users.id NOT IN (SELECT orders.user_id FROM orders) ORDER BY users.id",
+      "expected": {
+        "type": "query",
+        "columns": ["name"],
+        "rows": [
+          { "name": "dave" },
+          { "name": "frank" }
+        ]
+      }
+    },
+    {
+      "index": 5,
+      "sql": "SELECT users.name FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id AND orders.amount > 70.0) ORDER BY users.id",
+      "expected": {
+        "type": "query",
+        "columns": ["name"],
+        "rows": [
+          { "name": "alice" }
+        ]
+      }
+    },
+    {
+      "index": 6,
+      "sql": "SELECT users.name FROM users WHERE NOT EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id) ORDER BY users.id",
+      "expected": {
+        "type": "query",
+        "columns": ["name"],
+        "rows": [
+          { "name": "dave" },
+          { "name": "frank" }
+        ]
+      }
+    },
+    {
+      "index": 7,
+      "sql": "SELECT products.id, products.price FROM products WHERE products.price > ANY (SELECT products.price FROM products WHERE products.category = 'game') ORDER BY products.id",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "price"],
+        "rows": [
+          { "id": 1, "price": 11.0 },
+          { "id": 2, "price": 16.0 },
+          { "id": 4, "price": 20.0 }
+        ]
+      }
+    },
+    {
+      "index": 8,
+      "sql": "SELECT products.id, products.price FROM products WHERE products.price >= ALL (SELECT products.price FROM products WHERE products.category = 'book') ORDER BY products.id",
+      "expected": {
+        "type": "query",
+        "columns": ["id", "price"],
+        "rows": [
+          { "id": 2, "price": 16.0 },
+          { "id": 4, "price": 20.0 }
+        ]
+      }
+    },
+    {
+      "index": 9,
+      "sql": "SELECT (SELECT MAX(orders.amount) FROM orders) - (SELECT MIN(orders.amount) FROM orders) AS amount_range",
+      "expected": {
+        "type": "query",
+        "columns": ["amount_range"],
+        "rows": [
+          { "amount_range": 62.75 }
+        ]
+      }
+    }
+  ]
+}

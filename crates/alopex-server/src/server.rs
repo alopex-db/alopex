@@ -393,8 +393,10 @@ async fn run_http(
         let shutdown_signal = async move {
             let _ = shutdown.recv().await;
         };
-        axum::Server::bind(&addr)
-            .serve(app.into_make_service())
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(ServerError::Io)?;
+        axum::serve(listener, app.into_make_service())
             .with_graceful_shutdown(shutdown_signal)
             .await
             .map_err(|err| ServerError::Internal(err.to_string()))?;
@@ -426,11 +428,16 @@ async fn run_admin(
         let shutdown_signal = async move {
             let _ = shutdown.recv().await;
         };
-        axum::Server::bind(&addr)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-            .with_graceful_shutdown(shutdown_signal)
+        let listener = tokio::net::TcpListener::bind(addr)
             .await
-            .map_err(|err| ServerError::Internal(err.to_string()))?;
+            .map_err(ServerError::Io)?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal)
+        .await
+        .map_err(|err| ServerError::Internal(err.to_string()))?;
     }
     Ok(())
 }

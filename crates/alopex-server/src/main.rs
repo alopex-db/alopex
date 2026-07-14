@@ -54,6 +54,15 @@ fn parse_args() -> Result<Action, String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Install the `ring` CryptoProvider as the process-level default. Our own
+    // TLS config construction (see `alopex_server::tls::build_rustls_config`)
+    // builds `rustls::ServerConfig` with an explicit provider and does not
+    // depend on this, but installing it here keeps behavior consistent with
+    // any future rustls-backed client code paths (e.g. tonic Channel TLS) and
+    // matches the provider already selected process-wide via `object_store`'s
+    // TLS stack.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     match parse_args() {
         Ok(Action::Help) => {
             print_help();

@@ -136,24 +136,8 @@ pub fn execute_query_streaming_with_policy<
         // For KNN, we materialize and wrap in VecIterator
         let result = execute_query_with_policy(txn, catalog, plan, memory)?;
         if let ExecutionResult::Query(qr) = result {
-            let column_names: Vec<String> = qr.columns.iter().map(|c| c.name.clone()).collect();
-            let schema: Vec<crate::catalog::ColumnMetadata> = qr
-                .columns
-                .iter()
-                .map(|c| crate::catalog::ColumnMetadata::new(&c.name, c.data_type.clone()))
-                .collect();
-            let rows: Vec<Row> = qr
-                .rows
-                .into_iter()
-                .enumerate()
-                .map(|(i, values)| Row::new(i as u64, values))
-                .collect();
-            let iter = iterator::VecIterator::new(rows, schema.clone());
-            return Ok(QueryRowIterator::new(
-                Box::new(iter),
-                Projection::All(column_names),
-                schema,
-            ));
+            let (iter, projection, schema) = materialize_query_result(qr);
+            return Ok(QueryRowIterator::new(iter, projection, schema));
         }
         return Err(ExecutorError::InvalidOperation {
             operation: "execute_query_streaming".into(),
@@ -161,9 +145,46 @@ pub fn execute_query_streaming_with_policy<
         });
     }
 
+    // Subqueries need transaction access during evaluation, which streaming
+    // iterators borrow exclusively. Execute through the materializing path
+    // (the same one used by `execute_query`) so results are identical to the
+    // non-streaming API instead of failing or silently dropping rows.
+    if subquery::plan_contains_subquery(&plan) {
+        let result = execute_query_result_with_outer_and_policy(txn, catalog, plan, None, memory)?;
+        let (iter, projection, schema) = materialize_query_result(result);
+        return Ok(QueryRowIterator::new(iter, projection, schema));
+    }
+
     let (iter, projection, schema) = build_iterator_pipeline(txn, catalog, plan, memory)?;
 
     Ok(QueryRowIterator::new(iter, projection, schema))
+}
+
+/// Convert a materialized `QueryResult` into pipeline outputs.
+///
+/// The resulting rows are already fully projected, so the returned projection
+/// is `Projection::All` over the output column names.
+fn materialize_query_result(
+    result: QueryResult,
+) -> (
+    Box<dyn RowIterator>,
+    Projection,
+    Vec<crate::catalog::ColumnMetadata>,
+) {
+    let column_names: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
+    let schema: Vec<crate::catalog::ColumnMetadata> = result
+        .columns
+        .iter()
+        .map(|c| crate::catalog::ColumnMetadata::new(&c.name, c.data_type.clone()))
+        .collect();
+    let rows: Vec<Row> = result
+        .rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, values)| Row::new(i as u64, values))
+        .collect();
+    let iter = iterator::VecIterator::new(rows, schema.clone());
+    (Box::new(iter), Projection::All(column_names), schema)
 }
 
 /// Build an iterator pipeline from a logical plan.
@@ -453,6 +474,16 @@ pub fn build_streaming_pipeline_with_policy<
     Projection,
     Vec<crate::catalog::ColumnMetadata>,
 )> {
+    // Subqueries need transaction access during evaluation, which streaming
+    // iterators borrow exclusively. Execute through the materializing path
+    // (the same one used by `execute_query`) so results are identical to the
+    // non-streaming API instead of failing or silently dropping rows
+    // (GitHub issues #23 / #24).
+    if subquery::plan_contains_subquery(&plan) {
+        let result = execute_query_result_with_outer_and_policy(txn, catalog, plan, None, memory)?;
+        return Ok(materialize_query_result(result));
+    }
+
     build_streaming_pipeline_inner(txn, catalog, plan, memory)
 }
 

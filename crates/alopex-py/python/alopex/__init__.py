@@ -1,3 +1,17 @@
+import os
+import sys
+
+# NOTE: mypy の platform 分岐解析はエイリアスなしの `sys.platform` のみ認識する。
+if sys.platform == "win32":
+    # Windows: Python 3.8+ (bpo-36085) は拡張モジュールの依存 DLL 解決に PATH を
+    # 使わない。`_alopex` は Nim SQL パーサー (alopex_sql_parser.dll) に動的リンク
+    # しているため、依存 DLL のディレクトリは環境変数 ALOPEX_DLL_DIR
+    # (os.pathsep 区切り) で明示的に指定し、os.add_dll_directory() へ登録する。
+    # 存在しないディレクトリは設定ミスとして即座に OSError で失敗させる
+    # (暗黙の PATH 走査などのフォールバックは行わない)。
+    for _dll_dir in filter(None, os.environ.get("ALOPEX_DLL_DIR", "").split(os.pathsep)):
+        os.add_dll_directory(_dll_dir)
+
 from . import _alopex as _alopex
 from ._alopex import catalog as _catalog  # type: ignore[attr-defined]
 from ._alopex import database as _database  # type: ignore[attr-defined]

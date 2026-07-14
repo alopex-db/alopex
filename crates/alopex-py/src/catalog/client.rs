@@ -18,9 +18,14 @@ thread_local! {
     static POLARS_AVAILABLE: RefCell<Option<bool>> = const { RefCell::new(None) };
 }
 
-#[allow(deprecated)]
-fn default_credential_provider() -> PyObject {
-    Python::with_gil(|py| "auto".into_py(py))
+fn default_credential_provider() -> Py<PyAny> {
+    Python::attach(|py| {
+        "auto"
+            .into_pyobject(py)
+            .expect("str to PyString conversion is infallible")
+            .into_any()
+            .unbind()
+    })
 }
 
 fn get_scan_parquet(py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -86,7 +91,7 @@ fn polars_dtype_to_alopex_type(dtype: &str) -> String {
 
 fn infer_columns_from_dataframe(df: &Bound<'_, PyAny>) -> PyResult<Vec<PyColumnInfo>> {
     let schema = df.getattr("schema")?;
-    let schema = schema.downcast::<PyDict>()?;
+    let schema = schema.cast::<PyDict>()?;
     let mut columns = Vec::with_capacity(schema.len());
     for (position, (name, dtype)) in schema.iter().enumerate() {
         let name: String = name.extract()?;
@@ -160,7 +165,7 @@ impl PyCatalog {
     #[staticmethod]
     fn list_catalogs(py: Python<'_>) -> PyResult<Vec<PyCatalogInfo>> {
         let catalogs = py
-            .allow_threads(alopex_embedded::Catalog::list_catalogs)
+            .detach(alopex_embedded::Catalog::list_catalogs)
             .map_err(error::embedded_err)?;
         Ok(catalogs.into_iter().map(PyCatalogInfo::from).collect())
     }
@@ -184,7 +189,7 @@ impl PyCatalog {
     fn list_namespaces(py: Python<'_>, catalog_name: &str) -> PyResult<Vec<PyNamespaceInfo>> {
         validate_identifier(catalog_name)?;
         let namespaces = py
-            .allow_threads(|| alopex_embedded::Catalog::list_namespaces(catalog_name))
+            .detach(|| alopex_embedded::Catalog::list_namespaces(catalog_name))
             .map_err(error::embedded_err)?;
         Ok(namespaces.into_iter().map(PyNamespaceInfo::from).collect())
     }
@@ -214,7 +219,7 @@ impl PyCatalog {
         validate_identifier(catalog_name)?;
         validate_identifier(namespace)?;
         let tables = py
-            .allow_threads(|| alopex_embedded::Catalog::list_tables(catalog_name, namespace))
+            .detach(|| alopex_embedded::Catalog::list_tables(catalog_name, namespace))
             .map_err(error::embedded_err)?;
         Ok(tables.into_iter().map(PyTableInfo::from).collect())
     }
@@ -248,7 +253,7 @@ impl PyCatalog {
         validate_identifier(namespace)?;
         validate_identifier(table_name)?;
         let table_info = py
-            .allow_threads(|| {
+            .detach(|| {
                 alopex_embedded::Catalog::get_table_info(catalog_name, namespace, table_name)
             })
             .map_err(error::embedded_err)?;
@@ -272,7 +277,7 @@ impl PyCatalog {
     fn create_catalog(py: Python<'_>, name: &str) -> PyResult<()> {
         validate_identifier(name)?;
         // Cache invalidation is now handled at the embedded layer
-        py.allow_threads(|| alopex_embedded::Catalog::create_catalog(name))
+        py.detach(|| alopex_embedded::Catalog::create_catalog(name))
             .map_err(error::embedded_err)
     }
 
@@ -292,7 +297,7 @@ impl PyCatalog {
     fn delete_catalog(py: Python<'_>, name: &str) -> PyResult<()> {
         validate_identifier(name)?;
         // Cache invalidation is now handled at the embedded layer
-        py.allow_threads(|| alopex_embedded::Catalog::delete_catalog(name))
+        py.detach(|| alopex_embedded::Catalog::delete_catalog(name))
             .map_err(error::embedded_err)
     }
 
@@ -315,7 +320,7 @@ impl PyCatalog {
         validate_identifier(catalog_name)?;
         validate_identifier(namespace)?;
         // Cache invalidation is now handled at the embedded layer
-        py.allow_threads(|| alopex_embedded::Catalog::create_namespace(catalog_name, namespace))
+        py.detach(|| alopex_embedded::Catalog::create_namespace(catalog_name, namespace))
             .map_err(|err| match err {
                 alopex_embedded::Error::CatalogNotFound(name) => {
                     error::AlopexError::ParentNotFound(name).into()
@@ -342,7 +347,7 @@ impl PyCatalog {
         validate_identifier(catalog_name)?;
         validate_identifier(namespace)?;
         // Cache invalidation is now handled at the embedded layer
-        py.allow_threads(|| alopex_embedded::Catalog::delete_namespace(catalog_name, namespace))
+        py.detach(|| alopex_embedded::Catalog::delete_namespace(catalog_name, namespace))
             .map_err(error::embedded_err)
     }
 
@@ -399,7 +404,7 @@ impl PyCatalog {
         }
         let embedded_format = normalized_format.to_ascii_lowercase();
         let columns = to_embedded_columns(columns);
-        py.allow_threads(move || {
+        py.detach(move || {
             alopex_embedded::Catalog::create_table(
                 catalog_name,
                 namespace,
@@ -445,10 +450,8 @@ impl PyCatalog {
         validate_identifier(namespace)?;
         validate_identifier(table_name)?;
         // Cache invalidation is now handled at the embedded layer
-        py.allow_threads(|| {
-            alopex_embedded::Catalog::delete_table(catalog_name, namespace, table_name)
-        })
-        .map_err(error::embedded_err)
+        py.detach(|| alopex_embedded::Catalog::delete_table(catalog_name, namespace, table_name))
+            .map_err(error::embedded_err)
     }
 
     /// Lazily scan a table as a Polars LazyFrame.
@@ -485,7 +488,7 @@ impl PyCatalog {
         catalog_name: &str,
         namespace: &str,
         table_name: &str,
-        credential_provider: PyObject,
+        credential_provider: Py<PyAny>,
         storage_options: Option<HashMap<String, String>>,
     ) -> PyResult<Py<PyAny>> {
         validate_identifier(catalog_name)?;
@@ -569,13 +572,13 @@ impl PyCatalog {
     #[allow(clippy::too_many_arguments)]
     fn write_table(
         py: Python<'_>,
-        df: PyObject,
+        df: Py<PyAny>,
         catalog_name: &str,
         namespace: &str,
         table_name: &str,
         delta_mode: &str,
         storage_location: Option<String>,
-        credential_provider: PyObject,
+        credential_provider: Py<PyAny>,
         storage_options: Option<HashMap<String, String>>,
         primary_key: Option<Vec<String>>,
     ) -> PyResult<()> {
@@ -623,7 +626,7 @@ impl PyCatalog {
             }
         }
 
-        let table_info = match py.allow_threads(|| {
+        let table_info = match py.detach(|| {
             alopex_embedded::Catalog::get_table_info(catalog_name, namespace, table_name)
         }) {
             Ok(info) => Some(info),
@@ -802,7 +805,7 @@ fn create_table_from_dataframe(
     let columns = infer_columns_from_dataframe(df)?;
     let columns = to_embedded_columns(columns);
     let embedded_format = "parquet".to_string();
-    py.allow_threads(move || {
+    py.detach(move || {
         alopex_embedded::Catalog::create_table(
             catalog_name,
             namespace,

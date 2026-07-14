@@ -660,7 +660,6 @@ fn execute_server_command(
             ))
         }
         Command::Sql(sql_cmd) => {
-            let formatter = create_formatter(output_format);
             let stdout = io::stdout();
             let mut handle = stdout.lock();
             let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> =
@@ -696,7 +695,7 @@ fn execute_server_command(
                 batch_mode,
                 ui_mode,
                 &mut handle,
-                formatter,
+                output_format,
                 admin_launcher,
                 limit,
                 quiet,
@@ -1171,7 +1170,6 @@ fn execute_command(
             commands::kv::execute(db, kv_cmd, &mut writer)
         }
         Command::Sql(sql_cmd) => {
-            let formatter = create_formatter(output_format);
             let admin_launcher: Option<Box<dyn FnMut() -> Result<()> + '_>> =
                 if ui_mode == UiMode::Tui {
                     let admin_label = "local".to_string();
@@ -1202,7 +1200,7 @@ fn execute_command(
                 batch_mode,
                 ui_mode,
                 &mut handle,
-                formatter,
+                output_format,
                 admin_launcher,
                 limit,
                 quiet,

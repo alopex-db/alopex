@@ -6,7 +6,6 @@ use alopex_cli::batch::{BatchMode, BatchModeSource};
 use alopex_cli::client::http::HttpClient;
 use alopex_cli::cli::{OutputFormat, SqlCommand};
 use alopex_cli::commands::sql::{execute_remote_with_formatter_control, SqlExecutionOptions};
-use alopex_cli::output::formatter::create_formatter;
 use alopex_cli::profile::config::ServerConfig as CliServerConfig;
 use alopex_cli::ui::mode::UiMode;
 use alopex_cli::streaming::{CancelSignal, Deadline};
@@ -28,6 +27,14 @@ fn batch_mode() -> BatchMode {
 }
 
 async fn spawn_tls_server(router: Router) -> (String, oneshot::Sender<()>) {
+    // rustls 0.23: axum-server's `tls-rustls-no-provider` feature does not
+    // auto-install a process-level CryptoProvider (unlike `tls-rustls`,
+    // which hardcodes aws-lc-rs). Install `ring` explicitly so
+    // `RustlsConfig::from_pem_file` (which calls `ServerConfig::builder()`
+    // internally) doesn't panic. Ignore the error if another codepath
+    // (e.g. reqwest) already installed a provider first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cert = generate_simple_self_signed(vec!["localhost".to_string()]).expect("cert");
     let dir = tempfile::tempdir().expect("tempdir");
     let cert_path = dir.path().join("cert.pem");
@@ -133,7 +140,6 @@ async fn e2e_streaming_large_dataset() {
         tui: false,
     };
 
-    let formatter = create_formatter(OutputFormat::Json);
     let cancel = CancelSignal::new();
     let deadline = Deadline::new(Duration::from_secs(10));
     let mut output = Vec::new();
@@ -144,7 +150,7 @@ async fn e2e_streaming_large_dataset() {
         &batch_mode(),
         UiMode::Batch,
         &mut output,
-        formatter,
+        OutputFormat::Json,
         SqlExecutionOptions {
             limit: None,
             quiet: false,
@@ -157,7 +163,9 @@ async fn e2e_streaming_large_dataset() {
     .expect("streaming");
 
     let value: serde_json::Value = serde_json::from_slice(&output).expect("json");
-    let rows = value.as_array().expect("array");
+    let sets = value.as_array().expect("array of result sets");
+    assert_eq!(sets.len(), 1, "remote sql yields one result set");
+    let rows = sets[0].as_array().expect("rows array");
     assert_eq!(rows.len(), 500);
     assert_eq!(rows[0]["id"], json!(0));
     assert_eq!(rows[499]["id"], json!(499));

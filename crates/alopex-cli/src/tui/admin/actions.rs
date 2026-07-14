@@ -72,38 +72,29 @@ pub fn execute_local_action<W: Write>(
     batch_mode: &BatchMode,
     request: AdminRequest,
     writer: &mut W,
-    formatter: Box<dyn Formatter>,
+    make_formatter: &mut dyn FnMut() -> Box<dyn Formatter>,
 ) -> Result<()> {
     ensure_action_supported(request.action)?;
     ensure_action_matches_command(request.action, &request.command)?;
 
     match request.command {
         AdminCommand::Sql(cmd) => {
-            if request.ui_mode == UiMode::Tui {
-                sql::execute_with_formatter(
-                    db,
-                    cmd,
-                    batch_mode,
-                    request.ui_mode,
-                    writer,
-                    formatter,
-                    None,
-                    request.limit,
-                    request.quiet,
-                )
+            let ui_mode = if request.ui_mode == UiMode::Tui {
+                request.ui_mode
             } else {
-                sql::execute_with_formatter(
-                    db,
-                    cmd,
-                    batch_mode,
-                    UiMode::Batch,
-                    writer,
-                    formatter,
-                    None,
-                    request.limit,
-                    request.quiet,
-                )
-            }
+                UiMode::Batch
+            };
+            sql::execute_with_formatter_factory(
+                db,
+                cmd,
+                batch_mode,
+                ui_mode,
+                writer,
+                make_formatter,
+                None,
+                request.limit,
+                request.quiet,
+            )
         }
         AdminCommand::Kv(cmd) => {
             if request.ui_mode == UiMode::Tui {
@@ -121,8 +112,9 @@ pub fn execute_local_action<W: Write>(
                 )
             } else {
                 let columns = kv_columns_for(&cmd);
-                let mut streaming = StreamingWriter::new(writer, formatter, columns, request.limit)
-                    .with_quiet(request.quiet);
+                let mut streaming =
+                    StreamingWriter::new(writer, make_formatter(), columns, request.limit)
+                        .with_quiet(request.quiet);
                 kv::execute(db, cmd, &mut streaming)
             }
         }
@@ -142,8 +134,9 @@ pub fn execute_local_action<W: Write>(
                 )
             } else {
                 let columns = vector_columns_for(&cmd);
-                let mut streaming = StreamingWriter::new(writer, formatter, columns, request.limit)
-                    .with_quiet(request.quiet);
+                let mut streaming =
+                    StreamingWriter::new(writer, make_formatter(), columns, request.limit)
+                        .with_quiet(request.quiet);
                 vector::execute(db, cmd, batch_mode, &mut streaming)
             }
         }
@@ -163,8 +156,9 @@ pub fn execute_local_action<W: Write>(
                 )
             } else {
                 let columns = hnsw_columns_for(&cmd);
-                let mut streaming = StreamingWriter::new(writer, formatter, columns, request.limit)
-                    .with_quiet(request.quiet);
+                let mut streaming =
+                    StreamingWriter::new(writer, make_formatter(), columns, request.limit)
+                        .with_quiet(request.quiet);
                 hnsw::execute(db, cmd, &mut streaming)
             }
         }
@@ -186,15 +180,18 @@ pub fn execute_local_action<W: Write>(
                     cmd,
                     batch_mode,
                     writer,
-                    formatter,
+                    make_formatter(),
                     request.limit,
                     request.quiet,
                 )
             }
         }
-        AdminCommand::Lifecycle(cmd) => {
-            lifecycle::execute_with_formatter(&cmd, request.data_dir.as_deref(), writer, formatter)
-        }
+        AdminCommand::Lifecycle(cmd) => lifecycle::execute_with_formatter(
+            &cmd,
+            request.data_dir.as_deref(),
+            writer,
+            make_formatter(),
+        ),
     }
 }
 
@@ -203,20 +200,20 @@ pub async fn execute_remote_action<W: Write>(
     batch_mode: &BatchMode,
     request: AdminRequest,
     writer: &mut W,
-    formatter: Box<dyn Formatter>,
+    make_formatter: &mut dyn FnMut() -> Box<dyn Formatter>,
 ) -> Result<()> {
     ensure_action_supported(request.action)?;
     ensure_action_matches_command(request.action, &request.command)?;
 
     match request.command {
         AdminCommand::Sql(cmd) => {
-            sql::execute_remote_with_formatter(
+            sql::execute_remote_with_formatter_factory(
                 client,
                 &cmd,
                 batch_mode,
                 request.ui_mode,
                 writer,
-                formatter,
+                make_formatter,
                 None,
                 request.limit,
                 request.quiet,
@@ -242,7 +239,7 @@ pub async fn execute_remote_action<W: Write>(
                     client,
                     &cmd,
                     writer,
-                    formatter,
+                    make_formatter(),
                     request.limit,
                     request.quiet,
                 )
@@ -270,7 +267,7 @@ pub async fn execute_remote_action<W: Write>(
                     &cmd,
                     batch_mode,
                     writer,
-                    formatter,
+                    make_formatter(),
                     request.limit,
                     request.quiet,
                 )
@@ -296,7 +293,7 @@ pub async fn execute_remote_action<W: Write>(
                     client,
                     &cmd,
                     writer,
-                    formatter,
+                    make_formatter(),
                     request.limit,
                     request.quiet,
                 )
@@ -322,7 +319,7 @@ pub async fn execute_remote_action<W: Write>(
                     &cmd,
                     batch_mode,
                     writer,
-                    formatter,
+                    make_formatter(),
                     request.limit,
                     request.quiet,
                 )
@@ -335,7 +332,7 @@ pub async fn execute_remote_action<W: Write>(
                 &cmd,
                 lifecycle::RemoteLifecycleSupport::unknown(),
                 writer,
-                formatter,
+                make_formatter(),
             )
             .await
         }

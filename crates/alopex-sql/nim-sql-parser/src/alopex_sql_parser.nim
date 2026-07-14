@@ -11,16 +11,16 @@ import ast, parser
 # --- C ABI types ---
 
 type
-  ParseResultKind {.exportc.} = enum
+  ParseResultKind* {.exportc.} = enum
     prkOk = 0
     prkError = 1
 
-  CParseResult {.exportc.} = object
-    kind: ParseResultKind
-    buffer_ptr: pointer  ## MessagePack AST bytes on success.
-    buffer_len: cint
-    error_ptr: cstring   ## Error message if kind == prkError.
-    error_len: cint
+  CParseResult* {.exportc.} = object
+    kind*: ParseResultKind
+    buffer_ptr*: pointer  ## MessagePack AST bytes on success.
+    buffer_len*: cint
+    error_ptr*: cstring   ## Error message if kind == prkError.
+    error_len*: cint
 
 # --- MessagePack contract helpers ---
 
@@ -695,9 +695,10 @@ proc writeSelectKind(s: MsgStream; node: SqlNode) =
 
 proc writeInsertKind(s: MsgStream; node: SqlNode) =
   let tableName = node.children[0].firstIdent()
-  var hasColumns = false
-  if node.children.len > 2:
-    hasColumns = true
+  # カラムリストは nkColumnList、VALUES 行は nkExprList。children 数からの
+  # 推測は「カラムリスト省略 × 多行 VALUES」で先頭行を列リストと誤判別する
+  # (issue #40) ため、ノード種別で判定する。
+  let hasColumns = node.children.len > 1 and node.children[1].kind == nkColumnList
 
   s.pack_map(5)
   s.writeKey("variant")
@@ -890,6 +891,18 @@ proc writeStatement(s: MsgStream; node: SqlNode) =
 
 proc astToMsgPack*(statements: seq[SqlNode]): string =
   ## Encode parsed statements into the FFI MessagePack contract.
+  ##
+  ## Precondition: each `SqlNode` must be a tree produced by this module's
+  ## own `parser.nim` (i.e. via `parseSqlStatements`/`parseSql`), where an
+  ## INSERT's column list is `nkColumnList` and each VALUES row is
+  ## `nkExprList` (see issue #40). A hand-built `nkInsert` tree that still
+  ## uses `nkExprList` for the column list — the pre-fix representation —
+  ## is structurally indistinguishable from a column-list-omitted,
+  ## single-row INSERT (`table, row1` vs. `table, columns`) and
+  ## `writeInsertKind` cannot reject it loudly; it will silently
+  ## misinterpret the first child as either a values row or a column list.
+  ## Callers outside `parseSqlStatements` must ensure this invariant
+  ## themselves.
   var s = MsgStream.init()
   s.pack_array(statements.len)
   for statement in statements:
@@ -914,11 +927,39 @@ proc copyToOwnedBuffer(payload: string): pointer =
   result = alloc(payload.len)
   copyMem(result, unsafeAddr payload[0], payload.len)
 
+proc errorResult(message: string): CParseResult =
+  let copied = cast[cstring](alloc(message.len + 1))
+  copyMem(copied, cstring(message), message.len + 1)
+  CParseResult(
+    kind: prkError,
+    buffer_ptr: nil,
+    buffer_len: 0,
+    error_ptr: copied,
+    error_len: cint(message.len),
+  )
+
+const internalDefectPrefix = "internal parser defect (this is a parser bug, not invalid SQL): "
+
 proc alopex_parse_sql*(input: cstring, length: cint): CParseResult {.exportc, dynlib, cdecl.} =
   ## Parse SQL and return MessagePack-serialized AST bytes.
   ## Caller must free buffer_ptr with alopex_free_buffer.
-  let sql = if length > 0: ($input)[0 ..< length] else: $input
+  ##
+  ## FFI 境界からは決して例外を漏らさない。例外が漏れると
+  ## (--exceptions:goto では) スレッドのエラーフラグが立ったまま C 側へ
+  ## 戻り、この呼び出しはゼロ初期化の CParseResult (= prkOk + 空バッファ)
+  ## を返し、さらに同一スレッドの後続呼び出しも同じ経路で失敗し続ける
+  ## ストリーム desync になる (issue #40)。そのため ParseError (通常の
+  ## 構文エラー) に限らず CatchableError / Defect (パーサー内部の不変条件
+  ## 違反、例: IndexDefect/FieldDefect) も全て prkError へ写像する。
+  ##
+  ## ただし両者は運用上の意味が異なる (前者はユーザー入力の誤り、後者は
+  ## パーサーのバグ) ため、Defect のメッセージには `internalDefectPrefix`
+  ## を付与し、Rust 側 (nim_bridge.rs) が機械的に ALOPEX-P007
+  ## (InternalParserDefect) として区別できるようにする。MessagePack の
+  ## ワイヤ契約 (docs/ffi-ast-contract.md) はエラー経路には及ばないため
+  ## 不変。
   try:
+    let sql = if length > 0: ($input)[0 ..< length] else: $input
     let payload = encodeSqlToMsgPack(sql)
     result = CParseResult(
       kind: prkOk,
@@ -927,17 +968,10 @@ proc alopex_parse_sql*(input: cstring, length: cint): CParseResult {.exportc, dy
       error_ptr: nil,
       error_len: 0,
     )
-  except ParseError:
-    let errMsg = getCurrentExceptionMsg()
-    let copied = cast[cstring](alloc(errMsg.len + 1))
-    copyMem(copied, cstring(errMsg), errMsg.len + 1)
-    result = CParseResult(
-      kind: prkError,
-      buffer_ptr: nil,
-      buffer_len: 0,
-      error_ptr: copied,
-      error_len: cint(errMsg.len),
-    )
+  except CatchableError:
+    result = errorResult(getCurrentExceptionMsg())
+  except Defect:
+    result = errorResult(internalDefectPrefix & getCurrentExceptionMsg())
 
 proc alopex_free_buffer*(p: pointer) {.exportc, dynlib, cdecl.} =
   ## Free a buffer returned by alopex_parse_sql.
