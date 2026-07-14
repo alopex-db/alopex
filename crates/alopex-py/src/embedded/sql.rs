@@ -70,7 +70,7 @@ pub(crate) fn bind_params(sql: &str, params: Option<&Bound<'_, PyAny>>) -> PyRes
 pub(crate) fn execution_result_to_py(
     py: Python<'_>,
     result: ExecutionResult,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     match result {
         ExecutionResult::Success => Ok(py.None()),
         ExecutionResult::RowsAffected(count) => count.into_py_any(py),
@@ -156,9 +156,9 @@ fn render_params(params: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
     let Some(params) = params else {
         return Ok(Vec::new());
     };
-    let items: Vec<Bound<'_, PyAny>> = if let Ok(list) = params.downcast::<PyList>() {
+    let items: Vec<Bound<'_, PyAny>> = if let Ok(list) = params.cast::<PyList>() {
         list.iter().collect()
-    } else if let Ok(tuple) = params.downcast::<PyTuple>() {
+    } else if let Ok(tuple) = params.cast::<PyTuple>() {
         tuple.iter().collect()
     } else {
         return Err(AlopexError::SqlParamUnsupportedType(format!(
@@ -219,7 +219,7 @@ fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<String> {
         .into());
     }
     // dict などのマッピングはベクトルとして反復するとキーのみが展開されるため明示的に拒否する。
-    if value.downcast::<PyDict>().is_ok() || value.hasattr("keys")? {
+    if value.cast::<PyDict>().is_ok() || value.hasattr("keys")? {
         return Err(unsupported_type_error(value, index));
     }
     // 数値シーケンス（list / tuple / numpy 配列など）はベクトルリテラルへ展開する。
@@ -321,7 +321,7 @@ fn type_name(value: &Bound<'_, PyAny>) -> String {
 ///
 /// CLI / Server と同じく値をそのまま返す（Timestamp はエポックマイクロ秒の int、
 /// Vector は float の list）。
-fn sql_value_to_py(py: Python<'_>, value: SqlValue) -> PyResult<PyObject> {
+fn sql_value_to_py(py: Python<'_>, value: SqlValue) -> PyResult<Py<PyAny>> {
     match value {
         SqlValue::Null => Ok(py.None()),
         SqlValue::Integer(v) => v.into_py_any(py),
@@ -352,8 +352,8 @@ mod tests {
     use super::bind_params;
 
     fn with_py<F: FnOnce(Python<'_>)>(f: F) {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(f);
+        pyo3::Python::initialize();
+        Python::attach(f);
     }
 
     fn params_list<'py>(py: Python<'py>, values: Vec<Bound<'py, PyAny>>) -> Bound<'py, PyAny> {

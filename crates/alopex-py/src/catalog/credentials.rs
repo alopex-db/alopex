@@ -143,7 +143,7 @@ pub fn resolve_credentials(
     let mut resolved = HashMap::new();
     if credential_provider.is_none() {
         resolved = auto_resolve_credentials(storage_location)?;
-    } else if let Ok(dict) = credential_provider.downcast::<PyDict>() {
+    } else if let Ok(dict) = credential_provider.cast::<PyDict>() {
         for (key, value) in dict {
             let key: String = key.extract()?;
             let value: String = value.extract()?;
@@ -189,7 +189,7 @@ pub fn resolve_credentials(
 pub fn _resolve_credentials(
     py: Python<'_>,
     storage_location: &str,
-    credential_provider: Option<PyObject>,
+    credential_provider: Option<Py<PyAny>>,
     storage_options: Option<HashMap<String, String>>,
 ) -> PyResult<HashMap<String, String>> {
     let credential_provider = credential_provider.unwrap_or_else(|| py.None());

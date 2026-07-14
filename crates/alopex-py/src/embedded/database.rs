@@ -7,7 +7,6 @@ use alopex_cluster::{
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
-use pyo3::PyObject;
 
 use crate::embedded::transaction::{PyTransaction, PyTransactionInner};
 use crate::error;
@@ -116,11 +115,11 @@ impl PyDatabase {
         py: Python<'_>,
         sql: &str,
         params: Option<Bound<'_, PyAny>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let db = self.ensure_open()?;
         let bound_sql = crate::embedded::sql::bind_params(sql, params.as_ref())?;
         let result = py
-            .allow_threads(move || db.execute_sql(&bound_sql))
+            .detach(move || db.execute_sql(&bound_sql))
             .map_err(error::embedded_err)?;
         crate::embedded::sql::execution_result_to_py(py, result)
     }
@@ -143,7 +142,7 @@ impl PyDatabase {
         let db = self.ensure_open()?;
         match self.mode {
             alopex_embedded::StorageMode::Disk => {
-                py.allow_threads(|| db.flush()).map_err(error::embedded_err)
+                py.detach(|| db.flush()).map_err(error::embedded_err)
             }
             alopex_embedded::StorageMode::InMemory => {
                 Err(error::to_py_err("flush is only supported in disk mode"))
@@ -253,7 +252,7 @@ impl PyDatabase {
         &self,
         py: Python<'_>,
         name: &str,
-        query: PyObject,
+        query: Py<PyAny>,
         k: usize,
         ef_search: Option<usize>,
     ) -> PyResult<(Vec<PySearchResult>, PyHnswStats)> {
@@ -267,14 +266,14 @@ impl PyDatabase {
                 SliceOrOwned::Borrowed { ptr, len, _guard } => {
                     let _guard = _guard;
                     let ptr = ptr as usize;
-                    py.allow_threads(move || {
+                    py.detach(move || {
                         let ptr = ptr as *const f32;
                         let values = unsafe { std::slice::from_raw_parts(ptr, len) };
                         db_clone.search_hnsw(&name_clone, values, k, ef_search)
                     })
                 }
                 SliceOrOwned::Owned(vec) => {
-                    py.allow_threads(move || db_clone.search_hnsw(&name_clone, &vec, k, ef_search))
+                    py.detach(move || db_clone.search_hnsw(&name_clone, &vec, k, ef_search))
                 }
             }
             .map_err(error::embedded_err)?;
@@ -314,8 +313,8 @@ mod tests {
     use super::PyDatabase;
 
     fn with_py<F: FnOnce(Python<'_>)>(f: F) {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(f);
+        pyo3::Python::initialize();
+        Python::attach(f);
     }
 
     #[test]
@@ -353,10 +352,10 @@ mod tests {
                     Some(params.into_any()),
                 )
                 .expect("select");
-            let rows = rows.bind(py).downcast::<PyList>().expect("list").clone();
+            let rows = rows.bind(py).cast::<PyList>().expect("list").clone();
             assert_eq!(rows.len(), 1);
             let row = rows.get_item(0).expect("row");
-            let row = row.downcast::<PyDict>().expect("dict");
+            let row = row.cast::<PyDict>().expect("dict");
             let id = row.get_item("id").expect("get id").expect("id present");
             assert_eq!(id.extract::<i64>().expect("id int"), 1);
             let name = row
@@ -376,7 +375,7 @@ mod tests {
             let rows = db
                 .execute_sql(py, "SELECT id FROM t", None)
                 .expect("select");
-            let rows = rows.bind(py).downcast::<PyList>().expect("list").clone();
+            let rows = rows.bind(py).cast::<PyList>().expect("list").clone();
             assert_eq!(rows.len(), 0);
         });
     }
@@ -440,10 +439,10 @@ mod tests {
                     Some(params.into_any()),
                 )
                 .expect("select");
-            let rows = rows.bind(py).downcast::<PyList>().expect("list").clone();
+            let rows = rows.bind(py).cast::<PyList>().expect("list").clone();
             assert_eq!(rows.len(), 1);
             let row = rows.get_item(0).expect("row");
-            let row = row.downcast::<PyDict>().expect("dict");
+            let row = row.cast::<PyDict>().expect("dict");
             let embedding = row
                 .get_item("embedding")
                 .expect("get embedding")

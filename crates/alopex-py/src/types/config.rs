@@ -1,7 +1,7 @@
 use pyo3::basic::CompareOp;
 use pyo3::prelude::*;
 
-#[pyclass(name = "TxnMode", frozen)]
+#[pyclass(name = "TxnMode", frozen, from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PyTxnMode {
     pub(crate) inner: alopex_core::TxnMode,
@@ -61,7 +61,7 @@ impl PyTxnMode {
     }
 }
 
-#[pyclass(name = "Metric", frozen)]
+#[pyclass(name = "Metric", frozen, from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PyMetric {
     pub(crate) inner: alopex_core::Metric,
@@ -127,7 +127,7 @@ impl PyMetric {
     }
 }
 
-#[pyclass(name = "StorageMode", frozen)]
+#[pyclass(name = "StorageMode", frozen, from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PyStorageMode {
     pub(crate) inner: alopex_embedded::StorageMode,
@@ -187,7 +187,7 @@ impl PyStorageMode {
     }
 }
 
-#[pyclass(name = "HnswConfig")]
+#[pyclass(name = "HnswConfig", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyHnswConfig {
     #[pyo3(get, set)]
@@ -236,7 +236,7 @@ impl PyHnswConfig {
     }
 }
 
-#[pyclass(name = "EmbeddedConfig")]
+#[pyclass(name = "EmbeddedConfig", from_py_object)]
 #[derive(Clone, Debug, Default)]
 pub struct PyEmbeddedConfig {
     #[pyo3(get, set)]
@@ -261,7 +261,7 @@ impl PyEmbeddedConfig {
     }
 }
 
-#[pyclass(name = "DatabaseOptions")]
+#[pyclass(name = "DatabaseOptions", from_py_object)]
 #[derive(Clone, Debug, Default)]
 pub struct PyDatabaseOptions {
     #[pyo3(get, set)]

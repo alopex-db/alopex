@@ -210,7 +210,7 @@ fn core_error_code(err: &alopex_core::Error) -> &'static str {
 }
 
 fn with_code(err: PyErr, code: &'static str) -> PyErr {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         err.value(py)
             .setattr("code", code)
             .expect("Python exception instances must accept stable code attributes");

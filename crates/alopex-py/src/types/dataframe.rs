@@ -21,7 +21,7 @@ enum ColumnKind {
 }
 
 /// Python wrapper around the Rust alopex-dataframe API.
-#[pyclass(name = "DataFrame")]
+#[pyclass(name = "DataFrame", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyDataFrame {
     inner: DataFrame,
@@ -95,7 +95,7 @@ impl PyDataFrame {
     }
 }
 
-#[pyclass(name = "StringNamespace")]
+#[pyclass(name = "StringNamespace", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyStringNamespace {
     df: DataFrame,
@@ -175,7 +175,7 @@ impl PyStringNamespace {
     }
 }
 
-#[pyclass(name = "DatetimeNamespace")]
+#[pyclass(name = "DatetimeNamespace", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyDatetimeNamespace {
     df: DataFrame,
@@ -239,7 +239,7 @@ impl PyDatetimeNamespace {
     }
 }
 
-#[pyclass(name = "ListNamespace")]
+#[pyclass(name = "ListNamespace", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyListNamespace {
     df: DataFrame,
@@ -323,7 +323,7 @@ fn infer_kind(values: &Bound<'_, PyAny>) -> ColumnKind {
         if item.is_none() {
             continue;
         }
-        if item.downcast::<PyList>().is_ok() || item.downcast::<PyTuple>().is_ok() {
+        if item.cast::<PyList>().is_ok() || item.cast::<PyTuple>().is_ok() {
             return ColumnKind::ListUtf8;
         }
         if item.extract::<i64>().is_ok() {
