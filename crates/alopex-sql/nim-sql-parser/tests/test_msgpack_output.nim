@@ -117,6 +117,40 @@ suite "MessagePack output - contract shape":
     check create["method"].getStr() == "Hnsw"
     check create["options"].len == 2
 
+suite "MessagePack output - INSERT (issue #40)":
+
+  test "multi-row INSERT without column list emits nil columns and all rows":
+    let kind = payloadJson("INSERT INTO t1 VALUES (1, 'a'), (2, 'b')").stmtKind()
+    check kind["variant"].getStr() == "Insert"
+    check kind["table"].getStr() == "t1"
+    check kind["columns"].kind == JNull
+    check kind["values"].len == 2
+    check kind["values"][0][0]["kind"]["variant"].getStr() == "Literal"
+    check kind["values"][0][0]["kind"]["literal"]["variant"].getStr() == "Number"
+    check kind["values"][0][0]["kind"]["literal"]["value"].getStr() == "1"
+    check kind["values"][0][1]["kind"]["literal"]["variant"].getStr() == "String"
+    check kind["values"][0][1]["kind"]["literal"]["value"].getStr() == "a"
+    check kind["values"][1][0]["kind"]["literal"]["value"].getStr() == "2"
+    check kind["values"][1][1]["kind"]["literal"]["value"].getStr() == "b"
+
+  test "multi-row all-string INSERT without column list is not misread as columns":
+    # 先頭行が全て文字列だと firstIdent が例外を出さず、列リストとして
+    # 静かに誤変換される回帰パターン。
+    let kind = payloadJson("INSERT INTO t1 VALUES ('a', 'b'), ('c', 'd')").stmtKind()
+    check kind["columns"].kind == JNull
+    check kind["values"].len == 2
+    check kind["values"][0][0]["kind"]["literal"]["value"].getStr() == "a"
+
+  test "multi-row INSERT with column list keeps explicit columns":
+    let kind = payloadJson("INSERT INTO t1 (id, name) VALUES (1, 'a'), (2, 'b')").stmtKind()
+    check kind["columns"].len == 2
+    check kind["columns"][0].getStr() == "id"
+    check kind["columns"][1].getStr() == "name"
+    check kind["values"].len == 2
+
+  test "multi-row INSERT without column list round-trips":
+    assertMsgpackRoundtrip("INSERT INTO t1 VALUES (1, 'a'), (2, 'b')")
+
 suite "MessagePack output - stability":
 
   test "SELECT literal payload is stable":

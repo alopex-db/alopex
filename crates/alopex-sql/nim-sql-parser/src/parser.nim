@@ -558,7 +558,10 @@ proc parseInsertStmt(p: var Parser): SqlNode =
 
   if p.check(tkLParen):
     discard p.advance()
-    let cols = newNode(nkExprList)
+    # nkColumnList で VALUES 行 (nkExprList) と区別する。nkExprList を共用すると
+    # 「カラムリスト省略 × 多行 VALUES」と「カラムリスト明示 × 単行」が
+    # 同じ木構造になり、シリアライズ側で判別できない (issue #40)。
+    let cols = newNode(nkColumnList)
     cols.children.add(newIdent(p.expectIdent("column name").value))
     while p.check(tkComma):
       discard p.advance()

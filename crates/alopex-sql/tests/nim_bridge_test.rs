@@ -65,6 +65,56 @@ fn parse_join_subquery_and_vector_variants_from_nim() {
 }
 
 #[test]
+fn parse_multi_row_insert_without_column_list_from_nim() {
+    // issue #40: 「カラムリスト省略 × 多行 VALUES」で先頭行が列リストと
+    // 誤判別され、FieldDefect が FFI から漏れて ALOPEX-P001 になっていた。
+    let statements = Parser::parse_sql(&AlopexDialect, "INSERT INTO t1 VALUES (1, 'a'), (2, 'b')")
+        .expect("multi-row INSERT without column list should parse");
+    assert_eq!(statements.len(), 1);
+    let StatementKind::Insert(insert) = &statements[0].kind else {
+        panic!("expected Insert, got {:?}", statements[0].kind);
+    };
+    assert_eq!(insert.table, "t1");
+    assert!(insert.columns.is_none());
+    assert_eq!(insert.values.len(), 2);
+    assert_eq!(insert.values[0].len(), 2);
+    assert!(matches!(
+        &insert.values[0][0].kind,
+        ExprKind::Literal {
+            literal: Literal::Number(value)
+        } if value == "1"
+    ));
+    assert!(matches!(
+        &insert.values[1][1].kind,
+        ExprKind::Literal {
+            literal: Literal::String(value)
+        } if value == "b"
+    ));
+}
+
+#[test]
+fn parse_multi_row_all_string_insert_without_column_list_from_nim() {
+    // issue #40: 先頭行が全て文字列だと例外にならず、先頭行が列リストへ
+    // 静かに誤変換される (columns = ["a","b"], values = [["c","d"]])。
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "INSERT INTO t1 VALUES ('a', 'b'), ('c', 'd')",
+    )
+    .expect("all-string multi-row INSERT should parse");
+    let StatementKind::Insert(insert) = &statements[0].kind else {
+        panic!("expected Insert, got {:?}", statements[0].kind);
+    };
+    assert!(insert.columns.is_none());
+    assert_eq!(insert.values.len(), 2);
+    assert!(matches!(
+        &insert.values[0][0].kind,
+        ExprKind::Literal {
+            literal: Literal::String(value)
+        } if value == "a"
+    ));
+}
+
+#[test]
 fn parse_derived_and_quantified_subqueries_from_nim() {
     let sql = "\
         SELECT x.id FROM (SELECT id FROM docs) x \
