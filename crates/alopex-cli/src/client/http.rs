@@ -66,6 +66,12 @@ impl HttpClient {
         validate_base_url(&base_url, config.insecure)?;
         let auth = AuthConfig::from_server_config(config)?;
         let builder = Client::builder()
+            // Explicit even though `default-tls` (native-tls/openssl) is not
+            // compiled in (see reqwest dependency in Cargo.toml): documents
+            // that this client is rustls-backed and protects against
+            // accidentally picking up `default-tls` again via feature
+            // unification if another crate in the workspace enables it.
+            .use_rustls_tls()
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(8);
         let builder = auth.apply_to_builder(builder)?;

@@ -32,6 +32,15 @@ pub enum TlsVersion {
 /// provider already selected process-wide via `object_store`'s TLS stack), so
 /// this does not depend on `CryptoProvider::install_default()` having been
 /// called elsewhere.
+///
+/// Known constraint: `ring` (unlike `aws-lc-rs`) does not implement
+/// ECDSA P-521 (secp521r1) signature verification/signing, so certificates
+/// using that curve are not supported here. This is an accepted trade-off:
+/// alopex has no requirement to support P-521 certificates, and P-256/P-384
+/// ECDSA plus RSA remain fully supported. Switching to `aws-lc-rs` would lift
+/// this constraint but was rejected to avoid a mixed-provider setup and the
+/// extra `cmake`/`nasm` build-time requirements `aws-lc-rs` introduces (see
+/// the rustls 0.23 migration notes in the issue #41 rustls upgrade commit).
 pub fn build_rustls_config(config: &TlsConfig) -> Result<Arc<rustls::ServerConfig>> {
     let certs = load_certs(&config.cert_path)?;
     let key = load_key(&config.key_path)?;
