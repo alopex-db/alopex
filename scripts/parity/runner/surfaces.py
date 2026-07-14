@@ -1,6 +1,8 @@
 """4 経路(embedded / cli / http / grpc)の実行とサーバー起動管理。
 
 docs-public/specs/alopex-mode-parity-spec.md「実行系の構成」に従う。
+SF-CLUSTER(cluster-aware サーバー・単一メンバーの HTTP 経路、v0.7.1 で
+有効化)は start_server(cluster_aware=True) + HTTP 経路の組み合わせで実現する。
 
 経路と実行手段:
 - embedded: ``cargo test -p alopex-embedded --test parity_corpus``(subprocess)。
@@ -80,6 +82,17 @@ HTTP_SQL_PATH = "/api/sql/query"
 
 #: 管理ポートのヘルスチェックパス(docs/server-guide.md「Admin endpoints」)。
 HEALTH_PATH = "/healthz"
+
+#: メイン HTTP ルーター上の管理 status パス(crates/alopex-server/src/http/mod.rs)。
+#: 応答の ``cluster`` フィールドが ClusterStatusSnapshot
+#: (mode / identity / membership / degraded ほか)である。
+ADMIN_STATUS_PATH = "/api/admin/status"
+
+#: SF-CLUSTER(単一メンバー)起動時の固定 identity。仕様
+#: (alopex-mode-parity-spec「クラスタサーフェスの有効化」)は node_id /
+#: cluster_id / advertised_endpoint の明示設定を要求する(値は任意)。
+CLUSTER_NODE_ID = "parity-node-1"
+CLUSTER_CLUSTER_ID = "parity-cluster"
 
 #: 製品バイナリ名(検証で使うのはこの 2 つのみ。検証用バイナリは追加しない)
 PRODUCT_BIN_CLI = "alopex"
@@ -721,6 +734,7 @@ def start_server(
     data_dir: Path,
     work_dir: Path,
     ready_timeout: float = 60.0,
+    cluster_aware: bool = False,
 ) -> ServerHandle:
     """alopex-server を空きポートで起動し、/healthz が ready になるまで待つ。
 
@@ -729,6 +743,12 @@ def start_server(
       (docs/server-guide.md: カレントディレクトリの alopex.toml を読む)。
     - ready 確認は admin ポートの GET /healthz ポーリング。
     - 停止は ServerHandle.stop()(context manager 推奨)。
+    - ``cluster_aware=True`` で SF-CLUSTER(単一メンバー)として起動する:
+      ``[cluster]`` セクションに mode=cluster_aware と identity(node_id /
+      cluster_id / advertised_endpoint)を明示設定する(仕様
+      「クラスタサーフェスの有効化(v0.7.1)」)。advertised_endpoint は
+      自身の HTTP バインド先。membership_source_available は既定 true だが、
+      検証条件を設定ファイル上で自己記述的にするため明示する。
     """
     import requests
 
@@ -736,16 +756,25 @@ def start_server(
     grpc_port = find_free_port()
     admin_port = find_free_port()
 
-    config = "\n".join(
-        [
-            f'http_bind = "127.0.0.1:{http_port}"',
-            f'grpc_bind = "127.0.0.1:{grpc_port}"',
-            f'admin_bind = "127.0.0.1:{admin_port}"',
-            f'data_dir = "{data_dir}"',
-            'auth_mode = { type = "none" }',
+    config_lines = [
+        f'http_bind = "127.0.0.1:{http_port}"',
+        f'grpc_bind = "127.0.0.1:{grpc_port}"',
+        f'admin_bind = "127.0.0.1:{admin_port}"',
+        f'data_dir = "{data_dir}"',
+        'auth_mode = { type = "none" }',
+    ]
+    if cluster_aware:
+        # TOML のテーブルセクションは必ず末尾(トップレベルキーの後)に置く
+        config_lines += [
             "",
+            "[cluster]",
+            'mode = "cluster_aware"',
+            f'node_id = "{CLUSTER_NODE_ID}"',
+            f'cluster_id = "{CLUSTER_CLUSTER_ID}"',
+            f'advertised_endpoint = "127.0.0.1:{http_port}"',
+            "membership_source_available = true",
         ]
-    )
+    config = "\n".join([*config_lines, ""])
     (work_dir / "alopex.toml").write_text(config, encoding="utf-8")
 
     stdout_log = open(work_dir / "server-stdout.log", "w", encoding="utf-8")
@@ -796,6 +825,36 @@ def start_server(
         f"alopex-server が {ready_timeout}s 以内に ready にならない"
         f" ({health_url}):\n{tail}"
     )
+
+
+def fetch_cluster_status(http_base: str, *, timeout: float = 10.0) -> Dict[str, Any]:
+    """GET /api/admin/status の ``cluster`` フィールドを返す。
+
+    ClusterStatusSnapshot(mode / identity / membership / degraded ほか)を
+    そのまま dict で返す。取得不能・スキーマ不正は SurfaceError(環境エラー)。
+    """
+    import requests
+
+    url = http_base.rstrip("/") + ADMIN_STATUS_PATH
+    try:
+        response = requests.get(url, timeout=timeout)
+    except requests.RequestException as exc:
+        raise SurfaceError(f"admin status の取得失敗 ({url}): {exc}") from exc
+    if response.status_code != 200:
+        raise SurfaceError(
+            f"admin status が HTTP {response.status_code} を返した ({url}):"
+            f" {response.text[:200]}"
+        )
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise SurfaceError(f"admin status 応答が JSON でない ({url}): {exc}") from exc
+    cluster = body.get("cluster") if isinstance(body, dict) else None
+    if not isinstance(cluster, dict):
+        raise SurfaceError(
+            f"admin status 応答に cluster フィールドがない ({url}): {str(body)[:200]}"
+        )
+    return cluster
 
 
 # ---------------------------------------------------------------------------

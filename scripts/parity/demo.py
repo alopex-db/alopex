@@ -9,7 +9,8 @@ docs-public/specs/alopex-mode-parity-spec.md「シナリオ S1」:
 | 2  | SF-FILE            | --data-dir で実行 → プロセス終了 → 再オープン照合 |
 | 3  | SF-HTTP / SF-GRPC  | 同一ディレクトリでサーバー起動、照合 + 追加 INSERT|
 | 4  | SF-FILE            | サーバー停止後に CLI で再オープン、追加行を照合   |
-| 5  | SF-CLUSTER         | SKIP 表示(v0.7 で有効化)                        |
+| 5  | SF-CLUSTER         | cluster-aware サーバー(単一メンバー)で第 4 幕の |
+|    |                    | データを開き HTTP で照合 + cluster status 検証    |
 
 検証層(verify.py)と同一の runner(コーパス・期待値・正規化)を共有する。
 各幕末の検証が失敗した場合は即座に非ゼロ exit で停止する。
@@ -363,11 +364,79 @@ def act4_reopen(
     assert_match("第 4 幕 (SF-FILE, サーバー書込の可視性)", expected_after, normalized)
 
 
-def act5_cluster() -> None:
-    banner(5, "SF-CLUSTER", "クラスタ")
-    print("  SKIP: SF-CLUSTER は v0.7 の cluster-aware リリース")
-    print("        (query router / membership) で有効化される予約。")
-    print("        本デモでは実行しない(スキップを完了と偽らない)。")
+def act5_cluster(
+    repo: Path,
+    binaries: Dict[str, Path],
+    expected_after: List[Dict[str, Any]],
+    data_dir: Path,
+    verify_statements: Sequence[str],
+    scratch: Path,
+) -> None:
+    banner(
+        5,
+        "SF-CLUSTER",
+        "クラスタ(cluster-aware、単一メンバー)— 第 4 幕のデータをそのまま開く",
+    )
+    print("  補足: v0.7 の cluster-aware foundation(単一メンバー、分散実行なし)。")
+    print("        マルチノードの分散実行は v0.8 以降の予約。")
+    work = scratch / "act5-cluster"
+    work.mkdir(parents=True, exist_ok=True)
+    with start_server(
+        binaries[surfaces.PRODUCT_BIN_SERVER],
+        repo=repo,
+        data_dir=data_dir,
+        work_dir=work,
+        cluster_aware=True,
+    ) as server:
+        print(f"  cluster-aware server ready: http={server.http_base}")
+
+        # 幕末検証 (1/2): cluster status(仕様: mode / node identity /
+        # membership を表示し、mode == cluster_aware かつ degraded == false)。
+        print("\n  -- cluster status (GET /api/admin/status の cluster フィールド) --")
+        cluster = surfaces.fetch_cluster_status(server.http_base)
+        identity = cluster.get("identity") or {}
+        membership = cluster.get("membership") or {}
+        members = membership.get("members") or []
+        print(f"       mode               : {cluster.get('mode')}")
+        print(f"       node_id            : {identity.get('node_id')}")
+        print(f"       cluster_id         : {identity.get('cluster_id')}")
+        print(f"       advertised_endpoint: {identity.get('advertised_endpoint')}")
+        print(
+            f"       role / lifecycle   : {identity.get('role')}"
+            f" / {identity.get('lifecycle_state')}"
+        )
+        print(
+            f"       membership         : source={membership.get('source')}"
+            f" members={len(members)}"
+        )
+        for member in members:
+            member_identity = (member or {}).get("identity") or {}
+            print(
+                f"         - node_id={member_identity.get('node_id')}"
+                f" derived_state={member.get('derived_state')}"
+            )
+        print(f"       degraded           : {cluster.get('degraded')}")
+        if cluster.get("mode") != "cluster_aware":
+            raise ActFailure(
+                f"第 5 幕: cluster status の mode が cluster_aware でない:"
+                f" {cluster.get('mode')!r}"
+            )
+        if cluster.get("degraded") is not False:
+            raise ActFailure(
+                f"第 5 幕: cluster status の degraded が false でない:"
+                f" {cluster.get('degraded')!r}"
+            )
+        print("  ✔ mode == cluster_aware / degraded == false")
+
+        # 幕末検証 (2/2): 第 4 幕までの全データ(サーバー追加 INSERT 含む)が
+        # 可視で期待値と一致すること。
+        print("\n  -- 第 4 幕までの全データが可視か検証 (99_verify.sql, HTTP) --")
+        normalized = normalize.normalize_records(
+            HttpSurface(server.http_base).run_statements(verify_statements)
+        )
+        show_records(normalized)
+        assert_match("第 5 幕 (SF-CLUSTER)", expected_after, normalized)
+    print("  server stopped")
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +516,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 base,
             )
             act4_reopen(cli, expected_after, data_dir, verify_statements)
-        act5_cluster()
+            act5_cluster(
+                repo,
+                binaries,
+                expected_after,
+                data_dir,
+                verify_statements,
+                base,
+            )
     except ActFailure as exc:
         print(f"\n検証不一致: {exc}", file=sys.stderr)
         return EXIT_MISMATCH
@@ -461,7 +537,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print()
     print("=" * 72)
-    print("デモ完了: 第 1〜4 幕 PASS / 第 5 幕 SKIP (SF-CLUSTER, v0.7 予約)")
+    print("デモ完了: 第 1〜5 幕 PASS (One Engine, Four Forms + cluster-aware)")
     print("=" * 72)
     return EXIT_OK
 

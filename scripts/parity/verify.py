@@ -51,6 +51,10 @@ ALL_FILTERS = (SECTION_S2A, SECTION_S2B, SECTION_S2C)
 ROUTES = ("embedded", "cli", "http", "grpc")
 #: S2-b の writer 経路(仕様のマトリクス行: 組み込み API / CLI / サーバー HTTP)
 WRITERS = ("embedded", "cli", "http")
+#: S2-b の reader 経路(仕様のマトリクス列)。cluster は SF-CLUSTER
+#: (cluster-aware モード・単一メンバーで起動した alopex-server の HTTP 経路。
+#: v0.7.1 で有効化)。
+S2B_READERS = (*ROUTES, "cluster")
 
 #: S2-c 互換フィクスチャの置き場所。契約:
 #:   <root>/<version>/data/          旧バージョンで生成したデータディレクトリ
@@ -133,6 +137,38 @@ def run_grpc_statements(
     ) as server:
         with GrpcSurface(server.grpc_target, proto_path=proto_path(repo)) as grpc_surface:
             return grpc_surface.run_statements(statements)
+
+
+def run_cluster_statements(
+    repo: Path,
+    binaries: Dict[str, Path],
+    statements: Sequence[str],
+    *,
+    data_dir: Path,
+    scratch: Path,
+) -> List[Dict[str, Any]]:
+    """SF-CLUSTER: cluster-aware サーバー(単一メンバー)を起動して HTTP で実行する。
+
+    実行前に GET /api/admin/status でサーフェスの同一性を確認する
+    (mode が cluster_aware でなければ、検証しているのは SF-CLUSTER ではない
+    ため環境エラー)。結果の正誤判定は呼び出し側の期待値比較が担う。
+    """
+    work = scratch / "srv-cluster"
+    work.mkdir(parents=True, exist_ok=True)
+    with start_server(
+        binaries[surfaces.PRODUCT_BIN_SERVER],
+        repo=repo,
+        data_dir=data_dir,
+        work_dir=work,
+        cluster_aware=True,
+    ) as server:
+        cluster = surfaces.fetch_cluster_status(server.http_base)
+        mode = cluster.get("mode")
+        if mode != "cluster_aware":
+            raise SurfaceError(
+                f"SF-CLUSTER サーフェスの mode が cluster_aware でない: {mode!r}"
+            )
+        return HttpSurface(server.http_base).run_statements(statements)
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +349,11 @@ def _s2b_read_phase(
             repo, binaries, verify_statements, data_dir=data_dir, scratch=scratch
         )
         return normalize.normalize_records(raw, columns_source=columns_source)
+    if reader == "cluster":
+        raw = run_cluster_statements(
+            repo, binaries, verify_statements, data_dir=data_dir, scratch=scratch
+        )
+        return normalize.normalize_records(raw)
     raise SurfaceError(f"未知の reader: {reader}")
 
 
@@ -343,7 +384,7 @@ def run_s2b(
         return
 
     for writer in WRITERS:
-        for reader in ROUTES:
+        for reader in S2B_READERS:
             cell = f"writer={writer}/reader={reader}"
             with tempfile.TemporaryDirectory(prefix="parity-s2b-") as tmp:
                 base = Path(tmp)
@@ -378,14 +419,6 @@ def run_s2b(
             rep.compare_record_lists(
                 SECTION_S2B, cell, "expected", expected_entries, reader, actual
             )
-
-    # SF-CLUSTER 列は v0.7 で有効化される予約(成功数に含めない)
-    for writer in WRITERS:
-        rep.skip(
-            SECTION_S2B,
-            f"writer={writer}/reader=cluster",
-            "SF-CLUSTER は v0.7 の cluster-aware リリースで有効化(仕様上の予約)",
-        )
 
 
 # ---------------------------------------------------------------------------
