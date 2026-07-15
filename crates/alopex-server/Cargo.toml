@@ -16,16 +16,16 @@ alopex-cluster = { workspace = true }
 alopex-core = { workspace = true, features = ["async", "tokio"] }
 alopex-sql = { workspace = true, features = ["tokio"] }
 anyhow = { workspace = true }
-axum = "0.7"
-axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 chrono = { version = "0.4", features = ["serde"] }
 config = "0.14"
 dashmap = "5.5"
 futures = { workspace = true }
 humantime-serde = "1.1"
 prometheus = "0.14"
-prost = "0.12"
-prost-types = "0.12"
+prost = "0.14"
+prost-types = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2"
 serde = { workspace = true }
@@ -36,9 +36,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-tonic = { version = "0.10" }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["trace", "limit", "request-id"] }
+tonic = { version = "0.14" }
+tonic-prost = "0.14"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "limit", "request-id"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { version = "1.6", features = ["v4", "serde"] }
@@ -57,5 +58,5 @@ tempfile = "3.10"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [build-dependencies]
-tonic-build = "0.10"
+tonic-prost-build = "0.14"
 protoc-bin-vendored = "3.2.0"

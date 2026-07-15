@@ -140,7 +140,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
         )
         .route("/api/admin/export", axum::routing::post(admin_api::export))
         .route(
-            "/api/admin/backup/:id",
+            "/api/admin/backup/{id}",
             axum::routing::get(admin_api::backup_status),
         )
         .route(
@@ -148,7 +148,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
             axum::routing::post(admin_api::start_restore),
         )
         .route(
-            "/api/admin/restore/:id",
+            "/api/admin/restore/{id}",
             axum::routing::get(admin_api::restore_status),
         )
         .route(
@@ -160,9 +160,9 @@ pub fn router(state: Arc<ServerState>) -> Router {
             axum::routing::post(admin_api::compaction),
         )
         .route("/session/begin", axum::routing::post(session::begin))
-        .route("/session/:id/commit", axum::routing::post(session::commit))
+        .route("/session/{id}/commit", axum::routing::post(session::commit))
         .route(
-            "/session/:id/rollback",
+            "/session/{id}/rollback",
             axum::routing::post(session::rollback),
         );
 

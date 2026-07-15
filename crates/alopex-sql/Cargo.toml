@@ -7,6 +7,25 @@ repository.workspace = true
 description = "SQL parser components for the Alopex DB dialect"
 keywords = ["database", "sql", "parser"]
 categories = ["database-implementations", "parser-implementations"]
+# links: build.rs が cargo::metadata=libdir=... で Nim 共有ライブラリの
+# ディレクトリを公開するために必要（コンシューマ側の build.rs が
+# DEP_ALOPEX_SQL_PARSER_LIBDIR で受け取り、自分自身のバイナリへ rpath を
+# 設定する。cargo:rustc-link-arg は依存クレートの build.rs から出しても
+# 最終バイナリのリンクに伝播しないため、この経路が必須）。
+links = "alopex_sql_parser"
+# SQL パーサーは Nim で実装され、事前ビルド済み共有ライブラリ
+# (nim-sql-parser/vendor/<target-triple>/) を通じて FFI 経由で呼び出す。
+# 公開 crate には vendor/ のビルド成果物のみを同梱し、Nim ツールチェーンを
+# 必要とする .nim ソース・nimble 定義・開発用 Dockerfile は含めない
+# (cargo install/build する側に Nim 環境を要求しないため。build.rs 参照)。
+exclude = [
+    "nim-sql-parser/src",
+    "nim-sql-parser/tests",
+    "nim-sql-parser/.devcontainer",
+    "nim-sql-parser/Dockerfile",
+    "nim-sql-parser/nim_sql_parser.nimble",
+    "nim-sql-parser/.gitignore",
+]
 
 [features]
 default = []

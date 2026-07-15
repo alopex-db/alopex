@@ -77,14 +77,14 @@ s3 = ["alopex-embedded/s3"]
 lane_ci = []
 [dev-dependencies]
 alopex-server = { path = "../alopex-server" }
-axum = "0.7"
-axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 hyper = "1"
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
 rcgen = "0.12"
-tower = "0.4"
+tower = { version = "0.5", features = ["util"] }
 tempfile = "3.8"
 criterion = { workspace = true }
 portable-pty = "0.8"
