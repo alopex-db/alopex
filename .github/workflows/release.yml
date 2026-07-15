@@ -228,6 +228,22 @@ jobs:
             ls -la "${dest}"
           done
 
+      # `cargo publish` は working directory が git 的にクリーンであることを
+      # 要求する(dirty チェック)。vendor/ 配下のファイルは nim-sql-parser/
+      # .gitignore の `!vendor/**` で cargo package の除外対象からは外れて
+      # いるが、git 自体には add/commit していないため untracked のまま
+      # であり、cargo publish の dirty チェックには依然として引っかかる
+      # (cargo package の除外ロジックと cargo publish の dirty チェックは
+      # 別物)。このランナー上だけの一時コミットを作り(push しない)、
+      # `--allow-dirty` でチェック自体を無効化せずに解決する。
+      - name: Commit vendored libraries locally (not pushed)
+        run: |
+          set -euo pipefail
+          git add "${NIM_SQL_PARSER_DIR}/vendor"
+          git -c user.name="github-actions[bot]" \
+              -c user.email="github-actions[bot]@users.noreply.github.com" \
+              commit -m "chore: vendor Nim shared libraries for release (CI-local, not pushed)"
+
       - name: Create publish helper
         run: |
           cat > publish-crate.sh <<'EOF'
