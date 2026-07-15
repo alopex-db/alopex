@@ -6,3 +6,10 @@ tests/fixtures/
 tests/test_parser
 tests/test_msgpack_output
 tests/test_ffi_boundary
+
+# vendor/<target-triple>/ は crates.io 公開時に CI (release.yml publish-crate
+# ジョブ) が配置する事前ビルド済み共有ライブラリ。上の *.so ルールで
+# 除外されると cargo package が拾えなくなる(git 追跡の有無に関わらず、
+# .gitignore の有効なルールにマッチしないファイルは package 対象になる
+# ため、明示的に除外解除する)。alopex-sql/build.rs 参照。
+!vendor/**
