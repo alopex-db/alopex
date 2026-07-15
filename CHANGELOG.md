@@ -8,6 +8,11 @@ Bugfix release. All fixes were discovered by the new mode-parity verification
 suite, which is included in this release.
 
 ### Fixed
+- `alopex-cli`'s `reqwest` dependency is now unified on 0.13 (it was pinned
+  at 0.12, incompatible with `object_store` 0.14's `reqwest ^0.13`
+  requirement). The two independent, semver-incompatible dependency trees
+  this produced duplicated the entire hyper/rustls/tokio stack and could
+  exhaust disk space during release builds.
 - Subqueries now execute on the CLI/streaming query path. Previously,
   WHERE-clause subqueries failed with `ALOPEX-E999` (unsupported expression)
   and scalar subqueries silently returned empty results on the streaming
