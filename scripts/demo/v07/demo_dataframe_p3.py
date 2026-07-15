@@ -36,6 +36,8 @@ from typing import Any, Dict, Optional, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _v07 import (  # noqa: E402
+    BINARY_SOURCE_ENV,
+    BINARY_SOURCE_RELEASED,
     EXIT_ENV,
     EXIT_MISMATCH,
     EXIT_OK,
@@ -52,17 +54,21 @@ REEXEC_MARKER = "V07_DEMO_DATAFRAME_REEXEC"
 
 
 def ensure_alopex_importable(repo: Path) -> Any:
-    """リポジトリ内の alopex Python パッケージを import する。
+    """alopex Python パッケージを import する。
 
-    - パッケージはリポジトリ内 crates/alopex-py/python を優先する
-      (maturin develop / 事前ビルド済みの _alopex.abi3.so を含む)。
+    - 既定(ALOPEX_BINARY_SOURCE 未設定): リポジトリ内 crates/alopex-py/python
+      を優先する(maturin develop / 事前ビルド済みの _alopex.abi3.so を含む)。
+    - ALOPEX_BINARY_SOURCE=released のときはリポジトリ内パッケージを
+      sys.path に挿入しない。PyPI からインストールした公開版パッケージ
+      (site-packages 上)がそのまま解決される(リリース確認専用モード)。
     - 拡張モジュールは libalopex_sql_parser.so(Nim パーサー)へ動的リンク
       するため、未解決なら LD_LIBRARY_PATH を整えて自分自身を exec し直す
       (動的リンカのパスはプロセス起動時にしか反映されないため)。
     """
-    package_dir = repo / "crates" / "alopex-py" / "python"
-    if package_dir.is_dir():
-        sys.path.insert(0, str(package_dir))
+    if os.environ.get(BINARY_SOURCE_ENV) != BINARY_SOURCE_RELEASED:
+        package_dir = repo / "crates" / "alopex-py" / "python"
+        if package_dir.is_dir():
+            sys.path.insert(0, str(package_dir))
     try:
         import alopex  # noqa: PLC0415
 

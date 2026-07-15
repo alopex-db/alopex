@@ -317,6 +317,31 @@ def _tail(text: str, lines: int = 30) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: ALOPEX_BINARY_SOURCE=released のとき、ソースを一切ビルドせず PATH 上の
+#: 公開版バイナリ(検証コンテナが `cargo install --locked --version X.Y.Z`
+#: で crates.io からインストールしたもの)を使う。リリース確認(公開物が
+#: 実際に動くかの検証)専用のモードであり、通常の parity 検証・デモは
+#: 従来どおりソースビルド(既定)を使う。
+BINARY_SOURCE_ENV = "ALOPEX_BINARY_SOURCE"
+BINARY_SOURCE_RELEASED = "released"
+
+
+def _released_binaries() -> Dict[str, Path]:
+    """PATH 上の公開版製品バイナリを解決する(ビルドしない)。"""
+    binaries: Dict[str, Path] = {}
+    for name in (PRODUCT_BIN_CLI, PRODUCT_BIN_SERVER):
+        found = shutil.which(name)
+        if found is None:
+            raise SurfaceError(
+                f"ALOPEX_BINARY_SOURCE={BINARY_SOURCE_RELEASED} だが"
+                f" 公開版バイナリ {name} が PATH に見つからない。"
+                " 検証コンテナ(scripts/release/verify-release/Dockerfile)内で"
+                " 実行すること。"
+            )
+        binaries[name] = Path(found)
+    return binaries
+
+
 def build_products(repo: Path, *, profile: str = "debug") -> Dict[str, Path]:
     """Nim パーサー + 製品バイナリ(alopex, alopex-server)を逐次ビルドする。
 
@@ -324,7 +349,14 @@ def build_products(repo: Path, *, profile: str = "debug") -> Dict[str, Path]:
       (``cd crates/alopex-sql/nim-sql-parser && nimble lib``)。
     - 製品バイナリ: 1 回の cargo 呼び出しでまとめてビルドする
       (「ビルドは単発」要件。cargo の多重起動はしない)。
+
+    環境変数 ALOPEX_BINARY_SOURCE=released のときはビルドを一切行わず、
+    PATH 上の公開版バイナリ(リリース確認コンテナが crates.io から
+    インストールしたもの)を返す(_released_binaries 参照)。
     """
+    if os.environ.get(BINARY_SOURCE_ENV) == BINARY_SOURCE_RELEASED:
+        return _released_binaries()
+
     if shutil.which("nimble") is None:
         raise SurfaceError(
             "nimble が見つからない。検証コンテナ(scripts/parity/Dockerfile)内で"
@@ -434,8 +466,9 @@ class EmbeddedSurface:
         if role == ROLE_READER and data_dir is None:
             raise SurfaceError("reader ロールはデータディレクトリが必須")
 
-        # parity_corpus.rs は PARITY_OUTPUT へ直接書き込む(親ディレクトリは
-        # 作成しない)ため、ハーネス側で必ず作成しておく。
+        # parity_corpus.rs / verify-release-embedded は PARITY_OUTPUT へ
+        # 直接書き込む(親ディレクトリは作成しない)ため、ハーネス側で
+        # 必ず作成しておく。
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         env = product_env(self.repo)
@@ -446,21 +479,43 @@ class EmbeddedSurface:
         if data_dir is not None:
             env["PARITY_DATA_DIR"] = str(data_dir)
 
-        # cargo test は run_cargo 経由でのみ起動する(逐次実行の保証)。
-        # テストバイナリ内も直列実行にするため --test-threads=1 を渡す。
-        result = run_cargo(
-            [
-                "test",
-                "-p",
-                "alopex-embedded",
-                "--test",
-                "parity_corpus",
-                "--",
-                "--test-threads=1",
-            ],
-            repo=self.repo,
-            env=env,
-        )
+        if os.environ.get(BINARY_SOURCE_ENV) == BINARY_SOURCE_RELEASED:
+            # リリース確認モード: crates.io 公開版の alopex-embedded に
+            # 依存する crates/alopex-tools の verify-release-embedded
+            # バイナリを実行する(ビルド自体は事前に検証コンテナ側で
+            # 完了させておく契約。ここでは起動のみ)。
+            binary = shutil.which("verify-release-embedded")
+            if binary is None:
+                raise SurfaceError(
+                    f"ALOPEX_BINARY_SOURCE={BINARY_SOURCE_RELEASED} だが"
+                    " verify-release-embedded が PATH に見つからない。"
+                    " 検証コンテナ内で"
+                    " `cargo build --release -p alopex-tools` 済みであること。"
+                )
+            result = subprocess.run(
+                [binary],
+                cwd=self.repo,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=300.0,
+            )
+        else:
+            # cargo test は run_cargo 経由でのみ起動する(逐次実行の保証)。
+            # テストバイナリ内も直列実行にするため --test-threads=1 を渡す。
+            result = run_cargo(
+                [
+                    "test",
+                    "-p",
+                    "alopex-embedded",
+                    "--test",
+                    "parity_corpus",
+                    "--",
+                    "--test-threads=1",
+                ],
+                repo=self.repo,
+                env=env,
+            )
 
         if not output_path.is_file():
             hint = ""
@@ -472,7 +527,7 @@ class EmbeddedSurface:
                 )
             raise SurfaceError(
                 "embedded 経路が出力 JSON を生成しなかった"
-                f" (cargo exit={result.returncode}):\n{_tail(combined)}{hint}"
+                f" (exit={result.returncode}):\n{_tail(combined)}{hint}"
             )
 
         try:

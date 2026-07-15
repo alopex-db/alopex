@@ -3,8 +3,13 @@ members = [
     "crates/alopex-core",
     "crates/alopex-dataframe",
     "crates/alopex-sql",
-    "crates/alopex-embedded", "crates/alopex-server", "crates/alopex-cluster", "crates/alopex-cli", "crates/alopex-tools", "crates/alopex-py",
+    "crates/alopex-embedded", "crates/alopex-server", "crates/alopex-cluster", "crates/alopex-cli", "crates/alopex-py",
 ]
+# crates/alopex-tools は意図的に除外する。開発ツール(競合DB比較ベンチ・
+# リリース確認バイナリ等)は製品コードの path 依存ではなく crates.io の
+# 公開バージョンに依存させ、ユーザーが実際に手にする配布物を検証する
+# ためのクレートであるため、独立ワークスペースとして分離している
+# (crates/alopex-tools/Cargo.toml の [workspace] 空テーブルを参照)。
 resolver = "2"
 
 [workspace.package]
