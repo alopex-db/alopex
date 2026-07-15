@@ -234,6 +234,14 @@ main() {
         log_warn "Skipping Python maturin/pytest checks because V07_GATE_RUN_MATURIN=${V07_GATE_RUN_MATURIN}"
     fi
 
+    # The debug-profile artifacts from the test steps above and maturin's
+    # release build are no longer needed once we get here, and CI runners
+    # have limited disk (~14GB). Free the debug target before the release
+    # build as defense in depth against "No space left on device" on the
+    # final compile (the primary fix was unifying reqwest to eliminate a
+    # duplicated hyper/rustls/tokio dependency tree; see CHANGELOG).
+    run_step "Free debug build artifacts before release build" \
+        cargo clean --profile dev
     run_step "Release artifact: CLI binary smoke build" \
         cargo build --release -p alopex-cli --locked
     verify_release_binary
