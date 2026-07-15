@@ -71,6 +71,38 @@ if [ "${ALOPEX_SKIP_CLIPPY:-0}" != "1" ]; then
     echo -e "${GREEN}Clippy check passed${NC}"
 fi
 
+# Network-stack duplicate-dependency check (only when Cargo.lock is staged).
+# v0.7.1 のリリース障害(object_store の reqwest ^0.13 要求と alopex-cli の
+# reqwest 0.12 指定が非互換で、hyper/rustls/tokio 系ネットワークスタックが
+# 丸ごと2重に解決され、target/ が112GBに膨張して GitHub Actions ランナー
+# (~14GB)でディスク枯渇)は、コミット前にこのチェックを一度でも回して
+# いれば検知できていた。GitHub の CI に到達する前にローカルで止める。
+#
+# `cargo tree --duplicates` は巨大ワークスペースでは常時大量にヒットする
+# (bevy/axum/itertools 等の既存重複は正常な状態でノイズが多い)ため、
+# 全件は見ない。今回痛みが大きかった「重量級ネットワークスタックの丸ごと
+# 重複」に絞って検知する。
+if git diff --cached --name-only | grep -q '^Cargo\.lock$'; then
+    echo ""
+    echo -e "${YELLOW}Checking for duplicate network-stack dependencies (Cargo.lock changed)...${NC}"
+    NETWORK_DUPS="$(cargo tree --duplicates 2>/dev/null | grep -E '^(reqwest|hyper|hyper-util|tokio-rustls|rustls|rustls-webpki|tower|tower-http|h2|tonic|axum|axum-server) v')"
+    if [ -n "$NETWORK_DUPS" ]; then
+        echo -e "${RED}Duplicate network-stack dependency versions detected:${NC}"
+        echo "$NETWORK_DUPS"
+        echo ""
+        echo -e "${RED}A network-stack crate is pulled in at two incompatible major${NC}"
+        echo -e "${RED}versions, duplicating hyper/rustls/tokio's entire sub-tree${NC}"
+        echo -e "${RED}(this is exactly what caused the v0.7.1 release CI to run${NC}"
+        echo -e "${RED}out of disk space).${NC}"
+        echo ""
+        echo "Check with: cargo tree -i <crate-name>"
+        echo "Align the version constraint with whichever dependent forces the"
+        echo "newer major (usually visible directly in the output above)."
+        exit 1
+    fi
+    echo -e "${GREEN}No duplicate network-stack dependencies${NC}"
+fi
+
 # Cross-architecture checks (optional, requires full toolchain)
 if [ "${ALOPEX_CROSS_CHECK:-0}" = "1" ]; then
     echo ""
