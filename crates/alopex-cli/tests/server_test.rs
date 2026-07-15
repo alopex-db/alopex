@@ -405,7 +405,7 @@ async fn start_admin_lifecycle_server() -> (
             }),
         )
         .route(
-            "/api/admin/backup/:id",
+            "/api/admin/backup/{id}",
             get(|Path(handle): Path<String>| async move {
                 Json(json!({
                     "status": "OK",
@@ -429,7 +429,7 @@ async fn start_admin_lifecycle_server() -> (
             }),
         )
         .route(
-            "/api/admin/restore/:id",
+            "/api/admin/restore/{id}",
             get(|Path(handle): Path<String>| async move {
                 Json(json!({
                     "status": "OK",
@@ -1563,7 +1563,7 @@ async fn server_admin_lifecycle_backup_restore_success() {
 #[tokio::test]
 async fn server_admin_lifecycle_unsupported_endpoint_maps_error() {
     let router = axum::Router::new().route(
-        "/api/admin/backup/:id",
+        "/api/admin/backup/{id}",
         get(|| async { (StatusCode::NOT_FOUND, Json(json!({ "error": "missing" }))) }),
     );
     let (base_url, shutdown, _dir) = spawn_tls_server(router).await;

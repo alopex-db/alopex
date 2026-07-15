@@ -54,6 +54,20 @@ print(sys.version_info.minor);",
 fn main() {
     pyo3_build_config::add_extension_module_link_args();
 
+    // alopex-sql の build.rs は Nim 共有ライブラリの link-search/link-lib しか
+    // 出せず（依存クレートの rustc-link-arg は最終バイナリ/cdylib に伝播しない
+    // cargo の仕様）、rpath はこの拡張モジュール自身の build.rs で設定する
+    // 必要がある。alopex-sql の links = "alopex_sql_parser" が
+    // cargo::metadata=libdir=... で公開した値を DEP_ALOPEX_SQL_PARSER_LIBDIR
+    // として受け取る。alopex-py は crate-type = ["cdylib"] であり
+    // rustc-link-arg-bins ではなく rustc-link-arg（cdylib にも適用される）を
+    // 使う。(edition 2021 の build.rs のため let chains は使わない)
+    if let Ok(libdir) = env::var("DEP_ALOPEX_SQL_PARSER_LIBDIR") {
+        if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{libdir}");
+        }
+    }
+
     if cfg!(target_os = "windows") {
         println!("cargo:warning=Windows では python3-config が利用できないため埋め込みフラグをスキップします");
         return;

@@ -14,6 +14,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tempfile::tempdir;
 
+use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
@@ -185,7 +186,7 @@ async fn spawn_grpc_server(state: Arc<ServerState>) -> (Channel, tokio::task::Jo
             async move {
                 let mut guard = client_stream.lock().await;
                 let stream = guard.take().expect("client stream");
-                Ok::<_, std::io::Error>(stream)
+                Ok::<_, std::io::Error>(TokioIo::new(stream))
             }
         }))
         .await

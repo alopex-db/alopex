@@ -137,6 +137,23 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: artifacts/${{ matrix.asset_name }}
 
+      # crates.io に公開する alopex-sql は Nim ツールチェーンを持たない環境
+      # でも `cargo install`/`cargo build` できる必要がある(D2 是正)。この
+      # ジョブが alopex-cli リンク用に既にビルド済みの Nim 共有ライブラリを
+      # vendor アーティファクトとしてもアップロードし、publish-crate ジョブが
+      # nim-sql-parser/vendor/<target-triple>/ へ配置してから publish する。
+      - name: Upload vendored Nim shared library
+        uses: actions/upload-artifact@v4
+        with:
+          name: nim-vendor-${{ matrix.target }}
+          # Linux: libalopex_sql_parser.so / macOS: libalopex_sql_parser.dylib
+          # / Windows: alopex_sql_parser.dll (lib 接頭辞なし)。
+          path: |
+            ${{ env.NIM_SQL_PARSER_DIR }}/libalopex_sql_parser.so
+            ${{ env.NIM_SQL_PARSER_DIR }}/libalopex_sql_parser.dylib
+            ${{ env.NIM_SQL_PARSER_DIR }}/alopex_sql_parser.dll
+          if-no-files-found: ignore
+
   create-release:
     name: Create GitHub Release
     needs: build-release
@@ -164,7 +181,7 @@ jobs:
 
   publish-crate:
     name: Publish to crates.io
-    needs: create-release
+    needs: [build-release, create-release]
     runs-on: ubuntu-latest
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
@@ -187,6 +204,30 @@ jobs:
             -e HOME=/tmp \
             nimlang/nim:2.2 \
             sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
+
+      # alopex-sql の公開 crate は Nim ツールチェーンを持たない環境でも
+      # `cargo install`/`cargo build` できる必要がある(D2 是正)。build-release
+      # ジョブが4プラットフォーム分ビルド済みの Nim 共有ライブラリを
+      # nim-sql-parser/vendor/<target-triple>/ へ配置してから publish する
+      # (alopex-sql/build.rs の解決順序に vendor/ を追加済み)。
+      - name: Download vendored Nim shared libraries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nim-vendor-*
+          path: /tmp/nim-vendor
+
+      - name: Place vendored libraries under nim-sql-parser/vendor/<target-triple>
+        run: |
+          set -euo pipefail
+          for dir in /tmp/nim-vendor/nim-vendor-*; do
+            target="$(basename "${dir}" | sed 's/^nim-vendor-//')"
+            dest="${NIM_SQL_PARSER_DIR}/vendor/${target}"
+            mkdir -p "${dest}"
+            cp "${dir}"/* "${dest}/"
+            echo "vendored for ${target}:"
+            ls -la "${dest}"
+          done
+
       - name: Create publish helper
         run: |
           cat > publish-crate.sh <<'EOF'

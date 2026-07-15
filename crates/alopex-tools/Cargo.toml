@@ -1,9 +1,16 @@
+# 親 alopex/ ワークスペースには意図的に含めない(親 Cargo.toml のコメント
+# 参照)。開発ツールは製品コードへの path 依存ではなく、crates.io の
+# 公開バージョンに依存させることで「ユーザーが実際に手にする配布物」を
+# 検証できるようにする。
+[workspace]
+
 [package]
 name = "alopex-tools"
-version.workspace = true
+version = "0.0.0"
+publish = false
 edition = "2024"  # Uses let chains feature
-license.workspace = true
-repository.workspace = true
+license = "Apache-2.0"
+repository = "https://github.com/alopex-db/alopex"
 description = "Development and debugging tools for Alopex DB"
 keywords = ["database", "tools", "debugging"]
 categories = ["database-implementations", "development-tools"]
@@ -11,4 +18,14 @@ categories = ["database-implementations", "development-tools"]
 [features]
 lane_ci = []
 
+[[bin]]
+name = "verify-release-embedded"
+path = "src/bin/verify_release_embedded.rs"
+
 [dependencies]
+serde_json = "1.0"
+
+# バージョンは release-please 等の自動化なしに手動で追随させる。
+# リリース確認ツールの目的上、常に「直近リリースの公開版」を指す。
+alopex-embedded = "=0.7.1"
+alopex-sql = "=0.7.1"

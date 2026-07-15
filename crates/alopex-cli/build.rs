@@ -1,12 +1,4 @@
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let protoc = protoc_bin_vendored::protoc_bin_path()?;
-    std::env::set_var("PROTOC", protoc);
-    tonic_prost_build::configure()
-        .build_server(true)
-        .build_client(true)
-        .compile_protos(&["proto/alopex.proto"], &["proto"])?;
-    println!("cargo:rerun-if-changed=proto/alopex.proto");
-
+fn main() {
     // alopex-sql の build.rs は Nim 共有ライブラリの link-search/link-lib しか
     // 出せず（依存クレートの rustc-link-arg は最終バイナリに伝播しない cargo
     // の仕様）、rpath はこのバイナリ自身の build.rs で設定する必要がある。
@@ -18,6 +10,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("cargo:rustc-link-arg-bins=-Wl,-rpath,{libdir}");
         }
     }
-
-    Ok(())
 }

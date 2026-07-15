@@ -85,7 +85,7 @@ fi
 if git diff --cached --name-only | grep -q '^Cargo\.lock$'; then
     echo ""
     echo -e "${YELLOW}Checking for duplicate network-stack dependencies (Cargo.lock changed)...${NC}"
-    NETWORK_DUPS="$(cargo tree --duplicates 2>/dev/null | grep -E '^(reqwest|hyper|hyper-util|tokio-rustls|rustls|rustls-webpki|tower|tower-http|h2|tonic|axum|axum-server) v')"
+    NETWORK_DUPS="$(cargo tree --duplicates 2>/dev/null | grep -E '^(reqwest|hyper|hyper-util|tokio-rustls|rustls|rustls-webpki|tower|tower-http|h2|tonic|axum|axum-server) v' || true)"
     if [ -n "$NETWORK_DUPS" ]; then
         echo -e "${RED}Duplicate network-stack dependency versions detected:${NC}"
         echo "$NETWORK_DUPS"

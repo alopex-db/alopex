@@ -84,7 +84,7 @@ async fn spawn_http_server(router: Router) -> (String, oneshot::Sender<()>) {
 async fn e2e_lifecycle_status_outputs_include_fields() {
     let router = Router::new()
         .route(
-            "/api/admin/backup/:id",
+            "/api/admin/backup/{id}",
             get(|Path(handle): Path<String>| async move {
                 Json(json!({
                     "status": "OK",
@@ -96,7 +96,7 @@ async fn e2e_lifecycle_status_outputs_include_fields() {
             }),
         )
         .route(
-            "/api/admin/restore/:id",
+            "/api/admin/restore/{id}",
             get(|Path(handle): Path<String>| async move {
                 Json(json!({
                     "status": "OK",

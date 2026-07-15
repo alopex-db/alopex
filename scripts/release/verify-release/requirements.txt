@@ -1,0 +1,17 @@
+# alopex リリース確認コンテナの Python 依存(バージョン固定)。
+# scripts/parity/requirements.txt と同一の直接依存(デモ/検証ハーネスを
+# そのまま流用するため)。`alopex`(PyPI 公開版)は Dockerfile 側で
+# ALOPEX_VERSION を指定してインストールする(このファイルには含めない)。
+#
+# --- 直接依存 ---
+grpcio==1.69.0        # SF-GRPC: AlopexService.ExecuteSql クライアント
+grpcio-tools==1.69.0  # crates/alopex-server/proto/alopex.proto から実行時にスタブ生成
+protobuf==5.29.3      # 生成スタブのランタイム
+requests==2.32.3      # SF-HTTP: SQL 実行 + /healthz ポーリング
+#
+# --- 推移的依存(ビルド決定性のため固定) ---
+certifi==2024.12.14
+charset-normalizer==3.4.0
+idna==3.10
+urllib3==2.2.3
+setuptools==75.8.0    # grpc_tools.protoc の proto include 解決に使用

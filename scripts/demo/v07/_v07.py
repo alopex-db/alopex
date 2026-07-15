@@ -20,6 +20,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -87,13 +88,35 @@ def product_env(repo: Path) -> Dict[str, str]:
     return env
 
 
-def find_product_binary(repo: Path, name: str) -> Path:
-    """製品バイナリ(alopex / alopex-server)を target から探す。
+#: scripts/parity/runner/surfaces.py と同一契約。ALOPEX_BINARY_SOURCE=released
+#: のときはビルド成果物を探さず、PATH 上の公開版バイナリ(検証コンテナが
+#: crates.io からインストールしたもの)を使う。
+BINARY_SOURCE_ENV = "ALOPEX_BINARY_SOURCE"
+BINARY_SOURCE_RELEASED = "released"
 
-    release を優先し、無ければ debug を使う。どちらにも無ければ環境エラー。
-    デモから cargo を起動しない(ビルドの逐次実行はビルド担当者の責務。
+
+def find_product_binary(repo: Path, name: str) -> Path:
+    """製品バイナリ(alopex / alopex-server)を解決する。
+
+    既定(ALOPEX_BINARY_SOURCE 未設定): target から探す。release を優先し、
+    無ければ debug を使う。どちらにも無ければ環境エラー。デモから cargo を
+    起動しない(ビルドの逐次実行はビルド担当者の責務。
     scripts/parity/runner/surfaces.py の run_cargo 規約を参照)。
+
+    ALOPEX_BINARY_SOURCE=released のときは PATH 上の公開版バイナリを使う
+    (リリース確認専用モード)。
     """
+    if os.environ.get(BINARY_SOURCE_ENV) == BINARY_SOURCE_RELEASED:
+        found = shutil.which(name)
+        if found is None:
+            raise EnvError(
+                f"ALOPEX_BINARY_SOURCE={BINARY_SOURCE_RELEASED} だが"
+                f" 公開版バイナリ {name} が PATH に見つからない。"
+                " 検証コンテナ(scripts/release/verify-release/Dockerfile)内で"
+                " 実行すること。"
+            )
+        return Path(found)
+
     for profile in ("release", "debug"):
         path = repo / "target" / profile / name
         if path.is_file():
