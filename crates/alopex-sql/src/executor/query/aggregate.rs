@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 
 use crate::catalog::ColumnMetadata;
 use crate::executor::evaluator::EvalContext;
@@ -7,9 +9,11 @@ use crate::executor::memory::{MemoryPolicy, MemoryTracker, map_core_memory_error
 use crate::executor::{ExecutorError, Result};
 use crate::planner::aggregate_expr::{AggregateExpr, AggregateFunction};
 use crate::planner::typed_expr::TypedExpr;
-use crate::storage::{RowCodec, SqlValue};
+use crate::planner::types::ResolvedType;
+use crate::storage::SqlValue;
+use alopex_core::sql::stream::ByteSized;
 
-use super::{Row, RowIterator};
+use super::{Row, RowIterator, iterator::VecIterator};
 
 /// Byte-encoded group key for hash-based aggregation.
 pub type GroupKeyBytes = Vec<u8>;
@@ -87,6 +91,10 @@ pub fn encode_group_key(values: &[SqlValue]) -> Result<GroupKeyBytes> {
 pub trait Accumulator: Send {
     /// Update the accumulator with a new value (None for COUNT(*) rows).
     fn update(&mut self, value: Option<SqlValue>) -> Result<()>;
+    /// Return the serializable partial aggregate state.
+    fn state(&self) -> Result<Vec<SqlValue>>;
+    /// Merge a partial state produced by an accumulator of the same function.
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()>;
     /// Finalize the accumulator and return the resulting SqlValue.
     fn finalize(&self) -> Result<SqlValue>;
     /// Clone the accumulator as a trait object.
@@ -97,6 +105,77 @@ impl Clone for Box<dyn Accumulator> {
     fn clone(&self) -> Self {
         self.clone_box()
     }
+}
+
+fn invalid_aggregate_state(function: &str, reason: impl Into<String>) -> ExecutorError {
+    ExecutorError::InvalidOperation {
+        operation: function.into(),
+        reason: reason.into(),
+    }
+}
+
+fn expect_state_arity(function: &str, state: &[SqlValue], expected: usize) -> Result<()> {
+    if state.len() == expected {
+        Ok(())
+    } else {
+        Err(invalid_aggregate_state(
+            function,
+            format!("expected {expected} state value(s), got {}", state.len()),
+        ))
+    }
+}
+
+fn state_bigint(function: &str, value: &SqlValue, index: usize) -> Result<i64> {
+    match value {
+        SqlValue::BigInt(v) => Ok(*v),
+        other => Err(invalid_aggregate_state(
+            function,
+            format!(
+                "state value {index} expected BigInt, got {}",
+                other.type_name()
+            ),
+        )),
+    }
+}
+
+fn state_double(function: &str, value: &SqlValue, index: usize) -> Result<f64> {
+    match value {
+        SqlValue::Double(v) => Ok(*v),
+        other => Err(invalid_aggregate_state(
+            function,
+            format!(
+                "state value {index} expected Double, got {}",
+                other.type_name()
+            ),
+        )),
+    }
+}
+
+fn state_text<'a>(function: &str, value: &'a SqlValue, index: usize) -> Result<&'a str> {
+    match value {
+        SqlValue::Text(v) => Ok(v),
+        other => Err(invalid_aggregate_state(
+            function,
+            format!(
+                "state value {index} expected Text, got {}",
+                other.type_name()
+            ),
+        )),
+    }
+}
+
+fn distinct_allows(
+    distinct_values: &mut Option<HashSet<Vec<u8>>>,
+    value: &SqlValue,
+) -> Result<bool> {
+    if value.is_null() {
+        return Ok(false);
+    }
+    let Some(distinct) = distinct_values else {
+        return Ok(true);
+    };
+    let encoded = encode_group_key(std::slice::from_ref(value))?;
+    Ok(distinct.insert(encoded))
 }
 
 /// Accumulator for COUNT / COUNT(DISTINCT).
@@ -123,7 +202,7 @@ impl Accumulator for CountAccumulator {
                 if value.is_null() {
                     return Ok(());
                 }
-                let encoded = RowCodec::encode(std::slice::from_ref(&value));
+                let encoded = encode_group_key(std::slice::from_ref(&value))?;
                 if distinct.insert(encoded) {
                     self.count += 1;
                 }
@@ -147,6 +226,23 @@ impl Accumulator for CountAccumulator {
         Ok(SqlValue::BigInt(self.count as i64))
     }
 
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![SqlValue::BigInt(self.count as i64)])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("count", state, 1)?;
+        let count = state_bigint("count", &state[0], 0)?;
+        if count < 0 {
+            return Err(invalid_aggregate_state(
+                "count",
+                "state count must be non-negative",
+            ));
+        }
+        self.count = self.count.saturating_add(count as usize);
+        Ok(())
+    }
+
     fn clone_box(&self) -> Box<dyn Accumulator> {
         Box::new(self.clone())
     }
@@ -156,12 +252,20 @@ impl Accumulator for CountAccumulator {
 #[derive(Debug, Clone)]
 pub struct SumAccumulator {
     sum: Option<f64>,
+    distinct_values: Option<HashSet<Vec<u8>>>,
 }
 
 impl SumAccumulator {
     /// Create a new sum accumulator.
     pub fn new() -> Self {
-        Self { sum: None }
+        Self::with_distinct(false)
+    }
+
+    pub fn with_distinct(distinct: bool) -> Self {
+        Self {
+            sum: None,
+            distinct_values: if distinct { Some(HashSet::new()) } else { None },
+        }
     }
 }
 
@@ -179,6 +283,9 @@ impl Accumulator for SumAccumulator {
         if value.is_null() {
             return Ok(());
         }
+        if !distinct_allows(&mut self.distinct_values, &value)? {
+            return Ok(());
+        }
         let numeric = numeric_to_f64(&value)?;
         self.sum = Some(self.sum.unwrap_or(0.0) + numeric);
         Ok(())
@@ -186,6 +293,20 @@ impl Accumulator for SumAccumulator {
 
     fn finalize(&self) -> Result<SqlValue> {
         Ok(self.sum.map_or(SqlValue::Null, SqlValue::Double))
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![self.sum.map_or(SqlValue::Null, SqlValue::Double)])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("sum", state, 1)?;
+        if state[0].is_null() {
+            return Ok(());
+        }
+        let numeric = numeric_to_f64(&state[0])?;
+        self.sum = Some(self.sum.unwrap_or(0.0) + numeric);
+        Ok(())
     }
 
     fn clone_box(&self) -> Box<dyn Accumulator> {
@@ -229,6 +350,17 @@ impl Accumulator for TotalAccumulator {
         Ok(SqlValue::Double(self.sum.unwrap_or(0.0)))
     }
 
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![SqlValue::Double(self.sum.unwrap_or(0.0))])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("total", state, 1)?;
+        let value = state_double("total", &state[0], 0)?;
+        self.sum = Some(self.sum.unwrap_or(0.0) + value);
+        Ok(())
+    }
+
     fn clone_box(&self) -> Box<dyn Accumulator> {
         Box::new(self.clone())
     }
@@ -239,14 +371,20 @@ impl Accumulator for TotalAccumulator {
 pub struct AvgAccumulator {
     sum: Option<f64>,
     count: usize,
+    distinct_values: Option<HashSet<Vec<u8>>>,
 }
 
 impl AvgAccumulator {
     /// Create a new average accumulator.
     pub fn new() -> Self {
+        Self::with_distinct(false)
+    }
+
+    pub fn with_distinct(distinct: bool) -> Self {
         Self {
             sum: None,
             count: 0,
+            distinct_values: if distinct { Some(HashSet::new()) } else { None },
         }
     }
 }
@@ -265,6 +403,9 @@ impl Accumulator for AvgAccumulator {
         if value.is_null() {
             return Ok(());
         }
+        if !distinct_allows(&mut self.distinct_values, &value)? {
+            return Ok(());
+        }
         let numeric = numeric_to_f64(&value)?;
         self.sum = Some(self.sum.unwrap_or(0.0) + numeric);
         self.count += 1;
@@ -277,6 +418,28 @@ impl Accumulator for AvgAccumulator {
         }
         let sum = self.sum.unwrap_or(0.0);
         Ok(SqlValue::Double(sum / self.count as f64))
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![
+            SqlValue::Double(self.sum.unwrap_or(0.0)),
+            SqlValue::BigInt(self.count as i64),
+        ])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("avg", state, 2)?;
+        let sum = state_double("avg", &state[0], 0)?;
+        let count = state_bigint("avg", &state[1], 1)?;
+        if count < 0 {
+            return Err(invalid_aggregate_state(
+                "avg",
+                "state count must be non-negative",
+            ));
+        }
+        self.sum = Some(self.sum.unwrap_or(0.0) + sum);
+        self.count = self.count.saturating_add(count as usize);
+        Ok(())
     }
 
     fn clone_box(&self) -> Box<dyn Accumulator> {
@@ -304,14 +467,20 @@ fn numeric_to_f64(value: &SqlValue) -> Result<f64> {
 pub struct MinMaxAccumulator {
     value: Option<SqlValue>,
     is_min: bool,
+    distinct_values: Option<HashSet<Vec<u8>>>,
 }
 
 impl MinMaxAccumulator {
     /// Create a new min/max accumulator.
     pub fn new(is_min: bool) -> Self {
+        Self::with_distinct(is_min, false)
+    }
+
+    pub fn with_distinct(is_min: bool, distinct: bool) -> Self {
         Self {
             value: None,
             is_min,
+            distinct_values: if distinct { Some(HashSet::new()) } else { None },
         }
     }
 }
@@ -322,6 +491,9 @@ impl Accumulator for MinMaxAccumulator {
             return Ok(());
         };
         if value.is_null() {
+            return Ok(());
+        }
+        if !distinct_allows(&mut self.distinct_values, &value)? {
             return Ok(());
         }
 
@@ -360,6 +532,18 @@ impl Accumulator for MinMaxAccumulator {
         Ok(self.value.clone().unwrap_or(SqlValue::Null))
     }
 
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![self.value.clone().unwrap_or(SqlValue::Null)])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity(if self.is_min { "min" } else { "max" }, state, 1)?;
+        if state[0].is_null() {
+            return Ok(());
+        }
+        self.update(Some(state[0].clone()))
+    }
+
     fn clone_box(&self) -> Box<dyn Accumulator> {
         Box::new(self.clone())
     }
@@ -370,14 +554,20 @@ impl Accumulator for MinMaxAccumulator {
 pub struct GroupConcatAccumulator {
     values: Vec<String>,
     separator: String,
+    distinct_values: Option<HashSet<Vec<u8>>>,
 }
 
 impl GroupConcatAccumulator {
     /// Create a new GROUP_CONCAT accumulator with the given separator.
     pub fn new(separator: String) -> Self {
+        Self::with_distinct(separator, false)
+    }
+
+    pub fn with_distinct(separator: String, distinct: bool) -> Self {
         Self {
             values: Vec::new(),
             separator,
+            distinct_values: if distinct { Some(HashSet::new()) } else { None },
         }
     }
 }
@@ -390,6 +580,10 @@ impl Accumulator for GroupConcatAccumulator {
         match value {
             SqlValue::Null => Ok(()),
             SqlValue::Text(text) => {
+                let value = SqlValue::Text(text.clone());
+                if !distinct_allows(&mut self.distinct_values, &value)? {
+                    return Ok(());
+                }
                 self.values.push(text);
                 Ok(())
             }
@@ -409,6 +603,42 @@ impl Accumulator for GroupConcatAccumulator {
         Ok(SqlValue::Text(self.values.join(&self.separator)))
     }
 
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![
+            if self.values.is_empty() {
+                SqlValue::Null
+            } else {
+                SqlValue::Text(self.values.join(&self.separator))
+            },
+            SqlValue::Text(self.separator.clone()),
+        ])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("group_concat", state, 2)?;
+        let separator = state_text("group_concat", &state[1], 1)?;
+        if separator != self.separator {
+            return Err(invalid_aggregate_state(
+                "group_concat",
+                "state separator differs from accumulator separator",
+            ));
+        }
+        match &state[0] {
+            SqlValue::Null => Ok(()),
+            SqlValue::Text(text) => {
+                self.values.push(text.clone());
+                Ok(())
+            }
+            other => Err(invalid_aggregate_state(
+                "group_concat",
+                format!(
+                    "state value 0 expected Text or Null, got {}",
+                    other.type_name()
+                ),
+            )),
+        }
+    }
+
     fn clone_box(&self) -> Box<dyn Accumulator> {
         Box::new(self.clone())
     }
@@ -419,14 +649,20 @@ impl Accumulator for GroupConcatAccumulator {
 pub struct StringAggAccumulator {
     values: Vec<String>,
     separator: String,
+    distinct_values: Option<HashSet<Vec<u8>>>,
 }
 
 impl StringAggAccumulator {
     /// Create a new string_agg accumulator.
     pub fn new(separator: String) -> Self {
+        Self::with_distinct(separator, false)
+    }
+
+    pub fn with_distinct(separator: String, distinct: bool) -> Self {
         Self {
             values: Vec::new(),
             separator,
+            distinct_values: if distinct { Some(HashSet::new()) } else { None },
         }
     }
 }
@@ -439,6 +675,10 @@ impl Accumulator for StringAggAccumulator {
         match value {
             SqlValue::Null => Ok(()),
             SqlValue::Text(s) => {
+                let value = SqlValue::Text(s.clone());
+                if !distinct_allows(&mut self.distinct_values, &value)? {
+                    return Ok(());
+                }
                 self.values.push(s);
                 Ok(())
             }
@@ -458,6 +698,42 @@ impl Accumulator for StringAggAccumulator {
         Ok(SqlValue::Text(self.values.join(&self.separator)))
     }
 
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![
+            if self.values.is_empty() {
+                SqlValue::Null
+            } else {
+                SqlValue::Text(self.values.join(&self.separator))
+            },
+            SqlValue::Text(self.separator.clone()),
+        ])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("string_agg", state, 2)?;
+        let separator = state_text("string_agg", &state[1], 1)?;
+        if separator != self.separator {
+            return Err(invalid_aggregate_state(
+                "string_agg",
+                "state separator differs from accumulator separator",
+            ));
+        }
+        match &state[0] {
+            SqlValue::Null => Ok(()),
+            SqlValue::Text(text) => {
+                self.values.push(text.clone());
+                Ok(())
+            }
+            other => Err(invalid_aggregate_state(
+                "string_agg",
+                format!(
+                    "state value 0 expected Text or Null, got {}",
+                    other.type_name()
+                ),
+            )),
+        }
+    }
+
     fn clone_box(&self) -> Box<dyn Accumulator> {
         Box::new(self.clone())
     }
@@ -467,24 +743,35 @@ impl Accumulator for StringAggAccumulator {
 pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<dyn Accumulator> {
     match function {
         AggregateFunction::Count => Box::new(CountAccumulator::new(distinct)),
-        AggregateFunction::Sum => Box::new(SumAccumulator::new()),
+        AggregateFunction::Sum => Box::new(SumAccumulator::with_distinct(distinct)),
         AggregateFunction::Total => Box::new(TotalAccumulator::new()),
-        AggregateFunction::Avg => Box::new(AvgAccumulator::new()),
-        AggregateFunction::Min => Box::new(MinMaxAccumulator::new(true)),
-        AggregateFunction::Max => Box::new(MinMaxAccumulator::new(false)),
+        AggregateFunction::Avg => Box::new(AvgAccumulator::with_distinct(distinct)),
+        AggregateFunction::Min => Box::new(MinMaxAccumulator::with_distinct(true, distinct)),
+        AggregateFunction::Max => Box::new(MinMaxAccumulator::with_distinct(false, distinct)),
         AggregateFunction::GroupConcat { separator } => {
             let sep = separator.clone().unwrap_or_else(|| ",".to_string());
-            Box::new(GroupConcatAccumulator::new(sep))
+            Box::new(GroupConcatAccumulator::with_distinct(sep, distinct))
         }
         AggregateFunction::StringAgg { separator } => {
             let sep = separator.clone().unwrap_or_else(|| ",".to_string());
-            Box::new(StringAggAccumulator::new(sep))
+            Box::new(StringAggAccumulator::with_distinct(sep, distinct))
         }
     }
 }
 
 const DEFAULT_GROUP_LIMIT: usize = 1_000_000;
 const AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES: u64 = 32;
+
+/// Aggregate execution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateMode {
+    /// Consume raw input rows and output aggregate partial state rows.
+    Partial,
+    /// Consume partial state rows and output final aggregate values.
+    Final,
+    /// Consume raw input rows and output final aggregate values in one pass.
+    Single,
+}
 
 struct AggregateGroup {
     key_values: Vec<SqlValue>,
@@ -497,12 +784,14 @@ pub struct AggregateIterator<'a> {
     group_keys: Vec<TypedExpr>,
     aggregates: Vec<AggregateExpr>,
     having: Option<TypedExpr>,
+    mode: AggregateMode,
     hash_table: Option<HashMap<GroupKeyBytes, AggregateGroup>>,
     result_rows: Vec<Row>,
     index: usize,
     schema: Vec<ColumnMetadata>,
     group_limit: usize,
     memory_tracker: Option<MemoryTracker>,
+    shared_group_counter: Option<Arc<AtomicUsize>>,
 }
 
 impl<'a> AggregateIterator<'a> {
@@ -519,12 +808,14 @@ impl<'a> AggregateIterator<'a> {
             group_keys,
             aggregates,
             having,
+            mode: AggregateMode::Single,
             hash_table: None,
             result_rows: Vec::new(),
             index: 0,
             schema,
             group_limit: DEFAULT_GROUP_LIMIT,
             memory_tracker: None,
+            shared_group_counter: None,
         }
     }
 
@@ -534,9 +825,21 @@ impl<'a> AggregateIterator<'a> {
         self
     }
 
+    /// Set the aggregate execution mode.
+    pub fn with_mode(mut self, mode: AggregateMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
     /// Attach a memory policy for enforcing in-flight aggregation limits.
     pub fn with_memory_policy(mut self, policy: Option<MemoryPolicy>) -> Self {
         self.memory_tracker = policy.map(MemoryTracker::new);
+        self
+    }
+
+    /// Attach a shared group counter used by parallel Partial aggregation.
+    pub fn with_shared_group_counter(mut self, counter: Option<Arc<AtomicUsize>>) -> Self {
+        self.shared_group_counter = counter;
         self
     }
 
@@ -546,23 +849,34 @@ impl<'a> AggregateIterator<'a> {
 
         while let Some(result) = self.input.next_row() {
             let row = result?;
-            let ctx = EvalContext::new(&row.values);
-
-            let mut key_values = Vec::with_capacity(self.group_keys.len());
-            for expr in &self.group_keys {
-                key_values.push(crate::executor::evaluator::evaluate(expr, &ctx)?);
-            }
-            let key_bytes = encode_group_key(&key_values)?;
+            let (key_values, key_bytes) = match self.mode {
+                AggregateMode::Final => {
+                    let key_values = row
+                        .values
+                        .get(..self.group_keys.len())
+                        .ok_or_else(|| {
+                            invalid_aggregate_state(
+                                "aggregate",
+                                "partial state row is missing group key values",
+                            )
+                        })?
+                        .to_vec();
+                    let key_bytes = encode_group_key(&key_values)?;
+                    (key_values, key_bytes)
+                }
+                AggregateMode::Partial | AggregateMode::Single => {
+                    let ctx = EvalContext::new(&row.values);
+                    let mut key_values = Vec::with_capacity(self.group_keys.len());
+                    for expr in &self.group_keys {
+                        key_values.push(crate::executor::evaluator::evaluate(expr, &ctx)?);
+                    }
+                    let key_bytes = encode_group_key(&key_values)?;
+                    (key_values, key_bytes)
+                }
+            };
 
             if !table.contains_key(&key_bytes) {
-                if table.len() + 1 > self.group_limit {
-                    return Err(ExecutorError::ResourceExhausted {
-                        message: format!(
-                            "GROUP BY result exceeds memory limit (max groups: {})",
-                            self.group_limit
-                        ),
-                    });
-                }
+                self.reserve_group_slot(table.len())?;
                 if let Some(tracker) = &mut self.memory_tracker {
                     tracker
                         .add_values(&key_values)
@@ -576,7 +890,12 @@ impl<'a> AggregateIterator<'a> {
                 let accumulators = self
                     .aggregates
                     .iter()
-                    .map(|agg| create_accumulator(&agg.function, agg.distinct))
+                    .map(|agg| {
+                        create_accumulator(
+                            &agg.function,
+                            matches!(self.mode, AggregateMode::Single) && agg.distinct,
+                        )
+                    })
                     .collect::<Vec<_>>();
                 table.insert(
                     key_bytes.clone(),
@@ -588,24 +907,56 @@ impl<'a> AggregateIterator<'a> {
             }
 
             if let Some(group) = table.get_mut(&key_bytes) {
-                for (idx, agg) in self.aggregates.iter().enumerate() {
-                    let value = match &agg.arg {
-                        None => None,
-                        Some(expr) => Some(crate::executor::evaluator::evaluate(expr, &ctx)?),
-                    };
-                    if let Some(tracker) = &mut self.memory_tracker
-                        && matches!(
-                            agg.function,
-                            AggregateFunction::GroupConcat { .. }
-                                | AggregateFunction::StringAgg { .. }
-                        )
-                        && let Some(value_ref) = value.as_ref()
-                    {
-                        tracker
-                            .add_value(value_ref)
-                            .map_err(map_core_memory_error)?;
+                match self.mode {
+                    AggregateMode::Final => {
+                        let mut offset = self.group_keys.len();
+                        for (idx, agg) in self.aggregates.iter().enumerate() {
+                            let arity = aggregate_state_types(agg).len();
+                            let state = row.values.get(offset..offset + arity).ok_or_else(|| {
+                                invalid_aggregate_state(
+                                    "aggregate",
+                                    format!(
+                                        "partial state row is missing state values for aggregate {idx}"
+                                    ),
+                                )
+                            })?;
+                            group.accumulators[idx].merge(state)?;
+                            offset += arity;
+                        }
+                        if offset != row.values.len() {
+                            return Err(invalid_aggregate_state(
+                                "aggregate",
+                                format!(
+                                    "partial state row has {} trailing value(s)",
+                                    row.values.len() - offset
+                                ),
+                            ));
+                        }
                     }
-                    group.accumulators[idx].update(value)?;
+                    AggregateMode::Partial | AggregateMode::Single => {
+                        let ctx = EvalContext::new(&row.values);
+                        for (idx, agg) in self.aggregates.iter().enumerate() {
+                            let value = match &agg.arg {
+                                None => None,
+                                Some(expr) => {
+                                    Some(crate::executor::evaluator::evaluate(expr, &ctx)?)
+                                }
+                            };
+                            if let Some(tracker) = &mut self.memory_tracker
+                                && matches!(
+                                    agg.function,
+                                    AggregateFunction::GroupConcat { .. }
+                                        | AggregateFunction::StringAgg { .. }
+                                )
+                                && let Some(value_ref) = value.as_ref()
+                            {
+                                tracker
+                                    .add_value(value_ref)
+                                    .map_err(map_core_memory_error)?;
+                            }
+                            group.accumulators[idx].update(value)?;
+                        }
+                    }
                 }
             }
         }
@@ -619,7 +970,12 @@ impl<'a> AggregateIterator<'a> {
             let accumulators = self
                 .aggregates
                 .iter()
-                .map(|agg| create_accumulator(&agg.function, agg.distinct))
+                .map(|agg| {
+                    create_accumulator(
+                        &agg.function,
+                        matches!(self.mode, AggregateMode::Single) && agg.distinct,
+                    )
+                })
                 .collect::<Vec<_>>();
             table.insert(
                 Vec::new(),
@@ -635,7 +991,10 @@ impl<'a> AggregateIterator<'a> {
             let mut values = Vec::with_capacity(self.group_keys.len() + self.aggregates.len());
             values.extend(group.key_values.iter().cloned());
             for acc in &group.accumulators {
-                values.push(acc.finalize()?);
+                match self.mode {
+                    AggregateMode::Partial => values.extend(acc.state()?),
+                    AggregateMode::Final | AggregateMode::Single => values.push(acc.finalize()?),
+                }
             }
             let row = Row::new(next_row_id, values);
             next_row_id += 1;
@@ -645,7 +1004,9 @@ impl<'a> AggregateIterator<'a> {
                     .map_err(map_core_memory_error)?;
             }
 
-            if let Some(having) = &self.having {
+            if self.mode != AggregateMode::Partial
+                && let Some(having) = &self.having
+            {
                 let ctx = EvalContext::new(&row.values);
                 match crate::executor::evaluator::evaluate(having, &ctx)? {
                     SqlValue::Boolean(true) => rows.push(row),
@@ -666,6 +1027,23 @@ impl<'a> AggregateIterator<'a> {
 
         self.hash_table = Some(table);
         self.result_rows = rows;
+        Ok(())
+    }
+
+    fn reserve_group_slot(&self, local_group_count: usize) -> Result<()> {
+        let next_count = if let Some(counter) = &self.shared_group_counter {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+        } else {
+            local_group_count + 1
+        };
+        if next_count > self.group_limit {
+            return Err(ExecutorError::ResourceExhausted {
+                message: format!(
+                    "GROUP BY result exceeds memory limit (max groups: {})",
+                    self.group_limit
+                ),
+            });
+        }
         Ok(())
     }
 }
@@ -857,6 +1235,19 @@ impl<'a> RowIterator for StreamingAggregateIterator<'a> {
     }
 }
 
+fn aggregate_state_types(agg: &AggregateExpr) -> Vec<ResolvedType> {
+    match &agg.function {
+        AggregateFunction::Count => vec![ResolvedType::BigInt],
+        AggregateFunction::Sum => vec![ResolvedType::Double],
+        AggregateFunction::Total => vec![ResolvedType::Double],
+        AggregateFunction::Avg => vec![ResolvedType::Double, ResolvedType::BigInt],
+        AggregateFunction::Min | AggregateFunction::Max => vec![agg.result_type.clone()],
+        AggregateFunction::GroupConcat { .. } | AggregateFunction::StringAgg { .. } => {
+            vec![ResolvedType::Text, ResolvedType::Text]
+        }
+    }
+}
+
 /// Build output schema for aggregate results.
 pub fn build_aggregate_schema(
     group_keys: &[TypedExpr],
@@ -886,9 +1277,1121 @@ pub fn build_aggregate_schema(
     schema
 }
 
+/// Build internal partial aggregate schema.
+pub fn build_partial_aggregate_schema(
+    group_keys: &[TypedExpr],
+    aggregates: &[AggregateExpr],
+) -> Vec<ColumnMetadata> {
+    let mut schema = Vec::new();
+    for (idx, key) in group_keys.iter().enumerate() {
+        let name = match &key.kind {
+            crate::planner::typed_expr::TypedExprKind::ColumnRef { column, .. } => column.clone(),
+            _ => format!("group_{idx}"),
+        };
+        schema.push(ColumnMetadata::new(name, key.resolved_type.clone()));
+    }
+    for (agg_idx, agg) in aggregates.iter().enumerate() {
+        for (state_idx, state_type) in aggregate_state_types(agg).into_iter().enumerate() {
+            schema.push(ColumnMetadata::new(
+                format!("__agg{agg_idx}_state{state_idx}"),
+                state_type,
+            ));
+        }
+    }
+    schema
+}
+
+/// Return true when aggregate execution must remain Single for correctness.
+pub fn should_use_single_for_parallel(parallelism: usize, aggregates: &[AggregateExpr]) -> bool {
+    parallelism <= 1 || aggregates.iter().any(|agg| agg.distinct)
+}
+
+fn collect_iterator_rows(iter: &mut dyn RowIterator) -> Result<Vec<Row>> {
+    let mut rows = Vec::new();
+    while let Some(result) = iter.next_row() {
+        rows.push(result?);
+    }
+    Ok(rows)
+}
+
+struct ChainRowIterator<'a> {
+    prefix: std::vec::IntoIter<Row>,
+    tail: Box<dyn RowIterator + 'a>,
+    schema: Vec<ColumnMetadata>,
+}
+
+impl<'a> ChainRowIterator<'a> {
+    fn new(prefix: Vec<Row>, tail: Box<dyn RowIterator + 'a>, schema: Vec<ColumnMetadata>) -> Self {
+        Self {
+            prefix: prefix.into_iter(),
+            tail,
+            schema,
+        }
+    }
+}
+
+impl RowIterator for ChainRowIterator<'_> {
+    fn next_row(&mut self) -> Option<Result<Row>> {
+        if let Some(row) = self.prefix.next() {
+            return Some(Ok(row));
+        }
+        self.tail.next_row()
+    }
+
+    fn schema(&self) -> &[ColumnMetadata] {
+        &self.schema
+    }
+}
+
+fn estimate_row_bytes(row: &Row) -> u64 {
+    row.values.iter().map(ByteSized::estimated_bytes).sum()
+}
+
+fn split_contiguous_partitions(rows: Vec<Row>, parallelism: usize) -> Vec<Vec<Row>> {
+    let requested = parallelism.max(1);
+    if rows.is_empty() {
+        return (0..requested).map(|_| Vec::new()).collect();
+    }
+    let partitions = requested.min(rows.len());
+    let total = rows.len();
+    let mut tail = rows;
+    let mut output = Vec::with_capacity(partitions);
+    for partition in (0..partitions).rev() {
+        let start = partition * total / partitions;
+        output.push(tail.split_off(start));
+    }
+    output.reverse();
+    output
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_partial_partition(
+    partition_index: usize,
+    rows: Vec<Row>,
+    input_schema: Vec<ColumnMetadata>,
+    group_keys: Vec<TypedExpr>,
+    aggregates: Vec<AggregateExpr>,
+    partial_schema: Vec<ColumnMetadata>,
+    group_limit: usize,
+    shared_group_counter: Arc<AtomicUsize>,
+    shared_memory_counter: Arc<AtomicU64>,
+    memory_limit: Option<u64>,
+) -> Result<(usize, Vec<Row>)> {
+    let input = VecIterator::new(rows, input_schema);
+    let mut iter = AggregateIterator::new(
+        Box::new(input),
+        group_keys,
+        aggregates,
+        None,
+        partial_schema,
+    )
+    .with_mode(AggregateMode::Partial)
+    .with_group_limit(group_limit)
+    .with_shared_group_counter(Some(shared_group_counter));
+    let rows = collect_iterator_rows(&mut iter)?;
+    for row in &rows {
+        let used = shared_memory_counter
+            .fetch_add(estimate_row_bytes(row), std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(estimate_row_bytes(row));
+        if let Some(limit) = memory_limit
+            && used > limit
+        {
+            return Err(ExecutorError::ResourceExhausted {
+                message: format!(
+                    "parallel aggregate memory limit exceeded: {used} bytes (limit {limit})"
+                ),
+            });
+        }
+    }
+    Ok((partition_index, rows))
+}
+
+fn recv_partition_results(
+    receiver: std::sync::mpsc::Receiver<Result<(usize, Vec<Row>)>>,
+    expected: usize,
+) -> Result<Vec<(usize, Vec<Row>)>> {
+    let mut outputs = Vec::with_capacity(expected);
+    for _ in 0..expected {
+        let result = receiver
+            .recv()
+            .map_err(|err| ExecutorError::InvalidOperation {
+                operation: "parallel aggregate".into(),
+                reason: format!("partition worker failed to report result: {err}"),
+            })?;
+        outputs.push(result?);
+    }
+    outputs.sort_by_key(|(idx, _)| *idx);
+    Ok(outputs)
+}
+
+#[cfg(feature = "tokio")]
+#[allow(clippy::too_many_arguments)]
+fn run_partial_partitions(
+    partitions: Vec<Vec<Row>>,
+    input_schema: Vec<ColumnMetadata>,
+    group_keys: Vec<TypedExpr>,
+    aggregates: Vec<AggregateExpr>,
+    partial_schema: Vec<ColumnMetadata>,
+    group_limit: usize,
+    shared_group_counter: Arc<AtomicUsize>,
+    shared_memory_counter: Arc<AtomicU64>,
+    memory_limit: Option<u64>,
+) -> Result<Vec<(usize, Vec<Row>)>> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let expected = partitions.len();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        for (partition_index, rows) in partitions.into_iter().enumerate() {
+            let sender = sender.clone();
+            let input_schema = input_schema.clone();
+            let group_keys = group_keys.clone();
+            let aggregates = aggregates.clone();
+            let partial_schema = partial_schema.clone();
+            let shared_group_counter = Arc::clone(&shared_group_counter);
+            let shared_memory_counter = Arc::clone(&shared_memory_counter);
+            handle.spawn_blocking(move || {
+                let result = execute_partial_partition(
+                    partition_index,
+                    rows,
+                    input_schema,
+                    group_keys,
+                    aggregates,
+                    partial_schema,
+                    group_limit,
+                    shared_group_counter,
+                    shared_memory_counter,
+                    memory_limit,
+                );
+                let _ = sender.send(result);
+            });
+        }
+        drop(sender);
+        return recv_partition_results(receiver, expected);
+    }
+
+    run_partial_partitions_on_threads(
+        partitions,
+        input_schema,
+        group_keys,
+        aggregates,
+        partial_schema,
+        group_limit,
+        shared_group_counter,
+        shared_memory_counter,
+        memory_limit,
+    )
+}
+
+#[cfg(not(feature = "tokio"))]
+#[allow(clippy::too_many_arguments)]
+fn run_partial_partitions(
+    partitions: Vec<Vec<Row>>,
+    input_schema: Vec<ColumnMetadata>,
+    group_keys: Vec<TypedExpr>,
+    aggregates: Vec<AggregateExpr>,
+    partial_schema: Vec<ColumnMetadata>,
+    group_limit: usize,
+    shared_group_counter: Arc<AtomicUsize>,
+    shared_memory_counter: Arc<AtomicU64>,
+    memory_limit: Option<u64>,
+) -> Result<Vec<(usize, Vec<Row>)>> {
+    run_partial_partitions_on_threads(
+        partitions,
+        input_schema,
+        group_keys,
+        aggregates,
+        partial_schema,
+        group_limit,
+        shared_group_counter,
+        shared_memory_counter,
+        memory_limit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_partial_partitions_on_threads(
+    partitions: Vec<Vec<Row>>,
+    input_schema: Vec<ColumnMetadata>,
+    group_keys: Vec<TypedExpr>,
+    aggregates: Vec<AggregateExpr>,
+    partial_schema: Vec<ColumnMetadata>,
+    group_limit: usize,
+    shared_group_counter: Arc<AtomicUsize>,
+    shared_memory_counter: Arc<AtomicU64>,
+    memory_limit: Option<u64>,
+) -> Result<Vec<(usize, Vec<Row>)>> {
+    let expected = partitions.len();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        for (partition_index, rows) in partitions.into_iter().enumerate() {
+            let sender = sender.clone();
+            let input_schema = input_schema.clone();
+            let group_keys = group_keys.clone();
+            let aggregates = aggregates.clone();
+            let partial_schema = partial_schema.clone();
+            let shared_group_counter = Arc::clone(&shared_group_counter);
+            let shared_memory_counter = Arc::clone(&shared_memory_counter);
+            scope.spawn(move || {
+                let result = execute_partial_partition(
+                    partition_index,
+                    rows,
+                    input_schema,
+                    group_keys,
+                    aggregates,
+                    partial_schema,
+                    group_limit,
+                    shared_group_counter,
+                    shared_memory_counter,
+                    memory_limit,
+                );
+                let _ = sender.send(result);
+            });
+        }
+    });
+    drop(sender);
+    recv_partition_results(receiver, expected)
+}
+
+/// Execute a deterministic single-process parallel partial-to-final aggregate.
+pub fn execute_parallel_aggregate_rows<'a>(
+    input: Box<dyn RowIterator + 'a>,
+    group_keys: Vec<TypedExpr>,
+    aggregates: Vec<AggregateExpr>,
+    having: Option<TypedExpr>,
+    final_schema: Vec<ColumnMetadata>,
+    parallelism: usize,
+) -> Result<Vec<Row>> {
+    execute_parallel_aggregate_rows_with_policy(
+        input,
+        group_keys,
+        aggregates,
+        having,
+        final_schema,
+        parallelism,
+        None,
+        DEFAULT_GROUP_LIMIT,
+    )
+}
+
+/// Execute a deterministic parallel aggregate with memory fallback controls.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_parallel_aggregate_rows_with_policy<'a>(
+    mut input: Box<dyn RowIterator + 'a>,
+    group_keys: Vec<TypedExpr>,
+    aggregates: Vec<AggregateExpr>,
+    having: Option<TypedExpr>,
+    final_schema: Vec<ColumnMetadata>,
+    parallelism: usize,
+    memory: Option<MemoryPolicy>,
+    group_limit: usize,
+) -> Result<Vec<Row>> {
+    if parallelism <= 1 {
+        return execute_single_aggregate_rows(
+            input,
+            group_keys,
+            aggregates,
+            having,
+            final_schema,
+            memory,
+            group_limit,
+        );
+    }
+
+    let input_schema = input.schema().to_vec();
+    let mut input_rows = Vec::new();
+    let mut materialized_bytes = 0u64;
+    let materialize_threshold = memory
+        .as_ref()
+        .and_then(MemoryPolicy::limit_bytes)
+        .map(|limit| (limit / 2).max(1));
+
+    while let Some(result) = input.next_row() {
+        let row = result?;
+        let row_bytes = materialize_threshold.map(|_| estimate_row_bytes(&row));
+        if let (Some(threshold), Some(row_bytes)) = (materialize_threshold, row_bytes)
+            && materialized_bytes.saturating_add(row_bytes) > threshold
+        {
+            input_rows.push(row);
+            let chained = ChainRowIterator::new(input_rows, input, input_schema.clone());
+            return execute_single_aggregate_rows(
+                Box::new(chained),
+                group_keys,
+                aggregates,
+                having,
+                final_schema,
+                memory,
+                group_limit,
+            );
+        }
+        if let Some(row_bytes) = row_bytes {
+            materialized_bytes = materialized_bytes.saturating_add(row_bytes);
+        }
+        input_rows.push(row);
+    }
+
+    let fallback_rows = if memory.is_some() || group_limit < input_rows.len() {
+        Some(input_rows.clone())
+    } else {
+        None
+    };
+    let result = execute_parallel_aggregate_rows_from_materialized(
+        input_rows,
+        input_schema.clone(),
+        group_keys.clone(),
+        aggregates.clone(),
+        having.clone(),
+        final_schema.clone(),
+        parallelism,
+        group_limit,
+        materialized_bytes,
+        memory.as_ref().and_then(MemoryPolicy::limit_bytes),
+    );
+    match result {
+        Ok(rows) => Ok(rows),
+        Err(ExecutorError::ResourceExhausted { .. }) => {
+            if let Some(fallback_rows) = fallback_rows {
+                execute_single_aggregate_rows(
+                    Box::new(VecIterator::new(fallback_rows, input_schema)),
+                    group_keys,
+                    aggregates,
+                    having,
+                    final_schema,
+                    memory,
+                    group_limit,
+                )
+            } else {
+                Err(ExecutorError::ResourceExhausted {
+                    message: format!(
+                        "parallel aggregate exceeded group limit {group_limit}; no fallback rows retained"
+                    ),
+                })
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_parallel_aggregate_rows_from_materialized(
+    input_rows: Vec<Row>,
+    input_schema: Vec<ColumnMetadata>,
+    group_keys: Vec<TypedExpr>,
+    aggregates: Vec<AggregateExpr>,
+    having: Option<TypedExpr>,
+    final_schema: Vec<ColumnMetadata>,
+    parallelism: usize,
+    group_limit: usize,
+    materialized_bytes: u64,
+    memory_limit: Option<u64>,
+) -> Result<Vec<Row>> {
+    let partial_schema = build_partial_aggregate_schema(&group_keys, &aggregates);
+    let partitions = split_contiguous_partitions(input_rows, parallelism);
+    let shared_group_counter = Arc::new(AtomicUsize::new(0));
+    let shared_memory_counter = Arc::new(AtomicU64::new(materialized_bytes));
+    let partial_results = run_partial_partitions(
+        partitions,
+        input_schema,
+        group_keys.clone(),
+        aggregates.clone(),
+        partial_schema.clone(),
+        group_limit,
+        shared_group_counter,
+        shared_memory_counter,
+        memory_limit,
+    )?;
+
+    let partial_rows = partial_results
+        .into_iter()
+        .flat_map(|(_, rows)| rows)
+        .collect::<Vec<_>>();
+    let final_input = VecIterator::new(partial_rows, partial_schema);
+    let mut final_iter = AggregateIterator::new(
+        Box::new(final_input),
+        group_keys,
+        aggregates,
+        having,
+        final_schema,
+    )
+    .with_mode(AggregateMode::Final)
+    .with_group_limit(group_limit);
+    collect_iterator_rows(&mut final_iter)
+}
+
+fn execute_single_aggregate_rows<'a>(
+    input: Box<dyn RowIterator + 'a>,
+    group_keys: Vec<TypedExpr>,
+    aggregates: Vec<AggregateExpr>,
+    having: Option<TypedExpr>,
+    final_schema: Vec<ColumnMetadata>,
+    memory: Option<MemoryPolicy>,
+    group_limit: usize,
+) -> Result<Vec<Row>> {
+    let mut iter = AggregateIterator::new(input, group_keys, aggregates, having, final_schema)
+        .with_group_limit(group_limit)
+        .with_memory_policy(memory);
+    collect_iterator_rows(&mut iter)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::span::Span;
+    use crate::executor::memory::SpillPolicy;
+    use crate::planner::typed_expr::TypedExprKind;
+
+    fn apply_values(acc: &mut dyn Accumulator, values: &[Option<SqlValue>]) {
+        for value in values {
+            acc.update(value.clone()).unwrap();
+        }
+    }
+
+    fn single_result(
+        make_accumulator: impl Fn() -> Box<dyn Accumulator>,
+        partitions: &[Vec<Option<SqlValue>>],
+    ) -> SqlValue {
+        let mut acc = make_accumulator();
+        for partition in partitions {
+            apply_values(acc.as_mut(), partition);
+        }
+        acc.finalize().unwrap()
+    }
+
+    fn merged_result(
+        make_partial: impl Fn() -> Box<dyn Accumulator>,
+        make_final: impl Fn() -> Box<dyn Accumulator>,
+        partitions: &[Vec<Option<SqlValue>>],
+        merge_order: &[usize],
+    ) -> SqlValue {
+        let states = partitions
+            .iter()
+            .map(|partition| {
+                let mut acc = make_partial();
+                apply_values(acc.as_mut(), partition);
+                acc.state().unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let mut final_acc = make_final();
+        for idx in merge_order {
+            final_acc.merge(&states[*idx]).unwrap();
+        }
+        final_acc.finalize().unwrap()
+    }
+
+    fn assert_single_equals_merged(
+        make_accumulator: impl Fn() -> Box<dyn Accumulator> + Copy,
+        partitions: Vec<Vec<Option<SqlValue>>>,
+    ) {
+        let merge_order = (0..partitions.len()).collect::<Vec<_>>();
+        let single = single_result(make_accumulator, &partitions);
+        let merged = merged_result(
+            make_accumulator,
+            make_accumulator,
+            &partitions,
+            &merge_order,
+        );
+        assert_eq!(single, merged);
+    }
+
+    fn assert_merge_order_invariant(
+        make_accumulator: impl Fn() -> Box<dyn Accumulator> + Copy,
+        partitions: Vec<Vec<Option<SqlValue>>>,
+        merge_orders: &[Vec<usize>],
+    ) {
+        let single = single_result(make_accumulator, &partitions);
+        for order in merge_orders {
+            let merged = merged_result(make_accumulator, make_accumulator, &partitions, order);
+            assert_eq!(single, merged, "merge order {order:?}");
+        }
+    }
+
+    fn column_expr(index: usize, name: &str, resolved_type: ResolvedType) -> TypedExpr {
+        TypedExpr {
+            kind: TypedExprKind::ColumnRef {
+                table: "t".into(),
+                column: name.into(),
+                column_index: index,
+            },
+            resolved_type,
+            span: Span::default(),
+        }
+    }
+
+    fn sample_aggregate_schema() -> Vec<ColumnMetadata> {
+        vec![
+            ColumnMetadata::new("category", ResolvedType::Text),
+            ColumnMetadata::new("price", ResolvedType::Double),
+            ColumnMetadata::new("label", ResolvedType::Text),
+        ]
+    }
+
+    fn sample_aggregate_rows() -> Vec<Row> {
+        vec![
+            Row::new(
+                0,
+                vec![
+                    SqlValue::Text("book".into()),
+                    SqlValue::Double(10.0),
+                    SqlValue::Text("a".into()),
+                ],
+            ),
+            Row::new(
+                1,
+                vec![
+                    SqlValue::Text("book".into()),
+                    SqlValue::Double(15.0),
+                    SqlValue::Text("b".into()),
+                ],
+            ),
+            Row::new(
+                2,
+                vec![
+                    SqlValue::Text("game".into()),
+                    SqlValue::Double(20.0),
+                    SqlValue::Text("c".into()),
+                ],
+            ),
+            Row::new(
+                3,
+                vec![
+                    SqlValue::Text("book".into()),
+                    SqlValue::Null,
+                    SqlValue::Text("a".into()),
+                ],
+            ),
+            Row::new(
+                4,
+                vec![
+                    SqlValue::Text("toy".into()),
+                    SqlValue::Double(3.0),
+                    SqlValue::Text("d".into()),
+                ],
+            ),
+        ]
+    }
+
+    fn sample_aggregates() -> Vec<AggregateExpr> {
+        let price = column_expr(1, "price", ResolvedType::Double);
+        let label = column_expr(2, "label", ResolvedType::Text);
+        vec![
+            AggregateExpr::count_star(),
+            AggregateExpr::sum(price.clone()),
+            AggregateExpr::avg(price),
+            AggregateExpr {
+                function: AggregateFunction::GroupConcat {
+                    separator: Some("|".into()),
+                },
+                arg: Some(label),
+                distinct: false,
+                result_type: ResolvedType::Text,
+            },
+        ]
+    }
+
+    fn collect_single_aggregate(
+        group_keys: Vec<TypedExpr>,
+        aggregates: Vec<AggregateExpr>,
+    ) -> Vec<Vec<SqlValue>> {
+        let input = VecIterator::new(sample_aggregate_rows(), sample_aggregate_schema());
+        let schema = build_aggregate_schema(&group_keys, &aggregates);
+        let mut iter =
+            AggregateIterator::new(Box::new(input), group_keys, aggregates, None, schema);
+        collect_iterator_rows(&mut iter)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.values)
+            .collect()
+    }
+
+    fn collect_parallel_aggregate(
+        group_keys: Vec<TypedExpr>,
+        aggregates: Vec<AggregateExpr>,
+        parallelism: usize,
+    ) -> Vec<Vec<SqlValue>> {
+        let input = VecIterator::new(sample_aggregate_rows(), sample_aggregate_schema());
+        let schema = build_aggregate_schema(&group_keys, &aggregates);
+        execute_parallel_aggregate_rows(
+            Box::new(input),
+            group_keys,
+            aggregates,
+            None,
+            schema,
+            parallelism,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.values)
+        .collect()
+    }
+
+    fn sort_rows(mut rows: Vec<Vec<SqlValue>>) -> Vec<Vec<SqlValue>> {
+        rows.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
+        rows
+    }
+
+    #[test]
+    fn partial_schema_uses_group_keys_and_state_columns() {
+        let category = column_expr(0, "category", ResolvedType::Text);
+        let price = column_expr(1, "price", ResolvedType::Double);
+        let aggregates = vec![AggregateExpr::count_star(), AggregateExpr::avg(price)];
+
+        let schema = build_partial_aggregate_schema(&[category], &aggregates);
+        let names = schema
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "category",
+                "__agg0_state0",
+                "__agg1_state0",
+                "__agg1_state1"
+            ]
+        );
+        assert_eq!(schema[1].data_type, ResolvedType::BigInt);
+        assert_eq!(schema[2].data_type, ResolvedType::Double);
+        assert_eq!(schema[3].data_type, ResolvedType::BigInt);
+    }
+
+    #[test]
+    fn parallel_aggregate_matches_single_with_group_by() {
+        let group_keys = vec![column_expr(0, "category", ResolvedType::Text)];
+        let aggregates = sample_aggregates();
+
+        let single = sort_rows(collect_single_aggregate(
+            group_keys.clone(),
+            aggregates.clone(),
+        ));
+        let parallel = sort_rows(collect_parallel_aggregate(group_keys, aggregates, 3));
+
+        assert_eq!(parallel, single);
+    }
+
+    #[test]
+    fn parallel_aggregate_matches_single_without_group_by() {
+        let aggregates = sample_aggregates();
+
+        let single = collect_single_aggregate(Vec::new(), aggregates.clone());
+        let parallel = collect_parallel_aggregate(Vec::new(), aggregates, 4);
+
+        assert_eq!(parallel, single);
+    }
+
+    #[test]
+    fn distinct_aggregates_force_single_parallel_mode() {
+        let price = column_expr(1, "price", ResolvedType::Double);
+        let aggregates = vec![AggregateExpr {
+            distinct: true,
+            ..AggregateExpr::sum(price)
+        }];
+
+        assert!(should_use_single_for_parallel(4, &aggregates));
+        assert!(should_use_single_for_parallel(1, &sample_aggregates()));
+        assert!(!should_use_single_for_parallel(2, &sample_aggregates()));
+    }
+
+    #[test]
+    fn parallel_group_counter_exhaustion_falls_back_to_single() {
+        let schema = vec![ColumnMetadata::new("category", ResolvedType::Text)];
+        let rows = vec![
+            Row::new(0, vec![SqlValue::Text("a".into())]),
+            Row::new(1, vec![SqlValue::Text("b".into())]),
+            Row::new(2, vec![SqlValue::Text("a".into())]),
+            Row::new(3, vec![SqlValue::Text("b".into())]),
+        ];
+        let group_keys = vec![column_expr(0, "category", ResolvedType::Text)];
+        let aggregates = vec![AggregateExpr::count_star()];
+        let final_schema = build_aggregate_schema(&group_keys, &aggregates);
+
+        let single_values = {
+            let input = VecIterator::new(rows.clone(), schema.clone());
+            execute_single_aggregate_rows(
+                Box::new(input),
+                group_keys.clone(),
+                aggregates.clone(),
+                None,
+                final_schema.clone(),
+                None,
+                2,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| row.values)
+            .collect::<Vec<_>>()
+        };
+
+        let parallel_values = execute_parallel_aggregate_rows_with_policy(
+            Box::new(VecIterator::new(rows, schema)),
+            group_keys,
+            aggregates,
+            None,
+            final_schema,
+            2,
+            None,
+            2,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.values)
+        .collect::<Vec<_>>();
+
+        assert_eq!(sort_rows(parallel_values), sort_rows(single_values));
+    }
+
+    #[test]
+    fn materialize_limit_exhaustion_falls_back_to_streaming_single() {
+        let schema = vec![ColumnMetadata::new("payload", ResolvedType::Text)];
+        let rows = (0..4)
+            .map(|idx| Row::new(idx, vec![SqlValue::Text("x".repeat(40))]))
+            .collect::<Vec<_>>();
+        let aggregates = vec![AggregateExpr::count_star()];
+        let final_schema = build_aggregate_schema(&[], &aggregates);
+        let policy = MemoryPolicy::new(Some(100), SpillPolicy::FailFast);
+
+        let result = execute_parallel_aggregate_rows_with_policy(
+            Box::new(VecIterator::new(rows, schema)),
+            Vec::new(),
+            aggregates,
+            None,
+            final_schema,
+            4,
+            Some(policy),
+            DEFAULT_GROUP_LIMIT,
+        )
+        .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].values, vec![SqlValue::BigInt(4)]);
+    }
+
+    #[test]
+    fn streaming_aggregate_respects_distinct_accumulators() {
+        let schema = sample_aggregate_schema();
+        let rows = vec![
+            Row::new(
+                0,
+                vec![
+                    SqlValue::Text("book".into()),
+                    SqlValue::Double(10.0),
+                    SqlValue::Text("a".into()),
+                ],
+            ),
+            Row::new(
+                1,
+                vec![
+                    SqlValue::Text("book".into()),
+                    SqlValue::Double(10.0),
+                    SqlValue::Text("a".into()),
+                ],
+            ),
+            Row::new(
+                2,
+                vec![
+                    SqlValue::Text("book".into()),
+                    SqlValue::Double(15.0),
+                    SqlValue::Text("b".into()),
+                ],
+            ),
+        ];
+        let group_keys = vec![column_expr(0, "category", ResolvedType::Text)];
+        let price = column_expr(1, "price", ResolvedType::Double);
+        let label = column_expr(2, "label", ResolvedType::Text);
+        let aggregates = vec![
+            AggregateExpr {
+                distinct: true,
+                ..AggregateExpr::sum(price)
+            },
+            AggregateExpr {
+                function: AggregateFunction::GroupConcat {
+                    separator: Some("|".into()),
+                },
+                arg: Some(label),
+                distinct: true,
+                result_type: ResolvedType::Text,
+            },
+        ];
+        let output_schema = build_aggregate_schema(&group_keys, &aggregates);
+        let input = VecIterator::new(rows, schema);
+        let mut iter = StreamingAggregateIterator::new(
+            Box::new(input),
+            group_keys,
+            aggregates,
+            None,
+            output_schema,
+        );
+        let rows = collect_iterator_rows(&mut iter).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].values[1], SqlValue::Double(25.0));
+        assert_eq!(rows[0].values[2], SqlValue::Text("a|b".into()));
+    }
+
+    #[test]
+    fn partial_state_matches_single_for_count_sum_total_avg_min_max() {
+        assert_single_equals_merged(
+            || Box::new(CountAccumulator::new(false)),
+            vec![
+                vec![
+                    Some(SqlValue::Integer(1)),
+                    Some(SqlValue::BigInt(2)),
+                    Some(SqlValue::Text("x".into())),
+                    Some(SqlValue::Null),
+                ],
+                vec![Some(SqlValue::Integer(3))],
+            ],
+        );
+        assert_single_equals_merged(
+            || Box::new(SumAccumulator::new()),
+            vec![
+                vec![
+                    Some(SqlValue::Integer(1)),
+                    Some(SqlValue::BigInt(2)),
+                    Some(SqlValue::Float(3.5)),
+                ],
+                vec![Some(SqlValue::Double(4.5)), Some(SqlValue::Null)],
+            ],
+        );
+        assert_single_equals_merged(
+            || Box::new(TotalAccumulator::new()),
+            vec![
+                vec![Some(SqlValue::Integer(1)), Some(SqlValue::Null)],
+                vec![Some(SqlValue::Double(2.5))],
+            ],
+        );
+        assert_single_equals_merged(
+            || Box::new(AvgAccumulator::new()),
+            vec![
+                vec![Some(SqlValue::Integer(2)), Some(SqlValue::Double(4.0))],
+                vec![Some(SqlValue::Null), Some(SqlValue::Double(6.0))],
+            ],
+        );
+        assert_single_equals_merged(
+            || Box::new(MinMaxAccumulator::new(true)),
+            vec![
+                vec![Some(SqlValue::Integer(3)), Some(SqlValue::Integer(1))],
+                vec![Some(SqlValue::Integer(2)), Some(SqlValue::Null)],
+            ],
+        );
+        assert_single_equals_merged(
+            || Box::new(MinMaxAccumulator::new(false)),
+            vec![
+                vec![
+                    Some(SqlValue::Text("b".into())),
+                    Some(SqlValue::Text("a".into())),
+                ],
+                vec![Some(SqlValue::Text("c".into())), Some(SqlValue::Null)],
+            ],
+        );
+    }
+
+    #[test]
+    fn partial_state_matches_single_for_ordered_string_aggregates() {
+        assert_single_equals_merged(
+            || Box::new(GroupConcatAccumulator::new("|".into())),
+            vec![
+                vec![Some(SqlValue::Text("a".into())), Some(SqlValue::Null)],
+                vec![
+                    Some(SqlValue::Text("b".into())),
+                    Some(SqlValue::Text("c".into())),
+                ],
+            ],
+        );
+        assert_single_equals_merged(
+            || Box::new(StringAggAccumulator::new("::".into())),
+            vec![
+                vec![Some(SqlValue::Text("a".into()))],
+                vec![Some(SqlValue::Text("b".into())), Some(SqlValue::Null)],
+            ],
+        );
+    }
+
+    #[test]
+    fn partial_state_handles_empty_all_null_single_and_mixed_boundaries() {
+        assert_single_equals_merged(
+            || Box::new(CountAccumulator::new(false)),
+            vec![vec![], vec![]],
+        );
+        assert_single_equals_merged(|| Box::new(SumAccumulator::new()), vec![vec![], vec![]]);
+        assert_single_equals_merged(|| Box::new(TotalAccumulator::new()), vec![vec![], vec![]]);
+        assert_single_equals_merged(|| Box::new(AvgAccumulator::new()), vec![vec![], vec![]]);
+        assert_single_equals_merged(
+            || Box::new(MinMaxAccumulator::new(true)),
+            vec![vec![], vec![]],
+        );
+        assert_single_equals_merged(
+            || Box::new(MinMaxAccumulator::new(false)),
+            vec![vec![], vec![]],
+        );
+        assert_single_equals_merged(
+            || Box::new(GroupConcatAccumulator::new(",".into())),
+            vec![vec![], vec![]],
+        );
+        assert_single_equals_merged(
+            || Box::new(StringAggAccumulator::new(",".into())),
+            vec![vec![], vec![]],
+        );
+        assert_single_equals_merged(
+            || Box::new(CountAccumulator::new(false)),
+            vec![vec![Some(SqlValue::Null)], vec![Some(SqlValue::Null)]],
+        );
+        assert_single_equals_merged(
+            || Box::new(SumAccumulator::new()),
+            vec![vec![Some(SqlValue::Null)], vec![Some(SqlValue::Null)]],
+        );
+        assert_single_equals_merged(
+            || Box::new(TotalAccumulator::new()),
+            vec![vec![Some(SqlValue::Null)], vec![Some(SqlValue::Null)]],
+        );
+        assert_single_equals_merged(
+            || Box::new(AvgAccumulator::new()),
+            vec![vec![Some(SqlValue::Null)], vec![Some(SqlValue::Null)]],
+        );
+        assert_single_equals_merged(
+            || Box::new(MinMaxAccumulator::new(true)),
+            vec![vec![Some(SqlValue::Null)], vec![Some(SqlValue::Null)]],
+        );
+        assert_single_equals_merged(
+            || Box::new(MinMaxAccumulator::new(false)),
+            vec![vec![Some(SqlValue::Null)], vec![Some(SqlValue::Null)]],
+        );
+        assert_single_equals_merged(
+            || Box::new(GroupConcatAccumulator::new(",".into())),
+            vec![vec![Some(SqlValue::Null)], vec![Some(SqlValue::Null)]],
+        );
+        assert_single_equals_merged(
+            || Box::new(StringAggAccumulator::new(",".into())),
+            vec![vec![Some(SqlValue::Null)], vec![Some(SqlValue::Null)]],
+        );
+        assert_single_equals_merged(
+            || Box::new(SumAccumulator::new()),
+            vec![vec![Some(SqlValue::Integer(7))]],
+        );
+        assert_single_equals_merged(
+            || Box::new(AvgAccumulator::new()),
+            vec![
+                vec![Some(SqlValue::Null)],
+                vec![Some(SqlValue::Double(8.0))],
+            ],
+        );
+    }
+
+    #[test]
+    fn commutative_accumulators_are_merge_order_invariant() {
+        let orders = vec![
+            vec![1, 3, 0, 2],
+            vec![3, 2, 1, 0],
+            vec![0, 1, 2, 3],
+            vec![2, 0, 3, 1],
+        ];
+        assert_merge_order_invariant(
+            || Box::new(CountAccumulator::new(false)),
+            vec![vec![Some(SqlValue::Integer(1))]],
+            &[vec![0]],
+        );
+        assert_merge_order_invariant(
+            || Box::new(SumAccumulator::new()),
+            vec![
+                vec![Some(SqlValue::Integer(1))],
+                vec![Some(SqlValue::Integer(2))],
+            ],
+            &[vec![0, 1], vec![1, 0]],
+        );
+        assert_merge_order_invariant(
+            || Box::new(AvgAccumulator::new()),
+            vec![
+                vec![Some(SqlValue::Integer(1))],
+                vec![Some(SqlValue::Integer(2))],
+                vec![Some(SqlValue::Integer(3))],
+            ],
+            &[vec![0, 1, 2], vec![2, 1, 0]],
+        );
+        let numeric_partitions = vec![
+            vec![Some(SqlValue::Integer(1)), Some(SqlValue::Null)],
+            vec![Some(SqlValue::BigInt(2))],
+            vec![],
+            vec![Some(SqlValue::Double(3.0))],
+        ];
+        assert_merge_order_invariant(
+            || Box::new(CountAccumulator::new(false)),
+            numeric_partitions.clone(),
+            &orders,
+        );
+        assert_merge_order_invariant(
+            || Box::new(SumAccumulator::new()),
+            numeric_partitions.clone(),
+            &orders,
+        );
+        assert_merge_order_invariant(
+            || Box::new(TotalAccumulator::new()),
+            numeric_partitions.clone(),
+            &orders,
+        );
+        assert_merge_order_invariant(
+            || Box::new(AvgAccumulator::new()),
+            numeric_partitions.clone(),
+            &orders,
+        );
+        let integer_partitions = vec![
+            vec![Some(SqlValue::Integer(3)), Some(SqlValue::Null)],
+            vec![Some(SqlValue::Integer(1))],
+            vec![],
+            vec![Some(SqlValue::Integer(2))],
+        ];
+        assert_merge_order_invariant(
+            || Box::new(MinMaxAccumulator::new(true)),
+            integer_partitions.clone(),
+            &orders,
+        );
+        assert_merge_order_invariant(
+            || Box::new(MinMaxAccumulator::new(false)),
+            integer_partitions,
+            &orders,
+        );
+    }
+
+    #[test]
+    fn avg_partial_state_uses_sum_count_and_never_divides_by_zero_during_merge() {
+        let empty = {
+            let acc = AvgAccumulator::new();
+            acc.state().unwrap()
+        };
+        assert_eq!(empty, vec![SqlValue::Double(0.0), SqlValue::BigInt(0)]);
+
+        let mut partial = AvgAccumulator::new();
+        partial.update(Some(SqlValue::Integer(2))).unwrap();
+        partial.update(Some(SqlValue::Double(4.0))).unwrap();
+        assert_eq!(
+            partial.state().unwrap(),
+            vec![SqlValue::Double(6.0), SqlValue::BigInt(2)]
+        );
+
+        let mut final_acc = AvgAccumulator::new();
+        final_acc.merge(&empty).unwrap();
+        assert_eq!(final_acc.finalize().unwrap(), SqlValue::Null);
+        final_acc.merge(&partial.state().unwrap()).unwrap();
+        assert_eq!(final_acc.finalize().unwrap(), SqlValue::Double(3.0));
+    }
+
+    #[test]
+    fn merge_rejects_invalid_state_contracts_without_panicking() {
+        let mut count = CountAccumulator::new(false);
+        assert!(count.merge(&[]).is_err());
+        assert!(count.merge(&[SqlValue::Text("bad".into())]).is_err());
+
+        let mut avg = AvgAccumulator::new();
+        assert!(avg.merge(&[SqlValue::Double(1.0)]).is_err());
+        assert!(
+            avg.merge(&[SqlValue::Double(1.0), SqlValue::Text("bad".into())])
+                .is_err()
+        );
+
+        let mut concat = GroupConcatAccumulator::new("|".into());
+        assert!(
+            concat
+                .merge(&[SqlValue::Text("a".into()), SqlValue::Text(",".into())])
+                .is_err()
+        );
+    }
 
     #[test]
     fn count_accumulator_counts_rows_and_skips_nulls() {
@@ -906,6 +2409,90 @@ mod tests {
         acc.update(Some(SqlValue::Integer(1))).unwrap();
         acc.update(Some(SqlValue::Integer(2))).unwrap();
         assert_eq!(acc.finalize().unwrap(), SqlValue::BigInt(2));
+    }
+
+    #[test]
+    fn count_distinct_uses_group_key_equality_boundaries() {
+        let mut acc = CountAccumulator::new(true);
+        let nan_a = f64::from_bits(0x7ff8_0000_0000_0001);
+        let nan_b = f64::from_bits(0x7ff8_0000_0000_0002);
+        for value in [
+            SqlValue::Null,
+            SqlValue::Null,
+            SqlValue::Integer(1),
+            SqlValue::Integer(1),
+            SqlValue::Double(1.0),
+            SqlValue::Double(-0.0),
+            SqlValue::Double(0.0),
+            SqlValue::Double(nan_a),
+            SqlValue::Double(nan_a),
+            SqlValue::Double(nan_b),
+            SqlValue::Text("same".into()),
+            SqlValue::Text("same".into()),
+            SqlValue::Blob(vec![1, 2]),
+            SqlValue::Blob(vec![1, 2]),
+            SqlValue::Blob(vec![1, 3]),
+        ] {
+            acc.update(Some(value)).unwrap();
+        }
+        assert_eq!(acc.finalize().unwrap(), SqlValue::BigInt(9));
+    }
+
+    #[test]
+    fn distinct_non_count_accumulators_deduplicate_non_null_values() {
+        let mut sum = SumAccumulator::with_distinct(true);
+        for value in [
+            SqlValue::Integer(1),
+            SqlValue::Integer(1),
+            SqlValue::Double(1.0),
+            SqlValue::Integer(2),
+            SqlValue::Null,
+        ] {
+            sum.update(Some(value)).unwrap();
+        }
+        assert_eq!(sum.finalize().unwrap(), SqlValue::Double(4.0));
+
+        let mut avg = AvgAccumulator::with_distinct(true);
+        for value in [
+            SqlValue::Integer(1),
+            SqlValue::Integer(1),
+            SqlValue::Integer(3),
+            SqlValue::Null,
+        ] {
+            avg.update(Some(value)).unwrap();
+        }
+        assert_eq!(avg.finalize().unwrap(), SqlValue::Double(2.0));
+
+        let mut min = MinMaxAccumulator::with_distinct(true, true);
+        let mut max = MinMaxAccumulator::with_distinct(false, true);
+        for value in [
+            SqlValue::Text("b".into()),
+            SqlValue::Text("a".into()),
+            SqlValue::Text("a".into()),
+            SqlValue::Text("c".into()),
+        ] {
+            min.update(Some(value.clone())).unwrap();
+            max.update(Some(value)).unwrap();
+        }
+        assert_eq!(min.finalize().unwrap(), SqlValue::Text("a".into()));
+        assert_eq!(max.finalize().unwrap(), SqlValue::Text("c".into()));
+
+        let mut group_concat = GroupConcatAccumulator::with_distinct("|".into(), true);
+        let mut string_agg = StringAggAccumulator::with_distinct(";".into(), true);
+        for value in [
+            SqlValue::Text("a".into()),
+            SqlValue::Text("a".into()),
+            SqlValue::Null,
+            SqlValue::Text("b".into()),
+        ] {
+            group_concat.update(Some(value.clone())).unwrap();
+            string_agg.update(Some(value)).unwrap();
+        }
+        assert_eq!(
+            group_concat.finalize().unwrap(),
+            SqlValue::Text("a|b".into())
+        );
+        assert_eq!(string_agg.finalize().unwrap(), SqlValue::Text("a;b".into()));
     }
 
     #[test]

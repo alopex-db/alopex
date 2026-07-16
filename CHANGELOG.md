@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.3]
+
+### Added
+- `alopex-sql` aggregate accumulators now expose `state()` and `merge()`
+  partial-state contracts. `AVG` uses `(sum, count)` state, ordered string
+  aggregates preserve partition order, and invalid state arity/type returns
+  an error instead of panicking.
+- Single-process partial-to-final aggregate execution for non-DISTINCT
+  aggregates, including GROUP BY and global aggregation. DISTINCT aggregates
+  intentionally remain Single mode because two-stage DISTINCT is not
+  mathematically correct without a future repartition/dedup stage.
+- `SUM/AVG/MIN/MAX/GROUP_CONCAT/STRING_AGG(DISTINCT ...)` support. DISTINCT
+  equality now follows the same `encode_group_key` semantics used by GROUP BY.
+
+### Changed
+- `COUNT(DISTINCT)` now uses the shared GROUP BY key encoder for duplicate
+  detection, keeping NULL exclusion and type/bit-level equality behavior
+  consistent across aggregate and grouping paths.
+- `scripts/release/verify-release/run.sh` now defaults to v0.7.3 and includes
+  a post-release artifact-only aggregate behavior guarantee step for
+  state/merge, DISTINCT aggregates, and single-process parallel aggregation.
+
+### Breaking Changes
+- External implementations of the `Accumulator` trait must implement
+  `state()` and `merge()` in addition to `update()`, `finalize()`, and
+  `clone_box()`.
+
 ## [0.7.2]
 
 Emergency bugfix release for v0.7.1. No new features. Both bugs were

@@ -21,7 +21,7 @@
 #
 # Usage:
 #   ./scripts/release/verify-release/run.sh [ALOPEX_VERSION] [--no-report]
-#   例: ./scripts/release/verify-release/run.sh 0.7.2
+#   例: ./scripts/release/verify-release/run.sh 0.7.3
 
 set -uo pipefail
 
@@ -29,7 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 DOCS_PUBLIC_DIR="${DOCS_PUBLIC_DIR:-${REPO_ROOT}/../docs-public}"
 
-ALOPEX_VERSION="0.7.1"
+ALOPEX_VERSION="0.7.3"
 DO_REPORT=1
 for arg in "$@"; do
     case "${arg}" in
@@ -115,6 +115,10 @@ cleanup_merged_report_branches() {
     fi
     (
         cd "${DOCS_PUBLIC_DIR}" || return 0
+        if [ -n "$(git status --porcelain)" ]; then
+            log_info "docs-public に未コミット変更があるため、古い report ブランチ cleanup をスキップします"
+            return 0
+        fi
         # 前回実行が report/verify-release-* ブランチにチェックアウトした
         # まま終わっている場合、そのブランチ自身は `git branch -D` できない
         # (カレントブランチは削除不可)。先に main へ戻しておく。
@@ -271,6 +275,7 @@ run_in_container() {
         -v "${TOOLS_TARGET_DIR}":/tools-target \
         -w /workspace \
         -e "ALOPEX_BINARY_SOURCE=released" \
+        -e "ALOPEX_VERSION=${ALOPEX_VERSION}" \
         -e "ALOPEX_EXTRA_PATH=/tools-target/release" \
         "${IMAGE_TAG}" \
         "$@"
@@ -300,6 +305,152 @@ run_step "v0.7 機能デモ: demo_routing.py" \
 run_step "v0.7 機能デモ: demo_dataframe_p3.py" \
     "DataFrame の string/datetime/list 名前空間関数と explode/implode の往復変換が Rust と Python の両サーフェスで決定的に(同一入力に対して常にバイト単位で同一の出力を)動作することを確認する(D4)。" \
     -- run_in_container python3 scripts/demo/v07/demo_dataframe_p3.py
+
+run_step "v0.7.3 動作保証: alopex-sql aggregate state/distinct/parallel" \
+    "crates.io 公開版 alopex-sql だけを依存にした一時 Rust crate をコンテナ内で作成し、v0.7.3 の中核変更である Accumulator state/merge、COUNT 以外の DISTINCT 集約、単一プロセス partial→final parallel aggregate が実際に動作することを確認する。リポジトリ内の alopex 製品ソースはビルドしないため、公開 artifact の振る舞い保証になる。" \
+    -- run_in_container bash -lc '
+set -euo pipefail
+workdir="$(mktemp -d)"
+trap "rm -rf \"${workdir}\"" EXIT
+cd "${workdir}"
+cat > Cargo.toml <<EOF
+[package]
+name = "alopex-v073-aggregate-guarantee"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alopex-sql = { version = "=${ALOPEX_VERSION}" }
+EOF
+mkdir -p src
+cat > src/main.rs <<'"'"'RS'"'"'
+use alopex_sql::Span;
+use alopex_sql::catalog::ColumnMetadata;
+use alopex_sql::executor::Row;
+use alopex_sql::executor::query::aggregate::{
+    Accumulator, AvgAccumulator, CountAccumulator, GroupConcatAccumulator, SumAccumulator,
+    build_aggregate_schema, execute_parallel_aggregate_rows,
+};
+use alopex_sql::executor::query::RowIterator;
+use alopex_sql::planner::aggregate_expr::AggregateExpr;
+use alopex_sql::planner::typed_expr::{TypedExpr, TypedExprKind};
+use alopex_sql::planner::types::ResolvedType;
+use alopex_sql::storage::SqlValue;
+
+struct LocalVecIterator {
+    rows: std::vec::IntoIter<Row>,
+    schema: Vec<ColumnMetadata>,
+}
+
+impl LocalVecIterator {
+    fn new(rows: Vec<Row>, schema: Vec<ColumnMetadata>) -> Self {
+        Self {
+            rows: rows.into_iter(),
+            schema,
+        }
+    }
+}
+
+impl RowIterator for LocalVecIterator {
+    fn next_row(&mut self) -> Option<alopex_sql::executor::Result<Row>> {
+        self.rows.next().map(Ok)
+    }
+
+    fn schema(&self) -> &[ColumnMetadata] {
+        &self.schema
+    }
+}
+
+fn column(index: usize, name: &str, ty: ResolvedType) -> TypedExpr {
+    TypedExpr {
+        kind: TypedExprKind::ColumnRef {
+            table: "t".to_string(),
+            column: name.to_string(),
+            column_index: index,
+        },
+        resolved_type: ty,
+        span: Span::default(),
+    }
+}
+
+fn main() -> alopex_sql::executor::Result<()> {
+    let mut avg_left = AvgAccumulator::new();
+    avg_left.update(Some(SqlValue::Integer(2)))?;
+    avg_left.update(Some(SqlValue::Integer(4)))?;
+    let mut avg_right = AvgAccumulator::new();
+    avg_right.update(Some(SqlValue::Integer(6)))?;
+    let mut avg_final = AvgAccumulator::new();
+    avg_final.merge(&avg_left.state()?)?;
+    avg_final.merge(&avg_right.state()?)?;
+    assert_eq!(avg_final.finalize()?, SqlValue::Double(4.0));
+
+    let mut count_distinct = CountAccumulator::new(true);
+    count_distinct.update(Some(SqlValue::Integer(1)))?;
+    count_distinct.update(Some(SqlValue::Integer(1)))?;
+    count_distinct.update(Some(SqlValue::Double(1.0)))?;
+    assert_eq!(count_distinct.finalize()?, SqlValue::BigInt(2));
+
+    let mut sum_distinct = SumAccumulator::with_distinct(true);
+    for value in [
+        SqlValue::Integer(10),
+        SqlValue::Integer(10),
+        SqlValue::Double(5.0),
+        SqlValue::Null,
+    ] {
+        sum_distinct.update(Some(value))?;
+    }
+    assert_eq!(sum_distinct.finalize()?, SqlValue::Double(15.0));
+
+    let mut concat_distinct = GroupConcatAccumulator::with_distinct("|".to_string(), true);
+    for value in [
+        SqlValue::Text("a".to_string()),
+        SqlValue::Text("a".to_string()),
+        SqlValue::Text("b".to_string()),
+    ] {
+        concat_distinct.update(Some(value))?;
+    }
+    assert_eq!(concat_distinct.finalize()?, SqlValue::Text("a|b".to_string()));
+
+    let schema = vec![
+        ColumnMetadata::new("category", ResolvedType::Text),
+        ColumnMetadata::new("amount", ResolvedType::Double),
+    ];
+    let rows = vec![
+        Row::new(0, vec![SqlValue::Text("book".to_string()), SqlValue::Double(10.0)]),
+        Row::new(1, vec![SqlValue::Text("game".to_string()), SqlValue::Double(20.0)]),
+        Row::new(2, vec![SqlValue::Text("book".to_string()), SqlValue::Double(15.0)]),
+        Row::new(3, vec![SqlValue::Text("game".to_string()), SqlValue::Double(5.0)]),
+    ];
+    let group_keys = vec![column(0, "category", ResolvedType::Text)];
+    let amount = column(1, "amount", ResolvedType::Double);
+    let aggregates = vec![
+        AggregateExpr::count_star(),
+        AggregateExpr::sum(amount),
+    ];
+    let final_schema = build_aggregate_schema(&group_keys, &aggregates);
+    let parallel_rows = execute_parallel_aggregate_rows(
+        Box::new(LocalVecIterator::new(rows, schema)),
+        group_keys,
+        aggregates,
+        None,
+        final_schema,
+        2,
+    )?;
+    assert_eq!(parallel_rows.len(), 2);
+    let mut totals = parallel_rows
+        .into_iter()
+        .map(|row| (format!("{:?}", row.values[0]), row.values[2].clone()))
+        .collect::<Vec<_>>();
+    totals.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(totals[0].1, SqlValue::Double(25.0));
+    assert_eq!(totals[1].1, SqlValue::Double(25.0));
+
+    println!("v0.7.3 aggregate behavior guarantee passed");
+    Ok(())
+}
+RS
+cargo run --quiet
+'
 
 echo ""
 log_ok "全デモスクリプトが公開版 v${ALOPEX_VERSION} で完走しました。"

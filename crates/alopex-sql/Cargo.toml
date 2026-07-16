@@ -1,6 +1,6 @@
 [package]
 name = "alopex-sql"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2024"  # Uses let chains feature
 license.workspace = true
 repository.workspace = true
@@ -71,6 +71,10 @@ harness = false
 
 [[bench]]
 name = "group_by_bench"
+harness = false
+
+[[bench]]
+name = "aggregate_parallel_bench"
 harness = false
 
 [[bench]]

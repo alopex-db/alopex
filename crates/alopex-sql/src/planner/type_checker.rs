@@ -1289,7 +1289,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     fn check_sum(
         &self,
         args: &[TypedExpr],
-        distinct: bool,
+        _distinct: bool,
         star: bool,
         span: Span,
     ) -> Result<ResolvedType, PlannerError> {
@@ -1297,13 +1297,6 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             return Err(PlannerError::type_mismatch(
                 "numeric argument",
                 "COUNT(*) style",
-                span,
-            ));
-        }
-        if distinct {
-            return Err(PlannerError::unsupported_feature(
-                "SUM(DISTINCT ...)",
-                "future",
                 span,
             ));
         }
@@ -1353,7 +1346,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     fn check_avg(
         &self,
         args: &[TypedExpr],
-        distinct: bool,
+        _distinct: bool,
         star: bool,
         span: Span,
     ) -> Result<ResolvedType, PlannerError> {
@@ -1361,13 +1354,6 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             return Err(PlannerError::type_mismatch(
                 "numeric argument",
                 "COUNT(*) style",
-                span,
-            ));
-        }
-        if distinct {
-            return Err(PlannerError::unsupported_feature(
-                "AVG(DISTINCT ...)",
-                "future",
                 span,
             ));
         }
@@ -1385,7 +1371,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     fn check_min_max(
         &self,
         args: &[TypedExpr],
-        distinct: bool,
+        _distinct: bool,
         star: bool,
         span: Span,
     ) -> Result<ResolvedType, PlannerError> {
@@ -1393,13 +1379,6 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             return Err(PlannerError::type_mismatch(
                 "argument",
                 "COUNT(*) style",
-                span,
-            ));
-        }
-        if distinct {
-            return Err(PlannerError::unsupported_feature(
-                "MIN/MAX(DISTINCT ...)",
-                "future",
                 span,
             ));
         }
@@ -1417,7 +1396,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     fn check_group_concat(
         &self,
         args: &[TypedExpr],
-        distinct: bool,
+        _distinct: bool,
         star: bool,
         span: Span,
     ) -> Result<ResolvedType, PlannerError> {
@@ -1425,13 +1404,6 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             return Err(PlannerError::type_mismatch(
                 "text argument",
                 "COUNT(*) style",
-                span,
-            ));
-        }
-        if distinct {
-            return Err(PlannerError::unsupported_feature(
-                "GROUP_CONCAT(DISTINCT ...)",
-                "future",
                 span,
             ));
         }
@@ -1470,7 +1442,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     fn check_string_agg(
         &self,
         args: &[TypedExpr],
-        distinct: bool,
+        _distinct: bool,
         star: bool,
         span: Span,
     ) -> Result<ResolvedType, PlannerError> {
@@ -1478,13 +1450,6 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             return Err(PlannerError::type_mismatch(
                 "text argument",
                 "COUNT(*) style",
-                span,
-            ));
-        }
-        if distinct {
-            return Err(PlannerError::unsupported_feature(
-                "STRING_AGG(DISTINCT ...)",
-                "future",
                 span,
             ));
         }

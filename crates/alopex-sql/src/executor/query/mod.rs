@@ -391,6 +391,24 @@ fn build_iterator_pipeline_with_outer<
                 return Ok((Box::new(iter), projection, schema));
             }
 
+            let parallelism = std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1);
+            if !aggregate::should_use_single_for_parallel(parallelism, &aggregates) {
+                let rows = aggregate::execute_parallel_aggregate_rows_with_policy(
+                    input_iter,
+                    group_keys,
+                    aggregates,
+                    having,
+                    schema.clone(),
+                    parallelism,
+                    memory.cloned(),
+                    1_000_000,
+                )?;
+                let iter = iterator::VecIterator::new(rows, schema.clone());
+                return Ok((Box::new(iter), projection, schema));
+            }
+
             let mut iter = aggregate::AggregateIterator::new(
                 input_iter,
                 group_keys,
@@ -651,6 +669,24 @@ fn build_streaming_pipeline_inner<
                     having,
                     schema.clone(),
                 );
+                return Ok((Box::new(iter), projection, schema));
+            }
+
+            let parallelism = std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1);
+            if !aggregate::should_use_single_for_parallel(parallelism, &aggregates) {
+                let rows = aggregate::execute_parallel_aggregate_rows_with_policy(
+                    input_iter,
+                    group_keys,
+                    aggregates,
+                    having,
+                    schema.clone(),
+                    parallelism,
+                    memory.cloned(),
+                    1_000_000,
+                )?;
+                let iter = iterator::VecIterator::new(rows, schema.clone());
                 return Ok((Box::new(iter), projection, schema));
             }
 

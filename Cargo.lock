@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-cli"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "alopex-core",
  "alopex-embedded",
@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-cluster"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "alopex-chirps-gossip-swim",
  "serde",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-core"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "alopex-dataframe",
  "alopex-sql",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-dataframe"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "alopex-core",
  "arrow",
@@ -208,7 +208,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-embedded"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "alopex-core",
  "alopex-dataframe",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-py"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "alopex-cluster",
  "alopex-core",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-server"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "alopex-cli",
  "alopex-cluster",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-sql"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "alopex-core",
  "arrow-array 52.2.0",

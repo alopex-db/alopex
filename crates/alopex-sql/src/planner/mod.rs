@@ -1739,10 +1739,10 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::Sum,
                     arg: Some(arg.clone()),
-                    distinct: false,
+                    distinct,
                     result_type: ResolvedType::Double,
                 };
-                let signature = aggregate_signature(name, false, star, Some(arg), None, expr);
+                let signature = aggregate_signature(name, distinct, star, Some(arg), None, expr);
                 Ok((agg, signature))
             }
             "total" => {
@@ -1761,10 +1761,10 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::Avg,
                     arg: Some(arg.clone()),
-                    distinct: false,
+                    distinct,
                     result_type: ResolvedType::Double,
                 };
-                let signature = aggregate_signature(name, false, star, Some(arg), None, expr);
+                let signature = aggregate_signature(name, distinct, star, Some(arg), None, expr);
                 Ok((agg, signature))
             }
             "min" => {
@@ -1772,10 +1772,10 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::Min,
                     arg: Some(arg.clone()),
-                    distinct: false,
+                    distinct,
                     result_type: arg.resolved_type.clone(),
                 };
-                let signature = aggregate_signature(name, false, star, Some(arg), None, expr);
+                let signature = aggregate_signature(name, distinct, star, Some(arg), None, expr);
                 Ok((agg, signature))
             }
             "max" => {
@@ -1783,10 +1783,10 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::Max,
                     arg: Some(arg.clone()),
-                    distinct: false,
+                    distinct,
                     result_type: arg.resolved_type.clone(),
                 };
-                let signature = aggregate_signature(name, false, star, Some(arg), None, expr);
+                let signature = aggregate_signature(name, distinct, star, Some(arg), None, expr);
                 Ok((agg, signature))
             }
             "group_concat" => {
@@ -1811,12 +1811,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::GroupConcat { separator },
                     arg: Some(arg.clone()),
-                    distinct: false,
+                    distinct,
                     result_type: ResolvedType::Text,
                 };
                 let signature = aggregate_signature(
                     name,
-                    false,
+                    distinct,
                     star,
                     Some(arg),
                     match &agg.function {
@@ -1847,12 +1847,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::StringAgg { separator },
                     arg: Some(arg.clone()),
-                    distinct: false,
+                    distinct,
                     result_type: ResolvedType::Text,
                 };
                 let signature = aggregate_signature(
                     name,
-                    false,
+                    distinct,
                     star,
                     Some(arg),
                     match &agg.function {

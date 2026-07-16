@@ -149,3 +149,68 @@ fn string_agg_with_separator() {
         }
     }
 }
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn distinct_aggregates_apply_to_non_count_functions() {
+    let mut harness = TestHarness::new();
+    seed_products(&mut harness);
+
+    let result = harness.query_sql(
+        "SELECT SUM(DISTINCT price), AVG(DISTINCT price), MIN(DISTINCT label), MAX(DISTINCT label), GROUP_CONCAT(DISTINCT label, '|'), STRING_AGG(DISTINCT label, ';') FROM products",
+    );
+    assert_eq!(result.rows.len(), 1);
+    let row = &result.rows[0];
+    assert_eq!(row[0], SqlValue::Double(48.0));
+    match &row[1] {
+        SqlValue::Double(value) => assert!((*value - 12.0).abs() < 1e-6),
+        other => panic!("unexpected distinct avg {other:?}"),
+    }
+    assert_eq!(row[2], SqlValue::Text("a".into()));
+    assert_eq!(row[3], SqlValue::Text("c".into()));
+    assert_eq!(row[4], SqlValue::Text("a|b|c".into()));
+    assert_eq!(row[5], SqlValue::Text("a;b;c".into()));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn distinct_aggregates_apply_per_group() {
+    let mut harness = TestHarness::new();
+    seed_products(&mut harness);
+
+    let result = harness.query_sql(
+        "SELECT category, SUM(DISTINCT price), AVG(DISTINCT price), MIN(DISTINCT label), MAX(DISTINCT label), GROUP_CONCAT(DISTINCT label, '|'), STRING_AGG(DISTINCT label, ';') FROM products GROUP BY category",
+    );
+    for row in result.rows {
+        let SqlValue::Text(category) = &row[0] else {
+            panic!("expected text category");
+        };
+        match category.as_str() {
+            "book" => {
+                assert_eq!(row[1], SqlValue::Double(25.0));
+                assert_eq!(row[2], SqlValue::Double(12.5));
+                assert_eq!(row[3], SqlValue::Text("a".into()));
+                assert_eq!(row[4], SqlValue::Text("b".into()));
+                assert_eq!(row[5], SqlValue::Text("a|b".into()));
+                assert_eq!(row[6], SqlValue::Text("a;b".into()));
+            }
+            "game" => {
+                assert_eq!(row[1], SqlValue::Double(20.0));
+                assert_eq!(row[2], SqlValue::Double(20.0));
+                assert_eq!(row[3], SqlValue::Text("c".into()));
+                assert_eq!(row[4], SqlValue::Text("c".into()));
+                assert_eq!(row[5], SqlValue::Text("c".into()));
+                assert_eq!(row[6], SqlValue::Text("c".into()));
+            }
+            "toy" => {
+                assert_eq!(row[1], SqlValue::Double(3.0));
+                assert_eq!(row[2], SqlValue::Double(3.0));
+                assert_eq!(row[3], SqlValue::Text("c".into()));
+                assert_eq!(row[4], SqlValue::Text("c".into()));
+                assert_eq!(row[5], SqlValue::Text("c".into()));
+                assert_eq!(row[6], SqlValue::Text("c".into()));
+            }
+            other => panic!("unexpected category {other}"),
+        }
+    }
+}
