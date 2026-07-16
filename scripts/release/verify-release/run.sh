@@ -22,12 +22,20 @@
 # Usage:
 #   ./scripts/release/verify-release/run.sh [ALOPEX_VERSION] [--no-report]
 #   例: ./scripts/release/verify-release/run.sh 0.7.3
+#
+# chirps は既定では隣接 checkout (${REPO_ROOT}/../chirps) を使う。存在しない
+# 場合は公開 repo を一時 clone するため、worktree 配置に依存しない。
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-DOCS_PUBLIC_DIR="${DOCS_PUBLIC_DIR:-${REPO_ROOT}/../docs-public}"
+DEFAULT_DOCS_PUBLIC_DIR="${REPO_ROOT}/../docs-public"
+if [ -z "${DOCS_PUBLIC_DIR:-}" ] && [ ! -d "${DEFAULT_DOCS_PUBLIC_DIR}" ] \
+    && [ -d "${REPO_ROOT}/../../docs-public" ]; then
+    DEFAULT_DOCS_PUBLIC_DIR="${REPO_ROOT}/../../docs-public"
+fi
+DOCS_PUBLIC_DIR="${DOCS_PUBLIC_DIR:-${DEFAULT_DOCS_PUBLIC_DIR}}"
 
 ALOPEX_VERSION="0.7.3"
 DO_REPORT=1
@@ -39,7 +47,18 @@ for arg in "$@"; do
 done
 
 IMAGE_TAG="alopex-verify-release:${ALOPEX_VERSION}"
-CHIRPS_DIR="${CHIRPS_DIR:-${REPO_ROOT}/../chirps}"
+DEFAULT_CHIRPS_DIR="${REPO_ROOT}/../chirps"
+if [ ! -d "${DEFAULT_CHIRPS_DIR}" ] && [ -d "${REPO_ROOT}/../../chirps" ]; then
+    DEFAULT_CHIRPS_DIR="${REPO_ROOT}/../../chirps"
+fi
+CHIRPS_REPO_URL="${CHIRPS_REPO_URL:-https://github.com/alopex-db/alopex-chirps.git}"
+CHIRPS_REF="${CHIRPS_REF:-main}"
+CHIRPS_DIR_WAS_EXPLICIT=0
+if [ -n "${CHIRPS_DIR:-}" ]; then
+    CHIRPS_DIR_WAS_EXPLICIT=1
+else
+    CHIRPS_DIR="${DEFAULT_CHIRPS_DIR}"
+fi
 LOG_DIR="$(mktemp -d)"
 TOOLS_TARGET_DIR=""
 cleanup() { rm -rf "${LOG_DIR}" "${TOOLS_TARGET_DIR}"; }
@@ -53,6 +72,26 @@ NC='\033[0m'
 log_info() { echo -e "${YELLOW}[INFO]${NC} $1"; }
 log_ok() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_fail() { echo -e "${RED}[FAIL]${NC} $1"; }
+
+ensure_chirps_dir() {
+    if [ -d "${CHIRPS_DIR}" ]; then
+        return 0
+    fi
+    if [ "${CHIRPS_DIR_WAS_EXPLICIT}" -eq 1 ]; then
+        log_fail "CHIRPS_DIR で指定された chirps リポジトリが見つからない: ${CHIRPS_DIR}"
+        echo "  パスを修正するか、CHIRPS_DIR を未指定にして公開 repo からの一時取得を使ってください。"
+        exit 2
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+        log_fail "git コマンドが見つからないため、公開 chirps repo を取得できません。"
+        echo "  CHIRPS_DIR=<path> を指定してください。"
+        exit 2
+    fi
+    local cloned_dir="${LOG_DIR}/chirps"
+    log_info "chirps checkout が見つからないため、公開 repo から一時取得します: ${CHIRPS_REPO_URL} (${CHIRPS_REF})"
+    git clone --depth 1 --branch "${CHIRPS_REF}" "${CHIRPS_REPO_URL}" "${cloned_dir}"
+    CHIRPS_DIR="${cloned_dir}"
+}
 
 # --- レポート用の結果蓄積 ---
 # 各ステップを "name|status|description|logfile" 形式で配列に積む。
@@ -239,12 +278,7 @@ EOF
     log_ok "docs-public へレポートを push しました(branch: ${branch})"
 }
 
-if [ ! -d "${CHIRPS_DIR}" ]; then
-    log_fail "chirps リポジトリが見つからない: ${CHIRPS_DIR}"
-    echo "  CHIRPS_DIR=<path> ./scripts/release/verify-release/run.sh ${ALOPEX_VERSION} で指定するか、"
-    echo "  ${REPO_ROOT}/../chirps に配置すること。"
-    exit 2
-fi
+ensure_chirps_dir
 
 log_info "alopex v${ALOPEX_VERSION} リリース確認を開始します"
 
@@ -308,7 +342,7 @@ run_step "v0.7 機能デモ: demo_dataframe_p3.py" \
 
 run_step "v0.7.3 動作保証: alopex-sql aggregate state/distinct/parallel" \
     "crates.io 公開版 alopex-sql だけを依存にした一時 Rust crate をコンテナ内で作成し、v0.7.3 の中核変更である Accumulator state/merge、COUNT 以外の DISTINCT 集約、単一プロセス partial→final parallel aggregate が実際に動作することを確認する。リポジトリ内の alopex 製品ソースはビルドしないため、公開 artifact の振る舞い保証になる。" \
-    -- run_in_container bash -lc '
+    -- run_in_container bash -c '
 set -euo pipefail
 workdir="$(mktemp -d)"
 trap "rm -rf \"${workdir}\"" EXIT
