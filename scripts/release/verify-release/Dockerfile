@@ -7,23 +7,32 @@
 # COPY/マウントせず、crates.io / PyPI に実際に公開された成果物だけを
 # 取得して動かす。「ユーザーが手にする配布物が本当に動くか」を検証する
 # ためのものであり、v0.7.1 リリースで発生した障害(crates.io publish の
-# 順序バグ・依存重複によるディスク枯渇等)はいずれもこの観点の検証が
-# 無かったために気づけなかった。
+# 順序バグ・依存重複によるディスク枯渇・rpath 伝播バグ・Nim ツールチェーン
+# 依存等)はいずれもこの観点の検証が無かったために気づけなかった。
+#
+# v0.7.2 (D2 是正) 以降、alopex-sql は crates.io 公開時に4プラットフォーム
+# 分の事前ビルド済み Nim 共有ライブラリを nim-sql-parser/vendor/<target>/
+# に同梱するようになった (build.rs の解決順序に vendor/ を追加)。これにより
+# `cargo install alopex-cli` はホスト側で Nim ソースを別途ビルドする
+# ワークアラウンド無しに動作する。Nim ツールチェーン(下記 nim-toolchain)は
+# このイメージ自体には不要になったが、alopex-tools(verify-release-embedded)
+# のビルド時に *ソース側* の Nim 共有ライブラリを使う経路が実行時に必要な
+# ため、引き続き同梱する(run.sh が実行時にリポジトリをマウントしてビルド
+# する契約)。
 #
 # 取得する成果物:
 #   - alopex-cli / alopex-server: `cargo install --locked` で crates.io から
 #     ソース取得してビルド(バイナリ配布は Linux/macOS/Windows の4種のみで
-#     alopex-server を含まないため、cargo install に統一する)。
+#     alopex-server を含まないため、cargo install に統一する)。Nim
+#     ツールチェーンは不要(vendored ライブラリを alopex-sql の build.rs が
+#     自動解決する)。
 #   - alopex (Python): `pip install alopex==<version>` で PyPI の manylinux
 #     wheel を取得(ビルドしない。ユーザーが実際にインストールする経路
 #     そのもの)。
 #   - crates/alopex-tools の verify-release-embedded: crates.io 公開版の
 #     alopex-embedded に依存する独立クレート(alopex-tools/Cargo.toml の
-#     [workspace] 空テーブルで親から分離済み)。ビルドには
-#     デモスクリプト側から crates/alopex-sql/nim-sql-parser の Nim 共有
-#     ライブラリが必要(ビルド時のみ、実行時は cargo install 版の
-#     alopex-cli/alopex-server が libalopex_sql_parser.so を rpath で
-#     解決する)。
+#     [workspace] 空テーブルで親から分離済み)。alopex-embedded 経由で
+#     alopex-sql に依存するため、同じく vendored ライブラリで解決される。
 #
 # ビルド版のバージョン固定根拠は scripts/parity/Dockerfile と同じ
 # (Rust stable、Nim 2.2、Python 3.11)。
@@ -89,25 +98,14 @@ ENV XDG_CACHE_HOME=/tmp/verify-cache
 # --- Rust 製品バイナリ: crates.io から `cargo install` (ソース取得+ビルド)。
 #     GitHub Release のプリビルドバイナリは alopex-server を含まず
 #     4 プラットフォームの固定ターゲットしかないため使わない。
-#     alopex-sql の build.rs が要求する Nim 共有ライブラリを、この
-#     ビルド専用に一時生成する(実行時に使う正式な rpath 解決対象とは
-#     別。generated once, used only during `cargo install`)。 ---
+#     v0.7.2 (D2 是正) 以降、alopex-sql の build.rs が
+#     nim-sql-parser/vendor/<target-triple>/ の事前ビルド済み共有ライブラリを
+#     自動解決するため、Nim ソースを別途取得・ビルドする手順は不要になった。
+#     実行時の共有ライブラリ解決も rpath (RUNPATH) 経由でビルド時に完結する
+#     ため、LD_LIBRARY_PATH の設定も不要 (rpath 伝播バグの是正を実機で
+#     検証する意図もあり、あえて設定しない)。 ---
 ARG ALOPEX_VERSION
 ENV CARGO_HOME=/home/verify/.cargo
-RUN set -eux; \
-    tmp_nim_dir="$(mktemp -d)"; \
-    cd "${tmp_nim_dir}"; \
-    curl -sSL -A "alopex-verify-release (https://github.com/alopex-db/alopex)" \
-      -o alopex-sql.crate \
-      "https://crates.io/api/v1/crates/alopex-sql/${ALOPEX_VERSION}/download"; \
-    tar xzf alopex-sql.crate; \
-    cd "alopex-sql-${ALOPEX_VERSION}/nim-sql-parser"; \
-    nimble lib; \
-    mkdir -p /home/verify/.local/lib; \
-    cp libalopex_sql_parser.so /home/verify/.local/lib/; \
-    rm -rf "${tmp_nim_dir}"
-ENV NIM_SQL_PARSER_LIB_DIR=/home/verify/.local/lib
-ENV LD_LIBRARY_PATH=/home/verify/.local/lib
 RUN cargo install alopex-cli --version "=${ALOPEX_VERSION}" --locked \
  && cargo install alopex-server --version "=${ALOPEX_VERSION}" --locked
 ENV PATH=/home/verify/.cargo/bin:${PATH}
