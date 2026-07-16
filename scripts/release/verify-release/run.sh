@@ -12,7 +12,12 @@
 # 実行結果は docs-public リポジトリへの PR として自動レポートされる
 # (--no-report で無効化可能。CI 以外でのアドホック実行時など、レポート
 # 不要な場合に使う)。「実行して終わり」では検証の意味が薄いため、成功時
-# だけでなく失敗時も必ずレポートを生成する。
+# だけでなく失敗時も必ずレポートを生成する。レポートは結果の一覧表だけ
+# ではなく、各ステップが「何を・なぜ検証するか」の説明文と、実行時の
+# 主要な出力(検証コーパスの実行結果サマリー等)を含む。
+#
+# 新しいステップを追加する場合は run_step 呼び出しに DESCRIPTION も
+# 必ず添える(結果一覧だけのステップを増やさない)。
 #
 # Usage:
 #   ./scripts/release/verify-release/run.sh [ALOPEX_VERSION] [--no-report]
@@ -35,6 +40,10 @@ done
 
 IMAGE_TAG="alopex-verify-release:${ALOPEX_VERSION}"
 CHIRPS_DIR="${CHIRPS_DIR:-${REPO_ROOT}/../chirps}"
+LOG_DIR="$(mktemp -d)"
+TOOLS_TARGET_DIR=""
+cleanup() { rm -rf "${LOG_DIR}" "${TOOLS_TARGET_DIR}"; }
+trap cleanup EXIT
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -46,17 +55,53 @@ log_ok() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_fail() { echo -e "${RED}[FAIL]${NC} $1"; }
 
 # --- レポート用の結果蓄積 ---
-# 各ステップの結果を "name|status|detail" 形式で配列に積む。
-# status は ok / fail / skip のいずれか。
+# 各ステップを "name|status|description|logfile" 形式で配列に積む。
+# status は ok / fail のいずれか。description はレポート読者(一般公開)
+# に「これは何を検証しているか」を伝える1〜2文。logfile はそのステップの
+# 標準出力キャプチャ(存在すれば末尾を抜粋してレポートに埋め込む)。
 declare -a REPORT_STEPS=()
 OVERALL_STATUS="ok"
+STEP_INDEX=0
 
-record_step() {
-    local name="$1" status="$2" detail="${3:-}"
-    REPORT_STEPS+=("${name}|${status}|${detail}")
-    if [ "${status}" = "fail" ]; then
-        OVERALL_STATUS="fail"
+# run_step NAME DESCRIPTION -- CMD...
+# CMD の標準出力/標準エラーをログファイルへも複製しつつ画面に表示する
+# (tee)。失敗した場合はここで即座にレポートを生成して exit する。
+run_step() {
+    local name="$1" description="$2"
+    shift 2
+    if [ "${1:-}" != "--" ]; then
+        echo "run_step: expected -- before command" >&2
+        exit 64
     fi
+    shift
+    STEP_INDEX=$((STEP_INDEX + 1))
+    local logfile="${LOG_DIR}/step-${STEP_INDEX}.log"
+
+    log_info "${name}"
+    "$@" 2>&1 | tee "${logfile}"
+    local status="${PIPESTATUS[0]}"
+
+    if [ "${status}" -eq 0 ]; then
+        log_ok "${name} 完了(exit 0)"
+        REPORT_STEPS+=("${name}|ok|${description}|${logfile}")
+    else
+        log_fail "${name} 失敗(exit ${status})"
+        REPORT_STEPS+=("${name}|fail|${description}|${logfile}")
+        OVERALL_STATUS="fail"
+        write_report_and_maybe_pr
+        exit "${status}"
+    fi
+}
+
+# ログファイルから末尾 N 行を Markdown コードブロックとして整形する。
+render_log_excerpt() {
+    local logfile="$1" lines="${2:-40}"
+    if [ ! -s "${logfile}" ]; then
+        return 0
+    fi
+    echo '```'
+    tail -n "${lines}" "${logfile}"
+    echo '```'
 }
 
 write_report_and_maybe_pr() {
@@ -80,33 +125,45 @@ write_report_and_maybe_pr() {
         echo "# リリース確認レポート: v${ALOPEX_VERSION}"
         echo ""
         echo "> 生成日時 (UTC): ${report_date}"
-        echo "> 検証方法: \`scripts/release/verify-release/run.sh\`(crates.io/PyPI 公開版のみを使用、ソースビルドなし)"
         echo "> 総合結果: **$([ "${OVERALL_STATUS}" = "ok" ] && echo "✅ 全ステップ成功" || echo "❌ 失敗あり")**"
         echo ""
-        echo "## ステップ結果"
+        echo "## これは何を検証しているか"
         echo ""
-        echo "| ステップ | 結果 | 詳細 |"
-        echo "|---|---|---|"
-        local entry name status detail mark
+        echo "alopex は「ライブラリ(インメモリ)・組み込み(ファイル)・シングルノード"
+        echo "サーバー・クラスタが、同一データファイルと同一プロトコルで動作する単一"
+        echo "エンジンである」ことを製品価値としている。このレポートは、その価値が"
+        echo "**実際にユーザーが手にする配布物**(crates.io の \`cargo install\`、"
+        echo "PyPI の \`pip install\`)で成立していることを示す。"
+        echo ""
+        echo "検証は専用コンテナ(\`scripts/release/verify-release/\`)内で行い、"
+        echo "**alopex のソースコードは一切ビルドしない**。Nim ツールチェーンも"
+        echo "使わない(v0.7.2 以降、Nim 共有ライブラリは crates.io 公開 crate に"
+        echo "事前ビルド済みで同梱されている)。過去に crates.io publish の順序"
+        echo "バグ・依存重複によるビルド失敗・実行時のライブラリ解決失敗が"
+        echo "リリース後に発覚した経緯があり、この検証はそれらを releaseタグ"
+        echo "push 後に即座に検知するためのものである。"
+        echo ""
+        echo "## ステップ"
+        echo ""
+        local entry name status description logfile mark i=0
         for entry in "${REPORT_STEPS[@]}"; do
-            IFS='|' read -r name status detail <<<"${entry}"
-            case "${status}" in
-                ok) mark="✅" ;;
-                fail) mark="❌" ;;
-                skip) mark="⏭️" ;;
-                *) mark="?" ;;
-            esac
-            echo "| ${name} | ${mark} ${status} | ${detail} |"
+            i=$((i + 1))
+            IFS='|' read -r name status description logfile <<<"${entry}"
+            mark="✅"
+            [ "${status}" = "fail" ] && mark="❌"
+            echo "### ${i}. ${name} ${mark}"
+            echo ""
+            echo "${description}"
+            echo ""
+            render_log_excerpt "${logfile}" 60
+            echo ""
         done
+        echo "## 免責"
         echo ""
-        echo "## 検証内容"
-        echo ""
-        echo "- \`crates/alopex-tools\` の \`verify-release-embedded\`: crates.io 公開版 \`alopex-embedded\` への依存としてビルド可能か"
-        echo "- mode-parity 検証 (\`scripts/parity/verify.py\`): S2a/S2b/S2c の全組み合わせ一致"
-        echo "- mode-parity デモ (\`scripts/parity/demo.py\`): 第1〜5幕(SF-MEM/SF-FILE/SF-HTTP/SF-GRPC/SF-CLUSTER)"
-        echo "- v0.7 機能デモ: \`demo_cluster.py\` / \`demo_routing.py\` / \`demo_dataframe_p3.py\`"
-        echo ""
-        echo "リポジトリのソースコードは一切ビルドせず、\`cargo install\`/\`pip install\` で取得した公開版のみを使用する(Nim ツールチェーンも不要)。"
+        echo "- このレポートは \`scripts/release/verify-release/run.sh\` の自動実行結果を"
+        echo "  そのまま記録したものである。人手による追記・改変は行わない。"
+        echo "- 新しい検証ステップを追加する場合は run.sh 側の \`run_step\` 呼び出しに"
+        echo "  \`description\` を含めることが必須(結果一覧だけのステップを増やさない)。"
     } >"${report_file}"
 
     log_info "レポートを生成しました: ${report_file}"
@@ -150,30 +207,21 @@ fi
 
 log_info "alopex v${ALOPEX_VERSION} リリース確認を開始します"
 
-log_info "コンテナイメージをビルド中: ${IMAGE_TAG}"
-if docker build \
-    -t "${IMAGE_TAG}" \
-    --build-arg "ALOPEX_VERSION=${ALOPEX_VERSION}" \
-    --build-arg "VERIFY_UID=$(id -u)" \
-    --build-arg "VERIFY_GID=$(id -g)" \
-    -f "${SCRIPT_DIR}/Dockerfile" \
-    "${SCRIPT_DIR}"; then
-    log_ok "イメージビルド完了"
-    record_step "コンテナイメージビルド" ok ""
-else
-    status=$?
-    log_fail "イメージビルド失敗(exit ${status})"
-    record_step "コンテナイメージビルド" fail "exit ${status}"
-    write_report_and_maybe_pr
-    exit "${status}"
-fi
+run_step "コンテナイメージビルド" \
+    "検証専用の Docker イメージをビルドする。alopex-cli/alopex-server は \`cargo install\`、alopex(Python) は \`pip install\` で crates.io/PyPI から取得する(このイメージには alopex のソースコードを一切 COPY しない)。" \
+    -- docker build \
+        -t "${IMAGE_TAG}" \
+        --build-arg "ALOPEX_VERSION=${ALOPEX_VERSION}" \
+        --build-arg "VERIFY_UID=$(id -u)" \
+        --build-arg "VERIFY_GID=$(id -g)" \
+        -f "${SCRIPT_DIR}/Dockerfile" \
+        "${SCRIPT_DIR}"
 
 # crates/alopex-tools の verify-release-embedded は、EmbeddedSurface
 # (released モード)がデモスクリプトから起動する契約(surfaces.py 参照)。
 # ここで一度だけビルドし(ホスト側の一時ディレクトリへ出力してコンテナ間
 # で使い回す)、以降のデモ実行では PATH に加えるだけにする。
 TOOLS_TARGET_DIR="$(mktemp -d)"
-trap 'rm -rf "${TOOLS_TARGET_DIR}"' EXIT
 
 # /tools-target/release (verify-release-embedded のビルド出力) を PATH に
 # 追加する。イメージの ENV PATH は Dockerfile 側で維持されるので、ここでは
@@ -191,60 +239,30 @@ run_in_container() {
         "$@"
 }
 
-log_info "crates/alopex-tools (verify-release-embedded) をビルド中(公開版 alopex-embedded 依存)"
-if run_in_container bash -c 'cd crates/alopex-tools && CARGO_TARGET_DIR=/tools-target cargo build --release'; then
-    log_ok "verify-release-embedded ビルド完了"
-    record_step "verify-release-embedded ビルド" ok ""
-else
-    status=$?
-    log_fail "verify-release-embedded ビルド失敗(exit ${status})"
-    record_step "verify-release-embedded ビルド" fail "exit ${status}"
-    write_report_and_maybe_pr
-    exit "${status}"
-fi
+run_step "verify-release-embedded ビルド" \
+    "crates/alopex-tools(開発ツール専用の独立ワークスペース)が crates.io 公開版の alopex-embedded/alopex-sql に依存としてビルドできるかを検証する。これが通ること自体が「公開 crate が実際に取得・ビルド可能」であることの証明になる。" \
+    -- run_in_container bash -c 'cd crates/alopex-tools && CARGO_TARGET_DIR=/tools-target cargo build --release'
 
-log_info "mode-parity 検証(scripts/parity/verify.py)を実行"
-if run_in_container python3 scripts/parity/verify.py \
-    --corpus scripts/parity/corpus --expected scripts/parity/expected; then
-    log_ok "verify.py 完走(exit 0)"
-    record_step "mode-parity 検証 (verify.py)" ok ""
-else
-    status=$?
-    if [ "${status}" -eq 1 ]; then
-        log_fail "verify.py が検証不一致を検出(exit 1)"
-    else
-        log_fail "verify.py が環境エラー(exit ${status})"
-    fi
-    record_step "mode-parity 検証 (verify.py)" fail "exit ${status}"
-    write_report_and_maybe_pr
-    exit "${status}"
-fi
+run_step "mode-parity 検証 (verify.py)" \
+    "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)の全組み合わせが一致することを確認する。" \
+    -- run_in_container python3 scripts/parity/verify.py \
+        --corpus scripts/parity/corpus --expected scripts/parity/expected
 
-log_info "mode-parity デモ(scripts/parity/demo.py)を実行"
-run_in_container python3 scripts/parity/demo.py
-demo_status=$?
-if [ "${demo_status}" -ne 0 ]; then
-    log_fail "demo.py が失敗(exit ${demo_status})"
-    record_step "mode-parity デモ (demo.py)" fail "exit ${demo_status}"
-    write_report_and_maybe_pr
-    exit "${demo_status}"
-fi
-log_ok "demo.py 完走(exit 0)"
-record_step "mode-parity デモ (demo.py)" ok ""
+run_step "mode-parity デモ (demo.py)" \
+    "上記の機械検証と同一のコーパスを使い、「One Engine, Four Forms」を人間向けに実演する。第1幕(ライブラリ/インメモリ)で実行した結果が、第2幕(組み込み/ファイル永続化)・第3幕(シングルノードサーバー、HTTP と gRPC の両方)・第4幕(サーバー停止後に CLI で再オープン)・第5幕(cluster-aware 単一メンバー)を通じて一貫することを確認する。" \
+    -- run_in_container python3 scripts/parity/demo.py
 
-for script in demo_cluster.py demo_routing.py demo_dataframe_p3.py; do
-    log_info "v0.7 機能デモ(scripts/demo/v07/${script})を実行"
-    run_in_container python3 "scripts/demo/v07/${script}"
-    status=$?
-    if [ "${status}" -ne 0 ]; then
-        log_fail "${script} が失敗(exit ${status})"
-        record_step "v0.7 機能デモ (${script})" fail "exit ${status}"
-        write_report_and_maybe_pr
-        exit "${status}"
-    fi
-    log_ok "${script} 完走(exit 0)"
-    record_step "v0.7 機能デモ (${script})" ok ""
-done
+run_step "v0.7 機能デモ: demo_cluster.py" \
+    "cluster status API のクロスサーフェス実証(D2)。single_node/cluster_aware の両モードでの起動、membership の join/leave によるライフサイクル遷移、Chirps 不可時の degraded フォールバックを、HTTP と CLI の両方で観測し、フィールドが一致することを確認する。" \
+    -- run_in_container python3 scripts/demo/v07/demo_cluster.py
+
+run_step "v0.7 機能デモ: demo_routing.py" \
+    "SQL 実行がすべてルーティング判定を経由し、その決定理由が診断として観測できることを実証する(D3)。v0.7 のライブ実行は local_only であり、分散が必要な操作は明示的に拒否されることを確認する。" \
+    -- run_in_container python3 scripts/demo/v07/demo_routing.py
+
+run_step "v0.7 機能デモ: demo_dataframe_p3.py" \
+    "DataFrame の string/datetime/list 名前空間関数と explode/implode の往復変換が Rust と Python の両サーフェスで決定的に(同一入力に対して常にバイト単位で同一の出力を)動作することを確認する(D4)。" \
+    -- run_in_container python3 scripts/demo/v07/demo_dataframe_p3.py
 
 echo ""
 log_ok "全デモスクリプトが公開版 v${ALOPEX_VERSION} で完走しました。"
