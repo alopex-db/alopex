@@ -104,6 +104,41 @@ render_log_excerpt() {
     echo '```'
 }
 
+# docs-public 側に前回までの実行が残した「report/verify-release-*」
+# ブランチのうち、対応する PR がマージ済みのものをローカル・リモート
+# 両方から削除する。run.sh 自身が作ったブランチの後始末を毎回自動で
+# 行い、実行のたびに未マージ分だけが残る状態を保つ(マージされていない
+# ブランチは残し、確認なしに壊さない)。
+cleanup_merged_report_branches() {
+    if ! command -v gh >/dev/null 2>&1; then
+        return 0
+    fi
+    (
+        cd "${DOCS_PUBLIC_DIR}" || return 0
+        # 前回実行が report/verify-release-* ブランチにチェックアウトした
+        # まま終わっている場合、そのブランチ自身は `git branch -D` できない
+        # (カレントブランチは削除不可)。先に main へ戻しておく。
+        git checkout main >/dev/null 2>&1
+        local merged_branches
+        merged_branches="$(gh pr list --repo alopex-db/docs --state merged \
+            --search 'head:report/verify-release-' \
+            --json headRefName --jq '.[].headRefName' 2>/dev/null | sort -u)"
+        [ -z "${merged_branches}" ] && return 0
+        local branch
+        while IFS= read -r branch; do
+            [ -z "${branch}" ] && continue
+            if git show-ref --verify --quiet "refs/heads/${branch}"; then
+                git branch -D "${branch}" >/dev/null 2>&1 \
+                    && log_info "docs-public: マージ済みブランチを削除しました(local): ${branch}"
+            fi
+            if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+                git push origin --delete "${branch}" >/dev/null 2>&1 \
+                    && log_info "docs-public: マージ済みブランチを削除しました(remote): ${branch}"
+            fi
+        done <<<"${merged_branches}"
+    )
+}
+
 write_report_and_maybe_pr() {
     if [ "${DO_REPORT}" -eq 0 ]; then
         log_info "--no-report 指定によりレポート生成をスキップします"
@@ -114,34 +149,29 @@ write_report_and_maybe_pr() {
         log_fail "DOCS_PUBLIC_DIR=<path> で指定するか、${REPO_ROOT}/../docs-public に配置すること。レポートは生成できません。"
         return 1
     fi
+    cleanup_merged_report_branches
 
-    local report_date report_dir report_file
+    local report_date report_dir report_file rust_version nim_image
     report_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     report_dir="${DOCS_PUBLIC_DIR}/reports/release-verification"
     report_file="${report_dir}/v${ALOPEX_VERSION}.md"
     mkdir -p "${report_dir}"
+    rust_version="$(grep -oP '^ARG RUST_VERSION=\K.*' "${SCRIPT_DIR}/Dockerfile")"
+    nim_image="$(grep -oP '^ARG NIM_IMAGE=\K[^@]*' "${SCRIPT_DIR}/Dockerfile")"
 
     {
         echo "# リリース確認レポート: v${ALOPEX_VERSION}"
         echo ""
-        echo "> 生成日時 (UTC): ${report_date}"
         echo "> 総合結果: **$([ "${OVERALL_STATUS}" = "ok" ] && echo "✅ 全ステップ成功" || echo "❌ 失敗あり")**"
         echo ""
-        echo "## これは何を検証しているか"
-        echo ""
-        echo "alopex は「ライブラリ(インメモリ)・組み込み(ファイル)・シングルノード"
-        echo "サーバー・クラスタが、同一データファイルと同一プロトコルで動作する単一"
-        echo "エンジンである」ことを製品価値としている。このレポートは、その価値が"
-        echo "**実際にユーザーが手にする配布物**(crates.io の \`cargo install\`、"
-        echo "PyPI の \`pip install\`)で成立していることを示す。"
-        echo ""
-        echo "検証は専用コンテナ(\`scripts/release/verify-release/\`)内で行い、"
-        echo "**alopex のソースコードは一切ビルドしない**。Nim ツールチェーンも"
-        echo "使わない(v0.7.2 以降、Nim 共有ライブラリは crates.io 公開 crate に"
-        echo "事前ビルド済みで同梱されている)。過去に crates.io publish の順序"
-        echo "バグ・依存重複によるビルド失敗・実行時のライブラリ解決失敗が"
-        echo "リリース後に発覚した経緯があり、この検証はそれらを releaseタグ"
-        echo "push 後に即座に検知するためのものである。"
+        if [ "${OVERALL_STATUS}" = "ok" ]; then
+            echo "v${ALOPEX_VERSION} は、crates.io / PyPI に公開されたパッケージを"
+            echo "そのままインストールした状態で、ライブラリ・組み込み(ファイル)・"
+            echo "サーバー・クラスタのすべてが同一データに対して同一の結果を返すことを"
+            echo "確認済みである。"
+        else
+            echo "v${ALOPEX_VERSION} の確認中に失敗したステップがある。詳細は下記を参照。"
+        fi
         echo ""
         echo "## ステップ"
         echo ""
@@ -158,12 +188,19 @@ write_report_and_maybe_pr() {
             render_log_excerpt "${logfile}" 60
             echo ""
         done
-        echo "## 免責"
+        echo "---"
         echo ""
-        echo "- このレポートは \`scripts/release/verify-release/run.sh\` の自動実行結果を"
-        echo "  そのまま記録したものである。人手による追記・改変は行わない。"
-        echo "- 新しい検証ステップを追加する場合は run.sh 側の \`run_step\` 呼び出しに"
-        echo "  \`description\` を含めることが必須(結果一覧だけのステップを増やさない)。"
+        echo "## 検証環境"
+        echo ""
+        echo "| 項目 | 値 |"
+        echo "|---|---|"
+        echo "| 対象バージョン | v${ALOPEX_VERSION} |"
+        echo "| 生成日時 (UTC) | ${report_date} |"
+        echo "| パッケージ取得元 | crates.io(alopex-cli/alopex-server) / PyPI(alopex) |"
+        echo "| ソースビルド | なし(公開パッケージのみ使用) |"
+        echo "| Rust | \`${rust_version}\` |"
+        echo "| Nim(ビルド専用イメージ) | \`${nim_image}\` |"
+        echo "| Python | \`3.11\` |"
     } >"${report_file}"
 
     log_info "レポートを生成しました: ${report_file}"
