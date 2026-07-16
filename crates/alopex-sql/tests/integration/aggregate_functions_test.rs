@@ -181,6 +181,7 @@ fn distinct_aggregates_apply_per_group() {
     let result = harness.query_sql(
         "SELECT category, SUM(DISTINCT price), AVG(DISTINCT price), MIN(DISTINCT label), MAX(DISTINCT label), GROUP_CONCAT(DISTINCT label, '|'), STRING_AGG(DISTINCT label, ';') FROM products GROUP BY category",
     );
+    assert_eq!(result.rows.len(), 3);
     for row in result.rows {
         let SqlValue::Text(category) = &row[0] else {
             panic!("expected text category");
