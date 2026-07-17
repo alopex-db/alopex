@@ -8,7 +8,7 @@ use crate::planner::typed_expr::TypedExpr;
 use crate::scalar::{self, ScalarSignature};
 use crate::storage::SqlValue;
 
-use super::{EvalContext, conditional, numeric, string, type_fn};
+use super::{EvalContext, conditional, hash, numeric, string, type_fn};
 
 pub type EvalFn = fn(&[SqlValue]) -> Result<SqlValue>;
 pub type LazyEvalFn = fn(&[TypedExpr], &EvalContext<'_>) -> Result<SqlValue>;
@@ -89,6 +89,8 @@ fn evaluator_for(name: &str) -> (EvalFn, Option<LazyEvalFn>) {
             } else if let Some(eval) = conditional::eval_for(name) {
                 (eval, conditional::lazy_eval_for(name))
             } else if let Some(eval) = type_fn::eval_for(name) {
+                (eval, None)
+            } else if let Some(eval) = hash::eval_for(name) {
                 (eval, None)
             } else {
                 (unsupported, None)

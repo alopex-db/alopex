@@ -9,6 +9,7 @@ mod column_ref;
 pub(crate) mod conditional;
 mod context;
 mod function_call;
+pub(crate) mod hash;
 mod is_null;
 mod literal;
 pub(crate) mod numeric;
