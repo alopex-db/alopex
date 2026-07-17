@@ -56,6 +56,11 @@ pub use memory::{MemoryPolicy, SpillPolicy};
 pub use query::{RowIterator, ScanIterator, build_streaming_pipeline};
 pub use result::{ColumnInfo, ExecutionResult, QueryResult, QueryRowIterator, Row};
 
+/// Returns whether a plan requires direct access to the backing KV store.
+pub fn is_store_direct_plan(plan: &LogicalPlan) -> bool {
+    system::is_store_direct_plan(plan)
+}
+
 use std::sync::{Arc, RwLock};
 
 use alopex_core::kv::KVStore;

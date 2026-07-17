@@ -7,6 +7,7 @@ use sha2::Sha256;
 use crate::executor::{EvaluationError, ExecutorError, Result};
 use crate::storage::SqlValue;
 
+/// Maximum byte length accepted by hash and encoding functions.
 pub const MAX_INPUT_BYTES: usize = 16 * 1024 * 1024;
 
 macro_rules! wrappers {

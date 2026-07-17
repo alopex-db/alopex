@@ -6,6 +6,7 @@ use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::typed_expr::{Projection, TypedExpr, TypedExprKind};
 use crate::storage::{SqlValue, TxnBridge};
 
+/// PRAGMA cache sizes are expressed in 4096-byte pages.
 const CACHE_PAGE_SIZE: usize = 4096;
 
 pub(crate) fn try_execute<S: KVStore>(
@@ -25,6 +26,12 @@ pub(crate) fn try_execute<S: KVStore>(
         vec![ColumnInfo::new(name, return_type)],
         vec![vec![value]],
     ))))
+}
+
+/// Returns whether a plan is a standalone system function that needs the
+/// executor's store-backed path rather than an external transaction bridge.
+pub fn is_store_direct_plan(plan: &LogicalPlan) -> bool {
+    direct_system_call(plan).is_some()
 }
 
 fn direct_system_call(plan: &LogicalPlan) -> Option<(&str, ResolvedType)> {
