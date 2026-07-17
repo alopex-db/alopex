@@ -4,8 +4,11 @@ use alopex_core::KVTransaction;
 use alopex_sql::catalog::CatalogOverlay;
 use alopex_sql::catalog::TxnCatalogView;
 use alopex_sql::executor::query::execute_query_streaming;
+use alopex_sql::executor::query::iterator::VecIterator;
 use alopex_sql::executor::query::RowIterator;
-use alopex_sql::executor::{build_streaming_pipeline, ColumnInfo, Executor, QueryRowIterator, Row};
+use alopex_sql::executor::{
+    build_streaming_pipeline, ColumnInfo, ExecutionResult, Executor, QueryRowIterator, Row,
+};
 use alopex_sql::planner::typed_expr::Projection;
 use alopex_sql::storage::{SqlValue, TxnBridge};
 use alopex_sql::AlopexDialect;
@@ -229,6 +232,28 @@ impl Database {
             return Ok(Vec::new());
         }
 
+        // PRAGMA controls must execute against the store itself. Running them
+        // through the external-transaction bridge would hide the store from
+        // the executor and correctly reject the operation. Keep the
+        // auto-commit public API usable for a standalone PRAGMA.
+        if stmts.len() == 1 {
+            let overlay = CatalogOverlay::new();
+            let plan = {
+                let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
+                plan_stmt(&*catalog, &overlay, &stmts[0])?
+            };
+            if matches!(stmts[0].kind, StatementKind::Pragma { .. })
+                || alopex_sql::executor::is_store_direct_plan(&plan)
+            {
+                let mut executor: Executor<_, _> =
+                    Executor::new(self.store.clone(), self.sql_catalog.clone());
+                return executor
+                    .execute(plan)
+                    .map(|result| vec![result])
+                    .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)));
+            }
+        }
+
         let requires_write = stmts.iter().any(stmt_requires_write);
         let mode = if requires_write {
             TxnMode::ReadWrite
@@ -339,6 +364,50 @@ impl Database {
                 let (_, overlay_ref) = borrowed.split_parts();
                 plan_stmt(&*catalog, overlay_ref, stmt)?
             };
+
+            if alopex_sql::executor::is_store_direct_plan(&plan) {
+                let mut executor: Executor<_, _> =
+                    Executor::new(self.store.clone(), self.sql_catalog.clone());
+                let result = executor
+                    .execute(plan)
+                    .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?;
+                let ExecutionResult::Query(query) = result else {
+                    return Err(Error::Sql(alopex_sql::SqlError::Execution {
+                        message: "store-direct system function did not return rows".into(),
+                        code: "ALOPEX-E022",
+                    }));
+                };
+                let column_names: Vec<String> = query
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect();
+                let schema: Vec<alopex_sql::catalog::ColumnMetadata> = query
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        alopex_sql::catalog::ColumnMetadata::new(
+                            &column.name,
+                            column.data_type.clone(),
+                        )
+                    })
+                    .collect();
+                let rows: Vec<Row> = query
+                    .rows
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, values)| Row::new(index as u64, values))
+                    .collect();
+                let iter = VecIterator::new(rows, schema.clone());
+                let streaming_rows = StreamingRows {
+                    columns: query.columns,
+                    iter: Box::new(iter),
+                    projection: Projection::All(column_names),
+                    schema,
+                };
+                let result = f(streaming_rows)?;
+                return Ok(StreamingQueryResult::QueryProcessed(result));
+            }
 
             let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
             let (mut sql_txn, overlay_ref) = borrowed.split_parts();

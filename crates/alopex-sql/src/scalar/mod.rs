@@ -3,6 +3,11 @@
 //! This module is the single source of truth for scalar names, arity, type
 //! contracts, return rules, and optimizer metadata. Evaluation functions are
 //! attached by `executor::evaluator::registry`.
+//!
+//! The v0.7.4 catalog includes the v0.5.3 scalar set, v0.5.1 hash/encoding
+//! functions, and v0.5.2 system functions. `memory_stats`, `io_stats`, and
+//! `clear_cache` are resolved by the executor because they require store
+//! access; their signatures still participate in planner validation here.
 
 use crate::PlannerError;
 use crate::ast::expr::Literal;

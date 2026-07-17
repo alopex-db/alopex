@@ -21,7 +21,7 @@
 #
 # Usage:
 #   ./scripts/release/verify-release/run.sh [ALOPEX_VERSION] [--no-report]
-#   例: ./scripts/release/verify-release/run.sh 0.7.3
+#   例: ./scripts/release/verify-release/run.sh 0.7.4
 #
 # chirps は既定では隣接 checkout (${REPO_ROOT}/../chirps) を使う。存在しない
 # 場合は公開 repo を一時 clone するため、worktree 配置に依存しない。
@@ -37,7 +37,7 @@ if [ -z "${DOCS_PUBLIC_DIR:-}" ] && [ ! -d "${DEFAULT_DOCS_PUBLIC_DIR}" ] \
 fi
 DOCS_PUBLIC_DIR="${DOCS_PUBLIC_DIR:-${DEFAULT_DOCS_PUBLIC_DIR}}"
 
-ALOPEX_VERSION="0.7.3"
+ALOPEX_VERSION="0.7.4"
 DO_REPORT=1
 for arg in "$@"; do
     case "${arg}" in
@@ -340,8 +340,8 @@ run_step "v0.7 機能デモ: demo_dataframe_p3.py" \
     "DataFrame の string/datetime/list 名前空間関数と explode/implode の往復変換が Rust と Python の両サーフェスで決定的に(同一入力に対して常にバイト単位で同一の出力を)動作することを確認する(D4)。" \
     -- run_in_container python3 scripts/demo/v07/demo_dataframe_p3.py
 
-run_step "v0.7.3 動作保証: alopex-sql aggregate state/distinct/parallel" \
-    "crates.io 公開版 alopex-sql だけを依存にした一時 Rust crate をコンテナ内で作成し、v0.7.3 の中核変更である Accumulator state/merge、COUNT 以外の DISTINCT 集約、単一プロセス partial→final parallel aggregate が実際に動作することを確認する。リポジトリ内の alopex 製品ソースはビルドしないため、公開 artifact の振る舞い保証になる。" \
+run_step "v${ALOPEX_VERSION} 回帰保証: alopex-sql aggregate state/distinct/parallel" \
+    "crates.io 公開版 alopex-sql だけを依存にした一時 Rust crate をコンテナ内で作成し、Accumulator state/merge、COUNT 以外の DISTINCT 集約、単一プロセス partial→final parallel aggregate が v${ALOPEX_VERSION} で実際に動作することを確認する。リポジトリ内の alopex 製品ソースはビルドしないため、公開 artifact の振る舞い保証になる。" \
     -- run_in_container bash -c '
 set -euo pipefail
 workdir="$(mktemp -d)"
@@ -479,12 +479,16 @@ fn main() -> alopex_sql::executor::Result<()> {
     assert_eq!(totals[0].1, SqlValue::Double(25.0));
     assert_eq!(totals[1].1, SqlValue::Double(25.0));
 
-    println!("v0.7.3 aggregate behavior guarantee passed");
+    println!("aggregate regression guarantee passed");
     Ok(())
 }
 RS
 cargo run --quiet
 '
+
+run_step "v0.7.4 SQL scalar/PRAGMA 動作保証" \
+    "crates.io/PyPI から取得した v0.7.4 の CLI で、ハッシュ・UUID・エンコード・文字列関数と PRAGMA の公開利用経路を確認する。ソースの cargo build は行わず、インストール済みの alopex CLI だけを実行する。" \
+    -- run_in_container bash -c 'ALOPEX_CLI=alopex bash scripts/demo/v074/demo_sql_v074.sh'
 
 echo ""
 log_ok "全デモスクリプトが公開版 v${ALOPEX_VERSION} で完走しました。"

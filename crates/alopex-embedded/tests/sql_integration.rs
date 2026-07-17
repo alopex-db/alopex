@@ -71,6 +71,34 @@ fn sql_integration_database_execute_sql_query() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_database_execute_sql_pragma_uses_store_path() {
+    let db = Database::new();
+
+    assert!(matches!(
+        db.execute_sql("PRAGMA cache_size = 8;").unwrap(),
+        ExecutionResult::Success
+    ));
+    assert!(matches!(
+        db.execute_sql("PRAGMA memory_limit = '64MiB';").unwrap(),
+        ExecutionResult::Success
+    ));
+
+    match db.execute_sql("PRAGMA io_stats;").unwrap() {
+        ExecutionResult::Query(result) => assert_eq!(result.columns[0].name, "io_stats"),
+        other => panic!("expected PRAGMA query result, got {other:?}"),
+    }
+
+    match db.execute_sql("SELECT clear_cache();").unwrap() {
+        ExecutionResult::Query(result) => assert!(matches!(
+            result.rows[0][0],
+            SqlValue::BigInt(_) | SqlValue::Integer(_)
+        )),
+        other => panic!("expected system function query result, got {other:?}"),
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_database_execute_sql_error() {
     let db = Database::new();
     let err = db
