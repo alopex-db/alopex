@@ -13,7 +13,7 @@
 //! - [`ProjectedColumn`]: A projected column for SELECT clauses
 //! - [`Projection`]: The projection specification for SELECT
 
-use crate::ast::expr::{BinaryOp, Literal, PatternMatchKind, UnaryOp};
+use crate::ast::expr::{BinaryOp, Literal, UnaryOp};
 use crate::ast::span::Span;
 use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::types::ResolvedType;
@@ -129,8 +129,6 @@ pub enum TypedExprKind {
         escape: Option<Box<TypedExpr>>,
         /// Whether the expression is negated (NOT LIKE).
         negated: bool,
-        /// Pattern operator variant.
-        kind: PatternMatchKind,
     },
 
     /// An IN list expression.

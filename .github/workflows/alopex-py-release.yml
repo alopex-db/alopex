@@ -112,7 +112,10 @@ jobs:
           nim-version: '2.2.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build Nim SQL parser library
-        run: bash scripts/build-nim-parser.sh --backend host
+        run: |
+          cd "${NIM_SQL_PARSER_DIR}"
+          nimble install -y npeg msgpack4nim
+          nimble lib
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -141,7 +144,10 @@ jobs:
           nim-version: '2.2.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build Nim SQL parser library
-        run: bash scripts/build-nim-parser.sh --backend host
+        run: |
+          cd "${NIM_SQL_PARSER_DIR}"
+          nimble install -y npeg msgpack4nim
+          nimble lib
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:

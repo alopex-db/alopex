@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::warn;
 
 /// メモリ使用量の統計（バイト単位）。
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct MemoryStats {
     /// 全体のメモリ使用量。
     pub total_bytes: usize,
@@ -119,15 +119,6 @@ impl KVStore for MemoryKV {
 
     fn begin(&self, mode: TxnMode) -> Result<Self::Transaction<'_>> {
         self.manager.begin_internal(mode)
-    }
-
-    fn runtime_stats(&self) -> Option<crate::kv::RuntimeStats> {
-        Some(crate::kv::RuntimeStats::Memory(self.memory_stats()))
-    }
-
-    fn set_memory_limit_bytes(&self, limit: Option<usize>) -> Result<()> {
-        self.manager.set_memory_limit(limit);
-        Ok(())
     }
 }
 

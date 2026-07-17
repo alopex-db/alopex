@@ -72,7 +72,15 @@ jobs:
 
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Run compatibility tests
         env:
           ALOPEX_COMPAT_COMPRESSION: ${{ matrix.compression }}

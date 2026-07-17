@@ -1496,7 +1496,6 @@ fn test_infer_like_expression() {
             }),
             escape: None,
             negated: false,
-            kind: Default::default(),
         },
         span: test_span(),
     };

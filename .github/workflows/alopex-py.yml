@@ -37,7 +37,15 @@ jobs:
           components: rustfmt, clippy
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Cargo fmt
         run: cargo fmt --all -- --check
       - name: Cargo clippy
@@ -124,7 +132,15 @@ jobs:
           apt-get install -y patchelf
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       # macOS/Windows ランナーは docker で Linux コンテナを動かせないため、
       # ネイティブ Nim ツールチェーン (2.2 固定) をセットアップして共有ライブラリを生成する。
       # 要 CI 検証: macOS/Windows ランナー上でのみ動作確認可能（ローカル検証不可）。
@@ -137,7 +153,10 @@ jobs:
       - name: Build Nim SQL parser library (macOS/Windows)
         if: runner.os != 'Linux'
         shell: bash
-        run: bash scripts/build-nim-parser.sh --backend host
+        run: |
+          cd "${NIM_SQL_PARSER_DIR}"
+          nimble install -y npeg msgpack4nim
+          nimble lib
       # 診断専用ステップ (fail させない): DLL の推移的依存と単体ロード可否を
       # CI ログへ出力する。静的リンク (nim_sql_parser.nimble) が不十分な場合、
       # 次の CI 実行でどの依存 DLL が残っているかをここで特定できる。
@@ -291,7 +310,15 @@ jobs:
           apt-get install -y patchelf
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Maturin develop
         run: |
           maturin develop -m crates/alopex-py/Cargo.toml
@@ -392,7 +419,15 @@ jobs:
           apt-get install -y patchelf
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w "/workspace/${NIM_SQL_PARSER_DIR}" \
+            -e PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            nimlang/nim:2.2 \
+            sh -c 'nimble install -y npeg msgpack4nim && nimble lib'
       - name: Maturin develop (numpy)
         run: |
           maturin develop -m crates/alopex-py/Cargo.toml --features numpy

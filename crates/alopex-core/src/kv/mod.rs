@@ -4,15 +4,6 @@ use crate::error::Result;
 use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, Value};
 
-/// Runtime statistics exposed by SQL system functions.
-#[derive(Debug, Clone, PartialEq)]
-pub enum RuntimeStats {
-    /// Statistics for the in-memory store.
-    Memory(crate::kv::memory::MemoryStats),
-    /// Statistics for the LSM store.
-    Lsm(crate::lsm::metrics::LsmMetricsSnapshot),
-}
-
 #[cfg(feature = "test-hooks")]
 pub mod hooks;
 
@@ -118,24 +109,4 @@ pub trait KVStore: Send + Sync {
 
     /// A convenience method to begin a new transaction.
     fn begin(&self, mode: TxnMode) -> Result<Self::Transaction<'_>>;
-
-    /// Returns a point-in-time runtime statistics snapshot, when supported.
-    fn runtime_stats(&self) -> Option<RuntimeStats> {
-        None
-    }
-
-    /// Sets the memory limit in bytes, when supported.
-    fn set_memory_limit_bytes(&self, _limit: Option<usize>) -> Result<()> {
-        Ok(())
-    }
-
-    /// Sets the cache capacity in bytes, when supported.
-    fn set_cache_capacity_bytes(&self, _capacity: usize) -> Result<()> {
-        Ok(())
-    }
-
-    /// Clears the cache and returns the number of bytes removed.
-    fn clear_cache(&self) -> Result<usize> {
-        Ok(0)
-    }
 }
