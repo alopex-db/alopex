@@ -66,7 +66,8 @@ type
     opAdd, opSub, opMul, opDiv, opMod
     opStringConcat
     opAnd, opOr
-    opLike, opNotLike, opIn, opNotIn, opBetween, opNotBetween, opIs
+    opLike, opNotLike, opILike, opNotILike, opGlob, opNotGlob,
+    opSimilarTo, opNotSimilarTo, opIn, opNotIn, opBetween, opNotBetween, opIs
 
   UnaryOpKind* = enum
     opNot, opNeg, opIsNull, opIsNotNull

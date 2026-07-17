@@ -87,7 +87,15 @@ proc normalizedBinaryOp(op: BinaryOpKind): string =
   of opAnd: "And"
   of opOr: "Or"
   of opStringConcat: "StringConcat"
-  of opLike, opNotLike, opIn, opNotIn, opBetween, opNotBetween, opIs: $op
+  of opLike, opNotLike, opILike, opNotILike, opGlob, opNotGlob,
+     opSimilarTo, opNotSimilarTo, opIn, opNotIn, opBetween, opNotBetween, opIs: $op
+
+proc patternKind(op: BinaryOpKind): string =
+  case op
+  of opILike, opNotILike: "ILike"
+  of opGlob, opNotGlob: "Glob"
+  of opSimilarTo, opNotSimilarTo: "SimilarTo"
+  else: "Like"
 
 proc normalizedBinaryOp(opName: string): string =
   case opName
@@ -486,8 +494,8 @@ proc writeExpr(s: MsgStream; node: SqlNode) =
       s.writeExpr(node.binRight.children[1])
       s.writeKey("negated")
       s.pack_type(node.binOp == opNotBetween)
-    of opLike, opNotLike:
-      s.pack_map(5)
+    of opLike, opNotLike, opILike, opNotILike, opGlob, opNotGlob, opSimilarTo, opNotSimilarTo:
+      s.pack_map(6)
       s.writeKey("variant")
       s.pack_type("Like")
       s.writeKey("expr")
@@ -503,7 +511,9 @@ proc writeExpr(s: MsgStream; node: SqlNode) =
       else:
         s.writeNil()
       s.writeKey("negated")
-      s.pack_type(node.binOp == opNotLike)
+      s.pack_type(node.binOp in {opNotLike, opNotILike, opNotGlob, opNotSimilarTo})
+      s.writeKey("kind")
+      s.pack_type(patternKind(node.binOp))
     of opIn, opNotIn:
       s.pack_map(4)
       s.writeKey("variant")

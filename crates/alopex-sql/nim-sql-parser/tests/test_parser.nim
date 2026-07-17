@@ -215,6 +215,54 @@ suite "Expressions — LIKE / NOT LIKE":
     check expr.binRight.kind == nkExprList
     check expr.binRight.children.len == 2
 
+suite "Expressions — standard pattern operators":
+
+  test "ILIKE and NOT ILIKE":
+    let ast = parseSql("SELECT * FROM t WHERE name ILIKE 'alice%'")
+    let expr = ast.children[^1].children[0]
+    check expr.kind == nkBinaryOp
+    check expr.binOp == opILike
+
+    let negated = parseSql("SELECT * FROM t WHERE name NOT ILIKE 'alice%'")
+    check negated.children[^1].children[0].binOp == opNotILike
+
+  test "GLOB and NOT GLOB":
+    let ast = parseSql("SELECT * FROM t WHERE name GLOB '*.sql'")
+    check ast.children[^1].children[0].binOp == opGlob
+
+    let negated = parseSql("SELECT * FROM t WHERE name NOT GLOB '*.sql'")
+    check negated.children[^1].children[0].binOp == opNotGlob
+
+  test "SIMILAR TO and NOT SIMILAR TO":
+    let ast = parseSql("SELECT * FROM t WHERE name SIMILAR TO '(alice|bob)%'")
+    check ast.children[^1].children[0].binOp == opSimilarTo
+
+    let negated = parseSql("SELECT * FROM t WHERE name NOT SIMILAR TO '(alice|bob)%'")
+    check negated.children[^1].children[0].binOp == opNotSimilarTo
+
+suite "Expressions — standard function syntax":
+
+  test "SUBSTRING normalizes to SUBSTR":
+    let ast = parseSql("SELECT SUBSTRING(name FROM 2 FOR 3)")
+    let call = ast.children[0].children[0]
+    check call.kind == nkFunctionCall
+    check call.children[0].strVal == "SUBSTR"
+    check call.children.len == 4
+
+  test "POSITION normalizes to STRPOS":
+    let ast = parseSql("SELECT POSITION('x' IN name)")
+    let call = ast.children[0].children[0]
+    check call.kind == nkFunctionCall
+    check call.children[0].strVal == "STRPOS"
+    check call.children.len == 3
+
+  test "TRIM supports FROM syntax":
+    let ast = parseSql("SELECT TRIM('x' FROM name)")
+    let call = ast.children[0].children[0]
+    check call.kind == nkFunctionCall
+    check call.children[0].strVal == "TRIM"
+    check call.children.len == 3
+
   test "NOT LIKE":
     let ast = parseSql("SELECT * FROM t WHERE name NOT LIKE '%bob%'")
     check ast.kind == nkSelect

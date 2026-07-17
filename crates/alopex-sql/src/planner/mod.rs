@@ -2622,6 +2622,7 @@ fn rewrite_expr_with_maps(
             pattern,
             escape,
             negated,
+            kind,
         } => {
             let inner = rewrite_expr_with_maps(inner, group_key_map, aggregate_map, output_names)?;
             let pattern =
@@ -2642,6 +2643,7 @@ fn rewrite_expr_with_maps(
                     pattern: Box::new(pattern),
                     escape,
                     negated: *negated,
+                    kind: *kind,
                 },
                 resolved_type: expr.resolved_type.clone(),
                 span: expr.span,

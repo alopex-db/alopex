@@ -17,7 +17,7 @@ type
     tkAs, tkNull, tkTrue, tkFalse
     tkOrder, tkBy, tkAsc, tkDesc, tkNulls, tkFirst, tkLast
     tkGroup, tkHaving, tkLimit, tkOffset
-    tkLike, tkIn, tkBetween, tkIs, tkExists, tkAny, tkSome
+    tkLike, tkILike, tkGlob, tkSimilar, tkTo, tkFor, tkIn, tkBetween, tkIs, tkExists, tkAny, tkSome
     tkDistinct, tkAll, tkCast, tkCase, tkWhen, tkThen, tkElse, tkEnd, tkNow
     tkPrimary, tkKey, tkForeign, tkReferences
     tkUnique, tkCheck, tkDefault, tkConstraint, tkEscape, tkWith
@@ -60,7 +60,8 @@ const Keywords = {
   "order": tkOrder, "by": tkBy, "asc": tkAsc, "desc": tkDesc,
   "nulls": tkNulls, "first": tkFirst, "last": tkLast,
   "group": tkGroup, "having": tkHaving, "limit": tkLimit, "offset": tkOffset,
-  "like": tkLike, "in": tkIn, "between": tkBetween, "is": tkIs,
+  "like": tkLike, "ilike": tkILike, "glob": tkGlob, "similar": tkSimilar, "to": tkTo, "for": tkFor,
+  "in": tkIn, "between": tkBetween, "is": tkIs,
   "exists": tkExists, "any": tkAny, "some": tkSome,
   "distinct": tkDistinct, "all": tkAll, "cast": tkCast, "now": tkNow,
   "case": tkCase, "when": tkWhen, "then": tkThen, "else": tkElse, "end": tkEnd,

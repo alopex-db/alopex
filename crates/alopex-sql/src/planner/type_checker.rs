@@ -7,7 +7,9 @@
 use crate::ast::Span;
 use crate::ast::Statement;
 use crate::ast::ddl::VectorMetric;
-use crate::ast::expr::{BinaryOp, Expr, ExprKind, Literal, Quantifier as AstQuantifier, UnaryOp};
+use crate::ast::expr::{
+    BinaryOp, Expr, ExprKind, Literal, PatternMatchKind, Quantifier as AstQuantifier, UnaryOp,
+};
 use crate::catalog::{Catalog, ColumnMetadata, TableMetadata};
 use crate::planner::aggregate_expr::{AggregateExpr, AggregateFunction};
 use crate::planner::error::PlannerError;
@@ -148,11 +150,13 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 pattern,
                 escape,
                 negated,
+                kind,
             } => self.infer_like_type_with_scope(
                 expr,
                 pattern,
                 escape.as_deref(),
                 *negated,
+                *kind,
                 scope,
                 plan_subquery,
                 span,
@@ -822,12 +826,14 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
 
     /// Infer the type of a LIKE expression.
     #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
     fn infer_like_type(
         &self,
         expr: &Expr,
         pattern: &Expr,
         escape: Option<&Expr>,
         negated: bool,
+        kind: PatternMatchKind,
         table: &TableMetadata,
         span: Span,
     ) -> Result<TypedExpr, PlannerError> {
@@ -881,6 +887,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 pattern: Box::new(pattern_typed),
                 escape: escape_typed,
                 negated,
+                kind,
             },
             resolved_type: ResolvedType::Boolean,
             span,
@@ -888,12 +895,14 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn infer_like_type_with_scope(
         &self,
         expr: &Expr,
         pattern: &Expr,
         escape: Option<&Expr>,
         negated: bool,
+        kind: PatternMatchKind,
         scope: &[ScopedTable],
         plan_subquery: &SubqueryPlanner<'_>,
         span: Span,
@@ -946,6 +955,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 pattern: Box::new(pattern_typed),
                 escape: escape_typed,
                 negated,
+                kind,
             },
             resolved_type: ResolvedType::Boolean,
             span,
@@ -1117,7 +1127,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         star: bool,
         span: Span,
     ) -> Result<ResolvedType, PlannerError> {
-        let lower_name = name.to_lowercase();
+        let lower_name = name.to_ascii_lowercase();
 
         match lower_name.as_str() {
             "count" => self.check_count(args, distinct, star, span),
@@ -1128,19 +1138,26 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             "max" => self.check_min_max(args, distinct, star, span),
             "group_concat" => self.check_group_concat(args, distinct, star, span),
             "string_agg" => self.check_string_agg(args, distinct, star, span),
-            "vector_distance" => self.check_vector_distance(args, span),
-            "vector_similarity" => self.check_vector_similarity(args, span),
-            "vector_dims" => self.check_vector_dims(args, span),
-            "vector_norm" => self.check_vector_norm(args, span),
-            // Add more built-in functions here as needed
             _ => {
-                // Unknown function is an error
-                Err(PlannerError::UnsupportedFeature {
-                    feature: format!("function '{}'", name),
-                    version: "future".to_string(),
-                    line: span.start.line,
-                    column: span.start.column,
-                })
+                let Some(signature) = crate::scalar::signature(&lower_name) else {
+                    return Err(PlannerError::unsupported_feature(
+                        format!("function '{name}'"),
+                        "future",
+                        span,
+                    ));
+                };
+                if distinct || star {
+                    return Err(PlannerError::invalid_expression(format!(
+                        "scalar function '{name}' does not support DISTINCT or *"
+                    )));
+                }
+                signature.arity.validate(name, args.len(), span)?;
+                (signature.check)(args)?;
+                let types: Vec<_> = args.iter().map(|arg| arg.resolved_type.clone()).collect();
+                match &signature.ret {
+                    crate::scalar::ReturnRule::Fixed(ty) => Ok(ty.clone()),
+                    crate::scalar::ReturnRule::FromArgs(rule) => rule(&types),
+                }
             }
         }
     }
@@ -1481,44 +1498,6 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             ));
         }
         Ok(ResolvedType::Text)
-    }
-
-    fn check_vector_dims(
-        &self,
-        args: &[TypedExpr],
-        span: Span,
-    ) -> Result<ResolvedType, PlannerError> {
-        let arg = self.require_single_arg(args, span)?;
-        if !matches!(
-            arg.resolved_type,
-            ResolvedType::Vector { .. } | ResolvedType::Null
-        ) {
-            return Err(PlannerError::type_mismatch(
-                "Vector",
-                arg.resolved_type.type_name().to_string(),
-                arg.span,
-            ));
-        }
-        Ok(ResolvedType::Integer)
-    }
-
-    fn check_vector_norm(
-        &self,
-        args: &[TypedExpr],
-        span: Span,
-    ) -> Result<ResolvedType, PlannerError> {
-        let arg = self.require_single_arg(args, span)?;
-        if !matches!(
-            arg.resolved_type,
-            ResolvedType::Vector { .. } | ResolvedType::Null
-        ) {
-            return Err(PlannerError::type_mismatch(
-                "Vector",
-                arg.resolved_type.type_name().to_string(),
-                arg.span,
-            ));
-        }
-        Ok(ResolvedType::Double)
     }
 
     fn require_single_arg<'b>(
