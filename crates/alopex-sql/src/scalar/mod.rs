@@ -142,12 +142,42 @@ pub fn check_text_or_blob(args: &[TypedExpr]) -> Result<(), PlannerError> {
     Ok(())
 }
 
+pub fn check_bigint(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    for arg in args {
+        if !matches!(arg.resolved_type, ResolvedType::BigInt | ResolvedType::Null) {
+            return Err(PlannerError::type_mismatch(
+                "BigInt",
+                arg.resolved_type.type_name(),
+                arg.span,
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn check_blob_text(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    if let Some(first) = args.first()
+        && !matches!(first.resolved_type, ResolvedType::Blob | ResolvedType::Null)
+    {
+        return Err(PlannerError::type_mismatch(
+            "Blob",
+            first.resolved_type.type_name(),
+            first.span,
+        ));
+    }
+    check_text(&args[1..])
+}
+
 pub fn check_any(args: &[TypedExpr]) -> Result<(), PlannerError> {
     if args.is_empty() {
         return Err(PlannerError::invalid_expression(
             "at least one argument is required",
         ));
     }
+    Ok(())
+}
+
+pub fn check_no_args(_args: &[TypedExpr]) -> Result<(), PlannerError> {
     Ok(())
 }
 
@@ -469,6 +499,68 @@ static SIGNATURES: &[ScalarSignature] = &[
         Arity::Exact(0),
         check_numeric,
         ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "sha256",
+        Arity::Exact(1),
+        check_text_or_blob,
+        ReturnRule::Fixed(ResolvedType::Blob),
+    ),
+    sig(
+        "md5",
+        Arity::Exact(1),
+        check_text_or_blob,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "simhash",
+        Arity::Exact(1),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::BigInt),
+    ),
+    sig(
+        "hamming_distance",
+        Arity::Exact(2),
+        check_bigint,
+        ReturnRule::Fixed(ResolvedType::Integer),
+    ),
+    sig_meta(
+        "gen_random_uuid",
+        Arity::Exact(0),
+        check_no_args,
+        ReturnRule::Fixed(ResolvedType::Text),
+        RANDOM_META,
+    ),
+    sig_meta(
+        "uuidv7",
+        Arity::Exact(0),
+        check_no_args,
+        ReturnRule::Fixed(ResolvedType::Text),
+        RANDOM_META,
+    ),
+    sig(
+        "hex",
+        Arity::Exact(1),
+        check_text_or_blob,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "unhex",
+        Arity::Exact(1),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Blob),
+    ),
+    sig(
+        "encode",
+        Arity::Exact(2),
+        check_blob_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "decode",
+        Arity::Exact(2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Blob),
     ),
     sig(
         "length",
