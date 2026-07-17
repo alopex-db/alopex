@@ -92,6 +92,17 @@ fn decode_format(function: &str, format: &str) -> Result<&'static str> {
 }
 
 fn eval_named(name: &str, values: &[SqlValue]) -> Result<SqlValue> {
+    let expected = match name {
+        "hamming_distance" | "encode" | "decode" => 2,
+        "gen_random_uuid" | "uuidv7" => 0,
+        _ => 1,
+    };
+    if values.len() != expected {
+        return Err(invalid(
+            name,
+            format!("expected {expected} argument(s), got {}", values.len()),
+        ));
+    }
     match name {
         "sha256" => {
             let Some(bytes) = input_bytes(name, &values[0])? else {
@@ -262,6 +273,12 @@ mod tests {
         assert!(matches!(&first, SqlValue::Text(value) if value.len() == 36));
         assert!(matches!(&second, SqlValue::Text(value) if value.len() == 36));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn wrong_arity_returns_error_without_panicking() {
+        assert!(eval_for("sha256").unwrap()(&[]).is_err());
+        assert!(eval_for("hamming_distance").unwrap()(&[SqlValue::BigInt(1)]).is_err());
     }
 
     #[test]
