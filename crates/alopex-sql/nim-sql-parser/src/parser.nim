@@ -68,12 +68,14 @@ proc makeAlias(expr: SqlNode, alias: string; span: Span = emptySpan()): SqlNode 
 
 # Forward declarations
 proc parseExpr(p: var Parser): SqlNode
+proc parseConcat(p: var Parser): SqlNode
 proc parseSelectStmt(p: var Parser): SqlNode
 proc parseInsertStmt(p: var Parser): SqlNode
 proc parseUpdateStmt(p: var Parser): SqlNode
 proc parseDeleteStmt(p: var Parser): SqlNode
 proc parseCreateStmt(p: var Parser): SqlNode
 proc parseDropStmt(p: var Parser): SqlNode
+proc parsePragmaStmt(p: var Parser): SqlNode
 proc parseTypeName(p: var Parser): SqlNode
 
 # --- Expression parsing (precedence climbing) ---
@@ -116,8 +118,54 @@ proc parseExistsExpr(p: var Parser; negated: bool): SqlNode =
 
 proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
   result = newNode(nkFunctionCall, tokenSpan(nameTok))
-  result.children.add(newIdent(nameTok.value, tokenSpan(nameTok)))
   discard p.expect(tkLParen)
+  let normalizedName = case nameTok.value.toLowerAscii()
+    of "substring": "SUBSTR"
+    of "position": "STRPOS"
+    else: nameTok.value
+  result.children.add(newIdent(normalizedName, tokenSpan(nameTok)))
+  if nameTok.value.toLowerAscii() == "substring" and not p.check(tkRParen):
+    result.children.add(p.parseExpr())
+    if p.check(tkFrom):
+      discard p.advance()
+      result.children.add(p.parseExpr())
+      if p.check(tkFor):
+        discard p.advance()
+        result.children.add(p.parseExpr())
+      discard p.expect(tkRParen)
+      return
+    while p.check(tkComma):
+      discard p.advance()
+      result.children.add(p.parseExpr())
+    discard p.expect(tkRParen)
+    return
+  if nameTok.value.toLowerAscii() == "position" and not p.check(tkRParen):
+    let searched = p.parseConcat()
+    if p.check(tkIn):
+      discard p.advance()
+      let source = p.parseExpr()
+      result.children.add(source)
+      result.children.add(searched)
+      discard p.expect(tkRParen)
+      return
+    result.children.add(searched)
+    while p.check(tkComma):
+      discard p.advance()
+      result.children.add(p.parseExpr())
+    discard p.expect(tkRParen)
+    return
+  if nameTok.value.toLowerAscii() == "trim" and not p.check(tkRParen):
+    result.children.add(p.parseExpr())
+    if p.check(tkFrom):
+      discard p.advance()
+      result.children.add(p.parseExpr())
+      discard p.expect(tkRParen)
+      return
+    while p.check(tkComma):
+      discard p.advance()
+      result.children.add(p.parseExpr())
+    discard p.expect(tkRParen)
+    return
   if not p.check(tkRParen):
     if p.check(tkStar):
       result.funcStar = true
@@ -272,6 +320,17 @@ proc parseInExpr(p: var Parser; left: SqlNode; negated: bool): SqlNode =
     discard p.expect(tkRParen)
     result = newBinaryOp(if negated: opNotIn else: opIn, left, list)
 
+proc parsePattern(p: var Parser; left: SqlNode; op: BinaryOpKind; allowEscape: bool): SqlNode =
+  let pattern = p.parseConcat()
+  if allowEscape and p.check(tkEscape):
+    discard p.advance()
+    let esc = p.parseConcat()
+    let pair = newNode(nkExprList)
+    pair.children.add(pattern)
+    pair.children.add(esc)
+    return newBinaryOp(op, left, pair)
+  newBinaryOp(op, left, pattern)
+
 proc parseComparison(p: var Parser): SqlNode =
   result = p.parseConcat()
 
@@ -286,18 +345,16 @@ proc parseComparison(p: var Parser): SqlNode =
       range.children.add(low)
       range.children.add(high)
       result = newBinaryOp(opNotBetween, result, range)
-    elif p.check(tkLike):
-      discard p.advance()
-      let pattern = p.parseConcat()
-      if p.check(tkEscape):
-        discard p.advance()
-        let esc = p.parseConcat()
-        let pair = newNode(nkExprList)
-        pair.children.add(pattern)
-        pair.children.add(esc)
-        result = newBinaryOp(opNotLike, result, pair)
-      else:
-        result = newBinaryOp(opNotLike, result, pattern)
+    elif p.check(tkLike) or p.check(tkILike) or p.check(tkGlob) or p.check(tkSimilar):
+      let opToken = p.advance()
+      let op = case opToken.kind
+        of tkLike: opNotLike
+        of tkILike: opNotILike
+        of tkGlob: opNotGlob
+        else:
+          discard p.expect(tkTo)
+          opNotSimilarTo
+      result = p.parsePattern(result, op, op in {opNotLike, opNotILike})
     elif p.check(tkIn):
       result = p.parseInExpr(result, true)
     else:
@@ -322,18 +379,16 @@ proc parseComparison(p: var Parser): SqlNode =
       result = p.parseQuantified(result, op)
     else:
       result = newBinaryOp(op, result, p.parseConcat())
-  elif p.check(tkLike):
-    discard p.advance()
-    let pattern = p.parseConcat()
-    if p.check(tkEscape):
-      discard p.advance()
-      let esc = p.parseConcat()
-      let pair = newNode(nkExprList)
-      pair.children.add(pattern)
-      pair.children.add(esc)
-      result = newBinaryOp(opLike, result, pair)
-    else:
-      result = newBinaryOp(opLike, result, pattern)
+  elif p.check(tkLike) or p.check(tkILike) or p.check(tkGlob) or p.check(tkSimilar):
+    let opToken = p.advance()
+    let op = case opToken.kind
+      of tkLike: opLike
+      of tkILike: opILike
+      of tkGlob: opGlob
+      else:
+        discard p.expect(tkTo)
+        opSimilarTo
+    result = p.parsePattern(result, op, op in {opLike, opILike})
   elif p.check(tkIn):
     result = p.parseInExpr(result, false)
   elif p.check(tkBetween):
@@ -786,6 +841,22 @@ proc parseDropStmt(p: var Parser): SqlNode =
   else:
     p.error("expected TABLE or INDEX after DROP")
 
+proc parsePragmaStmt(p: var Parser): SqlNode =
+  let start = p.expect(tkPragma)
+  result = newNode(nkPragma, tokenSpan(start))
+  let name = p.expectIdent("pragma name")
+  result.children.add(newIdent(name.value, tokenSpan(name)))
+  if p.check(tkEq):
+    discard p.advance()
+    if p.check(tkInteger):
+      let value = p.advance()
+      result.children.add(newIntLit(parseBiggestInt(value.value), tokenSpan(value)))
+    elif p.check(tkString):
+      let value = p.advance()
+      result.children.add(newStringLit(value.value, tokenSpan(value)))
+    else:
+      p.error("expected integer or string pragma value")
+
 proc parseStatement*(p: var Parser): SqlNode =
   case p.current.kind
   of tkSelect:
@@ -800,8 +871,10 @@ proc parseStatement*(p: var Parser): SqlNode =
     result = p.parseCreateStmt()
   of tkDrop:
     result = p.parseDropStmt()
+  of tkPragma:
+    result = p.parsePragmaStmt()
   else:
-    p.error("expected SQL statement (SELECT, INSERT, UPDATE, DELETE, CREATE, DROP)")
+    p.error("expected SQL statement (SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA)")
 
   if p.check(tkSemicolon):
     discard p.advance()

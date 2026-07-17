@@ -37,6 +37,7 @@ mod nim_bridge;
 mod nim_ffi;
 pub mod parser;
 pub mod planner;
+pub mod scalar;
 pub mod storage;
 #[cfg(all(feature = "tokio", not(target_arch = "wasm32")))]
 pub mod tokio_adapter;
@@ -44,7 +45,7 @@ pub mod unified_error;
 
 // AST types
 pub use ast::{
-    Statement, StatementKind,
+    PragmaValue, Statement, StatementKind,
     ddl::*,
     dml::*,
     expr::*,
