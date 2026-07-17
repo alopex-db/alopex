@@ -57,6 +57,7 @@ futures = { workspace = true, optional = true }
 [dev-dependencies]
 proptest = "1.4"
 criterion = "0.5"
+rusqlite = { version = "0.31", features = ["bundled"] }
 tempfile = "3.10"
 serde_json.workspace = true
 
