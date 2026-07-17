@@ -17,7 +17,7 @@ ACT_PY_FLAGS ?= --env ACT=true --platform $(ACT_PY_PLATFORM) --pull=false $(ACT_
 ACT_CLEAN_VOLUMES ?= docker volume ls -q --filter "label=act" | xargs -r docker volume rm && docker volume ls --format "{{.Name}}" | grep -E '^act-' | xargs -r docker volume rm
 
 nim-parser:
-	bash scripts/build-nim-parser.sh --backend "$${NIM_PARSER_BACKEND:-auto}"
+	cd crates/alopex-sql/nim-sql-parser && nimble lib
 
 verify-release:
 	./scripts/release/verify-release/run.sh $(ALOPEX_VERSION)

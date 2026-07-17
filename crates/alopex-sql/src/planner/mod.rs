@@ -39,7 +39,7 @@ use crate::ast::dml::{
     Delete, FromItem, Insert, LITERAL_TABLE, OrderByExpr, Select, SelectItem, Update,
 };
 use crate::ast::expr::Literal;
-use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
+use crate::ast::{Spanned, Statement, StatementKind};
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::{AlopexDialect, DataSourceFormat, Parser, SqlError, TableType};
 use std::collections::HashMap;
@@ -427,7 +427,6 @@ impl TableReferenceExtractor {
                     "DROP INDEX {name} does not expose a target table in the current logical plan"
                 ),
             )),
-            LogicalPlan::Pragma { .. } => {}
         }
     }
 
@@ -557,7 +556,6 @@ fn table_reference_access(statement_kind: &StatementKind) -> TableReferenceAcces
         StatementKind::CreateIndex(_) | StatementKind::DropIndex(_) => {
             TableReferenceAccess::Metadata
         }
-        StatementKind::Pragma { .. } => TableReferenceAccess::Metadata,
     }
 }
 
@@ -620,7 +618,6 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             StatementKind::DropTable(dt) => self.plan_drop_table(dt),
             StatementKind::CreateIndex(ci) => self.plan_create_index(ci),
             StatementKind::DropIndex(di) => self.plan_drop_index(di),
-            StatementKind::Pragma { name, value } => self.plan_pragma(name, value),
 
             // DML statements
             StatementKind::Select(sel) => self.plan_select(sel),
@@ -628,61 +625,6 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             StatementKind::Update(upd) => self.plan_update(upd),
             StatementKind::Delete(del) => self.plan_delete(del),
         }
-    }
-
-    fn plan_pragma(
-        &self,
-        raw_name: &str,
-        value: &Option<PragmaValue>,
-    ) -> Result<LogicalPlan, PlannerError> {
-        let name = raw_name.to_ascii_lowercase();
-        if !matches!(name.as_str(), "cache_size" | "memory_limit" | "io_stats") {
-            return Err(PlannerError::InvalidPragma {
-                name,
-                reason: "supported names are cache_size, memory_limit, and io_stats".to_string(),
-            });
-        }
-        match name.as_str() {
-            "cache_size" => match value {
-                Some(PragmaValue::Int(v)) if *v > 0 => {}
-                Some(PragmaValue::Int(_)) => {
-                    return Err(PlannerError::InvalidPragma {
-                        name,
-                        reason: "cache_size must be a positive page count".to_string(),
-                    });
-                }
-                Some(PragmaValue::Text(_)) => {
-                    return Err(PlannerError::InvalidPragma {
-                        name,
-                        reason: "cache_size requires an integer page count".to_string(),
-                    });
-                }
-                None => {}
-            },
-            "memory_limit" => {
-                if let Some(PragmaValue::Int(v)) = value
-                    && *v < 0
-                {
-                    return Err(PlannerError::InvalidPragma {
-                        name,
-                        reason: "memory_limit cannot be negative".to_string(),
-                    });
-                }
-            }
-            "io_stats" => {
-                if value.is_some() {
-                    return Err(PlannerError::InvalidPragma {
-                        name,
-                        reason: "io_stats does not accept a value".to_string(),
-                    });
-                }
-            }
-            _ => unreachable!(),
-        }
-        Ok(LogicalPlan::Pragma {
-            name,
-            value: value.clone(),
-        })
     }
 
     // ============================================================
@@ -2680,7 +2622,6 @@ fn rewrite_expr_with_maps(
             pattern,
             escape,
             negated,
-            kind,
         } => {
             let inner = rewrite_expr_with_maps(inner, group_key_map, aggregate_map, output_names)?;
             let pattern =
@@ -2701,7 +2642,6 @@ fn rewrite_expr_with_maps(
                     pattern: Box::new(pattern),
                     escape,
                     negated: *negated,
-                    kind: *kind,
                 },
                 resolved_type: expr.resolved_type.clone(),
                 span: expr.span,

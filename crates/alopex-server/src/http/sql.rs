@@ -932,8 +932,7 @@ fn is_ddl(sql: &str) -> bool {
         alopex_sql::ast::StatementKind::Select(_)
         | alopex_sql::ast::StatementKind::Insert(_)
         | alopex_sql::ast::StatementKind::Update(_)
-        | alopex_sql::ast::StatementKind::Delete(_)
-        | alopex_sql::ast::StatementKind::Pragma { .. } => false,
+        | alopex_sql::ast::StatementKind::Delete(_) => false,
     })
 }
 

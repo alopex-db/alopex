@@ -50,7 +50,6 @@ url = "2.5"
 # Testing
 criterion = "0.5"
 rand = "0.8"
-uuid = { version = "1.19", features = ["v4", "v7", "serde"] }
 
 [profile.release]
 opt-level = 3

@@ -56,8 +56,6 @@ pub enum ExprKind {
         pattern: Box<Expr>,
         escape: Option<Box<Expr>>,
         negated: bool,
-        #[serde(default)]
-        kind: PatternMatchKind,
     },
     InList {
         expr: Box<Expr>,
@@ -89,15 +87,6 @@ pub enum ExprKind {
         quantifier: Quantifier,
         subquery: Box<super::Statement>,
     },
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PatternMatchKind {
-    #[default]
-    Like,
-    ILike,
-    Glob,
-    SimilarTo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

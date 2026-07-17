@@ -751,7 +751,6 @@ fn test_resolve_expr_like() {
             }),
             escape: None,
             negated: false,
-            kind: Default::default(),
         },
         span: test_span(),
     };

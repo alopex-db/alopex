@@ -179,40 +179,4 @@ impl KVStore for AnyKV {
             Self::S3(kv) => Ok(AnyKVTransaction::Lsm(kv.inner().begin(mode)?)),
         }
     }
-
-    fn runtime_stats(&self) -> Option<crate::kv::RuntimeStats> {
-        match self {
-            Self::Memory(kv) => kv.runtime_stats(),
-            Self::Lsm(kv) => kv.runtime_stats(),
-            #[cfg(feature = "s3")]
-            Self::S3(kv) => kv.inner().runtime_stats(),
-        }
-    }
-
-    fn set_memory_limit_bytes(&self, limit: Option<usize>) -> Result<()> {
-        match self {
-            Self::Memory(kv) => kv.set_memory_limit_bytes(limit),
-            Self::Lsm(kv) => kv.set_memory_limit_bytes(limit),
-            #[cfg(feature = "s3")]
-            Self::S3(kv) => kv.inner().set_memory_limit_bytes(limit),
-        }
-    }
-
-    fn set_cache_capacity_bytes(&self, capacity: usize) -> Result<()> {
-        match self {
-            Self::Memory(kv) => <MemoryKV as KVStore>::set_cache_capacity_bytes(kv, capacity),
-            Self::Lsm(kv) => <LsmKV as KVStore>::set_cache_capacity_bytes(kv, capacity),
-            #[cfg(feature = "s3")]
-            Self::S3(kv) => <LsmKV as KVStore>::set_cache_capacity_bytes(kv.inner(), capacity),
-        }
-    }
-
-    fn clear_cache(&self) -> Result<usize> {
-        match self {
-            Self::Memory(kv) => <MemoryKV as KVStore>::clear_cache(kv),
-            Self::Lsm(kv) => <LsmKV as KVStore>::clear_cache(kv),
-            #[cfg(feature = "s3")]
-            Self::S3(kv) => <LsmKV as KVStore>::clear_cache(kv.inner()),
-        }
-    }
 }

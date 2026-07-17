@@ -47,7 +47,6 @@ mod hnsw_bridge;
 pub mod memory;
 pub mod query;
 mod result;
-mod system;
 
 #[cfg(feature = "tokio")]
 pub use async_executor::AsyncExecutor;
@@ -143,9 +142,6 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
     /// - `Scan`, `Filter`, `Sort`, `Limit`: SELECT query execution
     pub fn execute(&mut self, plan: LogicalPlan) -> Result<ExecutionResult> {
         match plan {
-            LogicalPlan::Pragma { name, value } => {
-                system::execute_pragma(&self.bridge, &name, value.as_ref())
-            }
             // DDL Operations
             LogicalPlan::CreateTable {
                 table,
@@ -268,9 +264,6 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
     // ========================================================================
 
     fn execute_query(&mut self, plan: LogicalPlan) -> Result<ExecutionResult> {
-        if let Some(result) = system::try_execute(&self.bridge, &plan)? {
-            return Ok(result);
-        }
         let catalog = self.catalog.read().expect("catalog lock poisoned");
         self.run_in_write_txn(|txn| query::execute_query(txn, &*catalog, plan))
     }
@@ -339,9 +332,6 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 &name,
                 if_exists,
             ),
-            LogicalPlan::Pragma { .. } => Err(ExecutorError::UnsupportedOperation(
-                "PRAGMA is not available inside an external transaction".to_string(),
-            )),
             LogicalPlan::Insert {
                 table,
                 columns,
@@ -714,35 +704,5 @@ mod tests {
             }]],
         });
         assert!(matches!(result, Ok(ExecutionResult::RowsAffected(1))));
-    }
-
-    #[test]
-    fn system_pragma_and_stats_function_use_the_store() {
-        let mut executor = create_executor();
-        let catalog = MemoryCatalog::new();
-
-        let pragma = crate::Parser::parse_sql(&crate::AlopexDialect, "PRAGMA cache_size = 8")
-            .unwrap()
-            .pop()
-            .unwrap();
-        let plan = crate::Planner::new(&catalog).plan(&pragma).unwrap();
-        assert!(matches!(
-            executor.execute(plan),
-            Ok(ExecutionResult::Success)
-        ));
-
-        let select = crate::Parser::parse_sql(&crate::AlopexDialect, "SELECT memory_stats()")
-            .unwrap()
-            .pop()
-            .unwrap();
-        let plan = crate::Planner::new(&catalog).plan(&select).unwrap();
-        let result = executor.execute(plan).unwrap();
-        let ExecutionResult::Query(result) = result else {
-            panic!("expected query result");
-        };
-        assert_eq!(result.columns[0].name, "memory_stats");
-        assert!(
-            matches!(&result.rows[0][0], crate::SqlValue::Text(text) if text.contains("total_bytes"))
-        );
     }
 }

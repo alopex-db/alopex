@@ -87,15 +87,7 @@ proc normalizedBinaryOp(op: BinaryOpKind): string =
   of opAnd: "And"
   of opOr: "Or"
   of opStringConcat: "StringConcat"
-  of opLike, opNotLike, opILike, opNotILike, opGlob, opNotGlob,
-     opSimilarTo, opNotSimilarTo, opIn, opNotIn, opBetween, opNotBetween, opIs: $op
-
-proc patternKind(op: BinaryOpKind): string =
-  case op
-  of opILike, opNotILike: "ILike"
-  of opGlob, opNotGlob: "Glob"
-  of opSimilarTo, opNotSimilarTo: "SimilarTo"
-  else: "Like"
+  of opLike, opNotLike, opIn, opNotIn, opBetween, opNotBetween, opIs: $op
 
 proc normalizedBinaryOp(opName: string): string =
   case opName
@@ -494,8 +486,8 @@ proc writeExpr(s: MsgStream; node: SqlNode) =
       s.writeExpr(node.binRight.children[1])
       s.writeKey("negated")
       s.pack_type(node.binOp == opNotBetween)
-    of opLike, opNotLike, opILike, opNotILike, opGlob, opNotGlob, opSimilarTo, opNotSimilarTo:
-      s.pack_map(6)
+    of opLike, opNotLike:
+      s.pack_map(5)
       s.writeKey("variant")
       s.pack_type("Like")
       s.writeKey("expr")
@@ -511,9 +503,7 @@ proc writeExpr(s: MsgStream; node: SqlNode) =
       else:
         s.writeNil()
       s.writeKey("negated")
-      s.pack_type(node.binOp in {opNotLike, opNotILike, opNotGlob, opNotSimilarTo})
-      s.writeKey("kind")
-      s.pack_type(patternKind(node.binOp))
+      s.pack_type(node.binOp == opNotLike)
     of opIn, opNotIn:
       s.pack_map(4)
       s.writeKey("variant")
@@ -871,26 +861,6 @@ proc writeDropIndexKind(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writePragmaKind(s: MsgStream; node: SqlNode) =
-  s.pack_map(4)
-  s.writeKey("variant")
-  s.pack_type("Pragma")
-  s.writeKey("name")
-  s.pack_type(node.children[0].firstIdent())
-  s.writeKey("value")
-  if node.children.len < 2:
-    s.writeNil()
-  else:
-    case node.children[1].kind
-    of nkIntLit:
-      s.pack_type(node.children[1].intVal)
-    of nkStringLit:
-      s.pack_type(node.children[1].strVal)
-    else:
-      raise newException(ParseError, "invalid PRAGMA value node")
-  s.writeKey("span")
-  s.writeSpan(node.span)
-
 proc writeStatementKind(s: MsgStream; node: SqlNode) =
   case node.kind
   of nkSelect:
@@ -909,8 +879,6 @@ proc writeStatementKind(s: MsgStream; node: SqlNode) =
     s.writeCreateIndexKind(node)
   of nkDropIndex:
     s.writeDropIndexKind(node)
-  of nkPragma:
-    s.writePragmaKind(node)
   else:
     raise newException(ParseError, "unsupported statement node for MessagePack: " & $node.kind)
 
