@@ -295,7 +295,9 @@ run_step "コンテナイメージビルド" \
 # crates/alopex-tools の verify-release-embedded は、EmbeddedSurface
 # (released モード)がデモスクリプトから起動する契約(surfaces.py 参照)。
 # ここで一度だけビルドし(ホスト側の一時ディレクトリへ出力してコンテナ間
-# で使い回す)、以降のデモ実行では PATH に加えるだけにする。
+# で使い回す)、以降のデモ実行では PATH に加えるだけにする。独立crateには
+# lockfileを同梱し、read-onlyでマウントした検証対象ソースへCargoが書き込ま
+# ないようにする。
 TOOLS_TARGET_DIR="$(mktemp -d)"
 
 # /tools-target/release (verify-release-embedded のビルド出力) を PATH に
@@ -317,7 +319,7 @@ run_in_container() {
 
 run_step "verify-release-embedded ビルド" \
     "crates/alopex-tools(開発ツール専用の独立ワークスペース)が crates.io 公開版の alopex-embedded/alopex-sql に依存としてビルドできるかを検証する。これが通ること自体が「公開 crate が実際に取得・ビルド可能」であることの証明になる。" \
-    -- run_in_container bash -c 'cd crates/alopex-tools && CARGO_TARGET_DIR=/tools-target cargo build --release'
+    -- run_in_container bash -c 'cd crates/alopex-tools && CARGO_TARGET_DIR=/tools-target cargo build --release --locked'
 
 run_step "mode-parity 検証 (verify.py)" \
     "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)の全組み合わせが一致することを確認する。" \
