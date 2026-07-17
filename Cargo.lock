@@ -303,6 +303,8 @@ dependencies = [
  "futures-core",
  "parquet 52.2.0",
  "proptest",
+ "rand 0.8.5",
+ "regex",
  "rmp-serde",
  "serde",
  "serde_json",

@@ -36,6 +36,8 @@ lane_ci = []
 lane_fuzz = []
 [dependencies]
 thiserror = "2.0"
+regex = "1.11"
+rand.workspace = true
 alopex-core.workspace = true
 parquet = { version = "52", features = ["arrow"] }
 arrow-array = "52"
@@ -79,4 +81,8 @@ harness = false
 
 [[bench]]
 name = "parser_exec_bench"
+harness = false
+
+[[bench]]
+name = "scalar_registry_bench"
 harness = false

@@ -189,6 +189,10 @@ pub enum EvaluationError {
     #[error("unsupported function: {0}")]
     UnsupportedFunction(String),
 
+    /// Invalid or resource-limited regular-expression input.
+    #[error("invalid regular expression '{pattern}': {reason}")]
+    InvalidRegex { pattern: String, reason: String },
+
     /// Vector evaluation error.
     #[error("vector error: {0}")]
     Vector(#[from] VectorError),
