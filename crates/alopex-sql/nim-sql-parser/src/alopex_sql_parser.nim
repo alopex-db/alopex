@@ -871,6 +871,26 @@ proc writeDropIndexKind(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
+proc writePragmaKind(s: MsgStream; node: SqlNode) =
+  s.pack_map(4)
+  s.writeKey("variant")
+  s.pack_type("Pragma")
+  s.writeKey("name")
+  s.pack_type(node.children[0].firstIdent())
+  s.writeKey("value")
+  if node.children.len < 2:
+    s.writeNil()
+  else:
+    case node.children[1].kind
+    of nkIntLit:
+      s.pack_type(node.children[1].intVal)
+    of nkStringLit:
+      s.pack_type(node.children[1].strVal)
+    else:
+      raise newException(ParseError, "invalid PRAGMA value node")
+  s.writeKey("span")
+  s.writeSpan(node.span)
+
 proc writeStatementKind(s: MsgStream; node: SqlNode) =
   case node.kind
   of nkSelect:
@@ -889,6 +909,8 @@ proc writeStatementKind(s: MsgStream; node: SqlNode) =
     s.writeCreateIndexKind(node)
   of nkDropIndex:
     s.writeDropIndexKind(node)
+  of nkPragma:
+    s.writePragmaKind(node)
   else:
     raise newException(ParseError, "unsupported statement node for MessagePack: " & $node.kind)
 

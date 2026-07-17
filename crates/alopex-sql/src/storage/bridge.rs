@@ -79,6 +79,26 @@ impl<S: KVStore> TxnBridge<S> {
         Self { store }
     }
 
+    /// Returns the underlying store's runtime statistics.
+    pub fn runtime_stats(&self) -> Option<alopex_core::kv::RuntimeStats> {
+        self.store.runtime_stats()
+    }
+
+    /// Applies a memory-limit setting to the underlying store.
+    pub fn set_memory_limit_bytes(&self, limit: Option<usize>) -> CoreResult<()> {
+        self.store.set_memory_limit_bytes(limit)
+    }
+
+    /// Applies a cache-capacity setting to the underlying store.
+    pub fn set_cache_capacity_bytes(&self, capacity: usize) -> CoreResult<()> {
+        self.store.set_cache_capacity_bytes(capacity)
+    }
+
+    /// Clears the underlying cache.
+    pub fn clear_cache(&self) -> CoreResult<usize> {
+        self.store.clear_cache()
+    }
+
     /// Begin a read-only transaction.
     pub fn begin_read(&self) -> Result<SqlTransaction<'_, S>> {
         let txn = self.store.begin(TxnMode::ReadOnly)?;

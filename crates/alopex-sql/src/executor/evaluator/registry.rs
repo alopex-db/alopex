@@ -68,8 +68,15 @@ fn unsupported(values: &[SqlValue]) -> Result<SqlValue> {
     ))
 }
 
+fn system_placeholder(_values: &[SqlValue]) -> Result<SqlValue> {
+    // Direct execution is handled by the executor, which owns the KV store.
+    // Keeping a registry entry lets the planner enforce the function contract.
+    Ok(SqlValue::Null)
+}
+
 fn evaluator_for(name: &str) -> (EvalFn, Option<LazyEvalFn>) {
     match name {
+        "memory_stats" | "io_stats" | "clear_cache" => (system_placeholder, None),
         "vector_similarity" => (super::function_call::eval_vector_similarity_values, None),
         "vector_distance" => (super::function_call::eval_vector_distance_values, None),
         "vector_dims" => (super::function_call::eval_vector_dims_values, None),

@@ -75,6 +75,7 @@ proc parseUpdateStmt(p: var Parser): SqlNode
 proc parseDeleteStmt(p: var Parser): SqlNode
 proc parseCreateStmt(p: var Parser): SqlNode
 proc parseDropStmt(p: var Parser): SqlNode
+proc parsePragmaStmt(p: var Parser): SqlNode
 proc parseTypeName(p: var Parser): SqlNode
 
 # --- Expression parsing (precedence climbing) ---
@@ -840,6 +841,22 @@ proc parseDropStmt(p: var Parser): SqlNode =
   else:
     p.error("expected TABLE or INDEX after DROP")
 
+proc parsePragmaStmt(p: var Parser): SqlNode =
+  let start = p.expect(tkPragma)
+  result = newNode(nkPragma, tokenSpan(start))
+  let name = p.expectIdent("pragma name")
+  result.children.add(newIdent(name.value, tokenSpan(name)))
+  if p.check(tkEq):
+    discard p.advance()
+    if p.check(tkInteger):
+      let value = p.advance()
+      result.children.add(newIntLit(parseBiggestInt(value.value), tokenSpan(value)))
+    elif p.check(tkString):
+      let value = p.advance()
+      result.children.add(newStringLit(value.value, tokenSpan(value)))
+    else:
+      p.error("expected integer or string pragma value")
+
 proc parseStatement*(p: var Parser): SqlNode =
   case p.current.kind
   of tkSelect:
@@ -854,8 +871,10 @@ proc parseStatement*(p: var Parser): SqlNode =
     result = p.parseCreateStmt()
   of tkDrop:
     result = p.parseDropStmt()
+  of tkPragma:
+    result = p.parsePragmaStmt()
   else:
-    p.error("expected SQL statement (SELECT, INSERT, UPDATE, DELETE, CREATE, DROP)")
+    p.error("expected SQL statement (SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA)")
 
   if p.check(tkSemicolon):
     discard p.advance()

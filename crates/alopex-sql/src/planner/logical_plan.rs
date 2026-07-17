@@ -67,6 +67,14 @@ pub enum JoinType {
 /// 3. **DDL Plans**: Schema modification (CreateTable, DropTable, CreateIndex, DropIndex)
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
+    /// Runtime configuration or statistics operation.
+    Pragma {
+        /// PRAGMA name.
+        name: String,
+        /// Optional assignment value.
+        value: Option<crate::ast::PragmaValue>,
+    },
+
     // === Query Plans ===
     /// Table scan operation.
     ///
@@ -238,6 +246,7 @@ pub enum LogicalPlan {
 impl LogicalPlan {
     pub fn operation_name(&self) -> &'static str {
         match self {
+            LogicalPlan::Pragma { .. } => "PRAGMA",
             LogicalPlan::Scan { .. }
             | LogicalPlan::Filter { .. }
             | LogicalPlan::Project { .. }
@@ -388,6 +397,7 @@ impl LogicalPlan {
     /// Returns the name of this plan variant.
     pub fn name(&self) -> &'static str {
         match self {
+            LogicalPlan::Pragma { .. } => "Pragma",
             LogicalPlan::Scan { .. } => "Scan",
             LogicalPlan::Filter { .. } => "Filter",
             LogicalPlan::Project { .. } => "Project",
@@ -435,6 +445,7 @@ impl LogicalPlan {
                 | LogicalPlan::DropTable { .. }
                 | LogicalPlan::CreateIndex { .. }
                 | LogicalPlan::DropIndex { .. }
+                | LogicalPlan::Pragma { .. }
         )
     }
 
@@ -462,6 +473,7 @@ impl LogicalPlan {
             LogicalPlan::DropTable { name, .. } => Some(name),
             LogicalPlan::CreateIndex { index, .. } => Some(&index.table),
             LogicalPlan::DropIndex { .. } => None,
+            LogicalPlan::Pragma { .. } => None,
             LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }

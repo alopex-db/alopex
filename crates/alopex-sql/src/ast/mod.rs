@@ -16,6 +16,16 @@ pub struct Statement {
     pub span: Span,
 }
 
+/// Value supplied to a PRAGMA statement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum PragmaValue {
+    /// Integer setting.
+    Int(i64),
+    /// Text setting.
+    Text(String),
+}
+
 impl Spanned for Statement {
     fn span(&self) -> Span {
         self.span
@@ -31,6 +41,14 @@ pub enum StatementKind {
     DropTable(DropTable),
     CreateIndex(CreateIndex),
     DropIndex(DropIndex),
+
+    /// Runtime configuration or statistics statement.
+    Pragma {
+        /// PRAGMA name.
+        name: String,
+        /// Optional assignment value.
+        value: Option<PragmaValue>,
+    },
 
     // DML
     Select(Select),

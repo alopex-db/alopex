@@ -12,6 +12,7 @@ type
     tkSelect, tkFrom, tkWhere, tkAnd, tkOr, tkNot
     tkInsert, tkInto, tkValues, tkUpdate, tkSet, tkDelete
     tkCreate, tkDrop, tkTable, tkAlter, tkIndex
+    tkPragma
     tkJoin, tkInner, tkLeft, tkRight, tkFull, tkOuter, tkCross, tkOn
     tkNatural, tkUsing
     tkAs, tkNull, tkTrue, tkFalse
@@ -52,6 +53,7 @@ const Keywords = {
   "insert": tkInsert, "into": tkInto, "values": tkValues,
   "update": tkUpdate, "set": tkSet, "delete": tkDelete,
   "create": tkCreate, "drop": tkDrop, "table": tkTable,
+  "pragma": tkPragma,
   "alter": tkAlter, "index": tkIndex,
   "join": tkJoin, "inner": tkInner, "left": tkLeft,
   "right": tkRight, "full": tkFull, "outer": tkOuter,
