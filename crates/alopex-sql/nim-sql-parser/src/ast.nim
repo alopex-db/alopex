@@ -22,6 +22,7 @@ type
     nkDropTable
     nkCreateIndex
     nkDropIndex
+    nkPragma
     nkStatementList
     nkIdentifier
     nkStringLit

@@ -10,6 +10,11 @@ import ../src/[ast, lexer, parser]
 
 suite "Tokenizer":
 
+  test "PRAGMA keyword is recognized":
+    var lex = initLexer("PRAGMA")
+    let tok = lex.nextToken()
+    check tok.kind == tkPragma
+
   test "keywords are case-insensitive":
     # All of these should produce keyword tokens regardless of case
     var lex = initLexer("SELECT select Select FROM from WHERE where")
@@ -90,6 +95,15 @@ suite "Tokenizer":
 # ---------------------------------------------------------------------------
 
 suite "Expressions — literals":
+
+  test "PRAGMA accepts integer and string values":
+    let integerPragma = parseSql("PRAGMA cache_size = 16")
+    check integerPragma.kind == nkPragma
+    check integerPragma.children[0].strVal == "cache_size"
+    check integerPragma.children[1].intVal == 16
+    let textPragma = parseSql("PRAGMA memory_limit = '100MB'")
+    check textPragma.kind == nkPragma
+    check textPragma.children[1].strVal == "100MB"
 
   test "integer literal":
     let ast = parseSql("SELECT 42")

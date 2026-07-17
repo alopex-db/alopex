@@ -80,6 +80,24 @@ pub const RANDOM_META: FnMeta = FnMeta {
     reorderable: true,
 };
 
+pub const SYSTEM_META: FnMeta = FnMeta {
+    deterministic: false,
+    volatile: true,
+    side_effecting: false,
+    foldable: false,
+    cacheable: false,
+    reorderable: false,
+};
+
+pub const SYSTEM_SIDE_EFFECT_META: FnMeta = FnMeta {
+    deterministic: false,
+    volatile: true,
+    side_effecting: true,
+    foldable: false,
+    cacheable: false,
+    reorderable: false,
+};
+
 #[derive(Debug, Clone)]
 pub struct ScalarSignature {
     pub name: &'static str,
@@ -765,6 +783,27 @@ static SIGNATURES: &[ScalarSignature] = &[
         Arity::Exact(1),
         check_any,
         ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig_meta(
+        "memory_stats",
+        Arity::Exact(0),
+        check_no_args,
+        ReturnRule::Fixed(ResolvedType::Text),
+        SYSTEM_META,
+    ),
+    sig_meta(
+        "io_stats",
+        Arity::Exact(0),
+        check_no_args,
+        ReturnRule::Fixed(ResolvedType::Text),
+        SYSTEM_META,
+    ),
+    sig_meta(
+        "clear_cache",
+        Arity::Exact(0),
+        check_no_args,
+        ReturnRule::Fixed(ResolvedType::BigInt),
+        SYSTEM_SIDE_EFFECT_META,
     ),
 ];
 

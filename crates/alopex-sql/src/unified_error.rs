@@ -332,6 +332,11 @@ impl From<PlannerError> for SqlError {
                 location: ErrorLocation::default(),
                 code: "ALOPEX-T007",
             },
+            PlannerError::InvalidPragma { name, reason } => Self::Plan {
+                message: format!("invalid PRAGMA '{name}': {reason}"),
+                location: ErrorLocation::default(),
+                code: "ALOPEX-F002",
+            },
         }
     }
 }
