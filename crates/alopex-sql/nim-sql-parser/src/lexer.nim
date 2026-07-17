@@ -12,12 +12,13 @@ type
     tkSelect, tkFrom, tkWhere, tkAnd, tkOr, tkNot
     tkInsert, tkInto, tkValues, tkUpdate, tkSet, tkDelete
     tkCreate, tkDrop, tkTable, tkAlter, tkIndex
+    tkPragma
     tkJoin, tkInner, tkLeft, tkRight, tkFull, tkOuter, tkCross, tkOn
     tkNatural, tkUsing
     tkAs, tkNull, tkTrue, tkFalse
     tkOrder, tkBy, tkAsc, tkDesc, tkNulls, tkFirst, tkLast
     tkGroup, tkHaving, tkLimit, tkOffset
-    tkLike, tkIn, tkBetween, tkIs, tkExists, tkAny, tkSome
+    tkLike, tkILike, tkGlob, tkSimilar, tkTo, tkFor, tkIn, tkBetween, tkIs, tkExists, tkAny, tkSome
     tkDistinct, tkAll, tkCast, tkCase, tkWhen, tkThen, tkElse, tkEnd, tkNow
     tkPrimary, tkKey, tkForeign, tkReferences
     tkUnique, tkCheck, tkDefault, tkConstraint, tkEscape, tkWith
@@ -52,6 +53,7 @@ const Keywords = {
   "insert": tkInsert, "into": tkInto, "values": tkValues,
   "update": tkUpdate, "set": tkSet, "delete": tkDelete,
   "create": tkCreate, "drop": tkDrop, "table": tkTable,
+  "pragma": tkPragma,
   "alter": tkAlter, "index": tkIndex,
   "join": tkJoin, "inner": tkInner, "left": tkLeft,
   "right": tkRight, "full": tkFull, "outer": tkOuter,
@@ -60,7 +62,8 @@ const Keywords = {
   "order": tkOrder, "by": tkBy, "asc": tkAsc, "desc": tkDesc,
   "nulls": tkNulls, "first": tkFirst, "last": tkLast,
   "group": tkGroup, "having": tkHaving, "limit": tkLimit, "offset": tkOffset,
-  "like": tkLike, "in": tkIn, "between": tkBetween, "is": tkIs,
+  "like": tkLike, "ilike": tkILike, "glob": tkGlob, "similar": tkSimilar, "to": tkTo, "for": tkFor,
+  "in": tkIn, "between": tkBetween, "is": tkIs,
   "exists": tkExists, "any": tkAny, "some": tkSome,
   "distinct": tkDistinct, "all": tkAll, "cast": tkCast, "now": tkNow,
   "case": tkCase, "when": tkWhen, "then": tkThen, "else": tkElse, "end": tkEnd,

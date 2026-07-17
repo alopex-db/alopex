@@ -5,7 +5,7 @@ use crate::executor::{EvaluationError, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;
 use crate::storage::SqlValue;
 
-use super::{EvalContext, evaluate};
+use super::{EvalContext, evaluate, registry::scalar_registry};
 
 pub fn evaluate_function_call(
     name: &str,
@@ -19,71 +19,72 @@ pub fn evaluate_function_call(
             EvaluationError::UnsupportedFunction(format!("{name} with modifiers")),
         ));
     }
-    let name_lower = name.to_lowercase();
-    match name_lower.as_str() {
-        "vector_similarity" => evaluate_vector_function(args, ctx, VectorFn::Similarity),
-        "vector_distance" => evaluate_vector_function(args, ctx, VectorFn::Distance),
-        "vector_dims" => evaluate_vector_dims(args, ctx),
-        "vector_norm" => evaluate_vector_norm(args, ctx),
-        _ => Err(ExecutorError::Evaluation(
+    let Some(function) = scalar_registry().get(name) else {
+        return Err(ExecutorError::Evaluation(
             EvaluationError::UnsupportedFunction(name.to_string()),
-        )),
+        ));
+    };
+    if let Some(eval_lazy) = function.eval_lazy {
+        return eval_lazy(args, ctx);
     }
+    let values = args
+        .iter()
+        .map(|arg| evaluate(arg, ctx))
+        .collect::<Result<Vec<_>>>()?;
+    (function.eval)(&values)
 }
 
-#[derive(Clone, Copy)]
-enum VectorFn {
-    Similarity,
-    Distance,
+pub(crate) fn eval_vector_similarity_values(values: &[SqlValue]) -> Result<SqlValue> {
+    eval_vector_values(values, VectorFn::Similarity)
 }
 
-fn evaluate_vector_dims(args: &[TypedExpr], ctx: &EvalContext<'_>) -> Result<SqlValue> {
-    if args.len() != 1 {
+pub(crate) fn eval_vector_distance_values(values: &[SqlValue]) -> Result<SqlValue> {
+    eval_vector_values(values, VectorFn::Distance)
+}
+
+pub(crate) fn eval_vector_dims_values(values: &[SqlValue]) -> Result<SqlValue> {
+    if values.len() != 1 {
         return Err(ExecutorError::Evaluation(EvaluationError::Vector(
-            VectorError::ArgumentCountMismatch { actual: args.len() },
+            VectorError::ArgumentCountMismatch {
+                actual: values.len(),
+            },
         )));
     }
-
-    let value = evaluate(&args[0], ctx)?;
-    match value {
+    match &values[0] {
         SqlValue::Null => Ok(SqlValue::Null),
-        SqlValue::Vector(v) => Ok(SqlValue::Integer(vector_dims(&v) as i32)),
+        SqlValue::Vector(v) => Ok(SqlValue::Integer(vector_dims(v) as i32)),
+        _other => Err(ExecutorError::Evaluation(EvaluationError::Vector(
+            VectorError::TypeMismatch,
+        ))),
+    }
+}
+
+pub(crate) fn eval_vector_norm_values(values: &[SqlValue]) -> Result<SqlValue> {
+    if values.len() != 1 {
+        return Err(ExecutorError::Evaluation(EvaluationError::Vector(
+            VectorError::ArgumentCountMismatch {
+                actual: values.len(),
+            },
+        )));
+    }
+    match &values[0] {
+        SqlValue::Null => Ok(SqlValue::Null),
+        SqlValue::Vector(v) => Ok(SqlValue::Double(vector_norm(v))),
         _ => Err(ExecutorError::Evaluation(EvaluationError::Vector(
             VectorError::TypeMismatch,
         ))),
     }
 }
 
-fn evaluate_vector_norm(args: &[TypedExpr], ctx: &EvalContext<'_>) -> Result<SqlValue> {
-    if args.len() != 1 {
+fn eval_vector_values(values: &[SqlValue], kind: VectorFn) -> Result<SqlValue> {
+    if values.len() != 3 {
         return Err(ExecutorError::Evaluation(EvaluationError::Vector(
-            VectorError::ArgumentCountMismatch { actual: args.len() },
+            VectorError::ArgumentCountMismatch {
+                actual: values.len(),
+            },
         )));
     }
-
-    let value = evaluate(&args[0], ctx)?;
-    match value {
-        SqlValue::Null => Ok(SqlValue::Null),
-        SqlValue::Vector(v) => Ok(SqlValue::Double(vector_norm(&v))),
-        _ => Err(ExecutorError::Evaluation(EvaluationError::Vector(
-            VectorError::TypeMismatch,
-        ))),
-    }
-}
-
-fn evaluate_vector_function(
-    args: &[TypedExpr],
-    ctx: &EvalContext<'_>,
-    kind: VectorFn,
-) -> Result<SqlValue> {
-    if args.len() != 3 {
-        return Err(ExecutorError::Evaluation(EvaluationError::Vector(
-            VectorError::ArgumentCountMismatch { actual: args.len() },
-        )));
-    }
-
-    let column_value = evaluate(&args[0], ctx)?;
-    let column_vec = match column_value {
+    let column = match &values[0] {
         SqlValue::Vector(v) => v,
         _ => {
             return Err(ExecutorError::Evaluation(EvaluationError::Vector(
@@ -91,9 +92,7 @@ fn evaluate_vector_function(
             )));
         }
     };
-
-    let query_value = evaluate(&args[1], ctx)?;
-    let query_vec = match query_value {
+    let query = match &values[1] {
         SqlValue::Vector(v) if !v.is_empty() => v,
         SqlValue::Vector(_) => {
             return Err(ExecutorError::Evaluation(EvaluationError::Vector(
@@ -110,31 +109,31 @@ fn evaluate_vector_function(
             )));
         }
     };
-
-    let metric_value = evaluate(&args[2], ctx)?;
-    let metric_str = match metric_value {
-        SqlValue::Text(s) => s,
+    let metric = match &values[2] {
+        SqlValue::Text(value) => value
+            .parse::<VectorMetric>()
+            .map_err(|error| ExecutorError::Evaluation(EvaluationError::Vector(error)))?,
         other => {
             return Err(ExecutorError::Evaluation(EvaluationError::Vector(
                 VectorError::InvalidMetric {
-                    metric: other.type_name().to_string(),
+                    metric: other.type_name().into(),
                     reason: "third argument must be string".into(),
                 },
             )));
         }
     };
-
-    let metric: VectorMetric = metric_str
-        .parse()
-        .map_err(|e| ExecutorError::Evaluation(EvaluationError::Vector(e)))?;
-
-    let score = match kind {
-        VectorFn::Similarity => vector_similarity(&column_vec, &query_vec, metric),
-        VectorFn::Distance => vector_distance(&column_vec, &query_vec, metric),
+    let result = match kind {
+        VectorFn::Similarity => vector_similarity(column, query, metric),
+        VectorFn::Distance => vector_distance(column, query, metric),
     }
-    .map_err(|e| ExecutorError::Evaluation(EvaluationError::Vector(e)))?;
+    .map_err(|error| ExecutorError::Evaluation(EvaluationError::Vector(error)))?;
+    Ok(SqlValue::Double(result))
+}
 
-    Ok(SqlValue::Double(score))
+#[derive(Clone, Copy)]
+enum VectorFn {
+    Similarity,
+    Distance,
 }
 
 #[cfg(test)]

@@ -6,10 +6,17 @@
 
 pub(crate) mod binary_op;
 mod column_ref;
+pub(crate) mod conditional;
 mod context;
 mod function_call;
+pub(crate) mod hash;
 mod is_null;
 mod literal;
+pub(crate) mod numeric;
+pub(crate) mod pattern;
+pub mod registry;
+pub(crate) mod string;
+pub(crate) mod type_fn;
 mod unary_op;
 pub mod vector_ops;
 
@@ -43,6 +50,13 @@ pub fn evaluate(expr: &TypedExpr, ctx: &EvalContext<'_>) -> Result<SqlValue> {
             distinct,
             star,
         } => function_call::evaluate_function_call(name, args, *distinct, *star, ctx),
+        TypedExprKind::Like {
+            expr,
+            pattern,
+            escape,
+            negated,
+            kind,
+        } => pattern::evaluate_pattern(expr, pattern, escape.as_deref(), *negated, *kind, ctx),
         // Unsupported expressions return a clear error message.
         other => Err(ExecutorError::Evaluation(
             EvaluationError::UnsupportedExpression(format!("{other:?}")),

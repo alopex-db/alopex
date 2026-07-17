@@ -114,7 +114,7 @@ impl BufferPoolStats {
 #[derive(Debug)]
 pub struct BufferPool {
     cache: RwLock<LruCache<BlockId, CacheEntry>>,
-    capacity: usize,
+    capacity: AtomicUsize,
     min_block_age: Duration,
     current_size: AtomicUsize,
     stats: BufferPoolStats,
@@ -125,7 +125,7 @@ impl BufferPool {
     pub fn new(config: BufferPoolConfig) -> Self {
         Self {
             cache: RwLock::new(LruCache::new()),
-            capacity: config.capacity,
+            capacity: AtomicUsize::new(config.capacity),
             min_block_age: Duration::from_millis(config.min_block_age_ms),
             current_size: AtomicUsize::new(0),
             stats: BufferPoolStats::default(),
@@ -139,7 +139,22 @@ impl BufferPool {
 
     /// 容量（バイト）。
     pub fn capacity_bytes(&self) -> usize {
-        self.capacity
+        self.capacity.load(Ordering::Relaxed)
+    }
+
+    /// Updates capacity and evicts entries if the new limit is smaller.
+    pub fn set_capacity_bytes(&self, capacity: usize) {
+        self.capacity.store(capacity, Ordering::Relaxed);
+        let mut cache = self.cache.write().expect("poisoned BufferPool lock");
+        self.evict_while_over_capacity_locked(&mut cache, Instant::now());
+    }
+
+    /// Removes all cached blocks and returns their byte size.
+    pub fn clear(&self) -> usize {
+        let mut cache = self.cache.write().expect("poisoned BufferPool lock");
+        let removed = self.current_size.swap(0, Ordering::Relaxed);
+        while cache.pop_lru().is_some() {}
+        removed
     }
 
     /// 統計を取得する。
@@ -171,7 +186,7 @@ impl BufferPool {
         self.stats.puts.fetch_add(1, Ordering::Relaxed);
 
         let size = block.len();
-        if size > self.capacity {
+        if size > self.capacity_bytes() {
             self.stats.oversized_puts.fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -225,7 +240,7 @@ impl BufferPool {
         cache: &mut LruCache<BlockId, CacheEntry>,
         now: Instant,
     ) {
-        while self.current_size.load(Ordering::Relaxed) > self.capacity {
+        while self.current_size.load(Ordering::Relaxed) > self.capacity_bytes() {
             let Some((_, entry)) = self.evict_one_locked(cache, now, self.min_block_age) else {
                 break;
             };

@@ -533,6 +533,16 @@ impl LsmKV {
         }
     }
 
+    /// Changes the LSM buffer-pool capacity in bytes.
+    pub fn set_cache_capacity_bytes(&self, capacity: usize) {
+        self.buffer_pool.set_capacity_bytes(capacity);
+    }
+
+    /// Clears the LSM buffer pool and returns removed bytes.
+    pub fn clear_cache(&self) -> usize {
+        self.buffer_pool.clear()
+    }
+
     /// 推定ディスク使用量（バイト）を返す。
     pub fn disk_usage(&self) -> u64 {
         fs::metadata(&self.wal_path).map(|m| m.len()).unwrap_or(0)
@@ -1247,6 +1257,19 @@ impl KVStore for LsmKV {
             mode,
             start_ts,
         ))
+    }
+
+    fn runtime_stats(&self) -> Option<crate::kv::RuntimeStats> {
+        Some(crate::kv::RuntimeStats::Lsm(self.metrics()))
+    }
+
+    fn set_cache_capacity_bytes(&self, capacity: usize) -> Result<()> {
+        self.set_cache_capacity_bytes(capacity);
+        Ok(())
+    }
+
+    fn clear_cache(&self) -> Result<usize> {
+        Ok(self.clear_cache())
     }
 }
 

@@ -11,6 +11,9 @@ use thiserror::Error;
 /// Planner errors for the Alopex SQL dialect.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PlannerError {
+    /// Invalid PRAGMA name or value.
+    #[error("invalid PRAGMA '{name}': {reason}")]
+    InvalidPragma { name: String, reason: String },
     // === Catalog Errors (ALOPEX-C*) ===
     /// ALOPEX-C001: Table not found.
     #[error("error[ALOPEX-C001]: table '{name}' not found at line {line}, column {column}")]

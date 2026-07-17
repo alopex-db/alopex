@@ -1,6 +1,6 @@
 [package]
 name = "alopex-sql"
-version = "0.7.3"
+version = "0.7.4"
 edition = "2024"  # Uses let chains feature
 license.workspace = true
 repository.workspace = true
@@ -36,6 +36,13 @@ lane_ci = []
 lane_fuzz = []
 [dependencies]
 thiserror = "2.0"
+regex = "1.11"
+rand.workspace = true
+base64 = "0.22"
+hex = "0.4"
+md-5 = "0.10"
+sha2 = "0.10"
+uuid.workspace = true
 alopex-core.workspace = true
 parquet = { version = "52", features = ["arrow"] }
 arrow-array = "52"
@@ -50,6 +57,7 @@ futures = { workspace = true, optional = true }
 [dev-dependencies]
 proptest = "1.4"
 criterion = "0.5"
+rusqlite = { version = "0.31", features = ["bundled"] }
 tempfile = "3.10"
 serde_json.workspace = true
 
@@ -79,4 +87,8 @@ harness = false
 
 [[bench]]
 name = "parser_exec_bench"
+harness = false
+
+[[bench]]
+name = "scalar_registry_bench"
 harness = false

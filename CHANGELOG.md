@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.4]
+
+### Added
+- Registry-backed scalar functions covering the v0.5.3 catalog, including
+  numeric, string, conditional, regex, pattern, and type-information functions.
+- SHA256, MD5, SIMHASH, HAMMING_DISTANCE, UUID v4/v7, HEX, UNHEX, ENCODE,
+  and DECODE SQL functions. Hash and encoding inputs are capped at 16 MiB.
+- `memory_stats()`, `io_stats()`, `clear_cache()`, and the `PRAGMA
+  cache_size`, `PRAGMA memory_limit`, and `PRAGMA io_stats` controls.
+- Reproducible Nim parser build and test scripts using host Nim or a pinned
+  Docker image.
+
+### Changed
+- Added SQL standard forms for `SUBSTRING ... FROM ... FOR`, `POSITION ...
+  IN`, and `TRIM ... FROM`, plus LIKE-family pattern operators.
+- System statistics remain backend-specific: unsupported statistics return
+  `NULL` instead of being synthesized.
+
+### Security
+- MD5 is provided for compatibility and fingerprinting only; it must not be
+  used for password storage, signatures, or other collision-sensitive security
+  purposes.
+
+### Breaking Changes
+- None intended. Existing SQL value variants and Python result mappings are
+  preserved.
+
 ## [0.7.3]
 
 ### Added
