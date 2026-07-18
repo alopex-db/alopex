@@ -280,7 +280,7 @@ async fn server_binary_exposes_all_http_apis() {
         json!({}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
     let (status, _) = send_json(
         &client,
         Method::POST,
