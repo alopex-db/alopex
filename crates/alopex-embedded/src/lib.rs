@@ -5,6 +5,7 @@
 /// Catalog metadata API (in-memory, primarily for Python bindings).
 pub mod catalog;
 pub mod catalog_api;
+mod cluster_state;
 pub mod columnar_api;
 mod dataframe_api;
 pub mod options;
@@ -117,6 +118,9 @@ pub enum Error {
     /// The catalog store lock was poisoned.
     #[error("catalog lock poisoned")]
     CatalogLockPoisoned,
+    /// The embedded cluster state lock was poisoned.
+    #[error("cluster state lock poisoned")]
+    ClusterStateLockPoisoned,
 }
 
 impl Error {
@@ -144,6 +148,7 @@ pub struct Database {
     pub(crate) columnar_bridge: ColumnarKvsBridge,
     pub(crate) columnar_memory: Option<InMemorySegmentStore>,
     pub(crate) segment_config: SegmentConfigV2,
+    pub(crate) cluster_state: RwLock<cluster_state::EmbeddedClusterState>,
 }
 
 pub(crate) fn disk_data_dir_path(path: &Path) -> std::path::PathBuf {
@@ -357,7 +362,43 @@ impl Database {
             columnar_bridge,
             columnar_memory,
             segment_config,
+            cluster_state: RwLock::new(cluster_state::EmbeddedClusterState::default()),
         }
+    }
+
+    /// Returns the current cluster status owned by this database instance.
+    pub fn cluster_status_snapshot(&self) -> Result<alopex_cluster::ClusterStatusSnapshot> {
+        let state = self
+            .cluster_state
+            .read()
+            .map_err(|_| Error::ClusterStateLockPoisoned)?;
+        Ok(state.status_snapshot(self.table_info_cache_epoch()))
+    }
+
+    /// Returns the latest routing decision produced by this database instance.
+    pub fn routing_diagnostics(&self) -> Result<alopex_cluster::RoutingDiagnostics> {
+        let state = self
+            .cluster_state
+            .read()
+            .map_err(|_| Error::ClusterStateLockPoisoned)?;
+        Ok(state.routing_diagnostics(self.table_info_cache_epoch()))
+    }
+
+    pub(crate) fn record_routing<C: alopex_sql::Catalog + ?Sized>(
+        &self,
+        catalog: &C,
+        statement: &alopex_sql::Statement,
+        statement_index: usize,
+    ) {
+        let Ok(mut state) = self.cluster_state.write() else {
+            return;
+        };
+        state.record_routing(
+            catalog,
+            statement,
+            statement_index,
+            self.table_info_cache_epoch(),
+        );
     }
 
     fn load_sql_catalog(&mut self) -> Result<()> {

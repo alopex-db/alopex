@@ -123,6 +123,16 @@ fn stmt_requires_write(stmt: &Statement) -> bool {
     !matches!(stmt.kind, StatementKind::Select(_))
 }
 
+fn stmt_changes_catalog(stmt: &Statement) -> bool {
+    matches!(
+        stmt.kind,
+        StatementKind::CreateTable(_)
+            | StatementKind::DropTable(_)
+            | StatementKind::CreateIndex(_)
+            | StatementKind::DropIndex(_)
+    )
+}
+
 fn plan_stmt<'a, S: KVStore>(
     catalog: &'a alopex_sql::catalog::PersistentCatalog<S>,
     overlay: &'a CatalogOverlay,
@@ -270,12 +280,19 @@ impl Database {
             Executor::new(self.store.clone(), self.sql_catalog.clone());
 
         let mut results = Vec::with_capacity(stmts.len());
-        for stmt in &stmts {
+        for (statement_index, stmt) in stmts.iter().enumerate() {
             let plan = {
                 let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
                 let (_, overlay) = borrowed.split_parts();
                 plan_stmt(&*catalog, &*overlay, stmt)?
             };
+
+            {
+                let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
+                let (_, overlay) = borrowed.split_parts();
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                self.record_routing(&view, stmt, statement_index);
+            }
 
             results.push(
                 executor
@@ -294,6 +311,9 @@ impl Database {
         if mode == TxnMode::ReadWrite {
             let mut catalog = self.sql_catalog.write().expect("catalog lock poisoned");
             catalog.apply_overlay(overlay);
+        }
+        if stmts.iter().any(stmt_changes_catalog) {
+            self.invalidate_table_info_cache();
         }
         if requires_write {
             let mut cache = self.hnsw_cache.write().expect("hnsw cache lock poisoned");
@@ -608,18 +628,28 @@ impl<'a> Transaction<'a> {
         let mut executor: Executor<_, _> = Executor::new(store, sql_catalog.clone());
 
         let mut last = alopex_sql::ExecutionResult::Success;
-        for stmt in &stmts {
+        for (statement_index, stmt) in stmts.iter().enumerate() {
             let plan = {
                 let catalog = sql_catalog.read().expect("catalog lock poisoned");
                 let (_, overlay) = borrowed.split_parts();
                 plan_stmt(&*catalog, &*overlay, stmt)?
             };
 
+            {
+                let catalog = sql_catalog.read().expect("catalog lock poisoned");
+                let (_, overlay) = borrowed.split_parts();
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                self.db.record_routing(&view, stmt, statement_index);
+            }
+
             last = executor
                 .execute_in_txn(plan, &mut borrowed)
                 .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))?;
         }
 
+        if stmts.iter().any(stmt_changes_catalog) {
+            self.catalog_modified = true;
+        }
         Ok(last)
     }
 }

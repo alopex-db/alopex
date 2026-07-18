@@ -121,19 +121,39 @@ def test_python_cluster_status_matches_cross_surface_fixture():
     _assert_with_diff(expected, actual)
 
 
-def test_python_routing_diagnostics_accessor_is_read_only_local_surface():
+def test_python_routing_diagnostics_accessor_reports_engine_state():
     db = Database.new()
 
     diagnostics = db.routing_diagnostics()
     assert diagnostics["schema_version"] == 1
     assert diagnostics["update_epoch"] == 0
     assert diagnostics["decision"] == "local_only"
-    assert diagnostics["reason"] == "single_resolved_target"
-    assert diagnostics["plan_id"] == "python_embedded_local"
+    assert diagnostics["reason"] == "planning_input_unavailable"
+    assert diagnostics["plan_id"] == "embedded.initial"
     assert diagnostics["roles"] == ["gateway"]
     assert diagnostics["targets"] == []
     assert diagnostics["excluded_targets"] == []
     assert diagnostics["retry_summary"] is None
+
+
+def test_python_cluster_accessors_reflect_latest_engine_state():
+    db = Database.open_in_memory()
+
+    initial_status = db.cluster_status()
+    initial_diagnostics = db.routing_diagnostics()
+
+    db.execute_sql("CREATE TABLE routed_users (id INTEGER PRIMARY KEY);")
+    db.execute_sql("SELECT id FROM routed_users;")
+
+    updated_status = db.cluster_status()
+    updated_diagnostics = db.routing_diagnostics()
+
+    assert updated_status["identity"]["update_epoch"] > initial_status["identity"]["update_epoch"]
+    assert updated_status["membership"]["update_epoch"] == updated_status["identity"]["update_epoch"]
+    assert updated_status["placement"]["update_epoch"] == updated_status["identity"]["update_epoch"]
+    assert updated_diagnostics["update_epoch"] == updated_status["identity"]["update_epoch"]
+    assert updated_diagnostics["plan_id"] != initial_diagnostics["plan_id"]
+    assert updated_diagnostics["reason"] == "placement_absent"
 
 
 @pytest.mark.requires_numpy
