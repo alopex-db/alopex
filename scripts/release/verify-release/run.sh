@@ -21,7 +21,7 @@
 #
 # Usage:
 #   ./scripts/release/verify-release/run.sh [ALOPEX_VERSION] [--no-report]
-#   例: ./scripts/release/verify-release/run.sh 0.7.5
+#   例: ./scripts/release/verify-release/run.sh 0.7.6
 #
 # chirps は既定では隣接 checkout (${REPO_ROOT}/../chirps) を使う。存在しない
 # 場合は公開 repo を一時 clone するため、worktree 配置に依存しない。
@@ -37,7 +37,7 @@ if [ -z "${DOCS_PUBLIC_DIR:-}" ] && [ ! -d "${DEFAULT_DOCS_PUBLIC_DIR}" ] \
 fi
 DOCS_PUBLIC_DIR="${DOCS_PUBLIC_DIR:-${DEFAULT_DOCS_PUBLIC_DIR}}"
 
-ALOPEX_VERSION="0.7.5"
+ALOPEX_VERSION="0.7.6"
 DO_REPORT=1
 for arg in "$@"; do
     case "${arg}" in
@@ -488,8 +488,8 @@ RS
 cargo run --quiet
 '
 
-run_step "v0.7.5 SQL scalar/PRAGMA 動作保証" \
-    "crates.io/PyPI から取得した v0.7.5 の CLI で、ハッシュ・UUID・エンコード・文字列関数と PRAGMA の公開利用経路を確認する。ソースの cargo build は行わず、インストール済みの alopex CLI だけを実行する。" \
+run_step "v${ALOPEX_VERSION} SQL scalar/PRAGMA 動作保証" \
+    "crates.io/PyPI から取得した v${ALOPEX_VERSION} の CLI で、ハッシュ・UUID・エンコード・文字列関数と PRAGMA の公開利用経路を確認する。ソースの cargo build は行わず、インストール済みの alopex CLI だけを実行する。" \
     -- run_in_container bash -c 'ALOPEX_CLI=alopex bash scripts/demo/v074/demo_sql_v074.sh'
 
 echo ""

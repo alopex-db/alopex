@@ -730,6 +730,67 @@ impl AlopexService for AlopexServiceImpl {
             status: "ok".to_string(),
         }))
     }
+
+    async fn cluster_status(
+        &self,
+        request: Request<proto::ClusterStatusRequest>,
+    ) -> std::result::Result<Response<proto::ClusterStatusResponse>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        let cluster = self
+            .state
+            .cluster_status_snapshot()
+            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        self.state.metrics.record_cluster_status(&cluster);
+        Ok(Response::new(proto::ClusterStatusResponse {
+            cluster_json: cluster_json(&cluster, &ctx.correlation_id)?,
+        }))
+    }
+
+    async fn cluster_join(
+        &self,
+        request: Request<proto::ClusterJoinRequest>,
+    ) -> std::result::Result<Response<proto::ClusterOperationResponse>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        let cluster = self
+            .state
+            .cluster_join()
+            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        self.state.metrics.record_cluster_status(&cluster);
+        Ok(Response::new(proto::ClusterOperationResponse {
+            action: "join".to_string(),
+            cluster_json: cluster_json(&cluster, &ctx.correlation_id)?,
+        }))
+    }
+
+    async fn cluster_leave(
+        &self,
+        request: Request<proto::ClusterLeaveRequest>,
+    ) -> std::result::Result<Response<proto::ClusterOperationResponse>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        let cluster = self
+            .state
+            .cluster_leave()
+            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        self.state.metrics.record_cluster_status(&cluster);
+        Ok(Response::new(proto::ClusterOperationResponse {
+            action: "leave".to_string(),
+            cluster_json: cluster_json(&cluster, &ctx.correlation_id)?,
+        }))
+    }
+}
+
+fn cluster_json(
+    cluster: &alopex_cluster::ClusterStatusSnapshot,
+    correlation_id: &str,
+) -> std::result::Result<String, Status> {
+    serde_json::to_string(cluster).map_err(|err| {
+        Status::internal(format!(
+            "failed to serialize cluster status: {err} (correlation_id={correlation_id})"
+        ))
+    })
 }
 
 fn sql_value_to_proto(value: &alopex_sql::storage::SqlValue) -> proto::Value {

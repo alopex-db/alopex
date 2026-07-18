@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-cli"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "alopex-core",
  "alopex-embedded",
@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-cluster"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "alopex-chirps-gossip-swim",
  "serde",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-core"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "alopex-dataframe",
  "alopex-sql",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-dataframe"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "alopex-core",
  "arrow",
@@ -208,8 +208,9 @@ dependencies = [
 
 [[package]]
 name = "alopex-embedded"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
+ "alopex-cluster",
  "alopex-core",
  "alopex-dataframe",
  "alopex-sql",
@@ -228,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-py"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "alopex-cluster",
  "alopex-core",
@@ -245,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-server"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "alopex-cli",
  "alopex-cluster",
@@ -292,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-sql"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "alopex-core",
  "arrow-array 52.2.0",
@@ -3763,6 +3764,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
+name = "libredox"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d0b95e02c851351f877147b7deea7b1afb1df71b63aa5f8270716e0c5720616"
+dependencies = [
+ "bitflags 2.10.0",
+ "libc",
+]
+
+[[package]]
 name = "libsqlite3-sys"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3771,16 +3782,6 @@ dependencies = [
  "cc",
  "pkg-config",
  "vcpkg",
-]
-
-[[package]]
-name = "libredox"
-version = "0.1.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d0b95e02c851351f877147b7deea7b1afb1df71b63aa5f8270716e0c5720616"
-dependencies = [
- "bitflags 2.10.0",
- "libc",
 ]
 
 [[package]]
@@ -6849,16 +6850,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
-name = "version_check"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
 name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "version_check"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vtparse"
@@ -7521,7 +7522,7 @@ checksum = "8902160c4e6f2fb145dbe9d6760a75e3c9522d8bf796ed7047c85919ac7115f8"
 dependencies = [
  "arraydeque",
  "encoding_rs",
- "hashlink",
+ "hashlink 0.8.4",
 ]
 
 [[package]]

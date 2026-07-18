@@ -11,6 +11,20 @@ Embedded, Server, SQL, DataFrame, and Python behavior remains the default.
 Cluster-aware behavior is enabled only when the Server cluster configuration is
 explicitly set to cluster-aware mode.
 
+## v0.7.6 Additive Surface
+
+v0.7.6 completes the cluster administration surface across the existing Server
+protocols. In addition to the HTTP admin endpoints, `alopex.v0.AlopexService`
+provides `ClusterStatus`, `ClusterJoin`, and `ClusterLeave` RPCs.
+
+Each RPC returns the same canonical `ClusterStatusSnapshot` JSON schema used by
+the HTTP `cluster` field. This is an additive protocol surface; the default
+single-node behavior and the v0.7 status/routing contracts remain unchanged.
+The RPCs are covered by the release gate, including the real transport
+authentication interceptor: `x-api-key` or `authorization: Bearer` metadata is
+required when `auth_mode` is `dev`, and missing or invalid credentials return
+`UNAUTHENTICATED`.
+
 Stable in v0.7.0:
 
 - `alopex-cluster` owns cluster identity, node role, node lifecycle, membership

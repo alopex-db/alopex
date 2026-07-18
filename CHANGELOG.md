@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.6]
+
+Additive cluster-surface release.
+
+### Added
+- gRPC cluster administration RPCs: `ClusterStatus`, `ClusterJoin`, and
+  `ClusterLeave` (#38). Their `cluster_json` payload uses the same canonical
+  cluster status schema as the HTTP admin `cluster` field, preserving exact
+  integer values and cross-surface parity.
+
+### Breaking Changes
+- None intended.
+
 ## [0.7.5]
 
 Bugfix and packaging release. No breaking changes intended.

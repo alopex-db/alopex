@@ -167,6 +167,18 @@ Service: `alopex.v0.AlopexService`
 - `VectorSearch`
 - `VectorUpsert`
 - `Health`
+- `ClusterStatus` - return the canonical cluster status snapshot as `cluster_json`
+- `ClusterJoin` - transition the local cluster member into the joined state and return the snapshot
+- `ClusterLeave` - transition the local cluster member into the leaving state and return the snapshot
+
+When `auth_mode` is `dev`, every gRPC call, including the cluster administration
+RPCs, requires either `x-api-key: <key>` or `authorization: Bearer <key>` metadata.
+Missing or invalid credentials return gRPC status `UNAUTHENTICATED`.
+
+The `cluster_json` field uses the same JSON schema as the HTTP admin response's
+`cluster` field. This preserves exact integer values such as update epochs and
+allows gRPC, HTTP, CLI, and Python clients to compare the same cluster status
+contract.
 
 See `crates/alopex-server/proto/alopex.proto` for message definitions.
 
@@ -178,9 +190,17 @@ See `crates/alopex-server/proto/alopex.proto` for message definitions.
 - `GET /api/admin/status` - status summary for CLI server commands
 - `GET /api/admin/metrics` - metrics summary for CLI server commands
 - `GET /api/admin/health` - health summary for CLI server commands
+- `POST /api/admin/cluster/join` - transition a cluster-aware node to `active` and return the cluster snapshot
+- `POST /api/admin/cluster/leave` - transition a cluster-aware node to `leaving` and return the cluster snapshot
 - `POST /api/admin/compaction` - trigger manual compaction; returns `501 Not Implemented` while the LSM compaction implementation is unavailable
 - `GET /api/admin/capabilities` - admin capability scope, allowed actions, and unsupported actions
 - `POST /api/admin/lifecycle` - lifecycle actions (archive/restore/backup/export)
+
+Cluster join and leave require `cluster.mode = "cluster_aware"`; in the default
+`single_node` mode they return HTTP `400`. Both endpoints are protected by the
+same admin authentication and allowlist boundary as the other admin endpoints.
+Their `cluster` response field is the canonical `ClusterStatusSnapshot` JSON
+schema also returned in gRPC `cluster_json`.
 
 ## CLI access
 
