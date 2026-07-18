@@ -178,8 +178,8 @@ See `crates/alopex-server/proto/alopex.proto` for message definitions.
 - `GET /api/admin/status` - status summary for CLI server commands
 - `GET /api/admin/metrics` - metrics summary for CLI server commands
 - `GET /api/admin/health` - health summary for CLI server commands
-- `POST /api/admin/compaction` - trigger compaction (if supported)
-- `GET /api/admin/capabilities` - admin capability scope and allowed actions
+- `POST /api/admin/compaction` - trigger manual compaction; returns `501 Not Implemented` while the LSM compaction implementation is unavailable
+- `GET /api/admin/capabilities` - admin capability scope, allowed actions, and unsupported actions
 - `POST /api/admin/lifecycle` - lifecycle actions (archive/restore/backup/export)
 
 ## CLI access
@@ -209,6 +209,11 @@ alopex --profile prod server metrics
 alopex --profile prod server health
 alopex --profile prod server compaction trigger
 ```
+
+The current server storage engine is LSM, but its manual compaction path is not
+implemented yet. The endpoint therefore returns a standard `501` error rather
+than reporting a successful HTTP response with `success: false`; the CLI maps
+that response to "server does not support this command".
 
 On TTY terminals, the CLI defaults to the TUI for interactive output. Use
 `--batch` or `--output` to force batch output, and run `alopex server` (no

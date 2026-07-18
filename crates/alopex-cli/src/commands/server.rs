@@ -442,7 +442,19 @@ fn map_client_error(err: ClientError) -> CliError {
         ClientError::Build(message) => CliError::InvalidArgument(message),
         ClientError::Auth(err) => CliError::InvalidArgument(err.to_string()),
         ClientError::HttpStatus { status, body } => {
-            CliError::InvalidArgument(format!("Server error: HTTP {} - {}", status.as_u16(), body))
+            if status == reqwest::StatusCode::NOT_IMPLEMENTED {
+                CliError::ServerUnsupported(format!(
+                    "server returned HTTP {}: {}",
+                    status.as_u16(),
+                    body
+                ))
+            } else {
+                CliError::InvalidArgument(format!(
+                    "Server error: HTTP {} - {}",
+                    status.as_u16(),
+                    body
+                ))
+            }
         }
     }
 }

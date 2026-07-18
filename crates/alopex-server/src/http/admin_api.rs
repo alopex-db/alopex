@@ -24,6 +24,7 @@ use crate::server::ServerState;
 struct AdminCapabilitiesResponse {
     scope: &'static str,
     allowed_actions: Vec<&'static str>,
+    unsupported_actions: Vec<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -86,12 +87,6 @@ struct AdminExportResponse {
 }
 
 #[derive(Serialize)]
-struct AdminCompactionResponse {
-    success: bool,
-    message: String,
-}
-
-#[derive(Serialize)]
 struct AdminBackupResponse {
     handle: String,
     location: String,
@@ -106,10 +101,11 @@ struct AdminRestoreResponse {
 }
 
 pub async fn capabilities(Extension(state): Extension<Arc<ServerState>>) -> impl IntoResponse {
-    let (scope, allowed_actions) = capabilities_for_auth(&state.auth);
+    let (scope, allowed_actions, unsupported_actions) = capabilities_for_auth(&state.auth);
     Json(AdminCapabilitiesResponse {
         scope,
         allowed_actions,
+        unsupported_actions,
     })
 }
 
@@ -194,11 +190,16 @@ pub async fn cluster_leave(
     cluster_operation_response(&state, &ctx, "leave")
 }
 
-pub async fn compaction() -> impl IntoResponse {
-    Json(AdminCompactionResponse {
-        success: false,
-        message: "Compaction is not available on this server build.".to_string(),
-    })
+pub async fn compaction(
+    Extension(_state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+) -> Response {
+    error_response(
+        crate::error::ServerError::NotImplemented(
+            "manual compaction is not available for the server's LSM storage engine".into(),
+        ),
+        &ctx,
+    )
 }
 
 pub async fn start_backup(
@@ -378,11 +379,17 @@ fn restore_response(
     })
 }
 
-fn capabilities_for_auth(auth: &crate::auth::AuthMiddleware) -> (&'static str, Vec<&'static str>) {
+fn capabilities_for_auth(
+    auth: &crate::auth::AuthMiddleware,
+) -> (&'static str, Vec<&'static str>, Vec<&'static str>) {
     match auth.mode() {
-        AuthMode::None => ("full", Vec::new()),
-        AuthMode::Dev { .. } => ("restricted", all_actions()),
+        AuthMode::None => ("full", Vec::new(), unsupported_actions()),
+        AuthMode::Dev { .. } => ("restricted", all_actions(), unsupported_actions()),
     }
+}
+
+fn unsupported_actions() -> Vec<&'static str> {
+    vec!["compaction"]
 }
 
 fn all_actions() -> Vec<&'static str> {

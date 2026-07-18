@@ -1209,6 +1209,42 @@ async fn server_admin_commands_success() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
+async fn server_admin_compaction_unsupported_is_reported() {
+    let router = axum::Router::new().route(
+        "/api/admin/compaction",
+        post(|| async {
+            (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(json!({
+                    "error": {
+                        "code": "NOT_IMPLEMENTED",
+                        "message": "manual compaction is not available"
+                    }
+                })),
+            )
+        }),
+    );
+    let (base_url, shutdown, _dir) = spawn_tls_server(router).await;
+    let client = build_test_client(&base_url);
+    let mut output = Vec::new();
+
+    let err = execute_server_remote(
+        &client,
+        &ServerCommand::Compaction {
+            command: CompactionCommand::Trigger,
+        },
+        &mut output,
+        false,
+    )
+    .await
+    .expect_err("unsupported compaction should fail");
+    assert!(matches!(err, CliError::ServerUnsupported(message) if message.contains("501")));
+
+    let _ = shutdown.send(());
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
 async fn server_admin_status_outputs_degraded_cluster_fields() {
     let router = axum::Router::new()
         .route(

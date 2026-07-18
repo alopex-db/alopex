@@ -165,6 +165,17 @@ async fn admin_api_endpoints_return_expected_payloads() {
     assert_eq!(value["degraded"].as_bool(), Some(false));
     assert_eq!(value["cluster"]["mode"].as_str(), Some("single_node"));
 
+    let (status, _, body) =
+        send_empty(router.clone(), Method::GET, "/api/admin/capabilities").await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("capabilities json");
+    assert_eq!(value["scope"].as_str(), Some("full"));
+    assert!(value["unsupported_actions"]
+        .as_array()
+        .expect("unsupported actions")
+        .iter()
+        .any(|action| action.as_str() == Some("compaction")));
+
     let (status, _, body) = send_json(
         router.clone(),
         Method::POST,
@@ -173,10 +184,13 @@ async fn admin_api_endpoints_return_expected_payloads() {
         &[],
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
     let value: Value = serde_json::from_slice(&body).expect("compaction json");
-    assert_eq!(value.get("success").and_then(|v| v.as_bool()), Some(false));
-    assert!(value.get("message").and_then(|v| v.as_str()).is_some());
+    assert_eq!(value["error"]["code"].as_str(), Some("NOT_IMPLEMENTED"));
+    assert!(value["error"]["message"]
+        .as_str()
+        .expect("compaction error")
+        .contains("LSM storage engine"));
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
