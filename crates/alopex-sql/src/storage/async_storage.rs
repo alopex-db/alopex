@@ -287,6 +287,10 @@ where
 /// Async SQL transaction trait for executing SQL within a transaction context.
 pub trait AsyncSqlTransaction<'txn>: MaybeSend {
     fn async_execute<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, ExecResult<ExecutionResult>>;
+    fn async_execute_multi<'a>(
+        &'a mut self,
+        sql: &'a str,
+    ) -> BoxFuture<'a, ExecResult<Vec<ExecutionResult>>>;
     fn async_query<'a>(&'a self, sql: &'a str) -> BoxStream<'a, ExecResult<Row>>;
     fn async_plan_for_routing<'a>(
         &'a self,
@@ -301,12 +305,28 @@ where
     T: for<'a> AsyncKVTransaction<'a> + Send + 'static,
 {
     fn async_execute<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, ExecResult<ExecutionResult>> {
+        Box::pin(async move {
+            self.async_execute_multi(sql)
+                .await?
+                .into_iter()
+                .last()
+                .ok_or_else(|| ExecutorError::InvalidOperation {
+                    operation: "async_execute".into(),
+                    reason: "empty SQL".into(),
+                })
+        })
+    }
+
+    fn async_execute_multi<'a>(
+        &'a mut self,
+        sql: &'a str,
+    ) -> BoxFuture<'a, ExecResult<Vec<ExecutionResult>>> {
         let catalog = match self.catalog.clone() {
             Some(catalog) => catalog,
             None => {
                 return Box::pin(async move {
                     Err(ExecutorError::InvalidOperation {
-                        operation: "async_execute".into(),
+                        operation: "async_execute_multi".into(),
                         reason: "catalog not configured".into(),
                     })
                 });
@@ -331,14 +351,14 @@ where
             let join = tokio::task::spawn_blocking(move || {
                 let mut blocking_txn =
                     BlockingSqlTransaction::new(txn, mode, handle, hnsw_indices, memory_policy);
-                let result = execute_sql_blocking(&mut blocking_txn, &catalog, &sql, mode);
+                let result = execute_sql_blocking_multi(&mut blocking_txn, &catalog, &sql, mode);
                 let (txn, hnsw) = blocking_txn.into_parts();
                 (result, txn, hnsw)
             });
 
             let (result, txn, hnsw_indices) =
                 join.await.map_err(|_| ExecutorError::InvalidOperation {
-                    operation: "async_execute".into(),
+                    operation: "async_execute_multi".into(),
                     reason: "blocking task cancelled".into(),
                 })?;
 
@@ -437,12 +457,12 @@ where
     }
 }
 
-fn execute_sql_blocking<T>(
+fn execute_sql_blocking_multi<T>(
     txn: &mut BlockingSqlTransaction<T>,
     catalog: &Arc<RwLock<dyn Catalog + Send + Sync>>,
     sql: &str,
     mode: TxnMode,
-) -> ExecResult<ExecutionResult>
+) -> ExecResult<Vec<ExecutionResult>>
 where
     T: for<'a> AsyncKVTransaction<'a>,
 {
@@ -454,7 +474,7 @@ where
         });
     }
 
-    let mut last = ExecutionResult::Success;
+    let mut results = Vec::with_capacity(statements.len());
     for stmt in statements {
         let plan = {
             let guard = catalog.read().expect("catalog lock poisoned");
@@ -462,7 +482,7 @@ where
         };
 
         let op_name = plan.operation_name();
-        last = match plan {
+        results.push(match plan {
             LogicalPlan::CreateTable {
                 table,
                 if_not_exists,
@@ -524,10 +544,10 @@ where
                 let policy = txn.memory_policy().cloned();
                 query::execute_query_with_policy(txn, &*guard, query_plan, policy.as_ref())?
             }
-        };
+        });
     }
 
-    Ok(last)
+    Ok(results)
 }
 
 fn stream_query_blocking<T>(

@@ -546,8 +546,13 @@ async fn grpc_execute_sql_matches_http_for_scalar_subquery_select() {
     let mut grpc_rows: Vec<Vec<i64>> = Vec::new();
     loop {
         match stream.message().await {
-            Ok(Some(row)) => {
-                grpc_rows.push(row.values.iter().map(grpc_sql_value_to_i64).collect());
+            Ok(Some(result_set)) => {
+                grpc_rows.extend(
+                    result_set
+                        .rows
+                        .iter()
+                        .map(|row| row.values.iter().map(grpc_sql_value_to_i64).collect()),
+                );
             }
             Ok(None) => break,
             Err(status) => panic!(

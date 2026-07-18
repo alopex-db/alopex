@@ -116,6 +116,22 @@ impl TxnHandle {
         })
     }
 
+    pub fn execute_multi<'a>(
+        &'a self,
+        sql: &'a str,
+    ) -> BoxFuture<'a, alopex_sql::executor::Result<Vec<ExecutionResult>>> {
+        Box::pin(async move {
+            let mut guard = self.inner.txn.lock().await;
+            let txn = guard
+                .as_mut()
+                .ok_or_else(|| ExecutorError::InvalidOperation {
+                    operation: "execute_multi".into(),
+                    reason: "transaction is closed".into(),
+                })?;
+            txn.execute_multi(sql).await
+        })
+    }
+
     pub fn query<'a>(&'a self, sql: &'a str) -> BoxStream<'a, alopex_sql::executor::Result<Row>> {
         let (sender, receiver) = mpsc::channel(32);
         let sql = sql.to_string();
