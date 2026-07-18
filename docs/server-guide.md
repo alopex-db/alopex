@@ -167,6 +167,14 @@ Service: `alopex.v0.AlopexService`
 - `VectorSearch`
 - `VectorUpsert`
 - `Health`
+- `ClusterStatus` - return the canonical cluster status snapshot as `cluster_json`
+- `ClusterJoin` - transition the local cluster member into the joined state and return the snapshot
+- `ClusterLeave` - transition the local cluster member into the leaving state and return the snapshot
+
+The `cluster_json` field uses the same JSON schema as the HTTP admin response's
+`cluster` field. This preserves exact integer values such as update epochs and
+allows gRPC, HTTP, CLI, and Python clients to compare the same cluster status
+contract.
 
 See `crates/alopex-server/proto/alopex.proto` for message definitions.
 

@@ -387,3 +387,63 @@ async fn grpc_health_returns_ok() {
         .into_inner();
     assert_eq!(response.status, "ok");
 }
+
+#[tokio::test]
+async fn grpc_cluster_status_matches_server_snapshot_schema() {
+    let (state, _temp) = build_cluster_aware_state().await;
+    let expected = serde_json::to_value(state.cluster_status_snapshot().expect("snapshot"))
+        .expect("expected snapshot json");
+    let (channel, _handle) = spawn_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+
+    let response = client
+        .cluster_status(grpc::proto::ClusterStatusRequest {})
+        .await
+        .expect("cluster status")
+        .into_inner();
+    let actual: serde_json::Value =
+        serde_json::from_str(&response.cluster_json).expect("cluster json");
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn grpc_cluster_join_and_leave_return_operation_and_status() {
+    let (state, _temp) = build_cluster_aware_state().await;
+    let (channel, _handle) = spawn_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+
+    let joined = client
+        .cluster_join(grpc::proto::ClusterJoinRequest {})
+        .await
+        .expect("cluster join")
+        .into_inner();
+    assert_eq!(joined.action, "join");
+    let joined_json: serde_json::Value =
+        serde_json::from_str(&joined.cluster_json).expect("join cluster json");
+    assert_eq!(joined_json["mode"], "cluster_aware");
+    assert_eq!(joined_json["identity"]["lifecycle_state"], "active");
+
+    let left = client
+        .cluster_leave(grpc::proto::ClusterLeaveRequest {})
+        .await
+        .expect("cluster leave")
+        .into_inner();
+    assert_eq!(left.action, "leave");
+    let left_json: serde_json::Value =
+        serde_json::from_str(&left.cluster_json).expect("leave cluster json");
+    assert_eq!(left_json["identity"]["lifecycle_state"], "leaving");
+}
+
+#[tokio::test]
+async fn grpc_cluster_join_rejects_single_node_mode() {
+    let (state, _temp) = build_state(AuthMode::None).await;
+    let (channel, _handle) = spawn_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+
+    let err = client
+        .cluster_join(grpc::proto::ClusterJoinRequest {})
+        .await
+        .expect_err("single-node cluster join");
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(err.message().contains("cluster_aware mode"));
+}
