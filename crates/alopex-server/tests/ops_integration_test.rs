@@ -9,8 +9,8 @@ use alopex_server::config::ServerConfig;
 use alopex_server::error::ServerError;
 use alopex_server::http;
 use alopex_server::ops::backup::{BackupCoordinator, BackupHandle};
-use alopex_server::ops::restore::{RestoreCoordinator, RestoreSource};
-use alopex_server::ops::state::{LifecycleStateManager, Mode, OperationStatus};
+use alopex_server::ops::restore::{RestoreCoordinator, RestoreHandle, RestoreSource};
+use alopex_server::ops::state::{LifecycleStateManager, Mode, OperationState, OperationStatus};
 use alopex_server::server::ServerState;
 use alopex_server::Server;
 use axum::body::Body;
@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use tempfile::tempdir;
 use tokio::time::{sleep, Duration as TokioDuration, Instant as TokioInstant};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 async fn build_state() -> (Arc<ServerState>, tempfile::TempDir) {
     let temp = tempdir().expect("tempdir");
@@ -67,60 +68,61 @@ async fn send_empty(router: axum::Router, method: Method, path: &str) -> (Status
     (status, body.to_vec())
 }
 
-async fn wait_for_backup(router: axum::Router, handle: &str) -> Value {
-    let path = format!("/api/admin/backup/{handle}");
+async fn wait_for_terminal_state<F>(mut status: F, operation: &str) -> OperationState
+where
+    F: FnMut() -> alopex_server::error::Result<OperationState>,
+{
     let timeout = if cfg!(windows) {
         TokioDuration::from_secs(60)
     } else {
         TokioDuration::from_secs(20)
     };
     let deadline = TokioInstant::now() + timeout;
+    let mut delay = TokioDuration::from_millis(10);
     loop {
-        let (status, body) = send_empty(router.clone(), Method::GET, &path).await;
-        assert_eq!(status, StatusCode::OK);
-        let value: Value = serde_json::from_slice(&body).expect("backup status json");
-        let state = value.get("state").cloned().expect("state");
-        let status_value = state
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if status_value != "running" && status_value != "queued" {
+        let state = status().unwrap_or_else(|err| panic!("{operation} status: {err}"));
+        if state.status != OperationStatus::Running && state.status != OperationStatus::Queued {
             return state;
         }
         if TokioInstant::now() >= deadline {
-            break;
+            panic!(
+                "{operation} did not complete in time (last status: {:?})",
+                state.status
+            );
         }
-        sleep(TokioDuration::from_millis(100)).await;
+        sleep(delay).await;
+        delay = std::cmp::min(delay.saturating_mul(2), TokioDuration::from_millis(250));
     }
-    panic!("backup did not complete in time");
 }
 
-async fn wait_for_restore(router: axum::Router, handle: &str) -> Value {
-    let path = format!("/api/admin/restore/{handle}");
-    let timeout = if cfg!(windows) {
-        TokioDuration::from_secs(60)
-    } else {
-        TokioDuration::from_secs(20)
+async fn wait_for_backup(state: &ServerState, router: axum::Router, handle: &str) -> Value {
+    let backup_handle = BackupHandle {
+        id: Uuid::parse_str(handle).expect("backup handle UUID"),
     };
-    let deadline = TokioInstant::now() + timeout;
-    loop {
-        let (status, body) = send_empty(router.clone(), Method::GET, &path).await;
-        assert_eq!(status, StatusCode::OK);
-        let value: Value = serde_json::from_slice(&body).expect("restore status json");
-        let state = value.get("state").cloned().expect("state");
-        let status_value = state
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if status_value != "running" && status_value != "queued" {
-            return value;
-        }
-        if TokioInstant::now() >= deadline {
-            break;
-        }
-        sleep(TokioDuration::from_millis(100)).await;
-    }
-    panic!("restore did not complete in time");
+    wait_for_terminal_state(|| state.backup_coordinator.status(&backup_handle), "backup").await;
+
+    let path = format!("/api/admin/backup/{handle}");
+    let (status, body) = send_empty(router, Method::GET, &path).await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("backup status json");
+    value.get("state").cloned().expect("state")
+}
+
+async fn wait_for_restore(state: &ServerState, router: axum::Router, handle: &str) -> Value {
+    let restore_handle = RestoreHandle {
+        id: Uuid::parse_str(handle).expect("restore handle UUID"),
+    };
+    wait_for_terminal_state(
+        || state.restore_coordinator.status(&restore_handle),
+        "restore",
+    )
+    .await;
+
+    let path = format!("/api/admin/restore/{handle}");
+    let (status, body) = send_empty(router, Method::GET, &path).await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("restore status json");
+    value
 }
 
 async fn wait_for_backup_state(
@@ -177,7 +179,7 @@ async fn backup_restore_flow_reports_status_and_metadata() {
         .and_then(|v| v.as_str())
         .expect("location");
 
-    let state_value = wait_for_backup(router.clone(), handle).await;
+    let state_value = wait_for_backup(state.as_ref(), router.clone(), handle).await;
     assert_eq!(
         state_value.get("status").and_then(|v| v.as_str()),
         Some("completed")
@@ -198,7 +200,7 @@ async fn backup_restore_flow_reports_status_and_metadata() {
         .and_then(|v| v.as_str())
         .expect("handle");
 
-    let restore_value = wait_for_restore(router.clone(), restore_handle).await;
+    let restore_value = wait_for_restore(state.as_ref(), router.clone(), restore_handle).await;
     let restore_state = restore_value.get("state").expect("restore state");
     assert_eq!(
         restore_state.get("status").and_then(|v| v.as_str()),
