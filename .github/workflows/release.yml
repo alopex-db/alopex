@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 env:
   RUST_BACKTRACE: 1
@@ -271,14 +272,16 @@ jobs:
       - name: Wait for crates.io index update
         run: sleep 30
 
-      - name: Publish alopex-embedded
-        run: ./publish-crate.sh alopex-embedded
+      # alopex-embedded depends on alopex-cluster at the same release
+      # version, so cluster must be visible on crates.io first.
+      - name: Publish alopex-cluster
+        run: ./publish-crate.sh alopex-cluster
 
       - name: Wait for crates.io index update
         run: sleep 30
 
-      - name: Publish alopex-cluster
-        run: ./publish-crate.sh alopex-cluster
+      - name: Publish alopex-embedded
+        run: ./publish-crate.sh alopex-embedded
 
       - name: Wait for crates.io index update
         run: sleep 30
