@@ -79,6 +79,13 @@ jobs:
             nimble install -y npeg msgpack4nim
             nimble lib
             cd "${REPO_ROOT}"
+      - name: Inspect Linux wheel contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          for wheel in dist/*.whl; do
+            python scripts/release/verify_wheel_contents.py "$wheel"
+          done
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -119,6 +126,13 @@ jobs:
           command: build
           args: -m crates/alopex-py/Cargo.toml --release --out dist
           target: ${{ matrix.target }}
+      - name: Inspect macOS wheel contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          for wheel in dist/*.whl; do
+            python scripts/release/verify_wheel_contents.py "$wheel"
+          done
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -142,11 +156,42 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build Nim SQL parser library
         run: bash scripts/build-nim-parser.sh --backend host
+      - name: Stage Nim parser DLL in Python package
+        shell: bash
+        run: |
+          set -euo pipefail
+          dll="${NIM_SQL_PARSER_DIR}/alopex_sql_parser.dll"
+          test -f "$dll"
+          mkdir -p crates/alopex-py/python/alopex/native
+          cp "$dll" crates/alopex-py/python/alopex/native/
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           command: build
           args: -m crates/alopex-py/Cargo.toml --release --out dist
+      - name: Inspect Windows wheel contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$wheel"
+          python scripts/release/verify_wheel_contents.py "$wheel" --require-nim-dll
+      - name: Import Windows wheel without ALOPEX_DLL_DIR
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $venv = Join-Path $env:RUNNER_TEMP "alopex-wheel-clean-venv"
+          if (Test-Path $venv) { Remove-Item -Recurse -Force $venv }
+          python -m venv $venv
+          $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
+          & "$venv\Scripts\python.exe" -m pip install --no-index --no-deps $wheel
+          Remove-Item Env:ALOPEX_DLL_DIR -ErrorAction SilentlyContinue
+          Push-Location $env:RUNNER_TEMP
+          try {
+            & "$venv\Scripts\python.exe" -c "from alopex import Database; print('clean wheel import OK')"
+          } finally {
+            Pop-Location
+          }
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -166,6 +211,13 @@ jobs:
         with:
           command: sdist
           args: -m crates/alopex-py/Cargo.toml --out dist
+      - name: Inspect sdist contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          for archive in dist/*.tar.gz; do
+            python scripts/release/verify_wheel_contents.py "$archive"
+          done
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

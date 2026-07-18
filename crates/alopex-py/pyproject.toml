@@ -29,3 +29,6 @@ bindings = "pyo3"
 module-name = "alopex._alopex"
 python-source = "python"
 features = ["pyo3/extension-module"]
+# The Nim parser is generated only by the Windows wheel job. Keep this
+# artifact out of sdists and non-Windows wheels.
+include = [{ path = "python/alopex/native/*.dll", format = "wheel" }]
