@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.5]
+
+Bugfix and packaging release. No breaking changes intended.
+
+### Fixed
+- HTTP multi-statement execution now returns every statement result, with
+  matching gRPC and CLI behavior (#31).
+- Embedded cluster status accessors now reflect the engine's live catalog and
+  routing state (#35).
+- Unsupported compaction is reported consistently as `501 Not Implemented`
+  across the server and CLI surfaces (#39).
+- Windows Python wheels now bundle the Nim SQL parser DLL and load it from the
+  package without requiring `ALOPEX_DLL_DIR` (#33).
+- Backup/restore completion tests now observe Coordinator state directly and
+  verify the final HTTP status without relying on a fixed polling interval
+  (#34).
+
+### Breaking Changes
+- None intended.
+
 ## [0.7.4]
 
 ### Added
