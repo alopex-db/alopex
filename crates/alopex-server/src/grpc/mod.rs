@@ -231,7 +231,7 @@ struct AlopexServiceImpl {
 #[async_trait]
 impl AlopexService for AlopexServiceImpl {
     type ExecuteSqlStream =
-        tokio_stream::Iter<std::vec::IntoIter<std::result::Result<proto::Row, Status>>>;
+        tokio_stream::Iter<std::vec::IntoIter<std::result::Result<proto::SqlResultSet, Status>>>;
 
     async fn execute_sql(
         &self,
@@ -268,24 +268,39 @@ impl AlopexService for AlopexServiceImpl {
                 .await
                 .map_err(|err| map_status(err, &ctx.correlation_id))?;
 
-        // パリティのため SELECT 以外 (DML/DDL) も HTTP `/sql` と同様に実行・
-        // コミットされる。stream Row は affected_rows / success を表現できない
-        // ため、これらの結果は空ストリーム (正常終了) となる。
-        //
-        // TODO(#25): proto::Row は列名メタデータを持たないため、result.columns は
-        // ここで失われる。列名メタデータおよび DML/DDL の affected_rows / success
-        // の表現追加は proto 変更を伴うため別対応 (issue #25 参照)。
-        //
-        // 行の変換は元の行を消費しながら行い、累積エンコードサイズが
-        // メモリポリシーまたは max_response_size を超えた時点で即エラーを返す。
+        // Each statement is represented by one result-set message. This keeps
+        // empty result sets and DDL/DML status results observable, while also
+        // carrying the column metadata that the old Row-only stream dropped.
         let memory_policy = MemoryControlPolicy::from_env();
         let mut bytes_total = 0usize;
-        let mut rows = Vec::with_capacity(result.rows.len());
-        for row in result.rows {
-            let proto_row = proto::Row {
-                values: row.iter().map(sql_value_to_proto).collect(),
+        let mut result_sets = Vec::with_capacity(result.results.len());
+        for result_set in result.results {
+            let is_query = !result_set.columns.is_empty();
+            let columns = result_set
+                .columns
+                .into_iter()
+                .map(|column| proto::SqlColumn {
+                    name: column.name,
+                    data_type: column.data_type,
+                })
+                .collect();
+            let rows = result_set
+                .rows
+                .into_iter()
+                .map(|row| proto::Row {
+                    values: row.iter().map(sql_value_to_proto).collect(),
+                })
+                .collect();
+            let has_affected_rows = result_set.affected_rows.is_some();
+            let affected_rows = result_set.affected_rows.unwrap_or_default();
+            let message = proto::SqlResultSet {
+                columns,
+                rows,
+                affected_rows,
+                has_affected_rows,
+                success: !has_affected_rows && !is_query,
             };
-            bytes_total = bytes_total.saturating_add(proto_row.encoded_len());
+            bytes_total = bytes_total.saturating_add(message.encoded_len());
             memory_policy
                 .enforce_output_bytes(bytes_total as u64)
                 .map_err(|err| map_status(err, &ctx.correlation_id))?;
@@ -295,11 +310,11 @@ impl AlopexService for AlopexServiceImpl {
                     &ctx.correlation_id,
                 ));
             }
-            rows.push(Ok(proto_row));
+            result_sets.push(Ok(message));
         }
 
-        // 変換済みの Vec をそのまま応答ストリームにする (中間チャネル無し)。
-        Ok(Response::new(tokio_stream::iter(rows)))
+        // Return the result sets directly without an intermediate channel.
+        Ok(Response::new(tokio_stream::iter(result_sets)))
     }
 
     async fn execute_ddl(

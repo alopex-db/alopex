@@ -137,8 +137,21 @@ message Row {
   repeated Value values = 1;
 }
 
+message SqlColumn {
+  string name = 1;
+  string data_type = 2;
+}
+
+message SqlResultSet {
+  repeated SqlColumn columns = 1;
+  repeated Row rows = 2;
+  uint64 affected_rows = 3;
+  bool has_affected_rows = 4;
+  bool success = 5;
+}
+
 service AlopexService {
-  rpc ExecuteSql(SqlRequest) returns (stream Row);
+  rpc ExecuteSql(SqlRequest) returns (stream SqlResultSet);
   rpc ExecuteDdl(DdlRequest) returns (DdlResponse);
   rpc ExecuteDml(DmlRequest) returns (DmlResponse);
   rpc BeginTransaction(BeginRequest) returns (TransactionHandle);

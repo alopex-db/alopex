@@ -7,6 +7,8 @@ use crate::storage::AsyncSqlTransaction;
 /// Object-safe async SQL transaction for type erasure.
 pub trait ErasedAsyncSqlTransaction: MaybeSend + 'static {
     fn execute<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<ExecutionResult>>;
+    fn execute_multi<'a>(&'a mut self, sql: &'a str)
+    -> BoxFuture<'a, Result<Vec<ExecutionResult>>>;
     fn query<'a>(&'a self, sql: &'a str) -> BoxStream<'a, Result<Row>>;
     fn plan_for_routing<'a>(&'a self, sql: &'a str)
     -> BoxFuture<'a, Result<Vec<PlannedStatement>>>;
@@ -20,6 +22,13 @@ where
 {
     fn execute<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<ExecutionResult>> {
         self.async_execute(sql)
+    }
+
+    fn execute_multi<'a>(
+        &'a mut self,
+        sql: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<ExecutionResult>>> {
+        self.async_execute_multi(sql)
     }
 
     fn query<'a>(&'a self, sql: &'a str) -> BoxStream<'a, Result<Row>> {

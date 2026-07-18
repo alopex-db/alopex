@@ -293,11 +293,39 @@ async fn grpc_sql_vector_transaction_flow() {
         .into_inner();
 
     let mut ids = Vec::new();
-    while let Some(row) = stream.message().await.expect("row") {
-        let value = row.values.first().expect("value");
-        ids.push(extract_int(value).expect("int"));
+    while let Some(result_set) = stream.message().await.expect("result set") {
+        for row in result_set.rows {
+            let value = row.values.first().expect("value");
+            ids.push(extract_int(value).expect("int"));
+        }
     }
     assert_eq!(ids, vec![1, 2, 3]);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn grpc_multi_statement_returns_result_per_statement() {
+    let (state, _temp) = build_state(AuthMode::None).await;
+    let (channel, _handle) = spawn_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+
+    let mut stream = client
+        .execute_sql(grpc::proto::SqlRequest {
+            sql: "SELECT 1; SELECT 2;".to_string(),
+            session_id: String::new(),
+        })
+        .await
+        .expect("query")
+        .into_inner();
+
+    let mut values = Vec::new();
+    while let Some(result_set) = stream.message().await.expect("result set") {
+        assert_eq!(result_set.columns.len(), 1);
+        assert_eq!(result_set.rows.len(), 1);
+        let value = result_set.rows[0].values.first().expect("value");
+        values.push(extract_int(value).expect("integer result"));
+    }
+    assert_eq!(values, vec![1, 2]);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

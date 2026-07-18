@@ -347,6 +347,43 @@ async fn http_session_commit_and_rollback() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
+async fn http_multi_statement_returns_result_per_statement() {
+    let (state, _temp_dir) = test_state();
+    let app = http::router(state);
+
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "CREATE TABLE multi_statement_users (id INTEGER PRIMARY KEY)",
+            "streaming": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create response body: {body}");
+
+    let (status, body) = send_json(
+        &app,
+        "/sql",
+        serde_json::json!({
+            "sql": "INSERT INTO multi_statement_users (id) VALUES (1); SELECT id FROM multi_statement_users;",
+            "streaming": false
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "response body: {body}");
+    let response = serde_json::from_str::<Value>(&body).expect("multi-statement response");
+    let results = response["results"]
+        .as_array()
+        .expect("HTTP response must expose per-statement results");
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["affected_rows"], 1);
+    assert_eq!(results[1]["rows"].as_array().expect("select rows").len(), 1);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
 async fn session_ddl_then_select_uses_same_transaction_catalog_view() {
     let (state, _temp_dir) = test_state();
     let app = http::router(state);

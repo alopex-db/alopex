@@ -42,17 +42,27 @@ pub struct SqlRequest {
     pub streaming: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ColumnInfoResponse {
     pub name: String,
     pub data_type: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct SqlResponse {
+#[derive(Debug, Clone, Serialize)]
+pub struct SqlResultResponse {
     pub columns: Vec<ColumnInfoResponse>,
     pub rows: Vec<Vec<alopex_sql::storage::SqlValue>>,
     pub affected_rows: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SqlResponse {
+    /// Legacy single-result fields. They contain the last statement result so
+    /// existing clients can migrate to `results` without an abrupt break.
+    #[serde(flatten)]
+    pub last_result: SqlResultResponse,
+    /// Results in input statement order.
+    pub results: Vec<SqlResultResponse>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub routing_diagnostics: Vec<RoutingDiagnostics>,
 }
@@ -150,14 +160,14 @@ pub(crate) async fn execute_non_streaming(
     }
 
     let exec_result: Result<(
-        alopex_sql::executor::ExecutionResult,
+        Vec<alopex_sql::executor::ExecutionResult>,
         Vec<RoutingDiagnostics>,
     )> = async {
         if let Some(session_id) = &request.session_id {
             let session_id = session_id
                 .parse::<SessionId>()
                 .map_err(|_| ServerError::BadRequest("invalid session_id".into()))?;
-            execute_session_statement_with_routing(
+            execute_session_statements_with_routing(
                 &state,
                 &session_id,
                 sql,
@@ -166,7 +176,7 @@ pub(crate) async fn execute_non_streaming(
             )
             .await
         } else {
-            execute_non_session_statement_with_routing(
+            execute_non_session_statements_with_routing(
                 &state,
                 sql,
                 &ctx.correlation_id,
@@ -196,17 +206,17 @@ pub(crate) async fn execute_non_streaming(
 
     state.metrics.record_query(start.elapsed(), true);
 
-    Ok(map_execution_result(exec_result.0, exec_result.1))
+    Ok(map_execution_results(exec_result.0, exec_result.1))
 }
 
-pub(crate) async fn execute_session_statement_with_routing(
+pub(crate) async fn execute_session_statements_with_routing(
     state: &ServerState,
     session_id: &SessionId,
     sql: &str,
     correlation_id: &str,
     timeout: Duration,
 ) -> Result<(
-    alopex_sql::executor::ExecutionResult,
+    Vec<alopex_sql::executor::ExecutionResult>,
     Vec<RoutingDiagnostics>,
 )> {
     let handle = state.session_manager.get_transaction(session_id).await?;
@@ -215,7 +225,7 @@ pub(crate) async fn execute_session_statement_with_routing(
         return Err(future_distributed_error(diagnostic));
     }
     let lifecycle_candidates = table_lifecycle_candidates(state, &routing_plan.planned)?;
-    let result = tokio::time::timeout(timeout, handle.execute(sql))
+    let result = tokio::time::timeout(timeout, handle.execute_multi(sql))
         .await
         .map_err(|_| ServerError::Timeout("query timeout".into()))?
         .map_err(|err| ServerError::Sql(err.into()))?;
@@ -230,13 +240,32 @@ pub(crate) async fn execute_session_statement_with_routing(
     Ok((result, routing_plan.diagnostics))
 }
 
-pub(crate) async fn execute_non_session_statement_with_routing(
+pub(crate) async fn execute_session_statement_with_routing(
     state: &ServerState,
+    session_id: &SessionId,
     sql: &str,
     correlation_id: &str,
     timeout: Duration,
 ) -> Result<(
     alopex_sql::executor::ExecutionResult,
+    Vec<RoutingDiagnostics>,
+)> {
+    let (mut results, diagnostics) =
+        execute_session_statements_with_routing(state, session_id, sql, correlation_id, timeout)
+            .await?;
+    let result = results
+        .pop()
+        .ok_or_else(|| ServerError::BadRequest("sql must not be empty".into()))?;
+    Ok((result, diagnostics))
+}
+
+pub(crate) async fn execute_non_session_statements_with_routing(
+    state: &ServerState,
+    sql: &str,
+    correlation_id: &str,
+    timeout: Duration,
+) -> Result<(
+    Vec<alopex_sql::executor::ExecutionResult>,
     Vec<RoutingDiagnostics>,
 )> {
     let mut txn = state.begin_sql_txn().await?;
@@ -252,7 +281,7 @@ pub(crate) async fn execute_non_session_statement_with_routing(
         return Err(future_distributed_error(diagnostic));
     }
     let lifecycle_candidates = table_lifecycle_candidates(state, &routing_plan.planned)?;
-    let fut = match tokio::time::timeout(timeout, txn.async_execute(sql)).await {
+    let fut = match tokio::time::timeout(timeout, txn.async_execute_multi(sql)).await {
         Ok(result) => result,
         Err(_) => {
             let _ = txn.async_rollback().await;
@@ -274,6 +303,23 @@ pub(crate) async fn execute_non_session_statement_with_routing(
             Err(ServerError::Sql(err.into()))
         }
     }
+}
+
+pub(crate) async fn execute_non_session_statement_with_routing(
+    state: &ServerState,
+    sql: &str,
+    correlation_id: &str,
+    timeout: Duration,
+) -> Result<(
+    alopex_sql::executor::ExecutionResult,
+    Vec<RoutingDiagnostics>,
+)> {
+    let (mut results, diagnostics) =
+        execute_non_session_statements_with_routing(state, sql, correlation_id, timeout).await?;
+    let result = results
+        .pop()
+        .ok_or_else(|| ServerError::BadRequest("sql must not be empty".into()))?;
+    Ok((result, diagnostics))
 }
 
 pub(crate) async fn route_session_statement_for_execution(
@@ -870,12 +916,30 @@ fn stream_item_error(err: ServerError, correlation_id: &str) -> StreamItem {
     }
 }
 
-fn map_execution_result(
-    exec_result: alopex_sql::executor::ExecutionResult,
+fn map_execution_results(
+    exec_results: Vec<alopex_sql::executor::ExecutionResult>,
     routing_diagnostics: Vec<RoutingDiagnostics>,
 ) -> SqlResponse {
+    let results: Vec<SqlResultResponse> =
+        exec_results.into_iter().map(map_execution_result).collect();
+    let last_result = results
+        .last()
+        .cloned()
+        .unwrap_or_else(|| SqlResultResponse {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            affected_rows: None,
+        });
+    SqlResponse {
+        last_result,
+        results,
+        routing_diagnostics,
+    }
+}
+
+fn map_execution_result(exec_result: alopex_sql::executor::ExecutionResult) -> SqlResultResponse {
     match exec_result {
-        alopex_sql::executor::ExecutionResult::Query(query) => SqlResponse {
+        alopex_sql::executor::ExecutionResult::Query(query) => SqlResultResponse {
             columns: query
                 .columns
                 .into_iter()
@@ -886,19 +950,16 @@ fn map_execution_result(
                 .collect(),
             rows: query.rows,
             affected_rows: None,
-            routing_diagnostics,
         },
-        alopex_sql::executor::ExecutionResult::RowsAffected(rows) => SqlResponse {
+        alopex_sql::executor::ExecutionResult::RowsAffected(rows) => SqlResultResponse {
             columns: Vec::new(),
             rows: Vec::new(),
             affected_rows: Some(rows),
-            routing_diagnostics,
         },
-        alopex_sql::executor::ExecutionResult::Success => SqlResponse {
+        alopex_sql::executor::ExecutionResult::Success => SqlResultResponse {
             columns: Vec::new(),
             rows: Vec::new(),
             affected_rows: None,
-            routing_diagnostics,
         },
     }
 }

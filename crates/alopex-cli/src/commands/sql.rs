@@ -237,9 +237,8 @@ fn is_select_query(sql: &str) -> Result<bool> {
 
 /// Execute a SQL command against a remote server using HttpClient.
 ///
-/// `--output json` emits an array of result sets (currently a single element,
-/// matching the local output contract; server-side per-statement results are
-/// tracked as issue #31).
+/// `--output json` emits an array of result sets, matching the local and
+/// server-side per-statement output contract.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_remote_with_formatter<'a, W: Write>(
     client: &HttpClient,
@@ -409,27 +408,57 @@ async fn execute_remote_with_formatter_impl<W: Write>(
         }
     };
 
-    // JSON output is an array of result sets; the remote API currently
-    // returns a single result set, so the array has one element (server-side
-    // per-statement results are tracked as issue #31).
+    // JSON output is an array of result sets, matching the server response.
     let json_array = output.statement_array();
+    if json_array {
+        writeln!(writer, "[")?;
+    }
+    let mut emitted = false;
+    for response in response.into_results() {
+        if response.columns.is_empty() && options.quiet {
+            continue;
+        }
+        if json_array && emitted {
+            writeln!(writer, ",")?;
+        }
+        emitted = true;
 
-    if response.columns.is_empty() {
-        if options.quiet {
+        if response.columns.is_empty() {
+            let message = match response.affected_rows {
+                Some(count) => format!("{count} row(s) affected"),
+                None => "Operation completed successfully".to_string(),
+            };
             if json_array {
                 writeln!(writer, "[")?;
+            }
+            let columns = sql_status_columns();
+            {
+                let mut streaming_writer = StreamingWriter::new(
+                    &mut *writer,
+                    output.create_block_formatter(),
+                    columns,
+                    options.limit,
+                )
+                .with_quiet(options.quiet);
+                streaming_writer.prepare(Some(1))?;
+                let row = Row::new(vec![Value::Text("OK".to_string()), Value::Text(message)]);
+                streaming_writer.write_row(row)?;
+                streaming_writer.finish()?;
+            }
+            if json_array {
                 writeln!(writer, "]")?;
             }
-            return Ok(());
+            continue;
         }
-        let message = match response.affected_rows {
-            Some(count) => format!("{count} row(s) affected"),
-            None => "Operation completed successfully".to_string(),
-        };
+
+        let columns: Vec<Column> = response
+            .columns
+            .iter()
+            .map(|col| Column::new(&col.name, data_type_from_string(&col.data_type)))
+            .collect();
         if json_array {
             writeln!(writer, "[")?;
         }
-        let columns = sql_status_columns();
         {
             let mut streaming_writer = StreamingWriter::new(
                 &mut *writer,
@@ -438,47 +467,24 @@ async fn execute_remote_with_formatter_impl<W: Write>(
                 options.limit,
             )
             .with_quiet(options.quiet);
-            streaming_writer.prepare(Some(1))?;
-            let row = Row::new(vec![Value::Text("OK".to_string()), Value::Text(message)]);
-            streaming_writer.write_row(row)?;
+            streaming_writer.prepare(Some(response.rows.len()))?;
+            for row in response.rows {
+                if options.cancel.is_cancelled() {
+                    let _ = send_cancel_request(client).await;
+                    return Err(CliError::Cancelled);
+                }
+                options.deadline.check()?;
+                let values = row.into_iter().map(remote_value_to_value).collect();
+                match streaming_writer.write_row(Row::new(values))? {
+                    WriteStatus::LimitReached => break,
+                    WriteStatus::Continue => {}
+                }
+            }
             streaming_writer.finish()?;
         }
         if json_array {
             writeln!(writer, "]")?;
         }
-        return Ok(());
-    }
-
-    let columns: Vec<Column> = response
-        .columns
-        .iter()
-        .map(|col| Column::new(&col.name, data_type_from_string(&col.data_type)))
-        .collect();
-    if json_array {
-        writeln!(writer, "[")?;
-    }
-    {
-        let mut streaming_writer = StreamingWriter::new(
-            &mut *writer,
-            output.create_block_formatter(),
-            columns,
-            options.limit,
-        )
-        .with_quiet(options.quiet);
-        streaming_writer.prepare(Some(response.rows.len()))?;
-        for row in response.rows {
-            if options.cancel.is_cancelled() {
-                let _ = send_cancel_request(client).await;
-                return Err(CliError::Cancelled);
-            }
-            options.deadline.check()?;
-            let values = row.into_iter().map(remote_value_to_value).collect();
-            match streaming_writer.write_row(Row::new(values))? {
-                WriteStatus::LimitReached => break,
-                WriteStatus::Continue => {}
-            }
-        }
-        streaming_writer.finish()?;
     }
     if json_array {
         writeln!(writer, "]")?;
@@ -636,6 +642,11 @@ async fn execute_tui_remote<'a>(
         }
     };
 
+    let response = response
+        .into_results()
+        .into_iter()
+        .last()
+        .unwrap_or_default();
     let (columns, rows) = if response.columns.is_empty() {
         let columns = sql_status_columns();
         let message = match response.affected_rows {
@@ -974,6 +985,11 @@ async fn collect_remote_non_streaming_rows(
         }
     };
 
+    let response = response
+        .into_results()
+        .into_iter()
+        .last()
+        .unwrap_or_default();
     if response.columns.is_empty() {
         let message = match response.affected_rows {
             Some(count) => format!("{count} row(s) affected"),
@@ -1035,9 +1051,8 @@ async fn execute_remote_streaming<W: Write>(
         }
     };
 
-    // JSON output is an array of result sets; the remote streaming API
-    // currently yields a single result set, so the array has one element
-    // (server-side per-statement results are tracked as issue #31).
+    // The streaming API is used only for a single SELECT; wrap that one
+    // result set in the same outer array as the non-streaming path.
     if !output.statement_array() {
         return stream_remote_result_set(
             client,
@@ -1980,11 +1995,32 @@ struct RemoteColumnInfo {
     data_type: String,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct RemoteSqlResult {
+    #[serde(default)]
+    columns: Vec<RemoteColumnInfo>,
+    #[serde(default)]
+    rows: Vec<Vec<alopex_sql::storage::SqlValue>>,
+    #[serde(default)]
+    affected_rows: Option<u64>,
+}
+
 #[derive(serde::Deserialize)]
 struct RemoteSqlResponse {
-    columns: Vec<RemoteColumnInfo>,
-    rows: Vec<Vec<alopex_sql::storage::SqlValue>>,
-    affected_rows: Option<u64>,
+    #[serde(default)]
+    results: Vec<RemoteSqlResult>,
+    #[serde(flatten)]
+    legacy: RemoteSqlResult,
+}
+
+impl RemoteSqlResponse {
+    fn into_results(self) -> Vec<RemoteSqlResult> {
+        if self.results.is_empty() {
+            vec![self.legacy]
+        } else {
+            self.results
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
