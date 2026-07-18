@@ -1,3 +1,4 @@
+use std::net::TcpListener;
 use std::sync::Arc;
 
 use alopex_cluster::{
@@ -16,13 +17,16 @@ use tempfile::tempdir;
 
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::metadata::MetadataValue;
 use tonic::transport::server::Connected;
 use tonic::transport::Server as TonicServer;
 use tonic::transport::{Channel, Uri};
-use tonic::Code;
+use tonic::{Code, Request};
 use tower::service_fn;
 
 async fn build_state(auth_mode: AuthMode) -> (Arc<ServerState>, tempfile::TempDir) {
@@ -37,11 +41,13 @@ async fn build_state(auth_mode: AuthMode) -> (Arc<ServerState>, tempfile::TempDi
     (server.state, temp)
 }
 
-async fn build_cluster_aware_state() -> (Arc<ServerState>, tempfile::TempDir) {
+async fn build_cluster_aware_state_with_auth(
+    auth_mode: AuthMode,
+) -> (Arc<ServerState>, tempfile::TempDir) {
     let temp = tempdir().expect("tempdir");
     let config = ServerConfig {
         data_dir: temp.path().to_path_buf(),
-        auth_mode: AuthMode::None,
+        auth_mode,
         audit_log_enabled: false,
         cluster: ClusterServerConfig {
             mode: alopex_cluster::ClusterMode::ClusterAware,
@@ -56,6 +62,10 @@ async fn build_cluster_aware_state() -> (Arc<ServerState>, tempfile::TempDir) {
     };
     let server = Server::new(config).expect("server");
     (server.state, temp)
+}
+
+async fn build_cluster_aware_state() -> (Arc<ServerState>, tempfile::TempDir) {
+    build_cluster_aware_state_with_auth(AuthMode::None).await
 }
 
 fn table_ref_and_id(state: &ServerState, table_name: &str) -> (String, u32) {
@@ -193,6 +203,37 @@ async fn spawn_grpc_server(state: Arc<ServerState>) -> (Channel, tokio::task::Jo
         .expect("channel");
 
     (channel, handle)
+}
+
+async fn spawn_network_grpc_server(
+    state: Arc<ServerState>,
+) -> (Channel, broadcast::Sender<()>, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve grpc port");
+    let addr = listener.local_addr().expect("grpc address");
+    drop(listener);
+
+    let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+    let handle = tokio::spawn(async move {
+        grpc::serve(state, addr, shutdown_rx)
+            .await
+            .expect("serve grpc transport");
+    });
+
+    let endpoint = format!("http://{addr}");
+    for _ in 0..40 {
+        match Channel::from_shared(endpoint.clone())
+            .expect("grpc endpoint")
+            .connect()
+            .await
+        {
+            Ok(channel) => return (channel, shutdown_tx, handle),
+            Err(_) => sleep(Duration::from_millis(25)).await,
+        }
+    }
+
+    let _ = shutdown_tx.send(());
+    let _ = handle.await;
+    panic!("gRPC transport did not become ready at {endpoint}");
 }
 
 fn extract_int(value: &grpc::proto::Value) -> Option<i64> {
@@ -446,4 +487,46 @@ async fn grpc_cluster_join_rejects_single_node_mode() {
         .expect_err("single-node cluster join");
     assert_eq!(err.code(), Code::InvalidArgument);
     assert!(err.message().contains("cluster_aware mode"));
+}
+
+#[tokio::test]
+async fn grpc_cluster_admin_enforces_authentication_over_transport() {
+    let (state, _temp) = build_cluster_aware_state_with_auth(AuthMode::Dev {
+        api_key: "secret".to_string(),
+    })
+    .await;
+    let (channel, shutdown, handle) = spawn_network_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+
+    let missing = client
+        .cluster_status(grpc::proto::ClusterStatusRequest {})
+        .await
+        .expect_err("missing gRPC credentials");
+    assert_eq!(missing.code(), Code::Unauthenticated);
+
+    let mut wrong = Request::new(grpc::proto::ClusterStatusRequest {});
+    wrong
+        .metadata_mut()
+        .insert("x-api-key", MetadataValue::from_static("wrong"));
+    let invalid = client
+        .cluster_status(wrong)
+        .await
+        .expect_err("invalid gRPC credentials");
+    assert_eq!(invalid.code(), Code::Unauthenticated);
+
+    let mut valid = Request::new(grpc::proto::ClusterStatusRequest {});
+    valid
+        .metadata_mut()
+        .insert("x-api-key", MetadataValue::from_static("secret"));
+    let response = client
+        .cluster_status(valid)
+        .await
+        .expect("valid gRPC credentials")
+        .into_inner();
+    let json: serde_json::Value =
+        serde_json::from_str(&response.cluster_json).expect("cluster json");
+    assert_eq!(json["mode"], "cluster_aware");
+
+    shutdown.send(()).expect("shutdown gRPC transport");
+    handle.await.expect("join gRPC transport");
 }

@@ -20,6 +20,10 @@ provides `ClusterStatus`, `ClusterJoin`, and `ClusterLeave` RPCs.
 Each RPC returns the same canonical `ClusterStatusSnapshot` JSON schema used by
 the HTTP `cluster` field. This is an additive protocol surface; the default
 single-node behavior and the v0.7 status/routing contracts remain unchanged.
+The RPCs are covered by the release gate, including the real transport
+authentication interceptor: `x-api-key` or `authorization: Bearer` metadata is
+required when `auth_mode` is `dev`, and missing or invalid credentials return
+`UNAUTHENTICATED`.
 
 Stable in v0.7.0:
 

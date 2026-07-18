@@ -210,6 +210,8 @@ main() {
         cargo test -p alopex-embedded --test v07_compatibility --all-features --locked
     run_step "Server: v0.6 compatibility regression tests" \
         cargo test -p alopex-server --test v07_compatibility --all-features --locked
+    run_step "Server: gRPC API, cluster administration, and transport authentication tests" \
+        cargo test -p alopex-server --test grpc_test --all-features --locked
     run_step "Server: cluster routing SQL smoke" \
         cargo test -p alopex-server --test http_sql_e2e --all-features --locked
     run_step "Server: cluster status cross-surface fixture" \
