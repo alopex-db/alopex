@@ -18,4 +18,9 @@ Example (from the repository root):
 
 ```bash
 cargo run --manifest-path crates/alopex-tools/v08/Cargo.toml --release --locked --offline
+bash crates/alopex-tools/v08/verify-v08-surfaces.sh
 ```
+
+`verify-v08-surfaces.sh` delegates to the authoritative distributed-read,
+cluster CLI, DataFrame streaming, and Python async/local-surface suites. Set
+`ALOPEX_PYTHON` when the Python environment is not `/tmp/alopex-v08-python`.
