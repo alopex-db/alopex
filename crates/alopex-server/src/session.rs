@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use alopex_cluster::TableLifecycleEffect;
+use alopex_cluster::{AuthenticatedSubject, TableLifecycleEffect};
 use alopex_core::async_runtime::{BoxFuture, BoxStream};
 use alopex_sql::catalog::TableMetadata;
 use alopex_sql::executor::{ExecutionResult, ExecutorError, Row};
@@ -58,6 +58,8 @@ pub enum SessionState {
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct SessionSnapshot {
     pub id: SessionId,
+    /// Authenticated subject bound when the session was created for remote work.
+    pub authenticated_subject: Option<AuthenticatedSubject>,
     pub has_transaction: bool,
     pub created_at: SystemTime,
     pub last_active: SystemTime,
@@ -249,6 +251,7 @@ pub struct SessionManager {
 
 struct Session {
     id: SessionId,
+    authenticated_subject: Option<AuthenticatedSubject>,
     txn_handle: Option<TxnHandle>,
     created_at: SystemTime,
     last_active: SystemTime,
@@ -266,10 +269,27 @@ impl SessionManager {
     }
 
     pub async fn create_session(&self) -> Result<SessionId> {
+        self.create_session_with_subject(None).await
+    }
+
+    /// Create a session whose authority is permanently bound to a validated
+    /// remote-read delegation subject.
+    pub async fn create_authenticated_session(
+        &self,
+        subject: AuthenticatedSubject,
+    ) -> Result<SessionId> {
+        self.create_session_with_subject(Some(subject)).await
+    }
+
+    async fn create_session_with_subject(
+        &self,
+        authenticated_subject: Option<AuthenticatedSubject>,
+    ) -> Result<SessionId> {
         let now = SystemTime::now();
         let id = SessionId::new();
         let session = Session {
             id: id.clone(),
+            authenticated_subject,
             txn_handle: None,
             created_at: now,
             last_active: now,
@@ -278,6 +298,17 @@ impl SessionManager {
         };
         self.sessions.insert(id.clone(), session);
         Ok(id)
+    }
+
+    /// Return the subject bound to a remote-read session.
+    ///
+    /// Ordinary legacy sessions intentionally have no subject and cannot be
+    /// repurposed as a remote worker session.
+    pub async fn authenticated_subject(&self, id: &SessionId) -> Result<AuthenticatedSubject> {
+        let snapshot = self.get_session(id).await?;
+        snapshot.authenticated_subject.ok_or_else(|| {
+            ServerError::Unauthorized("remote read requires a subject-bound session".into())
+        })
     }
 
     pub async fn get_session(&self, id: &SessionId) -> Result<SessionSnapshot> {
@@ -292,6 +323,7 @@ impl SessionManager {
         }
         Ok(SessionSnapshot {
             id: entry.id.clone(),
+            authenticated_subject: entry.authenticated_subject.clone(),
             has_transaction: entry.txn_handle.is_some(),
             created_at: entry.created_at,
             last_active: entry.last_active,
@@ -396,6 +428,11 @@ impl SessionManager {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn active_session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
     fn take_handle(&self, id: &SessionId, state: SessionState) -> Result<TxnHandle> {
         let mut entry = self
             .sessions
@@ -413,5 +450,45 @@ impl SessionManager {
         entry.state = state;
         entry.last_active = SystemTime::now();
         Ok(handle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manager() -> SessionManager {
+        SessionManager::new(
+            SessionConfig {
+                ttl: Duration::from_secs(60),
+            },
+            Arc::new(|| {
+                Box::pin(async {
+                    Err(ServerError::Internal(
+                        "test factory must not create a transaction".into(),
+                    ))
+                })
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn only_authenticated_sessions_expose_a_remote_read_subject() {
+        let manager = manager();
+        let anonymous = manager.create_session().await.unwrap();
+        assert!(matches!(
+            manager.authenticated_subject(&anonymous).await,
+            Err(ServerError::Unauthorized(_))
+        ));
+
+        let subject = AuthenticatedSubject::new("user-a");
+        let bound = manager
+            .create_authenticated_session(subject.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.authenticated_subject(&bound).await.unwrap(),
+            subject
+        );
     }
 }

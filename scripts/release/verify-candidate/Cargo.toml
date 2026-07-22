@@ -1,0 +1,24 @@
+# Candidate verification is intentionally an independent development workspace.
+# It must never become a product artifact or inherit the product workspace's
+# package version.
+[workspace]
+
+[package]
+name = "alopex-verify-candidate"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "Apache-2.0"
+description = "Offline, no-write v0.8 candidate readiness verifier"
+
+[[bin]]
+name = "verify-candidate"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

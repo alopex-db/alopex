@@ -71,9 +71,17 @@ fn main() {
     // から出しても、最終的にリンクされるバイナリ（alopex-cli/alopex-server/
     // alopex-py の cdylib）には伝播しない（cargo の仕様。rustc-link-arg-bins
     // も同様に「その build.rs を持つパッケージ自身の bin」にしか効かない）。
-    // そのため rpath はここでは設定せず、Cargo.toml の links = "alopex_sql_parser"
-    // を通じて cargo::metadata で libdir を公開し、コンシューマ側の build.rs が
-    // DEP_ALOPEX_SQL_PARSER_LIBDIR を読んで自分自身のバイナリに rpath を設定する
-    // （*-sys crate の標準パターン）。
+    // コンシューマ側には Cargo metadata で libdir を公開し、各コンシューマの
+    // build.rs が DEP_ALOPEX_SQL_PARSER_LIBDIR を読んで rpath を設定する。
+    // （*-sys crate の標準パターン）。SQL crate 自身の test harness にはここで設定する。
     println!("cargo::metadata=libdir={}", lib_dir.display());
+    // alopex-sql 自身の unit/integration test executable also links the
+    // shared parser directly, so it needs its own runtime search path.
+    if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
+        println!(
+            "cargo:rustc-link-arg-tests=-Wl,-rpath,{}",
+            lib_dir.display()
+        );
+    }
 }

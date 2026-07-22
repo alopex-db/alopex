@@ -24,7 +24,13 @@ pub mod async_adapter;
 /// Async KV traits (requires `async` feature).
 #[cfg(feature = "async")]
 pub mod async_kv;
+/// Atomic local range-change journal capability.
+pub mod change_journal;
 pub mod memory;
+/// Owned session contracts for long-lived local consumers.
+pub mod owned;
+/// Read-point capability for fenced distributed reads.
+pub mod read_at;
 /// Storage mode selection helpers (disk vs memory).
 pub mod storage;
 
@@ -37,6 +43,16 @@ pub use any::AnyKV;
 pub use async_adapter::{AsyncKVStoreAdapter, AsyncKVTransactionAdapter};
 #[cfg(feature = "async")]
 pub use async_kv::{AsyncKVStore, AsyncKVTransaction};
+pub use change_journal::{
+    decode_range_change, journal_key, stage_range_change, RangeChangeJournalCapability,
+    RangeChangePayload, RangeChangeRecord,
+};
+pub use owned::{
+    OwnedKVScan, OwnedKVStore, OwnedKVTransaction, OwnedKVTransactionAdapter, OwnedReadLease,
+    OwnedReadOptions, OwnedReadSession, OwnedReadSessionApi, OwnedSessionFactory,
+    OwnedTransactionLease, OwnedTransactionSession, OwnedTransactionSessionApi,
+};
+pub use read_at::{ReadAtCapability, ReadAtError, ReadAtPoint, ReadAtResult};
 
 #[cfg(feature = "s3")]
 pub use s3::{S3Config, S3KV};
@@ -118,6 +134,28 @@ pub trait KVStore: Send + Sync {
 
     /// A convenience method to begin a new transaction.
     fn begin(&self, mode: TxnMode) -> Result<Self::Transaction<'_>>;
+
+    /// Reports whether this backend can open a retained snapshot at a
+    /// caller-provided cluster data epoch.
+    ///
+    /// A normal `begin(ReadOnly)` snapshot is intentionally not evidence for a
+    /// distributed read point: it has only node-local transaction semantics.
+    /// Backends must return [`ReadAtCapability::Unavailable`] unless they can
+    /// retain and prove the requested epoch, schema, and index cut.
+    fn read_at_capability(&self) -> ReadAtCapability {
+        ReadAtCapability::unavailable("backend does not prove retained cluster read points")
+    }
+
+    /// Opens a read-only snapshot at a previously fenced cluster read point.
+    ///
+    /// The safe default never substitutes a local transaction for `point`.
+    /// A backend that advertises [`ReadAtCapability::Available`] must override
+    /// this method and validate retention before returning a transaction.
+    fn begin_read_at(&self, point: &ReadAtPoint) -> ReadAtResult<Self::Transaction<'_>> {
+        Err(self
+            .read_at_capability()
+            .unavailable_error(point, "backend did not implement begin_read_at"))
+    }
 
     /// Returns a point-in-time runtime statistics snapshot, when supported.
     fn runtime_stats(&self) -> Option<RuntimeStats> {

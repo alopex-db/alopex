@@ -29,7 +29,7 @@ use clap_complete::{generate, Shell};
 use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 
-use batch::BatchMode;
+use batch::{BatchMode, DistributedReadOutcome};
 use cli::{Cli, Command};
 use client::http::HttpClient;
 use commands::lifecycle::{RemoteLifecycleSupport, SupportLevel};
@@ -37,9 +37,13 @@ use config::{setup_signal_handler, validate_thread_mode, EXIT_CODE_INTERRUPTED};
 use error::{handle_error, CliError, Result};
 use models::{Column, DataType, Row, Value};
 use output::create_formatter;
-use profile::config::{AuthType, ConnectionType, ServerConfig};
+use profile::config::{
+    AuthType, ConnectionType, ExecutionScope, ResolvedSqlReadMode, ServerConfig,
+};
 use profile::{execute_profile_command, execute_profile_tui, ProfileManager, ResolvedConfig};
-use streaming::StreamingWriter;
+use streaming::{
+    write_distributed_read_routing_report, DistributedReadRoutingReport, StreamingWriter,
+};
 use tui::admin::actions::AdminAction;
 use tui::admin::{AdminBackend, AdminContext, AdminTarget, AuthCapabilities};
 use ui::mode::{resolve_ui_mode, UiMode};
@@ -57,7 +61,7 @@ fn main() -> ExitCode {
 
     // Set up signal handler
     if let Err(e) = setup_signal_handler() {
-        handle_error(e, verbose);
+        handle_error(&e, verbose);
         return ExitCode::from(1);
     }
 
@@ -75,8 +79,9 @@ fn main() -> ExitCode {
             }
 
             // Handle the error normally
-            handle_error(e, verbose);
-            ExitCode::from(1)
+            let exit_code = e.exit_code().as_i32() as u8;
+            handle_error(&e, verbose);
+            ExitCode::from(exit_code)
         }
     }
 }
@@ -117,6 +122,8 @@ fn resolve_config(cli: &Cli) -> Result<ResolvedConfig> {
             connection_type: ConnectionType::Local,
             server: None,
             fallback_local: None,
+            execution_scope: ExecutionScope::Local,
+            cluster_read: None,
         });
     }
 
@@ -132,6 +139,8 @@ fn resolve_config(cli: &Cli) -> Result<ResolvedConfig> {
             connection_type: ConnectionType::Local,
             server: None,
             fallback_local: None,
+            execution_scope: ExecutionScope::Local,
+            cluster_read: None,
         });
     }
 
@@ -346,6 +355,36 @@ fn run(cli: Cli) -> Result<()> {
     let command = cli
         .command
         .ok_or_else(|| CliError::InvalidArgument("Missing subcommand".to_string()))?;
+    let sql_read_mode = match &command {
+        Command::Sql(sql_cmd) => match resolved.resolve_sql_read_mode(sql_cmd.read_mode) {
+            Ok(mode) => Some(mode),
+            Err(error) => {
+                let reason = error.to_string();
+                if let Some(format) = sql_cmd.routing_report {
+                    let requested_mode = sql_cmd
+                        .read_mode
+                        .map(|mode| format!("{mode:?}").to_ascii_lowercase())
+                        .unwrap_or_else(|| "local".to_string());
+                    let report = DistributedReadRoutingReport::new(
+                        requested_mode,
+                        None,
+                        "pre_execution_rejection",
+                        DistributedReadOutcome::Unsupported.as_str(),
+                        Some(reason.clone()),
+                    );
+                    let stderr = io::stderr();
+                    let mut stderr = stderr.lock();
+                    write_distributed_read_routing_report(&mut stderr, format, &report)?;
+                }
+                return Err(CliError::DistributedReadOutcome {
+                    outcome: DistributedReadOutcome::Unsupported.as_str().to_string(),
+                    reason,
+                    exit_code: DistributedReadOutcome::Unsupported.exit_code(),
+                });
+            }
+        },
+        _ => None,
+    };
 
     if resolved.connection_type == ConnectionType::Server {
         let data_dir = resolved.data_dir.as_deref().map(Path::new);
@@ -359,6 +398,7 @@ fn run(cli: Cli) -> Result<()> {
                 output_format,
                 cli.limit,
                 cli.quiet,
+                sql_read_mode,
             ) {
                 Ok(()) => return Ok(()),
                 Err(err) => {
@@ -560,6 +600,7 @@ fn execute_server_command(
     output_format: cli::OutputFormat,
     limit: Option<usize>,
     quiet: bool,
+    sql_read_mode: Option<ResolvedSqlReadMode>,
 ) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().map_err(|err| {
         CliError::InvalidArgument(format!("Failed to start async runtime: {err}"))
@@ -689,9 +730,13 @@ fn execute_server_command(
                 } else {
                     None
                 };
-            runtime.block_on(commands::sql::execute_remote_with_formatter(
+            let sql_read_mode = sql_read_mode.ok_or_else(|| {
+                CliError::InvalidArgument("missing resolved SQL read mode".to_string())
+            })?;
+            runtime.block_on(commands::sql::execute_remote_with_routing(
                 &client,
                 sql_cmd,
+                sql_read_mode,
                 batch_mode,
                 ui_mode,
                 &mut handle,
@@ -968,11 +1013,12 @@ fn execute_server_command(
             }
             let stdout = io::stdout();
             let mut handle = stdout.lock();
-            runtime.block_on(commands::server::execute_remote(
+            runtime.block_on(commands::server::execute_remote_with_format(
                 &client,
                 server_cmd,
                 &mut handle,
                 quiet,
+                output_format,
             ))
         }
         Command::Lifecycle { command } => {

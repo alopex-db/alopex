@@ -4,8 +4,9 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
+use serde::{Deserialize, Serialize};
 
 fn parse_shell(value: &str) -> Result<Shell, String> {
     match value {
@@ -87,6 +88,27 @@ pub enum OutputFormat {
     Csv,
     /// TSV format (tab-separated values)
     Tsv,
+}
+
+/// Requested SQL read routing mode. `local` remains the compatibility default;
+/// all other modes require an explicitly configured cluster profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SqlReadMode {
+    #[default]
+    Local,
+    Inherit,
+    Strong,
+    Stale,
+}
+
+/// Requested format for the distributed-read routing report. The report is
+/// emitted by the later output adapter and is intentionally separate from
+/// query stdout formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RoutingReportFormat {
+    Human,
+    Json,
 }
 
 impl OutputFormat {
@@ -305,6 +327,15 @@ pub struct SqlCommand {
     #[arg(long)]
     pub deadline: Option<String>,
 
+    /// Read routing mode. Non-local modes require an explicit cluster profile.
+    #[arg(long, value_enum)]
+    pub read_mode: Option<SqlReadMode>,
+
+    /// Emit a distributed-read routing report to stderr without changing SQL
+    /// row output on stdout.
+    #[arg(long, value_enum)]
+    pub routing_report: Option<RoutingReportFormat>,
+
     /// Launch interactive TUI preview
     #[arg(long)]
     pub tui: bool,
@@ -490,6 +521,261 @@ pub enum ServerCommand {
         #[command(subcommand)]
         command: CompactionCommand,
     },
+    /// Cluster metadata management commands
+    Cluster {
+        #[command(subcommand)]
+        command: ClusterCommand,
+    },
+}
+
+/// Shared operation identity and optimistic-concurrency input for cluster
+/// management requests. The request ID is deliberately operator-supplied so a
+/// retry can use the same idempotency key.
+#[derive(Args, Debug)]
+pub struct ClusterOperationRequest {
+    /// Stable operation ID used for idempotency and status correlation
+    #[arg(long, value_name = "REQUEST_ID")]
+    pub request_id: String,
+    /// Expected committed metadata version
+    #[arg(long)]
+    pub expected_version: Option<u64>,
+}
+
+/// Read operation which addresses a specific public metadata target.
+#[derive(Args, Debug)]
+pub struct ClusterTargetedReadRequest {
+    #[command(flatten)]
+    pub operation: ClusterOperationRequest,
+    /// Public target encoded as JSON
+    #[arg(long, value_name = "JSON")]
+    pub target: String,
+}
+
+/// Mutation input. A target and explicit confirmation are kept in the grammar
+/// instead of being inferred from a positional argument or an interactive
+/// prompt, so automation and the HTTP contract cannot disagree.
+#[derive(Args, Debug)]
+pub struct ClusterMutationRequest {
+    #[command(flatten)]
+    pub operation: ClusterOperationRequest,
+    /// Public mutation target encoded as JSON
+    #[arg(long, value_name = "JSON")]
+    pub target: String,
+    /// Confirm this cluster metadata mutation
+    #[arg(long, required = true)]
+    pub confirm: bool,
+}
+
+/// Cluster metadata management areas.
+#[derive(Subcommand, Debug)]
+pub enum ClusterCommand {
+    /// Inspect cluster metadata control availability
+    Metadata {
+        #[command(subcommand)]
+        command: ClusterMetadataCommand,
+    },
+    /// Manage committed members
+    #[command(visible_alias = "member")]
+    Members {
+        #[command(subcommand)]
+        command: ClusterMembersCommand,
+    },
+    /// Inspect and manage registered ranges
+    #[command(visible_alias = "range")]
+    Ranges {
+        #[command(subcommand)]
+        command: ClusterRangesCommand,
+    },
+    /// Inspect and manage range placement
+    Placement {
+        #[command(subcommand)]
+        command: ClusterPlacementCommand,
+    },
+    /// Inspect and manage the cluster read policy
+    ReadPolicy {
+        #[command(subcommand)]
+        command: ClusterReadPolicyCommand,
+    },
+    /// Inspect and manage schema ownership and rollout
+    Schema {
+        #[command(subcommand)]
+        command: ClusterSchemaCommand,
+    },
+    /// Inspect or run recovery management operations
+    Recovery {
+        #[command(subcommand)]
+        command: ClusterRecoveryCommand,
+    },
+    /// Inspect or start a resumable upgrade
+    Upgrade {
+        #[command(subcommand)]
+        command: ClusterUpgradeCommand,
+    },
+}
+
+/// Metadata inspection commands.
+#[derive(Subcommand, Debug)]
+pub enum ClusterMetadataCommand {
+    /// Show committed metadata control status
+    Show {
+        #[command(flatten)]
+        request: ClusterOperationRequest,
+    },
+}
+
+/// Member management commands.
+#[derive(Subcommand, Debug)]
+pub enum ClusterMembersCommand {
+    /// List committed members
+    List {
+        #[command(flatten)]
+        request: ClusterOperationRequest,
+    },
+    /// Replace a member using an explicit public target
+    Replace {
+        #[command(flatten)]
+        request: ClusterMutationRequest,
+    },
+}
+
+/// Range management commands.
+#[derive(Subcommand, Debug)]
+pub enum ClusterRangesCommand {
+    /// List committed ranges
+    List {
+        #[command(flatten)]
+        request: ClusterOperationRequest,
+    },
+    /// Show one range using an explicit public target
+    Show {
+        #[command(flatten)]
+        request: ClusterTargetedReadRequest,
+    },
+    /// Register a provisioned range using an explicit public target
+    Register {
+        #[command(flatten)]
+        request: ClusterMutationRequest,
+    },
+    /// Update range metadata using an explicit public target
+    Update {
+        #[command(flatten)]
+        request: ClusterMutationRequest,
+    },
+    /// Retire a range using an explicit public target
+    Retire {
+        #[command(flatten)]
+        request: ClusterMutationRequest,
+    },
+}
+
+/// Range placement commands.
+#[derive(Subcommand, Debug)]
+pub enum ClusterPlacementCommand {
+    /// Get placement for an explicit range target
+    Get {
+        #[command(flatten)]
+        request: ClusterTargetedReadRequest,
+    },
+    /// Set placement using an explicit public target
+    Set {
+        #[command(flatten)]
+        request: ClusterMutationRequest,
+    },
+    /// Replace placement using an explicit public target
+    Replace {
+        #[command(flatten)]
+        request: ClusterMutationRequest,
+    },
+}
+
+/// Cluster read-policy commands.
+#[derive(Subcommand, Debug)]
+pub enum ClusterReadPolicyCommand {
+    /// Get the committed read policy
+    Get {
+        #[command(flatten)]
+        request: ClusterOperationRequest,
+    },
+    /// Set the committed read policy using an explicit public target
+    Set {
+        #[command(flatten)]
+        request: ClusterMutationRequest,
+    },
+}
+
+/// Cluster schema ownership and rollout commands.
+#[derive(Subcommand, Debug)]
+pub enum ClusterSchemaCommand {
+    /// Inspect schema owner
+    Owner {
+        #[command(subcommand)]
+        command: ClusterSchemaOwnerCommand,
+    },
+    /// Inspect or start schema rollout
+    Rollout {
+        #[command(subcommand)]
+        command: ClusterSchemaRolloutCommand,
+    },
+}
+
+/// Schema ownership commands.
+#[derive(Subcommand, Debug)]
+pub enum ClusterSchemaOwnerCommand {
+    /// Get the committed schema owner
+    Get {
+        #[command(flatten)]
+        request: ClusterOperationRequest,
+    },
+    /// Set the committed schema owner using an explicit public target
+    Set {
+        #[command(flatten)]
+        request: ClusterMutationRequest,
+    },
+}
+
+/// Schema rollout commands.
+#[derive(Subcommand, Debug)]
+pub enum ClusterSchemaRolloutCommand {
+    /// Start a schema rollout using an explicit public target
+    Start {
+        #[command(flatten)]
+        request: ClusterMutationRequest,
+    },
+    /// Get schema rollout status
+    Status {
+        #[command(flatten)]
+        request: ClusterOperationRequest,
+    },
+}
+
+/// Recovery management commands.
+#[derive(Subcommand, Debug)]
+pub enum ClusterRecoveryCommand {
+    /// Get recovery status
+    Status {
+        #[command(flatten)]
+        request: ClusterOperationRequest,
+    },
+    /// Restore from an explicit public target
+    Restore {
+        #[command(flatten)]
+        request: ClusterMutationRequest,
+    },
+}
+
+/// Upgrade management commands.
+#[derive(Subcommand, Debug)]
+pub enum ClusterUpgradeCommand {
+    /// Get resumable upgrade status
+    Status {
+        #[command(flatten)]
+        request: ClusterOperationRequest,
+    },
+    /// Start an upgrade from an explicit public target
+    Start {
+        #[command(flatten)]
+        request: ClusterMutationRequest,
+    },
 }
 
 /// Lifecycle subcommands
@@ -628,6 +914,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_distributed_read_options() {
+        let args = vec![
+            "alopex",
+            "sql",
+            "--read-mode",
+            "stale",
+            "--routing-report",
+            "json",
+            "SELECT 1",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+
+        match cli.command {
+            Some(Command::Sql(cmd)) => {
+                assert_eq!(cmd.read_mode, Some(SqlReadMode::Stale));
+                assert_eq!(cmd.routing_report, Some(RoutingReportFormat::Json));
+            }
+            _ => panic!("expected sql command"),
+        }
+    }
+
+    #[test]
     fn test_parse_sql_tui_flag() {
         let args = vec!["alopex", "sql", "--tui", "SELECT 1"];
         let cli = Cli::try_parse_from(args).unwrap();
@@ -686,6 +994,63 @@ mod tests {
                 command: Some(ServerCommand::Leave)
             })
         ));
+    }
+
+    #[test]
+    fn test_parse_cluster_mutation_requires_explicit_target_and_confirmation() {
+        let args = vec![
+            "alopex",
+            "server",
+            "cluster",
+            "ranges",
+            "register",
+            "--request-id",
+            "range-register-1",
+            "--expected-version",
+            "8",
+            "--target",
+            r#"{"range_id":"primary/0"}"#,
+            "--confirm",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Server {
+                command: Some(ServerCommand::Cluster {
+                    command: ClusterCommand::Ranges {
+                        command: ClusterRangesCommand::Register { request }
+                    }
+                })
+            }) if request.operation.request_id == "range-register-1"
+                && request.operation.expected_version == Some(8)
+                && request.target == r#"{"range_id":"primary/0"}"#
+                && request.confirm
+        ));
+
+        assert!(Cli::try_parse_from([
+            "alopex",
+            "server",
+            "cluster",
+            "ranges",
+            "register",
+            "--request-id",
+            "range-register-1",
+            "--confirm",
+        ])
+        .is_err());
+
+        assert!(Cli::try_parse_from([
+            "alopex",
+            "server",
+            "cluster",
+            "ranges",
+            "register",
+            "--request-id",
+            "range-register-1",
+            "--target",
+            r#"{"range_id":"primary/0"}"#,
+        ])
+        .is_err());
     }
 
     #[test]

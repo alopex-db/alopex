@@ -98,6 +98,18 @@ impl DataFrame {
         Ok(Self { schema, batches })
     }
 
+    /// Strict vertical concatenation of two or more eager frames.
+    ///
+    /// Column name/order/type/nullability must match exactly. The result keeps every batch from
+    /// input one before every batch from input two, and so on; no implicit coercion is performed.
+    pub fn concat(inputs: Vec<DataFrame>) -> Result<Self> {
+        let lazy_inputs = inputs
+            .into_iter()
+            .map(crate::LazyFrame::from_dataframe)
+            .collect();
+        crate::LazyFrame::concat(lazy_inputs)?.collect()
+    }
+
     /// Alias for `DataFrame::new`.
     pub fn from_series(series: Vec<Series>) -> Result<Self> {
         Self::new(series)
@@ -373,5 +385,47 @@ mod tests {
         assert_eq!(cols[1].name(), "a");
         assert_eq!(cols[0].len(), 2);
         assert_eq!(cols[1].len(), 2);
+    }
+
+    #[test]
+    fn eager_concat_preserves_input_order_and_rejects_mismatched_schema() {
+        let first = DataFrame::new(vec![Series::from_arrow(
+            "value",
+            vec![Arc::new(Int32Array::from(vec![1])) as ArrayRef],
+        )
+        .unwrap()])
+        .unwrap();
+        let second = DataFrame::new(vec![Series::from_arrow(
+            "value",
+            vec![Arc::new(Int32Array::from(vec![2])) as ArrayRef],
+        )
+        .unwrap()])
+        .unwrap();
+        let output = DataFrame::concat(vec![first.clone(), second]).unwrap();
+        let values = output
+            .to_arrow()
+            .into_iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![1, 2]);
+
+        let incompatible = DataFrame::new(vec![Series::from_arrow(
+            "other",
+            vec![Arc::new(Int32Array::from(vec![3])) as ArrayRef],
+        )
+        .unwrap()])
+        .unwrap();
+        let err = DataFrame::concat(vec![first, incompatible]).unwrap_err();
+        assert!(err.to_string().contains("concat_schema_mismatch"));
     }
 }

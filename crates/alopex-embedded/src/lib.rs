@@ -9,24 +9,34 @@ mod cluster_state;
 pub mod columnar_api;
 mod dataframe_api;
 pub mod options;
+pub mod owned_session;
+pub mod owned_sql;
 mod sql_api;
 mod txn_manager;
 
 pub use crate::catalog::{CachedTableInfo, Catalog};
 pub use crate::catalog_api::{
-    CatalogInfo, ColumnDefinition, ColumnInfo, CreateCatalogRequest, CreateNamespaceRequest,
-    CreateTableRequest, IndexInfo, NamespaceInfo, StorageInfo, TableInfo,
+    CatalogInfo, CatalogManifestCatalog, CatalogManifestColumn, CatalogManifestCompression,
+    CatalogManifestDataSourceFormat, CatalogManifestDataType, CatalogManifestDelta,
+    CatalogManifestIndex, CatalogManifestIndexMethod, CatalogManifestNamespace,
+    CatalogManifestRowIdMode, CatalogManifestStorage, CatalogManifestStorageType,
+    CatalogManifestTable, CatalogManifestTableType, CatalogManifestVectorMetric, ColumnDefinition,
+    ColumnInfo, CreateCatalogRequest, CreateNamespaceRequest, CreateTableRequest, IndexInfo,
+    NamespaceInfo, StorageInfo, TableInfo, CATALOG_MANIFEST_DELTA_FORMAT,
 };
 pub use crate::columnar_api::{
     ColumnarIndexInfo, ColumnarIndexType, ColumnarRowIterator, EmbeddedConfig, StorageMode,
 };
 pub use crate::options::DatabaseOptions;
+pub use crate::owned_session::{EmbeddedOwnedSessionFactory, OwnedEmbeddedTransaction};
+pub use crate::owned_sql::{OwnedSqlRowOutcome, OwnedSqlStreamPlan};
 pub use crate::sql_api::{SqlStreamingResult, StreamingQueryResult, StreamingRows};
 pub use crate::txn_manager::{TransactionInfo, TransactionManager};
 pub use alopex_dataframe::{DataFrame, JoinKeys, JoinType, SortOptions};
 pub use alopex_sql::{DataSourceFormat, TableType};
 /// `Database::execute_sql()` / `Transaction::execute_sql()` の返却型。
 pub type SqlResult = alopex_sql::SqlResult;
+pub use alopex_core::kv::{OwnedReadOptions, OwnedReadSession, OwnedTransactionSession};
 use alopex_core::vector::hnsw::{HnswTransactionState, SearchStats as HnswSearchStats};
 use alopex_core::{
     columnar::{
@@ -34,13 +44,14 @@ use alopex_core::{
     },
     kv::any::AnyKVTransaction,
     kv::memory::MemoryKV,
-    kv::AnyKV,
+    kv::{AnyKV, RangeChangeJournalCapability},
     validate_dimensions, HnswIndex, KVStore, KVTransaction, Key, LargeValueKind, LargeValueMeta,
     LargeValueReader, LargeValueWriter, StorageFactory, VectorType, DEFAULT_CHUNK_SIZE,
 };
 pub use alopex_core::{HnswConfig, HnswSearchResult, HnswStats, MemoryStats, Metric, TxnMode};
 /// Streaming query row iterator for FR-7 compliance.
 pub use alopex_sql::executor::QueryRowIterator;
+use alopex_sql::storage::LocalRangeChangeJournal;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs;
@@ -58,6 +69,10 @@ pub enum Error {
     /// An error from the underlying core storage engine.
     #[error("core error: {0}")]
     Core(#[from] alopex_core::Error),
+    /// A requested fenced storage read point is unavailable, expired, or not
+    /// yet readable on this backend.
+    #[error("{0}")]
+    ReadAt(#[from] alopex_core::ReadAtError),
     /// An error from the SQL execution pipeline.
     #[error("{0}")]
     Sql(#[from] alopex_sql::SqlError),
@@ -760,7 +775,19 @@ impl Database {
 
     /// Begins a new transaction.
     pub fn begin(&self, mode: TxnMode) -> Result<Transaction<'_>> {
-        let txn = self.store.begin(mode).map_err(Error::Core)?;
+        let mut txn = self.store.begin(mode).map_err(Error::Core)?;
+        let journal = if mode == TxnMode::ReadWrite
+            && self.store.range_change_journal_capability()
+                == RangeChangeJournalCapability::Supported
+        {
+            let scope = {
+                let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
+                sql_api::local_journal_scope(&*catalog)
+            };
+            Some(LocalRangeChangeJournal::capture(&mut txn, scope).map_err(Error::Core)?)
+        } else {
+            None
+        };
         Ok(Transaction {
             inner: Some(txn),
             db: self,
@@ -770,6 +797,7 @@ impl Database {
             vector_cache_deletes: Vec::new(),
             vector_cache_invalidated: false,
             catalog_modified: false,
+            journal,
         })
     }
 }
@@ -791,6 +819,8 @@ pub struct Transaction<'a> {
     vector_cache_invalidated: bool,
     /// Whether DDL operations were performed in this transaction.
     pub(crate) catalog_modified: bool,
+    /// SQL row/index state captured before a read-write local transaction.
+    journal: Option<LocalRangeChangeJournal>,
 }
 
 /// A search result row containing key, metadata, and similarity score.
@@ -1201,6 +1231,9 @@ impl<'a> Transaction<'a> {
             catalog
                 .persist_overlay(txn, &self.overlay)
                 .map_err(|err| Error::Sql(err.into()))?;
+            if let Some(journal) = self.journal.take() {
+                journal.stage(txn).map_err(Error::Core)?;
+            }
 
             let vector_cache_invalidated = self.vector_cache_invalidated;
             let vector_cache_updates = std::mem::take(&mut self.vector_cache_updates);
@@ -1321,6 +1354,215 @@ impl<'a> Transaction<'a> {
             return Err(Error::Core(alopex_core::Error::TxnReadOnly));
         }
         Ok(())
+    }
+}
+
+impl OwnedEmbeddedTransaction {
+    /// Stage a vector and its metadata in an owned transaction.
+    pub fn upsert_vector(
+        &mut self,
+        key: &[u8],
+        metadata: &[u8],
+        vector: &[f32],
+        metric: Metric,
+    ) -> Result<()> {
+        if vector.is_empty() {
+            return Err(Error::Core(alopex_core::Error::InvalidFormat(
+                "vector cannot be empty".into(),
+            )));
+        }
+        let vector_type = VectorType::new(vector.len(), metric);
+        vector_type.validate(vector).map_err(Error::Core)?;
+        let key = key.to_vec();
+        let payload = encode_vector_entry(vector_type, metadata, vector);
+
+        self.session
+            .with_transaction(|transaction| {
+                transaction.put(key.clone(), payload)?;
+                let mut keys = match transaction.get(&VECTOR_INDEX_KEY.to_vec())? {
+                    Some(raw) => decode_index(&raw)?,
+                    None => Vec::new(),
+                };
+                if !keys.iter().any(|entry| entry == &key) {
+                    keys.push(key.clone());
+                    transaction.put(VECTOR_INDEX_KEY.to_vec(), encode_index(&keys)?)?;
+                }
+                Ok(())
+            })
+            .map_err(Error::Core)?;
+        self.vector_cache_invalidated = true;
+        Ok(())
+    }
+
+    /// Retrieve one vector from an owned transaction.
+    pub fn get_vector(&mut self, key: &[u8], metric: Metric) -> Result<Option<Vec<f32>>> {
+        self.session
+            .with_transaction(|transaction| {
+                let Some(raw) = transaction.get(&key.to_vec())? else {
+                    return Ok(None);
+                };
+                let decoded = decode_vector_entry(&raw)?;
+                if decoded.metric != metric {
+                    return Err(alopex_core::Error::UnsupportedMetric {
+                        metric: metric.as_str().to_string(),
+                    });
+                }
+                Ok(Some(decoded.vector))
+            })
+            .map_err(Error::Core)
+    }
+
+    /// Retrieve vectors in input order from an owned transaction.
+    pub fn get_vectors(&mut self, keys: &[Key], metric: Metric) -> Result<Vec<Option<Vec<f32>>>> {
+        self.session
+            .with_transaction(|transaction| {
+                let mut output = Vec::with_capacity(keys.len());
+                for key in keys {
+                    let Some(raw) = transaction.get(key)? else {
+                        output.push(None);
+                        continue;
+                    };
+                    let decoded = decode_vector_entry(&raw)?;
+                    if decoded.metric != metric {
+                        return Err(alopex_core::Error::UnsupportedMetric {
+                            metric: metric.as_str().to_string(),
+                        });
+                    }
+                    output.push(Some(decoded.vector));
+                }
+                Ok(output)
+            })
+            .map_err(Error::Core)
+    }
+
+    /// Search vectors visible to this owned transaction.
+    pub fn search_similar(
+        &mut self,
+        query_vector: &[f32],
+        metric: Metric,
+        top_k: usize,
+        filter_keys: Option<&[Key]>,
+    ) -> Result<Vec<SearchResult>> {
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
+        let query_norm_sq = query_vector.iter().map(|value| value * value).sum::<f32>();
+        let query_norm = if metric == Metric::Cosine {
+            query_norm_sq.sqrt()
+        } else {
+            0.0
+        };
+        let keys = match filter_keys {
+            Some(keys) => keys.to_vec(),
+            None => self
+                .session
+                .with_transaction(|transaction| {
+                    match transaction.get(&VECTOR_INDEX_KEY.to_vec())? {
+                        Some(raw) => decode_index(&raw),
+                        None => Ok(Vec::new()),
+                    }
+                })
+                .map_err(Error::Core)?,
+        };
+        let mut rows = self
+            .session
+            .with_transaction(|transaction| {
+                let mut rows = Vec::with_capacity(keys.len());
+                for key in &keys {
+                    let Some(raw) = transaction.get(key)? else {
+                        continue;
+                    };
+                    let decoded = decode_vector_entry_view(&raw)?;
+                    if decoded.metric != metric {
+                        return Err(alopex_core::Error::UnsupportedMetric {
+                            metric: metric.as_str().to_string(),
+                        });
+                    }
+                    validate_dimensions(decoded.dim, query_vector.len())?;
+                    let score =
+                        score_from_bytes(metric, query_vector, query_norm, decoded.vector_bytes)?;
+                    rows.push(SearchResult {
+                        key: key.clone(),
+                        metadata: decoded.metadata,
+                        score,
+                    });
+                }
+                Ok(rows)
+            })
+            .map_err(Error::Core)?;
+        if rows.len() > top_k {
+            rows.select_nth_unstable_by(top_k - 1, |left, right| {
+                right
+                    .score
+                    .total_cmp(&left.score)
+                    .then_with(|| left.key.cmp(&right.key))
+            });
+            rows.truncate(top_k);
+        }
+        rows.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.key.cmp(&right.key))
+        });
+        Ok(rows)
+    }
+
+    /// Stage an HNSW upsert in this owned transaction.
+    pub fn upsert_to_hnsw(
+        &mut self,
+        index_name: &str,
+        key: &[u8],
+        vector: &[f32],
+        metadata: &[u8],
+    ) -> Result<()> {
+        self.ensure_owned_write_transaction()?;
+        let (index, state) = self.hnsw_entry_mut(index_name)?;
+        index
+            .upsert_staged(key, vector, metadata, state)
+            .map_err(Error::Core)
+    }
+
+    /// Stage an HNSW deletion in this owned transaction.
+    pub fn delete_from_hnsw(&mut self, index_name: &str, key: &[u8]) -> Result<bool> {
+        self.ensure_owned_write_transaction()?;
+        let (index, state) = self.hnsw_entry_mut(index_name)?;
+        index.delete_staged(key, state).map_err(Error::Core)
+    }
+
+    fn ensure_owned_write_transaction(&self) -> Result<()> {
+        let mode = self
+            .session
+            .with_transaction(|transaction| Ok(transaction.mode()))
+            .map_err(Error::Core)?;
+        if mode == TxnMode::ReadOnly {
+            return Err(Error::Core(alopex_core::Error::TxnReadOnly));
+        }
+        Ok(())
+    }
+
+    fn hnsw_entry_mut(
+        &mut self,
+        index_name: &str,
+    ) -> Result<&mut (HnswIndex, HnswTransactionState)> {
+        if !self.hnsw_indices.contains_key(index_name) {
+            let index = self
+                .session
+                .with_transaction(|transaction| {
+                    let mut transaction =
+                        alopex_core::kv::OwnedKVTransactionAdapter::new(transaction);
+                    HnswIndex::load(index_name, &mut transaction)
+                })
+                .map_err(Error::Core)?;
+            self.hnsw_indices.insert(
+                index_name.to_string(),
+                (index, HnswTransactionState::default()),
+            );
+        }
+        Ok(self
+            .hnsw_indices
+            .get_mut(index_name)
+            .expect("HNSW entry inserted above"))
     }
 }
 

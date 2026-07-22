@@ -114,6 +114,8 @@ fn tui_falls_back_in_non_tty() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        read_mode: None,
+        routing_report: None,
         tui: true,
     };
     let cancel = CancelSignal::new();

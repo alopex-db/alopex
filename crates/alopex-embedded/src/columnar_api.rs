@@ -3,11 +3,29 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use alopex_core::columnar::encoding::Column;
-use alopex_core::columnar::segment_v2::{RecordBatch, SegmentWriterV2};
+use alopex_core::columnar::encoding::{Column, LogicalType};
+use alopex_core::columnar::encoding_v2::Bitmap;
+use alopex_core::columnar::kvs_bridge::{ColumnarKvsBridge, StreamingSegmentLayoutPreflightV08};
+use alopex_core::columnar::segment_v08::ChunkedSegmentAccessV08;
+use alopex_core::columnar::segment_v2::{
+    RecordBatch as CoreRecordBatch, Schema as CoreSchema, SegmentWriterV2,
+};
 use alopex_core::storage::format::AlopexFileWriter;
 use alopex_core::{StorageFactory, StorageMode as CoreStorageMode};
+use alopex_dataframe::io::ColumnarSegmentBatchSourceFactory;
+use alopex_dataframe::physical::{
+    ColumnarSegmentBatchPlan, ColumnarSegmentCursor, ColumnarSegmentProvider, DataFrameStream,
+    PlanSubject, SourceLimit,
+};
+use alopex_dataframe::{DataFrameError, Result as DataFrameResult};
+use arrow::array::{
+    ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryBuilder, Float32Array, Float64Array,
+    Int64Array,
+};
+use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, SchemaRef};
+use arrow::record_batch::RecordBatch as ArrowRecordBatch;
 
 use crate::{Database, Error, Result, SegmentConfigV2, Transaction, TxnMode};
 
@@ -157,7 +175,7 @@ impl Database {
     }
 
     /// カラムナーセグメントを書き込む。
-    pub fn write_columnar_segment(&self, table: &str, batch: RecordBatch) -> Result<u64> {
+    pub fn write_columnar_segment(&self, table: &str, batch: CoreRecordBatch) -> Result<u64> {
         let mut writer = SegmentWriterV2::new(self.segment_config.clone());
         writer
             .write_batch(batch)
@@ -187,7 +205,7 @@ impl Database {
     pub fn write_columnar_segment_with_config(
         &self,
         table: &str,
-        batch: RecordBatch,
+        batch: CoreRecordBatch,
         config: SegmentConfigV2,
     ) -> Result<u64> {
         let mut writer = SegmentWriterV2::new(config);
@@ -221,7 +239,7 @@ impl Database {
         table: &str,
         segment_id: u64,
         columns: Option<&[&str]>,
-    ) -> Result<Vec<RecordBatch>> {
+    ) -> Result<Vec<CoreRecordBatch>> {
         let table_id = table_id(table)?;
         match self.columnar_mode {
             StorageMode::Disk => {
@@ -291,6 +309,92 @@ impl Database {
     /// テーブル名から内部 ID を解決する。
     pub fn resolve_table_id(&self, table: &str) -> Result<u32> {
         table_id(table)
+    }
+
+    /// Builds a bounded DataFrame factory for a provisioned V08 columnar segment.
+    ///
+    /// Legacy V2 segment blobs and in-memory columnar storage deliberately
+    /// return `requires_v08_chunked_layout`; neither is converted into an
+    /// artificial streaming source.
+    pub fn columnar_segment_streaming_factory_v08(
+        &self,
+        table: &str,
+        segment_id: u64,
+    ) -> Result<ColumnarSegmentBatchSourceFactory> {
+        let table_id = table_id(table)?;
+        self.columnar_segment_streaming_factory_v08_by_ids(table_id, segment_id)
+    }
+
+    /// Builds a bounded DataFrame factory from the canonical `{table_id}:{segment_id}` handle.
+    ///
+    /// This is the same local V08-only path as [`Self::columnar_segment_streaming_factory_v08`],
+    /// but preserves the public segment identity used by the catalog and Python `LocalScan`
+    /// without requiring a lossy reverse lookup of a table name.
+    pub fn columnar_segment_streaming_factory_v08_by_id(
+        &self,
+        segment_id: &str,
+    ) -> Result<ColumnarSegmentBatchSourceFactory> {
+        let (table_id, segment_id) = parse_segment_id(segment_id)?;
+        self.columnar_segment_streaming_factory_v08_by_ids(table_id, segment_id)
+    }
+
+    fn columnar_segment_streaming_factory_v08_by_ids(
+        &self,
+        table_id: u32,
+        segment_id: u64,
+    ) -> Result<ColumnarSegmentBatchSourceFactory> {
+        match self.columnar_mode {
+            StorageMode::Disk => match self
+                .columnar_bridge
+                .streaming_layout_preflight_v08(table_id, segment_id)
+                .map_err(|error| Error::DataFrame(map_v08_error(error)))?
+            {
+                StreamingSegmentLayoutPreflightV08::Available => Ok(
+                    ColumnarSegmentBatchSourceFactory::new(Arc::new(EmbeddedV08SegmentProvider {
+                        bridge: self.columnar_bridge.clone(),
+                        table_id,
+                        segment_id,
+                    })),
+                ),
+                StreamingSegmentLayoutPreflightV08::RequiresV08ChunkedLayout => {
+                    Err(Error::DataFrame(DataFrameError::streaming_unsupported(
+                        "columnar_segment_scan",
+                        "requires_v08_chunked_layout",
+                    )))
+                }
+                StreamingSegmentLayoutPreflightV08::NotFound => {
+                    Err(Error::DataFrame(DataFrameError::streaming_unsupported(
+                        "columnar_segment_scan",
+                        "v08_segment_not_found",
+                    )))
+                }
+            },
+            StorageMode::InMemory => Err(Error::DataFrame(DataFrameError::streaming_unsupported(
+                "columnar_segment_scan",
+                "requires_v08_chunked_layout",
+            ))),
+        }
+    }
+
+    /// Opens a bounded `DataFrameStream` for a provisioned V08 columnar segment.
+    pub fn stream_columnar_segment_v08(
+        &self,
+        table: &str,
+        segment_id: u64,
+        options: alopex_dataframe::physical::budget::StreamOptions,
+    ) -> Result<DataFrameStream> {
+        let factory = self.columnar_segment_streaming_factory_v08(table, segment_id)?;
+        DataFrameStream::from_factory(&factory, options).map_err(Error::DataFrame)
+    }
+
+    /// Opens a bounded V08 segment stream from the canonical `{table_id}:{segment_id}` handle.
+    pub fn stream_columnar_segment_v08_by_id(
+        &self,
+        segment_id: &str,
+        options: alopex_dataframe::physical::budget::StreamOptions,
+    ) -> Result<DataFrameStream> {
+        let factory = self.columnar_segment_streaming_factory_v08_by_id(segment_id)?;
+        DataFrameStream::from_factory(&factory, options).map_err(Error::DataFrame)
     }
 
     /// Scan a columnar segment by string ID.
@@ -363,7 +467,7 @@ impl Database {
     /// where streaming is required.
     ///
     /// The segment ID format is `{table_id}:{segment_id}` (e.g., "12345:1").
-    pub fn scan_columnar_segment_batches(&self, segment_id: &str) -> Result<Vec<RecordBatch>> {
+    pub fn scan_columnar_segment_batches(&self, segment_id: &str) -> Result<Vec<CoreRecordBatch>> {
         let (table_id, seg_id) = parse_segment_id(segment_id)?;
         let all_indices: Vec<usize> = match self.columnar_mode {
             StorageMode::Disk => {
@@ -595,7 +699,7 @@ impl<'a> Transaction<'a> {
     }
 
     /// カラムナーセグメントを書き込む（トランザクションコンテキスト利用）。
-    pub fn write_columnar_segment(&self, table: &str, batch: RecordBatch) -> Result<u64> {
+    pub fn write_columnar_segment(&self, table: &str, batch: CoreRecordBatch) -> Result<u64> {
         self.db.write_columnar_segment(table, batch)
     }
 
@@ -605,7 +709,7 @@ impl<'a> Transaction<'a> {
         table: &str,
         segment_id: u64,
         columns: Option<&[&str]>,
-    ) -> Result<Vec<RecordBatch>> {
+    ) -> Result<Vec<CoreRecordBatch>> {
         self.db.read_columnar_segment(table, segment_id, columns)
     }
 }
@@ -748,6 +852,224 @@ fn column_value_to_sql_value(col: &Column, row_idx: usize) -> alopex_sql::SqlVal
     }
 }
 
+struct EmbeddedV08SegmentProvider {
+    bridge: ColumnarKvsBridge,
+    table_id: u32,
+    segment_id: u64,
+}
+
+impl ColumnarSegmentProvider for EmbeddedV08SegmentProvider {
+    fn source_limits(&self) -> Vec<SourceLimit> {
+        vec![
+            SourceLimit {
+                source: PlanSubject::ColumnarSegmentScan,
+                code: "stable_row_group_order",
+                description: "V08 streaming preserves provisioned row-group and row order",
+            },
+            SourceLimit {
+                source: PlanSubject::ColumnarSegmentScan,
+                code: "requires_v08_chunked_layout",
+                description: "legacy V2 blobs and in-memory columnar storage are rejected before streaming reads",
+            },
+            SourceLimit {
+                source: PlanSubject::ColumnarSegmentScan,
+                code: "row_group_must_fit_resource_bound",
+                description: "each V08 row-group decoded and Arrow upper bound is reserved before chunk fetch",
+            },
+        ]
+    }
+
+    fn open(&self, metadata_limit_bytes: u64) -> DataFrameResult<Box<dyn ColumnarSegmentCursor>> {
+        let access = self
+            .bridge
+            .open_v08_segment_with_metadata_limit(
+                self.table_id,
+                self.segment_id,
+                metadata_limit_bytes,
+            )
+            .map_err(map_v08_error)?;
+        let schema = core_schema_to_arrow(access.schema())?;
+        let projection = (0..access.schema().column_count()).collect();
+        Ok(Box::new(EmbeddedV08SegmentCursor {
+            access,
+            schema,
+            projection,
+            next_row_group: 0,
+            closed: false,
+        }))
+    }
+}
+
+struct EmbeddedV08SegmentCursor {
+    access: ChunkedSegmentAccessV08,
+    schema: SchemaRef,
+    projection: Vec<usize>,
+    next_row_group: usize,
+    closed: bool,
+}
+
+impl ColumnarSegmentCursor for EmbeddedV08SegmentCursor {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn metadata_footprint_upper_bound(&self) -> u64 {
+        self.access.metadata_footprint_upper_bound()
+    }
+
+    fn next_batch_plan(&self) -> DataFrameResult<Option<ColumnarSegmentBatchPlan>> {
+        if self.closed || self.next_row_group == self.access.row_group_count() {
+            return Ok(None);
+        }
+        let row_group = self
+            .access
+            .row_group(self.next_row_group)
+            .map_err(map_v08_error)?;
+        Ok(Some(ColumnarSegmentBatchPlan {
+            decoded_bytes: row_group.decoded_bytes,
+            arrow_allocation_upper_bound: row_group.arrow_allocation_upper_bound,
+        }))
+    }
+
+    fn next_batch(&mut self) -> DataFrameResult<Option<ArrowRecordBatch>> {
+        if self.closed || self.next_row_group == self.access.row_group_count() {
+            return Ok(None);
+        }
+        let core_batch = self
+            .access
+            .read_row_group(self.next_row_group, &self.projection)
+            .map_err(map_v08_error)?;
+        let batch = core_batch_to_arrow(core_batch, self.schema.clone())?;
+        self.next_row_group = self.next_row_group.saturating_add(1);
+        Ok(Some(batch))
+    }
+
+    fn close(&mut self) -> DataFrameResult<()> {
+        self.closed = true;
+        Ok(())
+    }
+}
+
+fn core_schema_to_arrow(schema: &CoreSchema) -> DataFrameResult<SchemaRef> {
+    let fields = schema
+        .columns
+        .iter()
+        .map(|column| {
+            Ok(Field::new(
+                &column.name,
+                arrow_type(column.logical_type)?,
+                column.nullable,
+            ))
+        })
+        .collect::<DataFrameResult<Vec<_>>>()?;
+    Ok(Arc::new(ArrowSchema::new(fields)))
+}
+
+fn arrow_type(logical_type: LogicalType) -> DataFrameResult<DataType> {
+    match logical_type {
+        LogicalType::Int64 => Ok(DataType::Int64),
+        LogicalType::Float32 => Ok(DataType::Float32),
+        LogicalType::Float64 => Ok(DataType::Float64),
+        LogicalType::Bool => Ok(DataType::Boolean),
+        LogicalType::Binary => Ok(DataType::Binary),
+        LogicalType::Fixed(length) => Ok(DataType::FixedSizeBinary(i32::from(length))),
+    }
+}
+
+fn core_batch_to_arrow(
+    batch: CoreRecordBatch,
+    schema: SchemaRef,
+) -> DataFrameResult<ArrowRecordBatch> {
+    if batch.schema.columns.len() != schema.fields().len()
+        || batch.columns.len() != schema.fields().len()
+        || batch.null_bitmaps.len() != schema.fields().len()
+    {
+        return Err(DataFrameError::schema_mismatch(
+            "V08 decoded batch does not match its provisioned schema",
+        ));
+    }
+
+    let arrays = batch
+        .columns
+        .iter()
+        .zip(batch.null_bitmaps.iter())
+        .map(|(column, bitmap)| core_column_to_arrow(column, bitmap.as_ref()))
+        .collect::<DataFrameResult<Vec<_>>>()?;
+    ArrowRecordBatch::try_new(schema, arrays).map_err(|source| DataFrameError::Arrow { source })
+}
+
+fn core_column_to_arrow(column: &Column, bitmap: Option<&Bitmap>) -> DataFrameResult<ArrayRef> {
+    let valid = |index| bitmap.is_none_or(|bitmap| bitmap.is_valid(index));
+    match column {
+        Column::Int64(values) => Ok(Arc::new(Int64Array::from(
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| valid(index).then_some(*value))
+                .collect::<Vec<_>>(),
+        )) as ArrayRef),
+        Column::Float32(values) => Ok(Arc::new(Float32Array::from(
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| valid(index).then_some(*value))
+                .collect::<Vec<_>>(),
+        )) as ArrayRef),
+        Column::Float64(values) => Ok(Arc::new(Float64Array::from(
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| valid(index).then_some(*value))
+                .collect::<Vec<_>>(),
+        )) as ArrayRef),
+        Column::Bool(values) => Ok(Arc::new(BooleanArray::from(
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| valid(index).then_some(*value))
+                .collect::<Vec<_>>(),
+        )) as ArrayRef),
+        Column::Binary(values) => Ok(Arc::new(BinaryArray::from(
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| valid(index).then_some(value.as_slice()))
+                .collect::<Vec<_>>(),
+        )) as ArrayRef),
+        Column::Fixed { len, values } => {
+            let byte_width = i32::try_from(*len).map_err(|_| {
+                DataFrameError::schema_mismatch("V08 fixed binary length does not fit Arrow")
+            })?;
+            let mut builder = FixedSizeBinaryBuilder::with_capacity(values.len(), byte_width);
+            for (index, value) in values.iter().enumerate() {
+                if valid(index) {
+                    builder
+                        .append_value(value)
+                        .map_err(|source| DataFrameError::Arrow { source })?;
+                } else {
+                    builder.append_null();
+                }
+            }
+            Ok(Arc::new(builder.finish()) as ArrayRef)
+        }
+    }
+}
+
+fn map_v08_error(error: alopex_core::columnar::ColumnarError) -> DataFrameError {
+    match error {
+        alopex_core::columnar::ColumnarError::RequiresV08ChunkedLayout => {
+            DataFrameError::streaming_unsupported(
+                "columnar_segment_scan",
+                "requires_v08_chunked_layout",
+            )
+        }
+        alopex_core::columnar::ColumnarError::NotFound => {
+            DataFrameError::streaming_unsupported("columnar_segment_scan", "v08_segment_not_found")
+        }
+        error => DataFrameError::schema_mismatch(format!("V08 columnar segment error: {error}")),
+    }
+}
+
 // ============================================================================
 // ColumnarRowIterator - FR-7 Streaming Row Iterator
 // ============================================================================
@@ -758,7 +1080,7 @@ fn column_value_to_sql_value(col: &Column, row_idx: usize) -> alopex_sql::SqlVal
 /// avoiding the need to materialize all rows into `Vec<Vec<SqlValue>>` upfront.
 pub struct ColumnarRowIterator {
     /// Pre-loaded RecordBatches.
-    batches: Vec<RecordBatch>,
+    batches: Vec<CoreRecordBatch>,
     /// Current batch index.
     batch_idx: usize,
     /// Current row index within the batch.
@@ -767,7 +1089,7 @@ pub struct ColumnarRowIterator {
 
 impl ColumnarRowIterator {
     /// Create a new row iterator from RecordBatches.
-    pub fn new(batches: Vec<RecordBatch>) -> Self {
+    pub fn new(batches: Vec<CoreRecordBatch>) -> Self {
         Self {
             batches,
             batch_idx: 0,
@@ -781,7 +1103,7 @@ impl ColumnarRowIterator {
     }
 
     /// Returns the current batch being iterated, if any.
-    pub fn current_batch(&self) -> Option<&RecordBatch> {
+    pub fn current_batch(&self) -> Option<&CoreRecordBatch> {
         self.batches.get(self.batch_idx)
     }
 }
@@ -824,14 +1146,28 @@ impl Iterator for ColumnarRowIterator {
 mod tests {
     use super::*;
     use alopex_core::columnar::encoding::{Column, LogicalType};
+    use alopex_core::columnar::encoding_v2::{create_encoder, EncodingV2};
     use alopex_core::columnar::error::{ColumnarError, Result as ColumnarResult};
+    use alopex_core::columnar::kvs_bridge::key_layout;
+    use alopex_core::columnar::segment_v08::{
+        ChecksummedMetadataV08, StreamingChunkMetaV08, StreamingRowGroupV08,
+        StreamingSegmentDirectoryV08, StreamingSegmentHeaderV08,
+        STREAMING_SEGMENT_LAYOUT_VERSION_V08, STREAMING_SEGMENT_MAGIC_V08,
+    };
     use alopex_core::columnar::segment_v2::{ColumnSchema, Schema, SegmentReaderV2, SegmentSource};
+    use alopex_core::kv::{KVStore, KVTransaction};
+    use alopex_core::storage::compression::CompressionV2;
+    use alopex_core::storage::format::bincode_config;
     use alopex_core::storage::format::{AlopexFileWriter, FileFlags, FileVersion};
+    use alopex_core::TxnManager;
+    use arrow::array::Array;
+    use bincode::Options;
+    use crc32fast::Hasher;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    fn make_batch() -> RecordBatch {
+    fn make_batch() -> CoreRecordBatch {
         let schema = Schema {
             columns: vec![
                 ColumnSchema {
@@ -848,7 +1184,7 @@ mod tests {
                 },
             ],
         };
-        RecordBatch::new(
+        CoreRecordBatch::new(
             schema,
             vec![
                 Column::Int64(vec![1, 2, 3]),
@@ -858,7 +1194,7 @@ mod tests {
         )
     }
 
-    fn make_wide_batch(column_count: usize, row_count: usize) -> RecordBatch {
+    fn make_wide_batch(column_count: usize, row_count: usize) -> CoreRecordBatch {
         let schema = Schema {
             columns: (0..column_count)
                 .map(|idx| ColumnSchema {
@@ -878,10 +1214,10 @@ mod tests {
                 )
             })
             .collect();
-        RecordBatch::new(schema, columns, vec![None; column_count])
+        CoreRecordBatch::new(schema, columns, vec![None; column_count])
     }
 
-    fn decoded_payload_bytes(batches: &[RecordBatch]) -> usize {
+    fn decoded_payload_bytes(batches: &[CoreRecordBatch]) -> usize {
         batches
             .iter()
             .flat_map(|batch| batch.columns.iter())
@@ -894,6 +1230,177 @@ mod tests {
                 Column::Fixed { values, .. } => values.iter().map(Vec::len).sum(),
             })
             .sum()
+    }
+
+    fn checksum(bytes: &[u8]) -> u32 {
+        let mut hasher = Hasher::new();
+        hasher.update(bytes);
+        hasher.finalize()
+    }
+
+    fn metadata_checksum<T: serde::Serialize>(value: &T) -> u32 {
+        checksum(&bincode_config().serialize(value).unwrap())
+    }
+
+    fn checksummed_metadata<T: serde::Serialize + Clone>(value: T) -> Vec<u8> {
+        let checksum = metadata_checksum(&value);
+        bincode_config()
+            .serialize(&ChecksummedMetadataV08 { value, checksum })
+            .unwrap()
+    }
+
+    fn provision_v08_int64_fixture(db: &Database, table_id: u32, segment_id: u64) {
+        let schema = Schema {
+            columns: vec![ColumnSchema {
+                name: "value".into(),
+                logical_type: LogicalType::Int64,
+                nullable: false,
+                fixed_len: None,
+            }],
+        };
+        let chunk_bytes = create_encoder(EncodingV2::Plain)
+            .encode(&Column::Int64(vec![41, 42]), None)
+            .unwrap();
+        let chunk = StreamingChunkMetaV08 {
+            column_index: 0,
+            encoding: EncodingV2::Plain,
+            compression: CompressionV2::None,
+            encoded_bytes: chunk_bytes.len() as u64,
+            decoded_bytes: chunk_bytes.len() as u64,
+            checksum: checksum(&chunk_bytes),
+        };
+        let row_group = StreamingRowGroupV08 {
+            row_start: 0,
+            row_count: 2,
+            encoded_bytes: chunk.encoded_bytes,
+            decoded_bytes: chunk.decoded_bytes,
+            arrow_allocation_upper_bound: 4096,
+            chunks: vec![chunk],
+        };
+        let directory = StreamingSegmentDirectoryV08 {
+            row_groups: vec![row_group],
+        };
+        let header = StreamingSegmentHeaderV08 {
+            magic: STREAMING_SEGMENT_MAGIC_V08,
+            format_version: STREAMING_SEGMENT_LAYOUT_VERSION_V08,
+            row_count: 2,
+            column_count: 1,
+            row_group_count: 1,
+            schema_checksum: metadata_checksum(&schema),
+            directory_checksum: metadata_checksum(&directory),
+        };
+
+        let manager = db.store.txn_manager();
+        let mut txn = manager.begin(TxnMode::ReadWrite).unwrap();
+        txn.put(
+            key_layout::v08_header_key(table_id, segment_id),
+            checksummed_metadata(header),
+        )
+        .unwrap();
+        txn.put(
+            key_layout::v08_schema_key(table_id, segment_id),
+            checksummed_metadata(schema),
+        )
+        .unwrap();
+        txn.put(
+            key_layout::v08_directory_key(table_id, segment_id),
+            checksummed_metadata(directory),
+        )
+        .unwrap();
+        txn.put(
+            key_layout::v08_chunk_key(table_id, segment_id, 0, 0),
+            chunk_bytes,
+        )
+        .unwrap();
+        manager.commit(txn).unwrap();
+    }
+
+    #[test]
+    fn v08_factory_rejects_legacy_v2_before_stream_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let db =
+            Database::open_with_config(EmbeddedConfig::disk(dir.path().join("wal.log"))).unwrap();
+        let segment_id = db.write_columnar_segment("legacy", make_batch()).unwrap();
+
+        assert!(matches!(
+            db.columnar_segment_streaming_factory_v08("legacy", segment_id),
+            Err(Error::DataFrame(DataFrameError::StreamingUnsupported { reason, .. }))
+                if reason == "requires_v08_chunked_layout"
+        ));
+    }
+
+    #[test]
+    fn v08_adapter_converts_nullable_core_columns_to_arrow() {
+        let schema = CoreSchema {
+            columns: vec![
+                ColumnSchema {
+                    name: "id".into(),
+                    logical_type: LogicalType::Int64,
+                    nullable: true,
+                    fixed_len: None,
+                },
+                ColumnSchema {
+                    name: "payload".into(),
+                    logical_type: LogicalType::Binary,
+                    nullable: false,
+                    fixed_len: None,
+                },
+            ],
+        };
+        let batch = CoreRecordBatch::new(
+            schema.clone(),
+            vec![
+                Column::Int64(vec![10, 20]),
+                Column::Binary(vec![b"a".to_vec(), b"b".to_vec()]),
+            ],
+            vec![Some(Bitmap::from_bools(&[true, false])), None],
+        );
+
+        let arrow_schema = core_schema_to_arrow(&schema).unwrap();
+        let arrow_batch = core_batch_to_arrow(batch, arrow_schema).unwrap();
+        let ids = arrow_batch.columns()[0]
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let payload = arrow_batch.columns()[1]
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(ids.value(0), 10);
+        assert!(ids.is_null(1));
+        assert_eq!(payload.value(1), b"b");
+    }
+
+    #[test]
+    fn v08_database_adapter_streams_a_provisioned_row_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let db =
+            Database::open_with_config(EmbeddedConfig::disk(dir.path().join("wal.log"))).unwrap();
+        let table_id = db.resolve_table_id("v08").unwrap();
+        provision_v08_int64_fixture(&db, table_id, 77);
+        let options = alopex_dataframe::physical::budget::StreamOptions::new(
+            64 * 1024,
+            std::num::NonZeroUsize::new(1).unwrap(),
+            std::num::NonZeroUsize::new(2).unwrap(),
+        );
+
+        let mut stream = db.stream_columnar_segment_v08("v08", 77, options).unwrap();
+        let batch = stream.next_batch().unwrap().unwrap();
+        let values = batch.column("value").unwrap().to_arrow();
+        let values = values[0].as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(values.value(0), 41);
+        assert_eq!(values.value(1), 42);
+        assert!(stream.next_batch().unwrap().is_none());
+
+        let mut by_id = db
+            .stream_columnar_segment_v08_by_id(&format!("{table_id}:77"), options)
+            .unwrap();
+        let batch = by_id.next_batch().unwrap().unwrap();
+        let values = batch.column("value").unwrap().to_arrow();
+        let values = values[0].as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(values.value(0), 41);
+        assert_eq!(values.value(1), 42);
+        assert!(by_id.next_batch().unwrap().is_none());
     }
 
     #[derive(Debug, Clone)]

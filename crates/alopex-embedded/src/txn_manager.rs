@@ -3,7 +3,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alopex_core::kv::any::AnyKVTransaction;
+use alopex_core::kv::{RangeChangeJournalCapability, ReadAtCapability, ReadAtPoint, ReadAtResult};
 use alopex_core::{KVStore, KVTransaction, TxnMode};
+use alopex_sql::storage::{LocalRangeChangeJournal, RangeChangeJournalScope};
 
 use crate::{Database, Error, Result};
 
@@ -40,6 +42,18 @@ enum TxnWrite {
 pub struct TransactionManager;
 
 impl TransactionManager {
+    /// Checks the selected backend's read-at eligibility before a remote worker
+    /// attempts to open a fenced SQL session. This is distinct from persisted
+    /// CLI transaction metadata and never uses its wall-clock start time.
+    pub fn validate_read_at(db: &Database, point: &ReadAtPoint) -> ReadAtResult<()> {
+        db.store.read_at_capability().validate(point)
+    }
+
+    /// Returns the selected backend's explicit read-at capability.
+    pub fn read_at_capability(db: &Database) -> ReadAtCapability {
+        db.store.read_at_capability()
+    }
+
     /// Begins a new transaction with the given timeout and returns its ID.
     pub fn begin_with_timeout(db: &Database, timeout: Duration) -> Result<String> {
         let txn_id = generate_txn_id();
@@ -135,6 +149,19 @@ impl TransactionManager {
     pub fn commit(db: &Database, txn_id: &str) -> Result<()> {
         let mut txn = db.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
         let _ = load_meta(&mut txn, txn_id)?;
+        let journal = if db.store.range_change_journal_capability()
+            == RangeChangeJournalCapability::Supported
+        {
+            Some(
+                LocalRangeChangeJournal::capture(
+                    &mut txn,
+                    RangeChangeJournalScope::local(Default::default()),
+                )
+                .map_err(Error::Core)?,
+            )
+        } else {
+            None
+        };
         let prefix = txn_write_prefix(txn_id);
         let staged: Vec<(Vec<u8>, Vec<u8>)> =
             txn.scan_prefix(&prefix).map_err(Error::Core)?.collect();
@@ -153,6 +180,9 @@ impl TransactionManager {
             txn.delete(staged_key).map_err(Error::Core)?;
         }
         txn.delete(txn_meta_key(txn_id)).map_err(Error::Core)?;
+        if let Some(journal) = journal {
+            journal.stage(&mut txn).map_err(Error::Core)?;
+        }
         txn.commit_self().map_err(Error::Core)?;
         Ok(())
     }
@@ -285,6 +315,8 @@ fn extract_user_key(txn_id: &str, staged_key: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alopex_core::kv::decode_range_change;
+    use alopex_sql::storage::KeyEncoder;
 
     fn create_test_db() -> Database {
         Database::open_in_memory().unwrap()
@@ -348,5 +380,29 @@ mod tests {
         let db = create_test_db();
         let txn_id = TransactionManager::begin_with_timeout(&db, Duration::from_secs(0)).unwrap();
         assert!(TransactionManager::is_expired(&db, &txn_id).unwrap());
+    }
+
+    #[test]
+    fn failed_commit_can_be_replayed_without_duplicate_journal() {
+        let db = create_test_db();
+        let txn_id = TransactionManager::begin_with_timeout(&db, Duration::from_secs(60)).unwrap();
+        let row_key = KeyEncoder::row_key(1, 1);
+        TransactionManager::put(&db, &txn_id, &row_key, b"row").unwrap();
+
+        db.set_memory_limit(Some(0));
+        assert!(TransactionManager::commit(&db, &txn_id).is_err());
+        db.set_memory_limit(None);
+        TransactionManager::commit(&db, &txn_id).unwrap();
+
+        let mut reader = db.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(reader.get(&row_key).unwrap(), Some(b"row".to_vec()));
+        reader.commit().unwrap();
+        let journal_records = db
+            .snapshot()
+            .into_iter()
+            .filter_map(|(_, value)| decode_range_change(&value).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(journal_records.len(), 1);
+        assert_eq!(journal_records[0].epoch, 1);
     }
 }

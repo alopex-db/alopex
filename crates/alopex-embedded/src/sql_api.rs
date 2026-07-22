@@ -1,8 +1,9 @@
-use alopex_core::kv::KVStore;
+use alopex_core::kv::RangeChangeJournalCapability;
+use alopex_core::kv::{any::AnyKVTransaction, KVStore, OwnedKVTransactionAdapter, ReadAtPoint};
 use alopex_core::types::TxnMode;
 use alopex_core::KVTransaction;
-use alopex_sql::catalog::CatalogOverlay;
 use alopex_sql::catalog::TxnCatalogView;
+use alopex_sql::catalog::{Catalog, CatalogOverlay};
 use alopex_sql::executor::query::execute_query_streaming;
 use alopex_sql::executor::query::iterator::VecIterator;
 use alopex_sql::executor::query::RowIterator;
@@ -10,15 +11,18 @@ use alopex_sql::executor::{
     build_streaming_pipeline, ColumnInfo, ExecutionResult, Executor, QueryRowIterator, Row,
 };
 use alopex_sql::planner::typed_expr::Projection;
-use alopex_sql::storage::{SqlValue, TxnBridge};
+use alopex_sql::storage::{LocalRangeChangeJournal, RangeChangeJournalScope, SqlValue, TxnBridge};
 use alopex_sql::AlopexDialect;
 use alopex_sql::Parser;
 use alopex_sql::Planner;
 use alopex_sql::Statement;
 use alopex_sql::StatementKind;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::Database;
 use crate::Error;
+use crate::OwnedEmbeddedTransaction;
 use crate::Result;
 use crate::SqlResult;
 use crate::Transaction;
@@ -133,6 +137,23 @@ fn stmt_changes_catalog(stmt: &Statement) -> bool {
     )
 }
 
+fn stmt_changes_user_data(stmt: &Statement) -> bool {
+    matches!(
+        stmt.kind,
+        StatementKind::Insert(_) | StatementKind::Update(_) | StatementKind::Delete(_)
+    )
+}
+
+pub(crate) fn local_journal_scope<C: Catalog>(catalog: &C) -> RangeChangeJournalScope {
+    let mut index_tables = BTreeMap::new();
+    for table in catalog.list_tables() {
+        for index in catalog.get_indexes_for_table(&table.name) {
+            index_tables.insert(index.index_id, table.table_id);
+        }
+    }
+    RangeChangeJournalScope::local(index_tables)
+}
+
 fn plan_stmt<'a, S: KVStore>(
     catalog: &'a alopex_sql::catalog::PersistentCatalog<S>,
     overlay: &'a CatalogOverlay,
@@ -143,6 +164,83 @@ fn plan_stmt<'a, S: KVStore>(
     planner
         .plan(stmt)
         .map_err(|e| Error::Sql(alopex_sql::SqlError::from(e)))
+}
+
+/// Execute one SQL string inside an [`OwnedEmbeddedTransaction`] without committing it.
+///
+/// The legacy executor only needs a `KVTransaction` during this finite call.  We adapt the
+/// owned transaction for that scope and leave its terminal ownership with the core session.
+/// This preserves the catalog overlay and routing behaviour of [`Transaction::execute_sql`]
+/// without extending any borrow beyond the call.
+pub(crate) fn execute_sql_owned(
+    transaction: &mut OwnedEmbeddedTransaction,
+    sql: &str,
+) -> Result<SqlResult> {
+    let statements = parse_sql(sql)?;
+    if statements.is_empty() {
+        return Ok(alopex_sql::ExecutionResult::Success);
+    }
+
+    if statements.iter().any(stmt_requires_write) {
+        let mut cache = transaction
+            .db
+            .hnsw_cache
+            .write()
+            .expect("hnsw cache lock poisoned");
+        cache.clear();
+        let mut vector_cache = transaction
+            .db
+            .vector_cache
+            .write()
+            .expect("vector cache lock poisoned");
+        *vector_cache = None;
+    }
+
+    let db = Arc::clone(&transaction.db);
+    let session = transaction.session.clone();
+    let overlay = &mut transaction.overlay;
+    let catalog_modified = &mut transaction.catalog_modified;
+    let mut outcome = Ok(alopex_sql::ExecutionResult::Success);
+
+    session
+        .with_transaction(|owned| {
+            outcome = (|| {
+                let mut raw = AnyKVTransaction::Owned(OwnedKVTransactionAdapter::new(owned));
+                let mode = raw.mode();
+                let mut borrowed =
+                    TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut raw, mode, overlay);
+                let mut executor: Executor<_, _> =
+                    Executor::new(db.store.clone(), db.sql_catalog.clone());
+                let mut last = alopex_sql::ExecutionResult::Success;
+
+                for (statement_index, stmt) in statements.iter().enumerate() {
+                    let plan = {
+                        let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
+                        let (_, overlay) = borrowed.split_parts();
+                        plan_stmt(&*catalog, &*overlay, stmt)?
+                    };
+
+                    {
+                        let catalog = db.sql_catalog.read().expect("catalog lock poisoned");
+                        let (_, overlay) = borrowed.split_parts();
+                        let view = TxnCatalogView::new(&*catalog, &*overlay);
+                        db.record_routing(&view, stmt, statement_index);
+                    }
+
+                    last = executor
+                        .execute_in_txn(plan, &mut borrowed)
+                        .map_err(|error| Error::Sql(alopex_sql::SqlError::from(error)))?;
+                }
+
+                if statements.iter().any(stmt_changes_catalog) {
+                    *catalog_modified = true;
+                }
+                Ok(last)
+            })();
+            Ok(())
+        })
+        .map_err(Error::Core)?;
+    outcome
 }
 
 /// Build column info from projection and schema.
@@ -190,6 +288,20 @@ fn build_column_info(
 }
 
 impl Database {
+    /// Opens a read-only SQL storage transaction at a cluster-issued fenced
+    /// read point. The returned transaction retains data, metadata, schema,
+    /// and index identities through [`ReadAtPoint`].
+    ///
+    /// This API never falls back to `begin(ReadOnly)`: an unavailable or
+    /// expired point returns [`Error::ReadAt`] before any SQL rows exist.
+    pub fn begin_read_at_sql(
+        &self,
+        point: ReadAtPoint,
+    ) -> Result<alopex_sql::storage::SqlTransaction<'_, alopex_core::kv::AnyKV>> {
+        let transaction = self.store.begin_read_at(&point).map_err(Error::ReadAt)?;
+        Ok(TxnBridge::from_read_at(transaction, point))
+    }
+
     /// SQL を実行する（auto-commit）。
     ///
     /// - DDL/DML は ReadWrite トランザクションで実行し、成功時に自動コミットする。
@@ -272,6 +384,19 @@ impl Database {
         };
 
         let mut txn = self.store.begin(mode).map_err(Error::Core)?;
+        let journal = if mode == TxnMode::ReadWrite
+            && stmts.iter().any(stmt_changes_user_data)
+            && self.store.range_change_journal_capability()
+                == RangeChangeJournalCapability::Supported
+        {
+            let scope = {
+                let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
+                local_journal_scope(&*catalog)
+            };
+            Some(LocalRangeChangeJournal::capture(&mut txn, scope).map_err(Error::Core)?)
+        } else {
+            None
+        };
         let mut overlay = CatalogOverlay::new();
         let mut borrowed =
             TxnBridge::<alopex_core::kv::AnyKV>::wrap_external(&mut txn, mode, &mut overlay);
@@ -302,6 +427,10 @@ impl Database {
         }
 
         drop(borrowed);
+
+        if let Some(journal) = journal {
+            journal.stage(&mut txn).map_err(Error::Core)?;
+        }
 
         // `execute_in_txn()` 成功時に HNSW flush 済み（失敗時は abandon 済み）なので、
         // ここでは KV commit と overlay 適用のみを行う。
@@ -651,5 +780,73 @@ impl<'a> Transaction<'a> {
             self.catalog_modified = true;
         }
         Ok(last)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alopex_core::kv::decode_range_change;
+    use alopex_core::kv::RangeChangePayload;
+
+    #[test]
+    fn auto_commit_stages_sql_row_and_index_changes_before_visibility() {
+        let db = Database::open_in_memory().unwrap();
+        db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")
+            .unwrap();
+        db.execute_sql("CREATE INDEX idx_users_name ON users (name);")
+            .unwrap();
+        db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'alice');")
+            .unwrap();
+
+        let mut reader = db.store.begin(TxnMode::ReadOnly).unwrap();
+        let records = reader
+            .scan_prefix(b"\x00alopex/range-change/")
+            .unwrap()
+            .filter_map(|(_, value)| decode_range_change(&value).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 1);
+        assert!(records[0]
+            .payload
+            .iter()
+            .any(|payload| matches!(payload, RangeChangePayload::UpsertRow { .. })));
+        assert!(records[0]
+            .payload
+            .iter()
+            .any(|payload| matches!(payload, RangeChangePayload::UpsertIndex { .. })));
+    }
+
+    #[test]
+    fn explicit_sql_transaction_stages_journal_before_commit() {
+        let db = Database::open_in_memory().unwrap();
+        db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")
+            .unwrap();
+        let mut transaction = db.begin(TxnMode::ReadWrite).unwrap();
+        transaction
+            .execute_sql("INSERT INTO users (id, name) VALUES (1, 'alice');")
+            .unwrap();
+        transaction.commit().unwrap();
+
+        let records = db
+            .snapshot()
+            .into_iter()
+            .filter_map(|(_, value)| decode_range_change(&value).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 1);
+        assert!(records[0]
+            .payload
+            .iter()
+            .any(|payload| matches!(payload, RangeChangePayload::UpsertRow { .. })));
+    }
+
+    #[test]
+    fn embedded_read_at_returns_retention_error_before_a_sql_session_exists() {
+        let db = Database::open_in_memory().unwrap();
+        let point = ReadAtPoint::new(1, 2, 3, 4);
+
+        assert!(matches!(
+            db.begin_read_at_sql(point),
+            Err(Error::ReadAt(alopex_core::ReadAtError::Unavailable { .. }))
+        ));
     }
 }

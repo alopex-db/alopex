@@ -1,3 +1,5 @@
+use crate::{DataFrameError, Result};
+
 /// Expression AST used by `DataFrame` and `LazyFrame`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -19,6 +21,15 @@ pub enum Expr {
     Function {
         input: Box<Expr>,
         function: ExprFunction,
+    },
+    /// Row-wise concatenation of two or more UTF-8 expressions.
+    ConcatStr {
+        /// Inputs in concatenation order.
+        inputs: Vec<Expr>,
+        /// Text placed between adjacent included inputs.
+        separator: String,
+        /// Declared treatment of null input values.
+        null_behavior: ConcatStrNullBehavior,
     },
     /// Expression alias (renames the resulting column).
     Alias { expr: Box<Expr>, name: String },
@@ -164,6 +175,17 @@ pub enum Scalar {
     Utf8(String),
 }
 
+/// Null treatment for [`Expr::ConcatStr`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConcatStrNullBehavior {
+    /// A null in any input produces a null output for that row.
+    Propagate,
+    /// Omit null inputs; a row whose inputs are all null remains null.
+    Ignore,
+    /// Replace every null input with this string before concatenation.
+    Replace(String),
+}
+
 impl From<()> for Scalar {
     fn from(_: ()) -> Self {
         Scalar::Null
@@ -201,6 +223,27 @@ impl From<&str> for Scalar {
 }
 
 impl Expr {
+    /// Construct a `concat_str` expression from two or more UTF-8 expressions.
+    ///
+    /// Input arity is validated while the expression is built. Input type validation is performed
+    /// against the source batch schema before any output batch is constructed.
+    pub fn concat_str(
+        inputs: Vec<Expr>,
+        separator: impl Into<String>,
+        null_behavior: ConcatStrNullBehavior,
+    ) -> Result<Expr> {
+        if inputs.len() < 2 {
+            return Err(DataFrameError::invalid_operation(
+                "concat_str requires at least two input expressions",
+            ));
+        }
+        Ok(Expr::ConcatStr {
+            inputs,
+            separator: separator.into(),
+            null_behavior,
+        })
+    }
+
     /// Alias this expression (used to name output columns).
     pub fn alias(self, name: impl Into<String>) -> Expr {
         Expr::Alias {
@@ -385,6 +428,15 @@ impl Expr {
     }
 }
 
+/// Construct a `concat_str` expression from two or more UTF-8 expressions.
+pub fn concat_str(
+    inputs: Vec<Expr>,
+    separator: impl Into<String>,
+    null_behavior: ConcatStrNullBehavior,
+) -> Result<Expr> {
+    Expr::concat_str(inputs, separator, null_behavior)
+}
+
 /// Builder for `str.*` expression functions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StringExpr {
@@ -542,7 +594,10 @@ impl ListExpr {
 
 #[cfg(test)]
 mod tests {
-    use super::{AggFunc, Expr, ExprFunction, Operator, Scalar, StringFunction, UnaryOperator};
+    use super::{
+        concat_str, AggFunc, ConcatStrNullBehavior, Expr, ExprFunction, Operator, Scalar,
+        StringFunction, UnaryOperator,
+    };
     use crate::expr::{col, lit};
 
     #[test]
@@ -608,5 +663,27 @@ mod tests {
                 name: "name_lower".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn concat_str_requires_two_or_more_inputs() {
+        let err =
+            concat_str(vec![col("first")], "-", ConcatStrNullBehavior::Propagate).unwrap_err();
+        assert!(err.to_string().contains("at least two"));
+    }
+
+    #[test]
+    fn concat_str_builder_keeps_separator_and_null_policy() {
+        let expr = concat_str(
+            vec![col("first"), col("second")],
+            "-",
+            ConcatStrNullBehavior::Replace("?".into()),
+        )
+        .unwrap();
+        assert!(matches!(
+            expr,
+            Expr::ConcatStr { separator, null_behavior: ConcatStrNullBehavior::Replace(value), .. }
+                if separator == "-" && value == "?"
+        ));
     }
 }

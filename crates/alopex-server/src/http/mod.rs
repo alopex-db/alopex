@@ -135,6 +135,14 @@ pub fn router(state: Arc<ServerState>) -> Router {
             axum::routing::post(admin_api::cluster_leave),
         )
         .route(
+            "/api/admin/cluster/metadata",
+            axum::routing::get(admin_api::cluster_metadata),
+        )
+        .route(
+            "/api/admin/cluster/operations",
+            axum::routing::post(admin_api::cluster_management),
+        )
+        .route(
             "/api/admin/backup",
             axum::routing::post(admin_api::start_backup),
         )
@@ -171,6 +179,24 @@ pub fn router(state: Arc<ServerState>) -> Router {
     } else {
         Router::new().nest(&state.config.api_prefix, api)
     };
+
+    // The distributed-read protocol is versioned independently from the
+    // configurable legacy API prefix. This keeps its documented cancel route
+    // stable even when an installation mounts existing SQL endpoints under a
+    // compatibility prefix.
+    let api = api
+        .route(
+            "/v1/sql/reads",
+            axum::routing::post(sql::begin_distributed_read),
+        )
+        .route(
+            "/v1/sql/reads/{id}",
+            axum::routing::get(sql::stream_distributed_read),
+        )
+        .route(
+            "/v1/sql/reads/{id}/cancel",
+            axum::routing::post(sql::cancel_distributed_read),
+        );
 
     let middleware = middleware::from_fn(context_middleware);
     let connection_middleware = middleware::from_fn(connection_middleware);

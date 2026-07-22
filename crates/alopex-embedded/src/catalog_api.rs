@@ -1,16 +1,19 @@
 //! Catalog API 向けの公開型定義。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use alopex_cluster::{NodeId, SchemaApplyEvidence, SchemaApplyState, SchemaManifest};
 use alopex_core::{KVStore, KVTransaction};
 use alopex_sql::ast::ddl::{DataType, IndexMethod, VectorMetric};
-use alopex_sql::catalog::persistent::{CatalogMeta, NamespaceMeta, TableFqn};
+use alopex_sql::catalog::persistent::{CatalogMeta, IndexFqn, NamespaceMeta, TableFqn};
 use alopex_sql::catalog::{
-    Catalog, CatalogOverlay, ColumnMetadata, Compression, IndexMetadata, StorageOptions,
+    Catalog, CatalogOverlay, ColumnMetadata, Compression, IndexMetadata, RowIdMode, StorageOptions,
     StorageType, TableMetadata,
 };
 use alopex_sql::planner::types::ResolvedType;
 use alopex_sql::{DataSourceFormat, TableType};
+use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use crate::{Database, Error, Result, Transaction, TxnMode};
 
@@ -1564,6 +1567,897 @@ fn resolved_type_to_string(resolved_type: &ResolvedType) -> String {
     }
 }
 
+/// The only catalog representation accepted in a schema manifest.  It is a
+/// versioned structural document, never user-supplied SQL or Rust-private
+/// catalog persistence bytes.
+pub const CATALOG_MANIFEST_DELTA_FORMAT: &str = "alopex.catalog.snapshot.v1";
+
+const CATALOG_MANIFEST_VERSION_KEY: &[u8] = b"__alopex/schema-manifest-version/v1";
+
+/// Stable, versioned public representation of the catalog carried by a
+/// schema manifest.  The snapshot is additive: an existing object must be
+/// identical, while a missing object is created atomically with the reported
+/// catalog version.  Destructive schema replacement is intentionally outside
+/// this Phase 1 control path.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogManifestDelta {
+    pub format_version: u32,
+    pub catalog_version: u64,
+    #[serde(default)]
+    pub catalogs: Vec<CatalogManifestCatalog>,
+    #[serde(default)]
+    pub namespaces: Vec<CatalogManifestNamespace>,
+    pub tables: Vec<CatalogManifestTable>,
+    pub indexes: Vec<CatalogManifestIndex>,
+}
+
+#[allow(missing_docs)]
+impl CatalogManifestDelta {
+    pub const FORMAT_VERSION: u32 = 1;
+
+    pub fn encode(&self) -> std::result::Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    pub fn decode(bytes: &[u8]) -> std::result::Result<Self, serde_json::Error> {
+        serde_json::from_slice(bytes)
+    }
+}
+
+/// Catalog metadata in [`CatalogManifestDelta`].
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogManifestCatalog {
+    pub name: String,
+    pub comment: Option<String>,
+    pub storage_root: Option<String>,
+}
+
+impl From<&CatalogMeta> for CatalogManifestCatalog {
+    fn from(meta: &CatalogMeta) -> Self {
+        Self {
+            name: meta.name.clone(),
+            comment: meta.comment.clone(),
+            storage_root: meta.storage_root.clone(),
+        }
+    }
+}
+
+impl From<&CatalogManifestCatalog> for CatalogMeta {
+    fn from(manifest: &CatalogManifestCatalog) -> Self {
+        Self {
+            name: manifest.name.clone(),
+            comment: manifest.comment.clone(),
+            storage_root: manifest.storage_root.clone(),
+        }
+    }
+}
+
+/// Namespace metadata in [`CatalogManifestDelta`].
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogManifestNamespace {
+    pub catalog_name: String,
+    pub name: String,
+    pub comment: Option<String>,
+    pub storage_root: Option<String>,
+}
+
+impl From<&NamespaceMeta> for CatalogManifestNamespace {
+    fn from(meta: &NamespaceMeta) -> Self {
+        Self {
+            catalog_name: meta.catalog_name.clone(),
+            name: meta.name.clone(),
+            comment: meta.comment.clone(),
+            storage_root: meta.storage_root.clone(),
+        }
+    }
+}
+
+impl From<&CatalogManifestNamespace> for NamespaceMeta {
+    fn from(manifest: &CatalogManifestNamespace) -> Self {
+        Self {
+            catalog_name: manifest.catalog_name.clone(),
+            name: manifest.name.clone(),
+            comment: manifest.comment.clone(),
+            storage_root: manifest.storage_root.clone(),
+        }
+    }
+}
+
+/// Table definition in [`CatalogManifestDelta`].
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogManifestTable {
+    pub table_id: u32,
+    pub catalog_name: String,
+    pub namespace_name: String,
+    pub name: String,
+    pub table_type: CatalogManifestTableType,
+    pub data_source_format: CatalogManifestDataSourceFormat,
+    pub columns: Vec<CatalogManifestColumn>,
+    pub primary_key: Option<Vec<String>>,
+    pub storage: CatalogManifestStorage,
+    pub storage_location: Option<String>,
+    pub comment: Option<String>,
+    pub properties: BTreeMap<String, String>,
+}
+
+impl CatalogManifestTable {
+    fn fqn(&self) -> TableFqn {
+        TableFqn::new(&self.catalog_name, &self.namespace_name, &self.name)
+    }
+
+    fn to_metadata(&self) -> TableMetadata {
+        let columns = self
+            .columns
+            .iter()
+            .map(CatalogManifestColumn::to_metadata)
+            .collect();
+        let mut table = TableMetadata::new(self.name.clone(), columns).with_table_id(self.table_id);
+        table.catalog_name = self.catalog_name.clone();
+        table.namespace_name = self.namespace_name.clone();
+        table.table_type = self.table_type.into();
+        table.data_source_format = self.data_source_format.into();
+        table.primary_key = self.primary_key.clone();
+        table.storage_options = self.storage.to_options();
+        table.storage_location = self.storage_location.clone();
+        table.comment = self.comment.clone();
+        table.properties = self.properties.clone().into_iter().collect();
+        table
+    }
+}
+
+impl From<&TableMetadata> for CatalogManifestTable {
+    fn from(table: &TableMetadata) -> Self {
+        Self {
+            table_id: table.table_id,
+            catalog_name: table.catalog_name.clone(),
+            namespace_name: table.namespace_name.clone(),
+            name: table.name.clone(),
+            table_type: table.table_type.into(),
+            data_source_format: table.data_source_format.into(),
+            columns: table
+                .columns
+                .iter()
+                .map(CatalogManifestColumn::from)
+                .collect(),
+            primary_key: table.primary_key.clone(),
+            storage: CatalogManifestStorage::from(&table.storage_options),
+            storage_location: table.storage_location.clone(),
+            comment: table.comment.clone(),
+            properties: table
+                .properties
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        }
+    }
+}
+
+/// Column definition in [`CatalogManifestTable`].  SQL default expressions
+/// are deliberately excluded because the persistent catalog does not retain
+/// them as a portable catalog contract.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogManifestColumn {
+    pub name: String,
+    pub data_type: CatalogManifestDataType,
+    pub not_null: bool,
+    pub primary_key: bool,
+    pub unique: bool,
+}
+
+impl CatalogManifestColumn {
+    fn to_metadata(&self) -> ColumnMetadata {
+        ColumnMetadata::new(self.name.clone(), self.data_type.clone().into())
+            .with_not_null(self.not_null)
+            .with_primary_key(self.primary_key)
+            .with_unique(self.unique)
+    }
+}
+
+impl From<&ColumnMetadata> for CatalogManifestColumn {
+    fn from(column: &ColumnMetadata) -> Self {
+        Self {
+            name: column.name.clone(),
+            data_type: (&column.data_type).into(),
+            not_null: column.not_null,
+            primary_key: column.primary_key,
+            unique: column.unique,
+        }
+    }
+}
+
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogManifestTableType {
+    Managed,
+    External,
+}
+
+impl From<TableType> for CatalogManifestTableType {
+    fn from(value: TableType) -> Self {
+        match value {
+            TableType::Managed => Self::Managed,
+            TableType::External => Self::External,
+        }
+    }
+}
+
+impl From<CatalogManifestTableType> for TableType {
+    fn from(value: CatalogManifestTableType) -> Self {
+        match value {
+            CatalogManifestTableType::Managed => Self::Managed,
+            CatalogManifestTableType::External => Self::External,
+        }
+    }
+}
+
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogManifestDataSourceFormat {
+    Alopex,
+    Parquet,
+    Delta,
+}
+
+impl From<DataSourceFormat> for CatalogManifestDataSourceFormat {
+    fn from(value: DataSourceFormat) -> Self {
+        match value {
+            DataSourceFormat::Alopex => Self::Alopex,
+            DataSourceFormat::Parquet => Self::Parquet,
+            DataSourceFormat::Delta => Self::Delta,
+        }
+    }
+}
+
+impl From<CatalogManifestDataSourceFormat> for DataSourceFormat {
+    fn from(value: CatalogManifestDataSourceFormat) -> Self {
+        match value {
+            CatalogManifestDataSourceFormat::Alopex => Self::Alopex,
+            CatalogManifestDataSourceFormat::Parquet => Self::Parquet,
+            CatalogManifestDataSourceFormat::Delta => Self::Delta,
+        }
+    }
+}
+
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CatalogManifestDataType {
+    Integer,
+    BigInt,
+    Float,
+    Double,
+    Text,
+    Blob,
+    Boolean,
+    Timestamp,
+    Vector {
+        dimension: u32,
+        metric: CatalogManifestVectorMetric,
+    },
+    Null,
+}
+
+impl From<&ResolvedType> for CatalogManifestDataType {
+    fn from(value: &ResolvedType) -> Self {
+        match value {
+            ResolvedType::Integer => Self::Integer,
+            ResolvedType::BigInt => Self::BigInt,
+            ResolvedType::Float => Self::Float,
+            ResolvedType::Double => Self::Double,
+            ResolvedType::Text => Self::Text,
+            ResolvedType::Blob => Self::Blob,
+            ResolvedType::Boolean => Self::Boolean,
+            ResolvedType::Timestamp => Self::Timestamp,
+            ResolvedType::Vector { dimension, metric } => Self::Vector {
+                dimension: *dimension,
+                metric: (*metric).into(),
+            },
+            ResolvedType::Null => Self::Null,
+        }
+    }
+}
+
+impl From<CatalogManifestDataType> for ResolvedType {
+    fn from(value: CatalogManifestDataType) -> Self {
+        match value {
+            CatalogManifestDataType::Integer => Self::Integer,
+            CatalogManifestDataType::BigInt => Self::BigInt,
+            CatalogManifestDataType::Float => Self::Float,
+            CatalogManifestDataType::Double => Self::Double,
+            CatalogManifestDataType::Text => Self::Text,
+            CatalogManifestDataType::Blob => Self::Blob,
+            CatalogManifestDataType::Boolean => Self::Boolean,
+            CatalogManifestDataType::Timestamp => Self::Timestamp,
+            CatalogManifestDataType::Vector { dimension, metric } => Self::Vector {
+                dimension,
+                metric: metric.into(),
+            },
+            CatalogManifestDataType::Null => Self::Null,
+        }
+    }
+}
+
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogManifestVectorMetric {
+    Cosine,
+    L2,
+    Inner,
+}
+
+impl From<VectorMetric> for CatalogManifestVectorMetric {
+    fn from(value: VectorMetric) -> Self {
+        match value {
+            VectorMetric::Cosine => Self::Cosine,
+            VectorMetric::L2 => Self::L2,
+            VectorMetric::Inner => Self::Inner,
+        }
+    }
+}
+
+impl From<CatalogManifestVectorMetric> for VectorMetric {
+    fn from(value: CatalogManifestVectorMetric) -> Self {
+        match value {
+            CatalogManifestVectorMetric::Cosine => Self::Cosine,
+            CatalogManifestVectorMetric::L2 => Self::L2,
+            CatalogManifestVectorMetric::Inner => Self::Inner,
+        }
+    }
+}
+
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogManifestStorage {
+    pub storage_type: CatalogManifestStorageType,
+    pub compression: CatalogManifestCompression,
+    pub row_group_size: u32,
+    pub row_id_mode: CatalogManifestRowIdMode,
+}
+
+impl CatalogManifestStorage {
+    fn to_options(&self) -> StorageOptions {
+        StorageOptions {
+            storage_type: self.storage_type.into(),
+            compression: self.compression.into(),
+            row_group_size: self.row_group_size,
+            row_id_mode: self.row_id_mode.into(),
+        }
+    }
+}
+
+impl From<&StorageOptions> for CatalogManifestStorage {
+    fn from(value: &StorageOptions) -> Self {
+        Self {
+            storage_type: value.storage_type.into(),
+            compression: value.compression.into(),
+            row_group_size: value.row_group_size,
+            row_id_mode: value.row_id_mode.into(),
+        }
+    }
+}
+
+macro_rules! catalog_manifest_enum {
+    ($manifest:ident, $native:ident, { $($variant:ident),+ $(,)? }) => {
+        #[allow(missing_docs)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $manifest { $($variant),+ }
+
+        impl From<$native> for $manifest {
+            fn from(value: $native) -> Self {
+                match value { $($native::$variant => Self::$variant),+ }
+            }
+        }
+
+        impl From<$manifest> for $native {
+            fn from(value: $manifest) -> Self {
+                match value { $($manifest::$variant => Self::$variant),+ }
+            }
+        }
+    };
+}
+
+catalog_manifest_enum!(CatalogManifestStorageType, StorageType, { Row, Columnar });
+catalog_manifest_enum!(CatalogManifestCompression, Compression, { None, Lz4, Zstd });
+catalog_manifest_enum!(CatalogManifestRowIdMode, RowIdMode, { None, Direct });
+
+/// Index definition in [`CatalogManifestDelta`].
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogManifestIndex {
+    pub index_id: u32,
+    pub catalog_name: String,
+    pub namespace_name: String,
+    pub name: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub column_indices: Vec<usize>,
+    pub unique: bool,
+    pub method: Option<CatalogManifestIndexMethod>,
+    pub options: Vec<(String, String)>,
+}
+
+impl CatalogManifestIndex {
+    fn fqn(&self) -> IndexFqn {
+        IndexFqn::new(
+            &self.catalog_name,
+            &self.namespace_name,
+            &self.table,
+            &self.name,
+        )
+    }
+
+    fn to_metadata(&self) -> IndexMetadata {
+        let mut index = IndexMetadata::new(
+            self.index_id,
+            self.name.clone(),
+            self.table.clone(),
+            self.columns.clone(),
+        )
+        .with_column_indices(self.column_indices.clone())
+        .with_unique(self.unique)
+        .with_options(self.options.clone());
+        index.catalog_name = self.catalog_name.clone();
+        index.namespace_name = self.namespace_name.clone();
+        if let Some(method) = self.method {
+            index = index.with_method(method.into());
+        }
+        index
+    }
+}
+
+impl From<&IndexMetadata> for CatalogManifestIndex {
+    fn from(index: &IndexMetadata) -> Self {
+        Self {
+            index_id: index.index_id,
+            catalog_name: index.catalog_name.clone(),
+            namespace_name: index.namespace_name.clone(),
+            name: index.name.clone(),
+            table: index.table.clone(),
+            columns: index.columns.clone(),
+            column_indices: index.column_indices.clone(),
+            unique: index.unique,
+            method: index.method.map(Into::into),
+            options: index.options.clone(),
+        }
+    }
+}
+
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogManifestIndexMethod {
+    BTree,
+    Hnsw,
+}
+
+impl From<IndexMethod> for CatalogManifestIndexMethod {
+    fn from(value: IndexMethod) -> Self {
+        match value {
+            IndexMethod::BTree => Self::BTree,
+            IndexMethod::Hnsw => Self::Hnsw,
+        }
+    }
+}
+
+impl From<CatalogManifestIndexMethod> for IndexMethod {
+    fn from(value: CatalogManifestIndexMethod) -> Self {
+        match value {
+            CatalogManifestIndexMethod::BTree => Self::BTree,
+            CatalogManifestIndexMethod::Hnsw => Self::Hnsw,
+        }
+    }
+}
+
+impl Database {
+    /// Exports the currently visible SQL catalog as a versioned manifest
+    /// document.  This captures catalog metadata only; it does not transport
+    /// user SQL or table data.
+    pub fn export_catalog_manifest_delta(&self, catalog_version: u64) -> Result<Vec<u8>> {
+        let catalog = self.sql_catalog.read().expect("catalog lock poisoned");
+        let mut catalogs = catalog
+            .list_catalogs()
+            .iter()
+            .map(CatalogManifestCatalog::from)
+            .collect::<Vec<_>>();
+        catalogs.sort_by(|left, right| left.name.cmp(&right.name));
+        let mut namespaces = catalog
+            .list_catalogs()
+            .iter()
+            .flat_map(|meta| {
+                catalog
+                    .list_namespaces(&meta.name)
+                    .iter()
+                    .map(CatalogManifestNamespace::from)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        namespaces.sort_by(|left, right| {
+            (&left.catalog_name, &left.name).cmp(&(&right.catalog_name, &right.name))
+        });
+        let mut tables = catalog
+            .list_tables()
+            .iter()
+            .map(CatalogManifestTable::from)
+            .collect::<Vec<_>>();
+        tables.sort_by(|left, right| {
+            (&left.catalog_name, &left.namespace_name, &left.name).cmp(&(
+                &right.catalog_name,
+                &right.namespace_name,
+                &right.name,
+            ))
+        });
+        let mut indexes = catalog
+            .list_tables()
+            .iter()
+            .flat_map(|table| {
+                catalog
+                    .get_indexes_for_table(&table.name)
+                    .into_iter()
+                    .filter(|index| {
+                        index.catalog_name == table.catalog_name
+                            && index.namespace_name == table.namespace_name
+                    })
+                    .map(CatalogManifestIndex::from)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        indexes.sort_by(|left, right| {
+            (
+                &left.catalog_name,
+                &left.namespace_name,
+                &left.table,
+                &left.name,
+            )
+                .cmp(&(
+                    &right.catalog_name,
+                    &right.namespace_name,
+                    &right.table,
+                    &right.name,
+                ))
+        });
+        CatalogManifestDelta {
+            format_version: CatalogManifestDelta::FORMAT_VERSION,
+            catalog_version,
+            catalogs,
+            namespaces,
+            tables,
+            indexes,
+        }
+        .encode()
+        .map_err(catalog_manifest_encoding_error)
+    }
+
+    /// Returns the catalog version that was atomically recorded with the last
+    /// successfully applied schema manifest.  `None` is an untouched local
+    /// catalog, which compatibility checks treat as version zero.
+    pub fn catalog_manifest_version(&self) -> Result<Option<u64>> {
+        let mut txn = self.store.begin(TxnMode::ReadOnly).map_err(Error::Core)?;
+        let stored = txn
+            .get(&CATALOG_MANIFEST_VERSION_KEY.to_vec())
+            .map_err(Error::Core)?;
+        txn.rollback_self().map_err(Error::Core)?;
+        match stored {
+            None => Ok(None),
+            Some(bytes) if bytes.len() == std::mem::size_of::<u64>() => {
+                let mut encoded = [0u8; std::mem::size_of::<u64>()];
+                encoded.copy_from_slice(&bytes);
+                Ok(Some(u64::from_be_bytes(encoded)))
+            }
+            Some(_) => Err(Error::Core(alopex_core::Error::InvalidFormat(
+                "invalid stored schema manifest catalog version".to_string(),
+            ))),
+        }
+    }
+
+    /// Applies a committed management manifest to this member's local SQL
+    /// catalog.  The returned evidence is suitable for
+    /// `SchemaApplyEvidenceAdapter`; it reports `Applied` only after the
+    /// catalog overlay and manifest version commit together.
+    pub fn apply_schema_manifest(
+        &self,
+        member: impl Into<NodeId>,
+        manifest: &SchemaManifest,
+    ) -> SchemaApplyEvidence {
+        let member = member.into();
+        if manifest.catalog_delta_format != CATALOG_MANIFEST_DELTA_FORMAT {
+            return apply_evidence(
+                manifest,
+                member,
+                SchemaApplyState::Incompatible,
+                None,
+                false,
+                "unsupported catalog manifest format",
+            );
+        }
+        let actual_checksum = format!("{:x}", sha2::Sha256::digest(&manifest.catalog_delta));
+        if actual_checksum != manifest.checksum {
+            return apply_evidence(
+                manifest,
+                member,
+                SchemaApplyState::Failed,
+                None,
+                false,
+                "catalog manifest checksum mismatch",
+            );
+        }
+        let delta = match CatalogManifestDelta::decode(&manifest.catalog_delta) {
+            Ok(delta) => delta,
+            Err(_) => {
+                return apply_evidence(
+                    manifest,
+                    member,
+                    SchemaApplyState::Incompatible,
+                    None,
+                    false,
+                    "catalog manifest payload is not a supported structural document",
+                );
+            }
+        };
+        if let Err(detail) = validate_catalog_manifest_delta(&delta) {
+            return apply_evidence(
+                manifest,
+                member,
+                SchemaApplyState::Incompatible,
+                None,
+                false,
+                detail,
+            );
+        }
+        if delta.catalog_version != manifest.schema_version {
+            return apply_evidence(
+                manifest,
+                member,
+                SchemaApplyState::Incompatible,
+                None,
+                false,
+                "catalog document version does not match the committed schema version",
+            );
+        }
+        let current_version = match self.catalog_manifest_version() {
+            Ok(version) => version.unwrap_or(0),
+            Err(_) => {
+                return apply_evidence(
+                    manifest,
+                    member,
+                    SchemaApplyState::Failed,
+                    None,
+                    false,
+                    "local catalog manifest version could not be read",
+                );
+            }
+        };
+        if current_version < manifest.compatibility.minimum_catalog_version
+            || current_version > manifest.compatibility.maximum_catalog_version
+        {
+            return apply_evidence(
+                manifest,
+                member,
+                SchemaApplyState::Incompatible,
+                Some(current_version),
+                false,
+                "local catalog version is outside the manifest compatibility range",
+            );
+        }
+        match self.apply_catalog_manifest_delta(&delta) {
+            Ok(()) => apply_evidence(
+                manifest,
+                member,
+                SchemaApplyState::Applied,
+                Some(delta.catalog_version),
+                true,
+                "",
+            ),
+            Err(detail) => apply_evidence(
+                manifest,
+                member,
+                SchemaApplyState::Failed,
+                Some(current_version),
+                false,
+                detail,
+            ),
+        }
+    }
+
+    fn apply_catalog_manifest_delta(
+        &self,
+        delta: &CatalogManifestDelta,
+    ) -> std::result::Result<(), String> {
+        let mut txn = self
+            .store
+            .begin(TxnMode::ReadWrite)
+            .map_err(|error| error.to_string())?;
+        let mut catalog = self
+            .sql_catalog
+            .write()
+            .map_err(|_| "catalog lock poisoned".to_string())?;
+        let mut overlay = CatalogOverlay::new();
+
+        for manifest_catalog in &delta.catalogs {
+            match catalog.get_catalog(&manifest_catalog.name) {
+                Some(existing) if CatalogManifestCatalog::from(&existing) == *manifest_catalog => {}
+                Some(_) => {
+                    return Err(format!(
+                        "local catalog {} differs from the manifest",
+                        manifest_catalog.name
+                    ));
+                }
+                None => overlay.add_catalog(manifest_catalog.into()),
+            }
+        }
+        for manifest_namespace in &delta.namespaces {
+            match catalog.get_namespace(&manifest_namespace.catalog_name, &manifest_namespace.name)
+            {
+                Some(existing)
+                    if CatalogManifestNamespace::from(&existing) == *manifest_namespace => {}
+                Some(_) => {
+                    return Err(format!(
+                        "local namespace {}.{} differs from the manifest",
+                        manifest_namespace.catalog_name, manifest_namespace.name
+                    ));
+                }
+                None => overlay.add_namespace(manifest_namespace.into()),
+            }
+        }
+
+        for table in &delta.tables {
+            let existing = catalog.list_tables().into_iter().find(|candidate| {
+                candidate.name == table.name
+                    && candidate.catalog_name == table.catalog_name
+                    && candidate.namespace_name == table.namespace_name
+            });
+            match existing {
+                Some(existing) if CatalogManifestTable::from(&existing) == *table => {}
+                Some(_) => {
+                    return Err(format!(
+                        "local table {}.{}.{} differs from the manifest",
+                        table.catalog_name, table.namespace_name, table.name
+                    ));
+                }
+                None => overlay.add_table(table.fqn(), table.to_metadata()),
+            }
+        }
+
+        for index in &delta.indexes {
+            let existing = catalog.get_index(&index.name).filter(|candidate| {
+                candidate.catalog_name == index.catalog_name
+                    && candidate.namespace_name == index.namespace_name
+                    && candidate.table == index.table
+            });
+            match existing {
+                Some(existing) if CatalogManifestIndex::from(existing) == *index => {}
+                Some(_) => {
+                    return Err(format!(
+                        "local index {}.{}.{} differs from the manifest",
+                        index.catalog_name, index.namespace_name, index.name
+                    ));
+                }
+                None => overlay.add_index(index.fqn(), index.to_metadata()),
+            }
+        }
+
+        catalog
+            .persist_overlay(&mut txn, &overlay)
+            .map_err(|error| error.to_string())?;
+        txn.put(
+            CATALOG_MANIFEST_VERSION_KEY.to_vec(),
+            delta.catalog_version.to_be_bytes().to_vec(),
+        )
+        .map_err(|error| error.to_string())?;
+        txn.commit_self().map_err(|error| error.to_string())?;
+        catalog.apply_overlay(overlay);
+        drop(catalog);
+        self.invalidate_table_info_cache();
+        self.hnsw_cache
+            .write()
+            .map_err(|_| "HNSW cache lock poisoned".to_string())?
+            .clear();
+        Ok(())
+    }
+}
+
+fn catalog_manifest_encoding_error(error: serde_json::Error) -> Error {
+    Error::Core(alopex_core::Error::InvalidFormat(format!(
+        "could not encode catalog manifest: {error}"
+    )))
+}
+
+fn validate_catalog_manifest_delta(
+    delta: &CatalogManifestDelta,
+) -> std::result::Result<(), &'static str> {
+    if delta.format_version != CatalogManifestDelta::FORMAT_VERSION {
+        return Err("unsupported catalog manifest document version");
+    }
+    let mut catalogs = BTreeSet::new();
+    if delta
+        .catalogs
+        .iter()
+        .any(|catalog| catalog.name.trim().is_empty() || !catalogs.insert(catalog.name.as_str()))
+    {
+        return Err("catalog manifest contains an invalid or duplicate catalog");
+    }
+    let mut namespaces = BTreeSet::new();
+    if delta.namespaces.iter().any(|namespace| {
+        namespace.catalog_name.trim().is_empty()
+            || namespace.name.trim().is_empty()
+            || !namespaces.insert((namespace.catalog_name.as_str(), namespace.name.as_str()))
+    }) {
+        return Err("catalog manifest contains an invalid or duplicate namespace");
+    }
+    let mut tables = BTreeSet::new();
+    for table in &delta.tables {
+        if table.name.trim().is_empty()
+            || table.catalog_name.trim().is_empty()
+            || table.namespace_name.trim().is_empty()
+            || table.columns.is_empty()
+            || !tables.insert((
+                table.catalog_name.as_str(),
+                table.namespace_name.as_str(),
+                table.name.as_str(),
+            ))
+        {
+            return Err("catalog manifest contains an invalid or duplicate table");
+        }
+        let mut columns = BTreeSet::new();
+        if table
+            .columns
+            .iter()
+            .any(|column| column.name.trim().is_empty() || !columns.insert(column.name.as_str()))
+        {
+            return Err("catalog manifest contains an invalid or duplicate column");
+        }
+    }
+    let mut indexes = BTreeSet::new();
+    for index in &delta.indexes {
+        let table_key = (
+            index.catalog_name.as_str(),
+            index.namespace_name.as_str(),
+            index.table.as_str(),
+        );
+        if index.name.trim().is_empty()
+            || index.columns.is_empty()
+            || !tables.contains(&table_key)
+            || !indexes.insert((
+                index.catalog_name.as_str(),
+                index.namespace_name.as_str(),
+                index.table.as_str(),
+                index.name.as_str(),
+            ))
+        {
+            return Err("catalog manifest contains an invalid, duplicate, or orphaned index");
+        }
+    }
+    Ok(())
+}
+
+fn apply_evidence(
+    manifest: &SchemaManifest,
+    member: NodeId,
+    state: SchemaApplyState,
+    catalog_version: Option<u64>,
+    compatibility_verified: bool,
+    detail: impl Into<String>,
+) -> SchemaApplyEvidence {
+    let detail = detail.into();
+    SchemaApplyEvidence {
+        manifest_id: manifest.id.clone(),
+        member,
+        state,
+        catalog_version,
+        checksum: (state == SchemaApplyState::Applied).then(|| manifest.checksum.clone()),
+        compatibility_verified,
+        failure_detail: (!detail.is_empty()).then_some(detail),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1714,6 +2608,88 @@ mod tests {
     fn ensure_default_catalog_and_namespace(db: &Database) {
         let _ = db.create_catalog(CreateCatalogRequest::new("default"));
         let _ = db.create_namespace(CreateNamespaceRequest::new("default", "default"));
+    }
+
+    fn manifest_from_delta(delta: Vec<u8>, version: u64) -> SchemaManifest {
+        SchemaManifest {
+            id: alopex_cluster::SchemaManifestId::new("manifest-1"),
+            parent_id: None,
+            schema_version: version,
+            catalog_delta_format: CATALOG_MANIFEST_DELTA_FORMAT.to_string(),
+            checksum: format!("{:x}", sha2::Sha256::digest(&delta)),
+            catalog_delta: delta,
+            compatibility: alopex_cluster::SchemaCompatibility {
+                minimum_catalog_version: 0,
+                maximum_catalog_version: version,
+            },
+            owner: alopex_cluster::NodeId::new("node-a"),
+            created_at_epoch: 3,
+        }
+    }
+
+    #[test]
+    fn verified_manifest_apply_makes_sql_catalog_and_reported_version_agree() {
+        let source = Database::new();
+        ensure_default_catalog_and_namespace(&source);
+        source
+            .execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")
+            .unwrap();
+        source
+            .execute_sql("CREATE INDEX idx_users_name ON users (name);")
+            .unwrap();
+        let manifest = manifest_from_delta(source.export_catalog_manifest_delta(7).unwrap(), 7);
+
+        let target = Database::new();
+        let evidence = target.apply_schema_manifest("node-b", &manifest);
+
+        assert_eq!(evidence.state, SchemaApplyState::Applied);
+        assert_eq!(evidence.catalog_version, Some(7));
+        assert_eq!(
+            evidence.checksum.as_deref(),
+            Some(manifest.checksum.as_str())
+        );
+        assert!(evidence.compatibility_verified);
+        assert_eq!(target.catalog_manifest_version().unwrap(), Some(7));
+        assert!(matches!(
+            target
+                .execute_sql("INSERT INTO users (id, name) VALUES (1, 'alice');")
+                .unwrap(),
+            ExecutionResult::RowsAffected(1)
+        ));
+        assert_eq!(
+            target.get_table_info_simple("users").unwrap().table_id,
+            source.get_table_info_simple("users").unwrap().table_id
+        );
+        let indexes = target.list_indexes_simple("users").unwrap();
+        assert!(indexes.iter().any(|index| index.name == "idx_users_name"));
+    }
+
+    #[test]
+    fn corrupted_or_incompatible_catalog_never_returns_applied_evidence() {
+        let source = Database::new();
+        ensure_default_catalog_and_namespace(&source);
+        source
+            .execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        let mut corrupt = manifest_from_delta(source.export_catalog_manifest_delta(4).unwrap(), 4);
+        corrupt.checksum = "wrong".to_string();
+        let target = Database::new();
+        let evidence = target.apply_schema_manifest("node-b", &corrupt);
+        assert_eq!(evidence.state, SchemaApplyState::Failed);
+        assert_eq!(target.catalog_manifest_version().unwrap(), None);
+        assert!(target
+            .execute_sql("INSERT INTO users (id) VALUES (1);")
+            .is_err());
+
+        let manifest = manifest_from_delta(source.export_catalog_manifest_delta(4).unwrap(), 4);
+        let mismatched = Database::new();
+        ensure_default_catalog_and_namespace(&mismatched);
+        mismatched
+            .execute_sql("CREATE TABLE users (id TEXT PRIMARY KEY);")
+            .unwrap();
+        let evidence = mismatched.apply_schema_manifest("node-b", &manifest);
+        assert_eq!(evidence.state, SchemaApplyState::Failed);
+        assert_eq!(mismatched.catalog_manifest_version().unwrap(), None);
     }
 
     #[test]

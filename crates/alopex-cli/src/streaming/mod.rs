@@ -9,7 +9,10 @@ pub mod writer;
 
 pub use cancel::CancelSignal;
 pub use timeout::Deadline;
-pub use writer::{StreamingWriter, WriteStatus};
+pub use writer::{
+    write_distributed_read_routing_report, DistributedReadRoutingReport, StreamingWriter,
+    WriteStatus,
+};
 
 // Re-export for public API configuration
 #[allow(unused_imports)]

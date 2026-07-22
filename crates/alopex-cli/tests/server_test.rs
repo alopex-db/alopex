@@ -129,9 +129,15 @@ async fn spawn_tls_server(
         .await
         .expect("rustls config");
 
+    // Keep the ephemeral listener open until axum-server adopts it. Binding
+    // an address, dropping the listener, and binding it again introduces a
+    // race between concurrently running tests; another fixture can receive
+    // the request during that window.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
     let addr = listener.local_addr().expect("addr");
-    drop(listener);
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let handle = axum_server::Handle::new();
@@ -141,7 +147,8 @@ async fn spawn_tls_server(
         shutdown_handle.graceful_shutdown(Some(Duration::from_secs(5)));
     });
 
-    let server = axum_server::bind_rustls(addr, rustls_config)
+    let server = axum_server::from_tcp_rustls(listener, rustls_config)
+        .expect("adopt listener")
         .handle(handle)
         .serve(router.into_make_service());
     tokio::spawn(server);
@@ -834,6 +841,8 @@ async fn server_sql_streaming_json_array_success() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        read_mode: None,
+        routing_report: None,
         tui: false,
     };
     let cancel = CancelSignal::new();
@@ -881,6 +890,8 @@ async fn server_sql_streaming_jsonl_success() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        read_mode: None,
+        routing_report: None,
         tui: false,
     };
     let cancel = CancelSignal::new();
@@ -913,6 +924,8 @@ async fn server_sql_streaming_empty_array_outputs_json() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        read_mode: None,
+        routing_report: None,
         tui: false,
     };
     let cancel = CancelSignal::new();
@@ -949,6 +962,8 @@ async fn server_sql_streaming_invalid_rows_error() {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            read_mode: None,
+            routing_report: None,
             tui: false,
         };
         let cancel = CancelSignal::new();
@@ -972,6 +987,8 @@ async fn server_sql_streaming_csv_output() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        read_mode: None,
+        routing_report: None,
         tui: false,
     };
     let cancel = CancelSignal::new();
@@ -998,6 +1015,8 @@ async fn server_sql_streaming_tsv_output() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        read_mode: None,
+        routing_report: None,
         tui: false,
     };
     let cancel = CancelSignal::new();
@@ -1024,6 +1043,8 @@ async fn server_sql_streaming_non_array_error() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        read_mode: None,
+        routing_report: None,
         tui: false,
     };
     let cancel = CancelSignal::new();
@@ -1046,6 +1067,8 @@ async fn server_sql_streaming_sends_fetch_size_and_max_rows() {
         fetch_size: Some(10),
         max_rows: Some(25),
         deadline: None,
+        read_mode: None,
+        routing_report: None,
         tui: false,
     };
     let cancel = CancelSignal::new();
@@ -1076,6 +1099,8 @@ async fn server_sql_streaming_deadline_sends_cancel() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        read_mode: None,
+        routing_report: None,
         tui: false,
     };
     let cancel = CancelSignal::new();
@@ -1101,6 +1126,8 @@ async fn server_sql_streaming_cancel_sends_cancel_endpoint() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        read_mode: None,
+        routing_report: None,
         tui: false,
     };
     let cancel = CancelSignal::new();
@@ -1725,6 +1752,8 @@ fn streaming_error_test_cmd() -> SqlCommand {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        read_mode: None,
+        routing_report: None,
         tui: false,
     }
 }

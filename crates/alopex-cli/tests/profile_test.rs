@@ -27,6 +27,10 @@ fn local_profile(path: &str) -> Profile {
         }),
         server: None,
         data_dir: Some(path.to_string()),
+        // A pre-v0.8 local profile must remain local after the cluster-read
+        // fields were added; it must not acquire remote routing implicitly.
+        execution_scope: Default::default(),
+        cluster_read: None,
     }
 }
 
@@ -45,6 +49,10 @@ fn server_profile(url: &str, auth: AuthType) -> Profile {
             key_path: None,
         }),
         data_dir: None,
+        // A legacy server connection is still a local execution profile unless
+        // its owner explicitly opts into the cluster contract.
+        execution_scope: Default::default(),
+        cluster_read: None,
     }
 }
 

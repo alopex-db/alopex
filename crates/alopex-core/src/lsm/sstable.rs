@@ -1215,6 +1215,102 @@ impl SSTableReader {
     }
 }
 
+/// Incremental, snapshot-bounded reader for one SSTable.
+///
+/// The cursor owns its `SSTableReader` and retains at most one decoded on-disk block.  It is
+/// intentionally separate from the legacy `scan_*` helpers above, which return a complete
+/// `Vec` for compatibility callers.  Owned sessions advance this cursor one key at a time.
+pub struct SSTableCursor {
+    reader: SSTableReader,
+    file_id: u64,
+    read_timestamp: u64,
+    start: Key,
+    end: Option<Key>,
+    next_block: usize,
+    entries: Vec<SSTableEntry>,
+    entry_index: usize,
+    last_user_key: Option<Key>,
+    exhausted: bool,
+}
+
+impl SSTableCursor {
+    /// Open a cursor over `[start, end)` at `read_timestamp`.
+    pub fn open(
+        path: &Path,
+        file_id: u64,
+        start: Key,
+        end: Option<Key>,
+        read_timestamp: u64,
+    ) -> Result<Self> {
+        let reader = SSTableReader::open(path)?;
+        let mut next_block = 0;
+        while next_block < reader.index.len()
+            && reader.index[next_block].last_key.as_slice() < start.as_slice()
+        {
+            next_block += 1;
+        }
+        Ok(Self {
+            reader,
+            file_id,
+            read_timestamp,
+            start,
+            end,
+            next_block,
+            entries: Vec::new(),
+            entry_index: 0,
+            last_user_key: None,
+            exhausted: false,
+        })
+    }
+
+    /// Return one visible entry, decoding only the current bounded SSTable block as needed.
+    pub fn next_entry(
+        &mut self,
+        buffer_pool: &BufferPool,
+        metrics: &LsmMetrics,
+    ) -> Result<Option<SSTableEntry>> {
+        if self.exhausted {
+            return Ok(None);
+        }
+
+        loop {
+            if self.entry_index == self.entries.len() {
+                if self.next_block == self.reader.index.len() {
+                    self.exhausted = true;
+                    return Ok(None);
+                }
+                let block = self.reader.read_block_cached(
+                    Some(buffer_pool),
+                    Some(metrics),
+                    self.file_id,
+                    self.next_block,
+                )?;
+                self.entries = self.reader.decode_block_entries(&block)?;
+                self.entry_index = 0;
+                self.next_block += 1;
+            }
+
+            let entry = self.entries[self.entry_index].clone();
+            self.entry_index += 1;
+            if entry.key < self.start {
+                continue;
+            }
+            if self.end.as_ref().is_some_and(|end| entry.key >= *end) {
+                self.exhausted = true;
+                return Ok(None);
+            }
+            if self.last_user_key.as_ref() == Some(&entry.key) {
+                continue;
+            }
+            if entry.timestamp > self.read_timestamp {
+                continue;
+            }
+            self.last_user_key = Some(entry.key.clone());
+            return Ok(Some(entry));
+        }
+    }
+}
+
 fn next_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
     if prefix.is_empty() {
         return None;

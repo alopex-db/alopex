@@ -26,8 +26,32 @@ pub(crate) fn cluster_status_to_py(
         "metrics_summary",
         metrics_summary_to_py(py, &snapshot.metrics_summary)?,
     )?;
+    dict.set_item(
+        "cluster_control",
+        embedded_cluster_control_to_py(py, snapshot)?,
+    )?;
     dict.set_item("degraded", snapshot.degraded)?;
     dict.set_item("diagnostics", diagnostics_to_py(py, &snapshot.diagnostics)?)?;
+    Ok(dict.unbind())
+}
+
+/// Keep the embedded diagnostic surface compatible with the HTTP status
+/// control fields without creating a client or representing embedded storage
+/// as multi-node control. Embedded databases always report unavailable control
+/// for the default single-node snapshot.
+fn embedded_cluster_control_to_py(
+    py: Python<'_>,
+    snapshot: &ClusterStatusSnapshot,
+) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("available", false)?;
+    dict.set_item("mode", cluster_mode_name(snapshot.mode))?;
+    let reason = match snapshot.mode {
+        ClusterMode::SingleNode => "single_node_mode",
+        ClusterMode::ClusterAware => "embedded_local_diagnostics_only",
+    };
+    dict.set_item("reason", reason)?;
+    dict.set_item("missing_prerequisites", PyList::empty(py))?;
     Ok(dict.unbind())
 }
 
@@ -436,6 +460,15 @@ fn stable_diagnostic_code_name(value: StableDiagnosticCode) -> &'static str {
         StableDiagnosticCode::RetryScheduled => "retry_scheduled",
         StableDiagnosticCode::RetryExhausted => "retry_exhausted",
         StableDiagnosticCode::SubRequestCancelled => "sub_request_cancelled",
+        StableDiagnosticCode::DuplicateRequest => "duplicate_request",
+        StableDiagnosticCode::RequestConflict => "request_conflict",
+        StableDiagnosticCode::StaleMetadataVersion => "stale_metadata_version",
+        StableDiagnosticCode::Unauthorized => "unauthorized",
+        StableDiagnosticCode::InvalidRange => "invalid_range",
+        StableDiagnosticCode::RangeCoverageIncomplete => "range_coverage_incomplete",
+        StableDiagnosticCode::SchemaOwnerRequired => "schema_owner_required",
+        StableDiagnosticCode::OperationPending => "operation_pending",
+        StableDiagnosticCode::MetadataCommitted => "metadata_committed",
     }
 }
 
@@ -445,5 +478,42 @@ fn excluded_target_reason_name(value: ExcludedTargetReason) -> &'static str {
         ExcludedTargetReason::MemberUnknown => "member_unknown",
         ExcludedTargetReason::RoleNotWorker => "role_not_worker",
         ExcludedTargetReason::PlacementStale => "placement_stale",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stable_diagnostic_code_name;
+    use alopex_cluster::StableDiagnosticCode;
+
+    #[test]
+    fn phase_one_metadata_diagnostic_codes_have_stable_python_names() {
+        let cases = [
+            (StableDiagnosticCode::DuplicateRequest, "duplicate_request"),
+            (StableDiagnosticCode::RequestConflict, "request_conflict"),
+            (
+                StableDiagnosticCode::StaleMetadataVersion,
+                "stale_metadata_version",
+            ),
+            (StableDiagnosticCode::Unauthorized, "unauthorized"),
+            (StableDiagnosticCode::InvalidRange, "invalid_range"),
+            (
+                StableDiagnosticCode::RangeCoverageIncomplete,
+                "range_coverage_incomplete",
+            ),
+            (
+                StableDiagnosticCode::SchemaOwnerRequired,
+                "schema_owner_required",
+            ),
+            (StableDiagnosticCode::OperationPending, "operation_pending"),
+            (
+                StableDiagnosticCode::MetadataCommitted,
+                "metadata_committed",
+            ),
+        ];
+
+        for (code, expected) in cases {
+            assert_eq!(stable_diagnostic_code_name(code), expected);
+        }
     }
 }

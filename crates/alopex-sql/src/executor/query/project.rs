@@ -1,7 +1,57 @@
-use crate::executor::Result;
+use crate::catalog::ColumnMetadata;
+use crate::executor::{ColumnInfo, Result};
 use crate::planner::typed_expr::Projection;
+use crate::storage::SqlValue;
 
 use super::{Row, column_info_from_projection, column_infos_from_all, eval_expr};
+
+/// Build the public output schema for a projection without executing rows.
+pub fn projected_columns(
+    projection: &Projection,
+    schema: &[ColumnMetadata],
+) -> Result<Vec<ColumnInfo>> {
+    match projection {
+        Projection::All(names) => column_infos_from_all(schema, names),
+        Projection::Columns(cols) => Ok(cols
+            .iter()
+            .enumerate()
+            .map(|(index, column)| column_info_from_projection(column, index))
+            .collect()),
+    }
+}
+
+/// Apply one projection with the same expression kernel as local query
+/// execution. The distributed worker/assembler boundary uses this helper for
+/// its already fenced, already authorized rows; it does not deserialize a
+/// logical plan.
+pub fn project_row_values(
+    row: &Row,
+    projection: &Projection,
+    schema: &[ColumnMetadata],
+) -> Result<Vec<SqlValue>> {
+    match projection {
+        Projection::All(names) if names.len() == schema.len() => Ok(row.values.clone()),
+        Projection::All(names) => names
+            .iter()
+            .map(|name| {
+                let index = schema
+                    .iter()
+                    .position(|column| &column.name == name)
+                    .ok_or_else(|| crate::executor::ExecutorError::ColumnNotFound(name.clone()))?;
+                row.values.get(index).cloned().ok_or_else(|| {
+                    crate::executor::ExecutorError::InvalidOperation {
+                        operation: "project".into(),
+                        reason: format!("row is missing projected column '{name}'"),
+                    }
+                })
+            })
+            .collect(),
+        Projection::Columns(columns) => columns
+            .iter()
+            .map(|column| eval_expr(&column.expr, row))
+            .collect(),
+    }
+}
 
 /// Project rows according to Projection, returning QueryResult.
 pub fn execute_project(
@@ -20,23 +70,12 @@ fn project_all(
     schema: &[crate::catalog::ColumnMetadata],
     names: &[String],
 ) -> Result<crate::executor::QueryResult> {
-    let columns = column_infos_from_all(schema, names)?;
-    if names.len() == schema.len() {
-        let projected_rows = rows.into_iter().map(|row| row.values).collect();
-        return Ok(crate::executor::QueryResult::new(columns, projected_rows));
-    }
-    let mut projected_rows = Vec::with_capacity(rows.len());
-    for row in rows {
-        let mut values = Vec::with_capacity(names.len());
-        for name in names {
-            let idx = schema
-                .iter()
-                .position(|c| &c.name == name)
-                .ok_or_else(|| crate::executor::ExecutorError::ColumnNotFound(name.clone()))?;
-            values.push(row.values[idx].clone());
-        }
-        projected_rows.push(values);
-    }
+    let projection = Projection::All(names.to_vec());
+    let columns = projected_columns(&projection, schema)?;
+    let projected_rows = rows
+        .iter()
+        .map(|row| project_row_values(row, &projection, schema))
+        .collect::<Result<Vec<_>>>()?;
     Ok(crate::executor::QueryResult::new(columns, projected_rows))
 }
 
@@ -44,20 +83,12 @@ fn project_columns(
     rows: Vec<Row>,
     cols: &[crate::planner::typed_expr::ProjectedColumn],
 ) -> Result<crate::executor::QueryResult> {
-    let columns: Vec<_> = cols
+    let projection = Projection::Columns(cols.to_vec());
+    let columns = projected_columns(&projection, &[])?;
+    let projected_rows = rows
         .iter()
-        .enumerate()
-        .map(|(i, c)| column_info_from_projection(c, i))
-        .collect();
-
-    let mut projected_rows = Vec::with_capacity(rows.len());
-    for row in rows {
-        let mut values = Vec::with_capacity(cols.len());
-        for col in cols {
-            values.push(eval_expr(&col.expr, &row)?);
-        }
-        projected_rows.push(values);
-    }
+        .map(|row| project_row_values(row, &projection, &[]))
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(crate::executor::QueryResult::new(columns, projected_rows))
 }

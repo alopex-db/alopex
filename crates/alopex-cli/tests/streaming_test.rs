@@ -37,6 +37,8 @@ fn streaming_max_rows_limits_output() {
         fetch_size: None,
         max_rows: Some(2),
         deadline: None,
+        read_mode: None,
+        routing_report: None,
         tui: false,
     };
     let mut output = Vec::new();
@@ -78,6 +80,8 @@ fn streaming_deadline_exceeded() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        read_mode: None,
+        routing_report: None,
         tui: false,
     };
     let mut output = Vec::new();
@@ -121,6 +125,8 @@ fn streaming_cancelled() {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        read_mode: None,
+        routing_report: None,
         tui: false,
     };
     let mut output = Vec::new();

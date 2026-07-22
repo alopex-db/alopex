@@ -24,13 +24,20 @@ pub use crate::dataframe::{DataFrame, GroupBy, Series};
 /// Re-export of the crate error type and result alias.
 pub use crate::error::{DataFrameError, Result};
 /// Re-export of the expression DSL entrypoints.
-pub use crate::expr::{all, col, lit, Expr};
+pub use crate::expr::{all, col, concat_str, lit, ConcatStrNullBehavior, Expr};
 /// Re-export of eager CSV / Parquet I/O helpers.
 pub use crate::io::{read_csv, read_parquet, write_csv, write_parquet};
 /// Re-export of the primary lazy type.
 pub use crate::lazy::LazyFrame;
 /// Re-export of P1 operation types.
 pub use crate::ops::{FillNullStrategy, JoinKeys, JoinType, SortOptions};
+/// Public bounded-execution options and incremental stream result type.
+pub use crate::physical::{budget::StreamOptions, DataFrameStream};
+
+/// Strict vertical concatenation of two or more eager `DataFrame` inputs.
+pub fn concat(inputs: Vec<DataFrame>) -> Result<DataFrame> {
+    DataFrame::concat(inputs)
+}
 
 /// Create a `LazyFrame` that scans a CSV file without performing I/O eagerly.
 pub fn scan_csv(path: impl AsRef<std::path::Path>) -> Result<LazyFrame> {

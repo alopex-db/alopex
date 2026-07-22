@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
+use arrow::datatypes::SchemaRef;
+
 use crate::ops::{FillNull, JoinKeys, JoinType, SortOptions};
-use crate::{DataFrame, Expr};
+use crate::{DataFrame, DataFrameError, Expr, Result};
 
 /// How a projection node should be interpreted.
 #[derive(Debug, Clone)]
@@ -28,6 +30,13 @@ pub enum LogicalPlan {
         path: PathBuf,
         predicate: Option<Expr>,
         projection: Option<Vec<String>>,
+    },
+    /// Strict vertical concatenation of two or more compatible inputs.
+    Concat {
+        /// Inputs in declared output order.
+        inputs: Vec<LogicalPlan>,
+        /// Validated common schema, or deferred until bounded source preflight for lazy scans.
+        schema: Option<SchemaRef>,
     },
     /// Projection node (select or with_columns).
     Projection {
@@ -92,6 +101,46 @@ pub enum LogicalPlan {
 }
 
 impl LogicalPlan {
+    /// Construct a strict vertical concat plan from schema-known inputs.
+    ///
+    /// All input schemas must have identical field names, order, data types,
+    /// and nullability.  The check happens before execution and no implicit
+    /// coercion is attempted.
+    pub fn concat(inputs: Vec<(LogicalPlan, SchemaRef)>) -> Result<Self> {
+        if inputs.len() < 2 {
+            return Err(DataFrameError::invalid_operation(
+                "concat requires at least two inputs",
+            ));
+        }
+        let schema = inputs[0].1.clone();
+        for (index, (_, input_schema)) in inputs.iter().enumerate().skip(1) {
+            if input_schema.as_ref() != schema.as_ref() {
+                return Err(DataFrameError::schema_mismatch(format!(
+                    "concat_schema_mismatch: input 0 != input {index}"
+                )));
+            }
+        }
+        Ok(Self::Concat {
+            inputs: inputs.into_iter().map(|(plan, _)| plan).collect(),
+            schema: Some(schema),
+        })
+    }
+
+    /// Construct a concat whose source schemas are intentionally unavailable until bounded open.
+    ///
+    /// The streaming executor preflights every child schema before publishing its first result.
+    pub fn concat_deferred(inputs: Vec<LogicalPlan>) -> Result<Self> {
+        if inputs.len() < 2 {
+            return Err(DataFrameError::invalid_operation(
+                "concat requires at least two inputs",
+            ));
+        }
+        Ok(Self::Concat {
+            inputs,
+            schema: None,
+        })
+    }
+
     /// Render this plan as a readable string (used by `explain()` and tests).
     pub fn display(&self) -> String {
         let mut out = String::new();
@@ -132,6 +181,12 @@ impl LogicalPlan {
                     out.push_str(&format!(" filters=[{}]", fmt_expr(predicate)));
                 }
                 out.push('\n');
+            }
+            LogicalPlan::Concat { inputs, .. } => {
+                out.push_str(&format!("{pad}concat inputs={}\n", inputs.len()));
+                for input in inputs {
+                    input.fmt_into(out, indent + 1);
+                }
             }
             LogicalPlan::Projection { input, exprs, kind } => {
                 let label = match kind {
@@ -329,13 +384,33 @@ fn fmt_expr(expr: &Expr) -> String {
             };
             format!("{f}({})", fmt_expr(input))
         }
+        E::ConcatStr {
+            inputs,
+            separator,
+            null_behavior,
+        } => format!(
+            "concat_str([{}], separator={separator:?}, null_behavior={null_behavior:?})",
+            inputs.iter().map(fmt_expr).collect::<Vec<_>>().join(", ")
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use arrow::datatypes::{DataType, Field, Schema};
+
     use super::{LogicalPlan, ProjectionKind};
     use crate::expr::{col, lit};
+
+    fn int_schema(nullable: bool) -> arrow::datatypes::SchemaRef {
+        Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            nullable,
+        )]))
+    }
 
     #[test]
     fn display_is_readable_and_stable() {
@@ -357,5 +432,57 @@ mod tests {
         assert!(s.contains("project"));
         assert!(s.contains("filter"));
         assert!(s.contains("col(a)"));
+    }
+
+    #[test]
+    fn concat_rejects_schema_mismatch_at_plan_build_time() {
+        let err = LogicalPlan::concat(vec![
+            (
+                LogicalPlan::CsvScan {
+                    path: "first.csv".into(),
+                    predicate: None,
+                    projection: None,
+                },
+                int_schema(true),
+            ),
+            (
+                LogicalPlan::CsvScan {
+                    path: "second.csv".into(),
+                    predicate: None,
+                    projection: None,
+                },
+                int_schema(false),
+            ),
+        ])
+        .unwrap_err();
+
+        assert!(err.to_string().contains("concat_schema_mismatch"));
+    }
+
+    #[test]
+    fn concat_display_preserves_declared_input_order() {
+        let schema = int_schema(true);
+        let plan = LogicalPlan::concat(vec![
+            (
+                LogicalPlan::CsvScan {
+                    path: "first.csv".into(),
+                    predicate: None,
+                    projection: None,
+                },
+                schema.clone(),
+            ),
+            (
+                LogicalPlan::CsvScan {
+                    path: "second.csv".into(),
+                    predicate: None,
+                    projection: None,
+                },
+                schema,
+            ),
+        ])
+        .unwrap();
+
+        let display = plan.display();
+        assert!(display.find("first.csv").unwrap() < display.find("second.csv").unwrap());
     }
 }

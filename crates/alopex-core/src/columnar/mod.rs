@@ -9,6 +9,7 @@ pub mod kvs_bridge;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod memory;
 pub mod segment;
+pub mod segment_v08;
 pub mod segment_v2;
 pub mod statistics;
 
@@ -23,6 +24,11 @@ pub use kvs_bridge::ColumnarKvsBridge;
 #[cfg(not(target_arch = "wasm32"))]
 pub use memory::InMemorySegmentStore;
 pub use segment::SegmentReader;
+pub use segment_v08::{
+    ChunkedSegmentAccessV08, RangeAddressableSegmentProvider, SegmentReferenceV08,
+    StreamingChunkMetaV08, StreamingRowGroupV08, StreamingSegmentDirectoryV08,
+    StreamingSegmentHeaderV08, StreamingSegmentLayoutV08, VerifiedChunkV08,
+};
 pub use segment_v2::{SegmentReaderV2, SegmentWriterV2};
 pub use statistics::{ColumnStatistics, SegmentStatistics};
 

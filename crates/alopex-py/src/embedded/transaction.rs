@@ -1,8 +1,12 @@
 use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyDict, PyModule};
 
+use crate::embedded::async_stream::PyNativeAsyncSqlResultStream;
+use crate::embedded::local_scan::PyLocalScan;
+use crate::embedded::stream::{PySqlResultStream, StreamLeaseRegistry};
+use crate::embedded::thread_mode::DatabaseControl;
 use crate::error;
 #[cfg(feature = "numpy")]
 use crate::types::{PyMetric, PySearchResult};
@@ -23,7 +27,7 @@ enum TxnState {
 }
 
 pub(crate) struct PyTransactionInner {
-    pub(crate) txn: Mutex<Option<alopex_embedded::Transaction<'static>>>,
+    pub(crate) txn: Mutex<Option<alopex_embedded::OwnedEmbeddedTransaction>>,
     state: Mutex<TxnState>,
 }
 
@@ -31,33 +35,39 @@ pub(crate) struct PyTransactionInner {
 pub struct PyTransaction {
     #[allow(dead_code)]
     pub(crate) db: Arc<alopex_embedded::Database>,
+    pub(crate) control: Arc<DatabaseControl>,
+    pub(crate) streams: Arc<StreamLeaseRegistry>,
     #[allow(dead_code)]
     pub(crate) inner: Arc<PyTransactionInner>,
 }
 
 impl PyTransaction {
-    pub(crate) fn from_txn(
+    /// Construct a transaction facade that owns its embedded session under the database's shared
+    /// base control.  No borrowed embedded transaction crosses the PyO3 boundary.
+    pub(crate) fn begin_with_control(
         db: Arc<alopex_embedded::Database>,
-        txn: alopex_embedded::Transaction<'_>,
-    ) -> Self {
-        // SAFETY: We tie the transaction lifetime to the Arc<Database> stored in PyTransaction.
-        let txn_static = unsafe {
-            std::mem::transmute::<
-                alopex_embedded::Transaction<'_>,
-                alopex_embedded::Transaction<'static>,
-            >(txn)
-        };
+        mode: alopex_core::TxnMode,
+        control: Arc<DatabaseControl>,
+        streams: Arc<StreamLeaseRegistry>,
+    ) -> PyResult<Self> {
+        control.ensure_open()?;
+        let txn = Arc::clone(&db)
+            .begin_owned_embedded_transaction(mode)
+            .map_err(error::embedded_err)?;
         let inner = PyTransactionInner {
-            txn: Mutex::new(Some(txn_static)),
+            txn: Mutex::new(Some(txn)),
             state: Mutex::new(TxnState::Active),
         };
-        Self {
+        Ok(Self {
             db,
+            control,
+            streams,
             inner: Arc::new(inner),
-        }
+        })
     }
 
     fn ensure_active(&self) -> PyResult<()> {
+        self.control.ensure_open()?;
         let state = self
             .inner
             .state
@@ -78,9 +88,24 @@ impl PyTransaction {
         Ok(*state == TxnState::Active)
     }
 
+    fn state_name(&self) -> PyResult<&'static str> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| error::to_py_err("transaction state lock poisoned"))?;
+        Ok(match *state {
+            TxnState::Active => "active",
+            TxnState::Committed => "committed",
+            TxnState::RolledBack => "rolled_back",
+        })
+    }
+
     fn with_txn_mut<F, T>(&self, op: F) -> PyResult<T>
     where
-        F: FnOnce(&mut alopex_embedded::Transaction<'static>) -> Result<T, alopex_embedded::Error>,
+        F: FnOnce(
+            &mut alopex_embedded::OwnedEmbeddedTransaction,
+        ) -> Result<T, alopex_embedded::Error>,
     {
         self.ensure_active()?;
         let mut guard = self
@@ -96,7 +121,9 @@ impl PyTransaction {
 
     fn finalize_with<F>(&self, op: F, success_state: TxnState) -> PyResult<()>
     where
-        F: FnOnce(alopex_embedded::Transaction<'static>) -> Result<(), alopex_embedded::Error>,
+        F: FnOnce(
+            &mut alopex_embedded::OwnedEmbeddedTransaction,
+        ) -> Result<(), alopex_embedded::Error>,
     {
         let mut state = self
             .inner
@@ -112,14 +139,16 @@ impl PyTransaction {
             .lock()
             .map_err(|_| error::to_py_err("transaction lock poisoned"))?;
         let txn = guard
-            .take()
+            .as_mut()
             .ok_or_else(|| error::to_py_err("transaction is closed"))?;
         match op(txn) {
             Ok(()) => {
+                *guard = None;
                 *state = success_state;
                 Ok(())
             }
             Err(err) => {
+                *guard = None;
                 *state = TxnState::RolledBack;
                 Err(error::embedded_err(err))
             }
@@ -129,6 +158,36 @@ impl PyTransaction {
 
 #[pymethods]
 impl PyTransaction {
+    /// Return the transaction's current public lifecycle state.
+    ///
+    /// `stream_effect` is derived from the owned session state, so callers can distinguish an
+    /// active lease from a committable or abort-required transaction.
+    #[getter]
+    fn status(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        self.control.check_thread()?;
+        let state = self.state_name()?;
+        let stream_effect = self
+            .inner
+            .txn
+            .lock()
+            .map_err(|_| error::to_py_err("transaction lock poisoned"))?
+            .as_ref()
+            .map(|txn| match txn.session().status() {
+                alopex_core::txn::OwnedTransactionSessionStatus::Open
+                | alopex_core::txn::OwnedTransactionSessionStatus::Committable => "committable",
+                alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive => "active",
+                alopex_core::txn::OwnedTransactionSessionStatus::MustAbort => "must_abort",
+                alopex_core::txn::OwnedTransactionSessionStatus::Committed
+                | alopex_core::txn::OwnedTransactionSessionStatus::RolledBack
+                | alopex_core::txn::OwnedTransactionSessionStatus::Closed => "closed",
+            })
+            .unwrap_or("closed");
+        let status = PyDict::new(py);
+        status.set_item("state", state)?;
+        status.set_item("stream_effect", stream_effect)?;
+        Ok(status.unbind())
+    }
+
     fn get(&self, key: &[u8]) -> PyResult<Option<Vec<u8>>> {
         self.with_txn_mut(|txn| txn.get(key))
     }
@@ -396,6 +455,138 @@ impl PyTransaction {
         crate::embedded::sql::execution_result_to_py(py, result)
     }
 
+    /// Open a local SELECT stream within this explicit transaction.
+    ///
+    /// Preflight runs before a transaction lease is acquired.  The returned stream shares the
+    /// owned transaction session, so normal exhaustion is committable while close/cancel/failure
+    /// records the conservative abort requirement.
+    #[pyo3(signature = (sql, params = None, *, resource_limit_bytes = None, timeout = None))]
+    pub(crate) fn execute_sql_stream(
+        &self,
+        sql: &str,
+        params: Option<Bound<'_, PyAny>>,
+        resource_limit_bytes: Option<usize>,
+        timeout: Option<f64>,
+    ) -> PyResult<PySqlResultStream> {
+        self.ensure_active()?;
+        let bound_sql = crate::embedded::sql::bind_params(sql, params.as_ref())?;
+        let (plan, session) = self
+            .inner
+            .txn
+            .lock()
+            .map_err(|_| error::to_py_err("transaction lock poisoned"))?
+            .as_ref()
+            .ok_or_else(|| error::to_py_err("transaction is closed"))
+            .and_then(|txn| {
+                let plan = txn
+                    .preflight_sql_stream(&bound_sql)
+                    .map_err(error::embedded_err)?;
+                Ok((plan, txn.session()))
+            })?;
+        PySqlResultStream::open_transaction(
+            self.control.clone(),
+            &self.streams,
+            session,
+            plan,
+            resource_limit_bytes,
+            timeout,
+        )
+    }
+
+    /// Internal native bridge factory used only by `alopex.asyncio`.
+    #[pyo3(
+        name = "_open_native_async_sql_stream",
+        signature = (sql, params = None, *, resource_limit_bytes = None, timeout = None, prefetch_batches = 1, max_buffered_batches = 1, consumer_idle_timeout = None)
+    )]
+    #[allow(clippy::too_many_arguments)]
+    fn open_native_async_sql_stream(
+        &self,
+        sql: &str,
+        params: Option<Bound<'_, PyAny>>,
+        resource_limit_bytes: Option<usize>,
+        timeout: Option<f64>,
+        prefetch_batches: usize,
+        max_buffered_batches: usize,
+        consumer_idle_timeout: Option<f64>,
+    ) -> PyResult<PyNativeAsyncSqlResultStream> {
+        PyNativeAsyncSqlResultStream::validate_options(
+            prefetch_batches,
+            max_buffered_batches,
+            consumer_idle_timeout,
+        )?;
+        let stream = self.execute_sql_stream(sql, params, resource_limit_bytes, timeout)?;
+        PyNativeAsyncSqlResultStream::new(
+            stream,
+            self.control.thread_mode(),
+            prefetch_batches,
+            max_buffered_batches,
+            consumer_idle_timeout,
+        )
+    }
+
+    /// Internal native async factory for the transaction-isolated table-scan subset.
+    #[pyo3(
+        name = "_open_native_async_query_stream",
+        signature = (scan, *, resource_limit_bytes = None, timeout = None, prefetch_batches = 1, max_buffered_batches = 1, consumer_idle_timeout = None)
+    )]
+    fn open_native_async_query_stream(
+        &self,
+        scan: PyRef<'_, PyLocalScan>,
+        resource_limit_bytes: Option<usize>,
+        timeout: Option<f64>,
+        prefetch_batches: usize,
+        max_buffered_batches: usize,
+        consumer_idle_timeout: Option<f64>,
+    ) -> PyResult<PyNativeAsyncSqlResultStream> {
+        PyNativeAsyncSqlResultStream::validate_options(
+            prefetch_batches,
+            max_buffered_batches,
+            consumer_idle_timeout,
+        )?;
+        let stream = self.query_stream(scan, resource_limit_bytes, timeout)?;
+        PyNativeAsyncSqlResultStream::new(
+            stream,
+            self.control.thread_mode(),
+            prefetch_batches,
+            max_buffered_batches,
+            consumer_idle_timeout,
+        )
+    }
+
+    /// Open a transaction-isolated table scan.  Unsupported `LocalScan` variants are rejected
+    /// before a transaction cursor lease opens rather than being detached from the transaction.
+    #[pyo3(signature = (scan, *, resource_limit_bytes = None, timeout = None))]
+    pub(crate) fn query_stream(
+        &self,
+        scan: PyRef<'_, PyLocalScan>,
+        resource_limit_bytes: Option<usize>,
+        timeout: Option<f64>,
+    ) -> PyResult<PySqlResultStream> {
+        self.ensure_active()?;
+        let sql = scan.transaction_sql()?;
+        let (plan, session) = self
+            .inner
+            .txn
+            .lock()
+            .map_err(|_| error::to_py_err("transaction lock poisoned"))?
+            .as_ref()
+            .ok_or_else(|| error::to_py_err("transaction is closed"))
+            .and_then(|txn| {
+                let plan = txn
+                    .preflight_sql_stream(&sql)
+                    .map_err(error::embedded_err)?;
+                Ok((plan, txn.session()))
+            })?;
+        PySqlResultStream::open_transaction(
+            self.control.clone(),
+            &self.streams,
+            session,
+            plan,
+            resource_limit_bytes,
+            timeout,
+        )
+    }
+
     fn commit(&self, py: Python<'_>) -> PyResult<()> {
         let mut state = self
             .inner
@@ -411,15 +602,32 @@ impl PyTransaction {
             .lock()
             .map_err(|_| error::to_py_err("transaction lock poisoned"))?;
         let txn = guard
-            .take()
+            .as_mut()
             .ok_or_else(|| error::to_py_err("transaction is closed"))?;
+        match txn.session().status() {
+            alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive => {
+                return Err(error::stream_error(
+                    "stream_active",
+                    "commit is not allowed while a transaction stream is active",
+                ));
+            }
+            alopex_core::txn::OwnedTransactionSessionStatus::MustAbort => {
+                return Err(error::stream_error(
+                    "stream_abort_required",
+                    "transaction stream requires rollback before commit",
+                ));
+            }
+            _ => {}
+        }
         let result = py.detach(|| txn.commit());
         match result {
             Ok(()) => {
+                *guard = None;
                 *state = TxnState::Committed;
                 Ok(())
             }
             Err(err) => {
+                *guard = None;
                 *state = TxnState::RolledBack;
                 Err(error::embedded_err(err))
             }
@@ -427,6 +635,22 @@ impl PyTransaction {
     }
 
     fn rollback(&self) -> PyResult<()> {
+        if let Some(txn) = self
+            .inner
+            .txn
+            .lock()
+            .map_err(|_| error::to_py_err("transaction lock poisoned"))?
+            .as_ref()
+        {
+            if txn.session().status()
+                == alopex_core::txn::OwnedTransactionSessionStatus::LeaseActive
+            {
+                return Err(error::stream_error(
+                    "stream_active",
+                    "rollback is not allowed while a transaction stream is active",
+                ));
+            }
+        }
         self.finalize_with(|txn| txn.rollback(), TxnState::RolledBack)
     }
 
@@ -462,9 +686,10 @@ impl Drop for PyTransaction {
             Ok(guard) => guard,
             Err(_) => return,
         };
-        if let Some(txn) = guard.take() {
+        if let Some(txn) = guard.as_mut() {
             let _ = txn.rollback();
         }
+        *guard = None;
         *state = TxnState::RolledBack;
     }
 }
@@ -477,9 +702,24 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use alopex_core::TxnMode;
-    use pyo3::types::{PyList, PyListMethods};
+    use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList, PyListMethods};
     use pyo3::Python;
     use std::sync::Arc;
+
+    fn transaction(
+        database: Arc<alopex_embedded::Database>,
+        mode: TxnMode,
+    ) -> super::PyTransaction {
+        super::PyTransaction::begin_with_control(
+            database,
+            mode,
+            Arc::new(crate::embedded::thread_mode::DatabaseControl::new(
+                crate::embedded::thread_mode::ThreadMode::Multi,
+            )),
+            Arc::new(crate::embedded::stream::StreamLeaseRegistry::default()),
+        )
+        .expect("owned transaction")
+    }
 
     fn query_row_count(db: &alopex_embedded::Database, sql: &str) -> usize {
         match db.execute_sql(sql).expect("select") {
@@ -494,10 +734,7 @@ mod tests {
         let db = Arc::new(alopex_embedded::Database::new());
         db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
             .expect("ddl");
-        let txn = db
-            .begin(TxnMode::ReadWrite)
-            .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
-            .expect("txn");
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
         Python::attach(|py| {
             let params = PyList::empty(py);
             params.append(7i64).expect("append");
@@ -524,10 +761,7 @@ mod tests {
         let db = Arc::new(alopex_embedded::Database::new());
         db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
             .expect("ddl");
-        let txn = db
-            .begin(TxnMode::ReadWrite)
-            .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
-            .expect("txn");
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
         Python::attach(|py| {
             let params = PyList::empty(py);
             params.append(7i64).expect("append");
@@ -544,10 +778,7 @@ mod tests {
         let db = Arc::new(alopex_embedded::Database::new());
         db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY);")
             .expect("ddl");
-        let txn = db
-            .begin(TxnMode::ReadWrite)
-            .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
-            .expect("txn");
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
         txn.rollback().expect("rollback");
         Python::attach(|py| {
             let err = txn
@@ -560,10 +791,7 @@ mod tests {
     #[test]
     fn put_get_and_rollback() {
         let db = Arc::new(alopex_embedded::Database::new());
-        let txn = db
-            .begin(TxnMode::ReadWrite)
-            .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
-            .expect("txn");
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
         txn.put(b"key", b"value").expect("put");
         txn.rollback().expect("rollback");
 
@@ -576,10 +804,7 @@ mod tests {
     fn commit_closes_transaction() {
         pyo3::Python::initialize();
         let db = Arc::new(alopex_embedded::Database::new());
-        let txn = db
-            .begin(TxnMode::ReadWrite)
-            .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
-            .expect("txn");
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
         Python::attach(|py| {
             txn.commit(py).expect("commit");
         });
@@ -587,12 +812,50 @@ mod tests {
     }
 
     #[test]
+    fn status_reports_owned_transaction_lifecycle_and_commitability() {
+        pyo3::Python::initialize();
+        let db = Arc::new(alopex_embedded::Database::new());
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
+        Python::attach(|py| {
+            let status = txn.status(py).unwrap();
+            let status = status.bind(py);
+            assert_eq!(
+                status
+                    .get_item("state")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "active"
+            );
+            assert_eq!(
+                status
+                    .get_item("stream_effect")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "committable"
+            );
+            txn.rollback().unwrap();
+            let status = txn.status(py).unwrap();
+            assert_eq!(
+                status
+                    .bind(py)
+                    .get_item("state")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "rolled_back"
+            );
+        });
+    }
+
+    #[test]
     fn read_only_put_is_error() {
         let db = Arc::new(alopex_embedded::Database::new());
-        let txn = db
-            .begin(TxnMode::ReadOnly)
-            .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
-            .expect("txn");
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadOnly);
         assert!(txn.put(b"key", b"value").is_err());
     }
 
@@ -600,14 +863,110 @@ mod tests {
     fn drop_rolls_back_uncommitted() {
         let db = Arc::new(alopex_embedded::Database::new());
         {
-            let txn = db
-                .begin(TxnMode::ReadWrite)
-                .map(|txn| super::PyTransaction::from_txn(Arc::clone(&db), txn))
-                .expect("txn");
+            let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
             txn.put(b"key", b"value").expect("put");
         }
         let mut txn2 = db.begin(TxnMode::ReadOnly).expect("txn2");
         let value = txn2.get(b"key").expect("get");
         assert!(value.is_none());
+    }
+
+    #[test]
+    fn transaction_stream_blocks_commit_until_exhausted_and_records_abort_on_close() {
+        pyo3::Python::initialize();
+        let db = Arc::new(alopex_embedded::Database::new());
+        db.execute_sql("CREATE TABLE stream_t (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        db.execute_sql("INSERT INTO stream_t (id) VALUES (1)")
+            .unwrap();
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
+
+        Python::attach(|py| {
+            let stream = txn
+                .execute_sql_stream("SELECT id FROM stream_t", None, None, None)
+                .unwrap();
+            let row = stream.next_row(py).unwrap();
+            let row = row.bind(py).cast::<PyDict>().unwrap();
+            assert_eq!(
+                row.get_item("id")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<i64>()
+                    .unwrap(),
+                1
+            );
+            let error = txn.commit(py).expect_err("active stream blocks commit");
+            assert_eq!(
+                error
+                    .value(py)
+                    .getattr("code")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "stream_active"
+            );
+            assert!(stream
+                .next_row(py)
+                .unwrap_err()
+                .is_instance_of::<pyo3::exceptions::PyStopIteration>(py));
+            txn.commit(py).unwrap();
+        });
+
+        let aborted = transaction(Arc::clone(&db), TxnMode::ReadWrite);
+        Python::attach(|py| {
+            let stream = aborted
+                .execute_sql_stream("SELECT id FROM stream_t", None, None, None)
+                .unwrap();
+            stream.close().unwrap();
+            let error = aborted
+                .commit(py)
+                .expect_err("early stream close requires rollback");
+            assert_eq!(
+                error
+                    .value(py)
+                    .getattr("code")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "stream_abort_required"
+            );
+            aborted.rollback().unwrap();
+        });
+    }
+
+    #[test]
+    fn transaction_stream_sees_uncommitted_ddl_and_rows() {
+        pyo3::Python::initialize();
+        let db = Arc::new(alopex_embedded::Database::new());
+        let txn = transaction(Arc::clone(&db), TxnMode::ReadWrite);
+
+        Python::attach(|py| {
+            txn.execute_sql(
+                py,
+                "CREATE TABLE staged_stream (id INTEGER PRIMARY KEY)",
+                None,
+            )
+            .expect("transactional ddl");
+            txn.execute_sql(py, "INSERT INTO staged_stream (id) VALUES (9)", None)
+                .expect("transactional dml");
+
+            let stream = txn
+                .execute_sql_stream("SELECT id FROM staged_stream", None, None, None)
+                .expect("stream planned through the transaction overlay");
+            let row = stream.next_row(py).expect("staged row");
+            let row = row.bind(py).cast::<PyDict>().unwrap();
+            assert_eq!(
+                row.get_item("id")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<i64>()
+                    .unwrap(),
+                9
+            );
+            assert!(stream.next_row(py).is_err(), "stream is finite");
+            txn.commit(py).expect("commit after exhaustion");
+        });
+
+        assert_eq!(query_row_count(&db, "SELECT id FROM staged_stream"), 1);
     }
 }

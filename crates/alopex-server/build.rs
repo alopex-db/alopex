@@ -16,6 +16,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(libdir) = std::env::var("DEP_ALOPEX_SQL_PARSER_LIBDIR") {
         if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
             println!("cargo:rustc-link-arg-bins=-Wl,-rpath,{libdir}");
+            // Library unit-test harnesses are not covered by the test-target
+            // directive alone, so retain the parser search path for every
+            // final link target as well.
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{libdir}");
+            println!("cargo:rustc-link-arg-tests=-Wl,-rpath,{libdir}");
         }
     }
 

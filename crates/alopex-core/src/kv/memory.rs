@@ -4,17 +4,17 @@
 use crate::error::{Error, Result};
 #[cfg(feature = "test-hooks")]
 use crate::kv::hooks::{CrashOperation, CrashSimulator, CrashTiming, IoHooks};
-use crate::kv::{KVStore, KVTransaction};
+use crate::kv::{KVStore, KVTransaction, OwnedKVScan, OwnedKVStore, OwnedKVTransaction};
 use crate::log::wal::{WalReader, WalRecord, WalWriter};
 use crate::storage::flush::write_empty_vector_segment;
 use crate::storage::sstable::{SstableReader, SstableWriter};
 use crate::txn::TxnManager;
 use crate::types::{Key, TxnId, TxnMode, TxnState, Value};
 use std::collections::{BTreeMap, HashMap};
-use std::ops::Bound::{Excluded, Included};
+use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard};
 use tracing::warn;
 
 /// メモリ使用量の統計（バイト単位）。
@@ -131,6 +131,18 @@ impl KVStore for MemoryKV {
     }
 }
 
+impl OwnedKVStore for MemoryKV {
+    fn begin_owned_kv_transaction(
+        self: Arc<Self>,
+        mode: TxnMode,
+    ) -> Result<Box<dyn OwnedKVTransaction>> {
+        Ok(Box::new(OwnedMemoryTransaction::new(
+            self.manager.clone(),
+            mode,
+        )))
+    }
+}
+
 // The internal value stored in the BTreeMap, containing the data and its version.
 type VersionedValue = (Value, u64);
 
@@ -154,12 +166,105 @@ struct MemorySharedState {
     memory_limit: RwLock<Option<usize>>,
     /// Current memory consumption (bytes) tracked across operations。
     current_memory: AtomicUsize,
+    /// Safe snapshot gate for owned incremental cursors.  It prevents writers from replacing
+    /// the map while a cursor owns its stable read view, without self-referential lock guards.
+    owned_snapshot_gate: Arc<OwnedSnapshotGate>,
     #[cfg(feature = "test-hooks")]
     /// Optional I/O hooks for fault injection (test only).
     io_hooks: RwLock<Option<Arc<dyn IoHooks>>>,
     #[cfg(feature = "test-hooks")]
     /// Optional crash simulator for test-only crash points.
     crash_sim: RwLock<Option<Arc<CrashSimulator>>>,
+}
+
+#[derive(Default)]
+struct OwnedSnapshotGate {
+    state: Mutex<OwnedSnapshotGateState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct OwnedSnapshotGateState {
+    readers: usize,
+    writer: bool,
+}
+
+impl OwnedSnapshotGate {
+    fn acquire_reader(self: &Arc<Self>) -> OwnedSnapshotReader {
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned snapshot gate mutex poisoned");
+        while state.writer {
+            state = self
+                .changed
+                .wait(state)
+                .expect("owned snapshot gate mutex poisoned");
+        }
+        state.readers = state.readers.saturating_add(1);
+        OwnedSnapshotReader {
+            gate: self.clone(),
+            released: false,
+        }
+    }
+
+    fn acquire_writer(self: &Arc<Self>) -> OwnedSnapshotWriter {
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned snapshot gate mutex poisoned");
+        while state.writer || state.readers != 0 {
+            state = self
+                .changed
+                .wait(state)
+                .expect("owned snapshot gate mutex poisoned");
+        }
+        state.writer = true;
+        OwnedSnapshotWriter {
+            gate: self.clone(),
+            released: false,
+        }
+    }
+}
+
+struct OwnedSnapshotReader {
+    gate: Arc<OwnedSnapshotGate>,
+    released: bool,
+}
+
+impl Drop for OwnedSnapshotReader {
+    fn drop(&mut self) {
+        if !self.released {
+            let mut state = self
+                .gate
+                .state
+                .lock()
+                .expect("owned snapshot gate mutex poisoned");
+            state.readers = state.readers.saturating_sub(1);
+            self.released = true;
+            self.gate.changed.notify_all();
+        }
+    }
+}
+
+struct OwnedSnapshotWriter {
+    gate: Arc<OwnedSnapshotGate>,
+    released: bool,
+}
+
+impl Drop for OwnedSnapshotWriter {
+    fn drop(&mut self) {
+        if !self.released {
+            let mut state = self
+                .gate
+                .state
+                .lock()
+                .expect("owned snapshot gate mutex poisoned");
+            state.writer = false;
+            self.released = true;
+            self.gate.changed.notify_all();
+        }
+    }
 }
 
 impl MemorySharedState {
@@ -219,6 +324,7 @@ impl MemoryTxnManager {
                 sstable_path,
                 memory_limit: RwLock::new(memory_limit),
                 current_memory: AtomicUsize::new(0),
+                owned_snapshot_gate: Arc::new(OwnedSnapshotGate::default()),
                 #[cfg(feature = "test-hooks")]
                 io_hooks: RwLock::new(None),
                 #[cfg(feature = "test-hooks")]
@@ -283,6 +389,7 @@ impl MemoryTxnManager {
 
     /// Clears all data and resets memory accounting.
     pub fn clear_all(&self) {
+        let _snapshot_writer = self.state.owned_snapshot_gate.acquire_writer();
         let mut data = self.state.data.write().unwrap();
         data.clear();
         drop(data);
@@ -439,6 +546,7 @@ impl MemoryTxnManager {
             #[cfg(feature = "test-hooks")]
             self.notify_compaction(CrashTiming::During);
 
+            let _snapshot_writer = self.state.owned_snapshot_gate.acquire_writer();
             let mut write_guard = self.state.data.write().unwrap();
             *write_guard = rebuilt;
             Ok(())
@@ -509,6 +617,7 @@ impl MemoryTxnManager {
             return Ok(());
         }
 
+        let _snapshot_writer = self.state.owned_snapshot_gate.acquire_writer();
         let mut data = self.state.data.write().unwrap();
         let mut max_txn_id = 0;
         let mut max_version = self.state.commit_version.load(Ordering::Acquire);
@@ -654,6 +763,7 @@ impl<'a> TxnManager<'a, MemoryTransaction<'a>> for &'a MemoryTxnManager {
             return Ok(());
         }
 
+        let _snapshot_writer = self.state.owned_snapshot_gate.acquire_writer();
         let mut data = self.state.data.write().unwrap();
 
         for key in txn.read_set.keys() {
@@ -899,6 +1009,7 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
             return Ok(());
         }
 
+        let _snapshot_writer = self.manager.state.owned_snapshot_gate.acquire_writer();
         let mut data = self.manager.state.data.write().unwrap();
 
         // Check read-set for conflicts
@@ -973,6 +1084,387 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
         }
         self.state = TxnState::RolledBack;
         Ok(())
+    }
+}
+
+/// An owned MemoryKV transaction whose manager and mutable snapshot state both outlive callers.
+struct OwnedMemoryTransaction {
+    manager: Arc<MemoryTxnManager>,
+    state: Arc<Mutex<OwnedMemoryTransactionState>>,
+}
+
+struct OwnedMemoryTransactionState {
+    id: TxnId,
+    mode: TxnMode,
+    state: TxnState,
+    start_version: u64,
+    writes: BTreeMap<Key, Option<Value>>,
+    read_set: HashMap<Key, u64>,
+    cursor_open: bool,
+}
+
+impl OwnedMemoryTransaction {
+    fn new(manager: Arc<MemoryTxnManager>, mode: TxnMode) -> Self {
+        let id = TxnId(manager.state.next_txn_id.fetch_add(1, Ordering::SeqCst));
+        let start_version = manager.state.commit_version.load(Ordering::Acquire);
+        Self {
+            manager,
+            state: Arc::new(Mutex::new(OwnedMemoryTransactionState {
+                id,
+                mode,
+                state: TxnState::Active,
+                start_version,
+                writes: BTreeMap::new(),
+                read_set: HashMap::new(),
+                cursor_open: false,
+            })),
+        }
+    }
+
+    fn open_cursor(
+        &mut self,
+        start: Option<Key>,
+        prefix: Option<Vec<u8>>,
+        end: Option<Key>,
+    ) -> Result<Box<dyn OwnedKVScan>> {
+        let snapshot = self.manager.state.owned_snapshot_gate.acquire_reader();
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned memory transaction mutex poisoned");
+        if state.state != TxnState::Active || state.cursor_open {
+            return Err(Error::TxnClosed);
+        }
+        state.cursor_open = true;
+        drop(state);
+        Ok(Box::new(OwnedMemoryCursor {
+            manager: self.manager.clone(),
+            transaction: self.state.clone(),
+            snapshot: Some(snapshot),
+            last_key: None,
+            start,
+            prefix,
+            end,
+        }))
+    }
+
+    fn ensure_active(state: &OwnedMemoryTransactionState) -> Result<()> {
+        if state.state != TxnState::Active {
+            return Err(Error::TxnClosed);
+        }
+        Ok(())
+    }
+}
+
+impl OwnedKVTransaction for OwnedMemoryTransaction {
+    fn id(&self) -> TxnId {
+        self.state
+            .lock()
+            .expect("owned memory transaction mutex poisoned")
+            .id
+    }
+
+    fn mode(&self) -> TxnMode {
+        self.state
+            .lock()
+            .expect("owned memory transaction mutex poisoned")
+            .mode
+    }
+
+    fn get(&mut self, key: &Key) -> Result<Option<Value>> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned memory transaction mutex poisoned");
+        Self::ensure_active(&state)?;
+        if let Some(value) = state.writes.get(key) {
+            return Ok(value.clone());
+        }
+
+        let result = {
+            let data = self.manager.state.data.read().unwrap();
+            data.get(key).cloned()
+        };
+        if let Some((value, version)) = result {
+            if version <= state.start_version {
+                state.read_set.insert(key.clone(), version);
+                return Ok(Some(value));
+            }
+            return Ok(None);
+        }
+
+        if let Some(value) = self.manager.sstable_get(key)? {
+            let start_version = state.start_version;
+            state.read_set.insert(key.clone(), start_version);
+            return Ok(Some(value));
+        }
+        Ok(None)
+    }
+
+    fn put(&mut self, key: Key, value: Value) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned memory transaction mutex poisoned");
+        Self::ensure_active(&state)?;
+        if state.mode == TxnMode::ReadOnly {
+            return Err(Error::TxnReadOnly);
+        }
+        if state.cursor_open {
+            return Err(Error::TxnClosed);
+        }
+        state.writes.insert(key, Some(value));
+        Ok(())
+    }
+
+    fn delete(&mut self, key: Key) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned memory transaction mutex poisoned");
+        Self::ensure_active(&state)?;
+        if state.mode == TxnMode::ReadOnly {
+            return Err(Error::TxnReadOnly);
+        }
+        if state.cursor_open {
+            return Err(Error::TxnClosed);
+        }
+        state.writes.insert(key, None);
+        Ok(())
+    }
+
+    fn scan_prefix(&mut self, prefix: &[u8]) -> Result<Box<dyn OwnedKVScan>> {
+        // Start at the prefix itself.  An owned cursor advances over the backing map rather
+        // than a borrowed `BTreeMap::range` guard; starting at keyspace origin would see an
+        // unrelated earlier key (for example persisted catalog metadata), classify it as out
+        // of scope, and incorrectly report an empty prefix scan.
+        self.open_cursor(Some(prefix.to_vec()), Some(prefix.to_vec()), None)
+    }
+
+    fn scan_range(&mut self, start: &[u8], end: &[u8]) -> Result<Box<dyn OwnedKVScan>> {
+        self.open_cursor(Some(start.to_vec()), None, Some(end.to_vec()))
+    }
+
+    fn commit(self: Box<Self>) -> Result<()> {
+        let (id, mode, start_version, writes, read_set) = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("owned memory transaction mutex poisoned");
+            Self::ensure_active(&state)?;
+            if state.cursor_open {
+                return Err(Error::TxnClosed);
+            }
+            state.state = TxnState::Committed;
+            (
+                state.id,
+                state.mode,
+                state.start_version,
+                std::mem::take(&mut state.writes),
+                std::mem::take(&mut state.read_set),
+            )
+        };
+        if mode == TxnMode::ReadOnly || writes.is_empty() {
+            return Ok(());
+        }
+
+        let _snapshot_writer = self.manager.state.owned_snapshot_gate.acquire_writer();
+        let mut data = self.manager.state.data.write().unwrap();
+        for key in read_set.keys().chain(writes.keys()) {
+            let current_version = data.get(key).map(|(_, version)| *version).unwrap_or(0);
+            if current_version > start_version {
+                return Err(Error::TxnConflict);
+            }
+        }
+
+        let mut delta: isize = 0;
+        for (key, value) in &writes {
+            let current_size = data
+                .get(key)
+                .map(|(value, _)| key.len() + value.len())
+                .unwrap_or(0);
+            let new_size = value.as_ref().map_or(0, |value| key.len() + value.len());
+            delta += new_size as isize - current_size as isize;
+        }
+        let current_memory = self.manager.state.current_memory.load(Ordering::Relaxed);
+        let prospective = if delta >= 0 {
+            current_memory.saturating_add(delta as usize)
+        } else {
+            current_memory.saturating_sub(delta.unsigned_abs())
+        };
+        if delta > 0 {
+            self.manager.state.check_memory_limit(delta as usize)?;
+        }
+
+        let commit_version = self
+            .manager
+            .state
+            .commit_version
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
+        self.manager.write_wal(id, &writes)?;
+        for (key, value) in writes {
+            if let Some(value) = value {
+                data.insert(key, (value, commit_version));
+            } else {
+                data.remove(&key);
+            }
+        }
+        self.manager
+            .state
+            .current_memory
+            .store(prospective, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn rollback(self: Box<Self>) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("owned memory transaction mutex poisoned");
+        Self::ensure_active(&state)?;
+        if state.cursor_open {
+            return Err(Error::TxnClosed);
+        }
+        state.writes.clear();
+        state.state = TxnState::RolledBack;
+        Ok(())
+    }
+}
+
+struct OwnedMemoryCursor {
+    manager: Arc<MemoryTxnManager>,
+    transaction: Arc<Mutex<OwnedMemoryTransactionState>>,
+    snapshot: Option<OwnedSnapshotReader>,
+    last_key: Option<Key>,
+    start: Option<Key>,
+    prefix: Option<Vec<u8>>,
+    end: Option<Key>,
+}
+
+impl OwnedMemoryCursor {
+    fn key_is_in_scope(&self, key: &Key) -> bool {
+        self.prefix
+            .as_ref()
+            .is_none_or(|prefix| key.starts_with(prefix))
+            && self.end.as_ref().is_none_or(|end| key < end)
+    }
+
+    fn data_candidate(&self, start_version: u64) -> Option<(Key, Value, u64)> {
+        let data = self.manager.state.data.read().unwrap();
+        let entries: Box<dyn Iterator<Item = (&Key, &(Value, u64))>> = match &self.last_key {
+            Some(last_key) => Box::new(data.range::<Key, _>((Excluded(last_key), Unbounded))),
+            None => match &self.start {
+                Some(start) => Box::new(data.range::<Key, _>((Included(start), Unbounded))),
+                None => Box::new(data.iter()),
+            },
+        };
+        for (key, (value, version)) in entries {
+            if !self.key_is_in_scope(key) {
+                return None;
+            }
+            if *version <= start_version {
+                return Some((key.clone(), value.clone(), *version));
+            }
+        }
+        None
+    }
+
+    fn write_candidate(&self) -> Option<(Key, Option<Value>)> {
+        let transaction = self
+            .transaction
+            .lock()
+            .expect("owned memory transaction mutex poisoned");
+        let entry = match &self.last_key {
+            Some(last_key) => transaction
+                .writes
+                .range::<Key, _>((Excluded(last_key), Unbounded))
+                .next(),
+            None => match &self.start {
+                Some(start) => transaction
+                    .writes
+                    .range::<Key, _>((Included(start), Unbounded))
+                    .next(),
+                None => transaction.writes.iter().next(),
+            },
+        }?;
+        self.key_is_in_scope(entry.0)
+            .then(|| (entry.0.clone(), entry.1.clone()))
+    }
+
+    fn record_read(&self, key: Key, version: u64) -> Result<()> {
+        let mut transaction = self
+            .transaction
+            .lock()
+            .expect("owned memory transaction mutex poisoned");
+        if transaction.state != TxnState::Active || !transaction.cursor_open {
+            return Err(Error::TxnClosed);
+        }
+        transaction.read_set.insert(key, version);
+        Ok(())
+    }
+
+    fn finish(&mut self) {
+        self.snapshot.take();
+        let mut transaction = self
+            .transaction
+            .lock()
+            .expect("owned memory transaction mutex poisoned");
+        transaction.cursor_open = false;
+    }
+}
+
+impl OwnedKVScan for OwnedMemoryCursor {
+    fn next_entry(&mut self) -> Result<Option<(Key, Value)>> {
+        if self.snapshot.is_none() {
+            return Ok(None);
+        }
+        loop {
+            let start_version = self
+                .transaction
+                .lock()
+                .expect("owned memory transaction mutex poisoned")
+                .start_version;
+            let data = self.data_candidate(start_version);
+            let write = self.write_candidate();
+            let next = match (data, write) {
+                (Some((data_key, data_value, data_version)), Some((write_key, write_value))) => {
+                    if data_key == write_key {
+                        self.record_read(data_key.clone(), data_version)?;
+                        (data_key, write_value)
+                    } else if data_key < write_key {
+                        self.record_read(data_key.clone(), data_version)?;
+                        (data_key, Some(data_value))
+                    } else {
+                        (write_key, write_value)
+                    }
+                }
+                (Some((data_key, data_value, data_version)), None) => {
+                    self.record_read(data_key.clone(), data_version)?;
+                    (data_key, Some(data_value))
+                }
+                (None, Some((write_key, write_value))) => (write_key, write_value),
+                (None, None) => {
+                    self.finish();
+                    return Ok(None);
+                }
+            };
+            self.last_key = Some(next.0.clone());
+            if let Some(value) = next.1 {
+                return Ok(Some((next.0, value)));
+            }
+        }
+    }
+
+    fn close(&mut self) -> Result<()> {
+        self.finish();
+        Ok(())
+    }
+}
+
+impl Drop for OwnedMemoryCursor {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 
@@ -1454,6 +1946,154 @@ mod tests {
 
         let result = manager.commit(t1);
         assert!(matches!(result, Err(Error::TxnConflict)));
+    }
+
+    #[test]
+    fn owned_memory_transaction_merges_incremental_cursor_and_commits_once() {
+        use crate::kv::OwnedSessionFactory;
+
+        let store = Arc::new(MemoryKV::new());
+        let session = store
+            .clone()
+            .begin_owned_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        let lease = session.acquire_lease().unwrap();
+        lease
+            .with_transaction(|transaction| {
+                transaction.put(key("p:1"), value("one"))?;
+                transaction.put(key("p:2"), value("two"))?;
+                transaction.put(key("q:1"), value("other"))?;
+                Ok(())
+            })
+            .unwrap();
+        let mut cursor = lease
+            .with_transaction(|transaction| transaction.scan_prefix(b"p:"))
+            .unwrap();
+        assert_eq!(
+            cursor.next_entry().unwrap(),
+            Some((key("p:1"), value("one")))
+        );
+        assert_eq!(
+            cursor.next_entry().unwrap(),
+            Some((key("p:2"), value("two")))
+        );
+        assert_eq!(cursor.next_entry().unwrap(), None);
+        cursor.close().unwrap();
+        drop(cursor);
+        lease
+            .finish(crate::txn::OwnedLeaseOutcome::Exhausted)
+            .unwrap();
+        session.commit().unwrap();
+
+        let read = store
+            .clone()
+            .begin_owned_read(crate::kv::OwnedReadOptions::default())
+            .unwrap();
+        let lease = read.acquire_lease().unwrap();
+        assert_eq!(
+            lease
+                .with_transaction(|transaction| transaction.get(&key("p:2")))
+                .unwrap(),
+            Some(value("two"))
+        );
+        lease
+            .finish(crate::txn::OwnedLeaseOutcome::Exhausted)
+            .unwrap();
+
+        let range = store
+            .clone()
+            .begin_owned_read(crate::kv::OwnedReadOptions::default())
+            .unwrap();
+        let lease = range.acquire_lease().unwrap();
+        let mut cursor = lease
+            .with_transaction(|transaction| transaction.scan_range(b"p:1", b"q:"))
+            .unwrap();
+        assert_eq!(
+            cursor.next_entry().unwrap(),
+            Some((key("p:1"), value("one")))
+        );
+        assert_eq!(
+            cursor.next_entry().unwrap(),
+            Some((key("p:2"), value("two")))
+        );
+        assert_eq!(cursor.next_entry().unwrap(), None);
+        drop(cursor);
+        lease
+            .finish(crate::txn::OwnedLeaseOutcome::Exhausted)
+            .unwrap();
+    }
+
+    #[test]
+    fn owned_prefix_cursor_skips_keys_before_its_prefix() {
+        use crate::kv::OwnedSessionFactory;
+
+        let store = Arc::new(MemoryKV::new());
+        let writer = store
+            .clone()
+            .begin_owned_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        let writer_lease = writer.acquire_lease().unwrap();
+        writer_lease
+            .with_transaction(|transaction| {
+                transaction.put(key("catalog:before"), value("metadata"))?;
+                transaction.put(key("row:1"), value("one"))?;
+                Ok(())
+            })
+            .unwrap();
+        writer_lease
+            .finish(crate::txn::OwnedLeaseOutcome::Exhausted)
+            .unwrap();
+        writer.commit().unwrap();
+
+        let reader = store.clone().begin_owned_read(Default::default()).unwrap();
+        let reader_lease = reader.acquire_lease().unwrap();
+        let mut cursor = reader_lease
+            .with_transaction(|transaction| transaction.scan_prefix(b"row:"))
+            .unwrap();
+        assert_eq!(
+            cursor.next_entry().unwrap(),
+            Some((key("row:1"), value("one")))
+        );
+        assert_eq!(cursor.next_entry().unwrap(), None);
+        cursor.close().unwrap();
+        drop(cursor);
+        reader_lease
+            .finish(crate::txn::OwnedLeaseOutcome::Exhausted)
+            .unwrap();
+    }
+
+    #[test]
+    fn any_kv_memory_dispatches_to_owned_memory_session_without_borrowed_transaction() {
+        use crate::kv::{AnyKV, OwnedSessionFactory};
+
+        let store = Arc::new(AnyKV::Memory(MemoryKV::new()));
+        let session = store
+            .clone()
+            .begin_owned_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        let lease = session.acquire_lease().unwrap();
+        lease
+            .with_transaction(|transaction| transaction.put(key("owned"), value("value")))
+            .unwrap();
+        lease
+            .finish(crate::txn::OwnedLeaseOutcome::Exhausted)
+            .unwrap();
+        session.commit().unwrap();
+
+        let read = store
+            .clone()
+            .begin_owned_read(crate::kv::OwnedReadOptions::default())
+            .unwrap();
+        let lease = read.acquire_lease().unwrap();
+        assert_eq!(
+            lease
+                .with_transaction(|transaction| transaction.get(&key("owned")))
+                .unwrap(),
+            Some(value("value"))
+        );
+        lease
+            .finish(crate::txn::OwnedLeaseOutcome::Exhausted)
+            .unwrap();
     }
 
     #[test]

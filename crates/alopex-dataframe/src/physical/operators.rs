@@ -107,9 +107,14 @@ fn project_one_batch(batch: &RecordBatch, exprs: &[Expr]) -> Result<RecordBatch>
     let expanded = expand_projection_exprs(exprs, batch.schema().as_ref())?;
     let mut arrays = Vec::with_capacity(expanded.len());
     let mut fields = Vec::with_capacity(expanded.len());
+    let expressions = expanded
+        .iter()
+        .map(|(_, expression)| expression)
+        .collect::<Vec<_>>();
+    let mut evaluator = ExprEval::for_expressions(batch, &expressions);
 
     for (name, expr) in expanded {
-        let a = ExprEval::evaluate(&expr, batch)?;
+        let a = evaluator.evaluate(&expr)?;
         fields.push(Field::new(name, a.data_type().clone(), true));
         arrays.push(a);
     }
@@ -122,6 +127,14 @@ fn project_one_batch(batch: &RecordBatch, exprs: &[Expr]) -> Result<RecordBatch>
 fn with_columns_one_batch(batch: &RecordBatch, exprs: &[Expr]) -> Result<RecordBatch> {
     let mut arrays = batch.columns().to_vec();
     let mut fields = batch.schema().fields().to_vec();
+    let expressions = exprs
+        .iter()
+        .map(|expr| match expr {
+            E::Alias { expr, .. } => expr.as_ref(),
+            other => other,
+        })
+        .collect::<Vec<_>>();
+    let mut evaluator = ExprEval::for_expressions(batch, &expressions);
 
     for expr in exprs {
         let (name, inner) = match expr {
@@ -134,7 +147,7 @@ fn with_columns_one_batch(batch: &RecordBatch, exprs: &[Expr]) -> Result<RecordB
             }
         };
 
-        let a = ExprEval::evaluate(&inner, batch)?;
+        let a = evaluator.evaluate(&inner)?;
         if let Some(idx) = fields.iter().position(|f| f.name() == &name) {
             fields[idx] = Arc::new(Field::new(&name, a.data_type().clone(), true));
             arrays[idx] = a;

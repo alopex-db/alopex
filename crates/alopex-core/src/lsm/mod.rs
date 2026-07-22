@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::compaction::leveled::{KeyRange, LeveledCompactionConfig, SSTableMeta};
@@ -26,9 +26,11 @@ use crate::error::{Error, Result};
 use crate::kv::{KVStore, KVTransaction};
 use crate::lsm::buffer_pool::{BufferPool, BufferPoolConfig};
 use crate::lsm::checkpoint::{load_checkpoint_meta, save_checkpoint_meta, CheckpointMeta};
-use crate::lsm::memtable::{ImmutableMemTable, MemTable, MemTableConfig};
+use crate::lsm::memtable::{ImmutableMemTable, MemTable, MemTableConfig, MemTableEntry};
 use crate::lsm::metrics::{LsmMetrics, LsmMetricsSnapshot};
-use crate::lsm::sstable::{SSTableConfig, SSTableEntry, SSTableReader, SSTableWriter};
+use crate::lsm::sstable::{
+    SSTableConfig, SSTableCursor, SSTableEntry, SSTableReader, SSTableWriter,
+};
 use crate::lsm::wal::{
     detect_wal_format_version, SyncMode, WalBatchOp, WalConfig, WalEntry, WalEntryPayload,
     WalOpType, WalReader, WalWriter, WAL_FORMAT_VERSION,
@@ -203,6 +205,167 @@ impl<'a> LsmTxnManagerRef<'a> {
     }
 }
 
+/// Bounds shared by an owned LSM cursor and its per-SSTable cursors.
+///
+/// The type contains only key boundaries, not a materialized result set.  Its `end` is exclusive
+/// when present; an all-`0xff` prefix has no finite lexical successor and therefore no end.
+#[derive(Debug, Clone)]
+pub(crate) struct OwnedLsmScanBounds {
+    start: Key,
+    end: Option<Key>,
+    prefix: Option<Key>,
+}
+
+impl OwnedLsmScanBounds {
+    /// Construct a prefix bound.
+    pub(crate) fn prefix(prefix: Key) -> Self {
+        let end = lexical_prefix_end(&prefix);
+        Self {
+            start: prefix.clone(),
+            end,
+            prefix: Some(prefix),
+        }
+    }
+
+    /// Construct a half-open range bound.
+    pub(crate) fn range(start: Key, end: Key) -> Self {
+        Self {
+            start,
+            end: Some(end),
+            prefix: None,
+        }
+    }
+
+    /// Inclusive start key.
+    pub(crate) fn start(&self) -> &Key {
+        &self.start
+    }
+
+    /// Exclusive end key, when the range has a finite end.
+    pub(crate) fn end(&self) -> Option<&Key> {
+        self.end.as_ref()
+    }
+
+    /// Optional prefix constraint.
+    pub(crate) fn prefix_constraint(&self) -> Option<&Key> {
+        self.prefix.as_ref()
+    }
+
+    /// Whether `key` belongs to this cursor's result domain.
+    pub(crate) fn contains(&self, key: &[u8]) -> bool {
+        key >= self.start.as_slice()
+            && self.end.as_ref().is_none_or(|end| key < end.as_slice())
+            && self
+                .prefix
+                .as_ref()
+                .is_none_or(|prefix| key.starts_with(prefix))
+    }
+}
+
+fn lexical_prefix_end(prefix: &[u8]) -> Option<Key> {
+    if prefix.is_empty() {
+        return None;
+    }
+    let mut end = prefix.to_vec();
+    for index in (0..end.len()).rev() {
+        if end[index] != u8::MAX {
+            end[index] = end[index].saturating_add(1);
+            end.truncate(index + 1);
+            return Some(end);
+        }
+    }
+    None
+}
+
+/// Reader/writer gate that keeps an owned cursor's LSM source layout stable.
+///
+/// It is deliberately not an `RwLockReadGuard`: cursors own this small guard without borrowing
+/// the store, while legacy and owned writers wait before replacing/flushing source structures.
+#[derive(Debug, Default)]
+struct OwnedLsmSnapshotGate {
+    state: Mutex<OwnedLsmSnapshotGateState>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct OwnedLsmSnapshotGateState {
+    readers: usize,
+    writer: bool,
+}
+
+impl OwnedLsmSnapshotGate {
+    fn acquire_reader(self: &Arc<Self>) -> OwnedLsmSnapshotReader {
+        let mut state = self.state.lock().expect("lsm snapshot gate mutex poisoned");
+        while state.writer {
+            state = self
+                .changed
+                .wait(state)
+                .expect("lsm snapshot gate mutex poisoned");
+        }
+        state.readers = state.readers.saturating_add(1);
+        OwnedLsmSnapshotReader {
+            gate: self.clone(),
+            released: false,
+        }
+    }
+
+    fn acquire_writer(self: &Arc<Self>) -> OwnedLsmSnapshotWriter {
+        let mut state = self.state.lock().expect("lsm snapshot gate mutex poisoned");
+        while state.writer || state.readers != 0 {
+            state = self
+                .changed
+                .wait(state)
+                .expect("lsm snapshot gate mutex poisoned");
+        }
+        state.writer = true;
+        OwnedLsmSnapshotWriter {
+            gate: self.clone(),
+            released: false,
+        }
+    }
+}
+
+/// Owned cursor's source-stability token.
+pub(crate) struct OwnedLsmSnapshotReader {
+    gate: Arc<OwnedLsmSnapshotGate>,
+    released: bool,
+}
+
+impl Drop for OwnedLsmSnapshotReader {
+    fn drop(&mut self) {
+        if !self.released {
+            let mut state = self
+                .gate
+                .state
+                .lock()
+                .expect("lsm snapshot gate mutex poisoned");
+            state.readers = state.readers.saturating_sub(1);
+            self.released = true;
+            self.gate.changed.notify_all();
+        }
+    }
+}
+
+struct OwnedLsmSnapshotWriter {
+    gate: Arc<OwnedLsmSnapshotGate>,
+    released: bool,
+}
+
+impl Drop for OwnedLsmSnapshotWriter {
+    fn drop(&mut self) {
+        if !self.released {
+            let mut state = self
+                .gate
+                .state
+                .lock()
+                .expect("lsm snapshot gate mutex poisoned");
+            state.writer = false;
+            self.released = true;
+            self.gate.changed.notify_all();
+        }
+    }
+}
+
 /// LSM-Tree ベースの KV ストア（Disk モード）。
 ///
 /// 設計: 仕様書 §4.1
@@ -234,6 +397,8 @@ pub struct LsmKV {
     pub txn_manager: LsmTxnManager,
     /// コミットの直列化ロック（OCC の検証ウィンドウを閉じる）。
     pub commit_lock: Mutex<()>,
+    /// Source-layout stability gate for owned incremental cursors.
+    owned_snapshot_gate: Arc<OwnedLsmSnapshotGate>,
     /// 次に割り当てる SSTable ID。
     pub next_sstable_id: AtomicU64,
     /// WAL の現在使用量（バイト）。
@@ -243,6 +408,11 @@ pub struct LsmKV {
 }
 
 impl LsmKV {
+    /// Allocate a transaction id for an owned local session without borrowing this store.
+    pub(crate) fn allocate_owned_transaction_id(&self) -> TxnId {
+        TxnId(self.txn_manager.next_txn_id.fetch_add(1, Ordering::Relaxed))
+    }
+
     /// LsmKV をデフォルト設定で開く。
     ///
     /// `path` はデータディレクトリとして扱い、内部で WAL ファイルを作成/再利用する。
@@ -348,6 +518,7 @@ impl LsmKV {
             ts_oracle: TimestampOracle::new(next_ts),
             txn_manager: LsmTxnManager::default(),
             commit_lock: Mutex::new(()),
+            owned_snapshot_gate: Arc::new(OwnedLsmSnapshotGate::default()),
             next_sstable_id: AtomicU64::new(next_sstable_id),
             wal_used_bytes: AtomicU64::new(wal_used_bytes),
             last_checkpoint_ms: AtomicU64::new(last_checkpoint_ms),
@@ -419,6 +590,12 @@ impl LsmKV {
     ///
     /// 現段階では「Active MemTable を freeze して Immutable キューへ移す」までを行う。
     pub fn flush(&self) -> Result<()> {
+        let _snapshot_writer = self.owned_snapshot_gate.acquire_writer();
+        self.flush_inner()
+    }
+
+    /// Flush while the caller already owns the snapshot writer gate.
+    fn flush_inner(&self) -> Result<()> {
         let old = {
             let mut guard = self
                 .active_memtable
@@ -446,10 +623,11 @@ impl LsmKV {
 
     /// 明示的にチェックポイントを作成する。
     pub fn checkpoint(&self) -> Result<CheckpointResult> {
+        let _snapshot_writer = self.owned_snapshot_gate.acquire_writer();
         let _guard = self.commit_lock.lock().expect("lsm commit_lock poisoned");
         let start = Instant::now();
 
-        self.flush()?;
+        self.flush_inner()?;
         self.persist_immutable_memtables()?;
 
         let checkpoint_lsn = self.ts_oracle.current_timestamp();
@@ -689,6 +867,245 @@ impl LsmKV {
             }
         }
         best
+    }
+
+    /// Return a visible entry for an owned cursor, surfacing persisted-source errors instead of
+    /// silently skipping a damaged SSTable.
+    pub(crate) fn owned_visible_at(
+        &self,
+        key: &[u8],
+        read_timestamp: u64,
+    ) -> Result<Option<MemTableEntry>> {
+        if let Some(entry) = self
+            .active_memtable
+            .read()
+            .expect("lsm active_memtable lock poisoned")
+            .get(key, read_timestamp)
+        {
+            return Ok(Some(entry));
+        }
+        let immutables = self
+            .immutable_memtables
+            .read()
+            .expect("lsm immutable_memtables lock poisoned");
+        for table in immutables.iter().rev() {
+            if let Some(entry) = table.get(key, read_timestamp) {
+                return Ok(Some(entry));
+            }
+        }
+
+        let levels = self.levels.read().expect("lsm levels lock poisoned");
+        let mut best: Option<MemTableEntry> = None;
+        for level in levels.iter() {
+            for meta in level {
+                let path = self.sstable_path_for(meta.id);
+                let mut reader = SSTableReader::open(&path)?;
+                let Some(found) = reader.get_with_buffer_pool(
+                    &self.buffer_pool,
+                    &self.metrics,
+                    meta.id,
+                    key,
+                    read_timestamp,
+                )?
+                else {
+                    continue;
+                };
+                let candidate = MemTableEntry {
+                    value: found.value,
+                    timestamp: found.timestamp,
+                    sequence: found.sequence,
+                };
+                let better = match &best {
+                    None => true,
+                    Some(current) => {
+                        candidate.timestamp > current.timestamp
+                            || (candidate.timestamp == current.timestamp
+                                && candidate.sequence > current.sequence)
+                    }
+                };
+                if better {
+                    best = Some(candidate);
+                }
+            }
+        }
+        Ok(best)
+    }
+
+    /// Acquire the source-stability token that an owned LSM cursor retains until close/drop.
+    pub(crate) fn acquire_owned_snapshot_reader(&self) -> OwnedLsmSnapshotReader {
+        self.owned_snapshot_gate.acquire_reader()
+    }
+
+    /// Open one incremental reader for every persisted table overlapping an owned cursor bound.
+    pub(crate) fn open_owned_sstable_cursors(
+        &self,
+        bounds: &OwnedLsmScanBounds,
+        read_timestamp: u64,
+    ) -> Result<Vec<SSTableCursor>> {
+        let tables = {
+            let levels = self.levels.read().expect("lsm levels lock poisoned");
+            levels
+                .iter()
+                .flatten()
+                .map(|meta| {
+                    (
+                        meta.id,
+                        self.sstable_path_for(meta.id),
+                        meta.key_range.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut cursors = Vec::new();
+        for (file_id, path, key_range) in tables {
+            if key_range.last_key.as_slice() < bounds.start().as_slice()
+                || bounds
+                    .end()
+                    .is_some_and(|end| key_range.first_key.as_slice() >= end.as_slice())
+            {
+                continue;
+            }
+            cursors.push(SSTableCursor::open(
+                &path,
+                file_id,
+                bounds.start().clone(),
+                bounds.end().cloned(),
+                read_timestamp,
+            )?);
+        }
+        Ok(cursors)
+    }
+
+    /// Find the least next visible key among active and immutable MemTables without collecting a
+    /// whole scan result.
+    pub(crate) fn owned_next_memtable_key_after(
+        &self,
+        after: Option<&Key>,
+        bounds: &OwnedLsmScanBounds,
+        read_timestamp: u64,
+    ) -> Option<Key> {
+        let mut candidate = self
+            .active_memtable
+            .read()
+            .expect("lsm active_memtable lock poisoned")
+            .next_visible_after(
+                after.map(Vec::as_slice),
+                bounds.start(),
+                bounds.end().map(Vec::as_slice),
+                bounds.prefix_constraint().map(Vec::as_slice),
+                read_timestamp,
+            )
+            .map(|(key, _)| key);
+
+        let immutables = self
+            .immutable_memtables
+            .read()
+            .expect("lsm immutable_memtables lock poisoned");
+        for table in immutables.iter() {
+            let Some((key, _)) = table.next_visible_after(
+                after.map(Vec::as_slice),
+                bounds.start(),
+                bounds.end().map(Vec::as_slice),
+                bounds.prefix_constraint().map(Vec::as_slice),
+                read_timestamp,
+            ) else {
+                continue;
+            };
+            if candidate.as_ref().is_none_or(|current| key < *current) {
+                candidate = Some(key);
+            }
+        }
+        candidate
+    }
+
+    /// Commit a staged LSM write set while respecting owned-cursor source stability.
+    ///
+    /// Both legacy borrowed transactions and owned sessions call this one implementation so a
+    /// cursor never observes a half-flushed source layout and WAL-before-MemTable ordering stays
+    /// identical across the two APIs.
+    pub(crate) fn commit_write_set(
+        &self,
+        start_ts: u64,
+        read_set: &HashSet<Key>,
+        write_set: BTreeMap<Key, Option<Value>>,
+    ) -> Result<()> {
+        if write_set.is_empty() {
+            return Ok(());
+        }
+
+        let _snapshot_writer = self.owned_snapshot_gate.acquire_writer();
+        let _commit_guard = self.commit_lock.lock().expect("lsm commit_lock poisoned");
+        for key in read_set {
+            if self.latest_timestamp(key) > start_ts {
+                return Err(Error::TxnConflict);
+            }
+        }
+        for key in write_set.keys() {
+            if self.latest_timestamp(key) > start_ts {
+                return Err(Error::TxnConflict);
+            }
+        }
+
+        let commit_ts = self.ts_oracle.next_timestamp();
+        let mut ops = Vec::with_capacity(write_set.len());
+        for (key, value) in &write_set {
+            ops.push(match value {
+                Some(value) => WalBatchOp {
+                    op_type: WalOpType::Put,
+                    key: key.clone(),
+                    value: Some(value.clone()),
+                },
+                None => WalBatchOp {
+                    op_type: WalOpType::Delete,
+                    key: key.clone(),
+                    value: None,
+                },
+            });
+        }
+        {
+            let entry = WalEntry::batch(commit_ts, ops);
+            let mut wal = self.wal.write().expect("lsm wal lock poisoned");
+            let stats = wal.append_with_stats(&entry)?;
+            self.metrics.add_wal_write_bytes(stats.bytes_written);
+            let sync_duration_ms = if stats.sync_duration_ms == 0
+                && !matches!(self.config.wal.sync_mode, SyncMode::EveryWrite)
+            {
+                wal.force_sync()?
+            } else {
+                stats.sync_duration_ms
+            };
+            self.metrics.add_wal_sync_duration_ms(sync_duration_ms);
+            self.wal_used_bytes
+                .store(wal.used_bytes(), Ordering::Relaxed);
+        }
+
+        {
+            let active = self
+                .active_memtable
+                .read()
+                .expect("lsm active_memtable lock poisoned");
+            let mut sequence = 1u64;
+            for (key, value) in write_set {
+                match value {
+                    Some(value) => active.put(key, value, commit_ts, sequence),
+                    None => active.delete(key, commit_ts, sequence),
+                }
+                sequence = sequence.wrapping_add(1);
+            }
+        }
+        self.refresh_memtable_size_metrics();
+
+        if self
+            .active_memtable
+            .read()
+            .expect("lsm active_memtable lock poisoned")
+            .memory_usage_bytes()
+            >= self.config.memtable.flush_threshold
+        {
+            self.flush_inner()?;
+        }
+        Ok(())
     }
 
     fn latest_timestamp(&self, key: &[u8]) -> u64 {
@@ -1120,92 +1537,11 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
         if self.mode == TxnMode::ReadOnly || self.write_set.is_empty() {
             return Ok(());
         }
-
-        let _commit_guard = self
-            .store
-            .commit_lock
-            .lock()
-            .expect("lsm commit_lock poisoned");
-
-        for key in self.read_set.iter() {
-            if self.store.latest_timestamp(key) > self.start_ts {
-                return Err(Error::TxnConflict);
-            }
-        }
-        for key in self.write_set.keys() {
-            if self.store.latest_timestamp(key) > self.start_ts {
-                return Err(Error::TxnConflict);
-            }
-        }
-
-        let commit_ts = self.store.ts_oracle.next_timestamp();
-
-        // WAL に先行して追記してから MemTable に反映する（WAL → MemTable）。
-        let mut ops = Vec::with_capacity(self.write_set.len());
-        for (k, v) in self.write_set.iter() {
-            let op = match v {
-                Some(val) => WalBatchOp {
-                    op_type: WalOpType::Put,
-                    key: k.clone(),
-                    value: Some(val.clone()),
-                },
-                None => WalBatchOp {
-                    op_type: WalOpType::Delete,
-                    key: k.clone(),
-                    value: None,
-                },
-            };
-            ops.push(op);
-        }
-        {
-            let entry = WalEntry::batch(commit_ts, ops);
-            let mut wal = self.store.wal.write().expect("lsm wal lock poisoned");
-            let stats = wal.append_with_stats(&entry)?;
-            self.store.metrics.add_wal_write_bytes(stats.bytes_written);
-            let sync_duration_ms = if stats.sync_duration_ms == 0
-                && !matches!(self.store.config.wal.sync_mode, SyncMode::EveryWrite)
-            {
-                wal.force_sync()?
-            } else {
-                stats.sync_duration_ms
-            };
-            self.store
-                .metrics
-                .add_wal_sync_duration_ms(sync_duration_ms);
-            self.store
-                .wal_used_bytes
-                .store(wal.used_bytes(), Ordering::Relaxed);
-        }
-
-        {
-            let active = self
-                .store
-                .active_memtable
-                .read()
-                .expect("lsm active_memtable lock poisoned");
-            let mut seq = 1u64;
-            for (k, v) in std::mem::take(&mut self.write_set) {
-                match v {
-                    Some(val) => active.put(k, val, commit_ts, seq),
-                    None => active.delete(k, commit_ts, seq),
-                }
-                seq = seq.wrapping_add(1);
-            }
-        }
-        self.store.refresh_memtable_size_metrics();
-
-        // flush trigger: MemTable が閾値を超えたら freeze して immutable へ移動。
-        if self
-            .store
-            .active_memtable
-            .read()
-            .expect("lsm active_memtable lock poisoned")
-            .memory_usage_bytes()
-            >= self.store.config.memtable.flush_threshold
-        {
-            self.store.flush()?;
-        }
-        Ok(())
+        self.store.commit_write_set(
+            self.start_ts,
+            &self.read_set,
+            std::mem::take(&mut self.write_set),
+        )
     }
 
     fn rollback_self(mut self) -> Result<()> {
@@ -1311,6 +1647,7 @@ mod kv_store {
             ts_oracle: TimestampOracle::new(1),
             txn_manager: LsmTxnManager::default(),
             commit_lock: Mutex::new(()),
+            owned_snapshot_gate: Arc::new(OwnedLsmSnapshotGate::default()),
             next_sstable_id: AtomicU64::new(1),
             wal_used_bytes: AtomicU64::new(0),
             last_checkpoint_ms: AtomicU64::new(0),
@@ -1341,6 +1678,7 @@ mod kv_store {
             ts_oracle: TimestampOracle::new(1),
             txn_manager: LsmTxnManager::default(),
             commit_lock: Mutex::new(()),
+            owned_snapshot_gate: Arc::new(OwnedLsmSnapshotGate::default()),
             next_sstable_id: AtomicU64::new(1),
             wal_used_bytes: AtomicU64::new(0),
             last_checkpoint_ms: AtomicU64::new(0),
@@ -1477,6 +1815,7 @@ mod txn {
             ts_oracle: TimestampOracle::new(1),
             txn_manager: LsmTxnManager::default(),
             commit_lock: Mutex::new(()),
+            owned_snapshot_gate: Arc::new(OwnedLsmSnapshotGate::default()),
             next_sstable_id: AtomicU64::new(1),
             wal_used_bytes: AtomicU64::new(0),
             last_checkpoint_ms: AtomicU64::new(0),

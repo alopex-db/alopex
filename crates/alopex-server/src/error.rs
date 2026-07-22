@@ -24,6 +24,8 @@ pub enum ServerError {
     SessionExpired(String),
     #[error("future distributed execution required: {0}")]
     FutureDistributedExecutionRequired(String),
+    #[error("capability unavailable: {0}")]
+    CapabilityUnavailable(String),
     #[error("not implemented: {0}")]
     NotImplemented(String),
     #[error("restore integrity mismatch: {0}")]
@@ -54,6 +56,7 @@ impl ServerError {
             Self::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
             Self::SessionExpired(_) => StatusCode::GONE,
             Self::FutureDistributedExecutionRequired(_) => StatusCode::NOT_IMPLEMENTED,
+            Self::CapabilityUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             Self::RestoreIntegrityMismatch(_) => StatusCode::CONFLICT,
             Self::Core(_) | Self::Catalog(_) | Self::Io(_) | Self::Internal(_) => {
@@ -77,6 +80,7 @@ impl ServerError {
             Self::FutureDistributedExecutionRequired(_) => {
                 "FUTURE_DISTRIBUTED_EXECUTION_REQUIRED".to_string()
             }
+            Self::CapabilityUnavailable(_) => "CAPABILITY_UNAVAILABLE".to_string(),
             Self::NotImplemented(_) => "NOT_IMPLEMENTED".to_string(),
             Self::RestoreIntegrityMismatch(_) => "RESTORE_INTEGRITY_MISMATCH".to_string(),
             Self::Core(_) | Self::Catalog(_) | Self::Io(_) | Self::Internal(_) => {

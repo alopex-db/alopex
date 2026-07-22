@@ -5,6 +5,7 @@ members = [
     "crates/alopex-sql",
     "crates/alopex-embedded", "crates/alopex-server", "crates/alopex-cluster", "crates/alopex-cli", "crates/alopex-py",
 ]
+exclude = ["scripts/release/verify-candidate"]
 # crates/alopex-tools は意図的に除外する。開発ツール(競合DB比較ベンチ・
 # リリース確認バイナリ等)は製品コードの path 依存ではなく crates.io の
 # 公開バージョンに依存させ、ユーザーが実際に手にする配布物を検証する

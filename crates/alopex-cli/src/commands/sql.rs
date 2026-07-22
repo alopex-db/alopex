@@ -8,14 +8,18 @@ use std::io::{self, Read, Write};
 
 use alopex_embedded::Database;
 
-use crate::batch::BatchMode;
-use crate::cli::{OutputFormat, SqlCommand};
+use crate::batch::{BatchMode, DistributedReadOutcome};
+use crate::cli::{OutputFormat, RoutingReportFormat, SqlCommand, SqlReadMode};
 use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::{create_formatter, Formatter};
+use crate::profile::config::ResolvedSqlReadMode;
 use crate::streaming::timeout::parse_deadline;
-use crate::streaming::{CancelSignal, Deadline, StreamingWriter, WriteStatus};
+use crate::streaming::{
+    write_distributed_read_routing_report, CancelSignal, Deadline, DistributedReadRoutingReport,
+    StreamingWriter, WriteStatus,
+};
 use crate::tui::{is_tty, TuiApp};
 use crate::ui::mode::UiMode;
 use futures_util::StreamExt;
@@ -272,6 +276,208 @@ pub async fn execute_remote_with_formatter<'a, W: Write>(
         options,
     )
     .await
+}
+
+/// Dispatch a server SQL command after profile-side routing resolution.
+///
+/// Cluster candidates deliberately use the versioned distributed-read route
+/// instead of the legacy local SQL endpoint. Until a server supplies a
+/// prepared-result response, any non-success remains a classified client
+/// error; it is never retried through local execution.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_remote_with_routing<'a, W: Write>(
+    client: &HttpClient,
+    cmd: &SqlCommand,
+    read_mode: ResolvedSqlReadMode,
+    batch_mode: &BatchMode,
+    ui_mode: UiMode,
+    writer: &mut W,
+    output_format: OutputFormat,
+    admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
+    limit: Option<usize>,
+    quiet: bool,
+) -> Result<()> {
+    let requested_mode = requested_read_mode_name(cmd.read_mode, read_mode);
+    let (effective_mode, decision) = match read_mode {
+        ResolvedSqlReadMode::Local => (Some("local".to_string()), "local"),
+        ResolvedSqlReadMode::Cluster(mode) => (Some(read_mode_name(mode).to_string()), "cluster"),
+    };
+    let result = match read_mode {
+        ResolvedSqlReadMode::Local => {
+            execute_remote_with_formatter(
+                client,
+                cmd,
+                batch_mode,
+                ui_mode,
+                writer,
+                output_format,
+                admin_launcher,
+                limit,
+                quiet,
+            )
+            .await
+        }
+        ResolvedSqlReadMode::Cluster(mode) => {
+            execute_remote_cluster_read(client, cmd, batch_mode, ui_mode, mode).await
+        }
+    };
+    if let Some(format) = cmd.routing_report {
+        emit_routing_report(format, requested_mode, effective_mode, decision, &result)?;
+    }
+    result
+}
+
+async fn execute_remote_cluster_read(
+    client: &HttpClient,
+    cmd: &SqlCommand,
+    batch_mode: &BatchMode,
+    ui_mode: UiMode,
+    mode: SqlReadMode,
+) -> Result<()> {
+    if ui_mode == UiMode::Tui {
+        return Err(distributed_read_error(
+            DistributedReadOutcome::Unsupported,
+            "cluster SQL read does not support TUI preview",
+        ));
+    }
+    let sql = cmd.resolve_query(batch_mode)?;
+    if !is_select_query(&sql)? {
+        return Err(distributed_read_error(
+            DistributedReadOutcome::Unsupported,
+            "remote DDL, DML, and transactions are not supported for cluster reads",
+        ));
+    }
+    let request = RemoteDistributedReadRequest {
+        sql,
+        read_mode: read_mode_name(mode),
+    };
+    // P2.12 currently returns a typed capability failure until a fenced
+    // coordinator is installed. If a future server unexpectedly returns a
+    // success envelope without a prepared-result adapter, fail closed rather
+    // than treating it as a local SQL success.
+    let _: serde_json::Value = client
+        .post_json("v1/sql/reads", &request)
+        .await
+        .map_err(map_distributed_client_error)?;
+    Err(distributed_read_error(
+        DistributedReadOutcome::TerminalFailure,
+        "distributed-read server response requires a prepared-result stream adapter",
+    ))
+}
+
+fn read_mode_name(mode: SqlReadMode) -> &'static str {
+    match mode {
+        SqlReadMode::Local => "local",
+        SqlReadMode::Inherit => "inherit",
+        SqlReadMode::Strong => "strong",
+        SqlReadMode::Stale => "stale",
+    }
+}
+
+fn requested_read_mode_name(
+    command_mode: Option<SqlReadMode>,
+    resolved_mode: ResolvedSqlReadMode,
+) -> &'static str {
+    let default = match resolved_mode {
+        ResolvedSqlReadMode::Local => SqlReadMode::Local,
+        ResolvedSqlReadMode::Cluster(_) => SqlReadMode::Inherit,
+    };
+    read_mode_name(command_mode.unwrap_or(default))
+}
+
+fn emit_routing_report(
+    format: RoutingReportFormat,
+    requested_mode: &str,
+    effective_mode: Option<String>,
+    decision: &str,
+    result: &Result<()>,
+) -> Result<()> {
+    let (outcome, reason) = match result {
+        Ok(()) => (DistributedReadOutcome::Success.as_str().to_string(), None),
+        Err(CliError::DistributedReadOutcome {
+            outcome, reason, ..
+        }) => (outcome.clone(), Some(reason.clone())),
+        Err(CliError::Cancelled) => (
+            DistributedReadOutcome::Cancelled.as_str().to_string(),
+            Some("client cancellation".into()),
+        ),
+        Err(CliError::Timeout(reason)) => (
+            DistributedReadOutcome::RetryableFailure
+                .as_str()
+                .to_string(),
+            Some(reason.clone()),
+        ),
+        Err(CliError::ServerUnsupported(reason)) => (
+            DistributedReadOutcome::Unsupported.as_str().to_string(),
+            Some(reason.clone()),
+        ),
+        Err(error) => (
+            DistributedReadOutcome::TerminalFailure.as_str().to_string(),
+            Some(error.to_string()),
+        ),
+    };
+    let report = DistributedReadRoutingReport::new(
+        requested_mode,
+        effective_mode,
+        decision,
+        outcome,
+        reason,
+    );
+    let stderr = std::io::stderr();
+    let mut stderr = stderr.lock();
+    write_distributed_read_routing_report(&mut stderr, format, &report)
+}
+
+fn distributed_read_error(outcome: DistributedReadOutcome, reason: impl Into<String>) -> CliError {
+    let reason = reason.into();
+    CliError::DistributedReadOutcome {
+        outcome: outcome.as_str().to_string(),
+        reason,
+        exit_code: outcome.exit_code(),
+    }
+}
+
+fn map_distributed_client_error(error: ClientError) -> CliError {
+    match error {
+        ClientError::Request { source, .. } => distributed_read_error(
+            DistributedReadOutcome::RetryableFailure,
+            format!("request failed: {source}"),
+        ),
+        ClientError::Auth(error) => distributed_read_error(
+            DistributedReadOutcome::AuthorizationFailure,
+            error.to_string(),
+        ),
+        ClientError::HttpStatus { status, body } => {
+            let code = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("error")
+                        .and_then(|error| error.get("code"))
+                        .and_then(|code| code.as_str())
+                        .map(str::to_owned)
+                });
+            let outcome = match code.as_deref() {
+                Some("UNAUTHORIZED") | Some("AUTHORIZATION_FAILURE") => {
+                    DistributedReadOutcome::AuthorizationFailure
+                }
+                Some("UNSUPPORTED_REMOTE")
+                | Some("NOT_IMPLEMENTED")
+                | Some("FUTURE_DISTRIBUTED_EXECUTION_REQUIRED") => {
+                    DistributedReadOutcome::Unsupported
+                }
+                Some("CAPABILITY_UNAVAILABLE") => DistributedReadOutcome::TerminalFailure,
+                _ if status.is_server_error() || status.as_u16() == 408 => {
+                    DistributedReadOutcome::RetryableFailure
+                }
+                _ => DistributedReadOutcome::TerminalFailure,
+            };
+            distributed_read_error(outcome, format!("HTTP {}: {body}", status.as_u16()))
+        }
+        ClientError::InvalidUrl(message) | ClientError::Build(message) => {
+            distributed_read_error(DistributedReadOutcome::TerminalFailure, message)
+        }
+    }
 }
 
 fn sql_context_message(sql: &str) -> String {
@@ -1989,6 +2195,12 @@ struct RemoteSqlRequest {
     max_rows: Option<usize>,
 }
 
+#[derive(serde::Serialize)]
+struct RemoteDistributedReadRequest {
+    sql: String,
+    read_mode: &'static str,
+}
+
 #[derive(serde::Deserialize)]
 struct RemoteColumnInfo {
     name: String,
@@ -2488,6 +2700,8 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            read_mode: None,
+            routing_report: None,
             tui: false,
         };
 
@@ -2506,6 +2720,8 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            read_mode: None,
+            routing_report: None,
             tui: false,
         };
 
@@ -2521,6 +2737,8 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            read_mode: None,
+            routing_report: None,
             tui: false,
         };
 
@@ -2536,6 +2754,8 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            read_mode: None,
+            routing_report: None,
             tui: false,
         };
 

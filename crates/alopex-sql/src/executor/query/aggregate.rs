@@ -759,6 +759,62 @@ pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<d
     }
 }
 
+/// Returns whether an aggregate's partial state can be merged without
+/// changing the current local SQL result. Floating-point, DISTINCT, and
+/// order-sensitive aggregates must instead be replayed from ordered inputs.
+pub fn exact_partial_aggregate_is_proven(aggregate: &AggregateExpr) -> bool {
+    !aggregate.distinct
+        && matches!(
+            aggregate.function,
+            AggregateFunction::Count | AggregateFunction::Min | AggregateFunction::Max
+        )
+}
+
+/// Merge only aggregate states whose merge rule is proven to preserve the
+/// current local SQL result. This is the coordinator-side kernel used by the
+/// distributed result assembler after every worker has acknowledged cleanup.
+pub fn merge_exact_aggregate_states(
+    aggregates: &[AggregateExpr],
+    partial_rows: impl IntoIterator<Item = Vec<Vec<SqlValue>>>,
+) -> Result<Vec<SqlValue>> {
+    if let Some(aggregate) = aggregates
+        .iter()
+        .find(|aggregate| !exact_partial_aggregate_is_proven(aggregate))
+    {
+        return Err(ExecutorError::InvalidOperation {
+            operation: "distributed aggregate merge".into(),
+            reason: format!(
+                "{:?} requires ordered input replay rather than an exact partial merge",
+                aggregate.function
+            ),
+        });
+    }
+
+    let mut accumulators = aggregates
+        .iter()
+        .map(|aggregate| create_accumulator(&aggregate.function, false))
+        .collect::<Vec<_>>();
+    for states in partial_rows {
+        if states.len() != accumulators.len() {
+            return Err(ExecutorError::InvalidOperation {
+                operation: "distributed aggregate merge".into(),
+                reason: format!(
+                    "partial state has {} aggregate(s), expected {}",
+                    states.len(),
+                    accumulators.len()
+                ),
+            });
+        }
+        for (accumulator, state) in accumulators.iter_mut().zip(states) {
+            accumulator.merge(&state)?;
+        }
+    }
+    accumulators
+        .iter()
+        .map(|accumulator| accumulator.finalize())
+        .collect()
+}
+
 const DEFAULT_GROUP_LIMIT: usize = 1_000_000;
 const AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES: u64 = 32;
 

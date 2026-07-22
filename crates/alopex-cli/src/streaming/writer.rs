@@ -4,11 +4,91 @@
 
 use std::io::Write;
 
+use serde::Serialize;
+
+use crate::cli::RoutingReportFormat;
 use crate::error::{CliError, Result};
 use crate::models::{Column, Row};
 use crate::output::formatter::Formatter;
 /// Default buffer limit for non-streaming formats (table).
 pub const DEFAULT_BUFFER_LIMIT: usize = 10 * 1024 * 1024;
+
+/// A routing/status report kept separate from row output. Fields unavailable
+/// before a server coordinator responds remain null rather than being filled
+/// with local guesses.
+#[derive(Debug, Clone, Serialize)]
+pub struct DistributedReadRoutingReport {
+    pub schema_version: u32,
+    pub requested_mode: String,
+    pub effective_mode: Option<String>,
+    pub decision: String,
+    pub ranges: Vec<String>,
+    pub freshness: Option<String>,
+    pub retry_count: u32,
+    pub failover_count: u32,
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl DistributedReadRoutingReport {
+    pub fn new(
+        requested_mode: impl Into<String>,
+        effective_mode: Option<String>,
+        decision: impl Into<String>,
+        outcome: impl Into<String>,
+        reason: Option<String>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            requested_mode: requested_mode.into(),
+            effective_mode,
+            decision: decision.into(),
+            ranges: Vec::new(),
+            freshness: None,
+            retry_count: 0,
+            failover_count: 0,
+            outcome: outcome.into(),
+            reason,
+        }
+    }
+}
+
+/// Write the report to a caller-provided stderr writer. No `StreamingWriter`
+/// or SQL row formatter is involved, so table/JSON/CSV/TSV/JSONL stdout stays
+/// byte-for-byte independent from routing diagnostics.
+pub fn write_distributed_read_routing_report<W: Write>(
+    writer: &mut W,
+    format: RoutingReportFormat,
+    report: &DistributedReadRoutingReport,
+) -> Result<()> {
+    match format {
+        RoutingReportFormat::Json => {
+            serde_json::to_writer(&mut *writer, report)?;
+            writeln!(writer)?;
+        }
+        RoutingReportFormat::Human => {
+            writeln!(writer, "distributed read routing report")?;
+            writeln!(writer, "  requested_mode: {}", report.requested_mode)?;
+            if let Some(mode) = &report.effective_mode {
+                writeln!(writer, "  effective_mode: {mode}")?;
+            }
+            writeln!(writer, "  decision: {}", report.decision)?;
+            writeln!(writer, "  ranges: {}", report.ranges.join(","))?;
+            if let Some(freshness) = &report.freshness {
+                writeln!(writer, "  freshness: {freshness}")?;
+            }
+            writeln!(writer, "  retry_count: {}", report.retry_count)?;
+            writeln!(writer, "  failover_count: {}", report.failover_count)?;
+            writeln!(writer, "  outcome: {}", report.outcome)?;
+            if let Some(reason) = &report.reason {
+                writeln!(writer, "  reason: {reason}")?;
+            }
+        }
+    }
+    writer.flush()?;
+    Ok(())
+}
 
 /// Status returned by write operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,5 +513,23 @@ mod tests {
         assert!(writer.buffer.is_empty());
 
         writer.finish().unwrap();
+    }
+
+    #[test]
+    fn routing_report_is_serialized_to_its_own_writer_without_row_output() {
+        let report = DistributedReadRoutingReport::new(
+            "strong",
+            Some("strong".into()),
+            "cluster",
+            "retryable_failure",
+            Some("read point expired".into()),
+        );
+        let mut stderr = Vec::new();
+        write_distributed_read_routing_report(&mut stderr, RoutingReportFormat::Json, &report)
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&stderr).unwrap();
+        assert_eq!(value["requested_mode"], "strong");
+        assert_eq!(value["outcome"], "retryable_failure");
+        assert_eq!(value["reason"], "read point expired");
     }
 }

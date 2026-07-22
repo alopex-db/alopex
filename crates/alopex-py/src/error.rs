@@ -46,6 +46,17 @@ pub const ERROR_CODES: &[&str] = &[
     "ALOPEX-PY017",
     "ALOPEX-PY018",
     "ALOPEX-PY019",
+    "thread_mode_violation",
+    "unsupported_streaming_sql",
+    "unsupported_streaming_scan",
+    "stream_closed",
+    "stream_cancelled",
+    "stream_timeout",
+    "stream_resource_limit",
+    "stream_failure",
+    "stream_active",
+    "stream_abort_required",
+    "stream_busy",
     "ALOPEX-PY101",
     "ALOPEX-PY102",
     "ALOPEX-PY103",
@@ -209,7 +220,7 @@ fn core_error_code(err: &alopex_core::Error) -> &'static str {
     }
 }
 
-fn with_code(err: PyErr, code: &'static str) -> PyErr {
+pub(crate) fn with_code(err: PyErr, code: &'static str) -> PyErr {
     Python::attach(|py| {
         err.value(py)
             .setattr("code", code)
@@ -265,6 +276,19 @@ impl From<AlopexError> for PyErr {
 #[allow(dead_code)]
 pub fn to_py_err<E: Display>(err: E) -> PyErr {
     with_code(PyAlopexError::new_err(err.to_string()), GENERIC_ERROR_CODE)
+}
+
+/// Return the deterministic error used when a single-thread database is accessed elsewhere.
+pub fn thread_mode_violation() -> PyErr {
+    with_code(
+        PyAlopexError::new_err("database is restricted to its creating thread"),
+        "thread_mode_violation",
+    )
+}
+
+/// Return a stable structured stream error.
+pub(crate) fn stream_error(code: &'static str, message: impl Into<String>) -> PyErr {
+    with_code(PyAlopexError::new_err(message.into()), code)
 }
 
 /// Convert embedded catalog errors into Python exceptions.

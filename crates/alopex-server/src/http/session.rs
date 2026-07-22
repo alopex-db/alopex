@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::error::{Result, ServerError};
 use crate::http::sql::sync_catalog_to_store;
 use crate::http::{error_response, json_response, RequestContext};
+use crate::ops::distributed_read::ReadExecutionOwner;
 use crate::server::ServerState;
 use crate::session::SessionId;
 
@@ -51,6 +52,32 @@ pub async fn rollback(
         Ok(resp) => json_response(resp, state.config.max_response_size, &ctx),
         Err(err) => error_response(err, &ctx),
     }
+}
+
+/// Bind a distributed-read registration to the authenticated HTTP profile and
+/// (when supplied) to a live SQL session. The session is correlation state;
+/// the profile remains the authorization authority for later stream and cancel
+/// requests, so a guessed session ID cannot broaden access.
+pub async fn distributed_read_owner(
+    state: &ServerState,
+    ctx: &RequestContext,
+    session_id: Option<&str>,
+) -> Result<ReadExecutionOwner> {
+    let profile = ctx.actor.clone().ok_or_else(|| {
+        ServerError::Unauthorized("distributed read requires an authenticated profile".into())
+    })?;
+    let session_id = match session_id {
+        Some(id) => {
+            let session_id = id
+                .parse::<SessionId>()
+                .map_err(|_| ServerError::BadRequest("invalid session id".into()))?;
+            // Preserve the existing session expiry/not-found classification.
+            state.session_manager.get_session(&session_id).await?;
+            Some(session_id)
+        }
+        None => None,
+    };
+    ReadExecutionOwner::new(profile, session_id)
 }
 
 async fn begin_session(state: Arc<ServerState>) -> Result<SessionBeginResponse> {

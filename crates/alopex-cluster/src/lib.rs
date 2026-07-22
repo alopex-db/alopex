@@ -4,6 +4,66 @@
 //! does not perform remote execution, Raft replication, or distributed
 //! transactions.
 
+mod bootstrap;
+mod control;
+pub mod distributed_read;
+mod metadata;
+mod projection;
+mod read_point;
+mod transport;
+
+pub use bootstrap::{
+    ClusterBootstrapConfig, ClusterBootstrapMode, ClusterBootstrapOutcome,
+    bootstrap_cluster_control,
+};
+pub use control::{
+    EnrollmentCredential, MembershipOperation, MembershipOperationKind, MembershipOperationStore,
+    MembershipSaga, RaftMembershipView, RangeChangeEnvelope, RangeReplicaDirectory,
+    RangeReplicaReadiness, RangeReplicaReadinessState, RangeSnapshotChunk, RangeSnapshotEntry,
+    RangeTransferAck, RangeTransferApplyOutcome, RangeTransferError, RangeTransferExpectation,
+    RangeTransferFrameHandler, RangeTransferManifest, RangeTransferResumePoint,
+    RangeTransferSession, RangeTransferWireFrame, RangeTransferWireMessage,
+    SUPPORTED_UPGRADE_SOURCE_VERSION, SchemaApplyEvidenceAdapter, SchemaApplyEvidenceRequest,
+    SchemaControlError, SchemaControlResult, SchemaControlService, UpgradeCheckpoint, UpgradeInput,
+    UpgradeOperation, UpgradeOutcome, UpgradePlanner, UpgradePlanningError, UpgradeSourceKind,
+    VerifiedRangeTransferReceiver,
+};
+pub use distributed_read::{
+    AuthenticatedSubject, CleanupAcknowledgement, DelegationAuthorizationError,
+    DelegationValidationContext, DistributedReadPlan, FencedRangeReadBackend,
+    FencedRangeReadSession, LocalReadAuthorizationRecheck, LocalReadAuthorizationRequest,
+    RangeReadBatch, RangeReadEnd, RangeReadExecution, RangeReadWorker, RangeReadWorkerClock,
+    RangeReadWorkerConfig, RangeReadWorkerConfigError, RangeReadWorkerError, RangeTarget,
+    ReadDelegationCredential, ReadDelegationVerifier, ReadFence, ReadModeRequest,
+    ReadOperationScope, ReadRoutePlanRequest, ReadRoutePlanner, ReadRoutePlanningError,
+    RemoteRangeReadRequest, RemoteRangeReadRequestError, RemoteReadAuthorizationEnvelope,
+    RouteDecision, authorize_remote_read, descriptor_digest, range_fence_digest,
+    verify_and_recheck,
+};
+pub use metadata::{
+    AuthorizationScope, ChirpsMetadataBackend, ChirpsMetadataConsensusAdapter,
+    ClusterReadConsistency, ClusterReadPolicy, CommittedMetadata, ManagementOutcome,
+    ManagementOutcomeClass, MemberLifecycle, MemberRecord, MetadataActor, MetadataCommand,
+    MetadataCommandEnvelope, MetadataCommandValidator, MetadataConsensusError,
+    MetadataConsensusStore, MetadataSnapshot, MetadataValidationError, ObservedHealth,
+    RangeCoverageProof, RangeReplicaEvidence, RangeReplicaLifecycle, RangeRoutingDefinition,
+    ReadPolicyOverride, SchemaApplyEvidence, SchemaApplyState, SchemaCompatibility, SchemaManifest,
+    SchemaRolloutState, ValidatedMetadataCommand, ValidationDecision, compiled_chirps_bootstrap,
+};
+pub use projection::{
+    CommittedMetadataProjection, CommittedMetadataProjector, MetadataProjectionFreshness,
+    ProjectedMember, ProjectedSchemaApply, ProjectedSchemaRollout,
+};
+pub use read_point::{
+    ClusterReadPoint, ClusterReadPointAuthority, RangeReplicaReadWatermark, ReadConsistencyMode,
+    ReadPointFailure, ReadPointRequest,
+};
+pub use transport::{
+    ClusterFrameDispatchError, ClusterFrameDispatcher, ClusterFrameHandler,
+    ClusterFrameHandlerError, ClusterFrameKind, ClusterPeerAuthenticator, FrameDispatchOutcome,
+    InboundClusterFrame, PeerAuthenticationError, VerifiedClusterFrame, VerifiedPeerIdentity,
+};
+
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, error::Error, fmt};
 
@@ -76,6 +136,11 @@ string_id!(
 );
 string_id!(ShardId, "Logical shard identifier.");
 string_id!(RangeId, "Logical range identifier.");
+string_id!(
+    RequestId,
+    "Idempotency identifier for a management request."
+);
+string_id!(SchemaManifestId, "Immutable schema manifest identifier.");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -359,6 +424,15 @@ pub enum StableDiagnosticCode {
     RetryScheduled,
     RetryExhausted,
     SubRequestCancelled,
+    DuplicateRequest,
+    RequestConflict,
+    StaleMetadataVersion,
+    Unauthorized,
+    InvalidRange,
+    RangeCoverageIncomplete,
+    SchemaOwnerRequired,
+    OperationPending,
+    MetadataCommitted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -499,6 +573,78 @@ pub struct ClusterDiagnostic {
     pub message: String,
     pub remediation: String,
     pub degraded: bool,
+}
+
+/// A prerequisite that must be satisfied before multi-node cluster control can
+/// be started or advertised.
+///
+/// These are intentionally capability-level values rather than transport
+/// errors: callers must decide before accepting a management operation whether
+/// the configured process can provide a safe cluster control plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClusterCapabilityPrerequisite {
+    ChirpsFeature,
+    AuthenticatedFrameDispatcher,
+    MutualTlsPeerAuthentication,
+    DurableRaftStorage,
+    RecoverableMetadataStorage,
+}
+
+/// The explicit compatibility result for the optional Chirps foundation.
+///
+/// `available` can only become true after every listed prerequisite is
+/// satisfied.  It is deliberately separate from SWIM reachability: gossip is
+/// evidence only and never makes a node eligible for cluster control.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterCapabilityStatus {
+    pub available: bool,
+    #[serde(default)]
+    pub missing_prerequisites: Vec<ClusterCapabilityPrerequisite>,
+}
+
+impl ClusterCapabilityStatus {
+    pub fn available() -> Self {
+        Self {
+            available: true,
+            missing_prerequisites: Vec::new(),
+        }
+    }
+
+    pub fn unavailable(missing_prerequisites: Vec<ClusterCapabilityPrerequisite>) -> Self {
+        debug_assert!(
+            !missing_prerequisites.is_empty(),
+            "an unavailable capability must identify a prerequisite"
+        );
+        Self {
+            available: false,
+            missing_prerequisites,
+        }
+    }
+}
+
+/// Returns whether the currently compiled Chirps foundation is compatible with
+/// Alopex multi-node cluster control.
+///
+/// The current Chirps release supplies Raft and durable-storage building
+/// blocks, but its mesh subscriber is not a single authenticated dispatcher
+/// and its QUIC setup permits self-signed certificates without client
+/// authentication.  Therefore enabling the Cargo feature alone never
+/// advertises a multi-node capability.  Task 1.2 replaces this explicit
+/// unavailable result only after those foundation contracts are supplied.
+pub fn chirps_cluster_capability() -> ClusterCapabilityStatus {
+    #[cfg(feature = "chirps")]
+    {
+        ClusterCapabilityStatus::unavailable(vec![
+            ClusterCapabilityPrerequisite::AuthenticatedFrameDispatcher,
+            ClusterCapabilityPrerequisite::MutualTlsPeerAuthentication,
+        ])
+    }
+
+    #[cfg(not(feature = "chirps"))]
+    {
+        ClusterCapabilityStatus::unavailable(vec![ClusterCapabilityPrerequisite::ChirpsFeature])
+    }
 }
 
 impl ClusterDiagnostic {
@@ -1878,7 +2024,7 @@ impl ClusterManagerConfig {
             mode: ClusterMode::ClusterAware,
             identity: Some(identity),
             membership_source: MembershipSource::Chirps,
-            membership_source_available: true,
+            membership_source_available: chirps_cluster_capability().available,
             initial_membership: None,
             initial_placements: Vec::new(),
         }
@@ -2778,6 +2924,22 @@ mod tests {
         assert!(diagnostic.message.contains("Chirps membership input"));
     }
 
+    #[cfg(not(feature = "chirps"))]
+    #[test]
+    fn disabled_chirps_feature_cannot_advertise_cluster_control() {
+        let capability = chirps_cluster_capability();
+
+        assert!(!capability.available);
+        assert_eq!(
+            capability.missing_prerequisites,
+            vec![ClusterCapabilityPrerequisite::ChirpsFeature]
+        );
+
+        let manager = ClusterManager::new(ClusterManagerConfig::cluster_aware(active_identity()))
+            .expect("an unavailable foundation is reported as degraded, not initialized as control plane");
+        assert!(manager.status_snapshot().degraded);
+    }
+
     #[cfg(feature = "chirps")]
     #[test]
     fn chirps_adapter_maps_raw_status_values() {
@@ -2795,6 +2957,25 @@ mod tests {
             raw_chirps_state_from_status(&Status::Dead),
             RawChirpsState::Dead
         );
+    }
+
+    #[cfg(feature = "chirps")]
+    #[test]
+    fn incompatible_chirps_foundation_cannot_advertise_cluster_control() {
+        let capability = chirps_cluster_capability();
+
+        assert!(!capability.available);
+        assert_eq!(
+            capability.missing_prerequisites,
+            vec![
+                ClusterCapabilityPrerequisite::AuthenticatedFrameDispatcher,
+                ClusterCapabilityPrerequisite::MutualTlsPeerAuthentication,
+            ]
+        );
+
+        let manager = ClusterManager::new(ClusterManagerConfig::cluster_aware(active_identity()))
+            .expect("an incompatible foundation is reported as degraded, not initialized as control plane");
+        assert!(manager.status_snapshot().degraded);
     }
 
     #[test]

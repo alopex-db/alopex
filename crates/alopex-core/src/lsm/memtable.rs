@@ -287,6 +287,42 @@ impl MemTable {
         )
     }
 
+    /// Return the first visible key strictly after `after` within an owned cursor bound.
+    ///
+    /// Unlike [`Self::scan_prefix`] and [`Self::scan_range`], this reads only until one
+    /// visible user key is found.  Long-lived owned LSM cursors use it to avoid turning the
+    /// whole MemTable result into a `Vec` before yielding their first row.
+    pub fn next_visible_after(
+        &self,
+        after: Option<&[u8]>,
+        start: &[u8],
+        end: Option<&[u8]>,
+        prefix: Option<&[u8]>,
+        read_timestamp: u64,
+    ) -> Option<(Key, MemTableEntry)> {
+        let anchor = after.unwrap_or(start).to_vec();
+        let data = self.data.read().expect("memtable lock poisoned");
+        for (internal_key, entry) in data.range((Included(anchor), Unbounded)) {
+            let user_key = decode_user_key(internal_key);
+            if after.is_some_and(|last| user_key <= last) || user_key < start {
+                continue;
+            }
+            if end.is_some_and(|range_end| user_key >= range_end) {
+                return None;
+            }
+            if let Some(prefix) = prefix {
+                if !user_key.starts_with(prefix) {
+                    // The ordered map has reached the first key beyond this prefix.
+                    return None;
+                }
+            }
+            if entry.timestamp <= read_timestamp {
+                return Some((user_key.to_vec(), entry.clone()));
+            }
+        }
+        None
+    }
+
     /// Convert this MemTable into an immutable snapshot.
     pub fn freeze(self) -> ImmutableMemTable {
         let min_timestamp = self.min_timestamp();
@@ -551,6 +587,40 @@ impl ImmutableMemTable {
             Excluded(end.to_vec()),
             read_timestamp,
         )
+    }
+
+    /// Return the first visible key strictly after `after` within an owned cursor bound.
+    ///
+    /// This is the immutable counterpart of [`MemTable::next_visible_after`].  It deliberately
+    /// does not allocate a result collection: an owned cursor asks again only after consuming
+    /// the previously returned key.
+    pub fn next_visible_after(
+        &self,
+        after: Option<&[u8]>,
+        start: &[u8],
+        end: Option<&[u8]>,
+        prefix: Option<&[u8]>,
+        read_timestamp: u64,
+    ) -> Option<(Key, MemTableEntry)> {
+        let anchor = after.unwrap_or(start).to_vec();
+        for (internal_key, entry) in self.data.range((Included(anchor), Unbounded)) {
+            let user_key = decode_user_key(internal_key);
+            if after.is_some_and(|last| user_key <= last) || user_key < start {
+                continue;
+            }
+            if end.is_some_and(|range_end| user_key >= range_end) {
+                return None;
+            }
+            if let Some(prefix) = prefix {
+                if !user_key.starts_with(prefix) {
+                    return None;
+                }
+            }
+            if entry.timestamp <= read_timestamp {
+                return Some((user_key.to_vec(), entry.clone()));
+            }
+        }
+        None
     }
 }
 

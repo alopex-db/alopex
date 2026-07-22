@@ -21,6 +21,9 @@ fn _alopex(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     embedded::database::register(py, &database_module)?;
     m.add_submodule(&database_module)?;
 
+    m.add_class::<embedded::async_stream::PyNativeAsyncPayload>()?;
+    m.add_class::<embedded::async_stream::PyNativeAsyncSqlResultStream>()?;
+
     let transaction_module = PyModule::new(py, "transaction")?;
     embedded::transaction::register(py, &transaction_module)?;
     m.add_submodule(&transaction_module)?;
@@ -34,4 +37,51 @@ fn _alopex(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_submodule(&catalog_module)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule};
+    use pyo3::Python;
+
+    #[test]
+    fn exported_database_sql_stream_reads_auto_committed_rows() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "_alopex_runtime_test").unwrap();
+            super::_alopex(py, &module).unwrap();
+            let database = module
+                .getattr("database")
+                .unwrap()
+                .getattr("Database")
+                .unwrap()
+                .call_method0("new")
+                .unwrap();
+            database
+                .call_method1(
+                    "execute_sql",
+                    ("CREATE TABLE runtime_stream (id INTEGER PRIMARY KEY)",),
+                )
+                .unwrap();
+            database
+                .call_method1(
+                    "execute_sql",
+                    ("INSERT INTO runtime_stream (id) VALUES (1)",),
+                )
+                .unwrap();
+            let stream = database
+                .call_method1("execute_sql_stream", ("SELECT id FROM runtime_stream",))
+                .unwrap();
+            let row = stream.call_method0("__next__").unwrap();
+            let row = row.cast::<PyDict>().unwrap();
+            assert_eq!(
+                row.get_item("id")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<i64>()
+                    .unwrap(),
+                1
+            );
+        });
+    }
 }

@@ -17,6 +17,7 @@ use bincode::Options;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, ServerError};
+use crate::http::admin_api::{cluster_control_availability, ClusterControlAvailability};
 use crate::http::{error_response, json_response, RequestContext};
 use crate::server::ServerState;
 
@@ -45,6 +46,7 @@ pub struct AdminResourcesResponse {
     pub columnar_segments: Vec<ColumnarSegmentResource>,
     pub kv_keys: Vec<String>,
     pub truncated: TruncatedSections,
+    pub cluster_control: ClusterControlAvailability,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +104,8 @@ fn list_impl(
         columnar_column_limit,
     )?;
     let (kv_keys, kv_truncated) = list_kv_resources(state.store.clone(), limit, query.kv_prefix)?;
+    let cluster = state.cluster_status_snapshot()?;
+    let cluster_control = cluster_control_availability(&cluster)?;
 
     Ok(AdminResourcesResponse {
         sql_tables,
@@ -112,6 +116,7 @@ fn list_impl(
             columnar_segments: columnar_truncated,
             kv_keys: kv_truncated,
         },
+        cluster_control,
     })
 }
 

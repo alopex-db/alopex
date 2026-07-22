@@ -321,7 +321,7 @@ fn type_name(value: &Bound<'_, PyAny>) -> String {
 ///
 /// CLI / Server と同じく値をそのまま返す（Timestamp はエポックマイクロ秒の int、
 /// Vector は float の list）。
-fn sql_value_to_py(py: Python<'_>, value: SqlValue) -> PyResult<Py<PyAny>> {
+pub(crate) fn sql_value_to_py(py: Python<'_>, value: SqlValue) -> PyResult<Py<PyAny>> {
     match value {
         SqlValue::Null => Ok(py.None()),
         SqlValue::Integer(v) => v.into_py_any(py),

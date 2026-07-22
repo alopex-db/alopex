@@ -1,4 +1,4 @@
-use std::convert::TryInto;
+use alopex_core::{CanonicalRowKey, RowKeyRange};
 
 use super::error::{Result, StorageError};
 use super::value::SqlValue;
@@ -14,29 +14,27 @@ pub struct KeyEncoder;
 impl KeyEncoder {
     /// SQL row key.
     pub fn row_key(table_id: u32, row_id: u64) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(1 + 4 + 8);
-        buf.push(0x01);
-        buf.extend_from_slice(&table_id.to_be_bytes());
-        buf.extend_from_slice(&row_id.to_be_bytes());
-        buf
+        CanonicalRowKey::new(table_id, row_id).encode()
     }
 
     /// Decode SQL row key.
     pub fn decode_row_key(key: &[u8]) -> Result<(u32, u64)> {
-        if key.len() != 1 + 4 + 8 || key[0] != 0x01 {
-            return Err(StorageError::InvalidKeyFormat);
-        }
-        let table_id = u32::from_be_bytes(key[1..5].try_into().unwrap());
-        let row_id = u64::from_be_bytes(key[5..].try_into().unwrap());
-        Ok((table_id, row_id))
+        let key = CanonicalRowKey::decode(key).map_err(|_| StorageError::InvalidKeyFormat)?;
+        Ok((key.table_id(), key.row_id()))
     }
 
     /// Prefix for all rows of a table.
     pub fn table_prefix(table_id: u32) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(1 + 4);
-        buf.push(0x01);
-        buf.extend_from_slice(&table_id.to_be_bytes());
-        buf
+        CanonicalRowKey::table_prefix(table_id)
+    }
+
+    /// Rechecks an encoded primary key against a canonical physical range.
+    ///
+    /// Secondary-index order is unrelated to a table's primary-key range, so
+    /// callers must use this after resolving every index hit.
+    pub fn primary_key_is_in_range(key: &[u8], range: RowKeyRange) -> Result<bool> {
+        let key = CanonicalRowKey::decode(key).map_err(|_| StorageError::InvalidKeyFormat)?;
+        Ok(range.contains(key))
     }
 
     /// Index key (single value).
@@ -190,6 +188,48 @@ mod tests {
         let prefix = KeyEncoder::table_prefix(7);
         let key = KeyEncoder::row_key(7, 1);
         assert!(key.starts_with(&prefix));
+    }
+
+    #[test]
+    fn sql_row_keys_share_the_core_canonical_interval_contract() {
+        use alopex_core::{CanonicalRowKey, RowKeyRange};
+
+        let range = RowKeyRange::new(7, Some(10), Some(20)).unwrap();
+        let encoded = range.encoded_bounds();
+
+        assert_eq!(encoded.lower_inclusive, KeyEncoder::row_key(7, 10));
+        assert_eq!(encoded.upper_exclusive, KeyEncoder::row_key(7, 20));
+        assert!(range.contains(CanonicalRowKey::decode(&KeyEncoder::row_key(7, 19)).unwrap()));
+        assert!(!range.contains(CanonicalRowKey::decode(&KeyEncoder::row_key(7, 20)).unwrap()));
+    }
+
+    #[test]
+    fn secondary_index_hits_are_rechecked_against_the_primary_row_key_range() {
+        use alopex_core::{CanonicalRowKey, RowKeyRange};
+
+        let range = RowKeyRange::new(7, Some(10), Some(20)).unwrap();
+        let resolved_index_hits = [
+            CanonicalRowKey::decode(&KeyEncoder::row_key(7, 19)).unwrap(),
+            CanonicalRowKey::decode(&KeyEncoder::row_key(7, 20)).unwrap(),
+            CanonicalRowKey::decode(&KeyEncoder::row_key(8, 19)).unwrap(),
+        ];
+
+        let accepted = resolved_index_hits
+            .into_iter()
+            .filter(|row_key| range.contains(*row_key))
+            .collect::<Vec<_>>();
+
+        assert_eq!(accepted, vec![CanonicalRowKey::new(7, 19)]);
+    }
+
+    #[test]
+    fn encoded_primary_key_range_recheck_rejects_wrong_table_and_upper_bound() {
+        use alopex_core::RowKeyRange;
+
+        let range = RowKeyRange::new(7, Some(10), Some(20)).unwrap();
+        assert!(KeyEncoder::primary_key_is_in_range(&KeyEncoder::row_key(7, 19), range).unwrap());
+        assert!(!KeyEncoder::primary_key_is_in_range(&KeyEncoder::row_key(7, 20), range).unwrap());
+        assert!(!KeyEncoder::primary_key_is_in_range(&KeyEncoder::row_key(8, 19), range).unwrap());
     }
 
     #[test]

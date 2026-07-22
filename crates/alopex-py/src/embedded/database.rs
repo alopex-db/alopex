@@ -4,9 +4,13 @@ use std::sync::{Arc, Mutex, Weak};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 
+use crate::embedded::async_stream::PyNativeAsyncSqlResultStream;
+use crate::embedded::local_scan::PyLocalScan;
+use crate::embedded::stream::{PySqlResultStream, StreamLeaseRegistry};
+use crate::embedded::thread_mode::{DatabaseControl, PyThreadMode, ThreadMode};
 use crate::embedded::transaction::{PyTransaction, PyTransactionInner};
 use crate::error;
-use crate::types::{PyEmbeddedConfig, PyMemoryStats, PyTxnMode};
+use crate::types::{DataFrameStreamRegistry, PyEmbeddedConfig, PyMemoryStats, PyTxnMode};
 #[cfg(feature = "numpy")]
 use crate::types::{PyHnswConfig, PyHnswStats, PySearchResult};
 #[cfg(feature = "numpy")]
@@ -29,24 +33,30 @@ fn inject_rollback_failure_once() {
 pub struct PyDatabase {
     inner: Option<Arc<alopex_embedded::Database>>,
     mode: alopex_embedded::StorageMode,
-    closed: bool,
+    control: Arc<DatabaseControl>,
+    streams: Arc<StreamLeaseRegistry>,
+    dataframe_streams: Arc<DataFrameStreamRegistry>,
     txns: Arc<Mutex<Vec<Weak<PyTransactionInner>>>>,
 }
 
 impl PyDatabase {
-    fn from_db(db: alopex_embedded::Database, mode: alopex_embedded::StorageMode) -> Self {
+    fn from_db(
+        db: alopex_embedded::Database,
+        mode: alopex_embedded::StorageMode,
+        thread_mode: ThreadMode,
+    ) -> Self {
         Self {
             inner: Some(Arc::new(db)),
             mode,
-            closed: false,
+            control: Arc::new(DatabaseControl::new(thread_mode)),
+            streams: Arc::new(StreamLeaseRegistry::default()),
+            dataframe_streams: Arc::new(DataFrameStreamRegistry::default()),
             txns: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn ensure_open(&self) -> PyResult<Arc<alopex_embedded::Database>> {
-        if self.closed {
-            return Err(error::to_py_err("database is closed"));
-        }
+        self.control.ensure_open()?;
         self.inner
             .as_ref()
             .cloned()
@@ -57,27 +67,44 @@ impl PyDatabase {
 #[pymethods]
 impl PyDatabase {
     #[staticmethod]
-    fn open(path: &str) -> PyResult<Self> {
+    #[pyo3(signature = (path, *, thread_mode = None))]
+    fn open(path: &str, thread_mode: Option<&str>) -> PyResult<Self> {
+        let thread_mode = ThreadMode::parse(thread_mode)?;
         let db = alopex_embedded::Database::open(Path::new(path)).map_err(error::embedded_err)?;
-        Ok(Self::from_db(db, alopex_embedded::StorageMode::Disk))
-    }
-
-    #[staticmethod]
-    fn new() -> PyResult<Self> {
         Ok(Self::from_db(
-            alopex_embedded::Database::new(),
-            alopex_embedded::StorageMode::InMemory,
+            db,
+            alopex_embedded::StorageMode::Disk,
+            thread_mode,
         ))
     }
 
     #[staticmethod]
-    fn open_in_memory() -> PyResult<Self> {
-        let db = alopex_embedded::Database::open_in_memory().map_err(error::embedded_err)?;
-        Ok(Self::from_db(db, alopex_embedded::StorageMode::InMemory))
+    #[pyo3(signature = (*, thread_mode = None))]
+    fn new(thread_mode: Option<&str>) -> PyResult<Self> {
+        let thread_mode = ThreadMode::parse(thread_mode)?;
+        Ok(Self::from_db(
+            alopex_embedded::Database::new(),
+            alopex_embedded::StorageMode::InMemory,
+            thread_mode,
+        ))
     }
 
     #[staticmethod]
-    fn open_with_config(config: PyEmbeddedConfig) -> PyResult<Self> {
+    #[pyo3(signature = (*, thread_mode = None))]
+    fn open_in_memory(thread_mode: Option<&str>) -> PyResult<Self> {
+        let thread_mode = ThreadMode::parse(thread_mode)?;
+        let db = alopex_embedded::Database::open_in_memory().map_err(error::embedded_err)?;
+        Ok(Self::from_db(
+            db,
+            alopex_embedded::StorageMode::InMemory,
+            thread_mode,
+        ))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (config, *, thread_mode = None))]
+    fn open_with_config(config: PyEmbeddedConfig, thread_mode: Option<&str>) -> PyResult<Self> {
+        let thread_mode = ThreadMode::parse(thread_mode)?;
         let embedded = config.to_embedded();
         if embedded.storage_mode != alopex_embedded::StorageMode::InMemory {
             return Err(error::to_py_err(
@@ -86,7 +113,17 @@ impl PyDatabase {
         }
         let db =
             alopex_embedded::Database::open_with_config(embedded).map_err(error::embedded_err)?;
-        Ok(Self::from_db(db, alopex_embedded::StorageMode::InMemory))
+        Ok(Self::from_db(
+            db,
+            alopex_embedded::StorageMode::InMemory,
+            thread_mode,
+        ))
+    }
+
+    #[getter]
+    fn thread_mode(&self) -> PyResult<PyThreadMode> {
+        self.control.ensure_open()?;
+        Ok(self.control.thread_mode().into())
     }
 
     /// SQL を実行する（auto-commit）。
@@ -120,6 +157,126 @@ impl PyDatabase {
         crate::embedded::sql::execution_result_to_py(py, result)
     }
 
+    /// Open a local-only, incrementally consumed SQL result stream.
+    ///
+    /// The stream accepts the documented read-only SELECT subset only. Unsupported SQL is
+    /// rejected before an owned session or native cursor is opened.
+    #[pyo3(signature = (sql, params = None, *, resource_limit_bytes = None, timeout = None))]
+    fn execute_sql_stream(
+        &self,
+        sql: &str,
+        params: Option<Bound<'_, PyAny>>,
+        resource_limit_bytes: Option<usize>,
+        timeout: Option<f64>,
+    ) -> PyResult<PySqlResultStream> {
+        let db = self.ensure_open()?;
+        let bound_sql = crate::embedded::sql::bind_params(sql, params.as_ref())?;
+        let plan = alopex_embedded::OwnedSqlStreamPlan::preflight(&db, &bound_sql)
+            .map_err(error::embedded_err)?;
+        PySqlResultStream::open_database(
+            &db,
+            self.control.clone(),
+            &self.streams,
+            plan,
+            resource_limit_bytes,
+            timeout,
+        )
+    }
+
+    /// Internal factory for the documented Python asyncio facade.
+    ///
+    /// This deliberately constructs the native bridge before exposing any Python iterator.  The
+    /// async buffer options are validated before the owned SQL lease is opened.
+    #[pyo3(
+        name = "_open_native_async_sql_stream",
+        signature = (sql, params = None, *, resource_limit_bytes = None, timeout = None, prefetch_batches = 1, max_buffered_batches = 1, consumer_idle_timeout = None)
+    )]
+    #[allow(clippy::too_many_arguments)]
+    fn open_native_async_sql_stream(
+        &self,
+        sql: &str,
+        params: Option<Bound<'_, PyAny>>,
+        resource_limit_bytes: Option<usize>,
+        timeout: Option<f64>,
+        prefetch_batches: usize,
+        max_buffered_batches: usize,
+        consumer_idle_timeout: Option<f64>,
+    ) -> PyResult<PyNativeAsyncSqlResultStream> {
+        PyNativeAsyncSqlResultStream::validate_options(
+            prefetch_batches,
+            max_buffered_batches,
+            consumer_idle_timeout,
+        )?;
+        let db = self.ensure_open()?;
+        let bound_sql = crate::embedded::sql::bind_params(sql, params.as_ref())?;
+        let plan = alopex_embedded::OwnedSqlStreamPlan::preflight(&db, &bound_sql)
+            .map_err(error::embedded_err)?;
+        let stream = PySqlResultStream::open_database(
+            &db,
+            self.control.clone(),
+            &self.streams,
+            plan,
+            resource_limit_bytes,
+            timeout,
+        )?;
+        PyNativeAsyncSqlResultStream::new(
+            stream,
+            self.control.thread_mode(),
+            prefetch_batches,
+            max_buffered_batches,
+            consumer_idle_timeout,
+        )
+    }
+
+    /// Internal async factory for every canonical embedded-local `LocalScan` variant.
+    #[pyo3(
+        name = "_open_native_async_query_stream",
+        signature = (scan, *, resource_limit_bytes = None, timeout = None, prefetch_batches = 1, max_buffered_batches = 1, consumer_idle_timeout = None)
+    )]
+    fn open_native_async_query_stream(
+        &self,
+        scan: PyRef<'_, PyLocalScan>,
+        resource_limit_bytes: Option<usize>,
+        timeout: Option<f64>,
+        prefetch_batches: usize,
+        max_buffered_batches: usize,
+        consumer_idle_timeout: Option<f64>,
+    ) -> PyResult<PyNativeAsyncSqlResultStream> {
+        let database = self.ensure_open()?;
+        scan.open_native_async_database(
+            &database,
+            self.control.clone(),
+            &self.streams,
+            &self.dataframe_streams,
+            resource_limit_bytes,
+            timeout,
+            prefetch_batches,
+            max_buffered_batches,
+            consumer_idle_timeout,
+        )
+    }
+
+    /// Open one preflight-validated embedded-local scan stream.
+    #[pyo3(signature = (scan, *, resource_limit_bytes = None, timeout = None))]
+    fn query_stream(
+        &self,
+        py: Python<'_>,
+        scan: PyRef<'_, PyLocalScan>,
+        resource_limit_bytes: Option<usize>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        let database = self.ensure_open()?;
+        scan.open_database(
+            py,
+            &database,
+            self.control.clone(),
+            &self.streams,
+            &self.dataframe_streams,
+            resource_limit_bytes,
+            timeout,
+        )
+    }
+
     #[pyo3(signature = (mode = None))]
     fn begin(&self, mode: Option<PyTxnMode>) -> PyResult<PyTransaction> {
         let db = self.ensure_open()?;
@@ -128,8 +285,12 @@ impl PyDatabase {
             .txns
             .lock()
             .map_err(|_| error::to_py_err("transaction tracking lock poisoned"))?;
-        let txn = db.begin(txn_mode).map_err(error::embedded_err)?;
-        let py_txn = PyTransaction::from_txn(Arc::clone(&db), txn);
+        let py_txn = PyTransaction::begin_with_control(
+            Arc::clone(&db),
+            txn_mode,
+            self.control.clone(),
+            self.streams.clone(),
+        )?;
         guard.push(Arc::downgrade(&py_txn.inner));
         Ok(py_txn)
     }
@@ -157,12 +318,18 @@ impl PyDatabase {
         }
     }
 
+    /// Return diagnostics owned by this embedded database instance only.
+    ///
+    /// This method neither accepts a server target nor creates an HTTP client;
+    /// its `cluster_control` result is therefore an unavailable local
+    /// diagnostic, never a claim that multi-node management is configured.
     fn cluster_status(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         let db = self.ensure_open()?;
         let snapshot = db.cluster_status_snapshot().map_err(error::embedded_err)?;
         crate::types::cluster::cluster_status_to_py(py, &snapshot)
     }
 
+    /// Return the latest local routing diagnostics without any remote session.
     fn routing_diagnostics(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         let db = self.ensure_open()?;
         let diagnostics = db.routing_diagnostics().map_err(error::embedded_err)?;
@@ -170,8 +337,16 @@ impl PyDatabase {
     }
 
     fn close(&mut self) -> PyResult<()> {
-        if self.closed {
-            return Err(error::to_py_err("database is closed"));
+        if !self.control.begin_close()? {
+            return Ok(());
+        }
+        if let Err(err) = self.streams.close_all() {
+            self.control.reopen_after_close_failure()?;
+            return Err(err);
+        }
+        if let Err(err) = self.dataframe_streams.close_all() {
+            self.control.reopen_after_close_failure()?;
+            return Err(err);
         }
         let txns = self.txns.clone();
         let mut guard = txns
@@ -206,7 +381,7 @@ impl PyDatabase {
                     return true;
                 }
                 if let Some(txn) = txn_guard.as_mut() {
-                    if let Err(err) = txn.rollback_in_place() {
+                    if let Err(err) = txn.rollback() {
                         if first_err.is_none() {
                             first_err = Some(error::embedded_err(err));
                         }
@@ -222,10 +397,11 @@ impl PyDatabase {
             }
         });
         if let Some(err) = first_err {
+            self.control.reopen_after_close_failure()?;
             return Err(err);
         }
-        self.closed = true;
         self.inner = None;
+        self.control.finish_close()?;
         Ok(())
     }
 
@@ -289,7 +465,10 @@ impl PyDatabase {
 }
 
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyThreadMode>()?;
     m.add_class::<PyDatabase>()?;
+    m.add_class::<PySqlResultStream>()?;
+    m.add_class::<PyLocalScan>()?;
     Ok(())
 }
 
@@ -310,7 +489,7 @@ mod tests {
     #[test]
     fn execute_sql_ddl_dml_select_end_to_end() {
         with_py(|py| {
-            let db = PyDatabase::new().expect("db");
+            let db = PyDatabase::new(None).expect("db");
 
             let ddl = db
                 .execute_sql(
@@ -359,7 +538,7 @@ mod tests {
     #[test]
     fn execute_sql_select_empty_returns_empty_list() {
         with_py(|py| {
-            let db = PyDatabase::new().expect("db");
+            let db = PyDatabase::new(None).expect("db");
             db.execute_sql(py, "CREATE TABLE t (id INTEGER PRIMARY KEY)", None)
                 .expect("ddl");
             let rows = db
@@ -371,9 +550,42 @@ mod tests {
     }
 
     #[test]
+    fn python_database_sql_stream_reads_rows_written_by_detached_auto_commit_calls() {
+        with_py(|py| {
+            let db = Py::new(py, PyDatabase::new(None).expect("db")).expect("python database");
+            let db = db.bind(py);
+            db.call_method1(
+                "execute_sql",
+                ("CREATE TABLE stream_users (id INTEGER PRIMARY KEY)",),
+            )
+            .expect("ddl");
+            db.call_method1(
+                "execute_sql",
+                ("INSERT INTO stream_users (id) VALUES (1), (2)",),
+            )
+            .expect("dml");
+
+            let stream = db
+                .call_method1("execute_sql_stream", ("SELECT id FROM stream_users",))
+                .expect("stream");
+            let first = stream.call_method0("__next__").expect("first streamed row");
+            let first = first.cast::<PyDict>().expect("row dictionary");
+            assert_eq!(
+                first
+                    .get_item("id")
+                    .expect("dictionary access")
+                    .expect("id")
+                    .extract::<i64>()
+                    .expect("integer id"),
+                1
+            );
+        });
+    }
+
+    #[test]
     fn execute_sql_parse_error_maps_to_alopex_error_with_sql_code() {
         with_py(|py| {
-            let db = PyDatabase::new().expect("db");
+            let db = PyDatabase::new(None).expect("db");
             let err = db
                 .execute_sql(py, "SELEKT 1 FRUM nowhere", None)
                 .expect_err("parse error");
@@ -391,17 +603,47 @@ mod tests {
     #[test]
     fn execute_sql_on_closed_database_is_error() {
         with_py(|py| {
-            let mut db = PyDatabase::new().expect("db");
+            let mut db = PyDatabase::new(None).expect("db");
             db.close().expect("close");
+            db.close().expect("repeated close is idempotent");
             let err = db.execute_sql(py, "SELECT 1", None).expect_err("closed");
             assert!(err.is_instance_of::<crate::error::PyAlopexError>(py));
         });
     }
 
     #[test]
+    fn single_thread_database_reports_a_classified_cross_thread_error() {
+        pyo3::Python::initialize();
+        let database = PyDatabase::new(Some("single")).expect("single-thread db");
+        assert_eq!(
+            database.thread_mode().unwrap().__repr__(),
+            "ThreadMode.SINGLE"
+        );
+        assert!(PyDatabase::new(Some("invalid")).is_err());
+
+        let control = database.control.clone();
+        let code = std::thread::spawn(move || {
+            let error = control
+                .ensure_open()
+                .expect_err("other thread must be rejected");
+            Python::attach(|py| {
+                error
+                    .value(py)
+                    .getattr("code")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap()
+            })
+        })
+        .join()
+        .expect("thread must finish");
+        assert_eq!(code, "thread_mode_violation");
+    }
+
+    #[test]
     fn execute_sql_vector_param_roundtrip() {
         with_py(|py| {
-            let db = PyDatabase::new().expect("db");
+            let db = PyDatabase::new(None).expect("db");
             db.execute_sql(
                 py,
                 "CREATE TABLE docs (id INTEGER PRIMARY KEY, embedding VECTOR(3))",
@@ -445,7 +687,7 @@ mod tests {
     #[test]
     fn execute_sql_rejects_scalar_params() {
         with_py(|py| {
-            let db = PyDatabase::new().expect("db");
+            let db = PyDatabase::new(None).expect("db");
             db.execute_sql(py, "CREATE TABLE t (id INTEGER PRIMARY KEY)", None)
                 .expect("ddl");
             let scalar = 1i64.into_bound_py_any(py).expect("int");
@@ -458,7 +700,7 @@ mod tests {
 
     #[test]
     fn close_rolls_back_tracked_transactions_and_cleans_up() {
-        let mut db = PyDatabase::new().expect("db");
+        let mut db = PyDatabase::new(None).expect("db");
         let txn1 = db.begin(None).expect("txn1");
         let txn2 = db.begin(None).expect("txn2");
 
@@ -469,7 +711,7 @@ mod tests {
 
         db.close().expect("close");
 
-        assert!(db.closed);
+        assert!(db.ensure_open().is_err());
         assert!(db.inner.is_none());
         assert!(db
             .txns
@@ -487,7 +729,7 @@ mod tests {
 
     #[test]
     fn close_retry_keeps_tracked_transactions_on_failure() {
-        let mut db = PyDatabase::new().expect("db");
+        let mut db = PyDatabase::new(None).expect("db");
         let _txn = db.begin(None).expect("txn");
 
         inject_rollback_failure_once();
@@ -505,5 +747,29 @@ mod tests {
             .lock()
             .expect("transaction list lock poisoned")
             .is_empty());
+    }
+
+    #[test]
+    fn close_terminates_a_transaction_owned_stream_before_rollback() {
+        with_py(|py| {
+            let mut db = PyDatabase::new(None).expect("db");
+            db.execute_sql(
+                py,
+                "CREATE TABLE stream_close (id INTEGER PRIMARY KEY)",
+                None,
+            )
+            .expect("ddl");
+            db.execute_sql(py, "INSERT INTO stream_close (id) VALUES (1)", None)
+                .expect("insert");
+            let txn = db.begin(None).expect("transaction");
+            let stream = txn
+                .execute_sql_stream("SELECT id FROM stream_close", None, None, None)
+                .expect("stream");
+
+            db.close().expect("close");
+            let error = stream.next_row(py).expect_err("closed stream");
+            let code: String = error.value(py).getattr("code").unwrap().extract().unwrap();
+            assert_eq!(code, "stream_closed");
+        });
     }
 }

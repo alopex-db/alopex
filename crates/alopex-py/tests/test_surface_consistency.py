@@ -1,4 +1,5 @@
 import json
+import socket
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,12 @@ def test_python_cluster_status_accessor_shape_and_embedded_compatibility():
     }
     assert status["metrics_summary"]["source"] == "live_status_surface"
     assert status["metrics_summary"]["members"] == []
+    assert status["cluster_control"] == {
+        "available": False,
+        "mode": "single_node",
+        "reason": "single_node_mode",
+        "missing_prerequisites": [],
+    }
     assert status["degraded"] is False
     assert status["diagnostics"] == []
 
@@ -134,6 +141,24 @@ def test_python_routing_diagnostics_accessor_reports_engine_state():
     assert diagnostics["targets"] == []
     assert diagnostics["excluded_targets"] == []
     assert diagnostics["retry_summary"] is None
+
+
+def test_python_cluster_diagnostics_are_local_without_network_access(monkeypatch):
+    def forbidden_connect(*_args, **_kwargs):
+        raise AssertionError("embedded diagnostics must not create a network connection")
+
+    monkeypatch.setattr(socket, "create_connection", forbidden_connect)
+    monkeypatch.setattr(socket.socket, "connect", forbidden_connect)
+
+    db = Database.open_in_memory()
+    status = db.cluster_status()
+    diagnostics = db.routing_diagnostics()
+
+    assert status["cluster_control"]["available"] is False
+    assert status["cluster_control"]["reason"] == "single_node_mode"
+    assert status["degraded"] is False
+    assert diagnostics["decision"] == "local_only"
+    assert diagnostics["reason"] == "planning_input_unavailable"
 
 
 def test_python_cluster_accessors_reflect_latest_engine_state():

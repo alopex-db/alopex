@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use alopex_cluster::{
     CatalogTableRef, CatalogTableSnapshot, PlacementCatalog, PlanId, QueryRouter,
     QueryRoutingRequest, QueryTableReference, QueryTableReferenceAccess, QueryTableReferenceSource,
-    RoutingDecisionKind, RoutingDiagnostics, TableLifecycleEffect, TableRef,
+    RequestId, RoutingDecisionKind, RoutingDiagnostics, TableLifecycleEffect, TableRef,
 };
 use alopex_core::kv::async_adapter::AsyncKVTransactionAdapter;
 use alopex_core::kv::{KVStore, KVTransaction};
@@ -19,7 +19,7 @@ use alopex_sql::planner::{
 use alopex_sql::storage::async_storage::AsyncTxnBridge;
 use alopex_sql::storage::AsyncSqlTransaction;
 use alopex_sql::AlopexDialect;
-use axum::extract::Extension;
+use axum::extract::{Extension, Path};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use bincode::Options;
@@ -30,6 +30,9 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{Result, ServerError};
 use crate::http::{error_response, json_response, RequestContext};
+use crate::ops::distributed_read::{
+    PreparedReadLease, ReadCancellation, ReadExecutionOutcome, ReadExecutionSummary,
+};
 use crate::ops::memory::MemoryControlPolicy;
 use crate::server::ServerState;
 use crate::session::{CatalogRollbackEffect, SessionId, TxnHandle};
@@ -65,6 +68,38 @@ pub struct SqlResponse {
     pub results: Vec<SqlResultResponse>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub routing_diagnostics: Vec<RoutingDiagnostics>,
+}
+
+/// Explicit remote-read entry point. The coordinator registration is kept
+/// separate from legacy `/sql`, so an unsupported distributed request can
+/// never silently execute as a local SQL query.
+#[derive(Debug, Deserialize)]
+pub struct DistributedReadRequest {
+    pub sql: String,
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub read_mode: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum DistributedReadStreamItem {
+    Prepared {
+        execution_id: RequestId,
+        columns: Vec<ColumnInfoResponse>,
+    },
+    Row {
+        values: Vec<alopex_sql::storage::SqlValue>,
+    },
+    Terminal {
+        summary: ReadExecutionSummary,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct DistributedReadCancelResponse {
+    #[serde(flatten)]
+    cancellation: ReadCancellation,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +175,202 @@ pub async fn handle(
         Ok(response) => json_response(response, state.config.max_response_size, &ctx),
         Err(err) => error_response(err, &ctx),
     }
+}
+
+/// Reject an explicit distributed-read request when this server has no
+/// registered fenced range-read coordinator. This route intentionally does
+/// not call the legacy local SQL route: capability absence is observable and
+/// classified before a query can produce local rows.
+pub async fn begin_distributed_read(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+    Json(request): Json<DistributedReadRequest>,
+) -> Response {
+    if request.sql.trim().is_empty() {
+        return error_response(
+            ServerError::BadRequest("sql must not be empty".into()),
+            &ctx,
+        );
+    }
+    if let Err(error) =
+        crate::http::session::distributed_read_owner(&state, &ctx, request.session_id.as_deref())
+            .await
+    {
+        return error_response(error, &ctx);
+    }
+    let requested_mode = request.read_mode.as_deref().unwrap_or("inherit");
+    error_response(
+        ServerError::CapabilityUnavailable(format!(
+            "distributed read mode '{requested_mode}' has no registered fenced range-read coordinator; the SQL was not executed locally"
+        )),
+        &ctx,
+    )
+}
+
+/// Stream an already prepared distributed result. A coordinator registers the
+/// execution before dispatch and calls `publish_prepared` only after every
+/// range has supplied its P2.10 cleanup acknowledgement through P2.11.
+pub async fn stream_distributed_read(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(execution_id): Path<String>,
+) -> Response {
+    if execution_id.trim().is_empty() {
+        return error_response(
+            ServerError::BadRequest("distributed read execution id must not be empty".into()),
+            &ctx,
+        );
+    }
+    let execution_id = RequestId::new(execution_id);
+    let lease = match state
+        .distributed_read_registry
+        .open_prepared(&execution_id, ctx.actor.as_deref())
+    {
+        Ok(lease) => lease,
+        Err(error) => return error_response(error, &ctx),
+    };
+    if let Err(error) = preflight_distributed_stream(&lease, state.config.max_response_size) {
+        // Dropping an unconsumed lease dispatches the same cancellation and
+        // cleanup callbacks as an explicit HTTP cancellation request.
+        return error_response(error, &ctx);
+    }
+
+    let prepared = DistributedReadStreamItem::Prepared {
+        execution_id: execution_id.clone(),
+        columns: lease
+            .columns()
+            .iter()
+            .map(|column| ColumnInfoResponse {
+                name: column.name.clone(),
+                data_type: type_to_string(&column.data_type),
+            })
+            .collect(),
+    };
+    let (sender, receiver) = mpsc::channel(32);
+    tokio::spawn(async move {
+        if sender.send(prepared).await.is_err() {
+            return;
+        }
+        stream_prepared_distributed_rows(lease, sender).await;
+    });
+
+    let stream = ReceiverStream::new(receiver).map(|item| {
+        let json = serde_json::to_string(&item).unwrap_or_else(|_| {
+            "{\"type\":\"terminal\",\"summary\":{\"outcome\":\"terminal_failure\",\"reason\":\"response serialization failed\"}}".to_string()
+        });
+        Ok::<axum::body::Bytes, Infallible>(axum::body::Bytes::from(json + "\n"))
+    });
+    let body = axum::body::Body::from_stream(stream);
+    axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/jsonl")
+        .body(body)
+        .unwrap_or_else(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Deliver an idempotent cancellation to the coordinator and every registered
+/// range peer. Ownership is verified against the authenticated HTTP profile.
+pub async fn cancel_distributed_read(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(execution_id): Path<String>,
+) -> Response {
+    if execution_id.trim().is_empty() {
+        return error_response(
+            ServerError::BadRequest("distributed read execution id must not be empty".into()),
+            &ctx,
+        );
+    }
+    let execution_id = RequestId::new(execution_id);
+    match state
+        .distributed_read_registry
+        .cancel(&execution_id, ctx.actor.as_deref())
+    {
+        Ok(cancellation) => json_response(
+            DistributedReadCancelResponse { cancellation },
+            state.config.max_response_size,
+            &ctx,
+        ),
+        Err(error) => error_response(error, &ctx),
+    }
+}
+
+async fn stream_prepared_distributed_rows(
+    mut lease: PreparedReadLease,
+    sender: mpsc::Sender<DistributedReadStreamItem>,
+) {
+    loop {
+        let summary = lease.summary();
+        if summary.outcome != ReadExecutionOutcome::Success {
+            let _ = sender
+                .send(DistributedReadStreamItem::Terminal { summary })
+                .await;
+            lease.finish();
+            return;
+        }
+        let Some(values) = lease.next_row() else {
+            let summary = lease.summary();
+            let _ = sender
+                .send(DistributedReadStreamItem::Terminal { summary })
+                .await;
+            lease.finish();
+            return;
+        };
+        if sender
+            .send(DistributedReadStreamItem::Row { values })
+            .await
+            .is_err()
+        {
+            // The lease Drop implementation invokes the cancellation registry
+            // and releases any still-active peer work exactly once.
+            return;
+        }
+    }
+}
+
+fn preflight_distributed_stream(lease: &PreparedReadLease, max_size: usize) -> Result<()> {
+    let header = DistributedReadStreamItem::Prepared {
+        execution_id: lease.summary().execution_id,
+        columns: lease
+            .columns()
+            .iter()
+            .map(|column| ColumnInfoResponse {
+                name: column.name.clone(),
+                data_type: type_to_string(&column.data_type),
+            })
+            .collect(),
+    };
+    let mut total = serialized_jsonl_size(&header)?;
+    let mut preview = lease.preview_stream().ok_or_else(|| {
+        ServerError::Conflict("distributed read result has already been released".into())
+    })?;
+    while let Some(values) = preview.next_row() {
+        total = total.saturating_add(serialized_jsonl_size(&DistributedReadStreamItem::Row {
+            values,
+        })?);
+        if total > max_size {
+            return Err(ServerError::PayloadTooLarge(
+                "response size exceeds limit".into(),
+            ));
+        }
+    }
+    total = total.saturating_add(serialized_jsonl_size(
+        &DistributedReadStreamItem::Terminal {
+            summary: lease.summary(),
+        },
+    )?);
+    if total > max_size {
+        return Err(ServerError::PayloadTooLarge(
+            "response size exceeds limit".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn serialized_jsonl_size<T: Serialize>(item: &T) -> Result<usize> {
+    serde_json::to_vec(item)
+        .map(|encoded| encoded.len().saturating_add(1))
+        .map_err(|error| ServerError::Internal(error.to_string()))
 }
 
 /// SQL を非ストリーミングで実行する共有経路。

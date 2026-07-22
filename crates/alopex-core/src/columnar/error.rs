@@ -20,6 +20,9 @@ pub enum ColumnarError {
         /// 期待するバージョン。
         expected: u16,
     },
+    /// Bounded streaming requires a provisioned V08 chunked segment layout.
+    #[error("requires V08 chunked layout")]
+    RequiresV08ChunkedLayout,
     /// サポートされない圧縮方式。
     #[error("unsupported compression: {algorithm}")]
     UnsupportedCompression {

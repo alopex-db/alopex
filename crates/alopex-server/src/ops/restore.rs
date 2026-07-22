@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::task;
 use uuid::Uuid;
 
@@ -174,6 +176,50 @@ fn preflight_restore_source(source: &Path) -> Result<()> {
             "source snapshot failed integrity checks: {err}"
         ))
     })
+}
+
+/// Computes a deterministic SHA-256 identity for a restore/upgrade source.
+/// Every directory entry path, type, and file byte is included in sorted
+/// order, while `.lifecycle` remains excluded because it is server-local
+/// operation history rather than source database content.
+pub fn restore_source_fingerprint(source: &Path) -> Result<String> {
+    validate_source(source)?;
+    let mut digest = Sha256::new();
+    hash_restore_tree(source, source, &mut digest)?;
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn hash_restore_tree(root: &Path, path: &Path, digest: &mut Sha256) -> Result<()> {
+    let mut entries = fs::read_dir(path)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        if path == root && name == ".lifecycle" {
+            continue;
+        }
+        let child = entry.path();
+        let relative = child
+            .strip_prefix(root)
+            .map_err(|error| ServerError::Internal(error.to_string()))?;
+        digest.update(relative.to_string_lossy().as_bytes());
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            digest.update(b"directory");
+            hash_restore_tree(root, &child, digest)?;
+        } else if metadata.is_file() {
+            digest.update(b"file");
+            let mut file = fs::File::open(&child)?;
+            let mut buffer = [0u8; 8192];
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                digest.update(&buffer[..read]);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn restore_backup_dir(data_dir: &Path) -> PathBuf {

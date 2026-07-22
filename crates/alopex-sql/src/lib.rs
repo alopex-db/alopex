@@ -31,6 +31,7 @@ pub mod async_api;
 pub mod catalog;
 pub mod columnar;
 pub mod dialect;
+pub mod distributed_read;
 pub mod error;
 pub mod executor;
 mod nim_bridge;
@@ -78,8 +79,9 @@ pub use planner::{
 #[cfg(feature = "tokio")]
 pub use storage::ErasedAsyncSqlTransaction;
 pub use storage::{
-    IndexScanIterator, IndexStorage, KeyEncoder, RowCodec, SqlTransaction, SqlValue, StorageError,
-    TableScanIterator, TableStorage, TxnBridge, TxnContext,
+    IndexScanIterator, IndexStorage, KeyEncoder, RangeBoundedScanIterator, RangeReadSnapshot,
+    RowCodec, SqlTransaction, SqlValue, StorageError, StorageRangeConstraint,
+    StorageRangeConstraintError, TableScanIterator, TableStorage, TxnBridge, TxnContext,
 };
 
 // Executor types

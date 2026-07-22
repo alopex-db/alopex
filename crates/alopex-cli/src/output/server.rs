@@ -152,6 +152,53 @@ pub fn cluster_operation_row(
     ])
 }
 
+/// Fields emitted for every `server cluster` operation.  These names are kept
+/// stable for table and JSON output so operators and automation observe the
+/// same operation ID, outcome and capability prerequisite.
+#[derive(Debug, Clone, Copy)]
+pub struct ClusterManagementRowFields<'a> {
+    pub operation_id: &'a str,
+    pub operation: &'a str,
+    pub outcome_class: &'a str,
+    pub reason: &'a str,
+    pub state_version: Option<u64>,
+    pub control_available: bool,
+    pub control_mode: &'a str,
+    pub control_reason: &'a str,
+    pub missing_prerequisites: Option<&'a str>,
+    pub actor: Option<&'a str>,
+}
+
+pub fn cluster_management_columns() -> Vec<Column> {
+    vec![
+        Column::new("Operation ID", DataType::Text),
+        Column::new("Operation", DataType::Text),
+        Column::new("Outcome", DataType::Text),
+        Column::new("Reason", DataType::Text),
+        Column::new("State Version", DataType::Text),
+        Column::new("Control Available", DataType::Bool),
+        Column::new("Control Mode", DataType::Text),
+        Column::new("Control Reason", DataType::Text),
+        Column::new("Missing Prerequisites", DataType::Text),
+        Column::new("Actor", DataType::Text),
+    ]
+}
+
+pub fn cluster_management_row(fields: ClusterManagementRowFields<'_>) -> Row {
+    Row::new(vec![
+        Value::Text(fields.operation_id.to_string()),
+        Value::Text(fields.operation.to_string()),
+        Value::Text(fields.outcome_class.to_string()),
+        Value::Text(fields.reason.to_string()),
+        Value::Text(opt_u64(fields.state_version)),
+        Value::Bool(fields.control_available),
+        Value::Text(fields.control_mode.to_string()),
+        Value::Text(fields.control_reason.to_string()),
+        Value::Text(opt_text(fields.missing_prerequisites)),
+        Value::Text(opt_text(fields.actor)),
+    ])
+}
+
 fn opt_text(value: Option<&str>) -> String {
     value.unwrap_or("N/A").to_string()
 }
@@ -182,4 +229,31 @@ fn opt_bool(value: Option<bool>) -> String {
 
 fn opt_bool_value(value: Option<bool>) -> Value {
     value.map(Value::Bool).unwrap_or(Value::Null)
+}
+
+#[cfg(test)]
+mod cluster_management_tests {
+    use super::*;
+
+    #[test]
+    fn cluster_management_row_contains_machine_contract_fields() {
+        let columns = cluster_management_columns();
+        let row = cluster_management_row(ClusterManagementRowFields {
+            operation_id: "operation-7",
+            operation: "ranges_register",
+            outcome_class: "pending",
+            reason: "metadata_consensus_adapter_not_attached",
+            state_version: None,
+            control_available: true,
+            control_mode: "cluster_aware",
+            control_reason: "ready",
+            missing_prerequisites: None,
+            actor: Some("operator-a"),
+        });
+
+        assert_eq!(columns.len(), row.columns.len());
+        assert_eq!(row.columns[0], Value::Text("operation-7".to_string()));
+        assert_eq!(row.columns[2], Value::Text("pending".to_string()));
+        assert_eq!(row.columns[5], Value::Bool(true));
+    }
 }

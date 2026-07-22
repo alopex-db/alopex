@@ -482,6 +482,24 @@ impl LogicalPlan {
             LogicalPlan::Join { .. } => None,
         }
     }
+
+    /// Returns whether this plan tree contains a JOIN boundary.
+    ///
+    /// The normal local planner/executor continues to support JOIN.  Consumers
+    /// with a deliberately closed execution catalog (such as distributed
+    /// reads) can use this structural fact to reject it before any transport is
+    /// opened rather than trying to infer it from a table name.
+    pub fn contains_join(&self) -> bool {
+        match self {
+            LogicalPlan::Join { .. } => true,
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Limit { input, .. } => input.contains_join(),
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]

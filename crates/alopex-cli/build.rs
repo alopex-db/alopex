@@ -8,6 +8,16 @@ fn main() {
     if let Ok(libdir) = std::env::var("DEP_ALOPEX_SQL_PARSER_LIBDIR") {
         if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
             println!("cargo:rustc-link-arg-bins=-Wl,-rpath,{libdir}");
+            // `rustc-link-arg-tests` covers integration-test executables, but
+            // a library's own unit-test harness is not selected by that
+            // directive. Apply the same runtime search path to every final
+            // link target so `cargo test -p alopex-cli --lib` can load the
+            // parser without caller-provided environment variables.
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{libdir}");
+            // Integration tests are separate executable targets, so the bin
+            // directive alone does not make the Nim parser discoverable when
+            // `cargo test` launches tests/server_test.rs.
+            println!("cargo:rustc-link-arg-tests=-Wl,-rpath,{libdir}");
         }
     }
 }

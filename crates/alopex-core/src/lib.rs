@@ -13,6 +13,7 @@ pub mod kv;
 pub mod log;
 pub mod lsm;
 pub mod obs;
+pub mod row_key_range;
 pub mod sql;
 pub mod storage;
 pub mod txn;
@@ -37,9 +38,10 @@ pub use kv::storage::{StorageFactory, StorageMode};
 pub use kv::{AsyncKVStore, AsyncKVTransaction};
 #[cfg(feature = "tokio")]
 pub use kv::{AsyncKVStoreAdapter, AsyncKVTransactionAdapter};
-pub use kv::{KVStore, KVTransaction};
+pub use kv::{KVStore, KVTransaction, ReadAtCapability, ReadAtError, ReadAtPoint, ReadAtResult};
 #[cfg(feature = "s3")]
 pub use kv::{S3Config, S3KV};
+pub use row_key_range::{CanonicalRowKey, EncodedRowKeyRange, RowKeyRange, RowKeyRangeError};
 pub use storage::large_value::{
     LargeValueChunkInfo, LargeValueKind, LargeValueMeta, LargeValueReader, LargeValueWriter,
     DEFAULT_CHUNK_SIZE,

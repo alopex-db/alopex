@@ -23,8 +23,9 @@ use crate::config::ServerConfig;
 use crate::error::{Result, ServerError};
 use crate::metrics::Metrics;
 use crate::ops::backup::BackupCoordinator;
+use crate::ops::distributed_read::{DistributedReadRegistry, RemoteReadWorkerAuthorizer};
 use crate::ops::memory::MemoryControlPolicy;
-use crate::ops::recovery::{RecoveryCoordinator, RecoveryInfo};
+use crate::ops::recovery::{RecoveryCoordinator, RecoveryInfo, UpgradeCoordinator};
 use crate::ops::restore::RestoreCoordinator;
 use crate::ops::state::{LifecycleStateManager, Mode};
 use crate::session::{CatalogRollbackEffect, SessionConfig, SessionManager, TransactionFactory};
@@ -44,11 +45,17 @@ pub struct ServerState {
     pub metrics: Metrics,
     pub audit: AuditLogger,
     pub auth: AuthMiddleware,
+    /// Server-injected local authorization recheck for every remote worker.
+    pub remote_read_authorizer: RemoteReadWorkerAuthorizer,
+    /// Coordinator-owned execution/cleanup registry shared by HTTP cancel,
+    /// connection close, timeout, and range-worker cancellation delivery.
+    pub distributed_read_registry: DistributedReadRegistry,
     pub start_time: Instant,
     pub lifecycle_state: Arc<LifecycleStateManager>,
     pub recovery_info: RecoveryInfo,
     pub backup_coordinator: BackupCoordinator,
     pub restore_coordinator: RestoreCoordinator,
+    pub upgrade_coordinator: UpgradeCoordinator,
     pub admission_permits: Arc<Semaphore>,
     pub admission_waiters: AtomicUsize,
 }
@@ -89,6 +96,9 @@ impl Server {
         let metrics = Metrics::new()?;
         let audit = AuditLogger::new(config.audit_log_output.clone())?;
         let auth = AuthMiddleware::new(config.auth_mode.clone());
+        let remote_read_authorizer =
+            RemoteReadWorkerAuthorizer::new(auth.local_read_authorization_recheck());
+        let distributed_read_registry = DistributedReadRegistry::new();
 
         let txn_factory = build_txn_factory(async_store.clone(), catalog.clone(), metrics.clone());
         let session_manager = Arc::new(SessionManager::new(
@@ -113,6 +123,7 @@ impl Server {
         let backup_coordinator =
             BackupCoordinator::new(data_dir.clone(), lifecycle_state.clone(), checkpoint);
         let restore_coordinator = RestoreCoordinator::new(data_dir, lifecycle_state.clone());
+        let upgrade_coordinator = UpgradeCoordinator::new(&config.data_dir);
         let admission_permits = Arc::new(Semaphore::new(config.max_concurrency));
 
         Ok(Self {
@@ -126,11 +137,14 @@ impl Server {
                 metrics,
                 audit,
                 auth,
+                remote_read_authorizer,
+                distributed_read_registry,
                 start_time: Instant::now(),
                 lifecycle_state,
                 recovery_info,
                 backup_coordinator,
                 restore_coordinator,
+                upgrade_coordinator,
                 admission_permits,
                 admission_waiters: AtomicUsize::new(0),
             }),
@@ -453,6 +467,9 @@ async fn run_cleanup(state: Arc<ServerState>, mut shutdown: broadcast::Receiver<
         tokio::select! {
             _ = interval.tick() => {
                 state.session_manager.cleanup_expired();
+                state
+                    .distributed_read_registry
+                    .cleanup_after(state.config.session_ttl);
             }
             _ = shutdown.recv() => break,
         }

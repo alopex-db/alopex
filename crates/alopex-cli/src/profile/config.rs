@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::cli::Cli;
+use crate::cli::{Cli, SqlReadMode};
 use crate::error::{CliError, Result};
 
 #[cfg(unix)]
@@ -28,6 +28,41 @@ pub enum ConnectionType {
     #[default]
     Local,
     Server,
+}
+
+/// Declares whether a profile is allowed to request a distributed read. A
+/// server connection alone remains a legacy/local profile until this is set to
+/// `cluster`, preventing accidental remote routing after an upgrade.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecutionScope {
+    #[default]
+    Local,
+    Cluster,
+}
+
+/// Cluster-only read-mode policy configured by the profile owner. The server
+/// still checks committed cluster policy; this object only determines which
+/// client-side overrides are eligible to be sent to that server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterReadConfig {
+    #[serde(default)]
+    pub permitted_read_modes: Vec<SqlReadMode>,
+    #[serde(default = "default_cluster_read_mode")]
+    pub default_read_mode: SqlReadMode,
+}
+
+fn default_cluster_read_mode() -> SqlReadMode {
+    SqlReadMode::Inherit
+}
+
+impl Default for ClusterReadConfig {
+    fn default() -> Self {
+        Self {
+            permitted_read_modes: Vec::new(),
+            default_read_mode: default_cluster_read_mode(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -74,6 +109,10 @@ pub struct Profile {
     pub server: Option<ServerConfig>,
     #[serde(default)]
     pub data_dir: Option<String>,
+    #[serde(default)]
+    pub execution_scope: ExecutionScope,
+    #[serde(default)]
+    pub cluster_read: Option<ClusterReadConfig>,
 }
 
 impl Profile {
@@ -112,6 +151,76 @@ pub struct ResolvedConfig {
     pub server: Option<ServerConfig>,
     #[allow(dead_code)]
     pub fallback_local: Option<String>,
+    /// Retained in the resolved configuration so SQL execution can reject an
+    /// invalid mode before opening either local storage or a server request.
+    pub execution_scope: ExecutionScope,
+    pub cluster_read: Option<ClusterReadConfig>,
+}
+
+/// The deterministic profile-side result of resolving `SqlCommand` read mode.
+/// A cluster candidate must still be accepted by the server's committed read
+/// policy; callers must not reinterpret a rejection as permission to run
+/// locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedSqlReadMode {
+    Local,
+    Cluster(SqlReadMode),
+}
+
+impl ResolvedConfig {
+    pub fn resolve_sql_read_mode(
+        &self,
+        requested: Option<SqlReadMode>,
+    ) -> Result<ResolvedSqlReadMode> {
+        match self.execution_scope {
+            ExecutionScope::Local => match requested.unwrap_or(SqlReadMode::Local) {
+                SqlReadMode::Local => Ok(ResolvedSqlReadMode::Local),
+                mode => Err(CliError::InvalidArgument(format!(
+                    "read mode '{}' requires an explicit cluster profile",
+                    read_mode_name(mode)
+                ))),
+            },
+            ExecutionScope::Cluster => {
+                let cluster_read = self.cluster_read.as_ref().ok_or_else(|| {
+                    CliError::InvalidArgument(
+                        "cluster profile requires a [cluster_read] configuration".into(),
+                    )
+                })?;
+                let requested = requested.unwrap_or(SqlReadMode::Inherit);
+                if requested == SqlReadMode::Local {
+                    return Err(CliError::InvalidArgument(
+                        "local_not_permitted_for_cluster_profile".into(),
+                    ));
+                }
+                let candidate = if requested == SqlReadMode::Inherit {
+                    cluster_read.default_read_mode
+                } else {
+                    if !cluster_read.permitted_read_modes.contains(&requested) {
+                        return Err(CliError::InvalidArgument(format!(
+                            "read_mode_not_permitted: '{}' is not permitted by the cluster profile",
+                            read_mode_name(requested)
+                        )));
+                    }
+                    requested
+                };
+                if candidate == SqlReadMode::Local {
+                    return Err(CliError::InvalidArgument(
+                        "cluster profile default_read_mode cannot be local".into(),
+                    ));
+                }
+                Ok(ResolvedSqlReadMode::Cluster(candidate))
+            }
+        }
+    }
+}
+
+fn read_mode_name(mode: SqlReadMode) -> &'static str {
+    match mode {
+        SqlReadMode::Local => "local",
+        SqlReadMode::Inherit => "inherit",
+        SqlReadMode::Strong => "strong",
+        SqlReadMode::Stale => "stale",
+    }
 }
 
 #[derive(Debug)]
@@ -243,6 +352,8 @@ impl ProfileManager {
                 connection_type: ConnectionType::Local,
                 server: None,
                 fallback_local: None,
+                execution_scope: ExecutionScope::Local,
+                cluster_read: None,
             });
         }
 
@@ -264,6 +375,8 @@ impl ProfileManager {
             connection_type: ConnectionType::Local,
             server: None,
             fallback_local: None,
+            execution_scope: ExecutionScope::Local,
+            cluster_read: None,
         })
     }
 }
@@ -277,6 +390,18 @@ fn apply_cli_overrides(cli: &Cli, resolved: &mut ResolvedConfig) {
 }
 
 fn resolve_profile(profile: Profile, profile_name: Option<String>) -> Result<ResolvedConfig> {
+    if profile.execution_scope == ExecutionScope::Cluster {
+        if profile.connection_type != ConnectionType::Server {
+            return Err(CliError::InvalidArgument(
+                "cluster profile requires connection_type = 'server'".into(),
+            ));
+        }
+        if profile.cluster_read.is_none() {
+            return Err(CliError::InvalidArgument(
+                "cluster profile requires a [cluster_read] configuration".into(),
+            ));
+        }
+    }
     match profile.connection_type {
         ConnectionType::Local => {
             let local_path = profile.local_path().ok_or_else(|| {
@@ -289,15 +414,22 @@ fn resolve_profile(profile: Profile, profile_name: Option<String>) -> Result<Res
                 connection_type: ConnectionType::Local,
                 server: None,
                 fallback_local: None,
+                execution_scope: ExecutionScope::Local,
+                cluster_read: None,
             })
         }
         ConnectionType::Server => {
+            let execution_scope = profile.execution_scope;
+            let cluster_read = profile.cluster_read.clone();
             let fallback_local = profile.local_path();
             let server = profile.server.ok_or_else(|| {
                 CliError::InvalidArgument(
                     "Server profile requires a server configuration".to_string(),
                 )
             })?;
+            let fallback_local = (execution_scope == ExecutionScope::Local)
+                .then_some(fallback_local)
+                .flatten();
             Ok(ResolvedConfig {
                 data_dir: fallback_local.clone(),
                 in_memory: false,
@@ -305,6 +437,8 @@ fn resolve_profile(profile: Profile, profile_name: Option<String>) -> Result<Res
                 connection_type: ConnectionType::Server,
                 server: Some(server),
                 fallback_local,
+                execution_scope,
+                cluster_read,
             })
         }
     }
@@ -333,4 +467,98 @@ fn validate_config_permissions(path: &PathBuf) -> Result<()> {
 #[cfg(not(unix))]
 fn validate_config_permissions(_path: &PathBuf) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server_profile(
+        execution_scope: ExecutionScope,
+        cluster_read: Option<ClusterReadConfig>,
+    ) -> Profile {
+        Profile {
+            connection_type: ConnectionType::Server,
+            local: Some(LocalConfig {
+                path: "/tmp/local-fallback".into(),
+            }),
+            server: Some(ServerConfig {
+                url: "https://cluster.example.test".into(),
+                insecure: false,
+                auth: None,
+                token: None,
+                username: None,
+                password_command: None,
+                cert_path: None,
+                key_path: None,
+            }),
+            data_dir: None,
+            execution_scope,
+            cluster_read,
+        }
+    }
+
+    #[test]
+    fn legacy_server_profile_remains_local_and_allows_legacy_fallback() {
+        let resolved = resolve_profile(
+            server_profile(ExecutionScope::Local, None),
+            Some("legacy".into()),
+        )
+        .unwrap();
+        assert_eq!(resolved.execution_scope, ExecutionScope::Local);
+        assert_eq!(
+            resolved.fallback_local.as_deref(),
+            Some("/tmp/local-fallback")
+        );
+        assert_eq!(
+            resolved.resolve_sql_read_mode(None).unwrap(),
+            ResolvedSqlReadMode::Local
+        );
+        assert!(matches!(
+            resolved.resolve_sql_read_mode(Some(SqlReadMode::Strong)),
+            Err(CliError::InvalidArgument(message)) if message.contains("explicit cluster profile")
+        ));
+    }
+
+    #[test]
+    fn explicit_cluster_profile_resolves_permitted_overrides_without_local_fallback() {
+        let resolved = resolve_profile(
+            server_profile(
+                ExecutionScope::Cluster,
+                Some(ClusterReadConfig {
+                    permitted_read_modes: vec![SqlReadMode::Strong, SqlReadMode::Stale],
+                    default_read_mode: SqlReadMode::Strong,
+                }),
+            ),
+            Some("cluster".into()),
+        )
+        .unwrap();
+        assert_eq!(resolved.fallback_local, None);
+        assert_eq!(
+            resolved.resolve_sql_read_mode(None).unwrap(),
+            ResolvedSqlReadMode::Cluster(SqlReadMode::Strong)
+        );
+        assert_eq!(
+            resolved
+                .resolve_sql_read_mode(Some(SqlReadMode::Stale))
+                .unwrap(),
+            ResolvedSqlReadMode::Cluster(SqlReadMode::Stale)
+        );
+        assert!(matches!(
+            resolved.resolve_sql_read_mode(Some(SqlReadMode::Local)),
+            Err(CliError::InvalidArgument(message)) if message == "local_not_permitted_for_cluster_profile"
+        ));
+        assert!(matches!(
+            resolved.resolve_sql_read_mode(Some(SqlReadMode::Strong)),
+            Ok(ResolvedSqlReadMode::Cluster(SqlReadMode::Strong))
+        ));
+    }
+
+    #[test]
+    fn cluster_profile_requires_cluster_read_configuration() {
+        assert!(matches!(
+            resolve_profile(server_profile(ExecutionScope::Cluster, None), None),
+            Err(CliError::InvalidArgument(message)) if message.contains("cluster_read")
+        ));
+    }
 }

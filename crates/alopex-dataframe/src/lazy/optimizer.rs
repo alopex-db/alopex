@@ -80,6 +80,22 @@ fn predicate_pushdown(plan: LogicalPlan) -> LogicalPlan {
             exprs,
             kind,
         },
+        LogicalPlan::Concat { inputs, schema } => {
+            let mut flattened = Vec::new();
+            for input in inputs {
+                match predicate_pushdown(input) {
+                    LogicalPlan::Concat {
+                        inputs: nested,
+                        schema: nested_schema,
+                    } if nested_schema == schema => flattened.extend(nested),
+                    input => flattened.push(input),
+                }
+            }
+            LogicalPlan::Concat {
+                inputs: flattened,
+                schema,
+            }
+        }
         LogicalPlan::Aggregate {
             input,
             group_by,
@@ -215,6 +231,11 @@ fn collect_referenced_columns(expr: &Expr, out: &mut HashSet<String>) {
         }
         E::Agg { expr, .. } => collect_referenced_columns(expr, out),
         E::Function { input, .. } => collect_referenced_columns(input, out),
+        E::ConcatStr { inputs, .. } => {
+            for input in inputs {
+                collect_referenced_columns(input, out);
+            }
+        }
         E::Literal(_) | E::Wildcard => {}
     }
 }
@@ -336,6 +357,20 @@ fn projection_pushdown_inner(
                 required,
             )
         }
+        // Keep the validated concat schema intact.  Pushing a downstream projection into
+        // individual inputs would require rewriting this node's schema as well as proving that
+        // every input still produces the identical narrowed schema.  That optimisation is not
+        // needed for v0.8 correctness, so recurse without narrowing each input.
+        LogicalPlan::Concat { inputs, schema } => (
+            LogicalPlan::Concat {
+                inputs: inputs
+                    .into_iter()
+                    .map(|input| projection_pushdown_inner(input, RequiredColumns::All).0)
+                    .collect(),
+                schema,
+            },
+            required,
+        ),
         LogicalPlan::Aggregate {
             input,
             group_by,
@@ -559,6 +594,10 @@ fn merge_projection(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use arrow::datatypes::{DataType, Field, Schema};
+
     use super::Optimizer;
     use crate::expr::{col, lit};
     use crate::lazy::LogicalPlan;
@@ -642,5 +681,34 @@ mod tests {
         let optimized = Optimizer::optimize(&plan);
         let s = optimized.display();
         assert!(s.contains("projection"));
+    }
+
+    #[test]
+    fn concat_optimizer_flattens_only_compatible_nested_inputs_in_order() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            true,
+        )]));
+        let scan = |path: &str| LogicalPlan::CsvScan {
+            path: path.into(),
+            predicate: None,
+            projection: None,
+        };
+        let plan = LogicalPlan::Concat {
+            inputs: vec![
+                LogicalPlan::Concat {
+                    inputs: vec![scan("first.csv"), scan("second.csv")],
+                    schema: Some(schema.clone()),
+                },
+                scan("third.csv"),
+            ],
+            schema: Some(schema),
+        };
+
+        let display = Optimizer::optimize(&plan).display();
+        assert!(display.contains("concat inputs=3"));
+        assert!(display.find("first.csv").unwrap() < display.find("second.csv").unwrap());
+        assert!(display.find("second.csv").unwrap() < display.find("third.csv").unwrap());
     }
 }

@@ -8,7 +8,7 @@ use crate::models::{Column, DataType, Row, Value};
 use crate::output::formatter::{create_formatter, Formatter};
 use crate::tui::renderer::render_output;
 
-use super::config::{ConnectionType, LocalConfig, Profile, ProfileManager};
+use super::config::{ConnectionType, ExecutionScope, LocalConfig, Profile, ProfileManager};
 
 #[derive(Debug, Serialize)]
 pub struct ProfileListOutput {
@@ -42,6 +42,8 @@ pub fn execute_profile_command(cmd: ProfileCommand, output: OutputFormat) -> Res
                     }),
                     server: None,
                     data_dir: Some(data_dir),
+                    execution_scope: ExecutionScope::Local,
+                    cluster_read: None,
                 },
             )?;
             manager.save()?;
@@ -99,6 +101,8 @@ pub fn execute_profile_tui<'a>(
                     }),
                     server: None,
                     data_dir: Some(data_dir),
+                    execution_scope: ExecutionScope::Local,
+                    cluster_read: None,
                 },
             )?;
             manager.save()?;

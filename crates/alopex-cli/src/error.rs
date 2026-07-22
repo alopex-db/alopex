@@ -4,6 +4,8 @@
 
 use thiserror::Error;
 
+use crate::batch::ExitCode;
+
 /// CLI-specific error type.
 ///
 /// This enum represents all possible errors that can occur during CLI operations.
@@ -104,22 +106,54 @@ pub enum CliError {
     #[error("Server does not support this command: {0}")]
     #[allow(dead_code)]
     ServerUnsupported(String),
+
+    /// Classified terminal outcome of a distributed SQL read. Its exit code
+    /// is fixed by the wire/CLI classification rather than by a generic error.
+    #[error("Distributed read {outcome}: {reason}")]
+    DistributedReadOutcome {
+        outcome: String,
+        reason: String,
+        exit_code: ExitCode,
+    },
+
+    /// A cluster management request completed with a classified non-success
+    /// outcome. The response was already written to stdout before this error
+    /// is returned, preserving the operation ID for automation.
+    #[error("Cluster management {outcome}: {reason}")]
+    ClusterManagementOutcome {
+        outcome: String,
+        reason: String,
+        exit_code: ExitCode,
+    },
 }
 
 /// Type alias for CLI results.
 pub type Result<T> = std::result::Result<T, CliError>;
 
-/// Handle an error by printing it and exiting.
+/// Print an error for the top-level command dispatcher.
 ///
 /// If `verbose` is true, prints the debug format (with stack trace info).
 /// Otherwise, prints the display format (user-friendly message).
-pub fn handle_error(error: CliError, verbose: bool) {
+pub fn handle_error(error: &CliError, verbose: bool) {
     if verbose {
         eprintln!("Error: {:?}", error); // Debug format with stack trace
     } else {
         eprintln!("Error: {}", error); // Display format
     }
-    std::process::exit(1);
+}
+
+/// Return the process exit class associated with an error. Most CLI failures
+/// remain the legacy generic error code; a cluster management response can
+/// instead retain its explicit terminal, retryable, pending, or authorization
+/// classification.
+impl CliError {
+    pub fn exit_code(&self) -> ExitCode {
+        match self {
+            Self::ClusterManagementOutcome { exit_code, .. } => *exit_code,
+            Self::DistributedReadOutcome { exit_code, .. } => *exit_code,
+            _ => ExitCode::Error,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -145,6 +179,27 @@ mod tests {
             format!("{}", err),
             "Credentials error: AWS_ACCESS_KEY_ID not set"
         );
+    }
+
+    #[test]
+    fn cluster_management_error_preserves_its_exit_class() {
+        let err = CliError::ClusterManagementOutcome {
+            outcome: "retryable_failure".to_string(),
+            reason: "not_leader".to_string(),
+            exit_code: ExitCode::Retryable,
+        };
+
+        assert_eq!(err.exit_code(), ExitCode::Retryable);
+    }
+
+    #[test]
+    fn distributed_read_error_preserves_its_exit_class() {
+        let err = CliError::DistributedReadOutcome {
+            outcome: "unsupported".to_string(),
+            reason: "remote DDL is outside the closed catalog".to_string(),
+            exit_code: ExitCode::Unsupported,
+        };
+        assert_eq!(err.exit_code(), ExitCode::Unsupported);
     }
 
     #[test]

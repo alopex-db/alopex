@@ -6,6 +6,10 @@ use std::time::Duration;
 use bincode::Options;
 
 use crate::columnar::error::{ColumnarError, Result};
+use crate::columnar::segment_v08::{
+    ChunkedSegmentAccessV08, RangeAddressableSegmentProvider, SegmentReferenceV08,
+    DEFAULT_V08_METADATA_LIMIT_BYTES,
+};
 use crate::columnar::segment_v2::{
     ColumnSegmentV2, InMemorySegmentSource, RecordBatch, SegmentMetaV2, SegmentReaderV2,
 };
@@ -27,6 +31,13 @@ pub mod key_layout {
     pub const PREFIX_STATISTICS: u8 = 0x13;
     /// RowGroup 単位の付加情報。
     pub const PREFIX_ROW_GROUP: u8 = 0x14;
+    /// Provisioned V08 range-addressable columnar segment objects.
+    pub const PREFIX_COLUMN_SEGMENT_V08: u8 = 0x15;
+
+    const V08_OBJECT_HEADER: u8 = 0;
+    const V08_OBJECT_SCHEMA: u8 = 1;
+    const V08_OBJECT_DIRECTORY: u8 = 2;
+    const V08_OBJECT_CHUNK: u8 = 3;
 
     /// カラムナーセグメントのキーを生成する。
     pub fn column_segment_key(table_id: u32, segment_id: u64, column_idx: u16) -> Vec<u8> {
@@ -63,6 +74,54 @@ pub mod key_layout {
         key.extend_from_slice(&segment_id.to_le_bytes());
         key
     }
+
+    /// Generates the independent V08 header key.
+    pub fn v08_header_key(table_id: u32, segment_id: u64) -> Vec<u8> {
+        v08_object_key(table_id, segment_id, V08_OBJECT_HEADER)
+    }
+
+    /// Generates the independent V08 schema key.
+    pub fn v08_schema_key(table_id: u32, segment_id: u64) -> Vec<u8> {
+        v08_object_key(table_id, segment_id, V08_OBJECT_SCHEMA)
+    }
+
+    /// Generates the independent V08 directory key.
+    pub fn v08_directory_key(table_id: u32, segment_id: u64) -> Vec<u8> {
+        v08_object_key(table_id, segment_id, V08_OBJECT_DIRECTORY)
+    }
+
+    /// Generates one independently addressable V08 column chunk key.
+    pub fn v08_chunk_key(
+        table_id: u32,
+        segment_id: u64,
+        row_group_index: u32,
+        column_index: u16,
+    ) -> Vec<u8> {
+        let mut key = v08_object_key(table_id, segment_id, V08_OBJECT_CHUNK);
+        key.extend_from_slice(&row_group_index.to_le_bytes());
+        key.extend_from_slice(&column_index.to_le_bytes());
+        key
+    }
+
+    fn v08_object_key(table_id: u32, segment_id: u64, object: u8) -> Vec<u8> {
+        let mut key = Vec::with_capacity(1 + 4 + 8 + 1 + 4 + 2);
+        key.push(PREFIX_COLUMN_SEGMENT_V08);
+        key.extend_from_slice(&table_id.to_le_bytes());
+        key.extend_from_slice(&segment_id.to_le_bytes());
+        key.push(object);
+        key
+    }
+}
+
+/// Preflight result for DataFrame streaming over an embedded segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamingSegmentLayoutPreflightV08 {
+    /// A separately-addressable V08 header is provisioned.
+    Available,
+    /// The legacy V2 blob exists but cannot be used for bounded streaming.
+    RequiresV08ChunkedLayout,
+    /// Neither V08 nor legacy V2 data exists for this segment reference.
+    NotFound,
 }
 
 /// カラムナーセグメントを KVS に永続化するブリッジ。
@@ -79,6 +138,11 @@ impl ColumnarKvsBridge {
             store,
             max_retries: 10,
         }
+    }
+
+    fn read_v08_object(&self, key: Vec<u8>) -> Result<Vec<u8>> {
+        let mut txn = self.store.begin(TxnMode::ReadOnly)?;
+        txn.get(&key)?.ok_or(ColumnarError::NotFound)
     }
 
     fn load_index<'a>(txn: &mut AnyKVTransaction<'a>, table_id: u32) -> Result<Vec<u64>> {
@@ -174,6 +238,69 @@ impl ColumnarKvsBridge {
             .map_err(|e| ColumnarError::InvalidFormat(e.to_string()))
     }
 
+    /// Classifies whether this segment can be opened without a V2 blob read.
+    pub fn streaming_layout_preflight_v08(
+        &self,
+        table_id: u32,
+        segment_id: u64,
+    ) -> Result<StreamingSegmentLayoutPreflightV08> {
+        let mut txn = self.store.begin(TxnMode::ReadOnly)?;
+        if txn
+            .get(&key_layout::v08_header_key(table_id, segment_id))?
+            .is_some()
+        {
+            return Ok(StreamingSegmentLayoutPreflightV08::Available);
+        }
+        // V2 persists a separate small statistics object.  Looking up this
+        // marker avoids fetching its monolithic segment blob merely to decide
+        // that bounded streaming must reject it.
+        if txn
+            .get(&key_layout::statistics_key(table_id, segment_id))?
+            .is_some()
+        {
+            return Ok(StreamingSegmentLayoutPreflightV08::RequiresV08ChunkedLayout);
+        }
+        Ok(StreamingSegmentLayoutPreflightV08::NotFound)
+    }
+
+    /// Opens a provisioned V08 read-only chunk provider.
+    ///
+    /// Legacy V2 data is classified before it is read and is never converted
+    /// into artificial streaming batches.
+    pub fn open_v08_segment(
+        &self,
+        table_id: u32,
+        segment_id: u64,
+    ) -> Result<ChunkedSegmentAccessV08> {
+        self.open_v08_segment_with_metadata_limit(
+            table_id,
+            segment_id,
+            DEFAULT_V08_METADATA_LIMIT_BYTES,
+        )
+    }
+
+    /// Opens a provisioned V08 reader with the caller's metadata bound.
+    pub fn open_v08_segment_with_metadata_limit(
+        &self,
+        table_id: u32,
+        segment_id: u64,
+        metadata_limit_bytes: u64,
+    ) -> Result<ChunkedSegmentAccessV08> {
+        match self.streaming_layout_preflight_v08(table_id, segment_id)? {
+            StreamingSegmentLayoutPreflightV08::Available => {
+                ChunkedSegmentAccessV08::open_with_metadata_limit(
+                    Arc::new(self.clone()),
+                    SegmentReferenceV08::new(table_id, segment_id),
+                    metadata_limit_bytes,
+                )
+            }
+            StreamingSegmentLayoutPreflightV08::RequiresV08ChunkedLayout => {
+                Err(ColumnarError::RequiresV08ChunkedLayout)
+            }
+            StreamingSegmentLayoutPreflightV08::NotFound => Err(ColumnarError::NotFound),
+        }
+    }
+
     /// セグメントリーダーを開く。
     pub fn open_segment_reader(&self, table_id: u32, segment_id: u64) -> Result<SegmentReaderV2> {
         let segment = self.read_segment_raw(table_id, segment_id)?;
@@ -227,6 +354,43 @@ impl ColumnarKvsBridge {
             }
         }
         Ok(result)
+    }
+}
+
+impl RangeAddressableSegmentProvider for ColumnarKvsBridge {
+    fn read_header(&self, segment: SegmentReferenceV08) -> Result<Vec<u8>> {
+        self.read_v08_object(key_layout::v08_header_key(
+            segment.table_id,
+            segment.segment_id,
+        ))
+    }
+
+    fn read_schema(&self, segment: SegmentReferenceV08) -> Result<Vec<u8>> {
+        self.read_v08_object(key_layout::v08_schema_key(
+            segment.table_id,
+            segment.segment_id,
+        ))
+    }
+
+    fn read_directory(&self, segment: SegmentReferenceV08) -> Result<Vec<u8>> {
+        self.read_v08_object(key_layout::v08_directory_key(
+            segment.table_id,
+            segment.segment_id,
+        ))
+    }
+
+    fn read_chunk(
+        &self,
+        segment: SegmentReferenceV08,
+        row_group_index: u32,
+        column_index: u16,
+    ) -> Result<Vec<u8>> {
+        self.read_v08_object(key_layout::v08_chunk_key(
+            segment.table_id,
+            segment.segment_id,
+            row_group_index,
+            column_index,
+        ))
     }
 }
 
@@ -354,5 +518,39 @@ mod tests {
             let batches = bridge_arc.read_segment(3, id, &[0]).unwrap();
             assert_eq!(batches[0].num_rows(), 3);
         }
+    }
+
+    #[test]
+    fn v08_preflight_rejects_legacy_v2_without_opening_it() {
+        let store = Arc::new(AnyKV::Memory(MemoryKV::new()));
+        let bridge = ColumnarKvsBridge::new(store);
+        let segment_id = bridge.write_segment(17, &make_segment()).unwrap();
+
+        assert_eq!(
+            bridge
+                .streaming_layout_preflight_v08(17, segment_id)
+                .unwrap(),
+            StreamingSegmentLayoutPreflightV08::RequiresV08ChunkedLayout
+        );
+        assert!(matches!(
+            bridge.open_v08_segment(17, segment_id),
+            Err(ColumnarError::RequiresV08ChunkedLayout)
+        ));
+    }
+
+    #[test]
+    fn v08_preflight_prioritizes_provisioned_header_key() {
+        let store = Arc::new(AnyKV::Memory(MemoryKV::new()));
+        let bridge = ColumnarKvsBridge::new(store.clone());
+        let manager = store.txn_manager();
+        let mut txn = manager.begin(TxnMode::ReadWrite).unwrap();
+        txn.put(key_layout::v08_header_key(18, 4), vec![1, 2, 3])
+            .unwrap();
+        manager.commit(txn).unwrap();
+
+        assert_eq!(
+            bridge.streaming_layout_preflight_v08(18, 4).unwrap(),
+            StreamingSegmentLayoutPreflightV08::Available
+        );
     }
 }

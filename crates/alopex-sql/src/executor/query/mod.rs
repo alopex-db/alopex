@@ -22,7 +22,10 @@ pub mod subquery;
 
 pub use columnar_scan::{ColumnarScanIterator, create_columnar_scan_iterator};
 pub use iterator::{FilterIterator, LimitIterator, RowIterator, ScanIterator, SortIterator};
-pub use scan::create_scan_iterator;
+pub use project::{project_row_values, projected_columns};
+pub use scan::{
+    create_fenced_range_scan_iterator, create_scan_iterator, execute_fenced_range_scan,
+};
 
 /// Execute a SELECT logical plan and return a query result.
 ///

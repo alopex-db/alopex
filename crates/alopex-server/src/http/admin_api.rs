@@ -1,7 +1,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use alopex_cluster::ClusterStatusSnapshot;
+use alopex_cluster::{
+    bootstrap_cluster_control, ClusterBootstrapConfig, ClusterBootstrapMode,
+    ClusterBootstrapOutcome, ClusterMode, ClusterStatusSnapshot, UpgradeOperation,
+};
 use alopex_core::kv::any::AnyKV;
 use axum::extract::{Extension, Path as AxumPath};
 use axum::http::StatusCode;
@@ -34,6 +37,7 @@ struct AdminStatusResponse {
     connections: Option<u64>,
     queries_per_second: Option<f64>,
     cluster: ClusterStatusSnapshot,
+    cluster_control: ClusterControlAvailability,
     #[serde(flatten)]
     status: StatusView,
 }
@@ -61,6 +65,95 @@ struct AdminHealthResponse {
 struct AdminClusterOperationResponse {
     action: &'static str,
     cluster: ClusterStatusSnapshot,
+}
+
+/// Whether the running process can safely accept multi-node metadata control.
+/// A missing prerequisite is a normal, machine-readable state rather than an
+/// implicit in-memory fallback.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClusterControlAvailability {
+    pub available: bool,
+    pub mode: ClusterMode,
+    pub reason: &'static str,
+    pub missing_prerequisites: Vec<alopex_cluster::ClusterCapabilityPrerequisite>,
+}
+
+#[derive(Serialize)]
+struct AdminClusterMetadataResponse {
+    cluster: ClusterStatusSnapshot,
+    control: ClusterControlAvailability,
+    metadata_state_version: Option<u64>,
+    schema_rollout: Option<serde_json::Value>,
+    upgrade: Option<UpgradeOperation>,
+}
+
+/// Explicitly typed cluster management operations.  These are management API
+/// verbs, not SQL DDL statements and never carry a user SQL string.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminClusterManagementOperation {
+    MetadataShow,
+    MembersList,
+    MembersReplace,
+    RangesList,
+    RangesRegister,
+    RangesUpdate,
+    RangesRetire,
+    PlacementGet,
+    PlacementSet,
+    PlacementReplace,
+    ReadPolicyGet,
+    ReadPolicySet,
+    SchemaOwnerGet,
+    SchemaOwnerSet,
+    SchemaRolloutStart,
+    SchemaRolloutStatus,
+    RecoveryStatus,
+    RecoveryRestore,
+    UpgradeStatus,
+    UpgradeStart,
+}
+
+impl AdminClusterManagementOperation {
+    fn is_mutation(self) -> bool {
+        !matches!(
+            self,
+            Self::MetadataShow
+                | Self::MembersList
+                | Self::RangesList
+                | Self::PlacementGet
+                | Self::ReadPolicyGet
+                | Self::SchemaOwnerGet
+                | Self::SchemaRolloutStatus
+                | Self::RecoveryStatus
+                | Self::UpgradeStatus
+        )
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminClusterManagementRequest {
+    pub request_id: String,
+    pub operation: AdminClusterManagementOperation,
+    #[serde(default)]
+    pub expected_version: Option<u64>,
+    /// The public target is opaque at this adapter boundary; the later typed
+    /// consensus adapter validates it against immutable metadata.
+    #[serde(default)]
+    pub target: Option<serde_json::Value>,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+#[derive(Serialize)]
+struct AdminClusterManagementResponse {
+    operation_id: String,
+    operation: AdminClusterManagementOperation,
+    outcome_class: &'static str,
+    reason: &'static str,
+    state_version: Option<u64>,
+    control: ClusterControlAvailability,
+    actor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -120,6 +213,10 @@ pub async fn status(
         Ok(snapshot) => snapshot,
         Err(err) => return error_response(err, &ctx),
     };
+    let cluster_control = match cluster_control_availability(&cluster) {
+        Ok(control) => control,
+        Err(err) => return error_response(err, &ctx),
+    };
     state.metrics.record_cluster_status(&cluster);
     Json(AdminStatusResponse {
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -127,7 +224,66 @@ pub async fn status(
         connections: None,
         queries_per_second: None,
         cluster,
+        cluster_control,
         status,
+    })
+    .into_response()
+}
+
+pub async fn cluster_metadata(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+) -> Response {
+    let cluster = match state.cluster_status_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(err) => return error_response(err, &ctx),
+    };
+    let control = match cluster_control_availability(&cluster) {
+        Ok(control) => control,
+        Err(err) => return error_response(err, &ctx),
+    };
+    let upgrade = state.upgrade_coordinator.status().ok();
+    Json(AdminClusterMetadataResponse {
+        cluster,
+        control,
+        metadata_state_version: None,
+        schema_rollout: None,
+        upgrade,
+    })
+    .into_response()
+}
+
+pub async fn cluster_management(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+    Json(request): Json<AdminClusterManagementRequest>,
+) -> Response {
+    let cluster = match state.cluster_status_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(err) => return error_response(err, &ctx),
+    };
+    let control = match cluster_control_availability(&cluster) {
+        Ok(control) => control,
+        Err(err) => return error_response(err, &ctx),
+    };
+    let (outcome_class, reason) = if request.operation.is_mutation() && !request.confirmed {
+        ("terminal_failure", "confirmation_required")
+    } else if !control.available {
+        ("terminal_failure", "cluster_capability_unavailable")
+    } else {
+        // This branch becomes reachable only after a compatible Chirps
+        // consensus adapter is installed. Keeping it classified as pending
+        // prevents a route registration from falsely claiming a commit.
+        ("pending", "metadata_consensus_adapter_not_attached")
+    };
+    Json(AdminClusterManagementResponse {
+        operation_id: request.request_id,
+        operation: request.operation,
+        outcome_class,
+        reason,
+        state_version: None,
+        control,
+        actor: ctx.actor,
     })
     .into_response()
 }
@@ -188,6 +344,41 @@ pub async fn cluster_leave(
     Extension(ctx): Extension<RequestContext>,
 ) -> Response {
     cluster_operation_response(&state, &ctx, "leave")
+}
+
+/// Applies the same bootstrap gate used by the Rust control plane before an
+/// HTTP route advertises metadata mutation support.
+pub fn cluster_control_availability(
+    cluster: &ClusterStatusSnapshot,
+) -> crate::error::Result<ClusterControlAvailability> {
+    if cluster.mode == ClusterMode::SingleNode {
+        return Ok(ClusterControlAvailability {
+            available: false,
+            mode: cluster.mode,
+            reason: "single_node_mode",
+            missing_prerequisites: Vec::new(),
+        });
+    }
+    let outcome = bootstrap_cluster_control(&ClusterBootstrapConfig::compiled_chirps(
+        ClusterBootstrapMode::ClusterAware,
+    ));
+    match outcome {
+        ClusterBootstrapOutcome::ReadyForClusterControl => Ok(ClusterControlAvailability {
+            available: true,
+            mode: cluster.mode,
+            reason: "ready",
+            missing_prerequisites: Vec::new(),
+        }),
+        ClusterBootstrapOutcome::CapabilityUnavailable {
+            missing_prerequisites,
+        } => Ok(ClusterControlAvailability {
+            available: false,
+            mode: cluster.mode,
+            reason: "cluster_capability_unavailable",
+            missing_prerequisites,
+        }),
+        ClusterBootstrapOutcome::SingleNode => unreachable!("cluster-aware input was supplied"),
+    }
 }
 
 pub async fn compaction(
@@ -509,4 +700,28 @@ fn write_latest_marker(root: &Path, dest: &Path) -> Result<(), String> {
     std::fs::create_dir_all(root).map_err(|err| err.to_string())?;
     std::fs::write(&marker, dest.to_string_lossy().as_bytes()).map_err(|err| err.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alopex_cluster::{ClusterManager, ClusterManagerConfig};
+
+    #[test]
+    fn single_node_metadata_route_never_advertises_multi_node_control() {
+        let manager = ClusterManager::new(ClusterManagerConfig::single_node()).unwrap();
+        let availability = cluster_control_availability(&manager.status_snapshot()).unwrap();
+
+        assert!(!availability.available);
+        assert_eq!(availability.reason, "single_node_mode");
+        assert!(availability.missing_prerequisites.is_empty());
+    }
+
+    #[test]
+    fn only_read_operations_skip_explicit_mutation_confirmation() {
+        assert!(!AdminClusterManagementOperation::MetadataShow.is_mutation());
+        assert!(!AdminClusterManagementOperation::UpgradeStatus.is_mutation());
+        assert!(AdminClusterManagementOperation::RangesRegister.is_mutation());
+        assert!(AdminClusterManagementOperation::SchemaRolloutStart.is_mutation());
+    }
 }

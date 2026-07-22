@@ -11,15 +11,29 @@ categories = ["database-implementations"]
 [features]
 default = []
 lane_ci = []
-chirps = ["dep:alopex-chirps-gossip-swim"]
+# Enables the complete Chirps adapter surface.  A enabled feature is necessary,
+# but not sufficient, for multi-node cluster control: runtime bootstrap also
+# verifies the authenticated dispatcher and durable storage prerequisites.
+chirps = [
+    "dep:alopex-chirps",
+    "dep:alopex-chirps-core",
+    "dep:alopex-chirps-gossip-swim",
+    "dep:alopex-chirps-raft-storage",
+    "dep:alopex-chirps-transport-quic",
+]
 
 [dependencies]
+alopex-core.workspace = true
+alopex-sql.workspace = true
 serde = { workspace = true, features = ["derive"] }
-
-# Optional adapter source for v0.7 Chirps reachability input.
-# Kept behind the `chirps` feature so default Alopex builds do not depend on
-# the sibling Chirps workspace.
-alopex-chirps-gossip-swim = { version = "0.5.1", path = "../../../../chirps/crates/chirps-gossip-swim", optional = true }
-
-[dev-dependencies]
 serde_json = { workspace = true }
+thiserror.workspace = true
+sha2 = "0.10"
+
+# All Chirps dependencies are optional so the default embedded/single-node
+# build neither requires nor advertises cluster control.
+alopex-chirps = { version = "0.5.1", path = "../../../../chirps/crates/alopex-chirps", optional = true }
+alopex-chirps-core = { version = "0.5.1", path = "../../../../chirps/crates/chirps-core", optional = true }
+alopex-chirps-gossip-swim = { version = "0.5.1", path = "../../../../chirps/crates/chirps-gossip-swim", optional = true }
+alopex-chirps-raft-storage = { version = "0.5.1", path = "../../../../chirps/crates/chirps-raft-storage", optional = true }
+alopex-chirps-transport-quic = { version = "0.5.1", path = "../../../../chirps/crates/chirps-transport-quic", optional = true }
