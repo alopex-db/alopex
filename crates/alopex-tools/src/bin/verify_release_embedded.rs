@@ -1,22 +1,22 @@
-//! リリース確認(SF-EMB): crates.io から取得した公開版 alopex-embedded を
-//! 使い、SQL コーパスを実行して正規化 JSON を標準出力へ書く。
-//!
-//! alopex-tools は親ワークスペースに含まれない独立クレートであり
-//! (crates/alopex-tools/Cargo.toml の [workspace] 空テーブル参照)、
-//! ここでの alopex-embedded / alopex-sql への依存は常に crates.io の
-//! 公開バージョンを指す(path 依存ではない)。つまりこのバイナリの
-//! ビルドが通ること自体が「公開クレートが実際に取得・ビルドできる」
-//! ことの検証になる。
-//!
-//! 比較・期待値照合は行わない(scripts/parity/runner/normalize.py /
-//! report.py が既に持つロジックの二重実装を避けるため、Python 側が
-//! この出力を読んで既存の scripts/parity/expected/*.json と突き合わせる)。
-//!
-//! crates/alopex-embedded/tests/parity_corpus.rs の実行・正規化ロジックの
-//! 移植(比較・assert 部分を除く)。契約(環境変数・出力スキーマ)は
-//! 同一なので、EmbeddedSurface(scripts/parity/runner/surfaces.py)の
-//! released モードはこのバイナリを起動し、同じ PARITY_CORPUS_DIR /
-//! PARITY_DATA_DIR / PARITY_ROLE / PARITY_OUTPUT を渡す。
+// リリース確認(SF-EMB): crates.io から取得した公開版 alopex-embedded を
+// 使い、SQL コーパスを実行して正規化 JSON を標準出力へ書く。
+//
+// alopex-tools は親ワークスペースに含まれない独立クレートであり
+// (crates/alopex-tools/Cargo.toml の [workspace] 空テーブル参照)、
+// ここでの alopex-embedded / alopex-sql への依存は常に crates.io の
+// 公開バージョンを指す(path 依存ではない)。つまりこのバイナリの
+// ビルドが通ること自体が「公開クレートが実際に取得・ビルドできる」
+// ことの検証になる。
+//
+// 比較・期待値照合は行わない(scripts/parity/runner/normalize.py /
+// report.py が既に持つロジックの二重実装を避けるため、Python 側が
+// この出力を読んで既存の scripts/parity/expected/*.json と突き合わせる)。
+//
+// crates/alopex-embedded/tests/parity_corpus.rs の実行・正規化ロジックの
+// 移植(比較・assert 部分を除く)。契約(環境変数・出力スキーマ)は
+// 同一なので、EmbeddedSurface(scripts/parity/runner/surfaces.py)の
+// released モードはこのバイナリを起動し、同じ PARITY_CORPUS_DIR /
+// PARITY_DATA_DIR / PARITY_ROLE / PARITY_OUTPUT を渡す。
 
 use std::env;
 use std::fs;
@@ -229,6 +229,8 @@ fn corpus_number(name: &str) -> Option<u32> {
 }
 
 fn corpus_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let include_v08 = option_env!("CARGO_PKG_NAME") == Some("alopex-tools-v08")
+        || env::var("PARITY_V08_LOCAL").ok().as_deref() == Some("1");
     let entries = fs::read_dir(dir)
         .map_err(|e| format!("コーパスディレクトリを読めない {}: {e}", dir.display()))?;
     let mut files: Vec<PathBuf> = entries
@@ -238,7 +240,7 @@ fn corpus_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
             p.file_name()
                 .and_then(|n| n.to_str())
                 .and_then(corpus_number)
-                .is_some_and(|num| (1..=7).contains(&num))
+                .is_some_and(|num| (1..=7).contains(&num) || (include_v08 && num == 10))
         })
         .collect();
     files.sort();
@@ -310,6 +312,21 @@ fn run() -> Result<(), String> {
                 "actual": actual,
             }));
         }
+    }
+
+    if option_env!("CARGO_PKG_NAME") == Some("alopex-tools-v08")
+        && let Some(failed) = output_statements.iter().find(|statement| {
+            statement
+                .get("actual")
+                .and_then(|actual| actual.get("type"))
+                .and_then(Value::as_str)
+                == Some("error")
+        })
+    {
+        let index = failed.get("index").and_then(Value::as_u64).unwrap_or(0);
+        return Err(format!(
+            "v0.8 local compatibility corpus statement {index} returned an error"
+        ));
     }
 
     if let Some(path) = &output_path {

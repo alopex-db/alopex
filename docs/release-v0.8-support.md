@@ -30,7 +30,7 @@ and requires a local package/archive for each product crate. It also requires:
 | --- | --- |
 | `alopex-cli` / `alopex` binary | Package identity plus isolated `--version` startup. |
 | `alopex-py` / `alopex` wheel | Wheel tag/hash/native extension inspection and isolated `--no-index --no-deps` install/import. |
-| `alopex-tools` | Development-only (`publish = false`) evidence. It is never listed as a v0.8 distribution artifact. |
+| `alopex-tools` | Development-only (`publish = false`) evidence. `crates/alopex-tools/v08/verify-v08-embedded` builds the checked-out v0.8 Embedded/SQL sources and runs the local compatibility corpus; it is never listed as a v0.8 distribution artifact. |
 
 The verifier records platform and hash next to each artifact. A release candidate
 with a missing, mismatched, or unclassified artifact is `Blocked`.
