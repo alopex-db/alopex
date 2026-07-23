@@ -41,7 +41,6 @@ def test_close_rolls_back_active_transaction(db):
         txn.get(b"key")
 
 
-def test_close_twice_is_error(db):
+def test_close_twice_is_idempotent(db):
     db.close()
-    with pytest.raises(AlopexError):
-        db.close()
+    db.close()
