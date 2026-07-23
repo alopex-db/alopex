@@ -1,0 +1,4 @@
+interface:
+  display_name: "Alopex Development & Release"
+  short_description: "Alopex development and release workflow"
+  default_prompt: "Use $alopex-development-release to plan, implement, verify, and release an Alopex version safely."
