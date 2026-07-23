@@ -21,6 +21,9 @@ cargo run --manifest-path crates/alopex-tools/v08/Cargo.toml --release --locked 
 bash crates/alopex-tools/v08/verify-v08-surfaces.sh
 ```
 
-`verify-v08-surfaces.sh` delegates to the authoritative distributed-read,
-cluster CLI, DataFrame streaming, and Python async/local-surface suites. Set
-`ALOPEX_PYTHON` when the Python environment is not `/tmp/alopex-v08-python`.
+`verify-v08-surfaces.sh` delegates to the authoritative Phase 1–4 suites:
+cluster metadata and SQL catalog internals, server/cluster CLI operations,
+DataFrame sources and streaming, Rust binding lifecycle tests, and the full
+Python local/async/DataFrame test tree. It fails on any uncovered compatibility
+contract; set `ALOPEX_PYTHON` when the Python environment is not
+`/tmp/alopex-v08-python`.
