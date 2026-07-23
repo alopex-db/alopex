@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0]
+
+Cluster-aware and streaming release.
+
+### Added
+- Cluster metadata, lifecycle, routing diagnostics, and authenticated distributed-read contracts.
+- HTTP/gRPC/CLI multi-statement and streaming SQL surfaces with explicit unsupported-operation outcomes.
+- Bounded and incremental DataFrame streaming for CSV/Parquet with expression, projection, concat, and resource-lifecycle contracts.
+- Synchronous and asynchronous Python local APIs, SQL streams, transactions, local scans, and DataFrame bindings.
+- Offline, no-network/no-write candidate readiness verification and v0.7.4-to-v0.8 upgrade guidance.
+
+### Compatibility
+- Single-node behavior remains the default when cluster prerequisites are unavailable.
+- Remote execution, distributed transactions, and client/connection-pool APIs remain outside the v0.8 supported scope.
+
 ## [0.7.6]
 
 Additive cluster-surface release.
