@@ -102,7 +102,7 @@ class AsyncSqlResultStream(_AsyncLocalHandle):
                             raise
                         await _asyncio.sleep(0.001)
                         continue
-                    return row.into_python()
+                    return row.deliver_python()
             except _asyncio.CancelledError:
                 # This is a short native terminal transition, not a blocking row receive.  Keep
                 # it on the event-loop thread so the bridge can terminally release its source.
