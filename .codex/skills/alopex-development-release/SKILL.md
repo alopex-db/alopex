@@ -13,6 +13,7 @@ Use this skill for an end-to-end Alopex version. Keep requirements, design, impl
 - Prefix shell commands with `rtk`. Confirm cwd, branch, worktree, remotes, and clean/dirty state before changing anything.
 - **Never edit the `alopex` main worktree directly.** Before the first source, test, workflow, version, or release-file edit, require a dedicated worktree under `alopex-worktrees/` and a non-`main` branch. Set an explicit `SOURCE_ROOT` to that worktree and run every source-repository command there. If the main worktree is dirty, stop and preserve it; do not copy, reset, stash-drop, or overwrite user changes without an auditable recovery path.
 - All implementation and release changes must reach `main` through a reviewed pull request. Direct commits or pushes to `main`, tagging a feature branch, and publishing from an unmerged branch are forbidden. The source worktree must be clean and the branch/remote/PR base must be recorded before merge.
+- A PR is an integration gate, not an implementation-completion signal. Do not open a PR for an individual pending task or while the declared phase/release scope has pending tasks. Open it only after that scope's task markers are all `[x]`, implementation logs and independent evidence are present, and the scope-level consistency check passes.
 - Keep the 50 GiB workspace limit. Run the cache-budget check before and after Cargo, maturin, pytest, CI, stress, or other artifact-generating work; clean generated artifacts at each stage.
 - Never publish, push a release tag, create a GitHub Release, or deploy without explicit user authorization. “Release-ready” means stop before publication.
 - Preserve user work. Isolate release work in a dedicated worktree/branch and never reset or delete broad paths.
@@ -88,8 +89,8 @@ Use this sequence for every version; a skipped step is a release blocker:
 
 1. Observe `alopex` main (`status`, `branch`, `worktree list`, remote) and stop if it is dirty or not synchronized.
 2. Create `alopex-worktrees/<version>-<purpose>` from `main` with a unique non-main branch. Do not edit source files through the main path.
-3. Implement and verify approved phase tasks in that worktree; commit small, hook-validated commits and push the branch.
-4. Open a PR from the phase branch to `main`; obtain review/CI approval; merge the PR; record the merge SHA.
+3. Implement and verify all approved tasks in the declared scope in that worktree; commit small, hook-validated commits and push the branch as needed. Do not open a PR while the scope still has pending tasks.
+4. After every task in the declared scope is `[x]` and independent evidence passes, open a PR to `main`; obtain review/CI approval; merge the PR; record the merge SHA.
 5. Create a fresh release worktree from the merged `main` SHA. Apply the version bump and release metadata as a separate release PR, merge it, and record the new merge SHA.
 6. Run the target-version gate from a clean worktree at the version-bump merge SHA. Only after explicit publication authorization may tags and registries be touched.
 

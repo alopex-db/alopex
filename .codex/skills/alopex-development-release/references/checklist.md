@@ -21,8 +21,11 @@ rtk git -C alopex-worktrees/<version>-<purpose> status --short --branch
 ```
 
 All source, test, workflow, version, and release-file edits and commands run from
-the dedicated worktree. A phase branch is pushed and merged through a PR to `main`;
-direct commits/pushes to `main` are prohibited.
+the dedicated worktree. A phase branch is pushed and merged through a PR to `main`
+only after every task in that phase is `[x]`, implementation logs and independent
+evidence are complete, and the phase consistency check passes. A PR is not a signal
+that implementation is complete; do not open one for an in-progress task. Direct
+commits/pushes to `main` are prohibited.
 
 Before handoff, run:
 
