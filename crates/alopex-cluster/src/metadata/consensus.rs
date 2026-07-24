@@ -6,16 +6,93 @@
 
 use super::{CommittedMetadata, ValidatedMetadataCommand};
 use crate::{
-    ClusterBootstrapOutcome, ClusterCapabilityPrerequisite, NodeId, bootstrap_cluster_control,
+    ClusterBootstrapOutcome, ClusterCapabilityPrerequisite, ClusterId, NodeId,
+    bootstrap_cluster_control,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{error::Error, fmt};
+
+pub const METADATA_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 /// Versioned serialized committed metadata used for durable snapshot/restore.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataSnapshot {
+    #[serde(default = "default_snapshot_schema_version")]
+    pub schema_version: u32,
     pub state_version: u64,
+    #[serde(default)]
+    pub cluster_id: Option<ClusterId>,
     pub payload: Vec<u8>,
+    #[serde(default)]
+    pub checksum: String,
+}
+
+fn default_snapshot_schema_version() -> u32 {
+    METADATA_SNAPSHOT_SCHEMA_VERSION
+}
+
+impl MetadataSnapshot {
+    pub fn from_metadata(metadata: &CommittedMetadata) -> Result<Self, MetadataConsensusError> {
+        let payload =
+            serde_json::to_vec(metadata).map_err(|error| MetadataConsensusError::Snapshot {
+                message: error.to_string(),
+            })?;
+        Ok(Self {
+            schema_version: METADATA_SNAPSHOT_SCHEMA_VERSION,
+            state_version: metadata.state_version(),
+            cluster_id: Some(metadata.cluster_id().clone()),
+            checksum: format!("{:x}", Sha256::digest(&payload)),
+            payload,
+        })
+    }
+
+    pub fn validate_for(
+        &self,
+        current: &CommittedMetadata,
+    ) -> Result<CommittedMetadata, MetadataConsensusError> {
+        if self.schema_version != METADATA_SNAPSHOT_SCHEMA_VERSION {
+            return Err(MetadataConsensusError::Snapshot {
+                message: format!(
+                    "unsupported metadata snapshot schema version {}",
+                    self.schema_version
+                ),
+            });
+        }
+        if !self.checksum.is_empty() {
+            let checksum = format!("{:x}", Sha256::digest(&self.payload));
+            if checksum != self.checksum {
+                return Err(MetadataConsensusError::Snapshot {
+                    message: "metadata snapshot checksum mismatch".to_string(),
+                });
+            }
+        }
+        let restored =
+            serde_json::from_slice::<CommittedMetadata>(&self.payload).map_err(|error| {
+                MetadataConsensusError::Snapshot {
+                    message: error.to_string(),
+                }
+            })?;
+        if restored.state_version() != self.state_version {
+            return Err(MetadataConsensusError::Snapshot {
+                message: "snapshot state_version does not match its committed payload".to_string(),
+            });
+        }
+        if let Some(cluster_id) = &self.cluster_id
+            && cluster_id != restored.cluster_id()
+            && cluster_id != &ClusterId::new("")
+        {
+            return Err(MetadataConsensusError::Snapshot {
+                message: "snapshot cluster_id does not match its committed payload".to_string(),
+            });
+        }
+        if restored.cluster_id() != current.cluster_id() {
+            return Err(MetadataConsensusError::Snapshot {
+                message: "snapshot cluster_id does not match the current cluster".to_string(),
+            });
+        }
+        Ok(restored)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,14 +201,31 @@ impl<B: ChirpsMetadataBackend> MetadataConsensusStore for ChirpsMetadataConsensu
         &mut self,
         command: ValidatedMetadataCommand,
     ) -> Result<CommittedMetadata, MetadataConsensusError> {
+        let current = self.backend.read_current()?;
+        if let Some(existing) = current
+            .operation(&command.envelope().request_id)
+            .or_else(|| current.membership_operation(&command.envelope().request_id))
+        {
+            if existing.request_fingerprint == command.envelope().request_fingerprint {
+                return Ok(current);
+            }
+            return Err(MetadataConsensusError::Storage {
+                message: "request_id was already committed with a different fingerprint"
+                    .to_string(),
+            });
+        }
         self.backend.propose(command)
     }
 
     fn snapshot(&self) -> Result<MetadataSnapshot, MetadataConsensusError> {
-        self.backend.snapshot()
+        let current = self.backend.read_current()?;
+        let snapshot = self.backend.snapshot()?;
+        snapshot.validate_for(&current).map(|_| snapshot)
     }
 
     fn restore(&mut self, snapshot: MetadataSnapshot) -> Result<(), MetadataConsensusError> {
+        let current = self.backend.read_current()?;
+        snapshot.validate_for(&current)?;
         self.backend.restore(snapshot)
     }
 }
@@ -177,6 +271,22 @@ impl MetadataConsensusStore for DeterministicMetadataConsensus {
         &mut self,
         command: ValidatedMetadataCommand,
     ) -> Result<CommittedMetadata, MetadataConsensusError> {
+        if let Some(existing) = self
+            .current
+            .operation(&command.envelope().request_id)
+            .or_else(|| {
+                self.current
+                    .membership_operation(&command.envelope().request_id)
+            })
+        {
+            if existing.request_fingerprint == command.envelope().request_fingerprint {
+                return Ok(self.current.clone());
+            }
+            return Err(MetadataConsensusError::Storage {
+                message: "request_id was already committed with a different fingerprint"
+                    .to_string(),
+            });
+        }
         if !self.leader {
             return Err(MetadataConsensusError::NotLeader {
                 leader_hint: self.leader_hint.clone(),
@@ -189,30 +299,11 @@ impl MetadataConsensusStore for DeterministicMetadataConsensus {
     }
 
     fn snapshot(&self) -> Result<MetadataSnapshot, MetadataConsensusError> {
-        let payload = serde_json::to_vec(&self.current).map_err(|error| {
-            MetadataConsensusError::Snapshot {
-                message: error.to_string(),
-            }
-        })?;
-        Ok(MetadataSnapshot {
-            state_version: self.current.state_version(),
-            payload,
-        })
+        MetadataSnapshot::from_metadata(&self.current)
     }
 
     fn restore(&mut self, snapshot: MetadataSnapshot) -> Result<(), MetadataConsensusError> {
-        let restored =
-            serde_json::from_slice::<CommittedMetadata>(&snapshot.payload).map_err(|error| {
-                MetadataConsensusError::Snapshot {
-                    message: error.to_string(),
-                }
-            })?;
-        if restored.state_version() != snapshot.state_version {
-            return Err(MetadataConsensusError::Snapshot {
-                message: "snapshot state_version does not match its committed payload".to_string(),
-            });
-        }
-        self.current = restored;
+        self.current = snapshot.validate_for(&self.current)?;
         Ok(())
     }
 }
@@ -305,6 +396,42 @@ mod tests {
             DeterministicMetadataConsensus::new(CommittedMetadata::new("cluster-a"));
         restarted.restore(snapshot).unwrap();
         assert_eq!(restarted.read_current().unwrap(), committed);
+    }
+
+    #[test]
+    fn duplicate_validated_request_is_not_applied_twice() {
+        let mut store = DeterministicMetadataConsensus::new(CommittedMetadata::new("cluster-a"));
+        let first = store.submit(validated_read_policy()).unwrap();
+        let duplicate = store.submit(validated_read_policy()).unwrap();
+
+        assert_eq!(duplicate, first);
+        assert_eq!(store.read_current().unwrap().state_version(), 1);
+    }
+
+    #[test]
+    fn snapshot_checksum_and_schema_guard_restore() {
+        let mut store = DeterministicMetadataConsensus::new(CommittedMetadata::new("cluster-a"));
+        store.submit(validated_read_policy()).unwrap();
+        let snapshot = store.snapshot().unwrap();
+        assert_eq!(snapshot.schema_version, METADATA_SNAPSHOT_SCHEMA_VERSION);
+        assert!(!snapshot.checksum.is_empty());
+        assert_eq!(snapshot.cluster_id, Some(ClusterId::new("cluster-a")));
+
+        let mut tampered = snapshot.clone();
+        tampered.payload[0] ^= 0xff;
+        assert!(matches!(
+            store.restore(tampered),
+            Err(MetadataConsensusError::Snapshot { message })
+                if message.contains("checksum mismatch")
+        ));
+
+        let mut unknown_schema = snapshot;
+        unknown_schema.schema_version = METADATA_SNAPSHOT_SCHEMA_VERSION + 1;
+        assert!(matches!(
+            store.restore(unknown_schema),
+            Err(MetadataConsensusError::Snapshot { message })
+                if message.contains("unsupported metadata snapshot schema version")
+        ));
     }
 
     #[test]
