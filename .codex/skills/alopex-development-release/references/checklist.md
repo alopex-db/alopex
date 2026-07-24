@@ -50,6 +50,14 @@ For every approval request:
 
 The three documents have different boundaries: requirements define observable outcomes, design maps approved outcomes to implementation contracts, and tasks divide the design into small executable work. Implementation details belong in design/tasks and implementation logs, not requirements. At version kickoff, read and snapshot the roadmap before writing requirements; enumerate every roadmap module/crate and every inherited prior-version surface, then assign each an anchor and status (new, inherited, deferred, or explicitly out of scope). Map every row through requirements → design → task → test/evidence; do not defer this to a later audit or leave a row unclassified. Requirements must explicitly inventory all SQL statements/functions and CLI commands in scope and keep feature outcomes separate from cross-phase policy/gate criteria. Compare rough effort and surface size across phases, reject back-loaded or monolithic phases, and treat features as tasks under broad phases. `tasks.md` status markers are `- [ ]` pending, `- [-]` in progress, and `- [x]` complete.
 
+For the phase-level pattern and approval-blocking completeness checks, read
+`references/phase-requirements.md`. Use the approved v0.8.0 shape as the default
+starting point: cluster metadata/operations, distributed-read SQL/CLI, DataFrame
+streaming/expressions, and Python local surfaces. Adapt the names to the target
+roadmap, but preserve exact per-surface enumeration, one owning phase per row,
+explicit support/rejection classification, target-version gate coverage, and the
+full requirements → design → task → test/evidence crosswalk.
+
 Implementation logs are mandatory searchable evidence. Include task ID, summary, files, line statistics, tests, and all relevant structured artifacts; do not submit an empty `artifacts` object. Search prior logs before adding endpoints, functions, classes, components, or integrations.
 
 ## Release safety and tags
