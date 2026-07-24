@@ -18,11 +18,12 @@ pub use bootstrap::{
 };
 pub use control::{
     EnrollmentCredential, MembershipOperation, MembershipOperationKind, MembershipOperationStore,
-    MembershipSaga, RaftMembershipView, RangeChangeEnvelope, RangeReplicaDirectory,
-    RangeReplicaReadiness, RangeReplicaReadinessState, RangeSnapshotChunk, RangeSnapshotEntry,
-    RangeTransferAck, RangeTransferApplyOutcome, RangeTransferError, RangeTransferExpectation,
-    RangeTransferFrameHandler, RangeTransferManifest, RangeTransferResumePoint,
-    RangeTransferSession, RangeTransferWireFrame, RangeTransferWireMessage,
+    MembershipSaga, RaftMembershipView, RangeChangeEnvelope, RangeDirectory, RangeDirectoryError,
+    RangeReplicaDirectory, RangeReplicaReadiness, RangeReplicaReadinessState, RangeSnapshotChunk,
+    RangeSnapshotEntry, RangeTransferAck, RangeTransferApplyOutcome, RangeTransferError,
+    RangeTransferExpectation, RangeTransferFrameHandler, RangeTransferManifest,
+    RangeTransferResumePoint, RangeTransferSession, RangeTransferWireFrame,
+    RangeTransferWireMessage, RangeTransition, RangeTransitionKind,
     SUPPORTED_UPGRADE_SOURCE_VERSION, SchemaApplyEvidenceAdapter, SchemaApplyEvidenceRequest,
     SchemaControlError, SchemaControlResult, SchemaControlService, UpgradeCheckpoint, UpgradeInput,
     UpgradeOperation, UpgradeOutcome, UpgradePlanner, UpgradePlanningError, UpgradeSourceKind,

@@ -13,7 +13,8 @@ pub use membership::{
 };
 
 pub use range_directory::{
-    RangeReplicaDirectory, RangeReplicaReadiness, RangeReplicaReadinessState,
+    RangeDirectory, RangeDirectoryError, RangeReplicaDirectory, RangeReplicaReadiness,
+    RangeReplicaReadinessState, RangeTransition, RangeTransitionKind,
 };
 
 pub use range_transfer::{
