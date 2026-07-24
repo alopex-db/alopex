@@ -2,7 +2,8 @@
 
 use crate::{
     ClusterFrameHandler, ClusterFrameHandlerError, ClusterFrameKind, ClusterId, NodeId, RangeId,
-    RangeRoutingDefinition, SchemaManifestId, VerifiedClusterFrame, VerifiedPeerIdentity,
+    RangeRoutingDefinition, RequestId, SchemaManifestId, VerifiedClusterFrame,
+    VerifiedPeerIdentity,
 };
 use alopex_core::kv::{
     KVStore, KVTransaction, RangeChangePayload, RangeChangeRecord, stage_range_change,
@@ -197,6 +198,154 @@ pub struct RangeTransferResumePoint {
 pub enum RangeTransferApplyOutcome {
     Applied(RangeTransferAck),
     AlreadyAcknowledged(RangeTransferAck),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RangeTransferPhase {
+    Prepared,
+    Copying,
+    Verified,
+    Published,
+    Aborted,
+}
+
+/// Durable operation checkpoint for a move. The source remains the serving
+/// owner until `publish` succeeds; reconnecting with the same request returns
+/// this exact record instead of applying another move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RangeTransferCheckpoint {
+    pub request_id: RequestId,
+    pub transfer_id: String,
+    pub source_node_id: NodeId,
+    pub target_node_id: NodeId,
+    pub phase: RangeTransferPhase,
+    pub copied_chunks: u64,
+    pub verified_epoch: Option<u64>,
+    pub serving_owner: NodeId,
+}
+
+#[derive(Debug, Default)]
+pub struct RangeTransferCoordinator {
+    checkpoints: BTreeMap<RequestId, RangeTransferCheckpoint>,
+}
+
+impl RangeTransferCoordinator {
+    pub fn prepare(
+        &mut self,
+        request_id: impl Into<RequestId>,
+        transfer_id: impl Into<String>,
+        source_node_id: impl Into<NodeId>,
+        target_node_id: impl Into<NodeId>,
+    ) -> Result<RangeTransferCheckpoint, RangeTransferError> {
+        let request_id = request_id.into();
+        let transfer_id = transfer_id.into();
+        let source_node_id = source_node_id.into();
+        let target_node_id = target_node_id.into();
+        if let Some(existing) = self.checkpoints.get(&request_id) {
+            if existing.transfer_id == transfer_id
+                && existing.source_node_id == source_node_id
+                && existing.target_node_id == target_node_id
+            {
+                return Ok(existing.clone());
+            }
+            return Err(RangeTransferError::ProgressConflict);
+        }
+        let checkpoint = RangeTransferCheckpoint {
+            request_id: request_id.clone(),
+            transfer_id,
+            source_node_id: source_node_id.clone(),
+            target_node_id,
+            phase: RangeTransferPhase::Prepared,
+            copied_chunks: 0,
+            verified_epoch: None,
+            serving_owner: source_node_id,
+        };
+        self.checkpoints.insert(request_id, checkpoint.clone());
+        Ok(checkpoint)
+    }
+
+    pub fn copy_chunk(
+        &mut self,
+        request_id: &RequestId,
+    ) -> Result<RangeTransferCheckpoint, RangeTransferError> {
+        let checkpoint = self
+            .checkpoints
+            .get_mut(request_id)
+            .ok_or(RangeTransferError::ManifestMissing)?;
+        match checkpoint.phase {
+            RangeTransferPhase::Prepared | RangeTransferPhase::Copying => {
+                checkpoint.phase = RangeTransferPhase::Copying;
+                checkpoint.copied_chunks = checkpoint.copied_chunks.saturating_add(1);
+            }
+            RangeTransferPhase::Verified | RangeTransferPhase::Published => {}
+            RangeTransferPhase::Aborted => return Err(RangeTransferError::ProgressConflict),
+        }
+        Ok(checkpoint.clone())
+    }
+
+    pub fn verify(
+        &mut self,
+        request_id: &RequestId,
+        final_epoch: u64,
+    ) -> Result<RangeTransferCheckpoint, RangeTransferError> {
+        let checkpoint = self
+            .checkpoints
+            .get_mut(request_id)
+            .ok_or(RangeTransferError::ManifestMissing)?;
+        match checkpoint.phase {
+            RangeTransferPhase::Prepared | RangeTransferPhase::Copying => {
+                checkpoint.phase = RangeTransferPhase::Verified;
+                checkpoint.verified_epoch = Some(final_epoch);
+            }
+            RangeTransferPhase::Verified | RangeTransferPhase::Published => {}
+            RangeTransferPhase::Aborted => return Err(RangeTransferError::ProgressConflict),
+        }
+        Ok(checkpoint.clone())
+    }
+
+    pub fn publish(
+        &mut self,
+        request_id: &RequestId,
+    ) -> Result<RangeTransferCheckpoint, RangeTransferError> {
+        let checkpoint = self
+            .checkpoints
+            .get_mut(request_id)
+            .ok_or(RangeTransferError::ManifestMissing)?;
+        match checkpoint.phase {
+            RangeTransferPhase::Verified | RangeTransferPhase::Published => {
+                checkpoint.phase = RangeTransferPhase::Published;
+                checkpoint.serving_owner = checkpoint.target_node_id.clone();
+            }
+            RangeTransferPhase::Prepared | RangeTransferPhase::Copying => {
+                return Err(RangeTransferError::ManifestMissing);
+            }
+            RangeTransferPhase::Aborted => return Err(RangeTransferError::ProgressConflict),
+        }
+        Ok(checkpoint.clone())
+    }
+
+    pub fn abort(
+        &mut self,
+        request_id: &RequestId,
+    ) -> Result<RangeTransferCheckpoint, RangeTransferError> {
+        let checkpoint = self
+            .checkpoints
+            .get_mut(request_id)
+            .ok_or(RangeTransferError::ManifestMissing)?;
+        match checkpoint.phase {
+            RangeTransferPhase::Published => return Ok(checkpoint.clone()),
+            RangeTransferPhase::Aborted => {}
+            RangeTransferPhase::Prepared
+            | RangeTransferPhase::Copying
+            | RangeTransferPhase::Verified => checkpoint.phase = RangeTransferPhase::Aborted,
+        }
+        Ok(checkpoint.clone())
+    }
+
+    pub fn checkpoint(&self, request_id: &RequestId) -> Option<&RangeTransferCheckpoint> {
+        self.checkpoints.get(request_id)
+    }
 }
 
 /// Classified transfer rejection. No variant reports a partially ready range.
@@ -1006,6 +1155,48 @@ mod tests {
         assert!(matches!(
             session.apply(&store).unwrap_err(),
             RangeTransferError::NonContiguousEpoch { .. }
+        ));
+    }
+
+    #[test]
+    fn coordinator_is_idempotent_and_keeps_old_owner_until_publish() {
+        let mut coordinator = RangeTransferCoordinator::default();
+        let request_id = RequestId::new("request-1");
+        let prepared = coordinator
+            .prepare(request_id.clone(), "transfer-1", "node-a", "node-b")
+            .expect("prepare");
+        assert_eq!(prepared.phase, RangeTransferPhase::Prepared);
+        assert_eq!(prepared.serving_owner, NodeId::new("node-a"));
+        assert_eq!(
+            coordinator
+                .prepare(request_id.clone(), "transfer-1", "node-a", "node-b")
+                .unwrap(),
+            prepared
+        );
+
+        coordinator.copy_chunk(&request_id).expect("copy");
+        let verified = coordinator.verify(&request_id, 8).expect("verify");
+        assert_eq!(verified.phase, RangeTransferPhase::Verified);
+        assert_eq!(verified.serving_owner, NodeId::new("node-a"));
+        let published = coordinator.publish(&request_id).expect("publish");
+        assert_eq!(published.phase, RangeTransferPhase::Published);
+        assert_eq!(published.serving_owner, NodeId::new("node-b"));
+        assert_eq!(coordinator.publish(&request_id).unwrap(), published);
+    }
+
+    #[test]
+    fn coordinator_abort_preserves_source_owner_and_rejects_reuse_conflict() {
+        let mut coordinator = RangeTransferCoordinator::default();
+        let request_id = RequestId::new("request-2");
+        coordinator
+            .prepare(request_id.clone(), "transfer-2", "node-a", "node-b")
+            .expect("prepare");
+        let aborted = coordinator.abort(&request_id).expect("abort");
+        assert_eq!(aborted.phase, RangeTransferPhase::Aborted);
+        assert_eq!(aborted.serving_owner, NodeId::new("node-a"));
+        assert!(matches!(
+            coordinator.prepare(request_id, "other-transfer", "node-a", "node-b"),
+            Err(RangeTransferError::ProgressConflict)
         ));
     }
 

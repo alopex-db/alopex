@@ -19,10 +19,10 @@ pub use range_directory::{
 
 pub use range_transfer::{
     RangeChangeEnvelope, RangeSnapshotChunk, RangeSnapshotEntry, RangeTransferAck,
-    RangeTransferApplyOutcome, RangeTransferError, RangeTransferExpectation,
-    RangeTransferFrameHandler, RangeTransferManifest, RangeTransferResumePoint,
-    RangeTransferSession, RangeTransferWireFrame, RangeTransferWireMessage,
-    VerifiedRangeTransferReceiver,
+    RangeTransferApplyOutcome, RangeTransferCheckpoint, RangeTransferCoordinator,
+    RangeTransferError, RangeTransferExpectation, RangeTransferFrameHandler, RangeTransferManifest,
+    RangeTransferPhase, RangeTransferResumePoint, RangeTransferSession, RangeTransferWireFrame,
+    RangeTransferWireMessage, VerifiedRangeTransferReceiver,
 };
 
 pub use schema::{SchemaControlError, SchemaControlResult, SchemaControlService};
