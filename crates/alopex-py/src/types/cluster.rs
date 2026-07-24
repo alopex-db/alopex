@@ -64,6 +64,12 @@ pub(crate) fn routing_diagnostics_to_py(
     dict.set_item("update_epoch", diagnostics.update_epoch)?;
     dict.set_item("decision", routing_decision_name(diagnostics.decision))?;
     dict.set_item("reason", stable_diagnostic_code_name(diagnostics.reason))?;
+    // v0.9 clients consume a stable machine-readable reason_code; retain the
+    // legacy `reason` key for Python compatibility.
+    dict.set_item(
+        "reason_code",
+        stable_diagnostic_code_name(diagnostics.reason),
+    )?;
     dict.set_item("plan_id", diagnostics.plan_id.as_str())?;
     dict.set_item("roles", node_roles_to_py(py, &diagnostics.roles)?)?;
     dict.set_item("targets", routing_targets_to_py(py, &diagnostics.targets)?)?;
