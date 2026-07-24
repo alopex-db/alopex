@@ -143,6 +143,24 @@ impl DataFrameError {
         }
     }
 
+    /// Classify a roadmap DataFrame operation before a caller attempts execution.
+    ///
+    /// `cast`, `pivot`, `unpivot`, and `window` are intentionally not exposed as working
+    /// DataFrame operations in v0.9.  Returning their stable, pre-execution rejection here lets
+    /// adapters report the supported boundary instead of implying that a missing method ran and
+    /// failed. `cse` and `concat` are backed by the existing optimizer/execution paths.
+    pub fn preflight_dataframe_operation(operation: &str) -> Result<()> {
+        match operation {
+            "cse" | "concat" => Ok(()),
+            "cast" | "pivot" | "unpivot" | "window" => Err(Self::invalid_operation(format!(
+                "dataframe operation '{operation}' is planned and unavailable: pre_execution_unsupported"
+            ))),
+            _ => Err(Self::invalid_operation(format!(
+                "unknown dataframe operation '{operation}'"
+            ))),
+        }
+    }
+
     /// Create an invalid configuration error.
     pub fn configuration(option: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Configuration {
