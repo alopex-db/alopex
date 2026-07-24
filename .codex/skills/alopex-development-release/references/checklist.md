@@ -81,18 +81,21 @@ Implementation logs are mandatory searchable evidence. Include task ID, summary,
 
 ## Version bump, PR, and release sequence
 
-1. Merge all approved feature-phase PRs to `main` and record the resulting SHA.
-2. Create a fresh `release/v<version>` worktree from that merged SHA.
-3. In the release worktree, update the workspace/root version source, all publishing
+1. Verify a clean, synchronized `main` and create `release/v<version>` as the release
+   worktree and integration branch.
+2. Create phase/task worktrees from the release branch and merge completed feature
+   branches into the release branch; never merge feature branches directly to `main`.
+3. On the release branch, update the workspace/root version source, all publishing
    crate manifests and internal constraints, `Cargo.lock`, Python metadata and
    `__version__`, changelog/release notes, support/upgrade matrix, CI/workflow
    version inputs, artifact metadata, and target-version verifier constants.
 4. Search for the previous version, run Cargo metadata/lockfile validation and Python
    metadata validation, and keep unrelated lockfile churn out of the bump commit.
-5. Push the release branch and open a version-bump PR to `main`. Obtain review and CI
-   approval, merge it, and record the new merge SHA. Never tag the unmerged branch.
-6. Recreate a clean release worktree at the version-bump merge SHA, run the target
-   gate and `safe-tag.sh`, then stop for explicit publication authorization.
+5. After the complete release scope is `[x]` with independent evidence, push the
+   release branch and open the single `release/v<version>` → `main` PR. Obtain review
+   and CI approval, merge it, and record the merge SHA. Never tag the unmerged branch.
+6. Recreate a clean release worktree at the release PR merge SHA, run the target gate
+   and `safe-tag.sh`, then stop for explicit publication authorization.
 
 The release PR and version-bump merge SHA are required evidence in the release-readiness
 spec. A tag or registry artifact is invalid if its commit is not the approved merge SHA.
