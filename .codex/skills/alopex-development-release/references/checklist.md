@@ -21,8 +21,9 @@ rtk git -C alopex-worktrees/<version>-<purpose> status --short --branch
 ```
 
 All source, test, workflow, version, and release-file edits and commands run from
-the dedicated worktree. A phase branch is pushed and merged through a PR to `main`;
-direct commits/pushes to `main` are prohibited.
+the dedicated worktree. Create `release/v<version>` first; phase and version-bump
+branches merge into that release branch. Only one final release-branch PR targets
+`main`; direct commits/pushes to `main` are prohibited.
 
 Before handoff, run:
 
@@ -78,21 +79,27 @@ Implementation logs are mandatory searchable evidence. Include task ID, summary,
 
 ## Version bump, PR, and release sequence
 
-1. Merge all approved feature-phase PRs to `main` and record the resulting SHA.
-2. Create a fresh `release/v<version>` worktree from that merged SHA.
-3. In the release worktree, update the workspace/root version source, all publishing
+1. From clean synchronized `main`, create `release/v<version>` and its dedicated
+   worktree; record the base SHA.
+2. Create feature-phase worktrees from the release branch. Merge every approved
+   phase PR into `release/v<version>` and record each merge SHA.
+3. In a release/version-bump worktree based on `release/v<version>`, update the workspace/root version source, all publishing
    crate manifests and internal constraints, `Cargo.lock`, Python metadata and
    `__version__`, changelog/release notes, support/upgrade matrix, CI/workflow
    version inputs, artifact metadata, and target-version verifier constants.
 4. Search for the previous version, run Cargo metadata/lockfile validation and Python
    metadata validation, and keep unrelated lockfile churn out of the bump commit.
-5. Push the release branch and open a version-bump PR to `main`. Obtain review and CI
-   approval, merge it, and record the new merge SHA. Never tag the unmerged branch.
-6. Recreate a clean release worktree at the version-bump merge SHA, run the target
-   gate and `safe-tag.sh`, then stop for explicit publication authorization.
+5. Push the version-bump branch and open a PR to `release/v<version>`. Obtain review
+   and CI approval, merge it, and record the release-branch merge SHA. Never tag the
+   unmerged branch.
+6. Recreate a clean release worktree at the final release-branch SHA, run the target
+   gate, and open exactly one final PR from `release/v<version>` to `main`.
+7. Merge that final PR, record the main merge SHA, run `safe-tag.sh`, then stop for
+   explicit publication authorization.
 
-The release PR and version-bump merge SHA are required evidence in the release-readiness
-spec. A tag or registry artifact is invalid if its commit is not the approved merge SHA.
+The phase PRs, release/version-bump PR, final release PR, and both release/main merge
+SHAs are required evidence in the release-readiness spec. A tag or registry artifact
+is invalid if its commit is not the approved final main merge SHA.
 
 ## Release safety and tags
 
