@@ -42,13 +42,15 @@ pub use distributed_read::{
 };
 pub use metadata::{
     AuthorizationScope, ChirpsMetadataBackend, ChirpsMetadataConsensusAdapter,
-    ClusterReadConsistency, ClusterReadPolicy, CommittedMetadata, ManagementOutcome,
-    ManagementOutcomeClass, MemberLifecycle, MemberRecord, MetadataActor, MetadataCommand,
-    MetadataCommandEnvelope, MetadataCommandValidator, MetadataConsensusError,
+    ClusterReadConsistency, ClusterReadPolicy, CommittedMetadata, FailureClass, IdempotencyResult,
+    ManagementOutcome, ManagementOutcomeClass, MemberLifecycle, MemberRecord, MetadataActor,
+    MetadataCommand, MetadataCommandEnvelope, MetadataCommandValidator, MetadataConsensusError,
     MetadataConsensusStore, MetadataSnapshot, MetadataValidationError, ObservedHealth,
-    RangeCoverageProof, RangeReplicaEvidence, RangeReplicaLifecycle, RangeRoutingDefinition,
-    ReadPolicyOverride, SchemaApplyEvidence, SchemaApplyState, SchemaCompatibility, SchemaManifest,
-    SchemaRolloutState, ValidatedMetadataCommand, ValidationDecision, compiled_chirps_bootstrap,
+    OperationRecord, OperationRetention, OperationState, Placement, PlacementReadiness,
+    PlacementRole, RangeCoverageProof, RangeIdentity, RangeReplicaEvidence, RangeReplicaLifecycle,
+    RangeRoutingDefinition, ReadPolicyOverride, SchemaApplyEvidence, SchemaApplyState,
+    SchemaCompatibility, SchemaManifest, SchemaRolloutState, ValidatedMetadataCommand,
+    ValidationDecision, compiled_chirps_bootstrap,
 };
 pub use projection::{
     CommittedMetadataProjection, CommittedMetadataProjector, MetadataProjectionFreshness,

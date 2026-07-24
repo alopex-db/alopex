@@ -14,8 +14,10 @@ pub use consensus::{
     MetadataConsensusStore, MetadataSnapshot, compiled_chirps_bootstrap,
 };
 pub use model::{
-    ClusterReadConsistency, ClusterReadPolicy, CommittedMetadata, ManagementOutcome,
-    ManagementOutcomeClass, MemberLifecycle, MemberRecord, ObservedHealth, RangeCoverageProof,
-    RangeReplicaEvidence, RangeReplicaLifecycle, RangeRoutingDefinition, ReadPolicyOverride,
-    SchemaApplyEvidence, SchemaApplyState, SchemaCompatibility, SchemaManifest, SchemaRolloutState,
+    ClusterReadConsistency, ClusterReadPolicy, CommittedMetadata, FailureClass, IdempotencyResult,
+    ManagementOutcome, ManagementOutcomeClass, MemberLifecycle, MemberRecord, ObservedHealth,
+    OperationRecord, OperationRetention, OperationState, Placement, PlacementReadiness,
+    PlacementRole, RangeCoverageProof, RangeIdentity, RangeReplicaEvidence, RangeReplicaLifecycle,
+    RangeRoutingDefinition, ReadPolicyOverride, SchemaApplyEvidence, SchemaApplyState,
+    SchemaCompatibility, SchemaManifest, SchemaRolloutState,
 };

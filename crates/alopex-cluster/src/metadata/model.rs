@@ -51,6 +51,209 @@ pub struct MemberRecord {
     pub observed_health: Option<ObservedHealth>,
 }
 
+/// Stable identity of a logical range at a committed metadata version.
+///
+/// Bounds are encoded primary-row-key bytes and form the half-open interval
+/// `[lower_bound, upper_bound)`. `None` is reserved for the corresponding
+/// unbounded table edge; callers must not reinterpret these bytes using SQL
+/// collation or a secondary-index ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RangeIdentity {
+    pub cluster_id: ClusterId,
+    pub table_id: TableId,
+    pub range_id: RangeId,
+    #[serde(default)]
+    pub lower_bound: Option<Vec<u8>>,
+    #[serde(default)]
+    pub upper_bound: Option<Vec<u8>>,
+    pub schema_version: u64,
+    pub data_epoch: u64,
+}
+
+impl RangeIdentity {
+    pub fn new(
+        cluster_id: impl Into<ClusterId>,
+        table_id: TableId,
+        range_id: impl Into<RangeId>,
+        lower_bound: Option<Vec<u8>>,
+        upper_bound: Option<Vec<u8>>,
+        schema_version: u64,
+        data_epoch: u64,
+    ) -> Self {
+        Self {
+            cluster_id: cluster_id.into(),
+            table_id,
+            range_id: range_id.into(),
+            lower_bound,
+            upper_bound,
+            schema_version,
+            data_epoch,
+        }
+    }
+
+    pub fn contains(&self, row_key: &[u8]) -> bool {
+        self.lower_bound
+            .as_deref()
+            .is_none_or(|lower| row_key >= lower)
+            && self
+                .upper_bound
+                .as_deref()
+                .is_none_or(|upper| row_key < upper)
+    }
+}
+
+/// Placement role for a node participating in a range operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementRole {
+    Owner,
+    Replica,
+    Learner,
+    Draining,
+}
+
+/// Read/write readiness of a placement. This is intentionally independent of
+/// Chirps liveness: a reachable node is not automatically a ready replica.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementReadiness {
+    Ready,
+    Pending,
+    Unavailable,
+    Retired,
+}
+
+/// Committed ownership and replica placement for a logical range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Placement {
+    pub owner_node: NodeId,
+    #[serde(default)]
+    pub replica_nodes: Vec<NodeId>,
+    pub role: PlacementRole,
+    pub readiness: PlacementReadiness,
+    pub placement_epoch: u64,
+}
+
+impl Placement {
+    pub fn new(
+        owner_node: impl Into<NodeId>,
+        replica_nodes: Vec<NodeId>,
+        role: PlacementRole,
+        readiness: PlacementReadiness,
+        placement_epoch: u64,
+    ) -> Self {
+        Self {
+            owner_node: owner_node.into(),
+            replica_nodes,
+            role,
+            readiness,
+            placement_epoch,
+        }
+    }
+}
+
+/// Lifecycle state of a range-management operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationState {
+    Accepted,
+    Running,
+    Committed,
+    Rejected,
+    RetryableFailure,
+    TerminalFailure,
+    RecoveryPending,
+    Cancelled,
+}
+
+impl OperationState {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Committed | Self::Rejected | Self::TerminalFailure | Self::Cancelled
+        )
+    }
+}
+
+/// Stable failure classification shared by operation and surface adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureClass {
+    Unauthorized,
+    StaleMetadata,
+    Gap,
+    Overlap,
+    EpochMismatch,
+    NotLeader,
+    NodeUnavailable,
+    PrerequisiteMissing,
+    Timeout,
+    Conflict,
+    InvalidRequest,
+    Internal,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationRetention {
+    #[serde(default)]
+    pub retain_until_epoch: Option<u64>,
+    #[serde(default)]
+    pub completed_at_epoch: Option<u64>,
+}
+
+/// Durable identity and observable state for one metadata operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationRecord {
+    pub operation_id: String,
+    pub request_id: RequestId,
+    pub actor: NodeId,
+    pub target: String,
+    pub expected_version: MetadataVersion,
+    pub state: OperationState,
+    #[serde(default)]
+    pub failure_class: Option<FailureClass>,
+    #[serde(default)]
+    pub result_version: Option<MetadataVersion>,
+    #[serde(default)]
+    pub checkpoint: Option<String>,
+    #[serde(default)]
+    pub retention: OperationRetention,
+}
+
+impl OperationRecord {
+    pub fn new(
+        operation_id: impl Into<String>,
+        request_id: impl Into<RequestId>,
+        actor: impl Into<NodeId>,
+        target: impl Into<String>,
+        expected_version: MetadataVersion,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            request_id: request_id.into(),
+            actor: actor.into(),
+            target: target.into(),
+            expected_version,
+            state: OperationState::Accepted,
+            failure_class: None,
+            result_version: None,
+            checkpoint: None,
+            retention: OperationRetention::default(),
+        }
+    }
+}
+
+/// Stable result returned for duplicate requests, including after restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdempotencyResult {
+    pub operation_id: String,
+    pub request_id: RequestId,
+    pub first_outcome: String,
+    pub state: OperationState,
+    #[serde(default)]
+    pub duplicate_count: u64,
+}
+
 impl MemberRecord {
     pub fn new(identity: MemberIdentity, lifecycle: MemberLifecycle) -> Self {
         Self {
@@ -477,5 +680,59 @@ impl CommittedMetadata {
         }
         next.operations.insert(outcome.request_id.clone(), outcome);
         next
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn range_identity_and_placement_round_trip() {
+        let identity = RangeIdentity::new(
+            "cluster-a",
+            7,
+            "range-a",
+            Some(vec![0x10]),
+            Some(vec![0x20]),
+            3,
+            9,
+        );
+        assert!(identity.contains(&[0x10]));
+        assert!(!identity.contains(&[0x20]));
+
+        let placement = Placement::new(
+            "node-a",
+            vec![NodeId::new("node-b")],
+            PlacementRole::Owner,
+            PlacementReadiness::Ready,
+            4,
+        );
+        let encoded = serde_json::to_vec(&(&identity, &placement)).expect("encode contracts");
+        let decoded: (RangeIdentity, Placement) =
+            serde_json::from_slice(&encoded).expect("decode contracts");
+        assert_eq!(decoded.0, identity);
+        assert_eq!(decoded.1, placement);
+    }
+
+    #[test]
+    fn operation_contract_preserves_failure_and_duplicate_state() {
+        let mut operation = OperationRecord::new("op-1", "req-1", "node-a", "range-a", 12);
+        operation.state = OperationState::RetryableFailure;
+        operation.failure_class = Some(FailureClass::NodeUnavailable);
+        operation.checkpoint = Some("checkpoint-1".to_string());
+        let result = IdempotencyResult {
+            operation_id: operation.operation_id.clone(),
+            request_id: operation.request_id.clone(),
+            first_outcome: "retryable".to_string(),
+            state: operation.state,
+            duplicate_count: 2,
+        };
+        let encoded = serde_json::to_vec(&(&operation, &result)).expect("encode operation");
+        let decoded: (OperationRecord, IdempotencyResult) =
+            serde_json::from_slice(&encoded).expect("decode operation");
+        assert_eq!(decoded.0, operation);
+        assert_eq!(decoded.1, result);
+        assert!(!decoded.1.state.is_terminal());
     }
 }

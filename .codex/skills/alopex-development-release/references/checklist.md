@@ -10,6 +10,20 @@ rtk git -C alopex worktree list
 rtk scripts/check-rust-cache-budget.sh --check
 ```
 
+The `alopex` path is the main worktree and is observation-only during development.
+Create and use a dedicated worktree before editing:
+
+```bash
+rtk git -C alopex status --short --branch
+rtk git -C alopex worktree list
+rtk git -C alopex worktree add ../alopex-worktrees/<version>-<purpose> -b <branch> main
+rtk git -C alopex-worktrees/<version>-<purpose> status --short --branch
+```
+
+All source, test, workflow, version, and release-file edits and commands run from
+the dedicated worktree. A phase branch is pushed and merged through a PR to `main`;
+direct commits/pushes to `main` are prohibited.
+
 Before handoff, run:
 
 ```bash
@@ -50,6 +64,8 @@ For every approval request:
 
 The three documents have different boundaries: requirements define observable outcomes, design maps approved outcomes to implementation contracts, and tasks divide the design into small executable work. Implementation details belong in design/tasks and implementation logs, not requirements. At version kickoff, read and snapshot the roadmap before writing requirements; enumerate every roadmap module/crate and every inherited prior-version surface, then assign each an anchor and status (new, inherited, deferred, or explicitly out of scope). Map every row through requirements → design → task → test/evidence; do not defer this to a later audit or leave a row unclassified. Requirements must explicitly inventory all SQL statements/functions and CLI commands in scope and keep feature outcomes separate from cross-phase policy/gate criteria. Compare rough effort and surface size across phases, reject back-loaded or monolithic phases, and treat features as tasks under broad phases. `tasks.md` status markers are `- [ ]` pending, `- [-]` in progress, and `- [x]` complete.
 
+Every version also requires a separate `.spec-workflow/specs/<version>-release-readiness/` chain. Its tasks must explicitly cover target-version `alopex-tools`/verifier updates, all-surface aggregation, candidate no-write/offline verification, Rust/Python workflow authorization checks, exact target tags/artifact/platform/SHA checks, v<version> support/upgrade/publication checklists, and post-release registry/GitHub/tag/worktree/remote verification with partial-publication recovery. Feature-phase handoff tasks do not replace this release task set.
+
 For the phase-level pattern and approval-blocking completeness checks, read
 `references/phase-requirements.md`. Use the approved v0.8.0 shape as the default
 starting point: cluster metadata/operations, distributed-read SQL/CLI, DataFrame
@@ -59,6 +75,24 @@ explicit support/rejection classification, target-version gate coverage, and the
 full requirements → design → task → test/evidence crosswalk.
 
 Implementation logs are mandatory searchable evidence. Include task ID, summary, files, line statistics, tests, and all relevant structured artifacts; do not submit an empty `artifacts` object. Search prior logs before adding endpoints, functions, classes, components, or integrations.
+
+## Version bump, PR, and release sequence
+
+1. Merge all approved feature-phase PRs to `main` and record the resulting SHA.
+2. Create a fresh `release/v<version>` worktree from that merged SHA.
+3. In the release worktree, update the workspace/root version source, all publishing
+   crate manifests and internal constraints, `Cargo.lock`, Python metadata and
+   `__version__`, changelog/release notes, support/upgrade matrix, CI/workflow
+   version inputs, artifact metadata, and target-version verifier constants.
+4. Search for the previous version, run Cargo metadata/lockfile validation and Python
+   metadata validation, and keep unrelated lockfile churn out of the bump commit.
+5. Push the release branch and open a version-bump PR to `main`. Obtain review and CI
+   approval, merge it, and record the new merge SHA. Never tag the unmerged branch.
+6. Recreate a clean release worktree at the version-bump merge SHA, run the target
+   gate and `safe-tag.sh`, then stop for explicit publication authorization.
+
+The release PR and version-bump merge SHA are required evidence in the release-readiness
+spec. A tag or registry artifact is invalid if its commit is not the approved merge SHA.
 
 ## Release safety and tags
 
