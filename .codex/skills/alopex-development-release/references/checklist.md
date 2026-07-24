@@ -42,6 +42,15 @@ rtk bash crates/alopex-tools/v08/verify-v08-surfaces.sh
 
 Also run the repository's candidate verifier, then the focused test suites for any changed contract. Before and after Cargo/maturin work, perform the hygiene commands above.
 
+For every Nim SQL parser build or test, use the CI-equivalent Docker backend:
+
+```bash
+rtk bash scripts/build-nim-parser.sh --backend docker
+rtk bash scripts/test-nim-parser.sh --backend docker
+```
+
+Do not install host Nim/asdf only to run these checks unless the user explicitly asks for a host-toolchain validation.
+
 ## spec-workflow approval sequence
 
 Call the guide first, then complete one spec in this order:
