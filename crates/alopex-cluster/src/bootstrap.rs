@@ -67,6 +67,16 @@ impl ClusterBootstrapOutcome {
     pub fn can_advertise_cluster_control(&self) -> bool {
         matches!(self, Self::ReadyForClusterControl)
     }
+
+    /// Stable adapter-facing classification; capability failures are never
+    /// silently downgraded to a local control plane.
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::SingleNode => "single_node_mode",
+            Self::ReadyForClusterControl => "ready",
+            Self::CapabilityUnavailable { .. } => "prerequisite_missing",
+        }
+    }
 }
 
 /// Performs the pre-operation cluster capability check.
@@ -124,6 +134,7 @@ mod tests {
 
         assert_eq!(outcome, ClusterBootstrapOutcome::SingleNode);
         assert!(!outcome.can_advertise_cluster_control());
+        assert_eq!(outcome.reason_code(), "single_node_mode");
     }
 
     #[test]
@@ -145,6 +156,7 @@ mod tests {
             }
         );
         assert!(!outcome.can_advertise_cluster_control());
+        assert_eq!(outcome.reason_code(), "prerequisite_missing");
     }
 
     #[test]
