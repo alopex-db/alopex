@@ -1,0 +1,96 @@
+use std::collections::BTreeMap;
+
+use alopex_sql::scalar::{self, Arity};
+
+#[test]
+fn v09_scalar_register_is_complete_unique_and_exactly_arity_fenced() {
+    let expected = BTreeMap::from([
+        ("vector_similarity", Arity::Exact(3)),
+        ("vector_distance", Arity::Exact(3)),
+        ("vector_dims", Arity::Exact(1)),
+        ("vector_norm", Arity::Exact(1)),
+        ("abs", Arity::Exact(1)),
+        ("sign", Arity::Exact(1)),
+        ("round", Arity::Range(1, 2)),
+        ("floor", Arity::Exact(1)),
+        ("ceil", Arity::Exact(1)),
+        ("ceiling", Arity::Exact(1)),
+        ("trunc", Arity::Range(1, 2)),
+        ("mod", Arity::Exact(2)),
+        ("power", Arity::Exact(2)),
+        ("pow", Arity::Exact(2)),
+        ("sqrt", Arity::Exact(1)),
+        ("exp", Arity::Exact(1)),
+        ("ln", Arity::Exact(1)),
+        ("log", Arity::Range(1, 2)),
+        ("log10", Arity::Exact(1)),
+        ("random", Arity::Exact(0)),
+        ("sin", Arity::Exact(1)),
+        ("cos", Arity::Exact(1)),
+        ("tan", Arity::Exact(1)),
+        ("asin", Arity::Exact(1)),
+        ("acos", Arity::Exact(1)),
+        ("atan", Arity::Exact(1)),
+        ("atan2", Arity::Exact(2)),
+        ("degrees", Arity::Exact(1)),
+        ("radians", Arity::Exact(1)),
+        ("pi", Arity::Exact(0)),
+        ("sha256", Arity::Exact(1)),
+        ("md5", Arity::Exact(1)),
+        ("simhash", Arity::Exact(1)),
+        ("hamming_distance", Arity::Exact(2)),
+        ("gen_random_uuid", Arity::Exact(0)),
+        ("uuidv7", Arity::Exact(0)),
+        ("hex", Arity::Exact(1)),
+        ("unhex", Arity::Exact(1)),
+        ("encode", Arity::Exact(2)),
+        ("decode", Arity::Exact(2)),
+        ("length", Arity::Exact(1)),
+        ("char_length", Arity::Exact(1)),
+        ("octet_length", Arity::Exact(1)),
+        ("upper", Arity::Exact(1)),
+        ("lower", Arity::Exact(1)),
+        ("initcap", Arity::Exact(1)),
+        ("substr", Arity::Range(2, 3)),
+        ("left", Arity::Exact(2)),
+        ("right", Arity::Exact(2)),
+        ("trim", Arity::Range(1, 2)),
+        ("ltrim", Arity::Range(1, 2)),
+        ("rtrim", Arity::Range(1, 2)),
+        ("replace", Arity::Exact(3)),
+        ("instr", Arity::Exact(2)),
+        ("strpos", Arity::Exact(2)),
+        ("concat", Arity::Variadic(0)),
+        ("concat_ws", Arity::Variadic(1)),
+        ("repeat", Arity::Exact(2)),
+        ("reverse", Arity::Exact(1)),
+        ("lpad", Arity::Range(2, 3)),
+        ("rpad", Arity::Range(2, 3)),
+        ("split_part", Arity::Exact(3)),
+        ("regexp_replace", Arity::Exact(3)),
+        ("regexp_match", Arity::Exact(2)),
+        ("regexp_matches", Arity::Range(2, 3)),
+        ("coalesce", Arity::Variadic(1)),
+        ("nullif", Arity::Exact(2)),
+        ("ifnull", Arity::Exact(2)),
+        ("iif", Arity::Exact(3)),
+        ("greatest", Arity::Variadic(1)),
+        ("least", Arity::Variadic(1)),
+        ("typeof", Arity::Exact(1)),
+        ("pg_typeof", Arity::Exact(1)),
+        ("quote", Arity::Exact(1)),
+        ("memory_stats", Arity::Exact(0)),
+        ("io_stats", Arity::Exact(0)),
+        ("clear_cache", Arity::Exact(0)),
+    ]);
+    let actual = scalar::signatures()
+        .iter()
+        .map(|signature| (signature.name, signature.arity))
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(
+        actual, expected,
+        "missing, unknown, duplicate, or arity drift"
+    );
+    assert!(scalar::signature("v09_unknown_function").is_none());
+}
