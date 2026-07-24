@@ -1,8 +1,8 @@
 //! Read-only projection of committed metadata plus non-authoritative evidence.
 
 use crate::{
-    CommittedMetadata, MemberLifecycle, NodeId, ObservedHealth, RangeReplicaDirectory,
-    RangeReplicaReadiness, SchemaApplyState, SchemaManifestId,
+    CommittedMetadata, MemberLifecycle, NodeId, ObservedHealth, RangeIdentity,
+    RangeReplicaDirectory, RangeReplicaReadiness, SchemaApplyState, SchemaManifestId, TableId,
 };
 use std::collections::BTreeMap;
 
@@ -42,6 +42,48 @@ pub struct ProjectedSchemaRollout {
     pub members: Vec<ProjectedSchemaApply>,
 }
 
+/// Stable classification of a routing decision.  The value is deliberately
+/// independent of transport status codes so every adapter can map the same
+/// committed snapshot to the same result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingOutcomeKind {
+    Local,
+    SingleRange,
+    MultiRange,
+    LocalOnly,
+    Unsupported,
+    Unavailable,
+    Retryable,
+    Blocked,
+}
+
+/// Canonical routing result produced from one committed metadata version.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RoutingOutcome {
+    pub kind: RoutingOutcomeKind,
+    #[serde(default)]
+    pub range_identity: Option<RangeIdentity>,
+    pub metadata_version: u64,
+    pub reason_code: String,
+}
+
+impl RoutingOutcome {
+    pub fn new(
+        kind: RoutingOutcomeKind,
+        range_identity: Option<RangeIdentity>,
+        metadata_version: u64,
+        reason_code: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            range_identity,
+            metadata_version,
+            reason_code: reason_code.into(),
+        }
+    }
+}
+
 /// A view that is current only when it came from one committed metadata
 /// version. Reachability evidence is attached for diagnostics and cannot alter
 /// membership, placement, or schema ownership here.
@@ -70,6 +112,81 @@ impl CommittedMetadataProjection {
 
     pub fn is_current(&self) -> bool {
         self.freshness == MetadataProjectionFreshness::Committed
+    }
+
+    /// Classifies routing without consulting gossip or mutating metadata.
+    pub fn routing_outcome(&self, table_id: TableId) -> RoutingOutcome {
+        let Some(metadata) = self.metadata.as_ref() else {
+            return RoutingOutcome::new(
+                RoutingOutcomeKind::Unavailable,
+                None,
+                0,
+                "metadata_unavailable",
+            );
+        };
+        let mut ranges = metadata
+            .ranges()
+            .values()
+            .filter(|range| range.table_id == table_id)
+            .collect::<Vec<_>>();
+        ranges.sort_by(|left, right| left.lower_inclusive.cmp(&right.lower_inclusive));
+        if ranges.is_empty() {
+            return RoutingOutcome::new(
+                RoutingOutcomeKind::LocalOnly,
+                None,
+                metadata.state_version(),
+                "range_not_configured",
+            );
+        }
+        let readiness = &self.replica_readiness;
+        let all_ready = ranges.iter().all(|range| {
+            readiness.iter().any(|entry| {
+                entry.range_id == range.range_id
+                    && entry.state == crate::RangeReplicaReadinessState::Ready
+            })
+        });
+        if !all_ready {
+            return RoutingOutcome::new(
+                RoutingOutcomeKind::Blocked,
+                None,
+                metadata.state_version(),
+                "replica_not_ready",
+            );
+        }
+        let identity = (ranges.len() == 1).then(|| {
+            let range = ranges[0];
+            let data_epoch = metadata
+                .range_replicas()
+                .get(&range.range_id)
+                .into_iter()
+                .flat_map(|replicas| replicas.values())
+                .map(|evidence| evidence.data_epoch)
+                .max()
+                .unwrap_or_default();
+            RangeIdentity::new(
+                metadata.cluster_id().clone(),
+                range.table_id,
+                range.range_id.clone(),
+                range.lower_inclusive.clone(),
+                range.upper_exclusive.clone(),
+                metadata.state_version(),
+                data_epoch,
+            )
+        });
+        RoutingOutcome::new(
+            if ranges.len() == 1 {
+                RoutingOutcomeKind::SingleRange
+            } else {
+                RoutingOutcomeKind::MultiRange
+            },
+            identity,
+            metadata.state_version(),
+            if ranges.len() == 1 {
+                "single_range"
+            } else {
+                "multi_range"
+            },
+        )
     }
 }
 
@@ -208,5 +325,23 @@ mod tests {
         assert_eq!(schema.owner, Some(NodeId::new("node-a")));
         assert_eq!(schema.members[0].state, crate::SchemaApplyState::Failed);
         assert!(!schema.members[0].compatibility_verified);
+    }
+
+    #[test]
+    fn routing_outcome_is_derived_from_one_committed_version() {
+        let mut metadata = CommittedMetadata::new(ClusterId::new("cluster-a"));
+        metadata.record_range_for_apply(crate::RangeRoutingDefinition {
+            range_id: crate::RangeId::new("range-a"),
+            table_ref: crate::TableRef::new("default.public.users"),
+            table_id: 7,
+            lower_inclusive: None,
+            upper_exclusive: None,
+            generation: 1,
+        });
+        let projection = CommittedMetadataProjector.project(&metadata, &BTreeMap::new());
+        let blocked = projection.routing_outcome(7);
+        assert_eq!(blocked.kind, RoutingOutcomeKind::Blocked);
+        assert_eq!(blocked.metadata_version, metadata.state_version());
+        assert_eq!(blocked.reason_code, "replica_not_ready");
     }
 }

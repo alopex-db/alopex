@@ -55,7 +55,8 @@ pub use metadata::{
 };
 pub use projection::{
     CommittedMetadataProjection, CommittedMetadataProjector, MetadataProjectionFreshness,
-    ProjectedMember, ProjectedSchemaApply, ProjectedSchemaRollout,
+    ProjectedMember, ProjectedSchemaApply, ProjectedSchemaRollout, RoutingOutcome,
+    RoutingOutcomeKind,
 };
 pub use read_point::{
     ClusterReadPoint, ClusterReadPointAuthority, RangeReplicaReadWatermark, ReadConsistencyMode,

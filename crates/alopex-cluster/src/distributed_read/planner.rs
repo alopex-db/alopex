@@ -116,6 +116,22 @@ pub enum ReadRoutePlanningError {
     StorageConstraint(String),
 }
 
+impl ReadRoutePlanningError {
+    /// Stable machine-readable detail shared by HTTP, gRPC, CLI and Python.
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::ModeNotPermitted => "read_mode_not_permitted",
+            Self::NoRangesForTable(_) => "range_not_configured",
+            Self::IncompleteOrOverlappingCoverage(_) => "range_coverage_incomplete",
+            Self::MissingActiveSchemaManifest => "schema_manifest_unavailable",
+            Self::NoCompatibleTarget { .. } => "replica_not_ready",
+            Self::ReadPoint(_) => "read_point_unavailable",
+            Self::InvalidRangeMetadata(_) => "invalid_range_metadata",
+            Self::StorageConstraint(_) => "storage_constraint_invalid",
+        }
+    }
+}
+
 /// Builds remote dispatch plans exclusively from immutable committed evidence.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ReadRoutePlanner {
@@ -127,6 +143,18 @@ impl ReadRoutePlanner {
         Self {
             read_point_authority,
         }
+    }
+
+    /// Returns the canonical committed-snapshot classification used by
+    /// status and routing adapters before a remote read is dispatched.
+    pub fn routing_outcome(
+        &self,
+        metadata: &CommittedMetadata,
+        table_id: TableId,
+    ) -> crate::RoutingOutcome {
+        crate::CommittedMetadataProjector
+            .project(metadata, &std::collections::BTreeMap::new())
+            .routing_outcome(table_id)
     }
 
     /// Plans every physical range for a logical table or returns a classified

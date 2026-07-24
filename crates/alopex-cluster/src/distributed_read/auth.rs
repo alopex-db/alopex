@@ -154,6 +154,24 @@ pub enum DelegationAuthorizationError {
     Encoding(String),
 }
 
+impl DelegationAuthorizationError {
+    /// Stable reason code emitted by every worker boundary.
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::ClusterMismatch => "cluster_mismatch",
+            Self::IssuerMismatch => "delegation_issuer_mismatch",
+            Self::AudienceMismatch => "delegation_audience_mismatch",
+            Self::Expired => "delegation_expired",
+            Self::RangeMismatch => "delegation_range_mismatch",
+            Self::ScopeMismatch => "delegation_scope_mismatch",
+            Self::RequestMismatch => "delegation_request_mismatch",
+            Self::InvalidSignature => "delegation_signature_invalid",
+            Self::LocalAuthorizationDenied(_) => "local_authorization_denied",
+            Self::Encoding(_) => "delegation_encoding_failed",
+        }
+    }
+}
+
 /// Verifies the capability and performs the non-bypassable local policy recheck.
 pub fn verify_and_recheck(
     credential: &ReadDelegationCredential,
