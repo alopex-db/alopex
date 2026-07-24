@@ -761,6 +761,9 @@ impl AlopexService for AlopexServiceImpl {
         Ok(Response::new(proto::ClusterOperationResponse {
             action: "join".to_string(),
             cluster_json: cluster_json(&cluster, &ctx.correlation_id)?,
+            operation_id: Uuid::new_v4().to_string(),
+            state: "committed".to_string(),
+            reason_code: "membership_changed".to_string(),
         }))
     }
 
@@ -778,6 +781,9 @@ impl AlopexService for AlopexServiceImpl {
         Ok(Response::new(proto::ClusterOperationResponse {
             action: "leave".to_string(),
             cluster_json: cluster_json(&cluster, &ctx.correlation_id)?,
+            operation_id: Uuid::new_v4().to_string(),
+            state: "committed".to_string(),
+            reason_code: "membership_changed".to_string(),
         }))
     }
 }

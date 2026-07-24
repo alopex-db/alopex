@@ -131,6 +131,10 @@ message ClusterLeaveRequest {}
 message ClusterOperationResponse {
   string action = 1;
   string cluster_json = 2;
+  // Additive v0.9 lifecycle classification; fields 1-2 remain unchanged.
+  string operation_id = 3;
+  string state = 4;
+  string reason_code = 5;
 }
 
 message Vector {
