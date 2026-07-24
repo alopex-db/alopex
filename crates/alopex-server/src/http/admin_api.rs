@@ -64,6 +64,9 @@ struct AdminHealthResponse {
 #[derive(Serialize)]
 struct AdminClusterOperationResponse {
     action: &'static str,
+    operation_id: String,
+    state: &'static str,
+    reason_code: &'static str,
     cluster: ClusterStatusSnapshot,
 }
 
@@ -148,9 +151,12 @@ pub struct AdminClusterManagementRequest {
 #[derive(Serialize)]
 struct AdminClusterManagementResponse {
     operation_id: String,
+    request_id: String,
     operation: AdminClusterManagementOperation,
+    state: &'static str,
     outcome_class: &'static str,
     reason: &'static str,
+    reason_code: &'static str,
     state_version: Option<u64>,
     control: ClusterControlAvailability,
     actor: Option<String>,
@@ -277,10 +283,13 @@ pub async fn cluster_management(
         ("pending", "metadata_consensus_adapter_not_attached")
     };
     Json(AdminClusterManagementResponse {
-        operation_id: request.request_id,
+        operation_id: request.request_id.clone(),
+        request_id: request.request_id,
         operation: request.operation,
+        state: outcome_class,
         outcome_class,
         reason,
+        reason_code: reason,
         state_version: None,
         control,
         actor: ctx.actor,
@@ -605,7 +614,14 @@ fn cluster_operation_response(
         Err(err) => return error_response(err, ctx),
     };
     state.metrics.record_cluster_status(&cluster);
-    Json(AdminClusterOperationResponse { action, cluster }).into_response()
+    Json(AdminClusterOperationResponse {
+        action,
+        operation_id: Uuid::new_v4().to_string(),
+        state: "committed",
+        reason_code: "membership_changed",
+        cluster,
+    })
+    .into_response()
 }
 
 fn perform_lifecycle_action(action: &str, data_dir: &Path) -> Result<String, String> {
