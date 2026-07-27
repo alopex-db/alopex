@@ -31,8 +31,9 @@ pub use control::{
     UpgradePlanningError, UpgradeSourceKind, VerifiedRangeTransferReceiver,
 };
 pub use crdt::{
-    CrdtCommonFields, CrdtEnvelopeError, CrdtObjectType, CrdtOperationEnvelope, CrdtOperationKind,
-    CrdtPayload,
+    CrdtCommonFields, CrdtEnvelopeError, CrdtLedgerAdmission, CrdtLedgerError, CrdtLedgerIdentity,
+    CrdtLedgerRecord, CrdtObjectType, CrdtOperationEnvelope, CrdtOperationKind,
+    CrdtOperationLedger, CrdtPayload,
 };
 pub use distributed_read::{
     AuthenticatedSubject, CleanupAcknowledgement, DelegationAuthorizationError,

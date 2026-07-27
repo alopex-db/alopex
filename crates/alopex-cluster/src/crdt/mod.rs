@@ -6,8 +6,12 @@
 //! outcome contract.
 
 mod envelope;
+mod ledger;
 
 pub use envelope::{
     CrdtCommonFields, CrdtEnvelopeError, CrdtObjectType, CrdtOperationEnvelope, CrdtOperationKind,
     CrdtPayload,
+};
+pub use ledger::{
+    CrdtLedgerAdmission, CrdtLedgerError, CrdtLedgerIdentity, CrdtLedgerRecord, CrdtOperationLedger,
 };
