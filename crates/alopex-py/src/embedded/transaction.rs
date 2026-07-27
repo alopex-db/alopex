@@ -634,6 +634,76 @@ impl PyTransaction {
         }
     }
 
+    #[cfg(not(feature = "numpy"))]
+    fn upsert_vector(
+        &self,
+        py: Python<'_>,
+        key: &[u8],
+        metadata: Py<PyAny>,
+        vector: Py<PyAny>,
+        metric: Py<PyAny>,
+    ) -> PyResult<()> {
+        let _ = (key, metadata, vector, metric);
+        crate::vector::require_numpy(py)
+    }
+
+    #[cfg(not(feature = "numpy"))]
+    #[pyo3(signature = (query, metric, k, filter_keys = None, return_vectors = false, zero_copy_return = true))]
+    #[allow(clippy::too_many_arguments)]
+    fn search_similar(
+        &self,
+        py: Python<'_>,
+        query: Py<PyAny>,
+        metric: Py<PyAny>,
+        k: usize,
+        filter_keys: Option<Py<PyAny>>,
+        return_vectors: bool,
+        zero_copy_return: bool,
+    ) -> PyResult<()> {
+        let _ = (
+            query,
+            metric,
+            k,
+            filter_keys,
+            return_vectors,
+            zero_copy_return,
+        );
+        crate::vector::require_numpy(py)
+    }
+
+    #[cfg(not(feature = "numpy"))]
+    #[pyo3(signature = (name, key, vector, metadata = None))]
+    fn upsert_to_hnsw(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        key: &[u8],
+        vector: Py<PyAny>,
+        metadata: Option<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let _ = (name, key, vector, metadata);
+        crate::vector::require_numpy(py)
+    }
+
+    #[cfg(not(feature = "numpy"))]
+    fn delete_from_hnsw(&self, py: Python<'_>, name: &str, key: &[u8]) -> PyResult<()> {
+        let _ = (name, key);
+        crate::vector::require_numpy(py)
+    }
+
+    #[cfg(not(feature = "numpy"))]
+    #[pyo3(signature = (key, metric, zero_copy_return = true))]
+    fn get_vector(
+        &self,
+        py: Python<'_>,
+        key: &[u8],
+        metric: Py<PyAny>,
+        zero_copy_return: bool,
+    ) -> PyResult<()> {
+        let _ = (key, metric, zero_copy_return);
+        crate::vector::require_numpy(py)
+    }
+
     fn rollback(&self) -> PyResult<()> {
         if let Some(txn) = self
             .inner

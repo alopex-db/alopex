@@ -3,6 +3,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
+from alopex import Database
 
 CRATE_ROOT = Path(__file__).resolve().parents[1]
 CATALOG_SOURCE = (CRATE_ROOT / "src/catalog/client.rs").read_text(encoding="utf-8")
@@ -43,3 +46,23 @@ def test_i23a_catalog_and_numpy_register_has_individual_availability_rows() -> N
     assert "numpy support is not enabled" in VECTOR_SOURCE
     for method in NUMPY_METHODS:
         assert _has_rust_function(VECTOR_SOURCE, method), f"missing NumPy conversion {method}"
+
+
+def test_i23a_numpy_disabled_build_keeps_the_api_and_rejects_explicitly() -> None:
+    database = Database.new()
+    transaction = database.begin()
+    unavailable_calls = (
+        lambda: database.create_hnsw_index("v09_numpy_gate", object()),
+        lambda: database.search_hnsw("v09_numpy_gate", None, 1),
+        lambda: database.drop_hnsw_index("v09_numpy_gate"),
+        lambda: database.get_hnsw_stats("v09_numpy_gate"),
+        lambda: transaction.upsert_vector(b"key", None, None, None),
+        lambda: transaction.search_similar(None, None, 1),
+        lambda: transaction.upsert_to_hnsw("v09_numpy_gate", b"key", None),
+        lambda: transaction.delete_from_hnsw("v09_numpy_gate", b"key"),
+        lambda: transaction.get_vector(b"key", None),
+    )
+
+    for unavailable_call in unavailable_calls:
+        with pytest.raises(Exception, match="numpy support is not enabled"):
+            unavailable_call()

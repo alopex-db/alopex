@@ -13,7 +13,6 @@ use crate::error;
 use crate::types::{DataFrameStreamRegistry, PyEmbeddedConfig, PyMemoryStats, PyTxnMode};
 #[cfg(feature = "numpy")]
 use crate::types::{PyHnswConfig, PyHnswStats, PySearchResult};
-#[cfg(feature = "numpy")]
 use crate::vector;
 #[cfg(feature = "numpy")]
 use crate::vector::SliceOrOwned;
@@ -461,6 +460,38 @@ impl PyDatabase {
         db.get_hnsw_stats(name)
             .map(PyHnswStats::from)
             .map_err(error::embedded_err)
+    }
+
+    #[cfg(not(feature = "numpy"))]
+    fn create_hnsw_index(&self, py: Python<'_>, name: &str, config: Py<PyAny>) -> PyResult<()> {
+        let _ = (name, config);
+        vector::require_numpy(py)
+    }
+
+    #[cfg(not(feature = "numpy"))]
+    #[pyo3(signature = (name, query, k, ef_search = None))]
+    fn search_hnsw(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        query: Py<PyAny>,
+        k: usize,
+        ef_search: Option<usize>,
+    ) -> PyResult<()> {
+        let _ = (name, query, k, ef_search);
+        vector::require_numpy(py)
+    }
+
+    #[cfg(not(feature = "numpy"))]
+    fn drop_hnsw_index(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+        let _ = name;
+        vector::require_numpy(py)
+    }
+
+    #[cfg(not(feature = "numpy"))]
+    fn get_hnsw_stats(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+        let _ = name;
+        vector::require_numpy(py)
     }
 }
 

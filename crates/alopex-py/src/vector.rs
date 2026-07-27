@@ -1,9 +1,13 @@
 use crate::error;
 use pyo3::prelude::*;
+#[cfg(feature = "numpy")]
 use pyo3::types::PyAny;
+#[cfg(feature = "numpy")]
 use pyo3::types::PyModule;
+#[cfg(feature = "numpy")]
 use pyo3::Bound;
 
+#[cfg(feature = "numpy")]
 use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1};
 
 // =============================================================================
@@ -16,6 +20,7 @@ use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1};
 ///   - `_guard` が生存している間、`ptr` は有効
 ///   - GIL 解放中に `unsafe { std::slice::from_raw_parts(ptr, len) }` でスライス再構築可能
 /// - `Owned`: それ以外の場合、`Vec<f32>` として所有データを保持
+#[cfg(feature = "numpy")]
 pub enum SliceOrOwned {
     /// ゼロコピーパス: C-contiguous float32 配列への借用参照
     Borrowed {
@@ -30,6 +35,7 @@ pub enum SliceOrOwned {
     Owned(Vec<f32>),
 }
 
+#[cfg(feature = "numpy")]
 pub fn require_numpy(py: Python<'_>) -> PyResult<()> {
     if PyModule::import(py, "numpy").is_ok() {
         Ok(())
@@ -40,8 +46,22 @@ pub fn require_numpy(py: Python<'_>) -> PyResult<()> {
     }
 }
 
+/// Return the stable Python-facing error when this extension was compiled
+/// without the optional NumPy conversion implementation.
+///
+/// Keeping this function available in every build means callers receive a
+/// deterministic capability error instead of an attribute error or a changed
+/// data representation.
+#[cfg(not(feature = "numpy"))]
+pub fn require_numpy(_py: Python<'_>) -> PyResult<()> {
+    Err(error::to_py_err(
+        "numpy support is not enabled; rebuild alopex with the `numpy` feature",
+    ))
+}
+
 /// 旧 API: 後方互換性のため維持（新コードは with_ndarray_f32_gil_safe を使用）
 #[allow(dead_code)]
+#[cfg(feature = "numpy")]
 pub fn with_ndarray_f32<'py, F, R>(array: &Bound<'py, PyAny>, f: F) -> PyResult<R>
 where
     F: FnOnce(&[f32]) -> PyResult<R>,
@@ -94,6 +114,7 @@ where
 ///     }
 /// })
 /// ```
+#[cfg(feature = "numpy")]
 pub fn with_ndarray_f32_gil_safe<'py, F, R>(array: &Bound<'py, PyAny>, f: F) -> PyResult<R>
 where
     F: FnOnce(SliceOrOwned) -> PyResult<R>,
@@ -151,6 +172,7 @@ where
 /// `PyArray1::from_vec` を使用して所有権を Python 側に移譲する。
 /// 返された配列は Python の GC によって管理される。
 #[allow(dead_code)]
+#[cfg(feature = "numpy")]
 pub fn owned_vec_to_ndarray(py: Python<'_>, values: Vec<f32>) -> PyResult<Py<PyAny>> {
     Ok(PyArray1::from_vec(py, values)
         .into_pyobject(py)?
@@ -162,6 +184,7 @@ pub fn owned_vec_to_ndarray(py: Python<'_>, values: Vec<f32>) -> PyResult<Py<PyA
 ///
 /// Box を Vec に変換してから `PyArray1::from_vec` を使用する。
 #[allow(dead_code)]
+#[cfg(feature = "numpy")]
 pub fn owned_to_ndarray(py: Python<'_>, values: Box<[f32]>) -> PyResult<Py<PyAny>> {
     let vec: Vec<f32> = values.into_vec();
     owned_vec_to_ndarray(py, vec)
@@ -171,6 +194,7 @@ pub fn owned_to_ndarray(py: Python<'_>, values: Box<[f32]>) -> PyResult<Py<PyAny
 ///
 /// 検索結果の `vector` フィールド用。
 #[allow(dead_code)]
+#[cfg(feature = "numpy")]
 pub fn vec_to_ndarray_opt(py: Python<'_>, values: Option<Vec<f32>>) -> PyResult<Option<Py<PyAny>>> {
     match values {
         Some(v) => Ok(Some(owned_vec_to_ndarray(py, v)?)),
@@ -183,6 +207,7 @@ pub fn vec_to_ndarray_opt(py: Python<'_>, values: Option<Vec<f32>>) -> PyResult<
 /// `zero_copy_return=False` の場合に使用。
 /// `PyArray1::from_slice` を使用してデータをコピーする。
 #[allow(dead_code)]
+#[cfg(feature = "numpy")]
 pub fn vec_to_ndarray_copy(py: Python<'_>, values: &[f32]) -> PyResult<Py<PyAny>> {
     PyArray1::from_slice(py, values)
         .into_pyobject(py)
@@ -194,6 +219,7 @@ pub fn vec_to_ndarray_copy(py: Python<'_>, values: &[f32]) -> PyResult<Py<PyAny>
 ///
 /// `zero_copy_return=False` の場合に使用。
 #[allow(dead_code)]
+#[cfg(feature = "numpy")]
 pub fn vec_to_ndarray_opt_copy(
     py: Python<'_>,
     values: Option<&[f32]>,
@@ -205,6 +231,7 @@ pub fn vec_to_ndarray_opt_copy(
 }
 
 #[allow(dead_code)]
+#[cfg(feature = "numpy")]
 pub fn vec_to_ndarray<'py>(py: Python<'py>, values: &[f32]) -> PyResult<Py<PyAny>> {
     PyArray1::from_slice(py, values)
         .into_pyobject(py)
@@ -212,7 +239,7 @@ pub fn vec_to_ndarray<'py>(py: Python<'py>, values: &[f32]) -> PyResult<Py<PyAny
         .map_err(Into::into)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "numpy"))]
 mod tests {
     use super::vec_to_ndarray_opt_copy;
     use super::with_ndarray_f32;
