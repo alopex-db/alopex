@@ -5,11 +5,16 @@
 //! coordinator modules so every public surface starts from one identity and
 //! outcome contract.
 
+mod coordinator;
 mod counter;
 mod envelope;
 mod ledger;
 mod set;
 
+pub use coordinator::{
+    CrdtConvergenceCoordinator, CrdtCoordinationOutcome, CrdtCoordinatorConfig, CrdtReadinessGate,
+    CrdtReplicaObservation, accepted_digest_counts,
+};
 pub use counter::{
     CounterApplyResult, CounterProjectionState, CounterValue, CrdtCounterError,
     CrdtCounterProjection,

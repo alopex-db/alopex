@@ -31,11 +31,13 @@ pub use control::{
     UpgradePlanningError, UpgradeSourceKind, VerifiedRangeTransferReceiver,
 };
 pub use crdt::{
-    CounterApplyResult, CounterProjectionState, CounterValue, CrdtCommonFields, CrdtCounterError,
+    CounterApplyResult, CounterProjectionState, CounterValue, CrdtCommonFields,
+    CrdtConvergenceCoordinator, CrdtCoordinationOutcome, CrdtCoordinatorConfig, CrdtCounterError,
     CrdtCounterProjection, CrdtEnvelopeError, CrdtLedgerAdmission, CrdtLedgerError,
     CrdtLedgerIdentity, CrdtLedgerRecord, CrdtObjectType, CrdtOperationEnvelope, CrdtOperationKind,
-    CrdtOperationLedger, CrdtPayload, CrdtSetError, CrdtSetProjection, SetApplyResult,
-    SetMemberVersion, SetProjectionLimits, SetProjectionState, SetValue,
+    CrdtOperationLedger, CrdtPayload, CrdtReadinessGate, CrdtReplicaObservation, CrdtSetError,
+    CrdtSetProjection, SetApplyResult, SetMemberVersion, SetProjectionLimits, SetProjectionState,
+    SetValue, accepted_digest_counts,
 };
 pub use distributed_read::{
     AuthenticatedSubject, CleanupAcknowledgement, DelegationAuthorizationError,
