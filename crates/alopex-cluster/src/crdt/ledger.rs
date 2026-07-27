@@ -119,7 +119,7 @@ impl<S: KVStore> CrdtOperationLedger<S> {
         retention_until_epoch: u64,
     ) -> Result<CrdtLedgerAdmission, CrdtLedgerError> {
         let mut transaction = self.store.begin(TxnMode::ReadWrite)?;
-        let admission = self.admit_in_transaction(
+        let admission = admit_in_transaction(
             &mut transaction,
             envelope,
             first_outcome,
@@ -142,35 +142,14 @@ impl<S: KVStore> CrdtOperationLedger<S> {
         first_failure_class: Option<FailureClass>,
         retention_until_epoch: u64,
     ) -> Result<CrdtLedgerAdmission, CrdtLedgerError> {
-        let identity = CrdtLedgerIdentity::from_envelope(envelope)?;
-        let operation_key = operation_key(&identity.operation_id);
-        if let Some(encoded) = transaction.get(&operation_key)? {
-            let mut record = decode_record(&encoded)?;
-            if record.identity != identity {
-                return Err(CrdtLedgerError::Conflict {
-                    operation_id: identity.operation_id,
-                });
-            }
-            record.duplicate_count = record
-                .duplicate_count
-                .checked_add(1)
-                .ok_or(CrdtLedgerError::DuplicateCountOverflow)?;
-            write_record(transaction, &record)?;
-            return Ok(CrdtLedgerAdmission::Duplicate(record));
-        }
-
-        let record = CrdtLedgerRecord {
-            identity,
-            first_request_id: envelope.request_id.clone(),
-            first_outcome: first_outcome.into(),
+        admit_in_transaction(
+            transaction,
+            envelope,
+            first_outcome,
             first_state,
             first_failure_class,
-            duplicate_count: 0,
             retention_until_epoch,
-            tombstoned: false,
-        };
-        write_record(transaction, &record)?;
-        Ok(CrdtLedgerAdmission::First(record))
+        )
     }
 
     /// Retrieves a retained operation record by operation identity.
@@ -204,6 +183,45 @@ impl<S: KVStore> CrdtOperationLedger<S> {
         transaction.commit_self()?;
         Ok(record)
     }
+}
+
+pub(crate) fn admit_in_transaction<'a, T: KVTransaction<'a>>(
+    transaction: &mut T,
+    envelope: &CrdtOperationEnvelope,
+    first_outcome: impl Into<String>,
+    first_state: OperationState,
+    first_failure_class: Option<FailureClass>,
+    retention_until_epoch: u64,
+) -> Result<CrdtLedgerAdmission, CrdtLedgerError> {
+    let identity = CrdtLedgerIdentity::from_envelope(envelope)?;
+    let operation_key = operation_key(&identity.operation_id);
+    if let Some(encoded) = transaction.get(&operation_key)? {
+        let mut record = decode_record(&encoded)?;
+        if record.identity != identity {
+            return Err(CrdtLedgerError::Conflict {
+                operation_id: identity.operation_id,
+            });
+        }
+        record.duplicate_count = record
+            .duplicate_count
+            .checked_add(1)
+            .ok_or(CrdtLedgerError::DuplicateCountOverflow)?;
+        write_record(transaction, &record)?;
+        return Ok(CrdtLedgerAdmission::Duplicate(record));
+    }
+
+    let record = CrdtLedgerRecord {
+        identity,
+        first_request_id: envelope.request_id.clone(),
+        first_outcome: first_outcome.into(),
+        first_state,
+        first_failure_class,
+        duplicate_count: 0,
+        retention_until_epoch,
+        tombstoned: false,
+    };
+    write_record(transaction, &record)?;
+    Ok(CrdtLedgerAdmission::First(record))
 }
 
 fn write_record<'a, T: KVTransaction<'a>>(
