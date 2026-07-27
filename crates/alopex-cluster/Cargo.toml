@@ -29,6 +29,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror.workspace = true
 sha2 = "0.10"
+unicode-normalization = "0.1"
 
 # All Chirps dependencies are optional so the default embedded/single-node
 # build neither requires nor advertises cluster control.

@@ -34,7 +34,8 @@ pub use crdt::{
     CounterApplyResult, CounterProjectionState, CounterValue, CrdtCommonFields, CrdtCounterError,
     CrdtCounterProjection, CrdtEnvelopeError, CrdtLedgerAdmission, CrdtLedgerError,
     CrdtLedgerIdentity, CrdtLedgerRecord, CrdtObjectType, CrdtOperationEnvelope, CrdtOperationKind,
-    CrdtOperationLedger, CrdtPayload,
+    CrdtOperationLedger, CrdtPayload, CrdtSetError, CrdtSetProjection, SetApplyResult,
+    SetMemberVersion, SetProjectionLimits, SetProjectionState, SetValue,
 };
 pub use distributed_read::{
     AuthenticatedSubject, CleanupAcknowledgement, DelegationAuthorizationError,

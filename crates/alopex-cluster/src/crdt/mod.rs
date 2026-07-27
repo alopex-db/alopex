@@ -8,6 +8,7 @@
 mod counter;
 mod envelope;
 mod ledger;
+mod set;
 
 pub use counter::{
     CounterApplyResult, CounterProjectionState, CounterValue, CrdtCounterError,
@@ -19,4 +20,8 @@ pub use envelope::{
 };
 pub use ledger::{
     CrdtLedgerAdmission, CrdtLedgerError, CrdtLedgerIdentity, CrdtLedgerRecord, CrdtOperationLedger,
+};
+pub use set::{
+    CrdtSetError, CrdtSetProjection, SetApplyResult, SetMemberVersion, SetProjectionLimits,
+    SetProjectionState, SetValue,
 };
