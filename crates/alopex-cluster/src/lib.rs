@@ -6,6 +6,7 @@
 
 mod bootstrap;
 mod control;
+pub mod crdt;
 pub mod distributed_read;
 mod metadata;
 mod projection;
@@ -28,6 +29,10 @@ pub use control::{
     SchemaApplyEvidenceRequest, SchemaControlError, SchemaControlResult, SchemaControlService,
     UpgradeCheckpoint, UpgradeInput, UpgradeOperation, UpgradeOutcome, UpgradePlanner,
     UpgradePlanningError, UpgradeSourceKind, VerifiedRangeTransferReceiver,
+};
+pub use crdt::{
+    CrdtCommonFields, CrdtEnvelopeError, CrdtObjectType, CrdtOperationEnvelope, CrdtOperationKind,
+    CrdtPayload,
 };
 pub use distributed_read::{
     AuthenticatedSubject, CleanupAcknowledgement, DelegationAuthorizationError,
