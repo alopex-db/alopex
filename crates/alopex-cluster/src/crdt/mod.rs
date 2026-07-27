@@ -9,11 +9,12 @@ mod coordinator;
 mod counter;
 mod envelope;
 mod ledger;
+mod outcome;
 mod set;
 
 pub use coordinator::{
-    CrdtConvergenceCoordinator, CrdtCoordinationOutcome, CrdtCoordinatorConfig, CrdtReadinessGate,
-    CrdtReplicaObservation, accepted_digest_counts,
+    CrdtConvergenceCoordinator, CrdtCoordinationOutcome, CrdtCoordinatorConfig,
+    CrdtReadinessEvidence, CrdtReadinessGate, CrdtReplicaObservation, accepted_digest_counts,
 };
 pub use counter::{
     CounterApplyResult, CounterProjectionState, CounterValue, CrdtCounterError,
@@ -26,6 +27,7 @@ pub use envelope::{
 pub use ledger::{
     CrdtLedgerAdmission, CrdtLedgerError, CrdtLedgerIdentity, CrdtLedgerRecord, CrdtOperationLedger,
 };
+pub use outcome::{CrdtOutcome, CrdtSurfaceStatus, CrdtValue};
 pub use set::{
     CrdtSetError, CrdtSetProjection, SetApplyResult, SetMemberVersion, SetProjectionLimits,
     SetProjectionState, SetValue,

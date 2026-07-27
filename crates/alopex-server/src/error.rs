@@ -1,3 +1,4 @@
+use alopex_cluster::{CrdtCommonFields, FailureClass, RoutingOutcomeKind};
 use axum::http::StatusCode;
 
 /// Server-wide result type.
@@ -43,6 +44,34 @@ pub enum ServerError {
 }
 
 impl ServerError {
+    /// Converts a canonical CRDT failure into the existing server error
+    /// vocabulary.  The response itself keeps `FailureClass` authoritative;
+    /// this only selects the HTTP/gRPC-compatible server category.
+    pub fn from_crdt_common_fields(
+        fields: &CrdtCommonFields,
+        message: impl Into<String>,
+    ) -> Option<Self> {
+        let message = message.into();
+        if fields.routing.kind == RoutingOutcomeKind::Unsupported {
+            return Some(Self::NotImplemented(message));
+        }
+
+        fields.failure_class.map(|failure| match failure {
+            FailureClass::Unauthorized => Self::Unauthorized(message),
+            FailureClass::StaleMetadata
+            | FailureClass::Gap
+            | FailureClass::Overlap
+            | FailureClass::EpochMismatch
+            | FailureClass::Conflict => Self::Conflict(message),
+            FailureClass::NotLeader
+            | FailureClass::NodeUnavailable
+            | FailureClass::PrerequisiteMissing => Self::CapabilityUnavailable(message),
+            FailureClass::Timeout => Self::Timeout(message),
+            FailureClass::InvalidRequest => Self::BadRequest(message),
+            FailureClass::Internal => Self::Internal(message),
+        })
+    }
+
     /// Map error to HTTP status code.
     pub fn status_code(&self) -> StatusCode {
         match self {
@@ -87,5 +116,81 @@ impl ServerError {
                 "INTERNAL".to_string()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alopex_cluster::{
+        CrdtCommonFields, CrdtObjectType, IdempotencyResult, OperationState, RangeIdentity,
+        RoutingOutcome,
+    };
+
+    use super::{FailureClass, RoutingOutcomeKind, ServerError};
+
+    fn common(
+        failure_class: Option<FailureClass>,
+        routing_kind: RoutingOutcomeKind,
+    ) -> CrdtCommonFields {
+        let range = RangeIdentity::new("cluster-a", 7, "range-a", None, None, 1, 9);
+        CrdtCommonFields {
+            object_type: CrdtObjectType::Counter,
+            object_id: "counter-a".to_string(),
+            range: range.clone(),
+            state_epoch: 9,
+            actor: "node-a".into(),
+            request_id: "request-a".into(),
+            operation_id: "operation-a".to_string(),
+            state: OperationState::Rejected,
+            failure_class,
+            routing: RoutingOutcome::new(routing_kind, Some(range), 4, "fixture"),
+            retryable: false,
+            idempotency: IdempotencyResult {
+                operation_id: "operation-a".to_string(),
+                request_id: "request-a".into(),
+                first_outcome: "rejected".to_string(),
+                state: OperationState::Rejected,
+                duplicate_count: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn crdt_common_fields_use_existing_server_error_categories() {
+        let unauthorized = ServerError::from_crdt_common_fields(
+            &common(
+                Some(FailureClass::Unauthorized),
+                RoutingOutcomeKind::Blocked,
+            ),
+            "denied",
+        );
+        assert!(matches!(unauthorized, Some(ServerError::Unauthorized(_))));
+
+        let unavailable = ServerError::from_crdt_common_fields(
+            &common(
+                Some(FailureClass::PrerequisiteMissing),
+                RoutingOutcomeKind::Blocked,
+            ),
+            "prerequisite",
+        );
+        assert!(matches!(
+            unavailable,
+            Some(ServerError::CapabilityUnavailable(_))
+        ));
+
+        let unsupported = ServerError::from_crdt_common_fields(
+            &common(
+                Some(FailureClass::PrerequisiteMissing),
+                RoutingOutcomeKind::Unsupported,
+            ),
+            "unsupported",
+        );
+        assert!(matches!(unsupported, Some(ServerError::NotImplemented(_))));
+
+        assert!(ServerError::from_crdt_common_fields(
+            &common(None, RoutingOutcomeKind::SingleRange),
+            "not an error"
+        )
+        .is_none());
     }
 }

@@ -19,14 +19,22 @@ pub struct CrdtReadinessGate {
     pub metadata_version: u64,
 }
 
+/// Readiness observations supplied by the Phase 1 gate owner.  Grouping these
+/// independent facts keeps the range-directory constructor focused on the
+/// committed placement evidence it alone derives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrdtReadinessEvidence {
+    pub phase_one_approved: bool,
+    pub phase_one_evidence_complete: bool,
+    pub range_lease_valid: bool,
+    pub recovery_ready: bool,
+}
+
 impl CrdtReadinessGate {
     /// Derives the placement portion only from committed Phase 1 replica
     /// readiness, never from gossip reachability.
     pub fn from_range_directory(
-        phase_one_approved: bool,
-        phase_one_evidence_complete: bool,
-        range_lease_valid: bool,
-        recovery_ready: bool,
+        evidence: CrdtReadinessEvidence,
         bootstrap: ClusterBootstrapOutcome,
         range: RangeIdentity,
         metadata_version: u64,
@@ -34,11 +42,11 @@ impl CrdtReadinessGate {
     ) -> Self {
         let placement_ready = !directory.routing_eligible(&range.range_id).is_empty();
         Self {
-            phase_one_approved,
-            phase_one_evidence_complete,
-            range_lease_valid,
+            phase_one_approved: evidence.phase_one_approved,
+            phase_one_evidence_complete: evidence.phase_one_evidence_complete,
+            range_lease_valid: evidence.range_lease_valid,
             placement_ready,
-            recovery_ready,
+            recovery_ready: evidence.recovery_ready,
             bootstrap,
             range,
             metadata_version,
