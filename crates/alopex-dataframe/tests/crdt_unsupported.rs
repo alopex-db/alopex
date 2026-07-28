@@ -11,6 +11,7 @@ fn preflight(operation: &str) -> Result<()> {
 fn crdt_dataframe_operation_names_are_rejected_before_execution() {
     for operation in [
         "crdt_counter_increment",
+        "crdt_counter_read",
         "crdt_set_add",
         "crdt_set_contains",
         "crdt_merge",
@@ -33,6 +34,17 @@ fn counter_create_has_a_stable_pre_execution_unsupported_classification() {
     assert_eq!(
         error.to_string(),
         "invalid operation: dataframe CRDT operation 'crdt_counter_create' is unsupported: pre_execution_unsupported"
+    );
+}
+
+#[test]
+fn counter_read_has_a_stable_pre_execution_unsupported_classification() {
+    let operation = "crdt_counter_read";
+    let error = preflight(operation).expect_err("Counter read is not a DataFrame operation");
+    assert!(matches!(error, DataFrameError::InvalidOperation { .. }));
+    assert_eq!(
+        error.to_string(),
+        "invalid operation: dataframe CRDT operation 'crdt_counter_read' is unsupported: pre_execution_unsupported"
     );
 }
 
