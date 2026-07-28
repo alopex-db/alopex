@@ -10,6 +10,8 @@ TRANSACTION_SOURCE = (CRATE_ROOT / "src/embedded/transaction.rs").read_text(enco
 STREAM_SOURCE = (CRATE_ROOT / "src/embedded/stream.rs").read_text(encoding="utf-8")
 LOCAL_SCAN_SOURCE = (CRATE_ROOT / "src/embedded/local_scan.rs").read_text(encoding="utf-8")
 STUB_SOURCE = (CRATE_ROOT / "python/alopex/_alopex.pyi").read_text(encoding="utf-8")
+ASYNCIO_SOURCE = (CRATE_ROOT / "python/alopex/asyncio.py").read_text(encoding="utf-8")
+ASYNCIO_STUB_SOURCE = (CRATE_ROOT / "python/alopex/asyncio.pyi").read_text(encoding="utf-8")
 
 
 # Each approved I-22 method is intentionally represented as one row.  This is
@@ -60,3 +62,12 @@ def test_i22_counter_bindings_have_public_python_stubs() -> None:
             STUB_SOURCE,
             re.MULTILINE,
         ), f"missing public Database stub for {method}"
+
+
+def test_i22_counter_increment_has_async_implementation_and_stub() -> None:
+    for source in (ASYNCIO_SOURCE, ASYNCIO_STUB_SOURCE):
+        assert re.search(
+            r"^    async def increment_counter\s*\(",
+            source,
+            re.MULTILINE,
+        ), "missing public AsyncDatabase.increment_counter"
