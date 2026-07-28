@@ -405,6 +405,73 @@ impl PyDatabase {
         Ok(status)
     }
 
+    /// Apply a signed delta to an existing Counter through the shared local
+    /// CRDT projection.
+    ///
+    /// The result is the canonical Counter outcome mapping used by all Phase 2
+    /// surfaces. This embedded method never creates a remote client or reports
+    /// replica convergence; a local deployment therefore exposes its explicit
+    /// `local_only` routing result.
+    #[pyo3(
+        signature = (object_id, *, cluster_id, table_id, range_id, schema_version, data_epoch, request_id, operation_id, update_version, delta, actor = "alopex-python-local")
+    )]
+    #[allow(clippy::too_many_arguments)]
+    fn increment_counter(
+        &self,
+        py: Python<'_>,
+        object_id: &str,
+        cluster_id: &str,
+        table_id: u32,
+        range_id: &str,
+        schema_version: u64,
+        data_epoch: u64,
+        request_id: &str,
+        operation_id: &str,
+        update_version: u64,
+        delta: i64,
+        actor: &str,
+    ) -> PyResult<Py<PyDict>> {
+        let db = self.ensure_open()?;
+        let envelope = alopex_cluster::CrdtOperationEnvelope::new(
+            object_id,
+            alopex_cluster::RangeIdentity::new(
+                cluster_id,
+                table_id,
+                range_id,
+                None,
+                None,
+                schema_version,
+                data_epoch,
+            ),
+            actor,
+            request_id,
+            operation_id,
+            update_version,
+            alopex_cluster::CrdtOperationKind::CounterIncrement,
+            alopex_cluster::CrdtPayload::Counter {
+                initial_value: None,
+                delta: Some(delta),
+            },
+        )
+        .map_err(|error| error::to_py_err(error.to_string()))?;
+        let outcome = py
+            .detach(move || db.increment_counter(envelope))
+            .map_err(error::embedded_err)?;
+        let status = crdt_outcome_to_py(py, &outcome)?;
+        if let Some(code) = outcome.surface_status().python_error_code {
+            let py_err = error::with_code(
+                error::to_py_err(outcome.common().routing.reason_code.clone()),
+                code,
+            );
+            py_err.value(py).setattr("status", status.bind(py))?;
+            if let Some(failure) = status.bind(py).get_item("failure_class")? {
+                py_err.value(py).setattr("failure_class", failure)?;
+            }
+            return Err(py_err);
+        }
+        Ok(status)
+    }
+
     /// Read a Counter through the shared local CRDT projection without
     /// recording a mutation in its durable operation ledger.
     #[pyo3(
