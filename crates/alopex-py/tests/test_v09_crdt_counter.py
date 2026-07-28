@@ -50,6 +50,21 @@ def _increment_counter(db: Database, operation_id: str = "operation-increment") 
     )
 
 
+def _decrement_counter(db: Database, operation_id: str = "operation-decrement") -> dict:
+    return db.decrement_counter(
+        "counter-a",
+        cluster_id="cluster-a",
+        table_id=7,
+        range_id="range-a",
+        schema_version=1,
+        data_epoch=9,
+        request_id="request-decrement",
+        operation_id=operation_id,
+        update_version=14,
+        delta=3,
+    )
+
+
 def test_i27_python_sync_counter_create_preserves_canonical_outcome_and_idempotency() -> None:
     db = Database.open_in_memory()
 
@@ -139,6 +154,38 @@ def test_i27_python_sync_counter_increment_preserves_canonical_outcome_and_idemp
         "accepted_operation_versions": {
             "operation-a": 12,
             "operation-increment": 13,
+        },
+    }
+    assert first["idempotency"]["first_outcome"] == "counter_committed"
+    assert first["idempotency"]["duplicate_count"] == 0
+    assert duplicate["value"] == first["value"]
+    assert duplicate["idempotency"]["duplicate_count"] == 1
+
+
+def test_i27_python_sync_counter_decrement_preserves_canonical_outcome_and_idempotency() -> None:
+    db = Database.open_in_memory()
+    _create_counter(db)
+
+    first = _decrement_counter(db)
+    duplicate = _decrement_counter(db)
+
+    assert first["object_type"] == "counter"
+    assert first["object_id"] == "counter-a"
+    assert first["range"]["cluster_id"] == "cluster-a"
+    assert first["range"]["table_id"] == 7
+    assert first["range"]["range_id"] == "range-a"
+    assert first["request_id"] == "request-decrement"
+    assert first["operation_id"] == "operation-decrement"
+    assert first["state"] == "committed"
+    assert first["routing"]["kind"] == "local_only"
+    assert first["value"] == {
+        "value_type": "counter",
+        "value": -7,
+        "initial_value": -4,
+        "accepted_delta_total": -3,
+        "accepted_operation_versions": {
+            "operation-a": 12,
+            "operation-decrement": 14,
         },
     }
     assert first["idempotency"]["first_outcome"] == "counter_committed"

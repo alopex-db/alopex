@@ -531,6 +531,21 @@ class Database:
         delta: int,
         actor: str = "alopex-python-local",
     ) -> Dict[str, Any]: ...
+    def decrement_counter(
+        self,
+        object_id: str,
+        *,
+        cluster_id: str,
+        table_id: int,
+        range_id: str,
+        schema_version: int,
+        data_epoch: int,
+        request_id: str,
+        operation_id: str,
+        update_version: int,
+        delta: int,
+        actor: str = "alopex-python-local",
+    ) -> Dict[str, Any]: ...
     def close(self) -> None: ...
     def create_hnsw_index(self, name: str, config: HnswConfig) -> None: ...
     def search_hnsw(
