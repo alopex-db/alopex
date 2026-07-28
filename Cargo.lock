@@ -195,6 +195,7 @@ dependencies = [
 name = "alopex-cli"
 version = "0.8.0"
 dependencies = [
+ "alopex-cluster",
  "alopex-core 0.8.0",
  "alopex-embedded",
  "alopex-server",

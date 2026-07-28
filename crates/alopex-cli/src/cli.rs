@@ -178,6 +178,11 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<LifecycleCommand>,
     },
+    /// Conflict-free replicated data type operations
+    Crdt {
+        #[command(subcommand)]
+        command: Option<CrdtCommand>,
+    },
     /// Show CLI and file format version information
     Version,
     /// Generate shell completion scripts
@@ -185,6 +190,57 @@ pub enum Command {
         /// Shell type (bash, zsh, fish, pwsh)
         #[arg(value_parser = parse_shell, value_name = "SHELL")]
         shell: Shell,
+    },
+}
+
+/// CRDT object commands.
+#[derive(Subcommand, Debug)]
+pub enum CrdtCommand {
+    /// Counter operations
+    Counter {
+        #[command(subcommand)]
+        command: Option<CounterCommand>,
+    },
+}
+
+/// Counter CRDT commands.
+#[derive(Subcommand, Debug)]
+pub enum CounterCommand {
+    /// Create a Counter with an explicit durable operation identity
+    Create {
+        /// Logical Counter identifier
+        #[arg(long)]
+        object_id: String,
+        /// Cluster identity that owns the Counter range
+        #[arg(long)]
+        cluster_id: String,
+        /// Numeric table identity for the Counter range
+        #[arg(long)]
+        table_id: u32,
+        /// Committed range identity
+        #[arg(long)]
+        range_id: String,
+        /// Schema version observed for the range
+        #[arg(long)]
+        schema_version: u64,
+        /// Data epoch observed for the range
+        #[arg(long)]
+        data_epoch: u64,
+        /// Request identity; required for every mutation
+        #[arg(long)]
+        request_id: String,
+        /// Operation identity; required for every mutation
+        #[arg(long)]
+        operation_id: String,
+        /// F1 epoch-scoped update version
+        #[arg(long)]
+        update_version: u64,
+        /// Initial signed Counter value (zero and negative values are valid)
+        #[arg(long, allow_hyphen_values = true)]
+        initial_value: i64,
+        /// Local actor identity. Remote requests derive this from transport authentication.
+        #[arg(long, default_value = "alopex-cli-local")]
+        actor: String,
     },
 }
 

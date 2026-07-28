@@ -2,7 +2,7 @@ use alopex_cli::cli::Cli;
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 
-const TOP_LEVEL: [&str; 10] = [
+const TOP_LEVEL: [&str; 11] = [
     "profile",
     "kv",
     "sql",
@@ -11,6 +11,7 @@ const TOP_LEVEL: [&str; 10] = [
     "columnar",
     "server",
     "lifecycle",
+    "crdt",
     "version",
     "completions",
 ];

@@ -500,6 +500,7 @@ fn is_write_command(command: &Command) -> bool {
                     )
             )
         ),
+        Command::Crdt { .. } => true,
         Command::Server { .. }
         | Command::Lifecycle { .. }
         | Command::Profile { .. }
@@ -955,6 +956,20 @@ fn execute_server_command(
                 quiet,
             ))
         }
+        Command::Crdt { command: crdt_cmd } => {
+            let crdt_cmd = crdt_cmd
+                .as_ref()
+                .ok_or_else(|| CliError::InvalidArgument("Missing CRDT subcommand".to_string()))?;
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            runtime.block_on(commands::crdt::execute_remote(
+                &client,
+                crdt_cmd,
+                &mut handle,
+                output_format,
+                quiet,
+            ))
+        }
         Command::Server {
             command: server_cmd,
         } => {
@@ -1375,6 +1390,11 @@ fn execute_command(
                 limit,
                 quiet,
             )
+        }
+        Command::Crdt { command: crdt_cmd } => {
+            let crdt_cmd = crdt_cmd
+                .ok_or_else(|| CliError::InvalidArgument("Missing CRDT subcommand".to_string()))?;
+            commands::crdt::execute_local(db, crdt_cmd, &mut handle, output_format, quiet)
         }
         Command::Server { .. } => Err(CliError::InvalidArgument(
             "Server commands require a server profile".to_string(),

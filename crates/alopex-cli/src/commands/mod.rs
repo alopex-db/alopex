@@ -8,6 +8,7 @@
 //! - columnar: Columnar segment operations
 
 pub mod columnar;
+pub mod crdt;
 pub mod hnsw;
 pub mod kv;
 pub mod lifecycle;

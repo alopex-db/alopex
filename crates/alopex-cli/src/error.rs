@@ -125,6 +125,15 @@ pub enum CliError {
         reason: String,
         exit_code: ExitCode,
     },
+
+    /// A CRDT command returned a canonical non-success outcome after writing
+    /// its structured result to stdout.
+    #[error("CRDT {outcome}: {reason}")]
+    CrdtOutcome {
+        outcome: String,
+        reason: String,
+        exit_code: ExitCode,
+    },
 }
 
 /// Type alias for CLI results.
@@ -150,6 +159,7 @@ impl CliError {
     pub fn exit_code(&self) -> ExitCode {
         match self {
             Self::ClusterManagementOutcome { exit_code, .. } => *exit_code,
+            Self::CrdtOutcome { exit_code, .. } => *exit_code,
             Self::DistributedReadOutcome { exit_code, .. } => *exit_code,
             _ => ExitCode::Error,
         }
