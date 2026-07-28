@@ -353,6 +353,41 @@ class AsyncDatabase(_AsyncLocalHandle):
             actor=actor,
         )
 
+    async def decrement_counter(
+        self,
+        object_id: str,
+        *,
+        cluster_id: str,
+        table_id: int,
+        range_id: str,
+        schema_version: int,
+        data_epoch: int,
+        request_id: str,
+        operation_id: str,
+        update_version: int,
+        delta: int,
+        actor: str = "alopex-python-local",
+    ) -> dict[str, Any]:
+        """Decrement a local CRDT Counter with the canonical Phase 2 outcome.
+
+        The facade remains a local PyO3 adapter: it creates no remote client,
+        retries nothing, and preserves the native common outcome or
+        ``AlopexError`` status mapping unchanged.
+        """
+        return self._handle.decrement_counter(
+            object_id,
+            cluster_id=cluster_id,
+            table_id=table_id,
+            range_id=range_id,
+            schema_version=schema_version,
+            data_epoch=data_epoch,
+            request_id=request_id,
+            operation_id=operation_id,
+            update_version=update_version,
+            delta=delta,
+            actor=actor,
+        )
+
     async def begin(self, mode: Optional[TxnMode] = None) -> AsyncTransaction:
         transaction = self._handle.begin(mode)
         return AsyncTransaction(transaction, self._single_thread)

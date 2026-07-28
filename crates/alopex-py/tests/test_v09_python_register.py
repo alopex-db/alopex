@@ -64,10 +64,11 @@ def test_i22_counter_bindings_have_public_python_stubs() -> None:
         ), f"missing public Database stub for {method}"
 
 
-def test_i22_counter_increment_has_async_implementation_and_stub() -> None:
-    for source in (ASYNCIO_SOURCE, ASYNCIO_STUB_SOURCE):
-        assert re.search(
-            r"^    async def increment_counter\s*\(",
-            source,
-            re.MULTILINE,
-        ), "missing public AsyncDatabase.increment_counter"
+def test_i22_counter_mutation_has_async_implementation_and_stub() -> None:
+    for method in ("increment_counter", "decrement_counter"):
+        for source in (ASYNCIO_SOURCE, ASYNCIO_STUB_SOURCE):
+            assert re.search(
+                rf"^    async def {method}\s*\(",
+                source,
+                re.MULTILINE,
+            ), f"missing public AsyncDatabase.{method}"

@@ -342,3 +342,35 @@ def test_i27_python_async_counter_increment_preserves_canonical_outcome_and_idem
             await db.close()
 
     asyncio.run(scenario())
+
+
+def test_i27_python_async_counter_decrement_preserves_canonical_outcome_and_idempotency() -> None:
+    async def scenario() -> None:
+        db = await AsyncDatabase.open_in_memory()
+        try:
+            await db.create_counter(
+                "counter-a", cluster_id="cluster-a", table_id=7, range_id="range-a",
+                schema_version=1, data_epoch=9, request_id="request-create",
+                operation_id="operation-create", update_version=12, initial_value=-4,
+            )
+            first = await db.decrement_counter(
+                "counter-a", cluster_id="cluster-a", table_id=7, range_id="range-a",
+                schema_version=1, data_epoch=9, request_id="request-decrement",
+                operation_id="operation-decrement", update_version=14, delta=3,
+            )
+            duplicate = await db.decrement_counter(
+                "counter-a", cluster_id="cluster-a", table_id=7, range_id="range-a",
+                schema_version=1, data_epoch=9, request_id="request-decrement",
+                operation_id="operation-decrement", update_version=14, delta=3,
+            )
+            assert first["state"] == "committed"
+            assert first["routing"]["kind"] == "local_only"
+            assert first["value"]["value"] == -7
+            assert first["value"]["accepted_delta_total"] == -3
+            assert first["idempotency"]["duplicate_count"] == 0
+            assert duplicate["value"] == first["value"]
+            assert duplicate["idempotency"]["duplicate_count"] == 1
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
