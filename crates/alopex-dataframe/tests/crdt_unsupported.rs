@@ -49,6 +49,17 @@ fn counter_read_has_a_stable_pre_execution_unsupported_classification() {
 }
 
 #[test]
+fn counter_increment_has_a_stable_pre_execution_unsupported_classification() {
+    let operation = "crdt_counter_increment";
+    let error = preflight(operation).expect_err("Counter increment is not a DataFrame operation");
+    assert!(matches!(error, DataFrameError::InvalidOperation { .. }));
+    assert_eq!(
+        error.to_string(),
+        "invalid operation: dataframe CRDT operation 'crdt_counter_increment' is unsupported: pre_execution_unsupported"
+    );
+}
+
+#[test]
 fn existing_dataframe_operation_preflight_is_unchanged() {
     assert!(preflight("cse").is_ok());
     assert!(preflight("concat").is_ok());
