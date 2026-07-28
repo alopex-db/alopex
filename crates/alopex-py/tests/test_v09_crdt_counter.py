@@ -142,6 +142,27 @@ def test_i27_python_async_counter_create_preserves_canonical_outcome_and_error_m
             assert first["routing"]["kind"] == "local_only"
             assert duplicate["idempotency"]["duplicate_count"] == 1
 
+            read = await db.read_counter(
+                "counter-a",
+                cluster_id="cluster-a",
+                table_id=7,
+                range_id="range-a",
+                schema_version=1,
+                data_epoch=9,
+                request_id="request-read",
+                operation_id="operation-read",
+                update_version=12,
+            )
+            assert read["object_type"] == "counter"
+            assert read["object_id"] == "counter-a"
+            assert read["request_id"] == "request-read"
+            assert read["operation_id"] == "operation-read"
+            assert read["state"] == "committed"
+            assert read["routing"]["kind"] == "local_only"
+            assert read["value"] == first["value"]
+            assert read["idempotency"]["first_outcome"] == "counter_read"
+            assert read["idempotency"]["duplicate_count"] == 0
+
             with pytest.raises(AlopexError) as raised:
                 await db.create_counter(
                     "counter-a",

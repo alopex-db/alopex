@@ -284,6 +284,39 @@ class AsyncDatabase(_AsyncLocalHandle):
             actor=actor,
         )
 
+    async def read_counter(
+        self,
+        object_id: str,
+        *,
+        cluster_id: str,
+        table_id: int,
+        range_id: str,
+        schema_version: int,
+        data_epoch: int,
+        request_id: str,
+        operation_id: str,
+        update_version: int,
+        actor: str = "alopex-python-local",
+    ) -> dict[str, Any]:
+        """Read a local CRDT Counter with the canonical Phase 2 outcome mapping.
+
+        This facade keeps the existing owned database boundary: it forwards the
+        read identity unchanged, does not create a remote client, and preserves
+        the common outcome or ``AlopexError`` status from the native binding.
+        """
+        return self._handle.read_counter(
+            object_id,
+            cluster_id=cluster_id,
+            table_id=table_id,
+            range_id=range_id,
+            schema_version=schema_version,
+            data_epoch=data_epoch,
+            request_id=request_id,
+            operation_id=operation_id,
+            update_version=update_version,
+            actor=actor,
+        )
+
     async def begin(self, mode: Optional[TxnMode] = None) -> AsyncTransaction:
         transaction = self._handle.begin(mode)
         return AsyncTransaction(transaction, self._single_thread)
