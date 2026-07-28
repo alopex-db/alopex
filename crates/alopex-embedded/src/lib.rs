@@ -432,6 +432,18 @@ impl Database {
         Ok(state.read_counter(self.store.as_ref(), envelope))
     }
 
+    /// Applies a local Counter increment from the canonical Phase 2 envelope.
+    pub fn increment_counter(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        let mut state = self
+            .cluster_state
+            .write()
+            .map_err(|_| Error::ClusterStateLockPoisoned)?;
+        Ok(state.increment_counter(self.store.as_ref(), envelope))
+    }
+
     /// Returns the explicit async capability result for Counter create.
     ///
     /// Embedded owned sessions keep local state alive but do not provide a
@@ -2016,6 +2028,23 @@ mod tests {
         .expect("valid counter read envelope")
     }
 
+    fn counter_increment_envelope(operation_id: &str) -> CrdtOperationEnvelope {
+        CrdtOperationEnvelope::new(
+            "counter-a",
+            RangeIdentity::new("embedded-local", 7, "range-a", None, None, 1, 9),
+            "embedded-actor",
+            "request-increment",
+            operation_id,
+            2,
+            CrdtOperationKind::CounterIncrement,
+            CrdtPayload::Counter {
+                initial_value: None,
+                delta: Some(3),
+            },
+        )
+        .expect("valid counter increment envelope")
+    }
+
     #[test]
     fn embedded_counter_create_preserves_the_canonical_local_outcome() {
         let db = Database::new();
@@ -2106,6 +2135,38 @@ mod tests {
             .create_counter(counter_create_envelope("operation-create"))
             .expect("read must not alter the create ledger");
         assert_eq!(replay.common().idempotency.duplicate_count, 1);
+    }
+
+    #[test]
+    fn embedded_counter_increment_preserves_the_canonical_local_outcome() {
+        let db = Database::new();
+        db.create_counter(counter_create_envelope("operation-create"))
+            .expect("create Counter");
+        let increment = db
+            .increment_counter(counter_increment_envelope("operation-increment"))
+            .expect("increment Counter");
+        assert_eq!(increment.common().state, OperationState::Committed);
+        assert_eq!(
+            increment.common().routing.kind,
+            RoutingOutcomeKind::LocalOnly
+        );
+        assert_eq!(increment.common().idempotency.duplicate_count, 0);
+        assert!(matches!(
+            increment.value(),
+            Some(CrdtValue::Counter {
+                value: -1,
+                accepted_delta_total: 3,
+                ..
+            })
+        ));
+        let replay = db
+            .increment_counter(counter_increment_envelope("operation-increment"))
+            .expect("idempotent increment replay");
+        assert_eq!(replay.common().idempotency.duplicate_count, 1);
+        assert!(matches!(
+            replay.value(),
+            Some(CrdtValue::Counter { value: -1, .. })
+        ));
     }
 
     #[test]

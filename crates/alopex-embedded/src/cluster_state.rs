@@ -103,6 +103,40 @@ impl EmbeddedClusterState {
         }
     }
 
+    /// Applies a Counter increment through the same durable projection and
+    /// local-only outcome boundary as Counter create.
+    pub(crate) fn increment_counter(
+        &mut self,
+        store: &AnyKV,
+        envelope: CrdtOperationEnvelope,
+    ) -> CrdtOutcome {
+        if envelope.operation != CrdtOperationKind::CounterIncrement {
+            return self.counter_rejection(
+                &envelope,
+                FailureClass::InvalidRequest,
+                "counter_increment_envelope_required",
+            );
+        }
+        let projection = CrdtCounterProjection::new(EmbeddedCrdtStore(store));
+        match projection.apply(&envelope, envelope.state_epoch) {
+            Ok(result) => {
+                let common = envelope.common_fields(
+                    result.ledger.first_state,
+                    result.ledger.first_failure_class,
+                    self.counter_routing(
+                        &envelope,
+                        RoutingOutcomeKind::LocalOnly,
+                        "embedded_local_only",
+                    ),
+                    false,
+                    result.ledger.idempotency_result(),
+                );
+                CrdtOutcome::counter(common, result.value)
+            }
+            Err(error) => self.counter_projection_failure(&envelope, error),
+        }
+    }
+
     /// Reads a Counter projection without admitting a new ledger record.
     ///
     /// The standalone embedded database is intentionally local-only. A read
