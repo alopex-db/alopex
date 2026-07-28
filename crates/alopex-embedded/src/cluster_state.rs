@@ -103,6 +103,55 @@ impl EmbeddedClusterState {
         }
     }
 
+    /// Reads a Counter projection without admitting a new ledger record.
+    ///
+    /// The standalone embedded database is intentionally local-only. A read
+    /// therefore reports the same canonical identity/routing outcome as a
+    /// local mutation while preserving the projection's read-only boundary.
+    pub(crate) fn read_counter(
+        &self,
+        store: &AnyKV,
+        envelope: CrdtOperationEnvelope,
+    ) -> CrdtOutcome {
+        if envelope.operation != CrdtOperationKind::CounterRead {
+            return self.counter_rejection(
+                &envelope,
+                FailureClass::InvalidRequest,
+                "counter_read_envelope_required",
+            );
+        }
+
+        let projection = CrdtCounterProjection::new(EmbeddedCrdtStore(store));
+        match projection.read(&envelope) {
+            Ok(value) => {
+                let common = envelope.common_fields(
+                    OperationState::Committed,
+                    None,
+                    self.counter_routing(
+                        &envelope,
+                        RoutingOutcomeKind::LocalOnly,
+                        "embedded_local_only",
+                    ),
+                    false,
+                    IdempotencyResult {
+                        operation_id: envelope.operation_id.clone(),
+                        request_id: envelope.request_id.clone(),
+                        first_outcome: "counter_read".to_string(),
+                        state: OperationState::Committed,
+                        duplicate_count: 0,
+                    },
+                );
+                CrdtOutcome::counter(common, value)
+            }
+            Err(CrdtCounterError::MissingProjection { .. }) => self.counter_rejection(
+                &envelope,
+                FailureClass::PrerequisiteMissing,
+                "counter_not_found",
+            ),
+            Err(error) => self.counter_projection_failure(&envelope, error),
+        }
+    }
+
     pub(crate) fn status_snapshot(&self, catalog_epoch: u64) -> ClusterStatusSnapshot {
         let mut snapshot = self.manager.status_snapshot();
         let epoch = snapshot

@@ -416,6 +416,22 @@ impl Database {
         Ok(state.create_counter(self.store.as_ref(), envelope))
     }
 
+    /// Reads a local Counter through the canonical Phase 2 projection.
+    ///
+    /// A successful embedded read is explicitly `local_only` and never
+    /// advertises replica convergence. The read path does not add an operation
+    /// to the Counter ledger.
+    pub fn read_counter(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        let state = self
+            .cluster_state
+            .read()
+            .map_err(|_| Error::ClusterStateLockPoisoned)?;
+        Ok(state.read_counter(self.store.as_ref(), envelope))
+    }
+
     /// Returns the explicit async capability result for Counter create.
     ///
     /// Embedded owned sessions keep local state alive but do not provide a
@@ -1974,6 +1990,20 @@ mod tests {
         .expect("valid counter create envelope")
     }
 
+    fn counter_read_envelope(operation_id: &str) -> CrdtOperationEnvelope {
+        CrdtOperationEnvelope::new(
+            "counter-a",
+            RangeIdentity::new("embedded-local", 7, "range-a", None, None, 1, 9),
+            "embedded-actor",
+            "request-read",
+            operation_id,
+            1,
+            CrdtOperationKind::CounterRead,
+            CrdtPayload::None,
+        )
+        .expect("valid counter read envelope")
+    }
+
     #[test]
     fn embedded_counter_create_preserves_the_canonical_local_outcome() {
         let db = Database::new();
@@ -2030,6 +2060,52 @@ mod tests {
         assert_eq!(
             outcome.common().failure_class,
             Some(FailureClass::InvalidRequest)
+        );
+        assert_eq!(outcome.common().routing.kind, RoutingOutcomeKind::Blocked);
+        assert!(outcome.value().is_none());
+    }
+
+    #[test]
+    fn embedded_counter_read_returns_canonical_value_without_a_ledger_mutation() {
+        let db = Database::new();
+        db.create_counter(counter_create_envelope("operation-create"))
+            .expect("create Counter");
+
+        let read = db
+            .read_counter(counter_read_envelope("operation-read"))
+            .expect("read Counter");
+        assert_eq!(read.common().object_type, CrdtObjectType::Counter);
+        assert_eq!(read.common().object_id, "counter-a");
+        assert_eq!(read.common().state, OperationState::Committed);
+        assert_eq!(read.common().routing.kind, RoutingOutcomeKind::LocalOnly);
+        assert_eq!(read.common().idempotency.first_outcome, "counter_read");
+        assert_eq!(read.common().idempotency.duplicate_count, 0);
+        assert!(matches!(
+            read.value(),
+            Some(CrdtValue::Counter {
+                initial_value: -4,
+                accepted_delta_total: 0,
+                value: -4,
+                ..
+            })
+        ));
+
+        let replay = db
+            .create_counter(counter_create_envelope("operation-create"))
+            .expect("read must not alter the create ledger");
+        assert_eq!(replay.common().idempotency.duplicate_count, 1);
+    }
+
+    #[test]
+    fn embedded_counter_read_reports_missing_projection_without_claiming_success() {
+        let db = Database::new();
+        let outcome = db
+            .read_counter(counter_read_envelope("operation-read"))
+            .expect("canonical missing Counter outcome");
+        assert_eq!(outcome.common().state, OperationState::Rejected);
+        assert_eq!(
+            outcome.common().failure_class,
+            Some(FailureClass::PrerequisiteMissing)
         );
         assert_eq!(outcome.common().routing.kind, RoutingOutcomeKind::Blocked);
         assert!(outcome.value().is_none());
