@@ -1,6 +1,9 @@
+import asyncio
+
 import pytest
 
 from alopex import AlopexError, Database
+from alopex.asyncio import AsyncDatabase
 
 
 def _create_counter(db: Database, operation_id: str = "operation-a") -> dict:
@@ -55,3 +58,67 @@ def test_i27_python_sync_counter_conflict_exposes_code_status_and_failure_class(
     assert raised.value.failure_class == "conflict"
     assert raised.value.status["object_id"] == "counter-a"
     assert raised.value.status["state"] == "rejected"
+
+
+def test_i27_python_async_counter_create_preserves_canonical_outcome_and_error_mapping() -> None:
+    async def scenario() -> None:
+        db = await AsyncDatabase.open_in_memory()
+        try:
+            first = await db.create_counter(
+                "counter-a",
+                cluster_id="cluster-a",
+                table_id=7,
+                range_id="range-a",
+                schema_version=1,
+                data_epoch=9,
+                request_id="request-a",
+                operation_id="operation-a",
+                update_version=12,
+                initial_value=-4,
+            )
+            duplicate = await db.create_counter(
+                "counter-a",
+                cluster_id="cluster-a",
+                table_id=7,
+                range_id="range-a",
+                schema_version=1,
+                data_epoch=9,
+                request_id="request-a",
+                operation_id="operation-a",
+                update_version=12,
+                initial_value=-4,
+            )
+
+            assert first["object_type"] == "counter"
+            assert first["range"]["cluster_id"] == "cluster-a"
+            assert first["value"] == {
+                "value_type": "counter",
+                "value": -4,
+                "initial_value": -4,
+                "accepted_delta_total": 0,
+                "accepted_operation_versions": {"operation-a": 12},
+            }
+            assert first["state"] == "committed"
+            assert first["routing"]["kind"] == "local_only"
+            assert duplicate["idempotency"]["duplicate_count"] == 1
+
+            with pytest.raises(AlopexError) as raised:
+                await db.create_counter(
+                    "counter-a",
+                    cluster_id="cluster-a",
+                    table_id=7,
+                    range_id="range-a",
+                    schema_version=1,
+                    data_epoch=9,
+                    request_id="request-a",
+                    operation_id="operation-b",
+                    update_version=12,
+                    initial_value=-4,
+                )
+            assert raised.value.code == "crdt_conflict"
+            assert raised.value.failure_class == "conflict"
+            assert raised.value.status["state"] == "rejected"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
