@@ -107,6 +107,20 @@ impl CrdtOutcome {
         }
     }
 
+    /// Builds the canonical pre-execution response for a surface that does
+    /// not expose CRDT behavior.  SQL, DataFrame, and public lifecycle
+    /// requests use the existing rejected/invalid-request/unsupported
+    /// contracts; no private F2 error state is introduced.
+    pub fn unsupported(common: CrdtCommonFields, reason: impl Into<String>) -> Self {
+        assert_eq!(common.state, OperationState::Rejected);
+        assert_eq!(common.failure_class, Some(FailureClass::InvalidRequest));
+        assert_eq!(common.routing.kind, RoutingOutcomeKind::Unsupported);
+        match common.object_type {
+            CrdtObjectType::Counter => Self::counter_unavailable(common, reason),
+            CrdtObjectType::Set => Self::set_unavailable(common, reason),
+        }
+    }
+
     pub fn common(&self) -> &CrdtCommonFields {
         &self.common
     }
@@ -414,5 +428,26 @@ mod tests {
         assert_eq!(unsupported.grpc_code, "UNIMPLEMENTED");
         assert_eq!(unsupported.cli_exit_code, 5);
         assert_eq!(unsupported.python_error_code, Some("crdt_unsupported"));
+    }
+
+    #[test]
+    fn sql_dataframe_and_lifecycle_unsupported_use_one_canonical_outcome() {
+        let outcome = CrdtOutcome::unsupported(
+            common(
+                CrdtObjectType::Set,
+                OperationState::Rejected,
+                Some(FailureClass::InvalidRequest),
+                RoutingOutcomeKind::Unsupported,
+                false,
+            ),
+            "crdt_surface_unsupported",
+        );
+        assert_eq!(
+            outcome.membership_unavailable(),
+            Some("crdt_surface_unsupported")
+        );
+        assert_eq!(outcome.surface_status().http_status, 501);
+        assert_eq!(outcome.surface_status().grpc_code, "UNIMPLEMENTED");
+        assert_eq!(outcome.surface_status().cli_exit_code, 5);
     }
 }
