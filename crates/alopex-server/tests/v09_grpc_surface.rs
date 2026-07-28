@@ -13,7 +13,7 @@ use tokio::time::{sleep, Duration};
 use tonic::transport::Channel;
 use tonic::{Code, Request};
 
-const I14_REGISTER: [&str; 19] = [
+const I14_REGISTER: [&str; 20] = [
     "ExecuteSql",
     "ExecuteDdl",
     "ExecuteDml",
@@ -33,6 +33,7 @@ const I14_REGISTER: [&str; 19] = [
     "ClusterLeave",
     "CreateCounter",
     "ReadCounter",
+    "IncrementCounter",
 ];
 
 async fn build_state() -> (Arc<ServerState>, tempfile::TempDir) {
@@ -206,11 +207,17 @@ async fn i14_grpc_method_register_preserves_version_auth_status_and_unknown_fiel
         grpc::proto::ReadCounterRequest::default(),
         "ReadCounter"
     );
+    assert_unauthenticated!(
+        client,
+        increment_counter,
+        grpc::proto::IncrementCounterRequest::default(),
+        "IncrementCounter"
+    );
 
     let decoded = grpc::proto::HealthRequest::decode(&[0x10, 0x01][..])
         .expect("unknown protobuf field must be ignored");
     assert_eq!(decoded, grpc::proto::HealthRequest {});
-    assert_eq!(I14_REGISTER.len(), 19, "the I-14 RPC register drifted");
+    assert_eq!(I14_REGISTER.len(), 20, "the I-14 RPC register drifted");
 
     let _ = shutdown.send(());
     handle.await.expect("gRPC server shutdown");
@@ -321,6 +328,79 @@ async fn read_counter_uses_authenticated_actor_and_canonical_counter_outcome() {
     assert_eq!(outcome.value, -4);
     assert_eq!(outcome.first_outcome, "counter_read");
     assert_eq!(outcome.duplicate_count, 0);
+
+    let _ = shutdown.send(());
+    handle.await.expect("gRPC server shutdown");
+}
+
+#[tokio::test]
+async fn increment_counter_uses_the_authenticated_actor_and_replays_once() {
+    let (state, _temp) = build_state().await;
+    let (channel, shutdown, handle) = spawn_network_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+    let range = grpc::proto::CrdtRangeIdentity {
+        cluster_id: "cluster-grpc".into(),
+        table_id: 7,
+        range_id: "range-grpc".into(),
+        lower_bound: Vec::new(),
+        has_lower_bound: false,
+        upper_bound: Vec::new(),
+        has_upper_bound: false,
+        schema_version: 1,
+        data_epoch: 9,
+    };
+    let mut create = Request::new(grpc::proto::CreateCounterRequest {
+        object_id: "counter-grpc".into(),
+        range: Some(range.clone()),
+        request_id: "request-grpc-create".into(),
+        operation_id: "operation-grpc-create".into(),
+        update_version: 0,
+        initial_value: -4,
+    });
+    create
+        .metadata_mut()
+        .insert("x-api-key", "v09-key".parse().unwrap());
+    client
+        .create_counter(create)
+        .await
+        .expect("counter create before increment");
+
+    let increment = || {
+        let mut request = Request::new(grpc::proto::IncrementCounterRequest {
+            object_id: "counter-grpc".into(),
+            range: Some(range.clone()),
+            request_id: "request-grpc-increment".into(),
+            operation_id: "operation-grpc-increment".into(),
+            update_version: 1,
+            delta: 3,
+        });
+        request
+            .metadata_mut()
+            .insert("x-api-key", "v09-key".parse().unwrap());
+        request
+    };
+    let outcome = client
+        .increment_counter(increment())
+        .await
+        .expect("counter increment")
+        .into_inner();
+    assert_eq!(outcome.object_type, "counter");
+    assert_eq!(outcome.object_id, "counter-grpc");
+    assert_eq!(outcome.actor, "dev");
+    assert_eq!(outcome.state, "committed");
+    assert_eq!(outcome.routing_kind, "local_only");
+    assert_eq!(outcome.initial_value, -4);
+    assert_eq!(outcome.accepted_delta_total, 3);
+    assert_eq!(outcome.value, -1);
+    assert_eq!(outcome.duplicate_count, 0);
+
+    let replay = client
+        .increment_counter(increment())
+        .await
+        .expect("counter increment replay")
+        .into_inner();
+    assert_eq!(replay.duplicate_count, 1);
+    assert_eq!(replay.value, outcome.value);
 
     let _ = shutdown.send(());
     handle.await.expect("gRPC server shutdown");

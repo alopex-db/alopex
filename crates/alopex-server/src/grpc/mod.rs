@@ -858,6 +858,41 @@ impl AlopexService for AlopexServiceImpl {
         }
         Ok(Response::new(response))
     }
+
+    async fn increment_counter(
+        &self,
+        request: Request<proto::IncrementCounterRequest>,
+    ) -> std::result::Result<Response<proto::CounterOutcome>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        let request = request.into_inner();
+        let range = request
+            .range
+            .ok_or_else(|| Status::invalid_argument("range is required"))?;
+        let core_request = crate::http::crdt::CounterIncrementRequest {
+            range: range_identity_from_proto(range),
+            request_id: request.request_id.into(),
+            operation_id: request.operation_id,
+            update_version: request.update_version,
+            delta: request.delta,
+        };
+        let http_context = crate::http::RequestContext {
+            correlation_id: ctx.correlation_id.clone(),
+            actor: ctx.actor.clone(),
+        };
+        let outcome = crate::http::crdt::increment_counter_outcome(
+            self.state.as_ref(),
+            &http_context,
+            request.object_id,
+            core_request,
+        );
+        let response = counter_outcome_to_proto(&outcome);
+        let status = outcome.surface_status();
+        if status.grpc_code != "OK" {
+            return Err(crdt_status(status.grpc_code, &ctx.correlation_id));
+        }
+        Ok(Response::new(response))
+    }
 }
 
 fn range_identity_from_proto(range: proto::CrdtRangeIdentity) -> RangeIdentity {
