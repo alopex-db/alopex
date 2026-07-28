@@ -19,7 +19,7 @@ I22_ROWS: tuple[tuple[str, str, str], ...] = (
         "open", "new", "open_in_memory", "open_with_config", "thread_mode",
         "execute_sql", "execute_sql_stream", "open_native_async_sql_stream",
         "open_native_async_query_stream", "query_stream", "begin", "flush",
-        "memory_usage", "cluster_status", "routing_diagnostics", "create_counter", "close",
+        "memory_usage", "cluster_status", "routing_diagnostics", "create_counter", "read_counter", "close",
         "create_hnsw_index", "search_hnsw", "drop_hnsw_index", "get_hnsw_stats",
     )),
     *(("PyTransaction", method, TRANSACTION_SOURCE) for method in (
@@ -46,7 +46,7 @@ def _has_binding_method(source: str, method: str) -> bool:
 
 
 def test_i22_python_method_register_has_one_binding_row_per_requirement() -> None:
-    assert len(I22_ROWS) == 50
+    assert len(I22_ROWS) == 51
     for owner, method, source in I22_ROWS:
         assert f"impl {owner}" in source, f"missing binding implementation for {owner}"
         assert _has_binding_method(source, method), f"missing I-22 binding {owner}.{method}"

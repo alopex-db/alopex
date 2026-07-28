@@ -21,6 +21,20 @@ def _create_counter(db: Database, operation_id: str = "operation-a") -> dict:
     )
 
 
+def _read_counter(db: Database, operation_id: str = "operation-read") -> dict:
+    return db.read_counter(
+        "counter-a",
+        cluster_id="cluster-a",
+        table_id=7,
+        range_id="range-a",
+        schema_version=1,
+        data_epoch=9,
+        request_id="request-read",
+        operation_id=operation_id,
+        update_version=12,
+    )
+
+
 def test_i27_python_sync_counter_create_preserves_canonical_outcome_and_idempotency() -> None:
     db = Database.open_in_memory()
 
@@ -58,6 +72,32 @@ def test_i27_python_sync_counter_conflict_exposes_code_status_and_failure_class(
     assert raised.value.failure_class == "conflict"
     assert raised.value.status["object_id"] == "counter-a"
     assert raised.value.status["state"] == "rejected"
+
+
+def test_i27_python_sync_counter_read_preserves_canonical_value_without_mutation() -> None:
+    db = Database.open_in_memory()
+    _create_counter(db)
+
+    outcome = _read_counter(db)
+
+    assert outcome["object_type"] == "counter"
+    assert outcome["object_id"] == "counter-a"
+    assert outcome["range"]["cluster_id"] == "cluster-a"
+    assert outcome["range"]["table_id"] == 7
+    assert outcome["range"]["range_id"] == "range-a"
+    assert outcome["request_id"] == "request-read"
+    assert outcome["operation_id"] == "operation-read"
+    assert outcome["state"] == "committed"
+    assert outcome["routing"]["kind"] == "local_only"
+    assert outcome["value"] == {
+        "value_type": "counter",
+        "value": -4,
+        "initial_value": -4,
+        "accepted_delta_total": 0,
+        "accepted_operation_versions": {"operation-a": 12},
+    }
+    assert outcome["idempotency"]["first_outcome"] == "counter_read"
+    assert outcome["idempotency"]["duplicate_count"] == 0
 
 
 def test_i27_python_async_counter_create_preserves_canonical_outcome_and_error_mapping() -> None:
