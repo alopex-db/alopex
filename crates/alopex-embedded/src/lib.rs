@@ -444,6 +444,18 @@ impl Database {
         Ok(state.increment_counter(self.store.as_ref(), envelope))
     }
 
+    /// Applies a local Counter decrement from the canonical Phase 2 envelope.
+    pub fn decrement_counter(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        let mut state = self
+            .cluster_state
+            .write()
+            .map_err(|_| Error::ClusterStateLockPoisoned)?;
+        Ok(state.decrement_counter(self.store.as_ref(), envelope))
+    }
+
     /// Returns the explicit async capability result for Counter increment.
     ///
     /// The owned-session boundary has no native async CRDT executor, so this
@@ -2057,6 +2069,23 @@ mod tests {
         .expect("valid counter increment envelope")
     }
 
+    fn counter_decrement_envelope(operation_id: &str) -> CrdtOperationEnvelope {
+        CrdtOperationEnvelope::new(
+            "counter-a",
+            RangeIdentity::new("embedded-local", 7, "range-a", None, None, 1, 9),
+            "embedded-actor",
+            "request-decrement",
+            operation_id,
+            3,
+            CrdtOperationKind::CounterDecrement,
+            CrdtPayload::Counter {
+                initial_value: None,
+                delta: Some(3),
+            },
+        )
+        .expect("valid counter decrement envelope")
+    }
+
     #[test]
     fn embedded_counter_create_preserves_the_canonical_local_outcome() {
         let db = Database::new();
@@ -2178,6 +2207,38 @@ mod tests {
         assert!(matches!(
             replay.value(),
             Some(CrdtValue::Counter { value: -1, .. })
+        ));
+    }
+
+    #[test]
+    fn embedded_counter_decrement_preserves_the_canonical_local_outcome() {
+        let db = Database::new();
+        db.create_counter(counter_create_envelope("operation-create"))
+            .expect("create Counter");
+        let decrement = db
+            .decrement_counter(counter_decrement_envelope("operation-decrement"))
+            .expect("decrement Counter");
+        assert_eq!(decrement.common().state, OperationState::Committed);
+        assert_eq!(
+            decrement.common().routing.kind,
+            RoutingOutcomeKind::LocalOnly
+        );
+        assert_eq!(decrement.common().idempotency.duplicate_count, 0);
+        assert!(matches!(
+            decrement.value(),
+            Some(CrdtValue::Counter {
+                value: -7,
+                accepted_delta_total: -3,
+                ..
+            })
+        ));
+        let replay = db
+            .decrement_counter(counter_decrement_envelope("operation-decrement"))
+            .expect("idempotent decrement replay");
+        assert_eq!(replay.common().idempotency.duplicate_count, 1);
+        assert!(matches!(
+            replay.value(),
+            Some(CrdtValue::Counter { value: -7, .. })
         ));
     }
 
