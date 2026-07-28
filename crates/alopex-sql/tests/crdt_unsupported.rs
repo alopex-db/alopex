@@ -78,3 +78,19 @@ fn counter_read_is_rejected_during_planning_before_any_execution() {
     assert_eq!(error.code(), "ALOPEX-F001");
     assert!(error.message().contains(function));
 }
+
+#[test]
+fn counter_increment_is_rejected_during_planning_before_any_execution() {
+    let function = "crdt_counter_increment";
+    let catalog = MemoryCatalog::new();
+
+    // Increment remains outside the SQL scalar register. The planner must
+    // reject it before an executable plan, transaction, or Counter projection
+    // can be created.
+    assert!(scalar::signature(function).is_none());
+    let error = plan_sql_for_routing(&catalog, "SELECT crdt_counter_increment('requests', 1)")
+        .expect_err("Counter increment must be rejected before SQL execution");
+    assert!(matches!(error, SqlError::Plan { .. }));
+    assert_eq!(error.code(), "ALOPEX-F001");
+    assert!(error.message().contains(function));
+}
