@@ -1,4 +1,4 @@
-use alopex_sql::{AlopexDialect, Parser};
+use alopex_sql::{AlopexDialect, MemoryCatalog, Parser, SqlError, plan_sql_for_routing, scalar};
 
 #[test]
 fn crdt_statements_are_rejected_by_the_sql_boundary_before_planning() {
@@ -42,4 +42,21 @@ fn crdt_scalar_names_are_not_registered_as_sql_functions() {
             "ordinary identifier syntax remains parseable"
         );
     }
+}
+
+#[test]
+fn counter_create_is_rejected_during_planning_before_any_execution() {
+    let function = "crdt_counter_create";
+    let catalog = MemoryCatalog::new();
+
+    // Parsing an ordinary function identifier is intentionally allowed by the
+    // SQL grammar.  The scalar registry is the authoritative capability
+    // boundary, so a CRDT create request must fail during planning and never
+    // obtain an executable plan or reach a catalog/transaction projection.
+    assert!(scalar::signature(function).is_none());
+    let error = plan_sql_for_routing(&catalog, "SELECT crdt_counter_create('requests', 0)")
+        .expect_err("Counter create must be rejected before SQL execution");
+    assert!(matches!(error, SqlError::Plan { .. }));
+    assert_eq!(error.code(), "ALOPEX-F001");
+    assert!(error.message().contains(function));
 }
