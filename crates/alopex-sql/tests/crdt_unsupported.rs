@@ -27,6 +27,7 @@ fn crdt_scalar_names_are_not_registered_as_sql_functions() {
     let dialect = AlopexDialect;
     for expression in [
         "crdt_counter_create('requests', 0)",
+        "crdt_counter_read('requests')",
         "crdt_counter_increment('requests', 1)",
         "crdt_set_add('members', 'alice')",
         "crdt_set_contains('members', 'alice')",
@@ -56,6 +57,23 @@ fn counter_create_is_rejected_during_planning_before_any_execution() {
     assert!(scalar::signature(function).is_none());
     let error = plan_sql_for_routing(&catalog, "SELECT crdt_counter_create('requests', 0)")
         .expect_err("Counter create must be rejected before SQL execution");
+    assert!(matches!(error, SqlError::Plan { .. }));
+    assert_eq!(error.code(), "ALOPEX-F001");
+    assert!(error.message().contains(function));
+}
+
+#[test]
+fn counter_read_is_rejected_during_planning_before_any_execution() {
+    let function = "crdt_counter_read";
+    let catalog = MemoryCatalog::new();
+
+    // A read-looking SQL identifier is not an approved CRDT escape hatch.
+    // It must not be mistaken for a local SQL query or reach any CRDT
+    // projection: absence from the scalar registry is the pre-execution
+    // compatibility boundary.
+    assert!(scalar::signature(function).is_none());
+    let error = plan_sql_for_routing(&catalog, "SELECT crdt_counter_read('requests')")
+        .expect_err("Counter read must be rejected before SQL execution");
     assert!(matches!(error, SqlError::Plan { .. }));
     assert_eq!(error.code(), "ALOPEX-F001");
     assert!(error.message().contains(function));
