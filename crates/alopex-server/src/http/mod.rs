@@ -2,6 +2,7 @@ pub mod admin;
 pub mod admin_api;
 pub mod admin_resources;
 pub mod columnar;
+pub mod crdt;
 pub mod hnsw;
 pub mod kv;
 pub mod session;
@@ -62,6 +63,7 @@ impl Drop for QueueWaitGuard<'_> {
 
 pub fn router(state: Arc<ServerState>) -> Router {
     let api = Router::new()
+        .route("/crdt/counters", axum::routing::post(crdt::create_counter))
         .route("/kv/get", axum::routing::post(kv::get))
         .route("/kv/put", axum::routing::post(kv::put))
         .route("/kv/delete", axum::routing::post(kv::delete))
