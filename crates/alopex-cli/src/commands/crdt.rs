@@ -71,6 +71,41 @@ pub fn execute_local<W: Write>(
                     let outcome = db.create_counter(envelope)?;
                     render_and_classify(&outcome, writer, output_format, quiet)
                 }
+                CounterCommand::Read {
+                    object_id,
+                    cluster_id,
+                    table_id,
+                    range_id,
+                    schema_version,
+                    data_epoch,
+                    request_id,
+                    operation_id,
+                    update_version,
+                    actor,
+                } => {
+                    let range = RangeIdentity::new(
+                        cluster_id,
+                        table_id,
+                        range_id,
+                        None,
+                        None,
+                        schema_version,
+                        data_epoch,
+                    );
+                    let envelope = CrdtOperationEnvelope::new(
+                        object_id,
+                        range,
+                        actor,
+                        request_id,
+                        operation_id,
+                        update_version,
+                        CrdtOperationKind::CounterRead,
+                        CrdtPayload::None,
+                    )
+                    .map_err(|error| CliError::InvalidArgument(error.to_string()))?;
+                    let outcome = db.read_counter(envelope)?;
+                    render_and_classify(&outcome, writer, output_format, quiet)
+                }
             }
         }
     }
@@ -128,6 +163,38 @@ pub async fn execute_remote<W: Write>(
                         .map_err(map_client_error)?;
                     render_and_classify(&outcome, writer, output_format, quiet)
                 }
+                CounterCommand::Read {
+                    object_id,
+                    cluster_id,
+                    table_id,
+                    range_id,
+                    schema_version,
+                    data_epoch,
+                    request_id,
+                    operation_id,
+                    update_version,
+                    ..
+                } => {
+                    let request = RemoteCounterReadRequest {
+                        range: RangeIdentity::new(
+                            cluster_id.clone(),
+                            *table_id,
+                            range_id.clone(),
+                            None,
+                            None,
+                            *schema_version,
+                            *data_epoch,
+                        ),
+                        request_id,
+                        operation_id,
+                        update_version: *update_version,
+                    };
+                    let outcome: CrdtOutcome = client
+                        .post_json(&format!("api/crdt/counters/{object_id}/read"), &request)
+                        .await
+                        .map_err(map_client_error)?;
+                    render_and_classify(&outcome, writer, output_format, quiet)
+                }
             }
         }
     }
@@ -141,6 +208,14 @@ struct RemoteCounterCreateRequest<'a> {
     operation_id: &'a str,
     update_version: u64,
     initial_value: i64,
+}
+
+#[derive(Serialize)]
+struct RemoteCounterReadRequest<'a> {
+    range: RangeIdentity,
+    request_id: &'a str,
+    operation_id: &'a str,
+    update_version: u64,
 }
 
 fn render_and_classify<W: Write>(
