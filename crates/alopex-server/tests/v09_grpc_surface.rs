@@ -11,9 +11,9 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
 use tonic::transport::Channel;
-use tonic::Code;
+use tonic::{Code, Request};
 
-const I14_REGISTER: [&str; 17] = [
+const I14_REGISTER: [&str; 18] = [
     "ExecuteSql",
     "ExecuteDdl",
     "ExecuteDml",
@@ -31,6 +31,7 @@ const I14_REGISTER: [&str; 17] = [
     "ClusterStatus",
     "ClusterJoin",
     "ClusterLeave",
+    "CreateCounter",
 ];
 
 async fn build_state() -> (Arc<ServerState>, tempfile::TempDir) {
@@ -192,11 +193,62 @@ async fn i14_grpc_method_register_preserves_version_auth_status_and_unknown_fiel
         grpc::proto::ClusterLeaveRequest {},
         "ClusterLeave"
     );
+    assert_unauthenticated!(
+        client,
+        create_counter,
+        grpc::proto::CreateCounterRequest::default(),
+        "CreateCounter"
+    );
 
     let decoded = grpc::proto::HealthRequest::decode(&[0x10, 0x01][..])
         .expect("unknown protobuf field must be ignored");
     assert_eq!(decoded, grpc::proto::HealthRequest {});
-    assert_eq!(I14_REGISTER.len(), 17, "the I-14 RPC register drifted");
+    assert_eq!(I14_REGISTER.len(), 18, "the I-14 RPC register drifted");
+
+    let _ = shutdown.send(());
+    handle.await.expect("gRPC server shutdown");
+}
+
+#[tokio::test]
+async fn create_counter_uses_authenticated_actor_and_canonical_counter_outcome() {
+    let (state, _temp) = build_state().await;
+    let (channel, shutdown, handle) = spawn_network_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+    let mut request = Request::new(grpc::proto::CreateCounterRequest {
+        object_id: "counter-grpc".into(),
+        range: Some(grpc::proto::CrdtRangeIdentity {
+            cluster_id: "cluster-grpc".into(),
+            table_id: 7,
+            range_id: "range-grpc".into(),
+            lower_bound: Vec::new(),
+            has_lower_bound: false,
+            upper_bound: Vec::new(),
+            has_upper_bound: false,
+            schema_version: 1,
+            data_epoch: 9,
+        }),
+        request_id: "request-grpc".into(),
+        operation_id: "operation-grpc".into(),
+        update_version: 0,
+        initial_value: -4,
+    });
+    request
+        .metadata_mut()
+        .insert("x-api-key", "v09-key".parse().unwrap());
+    let outcome = client
+        .create_counter(request)
+        .await
+        .expect("counter create")
+        .into_inner();
+    assert_eq!(outcome.object_type, "counter");
+    assert_eq!(outcome.actor, "dev");
+    assert_eq!(outcome.state, "committed");
+    assert_eq!(outcome.routing_kind, "local_only");
+    assert!(outcome.has_value);
+    assert_eq!(outcome.initial_value, -4);
+    assert_eq!(outcome.accepted_delta_total, 0);
+    assert_eq!(outcome.value, -4);
+    assert_eq!(outcome.duplicate_count, 0);
 
     let _ = shutdown.send(());
     handle.await.expect("gRPC server shutdown");

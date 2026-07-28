@@ -64,7 +64,7 @@ pub async fn create_counter(
     crdt_response(outcome, state.config.max_response_size)
 }
 
-fn create_counter_outcome(
+pub(crate) fn create_counter_outcome(
     state: &ServerState,
     context: &RequestContext,
     request: CounterCreateRequest,

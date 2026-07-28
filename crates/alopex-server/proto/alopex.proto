@@ -137,6 +137,57 @@ message ClusterOperationResponse {
   string reason_code = 5;
 }
 
+// Versioned CRDT wire identity. Optional bounds are represented explicitly so
+// an empty boundary cannot be confused with an unbounded range edge.
+message CrdtRangeIdentity {
+  string cluster_id = 1;
+  uint32 table_id = 2;
+  string range_id = 3;
+  bytes lower_bound = 4;
+  bool has_lower_bound = 5;
+  bytes upper_bound = 6;
+  bool has_upper_bound = 7;
+  uint64 schema_version = 8;
+  uint64 data_epoch = 9;
+}
+
+message CreateCounterRequest {
+  string object_id = 1;
+  CrdtRangeIdentity range = 2;
+  string request_id = 3;
+  string operation_id = 4;
+  uint64 update_version = 5;
+  sint64 initial_value = 6;
+}
+
+// The flattened common contract mirrors the HTTP/embedded CrdtOutcome. A
+// non-OK gRPC status carries this exact encoded message in Status.details.
+message CounterOutcome {
+  string object_type = 1;
+  string object_id = 2;
+  CrdtRangeIdentity range = 3;
+  uint64 state_epoch = 4;
+  string actor = 5;
+  string request_id = 6;
+  string operation_id = 7;
+  string state = 8;
+  string failure_class = 9;
+  string routing_kind = 10;
+  uint64 routing_metadata_version = 11;
+  string routing_reason_code = 12;
+  bool retryable = 13;
+  string original_operation_id = 14;
+  string original_request_id = 15;
+  string first_outcome = 16;
+  string first_state = 17;
+  uint64 duplicate_count = 18;
+  bool has_value = 19;
+  sint64 initial_value = 20;
+  sint64 accepted_delta_total = 21;
+  sint64 value = 22;
+  string value_unavailable = 23;
+}
+
 message Vector {
   repeated float values = 1;
 }
@@ -190,4 +241,5 @@ service AlopexService {
   rpc ClusterStatus(ClusterStatusRequest) returns (ClusterStatusResponse);
   rpc ClusterJoin(ClusterJoinRequest) returns (ClusterOperationResponse);
   rpc ClusterLeave(ClusterLeaveRequest) returns (ClusterOperationResponse);
+  rpc CreateCounter(CreateCounterRequest) returns (CounterOutcome);
 }

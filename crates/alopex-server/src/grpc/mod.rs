@@ -16,6 +16,9 @@ use tonic::{async_trait, Request, Response, Status};
 use tower::{Layer, Service};
 use uuid::Uuid;
 
+use alopex_cluster::crdt::{CrdtOutcome, CrdtValue};
+use alopex_cluster::RangeIdentity;
+
 use crate::error::{Result, ServerError};
 use crate::http::sql::{
     execute_non_session_statement_with_routing, execute_session_statement_with_routing,
@@ -786,6 +789,133 @@ impl AlopexService for AlopexServiceImpl {
             reason_code: "membership_changed".to_string(),
         }))
     }
+
+    async fn create_counter(
+        &self,
+        request: Request<proto::CreateCounterRequest>,
+    ) -> std::result::Result<Response<proto::CounterOutcome>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        let request = request.into_inner();
+        let range = request
+            .range
+            .ok_or_else(|| Status::invalid_argument("range is required"))?;
+        let core_request = crate::http::crdt::CounterCreateRequest {
+            object_id: request.object_id,
+            range: range_identity_from_proto(range),
+            request_id: request.request_id.into(),
+            operation_id: request.operation_id,
+            update_version: request.update_version,
+            initial_value: request.initial_value,
+        };
+        let http_context = crate::http::RequestContext {
+            correlation_id: ctx.correlation_id.clone(),
+            actor: ctx.actor.clone(),
+        };
+        let outcome = crate::http::crdt::create_counter_outcome(
+            self.state.as_ref(),
+            &http_context,
+            core_request,
+        );
+        let response = counter_outcome_to_proto(&outcome);
+        let status = outcome.surface_status();
+        if status.grpc_code != "OK" {
+            return Err(crdt_status(status.grpc_code, &ctx.correlation_id));
+        }
+        Ok(Response::new(response))
+    }
+}
+
+fn range_identity_from_proto(range: proto::CrdtRangeIdentity) -> RangeIdentity {
+    RangeIdentity::new(
+        range.cluster_id,
+        range.table_id,
+        range.range_id,
+        range.has_lower_bound.then_some(range.lower_bound),
+        range.has_upper_bound.then_some(range.upper_bound),
+        range.schema_version,
+        range.data_epoch,
+    )
+}
+
+fn range_identity_to_proto(range: &RangeIdentity) -> proto::CrdtRangeIdentity {
+    proto::CrdtRangeIdentity {
+        cluster_id: range.cluster_id.as_str().to_owned(),
+        table_id: range.table_id,
+        range_id: range.range_id.as_str().to_owned(),
+        lower_bound: range.lower_bound.clone().unwrap_or_default(),
+        has_lower_bound: range.lower_bound.is_some(),
+        upper_bound: range.upper_bound.clone().unwrap_or_default(),
+        has_upper_bound: range.upper_bound.is_some(),
+        schema_version: range.schema_version,
+        data_epoch: range.data_epoch,
+    }
+}
+
+fn counter_outcome_to_proto(outcome: &CrdtOutcome) -> proto::CounterOutcome {
+    let common = outcome.common();
+    let (has_value, initial_value, accepted_delta_total, value) = match outcome.value() {
+        Some(CrdtValue::Counter {
+            initial_value,
+            accepted_delta_total,
+            value,
+            ..
+        }) => (true, *initial_value, *accepted_delta_total, *value),
+        _ => (false, 0, 0, 0),
+    };
+    proto::CounterOutcome {
+        object_type: enum_wire(&common.object_type),
+        object_id: common.object_id.clone(),
+        range: Some(range_identity_to_proto(&common.range)),
+        state_epoch: common.state_epoch,
+        actor: common.actor.as_str().to_owned(),
+        request_id: common.request_id.as_str().to_owned(),
+        operation_id: common.operation_id.clone(),
+        state: enum_wire(&common.state),
+        failure_class: common
+            .failure_class
+            .as_ref()
+            .map(enum_wire)
+            .unwrap_or_default(),
+        routing_kind: enum_wire(&common.routing.kind),
+        routing_metadata_version: common.routing.metadata_version,
+        routing_reason_code: common.routing.reason_code.clone(),
+        retryable: common.retryable,
+        original_operation_id: common.idempotency.operation_id.clone(),
+        original_request_id: common.idempotency.request_id.as_str().to_owned(),
+        first_outcome: common.idempotency.first_outcome.clone(),
+        first_state: enum_wire(&common.idempotency.state),
+        duplicate_count: common.idempotency.duplicate_count,
+        has_value,
+        initial_value,
+        accepted_delta_total,
+        value,
+        value_unavailable: outcome.value_unavailable().unwrap_or_default().to_owned(),
+    }
+}
+
+fn enum_wire(value: &impl serde::Serialize) -> String {
+    serde_json::to_value(value)
+        .expect("CRDT enum serializes")
+        .as_str()
+        .expect("CRDT enum serializes as string")
+        .to_owned()
+}
+
+fn crdt_status(code: &str, correlation_id: &str) -> Status {
+    let code = match code {
+        "UNAUTHENTICATED" => tonic::Code::Unauthenticated,
+        "ABORTED" => tonic::Code::Aborted,
+        "UNAVAILABLE" => tonic::Code::Unavailable,
+        "DEADLINE_EXCEEDED" => tonic::Code::DeadlineExceeded,
+        "INVALID_ARGUMENT" => tonic::Code::InvalidArgument,
+        "UNIMPLEMENTED" => tonic::Code::Unimplemented,
+        _ => tonic::Code::Internal,
+    };
+    Status::new(
+        code,
+        format!("CRDT request failed (correlation_id={correlation_id})"),
+    )
 }
 
 fn cluster_json(
