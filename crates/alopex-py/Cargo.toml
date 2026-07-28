@@ -25,6 +25,7 @@ alopex-dataframe.workspace = true
 alopex-embedded = { path = "../alopex-embedded" }
 alopex-sql.workspace = true
 arrow = "53"
+serde_json.workspace = true
 
 [build-dependencies]
 pyo3-build-config = "0.29.0"

@@ -1,0 +1,57 @@
+import pytest
+
+from alopex import AlopexError, Database
+
+
+def _create_counter(db: Database, operation_id: str = "operation-a") -> dict:
+    return db.create_counter(
+        "counter-a",
+        cluster_id="cluster-a",
+        table_id=7,
+        range_id="range-a",
+        schema_version=1,
+        data_epoch=9,
+        request_id="request-a",
+        operation_id=operation_id,
+        update_version=12,
+        initial_value=-4,
+    )
+
+
+def test_i27_python_sync_counter_create_preserves_canonical_outcome_and_idempotency() -> None:
+    db = Database.open_in_memory()
+
+    first = _create_counter(db)
+    duplicate = _create_counter(db)
+
+    assert first["object_type"] == "counter"
+    assert first["object_id"] == "counter-a"
+    assert first["range"] == {
+        "cluster_id": "cluster-a",
+        "table_id": 7,
+        "range_id": "range-a",
+        "lower_bound": None,
+        "upper_bound": None,
+        "schema_version": 1,
+        "data_epoch": 9,
+    }
+    assert first["state"] == "committed"
+    assert first["routing"]["kind"] == "local_only"
+    assert first["value"]["value_type"] == "counter"
+    assert first["value"]["value"] == -4
+    assert first["idempotency"]["duplicate_count"] == 0
+    assert duplicate["value"] == first["value"]
+    assert duplicate["idempotency"]["duplicate_count"] == 1
+
+
+def test_i27_python_sync_counter_conflict_exposes_code_status_and_failure_class() -> None:
+    db = Database.open_in_memory()
+    _create_counter(db)
+
+    with pytest.raises(AlopexError) as raised:
+        _create_counter(db, operation_id="operation-b")
+
+    assert raised.value.code == "crdt_conflict"
+    assert raised.value.failure_class == "conflict"
+    assert raised.value.status["object_id"] == "counter-a"
+    assert raised.value.status["state"] == "rejected"

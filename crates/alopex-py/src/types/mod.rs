@@ -17,6 +17,7 @@ pub use dataframe::{
     PyDataFrame, PyDataFrameStream, PyDatetimeNamespace, PyExpr, PyLazyFrame, PyListNamespace,
     PyStringNamespace,
 };
+pub(crate) use results::crdt_outcome_to_py;
 pub use results::{PyHnswStats, PyMemoryStats, PySearchResult};
 
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {

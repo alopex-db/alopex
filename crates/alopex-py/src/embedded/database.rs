@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule};
 
 use crate::embedded::async_stream::PyNativeAsyncSqlResultStream;
 use crate::embedded::local_scan::PyLocalScan;
@@ -10,7 +10,9 @@ use crate::embedded::stream::{PySqlResultStream, StreamLeaseRegistry};
 use crate::embedded::thread_mode::{DatabaseControl, PyThreadMode, ThreadMode};
 use crate::embedded::transaction::{PyTransaction, PyTransactionInner};
 use crate::error;
-use crate::types::{DataFrameStreamRegistry, PyEmbeddedConfig, PyMemoryStats, PyTxnMode};
+use crate::types::{
+    crdt_outcome_to_py, DataFrameStreamRegistry, PyEmbeddedConfig, PyMemoryStats, PyTxnMode,
+};
 #[cfg(feature = "numpy")]
 use crate::types::{PyHnswConfig, PyHnswStats, PySearchResult};
 use crate::vector;
@@ -333,6 +335,74 @@ impl PyDatabase {
         let db = self.ensure_open()?;
         let diagnostics = db.routing_diagnostics().map_err(error::embedded_err)?;
         crate::types::cluster::routing_diagnostics_to_py(py, &diagnostics)
+    }
+
+    /// Create a Counter through the shared local CRDT projection.
+    ///
+    /// The result is the canonical Counter outcome mapping used by all Phase 2
+    /// surfaces. This embedded method never creates a remote client or reports
+    /// replica convergence; a local deployment therefore exposes its explicit
+    /// `local_only` routing result.
+    #[pyo3(
+        signature = (object_id, *, cluster_id, table_id, range_id, schema_version, data_epoch, request_id, operation_id, update_version, initial_value, actor = "alopex-python-local")
+    )]
+    #[allow(clippy::too_many_arguments)]
+    fn create_counter(
+        &self,
+        py: Python<'_>,
+        object_id: &str,
+        cluster_id: &str,
+        table_id: u32,
+        range_id: &str,
+        schema_version: u64,
+        data_epoch: u64,
+        request_id: &str,
+        operation_id: &str,
+        update_version: u64,
+        initial_value: i64,
+        actor: &str,
+    ) -> PyResult<Py<PyDict>> {
+        let db = self.ensure_open()?;
+        let envelope = alopex_cluster::CrdtOperationEnvelope::new(
+            object_id,
+            alopex_cluster::RangeIdentity::new(
+                cluster_id,
+                table_id,
+                range_id,
+                None,
+                None,
+                schema_version,
+                data_epoch,
+            ),
+            actor,
+            request_id,
+            operation_id,
+            update_version,
+            alopex_cluster::CrdtOperationKind::CounterCreate,
+            alopex_cluster::CrdtPayload::Counter {
+                initial_value: Some(initial_value),
+                delta: None,
+            },
+        )
+        .map_err(|error| error::to_py_err(error.to_string()))?;
+        let outcome = py
+            .detach(move || db.create_counter(envelope))
+            .map_err(error::embedded_err)?;
+        let status = crdt_outcome_to_py(py, &outcome)?;
+        if let Some(code) = outcome.surface_status().python_error_code {
+            let py_err = error::with_code(
+                error::to_py_err(outcome.common().routing.reason_code.clone()),
+                code,
+            );
+            py_err.value(py).setattr("status", status.bind(py))?;
+            if let Some(failure) = status.bind(py).get_item("failure_class")? {
+                py_err.value(py).setattr("failure_class", failure)?;
+            } else {
+                py_err.value(py).setattr("failure_class", py.None())?;
+            }
+            return Err(py_err);
+        }
+        Ok(status)
     }
 
     fn close(&mut self) -> PyResult<()> {

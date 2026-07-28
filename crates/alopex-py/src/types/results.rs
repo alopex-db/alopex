@@ -1,4 +1,56 @@
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyDictMethods, PyList, PyListMethods};
+use pyo3::IntoPyObjectExt;
+
+/// Convert the shared Phase 2 outcome into the same nested mapping shape used
+/// by HTTP/CLI JSON.  The Python binding must not invent a private result
+/// schema or reinterpret CRDT state.
+pub(crate) fn crdt_outcome_to_py(
+    py: Python<'_>,
+    outcome: &alopex_cluster::crdt::CrdtOutcome,
+) -> PyResult<Py<PyDict>> {
+    let document = serde_json::to_value(outcome)
+        .map_err(|error| crate::error::to_py_err(error.to_string()))?;
+    let value = json_value_to_py(py, &document)?;
+    value
+        .into_bound(py)
+        .cast_into::<PyDict>()
+        .map(Bound::unbind)
+        .map_err(|_| crate::error::to_py_err("CRDT outcome must serialize to a Python dict"))
+}
+
+fn json_value_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<PyAny>> {
+    match value {
+        serde_json::Value::Null => Ok(py.None()),
+        serde_json::Value::Bool(value) => Ok(value.into_py_any(py)?),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(value.into_py_any(py)?)
+            } else if let Some(value) = value.as_u64() {
+                Ok(value.into_py_any(py)?)
+            } else if let Some(value) = value.as_f64() {
+                Ok(value.into_py_any(py)?)
+            } else {
+                Err(crate::error::to_py_err("unsupported CRDT JSON number"))
+            }
+        }
+        serde_json::Value::String(value) => Ok(value.clone().into_py_any(py)?),
+        serde_json::Value::Array(values) => {
+            let list = PyList::empty(py);
+            for value in values {
+                list.append(json_value_to_py(py, value)?)?;
+            }
+            Ok(list.into_any().unbind())
+        }
+        serde_json::Value::Object(values) => {
+            let dict = PyDict::new(py);
+            for (key, value) in values {
+                dict.set_item(key, json_value_to_py(py, value)?)?;
+            }
+            Ok(dict.into_any().unbind())
+        }
+    }
+}
 
 #[pyclass(name = "SearchResult", skip_from_py_object)]
 pub struct PySearchResult {
