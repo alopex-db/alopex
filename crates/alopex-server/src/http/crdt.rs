@@ -11,7 +11,7 @@ use alopex_cluster::{
 use alopex_core::kv::any::{AnyKVManager, AnyKVTransaction};
 use alopex_core::kv::{AnyKV, KVStore};
 use alopex_core::TxnMode;
-use axum::extract::Extension;
+use axum::extract::{Extension, Path};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
@@ -30,6 +30,17 @@ pub struct CounterCreateRequest {
     pub operation_id: String,
     pub update_version: u64,
     pub initial_value: i64,
+}
+
+/// HTTP JSON request for a Counter read. The object identity is carried by the
+/// route path while the full Phase 1 range identity remains explicit rather
+/// than being inferred from a caller-local default.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CounterReadRequest {
+    pub range: RangeIdentity,
+    pub request_id: RequestId,
+    pub operation_id: String,
+    pub update_version: u64,
 }
 
 /// A borrowing store adapter keeps the server Counter projection on the
@@ -61,6 +72,16 @@ pub async fn create_counter(
     Json(request): Json<CounterCreateRequest>,
 ) -> Response {
     let outcome = create_counter_outcome(&state, &context, request);
+    crdt_response(outcome, state.config.max_response_size)
+}
+
+pub async fn read_counter(
+    Path(object_id): Path<String>,
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(context): Extension<RequestContext>,
+    Json(request): Json<CounterReadRequest>,
+) -> Response {
+    let outcome = read_counter_outcome(&state, &context, object_id, request);
     crdt_response(outcome, state.config.max_response_size)
 }
 
@@ -175,6 +196,134 @@ pub(crate) fn create_counter_outcome(
     }
 }
 
+pub(crate) fn read_counter_outcome(
+    state: &ServerState,
+    context: &RequestContext,
+    object_id: String,
+    request: CounterReadRequest,
+) -> CrdtOutcome {
+    let actor = match state.auth.authorize_crdt(context.actor.as_deref()) {
+        Ok(subject) => subject.as_str().to_owned(),
+        Err(_) => {
+            let envelope = request.unchecked_envelope(
+                object_id,
+                context.actor.as_deref().unwrap_or("unauthenticated"),
+            );
+            return counter_rejection(
+                &envelope,
+                OperationState::Rejected,
+                FailureClass::Unauthorized,
+                RoutingOutcome::new(
+                    RoutingOutcomeKind::Blocked,
+                    Some(envelope.range.clone()),
+                    0,
+                    "authorization_denied",
+                ),
+                false,
+            );
+        }
+    };
+    let unchecked = request.unchecked_envelope(object_id.clone(), actor.as_str());
+    let envelope = match request.into_envelope(object_id, actor) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            return counter_rejection(
+                &unchecked,
+                OperationState::Rejected,
+                FailureClass::InvalidRequest,
+                RoutingOutcome::new(
+                    RoutingOutcomeKind::Blocked,
+                    Some(unchecked.range.clone()),
+                    0,
+                    "counter_read_request_invalid",
+                ),
+                false,
+            );
+        }
+    };
+
+    let (single_node, metadata_version) = match state.cluster_manager.read() {
+        Ok(manager) => (
+            manager.status_snapshot().mode == alopex_cluster::ClusterMode::SingleNode,
+            manager.identity().update_epoch,
+        ),
+        Err(_) => {
+            return counter_rejection(
+                &envelope,
+                OperationState::Rejected,
+                FailureClass::Internal,
+                RoutingOutcome::new(
+                    RoutingOutcomeKind::Blocked,
+                    Some(envelope.range.clone()),
+                    0,
+                    "cluster_manager_unavailable",
+                ),
+                false,
+            );
+        }
+    };
+    let routing = RoutingOutcome::new(
+        RoutingOutcomeKind::LocalOnly,
+        Some(envelope.range.clone()),
+        metadata_version,
+        "single_node_valid_lease",
+    );
+    let policy = CrdtPreExecutionPolicy::evaluate(&CrdtPolicyInput {
+        lifecycle: CrdtLifecycleAction::Read,
+        authorized: true,
+        range_freshness: CrdtRangeFreshness::Current,
+        chirps_ready: single_node,
+        node_available: true,
+        resource_available: true,
+        timed_out: false,
+        routing,
+    });
+    if !policy.permit_ledger {
+        return counter_rejection(
+            &envelope,
+            policy.state,
+            policy
+                .failure_class
+                .expect("rejected CRDT policy has a failure class"),
+            policy.routing,
+            policy.retryable,
+        );
+    }
+
+    let projection = CrdtCounterProjection::new(ServerCrdtStore(state.store.as_ref()));
+    match projection.read(&envelope) {
+        Ok(value) => {
+            let common = envelope.common_fields(
+                OperationState::Committed,
+                None,
+                policy.routing,
+                false,
+                IdempotencyResult {
+                    operation_id: envelope.operation_id.clone(),
+                    request_id: envelope.request_id.clone(),
+                    first_outcome: "counter_read".to_string(),
+                    state: OperationState::Committed,
+                    duplicate_count: 0,
+                },
+            );
+            CrdtOutcome::counter(common, value)
+        }
+        Err(CrdtCounterError::MissingProjection { .. }) => counter_rejection(
+            &envelope,
+            OperationState::Rejected,
+            FailureClass::PrerequisiteMissing,
+            RoutingOutcome::new(
+                RoutingOutcomeKind::Blocked,
+                Some(envelope.range.clone()),
+                metadata_version,
+                "counter_not_found",
+            ),
+            false,
+        ),
+        Err(error) => counter_projection_failure(&envelope, metadata_version, error),
+    }
+}
+
 impl CounterCreateRequest {
     fn into_envelope(self, actor: impl Into<NodeId>) -> Result<CrdtOperationEnvelope, ()> {
         CrdtOperationEnvelope::new(
@@ -208,6 +357,45 @@ impl CounterCreateRequest {
                 initial_value: Some(self.initial_value),
                 delta: None,
             },
+        }
+    }
+}
+
+impl CounterReadRequest {
+    fn into_envelope(
+        self,
+        object_id: String,
+        actor: impl Into<NodeId>,
+    ) -> Result<CrdtOperationEnvelope, ()> {
+        CrdtOperationEnvelope::new(
+            object_id,
+            self.range,
+            actor,
+            self.request_id,
+            self.operation_id,
+            self.update_version,
+            CrdtOperationKind::CounterRead,
+            CrdtPayload::None,
+        )
+        .map_err(|_| ())
+    }
+
+    fn unchecked_envelope(
+        &self,
+        object_id: String,
+        actor: impl Into<NodeId>,
+    ) -> CrdtOperationEnvelope {
+        CrdtOperationEnvelope {
+            object_type: alopex_cluster::CrdtObjectType::Counter,
+            object_id,
+            range: self.range.clone(),
+            state_epoch: self.range.data_epoch,
+            actor: actor.into(),
+            request_id: self.request_id.clone(),
+            operation_id: self.operation_id.clone(),
+            update_version: self.update_version,
+            operation: CrdtOperationKind::CounterRead,
+            payload: CrdtPayload::None,
         }
     }
 }
