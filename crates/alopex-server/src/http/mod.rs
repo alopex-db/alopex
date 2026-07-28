@@ -72,6 +72,10 @@ pub fn router(state: Arc<ServerState>) -> Router {
             "/crdt/counters/{object_id}/increment",
             axum::routing::post(crdt::increment_counter),
         )
+        .route(
+            "/crdt/counters/{object_id}/decrement",
+            axum::routing::post(crdt::decrement_counter),
+        )
         .route("/kv/get", axum::routing::post(kv::get))
         .route("/kv/put", axum::routing::post(kv::put))
         .route("/kv/delete", axum::routing::post(kv::delete))
