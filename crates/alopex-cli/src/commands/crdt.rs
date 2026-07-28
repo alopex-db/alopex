@@ -106,6 +106,45 @@ pub fn execute_local<W: Write>(
                     let outcome = db.read_counter(envelope)?;
                     render_and_classify(&outcome, writer, output_format, quiet)
                 }
+                CounterCommand::Increment {
+                    object_id,
+                    cluster_id,
+                    table_id,
+                    range_id,
+                    schema_version,
+                    data_epoch,
+                    request_id,
+                    operation_id,
+                    update_version,
+                    delta,
+                    actor,
+                } => {
+                    let range = RangeIdentity::new(
+                        cluster_id,
+                        table_id,
+                        range_id,
+                        None,
+                        None,
+                        schema_version,
+                        data_epoch,
+                    );
+                    let envelope = CrdtOperationEnvelope::new(
+                        object_id,
+                        range,
+                        actor,
+                        request_id,
+                        operation_id,
+                        update_version,
+                        CrdtOperationKind::CounterIncrement,
+                        CrdtPayload::Counter {
+                            initial_value: None,
+                            delta: Some(delta),
+                        },
+                    )
+                    .map_err(|error| CliError::InvalidArgument(error.to_string()))?;
+                    let outcome = db.increment_counter(envelope)?;
+                    render_and_classify(&outcome, writer, output_format, quiet)
+                }
             }
         }
     }
@@ -195,6 +234,43 @@ pub async fn execute_remote<W: Write>(
                         .map_err(map_client_error)?;
                     render_and_classify(&outcome, writer, output_format, quiet)
                 }
+                CounterCommand::Increment {
+                    object_id,
+                    cluster_id,
+                    table_id,
+                    range_id,
+                    schema_version,
+                    data_epoch,
+                    request_id,
+                    operation_id,
+                    update_version,
+                    delta,
+                    ..
+                } => {
+                    let request = RemoteCounterIncrementRequest {
+                        range: RangeIdentity::new(
+                            cluster_id.clone(),
+                            *table_id,
+                            range_id.clone(),
+                            None,
+                            None,
+                            *schema_version,
+                            *data_epoch,
+                        ),
+                        request_id,
+                        operation_id,
+                        update_version: *update_version,
+                        delta: *delta,
+                    };
+                    let outcome: CrdtOutcome = client
+                        .post_json(
+                            &format!("api/crdt/counters/{object_id}/increment"),
+                            &request,
+                        )
+                        .await
+                        .map_err(map_client_error)?;
+                    render_and_classify(&outcome, writer, output_format, quiet)
+                }
             }
         }
     }
@@ -216,6 +292,15 @@ struct RemoteCounterReadRequest<'a> {
     request_id: &'a str,
     operation_id: &'a str,
     update_version: u64,
+}
+
+#[derive(Serialize)]
+struct RemoteCounterIncrementRequest<'a> {
+    range: RangeIdentity,
+    request_id: &'a str,
+    operation_id: &'a str,
+    update_version: u64,
+    delta: i64,
 }
 
 fn render_and_classify<W: Write>(

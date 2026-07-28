@@ -275,6 +275,42 @@ pub enum CounterCommand {
         #[arg(long, default_value = "alopex-cli-local")]
         actor: String,
     },
+    /// Apply a signed delta to an existing Counter with a durable operation identity
+    Increment {
+        /// Logical Counter identifier
+        #[arg(long)]
+        object_id: String,
+        /// Cluster identity that owns the Counter range
+        #[arg(long)]
+        cluster_id: String,
+        /// Numeric table identity for the Counter range
+        #[arg(long)]
+        table_id: u32,
+        /// Committed range identity
+        #[arg(long)]
+        range_id: String,
+        /// Schema version observed for the range
+        #[arg(long)]
+        schema_version: u64,
+        /// Data epoch observed for the range
+        #[arg(long)]
+        data_epoch: u64,
+        /// Request identity; required for every mutation
+        #[arg(long)]
+        request_id: String,
+        /// Operation identity; required for every mutation
+        #[arg(long)]
+        operation_id: String,
+        /// F1 epoch-scoped update version
+        #[arg(long)]
+        update_version: u64,
+        /// Signed amount to add to the Counter
+        #[arg(long, allow_hyphen_values = true)]
+        delta: i64,
+        /// Local actor identity. Remote requests derive this from transport authentication.
+        #[arg(long, default_value = "alopex-cli-local")]
+        actor: String,
+    },
 }
 
 /// Profile subcommands
