@@ -123,6 +123,13 @@ impl AuthMiddleware {
         }
     }
 
+    /// Authorize a CRDT request only after transport credentials have been
+    /// validated.  F2 adapters pass this subject to the common fail-closed
+    /// policy instead of treating a caller-supplied actor string as authority.
+    pub fn authorize_crdt(&self, actor: Option<&str>) -> Result<AuthenticatedSubject, AuthError> {
+        self.authenticated_subject(actor)
+    }
+
     /// Return the worker-facing recheck backed by this server's local policy.
     pub fn local_read_authorization_recheck(&self) -> Arc<dyn LocalReadAuthorizationRecheck> {
         Arc::new(ServerLocalReadAuthorizationRecheck::new(Arc::new(
@@ -217,5 +224,17 @@ mod tests {
             ANONYMOUS_SUBJECT
         );
         assert!(anonymous.authenticated_subject(Some(DEV_SUBJECT)).is_err());
+    }
+
+    #[test]
+    fn crdt_authorization_uses_the_same_validated_subject_boundary() {
+        let auth = AuthMiddleware::new(AuthMode::Dev {
+            api_key: "secret".into(),
+        });
+        assert_eq!(
+            auth.authorize_crdt(Some(DEV_SUBJECT)).unwrap().as_str(),
+            DEV_SUBJECT
+        );
+        assert!(auth.authorize_crdt(Some("untrusted")).is_err());
     }
 }

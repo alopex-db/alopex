@@ -10,6 +10,7 @@ mod counter;
 mod envelope;
 mod ledger;
 mod outcome;
+mod policy;
 mod set;
 
 pub use coordinator::{
@@ -28,6 +29,10 @@ pub use ledger::{
     CrdtLedgerAdmission, CrdtLedgerError, CrdtLedgerIdentity, CrdtLedgerRecord, CrdtOperationLedger,
 };
 pub use outcome::{CrdtOutcome, CrdtSurfaceStatus, CrdtValue};
+pub use policy::{
+    CrdtLifecycleAction, CrdtPolicyDecision, CrdtPolicyInput, CrdtPreExecutionPolicy,
+    CrdtRangeFreshness,
+};
 pub use set::{
     CrdtSetError, CrdtSetProjection, SetApplyResult, SetMemberVersion, SetProjectionLimits,
     SetProjectionState, SetValue,
