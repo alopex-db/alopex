@@ -445,6 +445,18 @@ impl Database {
         Ok(owned_session::unsupported_async_counter_create(envelope))
     }
 
+    /// Returns the explicit async capability result for Counter read.
+    ///
+    /// The owned-session boundary has no native async CRDT executor, so this
+    /// method preserves the named async capability contract and does not call
+    /// [`Self::read_counter`] synchronously.
+    pub async fn read_counter_async(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        Ok(owned_session::unsupported_async_counter_read(envelope))
+    }
+
     pub(crate) fn record_routing<C: alopex_sql::Catalog + ?Sized>(
         &self,
         catalog: &C,
@@ -2133,6 +2145,36 @@ mod tests {
             .create_counter(counter_create_envelope("operation-a"))
             .expect("unsupported async result must not write the ledger");
         assert_eq!(sync.common().idempotency.duplicate_count, 0);
+    }
+
+    #[test]
+    fn embedded_async_counter_read_is_explicitly_unsupported_without_a_sync_fallback() {
+        let db = Database::new();
+        db.create_counter(counter_create_envelope("operation-create"))
+            .expect("create Counter");
+
+        let outcome =
+            poll_immediately(db.read_counter_async(counter_read_envelope("operation-read")))
+                .expect("canonical unsupported outcome");
+        assert_eq!(outcome.common().state, OperationState::Rejected);
+        assert_eq!(
+            outcome.common().failure_class,
+            Some(FailureClass::InvalidRequest)
+        );
+        assert_eq!(
+            outcome.common().routing.kind,
+            RoutingOutcomeKind::Unsupported
+        );
+        assert!(outcome.value().is_none());
+
+        let sync = db
+            .read_counter(counter_read_envelope("operation-sync"))
+            .expect("unsupported async result must not change the Counter projection");
+        assert_eq!(sync.common().state, OperationState::Committed);
+        assert!(matches!(
+            sync.value(),
+            Some(CrdtValue::Counter { value: -4, .. })
+        ));
     }
 
     #[test]
