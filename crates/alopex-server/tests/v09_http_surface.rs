@@ -47,7 +47,7 @@ struct ApiRoute {
     streaming: StreamBehavior,
 }
 
-const API_ROUTES: [ApiRoute; 56] = [
+const API_ROUTES: [ApiRoute; 57] = [
     ApiRoute {
         label: "POST /crdt/counters",
         path: "/crdt/counters",
@@ -61,6 +61,14 @@ const API_ROUTES: [ApiRoute; 56] = [
         path: "/crdt/counters/{object_id}/read",
         method: RouteMethod::Post,
         request_schema: "CounterReadRequest",
+        response_schema: "CrdtOutcome",
+        streaming: StreamBehavior::None,
+    },
+    ApiRoute {
+        label: "POST /crdt/counters/{object_id}/increment",
+        path: "/crdt/counters/{object_id}/increment",
+        method: RouteMethod::Post,
+        request_schema: "CounterIncrementRequest",
         response_schema: "CrdtOutcome",
         streaming: StreamBehavior::None,
     },
@@ -525,9 +533,10 @@ const ADMIN_ROUTES: [ApiRoute; 3] = [
     },
 ];
 
-const I13_REGISTER: [&str; 59] = [
+const I13_REGISTER: [&str; 60] = [
     "POST /crdt/counters",
     "POST /crdt/counters/{object_id}/read",
+    "POST /crdt/counters/{object_id}/increment",
     "POST /kv/get",
     "POST /kv/put",
     "POST /kv/delete",
