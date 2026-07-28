@@ -456,6 +456,18 @@ impl Database {
         Ok(state.decrement_counter(self.store.as_ref(), envelope))
     }
 
+    /// Returns the explicit async capability result for Counter decrement.
+    ///
+    /// The owned-session boundary has no native async CRDT executor, so this
+    /// method preserves the named async capability contract and does not call
+    /// [`Self::decrement_counter`] synchronously.
+    pub async fn decrement_counter_async(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        Ok(owned_session::unsupported_async_counter_decrement(envelope))
+    }
+
     /// Returns the explicit async capability result for Counter increment.
     ///
     /// The owned-session boundary has no native async CRDT executor, so this
@@ -2339,6 +2351,37 @@ mod tests {
         assert!(matches!(
             sync.value(),
             Some(CrdtValue::Counter { value: -1, .. })
+        ));
+    }
+
+    #[test]
+    fn embedded_async_counter_decrement_is_explicitly_unsupported_without_a_sync_fallback() {
+        let db = Database::new();
+        db.create_counter(counter_create_envelope("operation-create"))
+            .expect("create Counter");
+
+        let outcome = poll_immediately(
+            db.decrement_counter_async(counter_decrement_envelope("operation-decrement")),
+        )
+        .expect("canonical unsupported outcome");
+        assert_eq!(outcome.common().state, OperationState::Rejected);
+        assert_eq!(
+            outcome.common().failure_class,
+            Some(FailureClass::InvalidRequest)
+        );
+        assert_eq!(
+            outcome.common().routing.kind,
+            RoutingOutcomeKind::Unsupported
+        );
+        assert!(outcome.value().is_none());
+
+        let sync = db
+            .decrement_counter(counter_decrement_envelope("operation-decrement"))
+            .expect("unsupported async result must not write the ledger");
+        assert_eq!(sync.common().idempotency.duplicate_count, 0);
+        assert!(matches!(
+            sync.value(),
+            Some(CrdtValue::Counter { value: -7, .. })
         ));
     }
 
