@@ -399,6 +399,23 @@ impl Database {
         Ok(state.routing_diagnostics(self.table_info_cache_epoch()))
     }
 
+    /// Creates a local Counter from the canonical Phase 2 operation envelope.
+    ///
+    /// The embedded boundary only reports `local_only`; it never claims that
+    /// the operation has converged across replicas. Callers that need a
+    /// cluster outcome must use a cluster-capable adapter that establishes the
+    /// Phase 1 readiness and replica-quorum contracts first.
+    pub fn create_counter(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        let mut state = self
+            .cluster_state
+            .write()
+            .map_err(|_| Error::ClusterStateLockPoisoned)?;
+        Ok(state.create_counter(self.store.as_ref(), envelope))
+    }
+
     pub(crate) fn record_routing<C: alopex_sql::Catalog + ?Sized>(
         &self,
         catalog: &C,
@@ -1907,9 +1924,91 @@ fn decode_index(bytes: &[u8]) -> result::Result<Vec<Key>, alopex_core::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alopex_cluster::crdt::{
+        CrdtObjectType, CrdtOperationEnvelope, CrdtOperationKind, CrdtPayload, CrdtValue,
+    };
+    use alopex_cluster::{FailureClass, OperationState, RangeIdentity, RoutingOutcomeKind};
     use std::sync::mpsc;
     use std::thread;
     use tempfile::tempdir;
+
+    fn counter_create_envelope(operation_id: &str) -> CrdtOperationEnvelope {
+        CrdtOperationEnvelope::new(
+            "counter-a",
+            RangeIdentity::new("embedded-local", 7, "range-a", None, None, 1, 9),
+            "embedded-actor",
+            "request-a",
+            operation_id,
+            1,
+            CrdtOperationKind::CounterCreate,
+            CrdtPayload::Counter {
+                initial_value: Some(-4),
+                delta: None,
+            },
+        )
+        .expect("valid counter create envelope")
+    }
+
+    #[test]
+    fn embedded_counter_create_preserves_the_canonical_local_outcome() {
+        let db = Database::new();
+        let first = db
+            .create_counter(counter_create_envelope("operation-a"))
+            .expect("create Counter");
+
+        assert_eq!(first.common().object_type, CrdtObjectType::Counter);
+        assert_eq!(first.common().object_id, "counter-a");
+        assert_eq!(first.common().state, OperationState::Committed);
+        assert_eq!(first.common().routing.kind, RoutingOutcomeKind::LocalOnly);
+        assert_eq!(first.common().request_id.as_str(), "request-a");
+        assert_eq!(first.common().operation_id, "operation-a");
+        assert!(matches!(
+            first.value(),
+            Some(CrdtValue::Counter {
+                initial_value: -4,
+                accepted_delta_total: 0,
+                value: -4,
+                ..
+            })
+        ));
+
+        let replay = db
+            .create_counter(counter_create_envelope("operation-a"))
+            .expect("idempotent replay");
+        assert_eq!(replay.common().state, OperationState::Committed);
+        assert_eq!(replay.common().idempotency.duplicate_count, 1);
+        assert_eq!(
+            replay.canonical_bytes().unwrap(),
+            replay.canonical_bytes().unwrap()
+        );
+    }
+
+    #[test]
+    fn embedded_counter_create_rejects_the_wrong_envelope_before_mutation() {
+        let db = Database::new();
+        let wrong_operation = CrdtOperationEnvelope::new(
+            "counter-a",
+            RangeIdentity::new("embedded-local", 7, "range-a", None, None, 1, 9),
+            "embedded-actor",
+            "request-a",
+            "operation-read",
+            1,
+            CrdtOperationKind::CounterRead,
+            CrdtPayload::None,
+        )
+        .expect("valid read envelope");
+
+        let outcome = db
+            .create_counter(wrong_operation)
+            .expect("canonical rejected outcome");
+        assert_eq!(outcome.common().state, OperationState::Rejected);
+        assert_eq!(
+            outcome.common().failure_class,
+            Some(FailureClass::InvalidRequest)
+        );
+        assert_eq!(outcome.common().routing.kind, RoutingOutcomeKind::Blocked);
+        assert!(outcome.value().is_none());
+    }
 
     #[test]
     fn test_open_and_crud() {

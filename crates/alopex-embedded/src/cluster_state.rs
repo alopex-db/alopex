@@ -1,12 +1,45 @@
+use alopex_cluster::crdt::{
+    CrdtCounterError, CrdtCounterProjection, CrdtOperationEnvelope, CrdtOperationKind, CrdtOutcome,
+};
 use alopex_cluster::{
     CatalogTableRef, CatalogTableSnapshot, ClusterManager, ClusterStatusSnapshot, PlanId,
     QueryRouter, QueryRoutingRequest, QueryTableReference, QueryTableReferenceAccess,
     QueryTableReferenceSource, RoutingDecisionKind, RoutingDiagnostics, StableDiagnosticCode,
     TableRef,
 };
+use alopex_cluster::{
+    FailureClass, IdempotencyResult, OperationState, RoutingOutcome, RoutingOutcomeKind,
+};
+use alopex_core::kv::any::{AnyKVManager, AnyKVTransaction};
+use alopex_core::kv::{AnyKV, KVStore};
+use alopex_core::TxnMode;
 use alopex_sql::catalog::{Catalog, TableMetadata};
 use alopex_sql::planner::{plan_statement_for_routing, TableReferenceAccess, TableReferenceSource};
 use alopex_sql::Statement;
+
+/// A borrowing KV-store adapter lets the CRDT projection share the exact
+/// embedded `AnyKV` transaction/WAL boundary without cloning a disk-backed
+/// store or creating an independent persistence path.
+struct EmbeddedCrdtStore<'store>(&'store AnyKV);
+
+impl<'store> KVStore for EmbeddedCrdtStore<'store> {
+    type Transaction<'txn>
+        = AnyKVTransaction<'txn>
+    where
+        Self: 'txn;
+    type Manager<'txn>
+        = AnyKVManager<'txn>
+    where
+        Self: 'txn;
+
+    fn txn_manager(&self) -> Self::Manager<'_> {
+        self.0.txn_manager()
+    }
+
+    fn begin(&self, mode: TxnMode) -> alopex_core::Result<Self::Transaction<'_>> {
+        self.0.begin(mode)
+    }
+}
 
 pub(crate) struct EmbeddedClusterState {
     manager: ClusterManager,
@@ -33,6 +66,43 @@ impl Default for EmbeddedClusterState {
 }
 
 impl EmbeddedClusterState {
+    /// Applies a Counter create only through the shared CRDT projection and
+    /// returns its canonical common outcome. The standalone embedded database
+    /// is intentionally local-only, so it does not assert a replica-quorum
+    /// result or make a Chirps capability claim.
+    pub(crate) fn create_counter(
+        &mut self,
+        store: &AnyKV,
+        envelope: CrdtOperationEnvelope,
+    ) -> CrdtOutcome {
+        if envelope.operation != CrdtOperationKind::CounterCreate {
+            return self.counter_rejection(
+                &envelope,
+                FailureClass::InvalidRequest,
+                "counter_create_envelope_required",
+            );
+        }
+
+        let projection = CrdtCounterProjection::new(EmbeddedCrdtStore(store));
+        match projection.apply(&envelope, envelope.state_epoch) {
+            Ok(result) => {
+                let common = envelope.common_fields(
+                    result.ledger.first_state,
+                    result.ledger.first_failure_class,
+                    self.counter_routing(
+                        &envelope,
+                        RoutingOutcomeKind::LocalOnly,
+                        "embedded_local_only",
+                    ),
+                    false,
+                    result.ledger.idempotency_result(),
+                );
+                CrdtOutcome::counter(common, result.value)
+            }
+            Err(error) => self.counter_projection_failure(&envelope, error),
+        }
+    }
+
     pub(crate) fn status_snapshot(&self, catalog_epoch: u64) -> ClusterStatusSnapshot {
         let mut snapshot = self.manager.status_snapshot();
         let epoch = snapshot
@@ -93,6 +163,66 @@ impl EmbeddedClusterState {
         );
         diagnostics.roles.push(self.manager.identity().role);
         diagnostics
+    }
+
+    fn counter_projection_failure(
+        &self,
+        envelope: &CrdtOperationEnvelope,
+        error: CrdtCounterError,
+    ) -> CrdtOutcome {
+        let (failure_class, reason) = match error {
+            CrdtCounterError::AlreadyExists { .. } => {
+                (FailureClass::Conflict, "counter_already_exists")
+            }
+            CrdtCounterError::InvalidCounterPayload | CrdtCounterError::WrongOperation { .. } => {
+                (FailureClass::InvalidRequest, "counter_payload_invalid")
+            }
+            CrdtCounterError::ArithmeticOverflow => {
+                (FailureClass::InvalidRequest, "counter_value_out_of_range")
+            }
+            CrdtCounterError::MissingProjection { .. }
+            | CrdtCounterError::Ledger(_)
+            | CrdtCounterError::Storage(_)
+            | CrdtCounterError::Encode(_)
+            | CrdtCounterError::Decode(_) => (FailureClass::Internal, "counter_projection_failed"),
+        };
+        self.counter_rejection(envelope, failure_class, reason)
+    }
+
+    fn counter_rejection(
+        &self,
+        envelope: &CrdtOperationEnvelope,
+        failure_class: FailureClass,
+        reason: &str,
+    ) -> CrdtOutcome {
+        let common = envelope.common_fields(
+            OperationState::Rejected,
+            Some(failure_class),
+            self.counter_routing(envelope, RoutingOutcomeKind::Blocked, reason),
+            false,
+            IdempotencyResult {
+                operation_id: envelope.operation_id.clone(),
+                request_id: envelope.request_id.clone(),
+                first_outcome: reason.to_string(),
+                state: OperationState::Rejected,
+                duplicate_count: 0,
+            },
+        );
+        CrdtOutcome::counter_unavailable(common, reason)
+    }
+
+    fn counter_routing(
+        &self,
+        envelope: &CrdtOperationEnvelope,
+        kind: RoutingOutcomeKind,
+        reason: impl Into<String>,
+    ) -> RoutingOutcome {
+        RoutingOutcome::new(
+            kind,
+            Some(envelope.range.clone()),
+            self.manager.identity().update_epoch,
+            reason,
+        )
     }
 }
 
