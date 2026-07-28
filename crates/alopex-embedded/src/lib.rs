@@ -416,6 +416,19 @@ impl Database {
         Ok(state.create_counter(self.store.as_ref(), envelope))
     }
 
+    /// Returns the explicit async capability result for Counter create.
+    ///
+    /// Embedded owned sessions keep local state alive but do not provide a
+    /// native async CRDT executor. This method therefore returns the
+    /// canonical `unsupported` outcome instead of calling [`Self::create_counter`]
+    /// synchronously or pretending to provide a remote operation.
+    pub async fn create_counter_async(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        Ok(owned_session::unsupported_async_counter_create(envelope))
+    }
+
     pub(crate) fn record_routing<C: alopex_sql::Catalog + ?Sized>(
         &self,
         catalog: &C,
@@ -1928,9 +1941,21 @@ mod tests {
         CrdtObjectType, CrdtOperationEnvelope, CrdtOperationKind, CrdtPayload, CrdtValue,
     };
     use alopex_cluster::{FailureClass, OperationState, RangeIdentity, RoutingOutcomeKind};
+    use std::future::Future;
     use std::sync::mpsc;
+    use std::task::{Context, Poll, Waker};
     use std::thread;
     use tempfile::tempdir;
+
+    fn poll_immediately<F: Future>(future: F) -> F::Output {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = Box::pin(future);
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("embedded async capability result must be immediate"),
+        }
+    }
 
     fn counter_create_envelope(operation_id: &str) -> CrdtOperationEnvelope {
         CrdtOperationEnvelope::new(
@@ -2008,6 +2033,30 @@ mod tests {
         );
         assert_eq!(outcome.common().routing.kind, RoutingOutcomeKind::Blocked);
         assert!(outcome.value().is_none());
+    }
+
+    #[test]
+    fn embedded_async_counter_create_is_explicitly_unsupported_without_a_sync_fallback() {
+        let db = Database::new();
+        let outcome =
+            poll_immediately(db.create_counter_async(counter_create_envelope("operation-a")))
+                .expect("canonical unsupported outcome");
+
+        assert_eq!(outcome.common().state, OperationState::Rejected);
+        assert_eq!(
+            outcome.common().failure_class,
+            Some(FailureClass::InvalidRequest)
+        );
+        assert_eq!(
+            outcome.common().routing.kind,
+            RoutingOutcomeKind::Unsupported
+        );
+        assert!(outcome.value().is_none());
+
+        let sync = db
+            .create_counter(counter_create_envelope("operation-a"))
+            .expect("unsupported async result must not write the ledger");
+        assert_eq!(sync.common().idempotency.duplicate_count, 0);
     }
 
     #[test]

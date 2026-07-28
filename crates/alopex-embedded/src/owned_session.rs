@@ -7,6 +7,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use alopex_cluster::crdt::{CrdtOperationEnvelope, CrdtOutcome};
+use alopex_cluster::{
+    FailureClass, IdempotencyResult, OperationState, RoutingOutcome, RoutingOutcomeKind,
+};
 use alopex_core::kv::{
     AnyKV, OwnedKVTransactionAdapter, OwnedReadOptions, OwnedReadSession,
     OwnedSessionFactory as CoreOwnedSessionFactory, OwnedTransactionSession,
@@ -17,6 +21,35 @@ use alopex_sql::catalog::CatalogOverlay;
 use alopex_sql::storage::LocalRangeChangeJournal;
 
 use crate::{Database, Error, Result};
+
+/// Builds the explicit async capability response for a Counter create.
+///
+/// An owned embedded session is a non-borrowing local lifecycle boundary; it
+/// is not an async CRDT executor. Returning this result prevents a hidden
+/// synchronous fallback from writing the CRDT ledger through an async-named
+/// API before such an executor is implemented and approved.
+pub(crate) fn unsupported_async_counter_create(envelope: CrdtOperationEnvelope) -> CrdtOutcome {
+    let reason = "embedded_async_crdt_unavailable";
+    let common = envelope.common_fields(
+        OperationState::Rejected,
+        Some(FailureClass::InvalidRequest),
+        RoutingOutcome::new(
+            RoutingOutcomeKind::Unsupported,
+            Some(envelope.range.clone()),
+            envelope.state_epoch,
+            reason,
+        ),
+        false,
+        IdempotencyResult {
+            operation_id: envelope.operation_id.clone(),
+            request_id: envelope.request_id.clone(),
+            first_outcome: reason.to_owned(),
+            state: OperationState::Rejected,
+            duplicate_count: 0,
+        },
+    );
+    CrdtOutcome::unsupported(common, reason)
+}
 
 /// Factory for owned local read and transaction sessions from one embedded database.
 ///
