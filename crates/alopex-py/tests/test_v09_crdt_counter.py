@@ -423,6 +423,20 @@ def _contains_set(
     )
 
 
+def _list_set(db: Database, operation_id: str = "operation-set-list") -> dict:
+    return db.list_set(
+        "set-a",
+        cluster_id="cluster-a",
+        table_id=7,
+        range_id="range-a",
+        schema_version=1,
+        data_epoch=9,
+        request_id="request-set-list",
+        operation_id=operation_id,
+        update_version=0,
+    )
+
+
 def _increment_counter(db: Database, operation_id: str = "operation-increment") -> dict:
     return db.increment_counter(
         "counter-a",
@@ -660,6 +674,54 @@ def test_i27_python_sync_set_contains_preserves_canonical_membership_without_a_l
         "duplicate_count": 0,
         "request_id": "request-set-contains",
         "operation_id": "operation-set-contains",
+        "state": "committed",
+    }
+    assert repeated == first
+
+
+def test_i27_python_sync_set_list_preserves_canonical_membership_without_a_ledger_mutation() -> None:
+    db = Database.open_in_memory()
+    _create_set(db)
+    _add_set(db)
+
+    first = _list_set(db)
+    repeated = _list_set(db)
+
+    assert first["object_type"] == "set"
+    assert first["object_id"] == "set-a"
+    assert first["range"] == {
+        "cluster_id": "cluster-a",
+        "table_id": 7,
+        "range_id": "range-a",
+        "lower_bound": None,
+        "upper_bound": None,
+        "schema_version": 1,
+        "data_epoch": 9,
+    }
+    assert first["request_id"] == "request-set-list"
+    assert first["operation_id"] == "operation-set-list"
+    assert first["state"] == "committed"
+    assert first["routing"]["kind"] == "local_only"
+    assert first["value"] == {
+        "value_type": "set",
+        "members": ["alice"],
+        "member_versions": {
+            "alice": {
+                "update_version": 13,
+                "operation_id": "00000000-0000-0000-0000-000000000160",
+                "present": True,
+            }
+        },
+        "accepted_operation_versions": {
+            "operation-set-a": 12,
+            "00000000-0000-0000-0000-000000000160": 13,
+        },
+    }
+    assert first["idempotency"] == {
+        "first_outcome": "set_list",
+        "duplicate_count": 0,
+        "request_id": "request-set-list",
+        "operation_id": "operation-set-list",
         "state": "committed",
     }
     assert repeated == first
