@@ -29,6 +29,7 @@ fn crdt_scalar_names_are_not_registered_as_sql_functions() {
         "crdt_counter_create('requests', 0)",
         "crdt_counter_read('requests')",
         "crdt_counter_increment('requests', 1)",
+        "crdt_counter_decrement('requests', 1)",
         "crdt_set_add('members', 'alice')",
         "crdt_set_contains('members', 'alice')",
     ] {
@@ -90,6 +91,22 @@ fn counter_increment_is_rejected_during_planning_before_any_execution() {
     assert!(scalar::signature(function).is_none());
     let error = plan_sql_for_routing(&catalog, "SELECT crdt_counter_increment('requests', 1)")
         .expect_err("Counter increment must be rejected before SQL execution");
+    assert!(matches!(error, SqlError::Plan { .. }));
+    assert_eq!(error.code(), "ALOPEX-F001");
+    assert!(error.message().contains(function));
+}
+
+#[test]
+fn counter_decrement_is_rejected_during_planning_before_any_execution() {
+    let function = "crdt_counter_decrement";
+    let catalog = MemoryCatalog::new();
+
+    // Decrement is deliberately absent from the SQL scalar register. Planning
+    // must reject it before an executable plan, transaction, or Counter
+    // projection can be created.
+    assert!(scalar::signature(function).is_none());
+    let error = plan_sql_for_routing(&catalog, "SELECT crdt_counter_decrement('requests', 1)")
+        .expect_err("Counter decrement must be rejected before SQL execution");
     assert!(matches!(error, SqlError::Plan { .. }));
     assert_eq!(error.code(), "ALOPEX-F001");
     assert!(error.message().contains(function));
