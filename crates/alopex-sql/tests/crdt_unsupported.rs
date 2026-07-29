@@ -145,3 +145,19 @@ fn set_read_is_rejected_during_planning_before_any_execution() {
     assert_eq!(error.code(), "ALOPEX-F001");
     assert!(error.message().contains(function));
 }
+
+#[test]
+fn set_add_is_rejected_during_planning_before_any_execution() {
+    let function = "crdt_set_add";
+    let catalog = MemoryCatalog::new();
+
+    // Set membership mutation is intentionally absent from the SQL scalar
+    // register. Planning must reject the identifier before an executable
+    // plan, transaction, or Set projection can be created.
+    assert!(scalar::signature(function).is_none());
+    let error = plan_sql_for_routing(&catalog, "SELECT crdt_set_add('members', 'alice')")
+        .expect_err("Set add must be rejected before SQL execution");
+    assert!(matches!(error, SqlError::Plan { .. }));
+    assert_eq!(error.code(), "ALOPEX-F001");
+    assert!(error.message().contains(function));
+}
