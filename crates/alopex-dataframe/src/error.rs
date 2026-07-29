@@ -163,7 +163,8 @@ impl DataFrameError {
             | "crdt_counter_increment"
             | "crdt_counter_decrement"
             | "crdt_set_create"
-            | "crdt_set_read" => {
+            | "crdt_set_read"
+            | "crdt_set_add" => {
                 Err(Self::invalid_operation(format!(
                 "dataframe CRDT operation '{operation}' is unsupported: pre_execution_unsupported"
                 )))

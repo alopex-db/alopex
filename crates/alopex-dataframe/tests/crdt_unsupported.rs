@@ -96,6 +96,17 @@ fn set_read_has_a_stable_pre_execution_unsupported_classification() {
 }
 
 #[test]
+fn set_add_has_a_stable_pre_execution_unsupported_classification() {
+    let operation = "crdt_set_add";
+    let error = preflight(operation).expect_err("Set add is not a DataFrame operation");
+    assert!(matches!(error, DataFrameError::InvalidOperation { .. }));
+    assert_eq!(
+        error.to_string(),
+        "invalid operation: dataframe CRDT operation 'crdt_set_add' is unsupported: pre_execution_unsupported"
+    );
+}
+
+#[test]
 fn existing_dataframe_operation_preflight_is_unchanged() {
     assert!(preflight("cse").is_ok());
     assert!(preflight("concat").is_ok());
