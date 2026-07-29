@@ -242,6 +242,42 @@ impl EmbeddedClusterState {
         }
     }
 
+    /// Removes one member through the shared durable Set projection and
+    /// returns the canonical local-only outcome for the standalone embedded
+    /// database.
+    pub(crate) fn remove_set(
+        &mut self,
+        store: &AnyKV,
+        envelope: CrdtOperationEnvelope,
+    ) -> CrdtOutcome {
+        if envelope.operation != CrdtOperationKind::SetRemove {
+            return self.set_rejection(
+                &envelope,
+                FailureClass::InvalidRequest,
+                "set_remove_envelope_required",
+            );
+        }
+
+        let projection = CrdtSetProjection::new(EmbeddedCrdtStore(store));
+        match projection.apply(&envelope, envelope.state_epoch) {
+            Ok(result) => {
+                let common = envelope.common_fields(
+                    result.ledger.first_state,
+                    result.ledger.first_failure_class,
+                    self.set_routing(
+                        &envelope,
+                        RoutingOutcomeKind::LocalOnly,
+                        "embedded_local_only",
+                    ),
+                    false,
+                    result.ledger.idempotency_result(),
+                );
+                CrdtOutcome::set(common, result.value)
+            }
+            Err(error) => self.set_projection_failure(&envelope, error),
+        }
+    }
+
     /// Reads a Counter projection without admitting a new ledger record.
     ///
     /// The standalone embedded database is intentionally local-only. A read

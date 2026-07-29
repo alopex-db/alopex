@@ -481,6 +481,19 @@ impl Database {
         Ok(state.add_set(self.store.as_ref(), envelope))
     }
 
+    /// Removes one canonical member from a local Set through the Phase 2
+    /// durable projection.
+    pub fn remove_set(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        let mut state = self
+            .cluster_state
+            .write()
+            .map_err(|_| Error::ClusterStateLockPoisoned)?;
+        Ok(state.remove_set(self.store.as_ref(), envelope))
+    }
+
     /// Reads a local Set through the canonical Phase 2 projection.
     ///
     /// A successful embedded read is explicitly `local_only` and does not
@@ -2218,6 +2231,22 @@ mod tests {
         .expect("valid Set add envelope")
     }
 
+    fn set_remove_envelope(operation_id: &str, member: &str) -> CrdtOperationEnvelope {
+        CrdtOperationEnvelope::new(
+            "set-a",
+            RangeIdentity::new("embedded-local", 7, "range-a", None, None, 1, 9),
+            "embedded-actor",
+            "request-set-remove",
+            operation_id,
+            3,
+            CrdtOperationKind::SetRemove,
+            CrdtPayload::Set {
+                member: Some(member.to_string()),
+            },
+        )
+        .expect("valid Set remove envelope")
+    }
+
     #[test]
     fn embedded_counter_create_preserves_the_canonical_local_outcome() {
         let db = Database::new();
@@ -2470,6 +2499,47 @@ mod tests {
         let replay = db
             .add_set(set_add_envelope(operation_id, "alice"))
             .expect("idempotent Set add replay");
+        assert_eq!(replay.common().idempotency.duplicate_count, 1);
+        assert_eq!(replay.value(), first.value());
+    }
+
+    #[test]
+    fn embedded_set_remove_preserves_canonical_membership_and_idempotency() {
+        let db = Database::new();
+        db.create_set(set_create_envelope("operation-set-create"))
+            .expect("create Set");
+        db.add_set(set_add_envelope(
+            "00000000-0000-0000-0000-000000000155",
+            "alice",
+        ))
+        .expect("add Set member");
+
+        let operation_id = "00000000-0000-0000-0000-000000000164";
+        let first = db
+            .remove_set(set_remove_envelope(operation_id, "alice"))
+            .expect("remove Set member");
+        assert_eq!(first.common().object_type, CrdtObjectType::Set);
+        assert_eq!(first.common().state, OperationState::Committed);
+        assert_eq!(first.common().routing.kind, RoutingOutcomeKind::LocalOnly);
+        assert_eq!(first.common().idempotency.duplicate_count, 0);
+        match first.value() {
+            Some(CrdtValue::Set {
+                members,
+                member_versions,
+                accepted_operation_versions,
+            }) => {
+                assert!(members.is_empty());
+                assert_eq!(member_versions["alice"].update_version, 3);
+                assert!(!member_versions["alice"].present);
+                assert_eq!(member_versions["alice"].operation_id, operation_id);
+                assert_eq!(accepted_operation_versions[operation_id], 3);
+            }
+            value => panic!("expected Set remove outcome, got {value:?}"),
+        }
+
+        let replay = db
+            .remove_set(set_remove_envelope(operation_id, "alice"))
+            .expect("idempotent Set remove replay");
         assert_eq!(replay.common().idempotency.duplicate_count, 1);
         assert_eq!(replay.value(), first.value());
     }
