@@ -100,3 +100,10 @@ def test_i22_set_remove_has_async_implementation_and_stub() -> None:
         assert re.search(
             r"^    async def remove_set\s*\(", source, re.MULTILINE
         ), "missing public AsyncDatabase.remove_set"
+
+
+def test_i22_set_contains_has_async_implementation_and_stub() -> None:
+    for source in (ASYNCIO_SOURCE, ASYNCIO_STUB_SOURCE):
+        assert re.search(
+            r"^    async def contains_set\s*\(", source, re.MULTILINE
+        ), "missing public AsyncDatabase.contains_set"
