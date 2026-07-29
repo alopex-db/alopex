@@ -102,6 +102,20 @@ def _read_counter(db: Database, operation_id: str = "operation-read") -> dict:
     )
 
 
+def _read_set(db: Database, operation_id: str = "operation-set-read") -> dict:
+    return db.read_set(
+        "set-a",
+        cluster_id="cluster-a",
+        table_id=7,
+        range_id="range-a",
+        schema_version=1,
+        data_epoch=9,
+        request_id="request-set-read",
+        operation_id=operation_id,
+        update_version=12,
+    )
+
+
 def _increment_counter(db: Database, operation_id: str = "operation-increment") -> dict:
     return db.increment_counter(
         "counter-a",
@@ -194,6 +208,31 @@ def test_i27_python_sync_counter_read_preserves_canonical_value_without_mutation
         "accepted_operation_versions": {"operation-a": 12},
     }
     assert outcome["idempotency"]["first_outcome"] == "counter_read"
+    assert outcome["idempotency"]["duplicate_count"] == 0
+
+
+def test_i27_python_sync_set_read_preserves_canonical_membership_without_mutation() -> None:
+    db = Database.open_in_memory()
+    _create_set(db)
+
+    outcome = _read_set(db)
+
+    assert outcome["object_type"] == "set"
+    assert outcome["object_id"] == "set-a"
+    assert outcome["range"]["cluster_id"] == "cluster-a"
+    assert outcome["range"]["table_id"] == 7
+    assert outcome["range"]["range_id"] == "range-a"
+    assert outcome["request_id"] == "request-set-read"
+    assert outcome["operation_id"] == "operation-set-read"
+    assert outcome["state"] == "committed"
+    assert outcome["routing"]["kind"] == "local_only"
+    assert outcome["value"] == {
+        "value_type": "set",
+        "members": [],
+        "member_versions": {},
+        "accepted_operation_versions": {"operation-set-a": 12},
+    }
+    assert outcome["idempotency"]["first_outcome"] == "set_read"
     assert outcome["idempotency"]["duplicate_count"] == 0
 
 
