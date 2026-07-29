@@ -21,6 +21,40 @@ def _create_counter(db: Database, operation_id: str = "operation-a") -> dict:
     )
 
 
+def _create_set(db: Database, operation_id: str = "operation-set-a") -> dict:
+    return db.create_set(
+        "set-a",
+        cluster_id="cluster-a",
+        table_id=7,
+        range_id="range-a",
+        schema_version=1,
+        data_epoch=9,
+        request_id="request-set-a",
+        operation_id=operation_id,
+        update_version=12,
+    )
+
+
+def test_i27_python_sync_set_create_preserves_canonical_empty_membership_and_idempotency() -> None:
+    db = Database.open_in_memory()
+    first = _create_set(db)
+    duplicate = _create_set(db)
+
+    assert first["object_type"] == "set"
+    assert first["object_id"] == "set-a"
+    assert first["state"] == "committed"
+    assert first["routing"]["kind"] == "local_only"
+    assert first["value"] == {
+        "value_type": "set",
+        "members": [],
+        "member_versions": {},
+        "accepted_operation_versions": {"operation-set-a": 12},
+    }
+    assert first["idempotency"]["duplicate_count"] == 0
+    assert duplicate["value"] == first["value"]
+    assert duplicate["idempotency"]["duplicate_count"] == 1
+
+
 def _read_counter(db: Database, operation_id: str = "operation-read") -> dict:
     return db.read_counter(
         "counter-a",

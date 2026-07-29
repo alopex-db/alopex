@@ -405,6 +405,65 @@ impl PyDatabase {
         Ok(status)
     }
 
+    /// Create an empty Set through the shared local CRDT projection.
+    #[pyo3(
+        signature = (object_id, *, cluster_id, table_id, range_id, schema_version, data_epoch, request_id, operation_id, update_version, actor = "alopex-python-local")
+    )]
+    #[allow(clippy::too_many_arguments)]
+    fn create_set(
+        &self,
+        py: Python<'_>,
+        object_id: &str,
+        cluster_id: &str,
+        table_id: u32,
+        range_id: &str,
+        schema_version: u64,
+        data_epoch: u64,
+        request_id: &str,
+        operation_id: &str,
+        update_version: u64,
+        actor: &str,
+    ) -> PyResult<Py<PyDict>> {
+        let db = self.ensure_open()?;
+        let envelope = alopex_cluster::CrdtOperationEnvelope::new(
+            object_id,
+            alopex_cluster::RangeIdentity::new(
+                cluster_id,
+                table_id,
+                range_id,
+                None,
+                None,
+                schema_version,
+                data_epoch,
+            ),
+            actor,
+            request_id,
+            operation_id,
+            update_version,
+            alopex_cluster::CrdtOperationKind::SetCreate,
+            alopex_cluster::CrdtPayload::None,
+        )
+        .map_err(|error| error::to_py_err(error.to_string()))?;
+        let outcome = py
+            .detach(move || db.create_set(envelope))
+            .map_err(error::embedded_err)?;
+        let status = crdt_outcome_to_py(py, &outcome)?;
+        if let Some(code) = outcome.surface_status().python_error_code {
+            let py_err = error::with_code(
+                error::to_py_err(outcome.common().routing.reason_code.clone()),
+                code,
+            );
+            py_err.value(py).setattr("status", status.bind(py))?;
+            if let Some(failure) = status.bind(py).get_item("failure_class")? {
+                py_err.value(py).setattr("failure_class", failure)?;
+            } else {
+                py_err.value(py).setattr("failure_class", py.None())?;
+            }
+            return Err(py_err);
+        }
+        Ok(status)
+    }
+
     /// Apply a signed delta to an existing Counter through the shared local
     /// CRDT projection.
     ///
