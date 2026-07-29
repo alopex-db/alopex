@@ -99,6 +99,16 @@ pub struct SetContainsRequest {
     pub member: String,
 }
 
+/// HTTP JSON request for listing Set members. The object identity is carried
+/// by the route path and the actor remains transport-authenticated.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SetListRequest {
+    pub range: RangeIdentity,
+    pub request_id: RequestId,
+    pub operation_id: String,
+    pub update_version: u64,
+}
+
 /// HTTP JSON request for a Counter increment. The object identity remains in
 /// the route path and the actor remains transport-authenticated, so callers
 /// cannot supply either identity in a mutable payload.
@@ -211,6 +221,16 @@ pub async fn contains_set(
     Json(request): Json<SetContainsRequest>,
 ) -> Response {
     let outcome = contains_set_outcome(&state, &context, object_id, request);
+    crdt_response(outcome, state.config.max_response_size)
+}
+
+pub async fn list_set(
+    Path(object_id): Path<String>,
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(context): Extension<RequestContext>,
+    Json(request): Json<SetListRequest>,
+) -> Response {
+    let outcome = list_set_outcome(&state, &context, object_id, request);
     crdt_response(outcome, state.config.max_response_size)
 }
 
@@ -811,6 +831,134 @@ pub(crate) fn contains_set_outcome(
                     operation_id: envelope.operation_id.clone(),
                     request_id: envelope.request_id.clone(),
                     first_outcome: "set_contains".to_string(),
+                    state: OperationState::Committed,
+                    duplicate_count: 0,
+                },
+            );
+            CrdtOutcome::set(common, value)
+        }
+        Err(CrdtSetError::MissingProjection { .. }) => set_rejection(
+            &envelope,
+            OperationState::Rejected,
+            FailureClass::PrerequisiteMissing,
+            RoutingOutcome::new(
+                RoutingOutcomeKind::Blocked,
+                Some(envelope.range.clone()),
+                metadata_version,
+                "set_not_found",
+            ),
+            false,
+        ),
+        Err(error) => set_projection_failure(&envelope, metadata_version, error),
+    }
+}
+
+pub(crate) fn list_set_outcome(
+    state: &ServerState,
+    context: &RequestContext,
+    object_id: String,
+    request: SetListRequest,
+) -> CrdtOutcome {
+    let actor = match state.auth.authorize_crdt(context.actor.as_deref()) {
+        Ok(subject) => subject.as_str().to_owned(),
+        Err(_) => {
+            let envelope = request.unchecked_envelope(
+                object_id,
+                context.actor.as_deref().unwrap_or("unauthenticated"),
+            );
+            return set_rejection(
+                &envelope,
+                OperationState::Rejected,
+                FailureClass::Unauthorized,
+                RoutingOutcome::new(
+                    RoutingOutcomeKind::Blocked,
+                    Some(envelope.range.clone()),
+                    0,
+                    "authorization_denied",
+                ),
+                false,
+            );
+        }
+    };
+    let unchecked = request.unchecked_envelope(object_id.clone(), actor.as_str());
+    let envelope = match request.into_envelope(object_id, actor) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            return set_rejection(
+                &unchecked,
+                OperationState::Rejected,
+                FailureClass::InvalidRequest,
+                RoutingOutcome::new(
+                    RoutingOutcomeKind::Blocked,
+                    Some(unchecked.range.clone()),
+                    0,
+                    "set_list_request_invalid",
+                ),
+                false,
+            );
+        }
+    };
+
+    let (single_node, metadata_version) = match state.cluster_manager.read() {
+        Ok(manager) => (
+            manager.status_snapshot().mode == alopex_cluster::ClusterMode::SingleNode,
+            manager.identity().update_epoch,
+        ),
+        Err(_) => {
+            return set_rejection(
+                &envelope,
+                OperationState::Rejected,
+                FailureClass::Internal,
+                RoutingOutcome::new(
+                    RoutingOutcomeKind::Blocked,
+                    Some(envelope.range.clone()),
+                    0,
+                    "cluster_manager_unavailable",
+                ),
+                false,
+            );
+        }
+    };
+    let routing = RoutingOutcome::new(
+        RoutingOutcomeKind::LocalOnly,
+        Some(envelope.range.clone()),
+        metadata_version,
+        "single_node_valid_lease",
+    );
+    let policy = CrdtPreExecutionPolicy::evaluate(&CrdtPolicyInput {
+        lifecycle: CrdtLifecycleAction::Read,
+        authorized: true,
+        range_freshness: CrdtRangeFreshness::Current,
+        chirps_ready: single_node,
+        node_available: true,
+        resource_available: true,
+        timed_out: false,
+        routing,
+    });
+    if !policy.permit_ledger {
+        return set_rejection(
+            &envelope,
+            policy.state,
+            policy
+                .failure_class
+                .expect("rejected CRDT policy has a failure class"),
+            policy.routing,
+            policy.retryable,
+        );
+    }
+
+    let projection = CrdtSetProjection::new(ServerCrdtStore(state.store.as_ref()));
+    match projection.list(&envelope) {
+        Ok(value) => {
+            let common = envelope.common_fields(
+                OperationState::Committed,
+                None,
+                policy.routing,
+                false,
+                IdempotencyResult {
+                    operation_id: envelope.operation_id.clone(),
+                    request_id: envelope.request_id.clone(),
+                    first_outcome: "set_list".to_string(),
                     state: OperationState::Committed,
                     duplicate_count: 0,
                 },
@@ -1592,6 +1740,45 @@ impl SetContainsRequest {
             payload: CrdtPayload::Set {
                 member: Some(self.member.clone()),
             },
+        }
+    }
+}
+
+impl SetListRequest {
+    fn into_envelope(
+        self,
+        object_id: String,
+        actor: impl Into<NodeId>,
+    ) -> Result<CrdtOperationEnvelope, ()> {
+        CrdtOperationEnvelope::new(
+            object_id,
+            self.range,
+            actor,
+            self.request_id,
+            self.operation_id,
+            self.update_version,
+            CrdtOperationKind::SetList,
+            CrdtPayload::None,
+        )
+        .map_err(|_| ())
+    }
+
+    fn unchecked_envelope(
+        &self,
+        object_id: String,
+        actor: impl Into<NodeId>,
+    ) -> CrdtOperationEnvelope {
+        CrdtOperationEnvelope {
+            object_type: alopex_cluster::CrdtObjectType::Set,
+            object_id,
+            range: self.range.clone(),
+            state_epoch: self.range.data_epoch,
+            actor: actor.into(),
+            request_id: self.request_id.clone(),
+            operation_id: self.operation_id.clone(),
+            update_version: self.update_version,
+            operation: CrdtOperationKind::SetList,
+            payload: CrdtPayload::None,
         }
     }
 }

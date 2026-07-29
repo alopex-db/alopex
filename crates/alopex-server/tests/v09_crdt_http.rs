@@ -164,6 +164,22 @@ fn set_contains_request() -> Request<Body> {
         .expect("valid Set contains request")
 }
 
+fn set_list_request() -> Request<Body> {
+    let payload = json!({
+        "range": RangeIdentity::new("local", 7, "range-http", None, None, 1, 9),
+        "request_id": "request-set-http-list",
+        "operation_id": "operation-set-http-list",
+        "update_version": 0,
+    });
+    Request::builder()
+        .method("POST")
+        .uri("/api/crdt/sets/set-http/members")
+        .header("content-type", "application/json")
+        .header("x-api-key", "crdt-key")
+        .body(Body::from(payload.to_string()))
+        .expect("valid Set list request")
+}
+
 #[tokio::test]
 async fn set_create_uses_the_authenticated_api_prefix_and_replays_once() {
     let data_dir = tempdir().expect("data directory");
@@ -433,6 +449,61 @@ async fn set_contains_uses_the_authenticated_path_without_a_ledger_mutation() {
     );
     assert!(outcome["value"]["accepted_operation_versions"]
         .get("operation-set-http-contains")
+        .is_none());
+}
+
+#[tokio::test]
+async fn set_list_uses_the_authenticated_path_without_a_ledger_mutation() {
+    let data_dir = tempdir().expect("data directory");
+    let server = Server::new(ServerConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        api_prefix: "/api".into(),
+        auth_mode: AuthMode::Dev {
+            api_key: "crdt-key".into(),
+        },
+        audit_log_enabled: false,
+        ..ServerConfig::default()
+    })
+    .expect("server");
+
+    let create = http::router(server.state.clone())
+        .oneshot(set_create_request())
+        .await
+        .expect("create response");
+    assert_eq!(create.status(), StatusCode::OK);
+    let add = http::router(server.state.clone())
+        .oneshot(set_add_request())
+        .await
+        .expect("add response");
+    assert_eq!(add.status(), StatusCode::OK);
+
+    let response = http::router(server.state)
+        .oneshot(set_list_request())
+        .await
+        .expect("list response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let outcome: Value = serde_json::from_slice(&body).expect("canonical Set list response");
+    assert_eq!(outcome["object_type"], "set");
+    assert_eq!(outcome["object_id"], "set-http");
+    assert_eq!(outcome["actor"], "dev");
+    assert_eq!(outcome["state"], "committed");
+    assert_eq!(outcome["routing"]["kind"], "local_only");
+    assert_eq!(outcome["idempotency"]["first_outcome"], "set_list");
+    assert_eq!(outcome["idempotency"]["duplicate_count"], 0);
+    assert_eq!(outcome["value"]["members"], json!(["alice"]));
+    assert_eq!(
+        outcome["value"]["member_versions"]["alice"]["operation_id"],
+        "00000000-0000-0000-0000-000000000157"
+    );
+    assert_eq!(
+        outcome["value"]["member_versions"]["alice"]["present"],
+        true
+    );
+    assert!(outcome["value"]["accepted_operation_versions"]
+        .get("operation-set-http-list")
         .is_none());
 }
 
