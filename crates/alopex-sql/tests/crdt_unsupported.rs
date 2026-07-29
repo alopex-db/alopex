@@ -178,3 +178,19 @@ fn set_remove_is_rejected_during_planning_before_any_execution() {
     assert_eq!(error.code(), "ALOPEX-F001");
     assert!(error.message().contains(function));
 }
+
+#[test]
+fn set_contains_is_rejected_during_planning_before_any_execution() {
+    let function = "crdt_set_contains";
+    let catalog = MemoryCatalog::new();
+
+    // Membership lookup is deliberately absent from the SQL scalar register.
+    // Planning must reject the identifier before an executable plan, catalog
+    // transaction, or Set projection can observe its read-only query.
+    assert!(scalar::signature(function).is_none());
+    let error = plan_sql_for_routing(&catalog, "SELECT crdt_set_contains('members', 'alice')")
+        .expect_err("Set contains must be rejected before SQL execution");
+    assert!(matches!(error, SqlError::Plan { .. }));
+    assert_eq!(error.code(), "ALOPEX-F001");
+    assert!(error.message().contains(function));
+}
