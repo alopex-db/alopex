@@ -234,6 +234,24 @@ def _add_set(
     )
 
 
+def _remove_set(
+    db: Database,
+    operation_id: str = "00000000-0000-0000-0000-000000000169",
+) -> dict:
+    return db.remove_set(
+        "set-a",
+        cluster_id="cluster-a",
+        table_id=7,
+        range_id="range-a",
+        schema_version=1,
+        data_epoch=9,
+        request_id="request-set-remove",
+        operation_id=operation_id,
+        update_version=14,
+        member="alice",
+    )
+
+
 def _increment_counter(db: Database, operation_id: str = "operation-increment") -> dict:
     return db.increment_counter(
         "counter-a",
@@ -383,6 +401,44 @@ def test_i27_python_sync_set_add_preserves_canonical_membership_and_idempotency(
         "accepted_operation_versions": {
             "operation-set-a": 12,
             "00000000-0000-0000-0000-000000000160": 13,
+        },
+    }
+    assert first["idempotency"]["duplicate_count"] == 0
+    assert duplicate["value"] == first["value"]
+    assert duplicate["idempotency"]["duplicate_count"] == 1
+
+
+def test_i27_python_sync_set_remove_preserves_canonical_membership_and_idempotency() -> None:
+    db = Database.open_in_memory()
+    _create_set(db)
+    _add_set(db)
+
+    first = _remove_set(db)
+    duplicate = _remove_set(db)
+
+    assert first["object_type"] == "set"
+    assert first["object_id"] == "set-a"
+    assert first["range"]["cluster_id"] == "cluster-a"
+    assert first["range"]["table_id"] == 7
+    assert first["range"]["range_id"] == "range-a"
+    assert first["request_id"] == "request-set-remove"
+    assert first["operation_id"] == "00000000-0000-0000-0000-000000000169"
+    assert first["state"] == "committed"
+    assert first["routing"]["kind"] == "local_only"
+    assert first["value"] == {
+        "value_type": "set",
+        "members": [],
+        "member_versions": {
+            "alice": {
+                "update_version": 14,
+                "operation_id": "00000000-0000-0000-0000-000000000169",
+                "present": False,
+            }
+        },
+        "accepted_operation_versions": {
+            "operation-set-a": 12,
+            "00000000-0000-0000-0000-000000000160": 13,
+            "00000000-0000-0000-0000-000000000169": 14,
         },
     }
     assert first["idempotency"]["duplicate_count"] == 0
