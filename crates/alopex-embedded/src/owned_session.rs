@@ -136,6 +136,34 @@ pub(crate) fn unsupported_async_counter_decrement(envelope: CrdtOperationEnvelop
     CrdtOutcome::unsupported(common, reason)
 }
 
+/// Builds the explicit async capability response for a Set create.
+///
+/// The owned-session boundary has no native async CRDT executor. In
+/// particular, this must not invoke the synchronous Set-create path because
+/// that would mutate the durable operation ledger behind an async-named API.
+pub(crate) fn unsupported_async_set_create(envelope: CrdtOperationEnvelope) -> CrdtOutcome {
+    let reason = "embedded_async_crdt_unavailable";
+    let common = envelope.common_fields(
+        OperationState::Rejected,
+        Some(FailureClass::InvalidRequest),
+        RoutingOutcome::new(
+            RoutingOutcomeKind::Unsupported,
+            Some(envelope.range.clone()),
+            envelope.state_epoch,
+            reason,
+        ),
+        false,
+        IdempotencyResult {
+            operation_id: envelope.operation_id.clone(),
+            request_id: envelope.request_id.clone(),
+            first_outcome: reason.to_owned(),
+            state: OperationState::Rejected,
+            duplicate_count: 0,
+        },
+    );
+    CrdtOutcome::unsupported(common, reason)
+}
+
 /// Factory for owned local read and transaction sessions from one embedded database.
 ///
 /// The factory owns the same `Arc<AnyKV>` as its source [`Database`]. Consequently, a session

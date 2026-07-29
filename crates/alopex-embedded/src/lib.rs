@@ -468,6 +468,18 @@ impl Database {
         Ok(state.create_set(self.store.as_ref(), envelope))
     }
 
+    /// Returns the explicit async capability result for Set create.
+    ///
+    /// The owned-session boundary has no native async CRDT executor, so this
+    /// method preserves the named capability and does not call
+    /// [`Self::create_set`] synchronously.
+    pub async fn create_set_async(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        Ok(owned_session::unsupported_async_set_create(envelope))
+    }
+
     /// Returns the explicit async capability result for Counter decrement.
     ///
     /// The owned-session boundary has no native async CRDT executor, so this
@@ -2309,6 +2321,31 @@ mod tests {
             .expect("idempotent Set create replay");
         assert_eq!(replay.common().state, OperationState::Committed);
         assert_eq!(replay.common().idempotency.duplicate_count, 1);
+    }
+
+    #[test]
+    fn embedded_async_set_create_is_explicitly_unsupported_without_a_sync_fallback() {
+        let db = Database::new();
+        let outcome =
+            poll_immediately(db.create_set_async(set_create_envelope("operation-set-create")))
+                .expect("canonical unsupported outcome");
+        assert_eq!(outcome.common().object_type, CrdtObjectType::Set);
+        assert_eq!(outcome.common().state, OperationState::Rejected);
+        assert_eq!(
+            outcome.common().failure_class,
+            Some(FailureClass::InvalidRequest)
+        );
+        assert_eq!(
+            outcome.common().routing.kind,
+            RoutingOutcomeKind::Unsupported
+        );
+        assert!(outcome.value().is_none());
+
+        let sync = db
+            .create_set(set_create_envelope("operation-set-create"))
+            .expect("unsupported async result must not write the Set ledger");
+        assert_eq!(sync.common().idempotency.duplicate_count, 0);
+        assert!(matches!(sync.value(), Some(CrdtValue::Set { .. })));
     }
 
     #[test]
