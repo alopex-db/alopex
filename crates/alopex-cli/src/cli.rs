@@ -459,6 +459,30 @@ pub enum SetCommand {
         #[arg(long, default_value = "alopex-cli-local")]
         actor: String,
     },
+    /// List canonical Set members without mutating the durable projection
+    List {
+        #[arg(long)]
+        object_id: String,
+        #[arg(long)]
+        cluster_id: String,
+        #[arg(long)]
+        table_id: u32,
+        #[arg(long)]
+        range_id: String,
+        #[arg(long)]
+        schema_version: u64,
+        #[arg(long)]
+        data_epoch: u64,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        update_version: u64,
+        /// Local actor identity. Remote requests derive this from transport authentication.
+        #[arg(long, default_value = "alopex-cli-local")]
+        actor: String,
+    },
     /// Read a Set without adding a mutation to its durable operation ledger
     Read {
         #[arg(long)]

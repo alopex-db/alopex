@@ -336,6 +336,40 @@ pub fn execute_local<W: Write>(
                     let outcome = db.contains_set(envelope)?;
                     render_and_classify(&outcome, writer, output_format, quiet)
                 }
+                SetCommand::List {
+                    object_id,
+                    cluster_id,
+                    table_id,
+                    range_id,
+                    schema_version,
+                    data_epoch,
+                    request_id,
+                    operation_id,
+                    update_version,
+                    actor,
+                } => {
+                    let envelope = CrdtOperationEnvelope::new(
+                        object_id,
+                        RangeIdentity::new(
+                            cluster_id,
+                            table_id,
+                            range_id,
+                            None,
+                            None,
+                            schema_version,
+                            data_epoch,
+                        ),
+                        actor,
+                        request_id,
+                        operation_id,
+                        update_version,
+                        CrdtOperationKind::SetList,
+                        CrdtPayload::None,
+                    )
+                    .map_err(|error| CliError::InvalidArgument(error.to_string()))?;
+                    let outcome = db.list_set(envelope)?;
+                    render_and_classify(&outcome, writer, output_format, quiet)
+                }
                 SetCommand::Read {
                     object_id,
                     cluster_id,
@@ -675,6 +709,38 @@ pub async fn execute_remote<W: Write>(
                         .map_err(map_client_error)?;
                     render_and_classify(&outcome, writer, output_format, quiet)
                 }
+                SetCommand::List {
+                    object_id,
+                    cluster_id,
+                    table_id,
+                    range_id,
+                    schema_version,
+                    data_epoch,
+                    request_id,
+                    operation_id,
+                    update_version,
+                    ..
+                } => {
+                    let request = RemoteSetListRequest {
+                        range: RangeIdentity::new(
+                            cluster_id.clone(),
+                            *table_id,
+                            range_id.clone(),
+                            None,
+                            None,
+                            *schema_version,
+                            *data_epoch,
+                        ),
+                        request_id,
+                        operation_id,
+                        update_version: *update_version,
+                    };
+                    let outcome: CrdtOutcome = client
+                        .post_json(&format!("api/crdt/sets/{object_id}/members"), &request)
+                        .await
+                        .map_err(map_client_error)?;
+                    render_and_classify(&outcome, writer, output_format, quiet)
+                }
                 SetCommand::Read {
                     object_id,
                     cluster_id,
@@ -733,6 +799,14 @@ struct RemoteSetCreateRequest<'a> {
 
 #[derive(Serialize)]
 struct RemoteSetReadRequest<'a> {
+    range: RangeIdentity,
+    request_id: &'a str,
+    operation_id: &'a str,
+    update_version: u64,
+}
+
+#[derive(Serialize)]
+struct RemoteSetListRequest<'a> {
     range: RangeIdentity,
     request_id: &'a str,
     operation_id: &'a str,

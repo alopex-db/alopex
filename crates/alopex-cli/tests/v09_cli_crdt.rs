@@ -246,6 +246,32 @@ const SET_CONTAINS: [&str; 25] = [
     "alice",
 ];
 
+const SET_LIST: [&str; 23] = [
+    "--output",
+    "json",
+    "crdt",
+    "set",
+    "list",
+    "--object-id",
+    "set-a",
+    "--cluster-id",
+    "cluster-a",
+    "--table-id",
+    "7",
+    "--range-id",
+    "range-a",
+    "--schema-version",
+    "1",
+    "--data-epoch",
+    "9",
+    "--request-id",
+    "request-set-list",
+    "--operation-id",
+    "operation-set-list",
+    "--update-version",
+    "0",
+];
+
 #[test]
 fn i27_cli_set_create_preserves_canonical_empty_membership() {
     let parsed = Cli::try_parse_from(std::iter::once("alopex").chain(SET_CREATE));
@@ -545,6 +571,75 @@ fn i27_cli_set_contains_preserves_canonical_membership_without_a_ledger_mutation
         .args(args)
         .output()
         .expect("repeat Set contains");
+    assert!(repeat.status.success());
+    let repeat: serde_json::Value = serde_json::from_slice(&repeat.stdout).expect("repeat JSON");
+    assert_eq!(repeat[0]["idempotency"]["duplicate_count"], 0);
+}
+
+#[test]
+fn i27_cli_set_list_preserves_canonical_membership_without_a_ledger_mutation() {
+    let data_dir = tempdir().expect("temporary Set data directory");
+    let data_dir = data_dir.path().to_str().expect("UTF-8 data path");
+    let mut create_args = vec!["--data-dir", data_dir];
+    create_args.extend(
+        SET_CREATE
+            .iter()
+            .copied()
+            .filter(|argument| *argument != "--in-memory"),
+    );
+    let create = ProcessCommand::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(create_args)
+        .output()
+        .expect("run Set create before list");
+    assert!(create.status.success());
+
+    let mut add_args = vec!["--data-dir", data_dir];
+    add_args.extend(SET_ADD);
+    let add = ProcessCommand::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(add_args)
+        .output()
+        .expect("run Set add before list");
+    assert!(add.status.success());
+
+    let mut args = vec!["--data-dir", data_dir];
+    args.extend(SET_LIST);
+    assert!(Cli::try_parse_from(std::iter::once("alopex").chain(args.iter().copied())).is_ok());
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(&args)
+        .output()
+        .expect("run Set list");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).expect("Set list JSON");
+    let outcome = rows
+        .as_array()
+        .and_then(|rows| rows.first())
+        .expect("one Set outcome");
+    assert_eq!(outcome["object_type"], "set");
+    assert_eq!(outcome["object_id"], "set-a");
+    assert_eq!(outcome["range"]["cluster_id"], "cluster-a");
+    assert_eq!(outcome["range"]["table_id"], 7);
+    assert_eq!(outcome["range"]["range_id"], "range-a");
+    assert_eq!(outcome["state"], "committed");
+    assert_eq!(outcome["routing"]["kind"], "local_only");
+    assert_eq!(outcome["idempotency"]["first_outcome"], "set_list");
+    assert_eq!(outcome["idempotency"]["duplicate_count"], 0);
+    assert_eq!(outcome["value"]["members"], serde_json::json!(["alice"]));
+    assert_eq!(
+        outcome["value"]["member_versions"]["alice"]["present"],
+        true
+    );
+    assert!(outcome["value"]["accepted_operation_versions"]
+        .get("operation-set-list")
+        .is_none());
+
+    let repeat = ProcessCommand::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(args)
+        .output()
+        .expect("repeat Set list");
     assert!(repeat.status.success());
     let repeat: serde_json::Value = serde_json::from_slice(&repeat.stdout).expect("repeat JSON");
     assert_eq!(repeat[0]["idempotency"]["duplicate_count"], 0);
