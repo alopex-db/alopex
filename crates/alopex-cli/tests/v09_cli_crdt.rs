@@ -190,6 +190,34 @@ const SET_ADD: [&str; 25] = [
     "alice",
 ];
 
+const SET_REMOVE: [&str; 25] = [
+    "--output",
+    "json",
+    "crdt",
+    "set",
+    "remove",
+    "--object-id",
+    "set-a",
+    "--cluster-id",
+    "cluster-a",
+    "--table-id",
+    "7",
+    "--range-id",
+    "range-a",
+    "--schema-version",
+    "1",
+    "--data-epoch",
+    "9",
+    "--request-id",
+    "request-set-remove",
+    "--operation-id",
+    "00000000-0000-0000-0000-000000000168",
+    "--update-version",
+    "14",
+    "--member",
+    "alice",
+];
+
 #[test]
 fn i27_cli_set_create_preserves_canonical_empty_membership() {
     let parsed = Cli::try_parse_from(std::iter::once("alopex").chain(SET_CREATE));
@@ -339,6 +367,92 @@ fn i27_cli_set_add_preserves_canonical_membership_and_idempotency() {
         .and_then(|rows| rows.first())
         .expect("one replay Set add outcome");
     assert_eq!(replay["value"]["members"], serde_json::json!(["alice"]));
+    assert_eq!(replay["idempotency"]["duplicate_count"], 1);
+}
+
+#[test]
+fn i27_cli_set_remove_preserves_canonical_membership_and_idempotency() {
+    let data_dir = tempdir().expect("temporary Set data directory");
+    let data_dir = data_dir.path().to_str().expect("UTF-8 data path");
+    let mut create_args = vec!["--data-dir", data_dir];
+    create_args.extend(
+        SET_CREATE
+            .iter()
+            .copied()
+            .filter(|argument| *argument != "--in-memory"),
+    );
+    let create = ProcessCommand::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(create_args)
+        .output()
+        .expect("run Set create before remove");
+    assert!(
+        create.status.success(),
+        "Set create failed: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    let mut add_args = vec!["--data-dir", data_dir];
+    add_args.extend(SET_ADD);
+    let add = ProcessCommand::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(add_args)
+        .output()
+        .expect("run Set add before remove");
+    assert!(
+        add.status.success(),
+        "Set add failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let mut args = vec!["--data-dir", data_dir];
+    args.extend(SET_REMOVE);
+    assert!(Cli::try_parse_from(std::iter::once("alopex").chain(args.iter().copied())).is_ok());
+    let first = ProcessCommand::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(&args)
+        .output()
+        .expect("run Set remove");
+    assert!(
+        first.status.success(),
+        "Set remove failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_rows: serde_json::Value =
+        serde_json::from_slice(&first.stdout).expect("Set remove JSON");
+    let first = first_rows
+        .as_array()
+        .and_then(|rows| rows.first())
+        .expect("one Set remove outcome");
+    assert_eq!(first["object_type"], "set");
+    assert_eq!(first["object_id"], "set-a");
+    assert_eq!(first["state"], "committed");
+    assert_eq!(first["routing"]["kind"], "local_only");
+    assert_eq!(first["value"]["members"], serde_json::json!([]));
+    assert_eq!(
+        first["value"]["member_versions"]["alice"]["update_version"],
+        14
+    );
+    assert_eq!(
+        first["value"]["member_versions"]["alice"]["operation_id"],
+        SET_REMOVE[20]
+    );
+    assert_eq!(first["value"]["member_versions"]["alice"]["present"], false);
+    assert_eq!(first["idempotency"]["duplicate_count"], 0);
+
+    let replay = ProcessCommand::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(args)
+        .output()
+        .expect("replay Set remove");
+    assert!(
+        replay.status.success(),
+        "Set remove replay failed: {}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let replay_rows: serde_json::Value =
+        serde_json::from_slice(&replay.stdout).expect("Set remove replay JSON");
+    let replay = replay_rows
+        .as_array()
+        .and_then(|rows| rows.first())
+        .expect("one replay Set remove outcome");
+    assert_eq!(replay["value"]["members"], serde_json::json!([]));
     assert_eq!(replay["idempotency"]["duplicate_count"], 1);
 }
 
