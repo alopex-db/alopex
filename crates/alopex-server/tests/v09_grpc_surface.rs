@@ -13,7 +13,7 @@ use tokio::time::{sleep, Duration};
 use tonic::transport::Channel;
 use tonic::{Code, Request};
 
-const I14_REGISTER: [&str; 23] = [
+const I14_REGISTER: [&str; 24] = [
     "ExecuteSql",
     "ExecuteDdl",
     "ExecuteDml",
@@ -37,6 +37,7 @@ const I14_REGISTER: [&str; 23] = [
     "DecrementCounter",
     "CreateSet",
     "ReadSet",
+    "AddSet",
 ];
 
 async fn build_state() -> (Arc<ServerState>, tempfile::TempDir) {
@@ -234,11 +235,17 @@ async fn i14_grpc_method_register_preserves_version_auth_status_and_unknown_fiel
         grpc::proto::ReadSetRequest::default(),
         "ReadSet"
     );
+    assert_unauthenticated!(
+        client,
+        add_set,
+        grpc::proto::AddSetRequest::default(),
+        "AddSet"
+    );
 
     let decoded = grpc::proto::HealthRequest::decode(&[0x10, 0x01][..])
         .expect("unknown protobuf field must be ignored");
     assert_eq!(decoded, grpc::proto::HealthRequest {});
-    assert_eq!(I14_REGISTER.len(), 23, "the I-14 RPC register drifted");
+    assert_eq!(I14_REGISTER.len(), 24, "the I-14 RPC register drifted");
 
     let _ = shutdown.send(());
     handle.await.expect("gRPC server shutdown");
@@ -403,6 +410,81 @@ async fn read_set_uses_authenticated_actor_and_canonical_set_outcome() {
     assert!(outcome.member_versions.is_empty());
     assert_eq!(outcome.first_outcome, "set_read");
     assert_eq!(outcome.duplicate_count, 0);
+
+    let _ = shutdown.send(());
+    handle.await.expect("gRPC server shutdown");
+}
+
+#[tokio::test]
+async fn add_set_uses_authenticated_actor_and_canonical_set_outcome() {
+    let (state, _temp) = build_state().await;
+    let (channel, shutdown, handle) = spawn_network_grpc_server(state).await;
+    let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
+    let range = grpc::proto::CrdtRangeIdentity {
+        cluster_id: "cluster-grpc".into(),
+        table_id: 7,
+        range_id: "range-grpc".into(),
+        lower_bound: Vec::new(),
+        has_lower_bound: false,
+        upper_bound: Vec::new(),
+        has_upper_bound: false,
+        schema_version: 1,
+        data_epoch: 9,
+    };
+    let mut create = Request::new(grpc::proto::CreateSetRequest {
+        object_id: "set-grpc".into(),
+        range: Some(range.clone()),
+        request_id: "request-set-grpc".into(),
+        operation_id: "operation-set-grpc".into(),
+        update_version: 0,
+    });
+    create
+        .metadata_mut()
+        .insert("x-api-key", "v09-key".parse().unwrap());
+    client
+        .create_set(create)
+        .await
+        .expect("Set create before add");
+
+    let add = || {
+        let mut request = Request::new(grpc::proto::AddSetRequest {
+            object_id: "set-grpc".into(),
+            range: Some(range.clone()),
+            request_id: "request-set-grpc-add".into(),
+            operation_id: "00000000-0000-0000-0000-000000000158".into(),
+            update_version: 1,
+            member: "alice".into(),
+        });
+        request
+            .metadata_mut()
+            .insert("x-api-key", "v09-key".parse().unwrap());
+        request
+    };
+    let outcome = client.add_set(add()).await.expect("Set add").into_inner();
+    assert_eq!(outcome.object_type, "set");
+    assert_eq!(outcome.object_id, "set-grpc");
+    assert_eq!(outcome.actor, "dev");
+    assert_eq!(outcome.state, "committed");
+    assert_eq!(outcome.routing_kind, "local_only");
+    assert!(outcome.has_value);
+    assert_eq!(outcome.members, vec!["alice"]);
+    assert_eq!(outcome.member_versions.len(), 1);
+    assert_eq!(outcome.member_versions[0].member, "alice");
+    assert_eq!(outcome.member_versions[0].update_version, 1);
+    assert_eq!(
+        outcome.member_versions[0].operation_id,
+        "00000000-0000-0000-0000-000000000158"
+    );
+    assert!(outcome.member_versions[0].present);
+    assert_eq!(outcome.duplicate_count, 0);
+
+    let replay = client
+        .add_set(add())
+        .await
+        .expect("Set add replay")
+        .into_inner();
+    assert_eq!(replay.duplicate_count, 1);
+    assert_eq!(replay.members, outcome.members);
 
     let _ = shutdown.send(());
     handle.await.expect("gRPC server shutdown");
