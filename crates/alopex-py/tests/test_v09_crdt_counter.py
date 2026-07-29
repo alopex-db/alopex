@@ -132,6 +132,62 @@ def test_i27_python_async_set_read_preserves_canonical_membership_without_mutati
     asyncio.run(scenario())
 
 
+def test_i27_python_async_set_add_preserves_canonical_membership_and_idempotency() -> None:
+    async def scenario() -> None:
+        db = await AsyncDatabase.open_in_memory()
+        try:
+            await db.create_set(
+                "set-async-add",
+                cluster_id="cluster-a",
+                table_id=7,
+                range_id="range-a",
+                schema_version=1,
+                data_epoch=9,
+                request_id="request-set-async-create",
+                operation_id="operation-set-async-create",
+                update_version=12,
+            )
+            kwargs = dict(
+                cluster_id="cluster-a",
+                table_id=7,
+                range_id="range-a",
+                schema_version=1,
+                data_epoch=9,
+                request_id="request-set-async-add",
+                operation_id="00000000-0000-0000-0000-000000000161",
+                update_version=13,
+                member="alice",
+            )
+            first = await db.add_set("set-async-add", **kwargs)
+            duplicate = await db.add_set("set-async-add", **kwargs)
+            assert first["object_type"] == "set"
+            assert first["object_id"] == "set-async-add"
+            assert first["state"] == "committed"
+            assert first["routing"]["kind"] == "local_only"
+            assert first["value"] == {
+                "value_type": "set",
+                "members": ["alice"],
+                "member_versions": {
+                    "alice": {
+                        "update_version": 13,
+                        "operation_id": "00000000-0000-0000-0000-000000000161",
+                        "present": True,
+                    }
+                },
+                "accepted_operation_versions": {
+                    "operation-set-async-create": 12,
+                    "00000000-0000-0000-0000-000000000161": 13,
+                },
+            }
+            assert first["idempotency"]["duplicate_count"] == 0
+            assert duplicate["value"] == first["value"]
+            assert duplicate["idempotency"]["duplicate_count"] == 1
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def _read_counter(db: Database, operation_id: str = "operation-read") -> dict:
     return db.read_counter(
         "counter-a",
