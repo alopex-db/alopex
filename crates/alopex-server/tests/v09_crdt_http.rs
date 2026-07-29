@@ -80,6 +80,68 @@ fn counter_create_request() -> Value {
     })
 }
 
+fn set_create_request() -> Request<Body> {
+    let payload = json!({
+        "object_id": "set-http",
+        "range": RangeIdentity::new("local", 7, "range-http", None, None, 1, 9),
+        "request_id": "request-set-http",
+        "operation_id": "operation-set-http",
+        "update_version": 0,
+    });
+    Request::builder()
+        .method("POST")
+        .uri("/api/crdt/sets")
+        .header("content-type", "application/json")
+        .header("x-api-key", "crdt-key")
+        .body(Body::from(payload.to_string()))
+        .expect("valid Set create request")
+}
+
+#[tokio::test]
+async fn set_create_uses_the_authenticated_api_prefix_and_replays_once() {
+    let data_dir = tempdir().expect("data directory");
+    let server = Server::new(ServerConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        api_prefix: "/api".into(),
+        auth_mode: AuthMode::Dev {
+            api_key: "crdt-key".into(),
+        },
+        audit_log_enabled: false,
+        ..ServerConfig::default()
+    })
+    .expect("server");
+
+    let response = http::router(server.state.clone())
+        .oneshot(set_create_request())
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let outcome: Value = serde_json::from_slice(&body).expect("canonical Set response");
+    assert_eq!(outcome["object_type"], "set");
+    assert_eq!(outcome["object_id"], "set-http");
+    assert_eq!(outcome["actor"], "dev");
+    assert_eq!(outcome["state"], "committed");
+    assert_eq!(outcome["routing"]["kind"], "local_only");
+    assert_eq!(outcome["value"]["members"], json!([]));
+    assert_eq!(outcome["value"]["member_versions"], json!({}));
+    assert_eq!(outcome["idempotency"]["duplicate_count"], 0);
+
+    let replay = http::router(server.state)
+        .oneshot(set_create_request())
+        .await
+        .expect("replay response");
+    assert_eq!(replay.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(replay.into_body(), usize::MAX)
+        .await
+        .expect("replay body");
+    let replay: Value = serde_json::from_slice(&body).expect("replay outcome");
+    assert_eq!(replay["idempotency"]["duplicate_count"], 1);
+    assert_eq!(replay["value"], outcome["value"]);
+}
+
 #[tokio::test]
 async fn counter_create_uses_the_authenticated_api_prefix_and_canonical_outcome() {
     let data_dir = tempdir().expect("data directory");

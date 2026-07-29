@@ -5,8 +5,8 @@ use alopex_cluster::crdt::{
 };
 use alopex_cluster::{
     CrdtCounterError, CrdtCounterProjection, CrdtOperationEnvelope, CrdtOperationKind, CrdtPayload,
-    FailureClass, IdempotencyResult, NodeId, OperationState, RangeIdentity, RequestId,
-    RoutingOutcome, RoutingOutcomeKind,
+    CrdtSetError, CrdtSetProjection, FailureClass, IdempotencyResult, NodeId, OperationState,
+    RangeIdentity, RequestId, RoutingOutcome, RoutingOutcomeKind,
 };
 use alopex_core::kv::any::{AnyKVManager, AnyKVTransaction};
 use alopex_core::kv::{AnyKV, KVStore};
@@ -30,6 +30,17 @@ pub struct CounterCreateRequest {
     pub operation_id: String,
     pub update_version: u64,
     pub initial_value: i64,
+}
+
+/// Typed HTTP request for creating an empty Set. The actor remains derived
+/// from the authenticated request context rather than caller-controlled JSON.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SetCreateRequest {
+    pub object_id: String,
+    pub range: RangeIdentity,
+    pub request_id: RequestId,
+    pub operation_id: String,
+    pub update_version: u64,
 }
 
 /// HTTP JSON request for a Counter read. The object identity is carried by the
@@ -96,6 +107,15 @@ pub async fn create_counter(
     Json(request): Json<CounterCreateRequest>,
 ) -> Response {
     let outcome = create_counter_outcome(&state, &context, request);
+    crdt_response(outcome, state.config.max_response_size)
+}
+
+pub async fn create_set(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(context): Extension<RequestContext>,
+    Json(request): Json<SetCreateRequest>,
+) -> Response {
+    let outcome = create_set_outcome(&state, &context, request);
     crdt_response(outcome, state.config.max_response_size)
 }
 
@@ -237,6 +257,110 @@ pub(crate) fn create_counter_outcome(
             CrdtOutcome::counter(common, result.value)
         }
         Err(error) => counter_projection_failure(&envelope, metadata_version, error),
+    }
+}
+
+pub(crate) fn create_set_outcome(
+    state: &ServerState,
+    context: &RequestContext,
+    request: SetCreateRequest,
+) -> CrdtOutcome {
+    let actor = match state.auth.authorize_crdt(context.actor.as_deref()) {
+        Ok(subject) => subject.as_str().to_owned(),
+        Err(_) => {
+            let envelope =
+                request.unchecked_envelope(context.actor.as_deref().unwrap_or("unauthenticated"));
+            return set_rejection(
+                &envelope,
+                OperationState::Rejected,
+                FailureClass::Unauthorized,
+                RoutingOutcome::new(
+                    RoutingOutcomeKind::Blocked,
+                    Some(envelope.range.clone()),
+                    0,
+                    "authorization_denied",
+                ),
+                false,
+            );
+        }
+    };
+    let unchecked = request.unchecked_envelope(actor.as_str());
+    let envelope = match request.into_envelope(actor) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            return set_rejection(
+                &unchecked,
+                OperationState::Rejected,
+                FailureClass::InvalidRequest,
+                RoutingOutcome::new(
+                    RoutingOutcomeKind::Blocked,
+                    Some(unchecked.range.clone()),
+                    0,
+                    "set_create_request_invalid",
+                ),
+                false,
+            );
+        }
+    };
+    let (single_node, metadata_version) = match state.cluster_manager.read() {
+        Ok(manager) => (
+            manager.status_snapshot().mode == alopex_cluster::ClusterMode::SingleNode,
+            manager.identity().update_epoch,
+        ),
+        Err(_) => {
+            return set_rejection(
+                &envelope,
+                OperationState::Rejected,
+                FailureClass::Internal,
+                RoutingOutcome::new(
+                    RoutingOutcomeKind::Blocked,
+                    Some(envelope.range.clone()),
+                    0,
+                    "cluster_manager_unavailable",
+                ),
+                false,
+            );
+        }
+    };
+    let policy = CrdtPreExecutionPolicy::evaluate(&CrdtPolicyInput {
+        lifecycle: CrdtLifecycleAction::Create,
+        authorized: true,
+        range_freshness: CrdtRangeFreshness::Current,
+        chirps_ready: single_node,
+        node_available: state.lifecycle_state.check_write_allowed().is_ok(),
+        resource_available: true,
+        timed_out: false,
+        routing: RoutingOutcome::new(
+            RoutingOutcomeKind::LocalOnly,
+            Some(envelope.range.clone()),
+            metadata_version,
+            "single_node_valid_lease",
+        ),
+    });
+    if !policy.permit_ledger {
+        return set_rejection(
+            &envelope,
+            policy.state,
+            policy
+                .failure_class
+                .expect("rejected CRDT policy has a failure class"),
+            policy.routing,
+            policy.retryable,
+        );
+    }
+    let projection = CrdtSetProjection::new(ServerCrdtStore(state.store.as_ref()));
+    match projection.apply(&envelope, envelope.state_epoch) {
+        Ok(result) => {
+            let common = envelope.common_fields(
+                result.ledger.first_state,
+                result.ledger.first_failure_class,
+                policy.routing,
+                false,
+                result.ledger.idempotency_result(),
+            );
+            CrdtOutcome::set(common, result.value)
+        }
+        Err(error) => set_projection_failure(&envelope, metadata_version, error),
     }
 }
 
@@ -649,6 +773,37 @@ impl CounterCreateRequest {
     }
 }
 
+impl SetCreateRequest {
+    fn into_envelope(self, actor: impl Into<NodeId>) -> Result<CrdtOperationEnvelope, ()> {
+        CrdtOperationEnvelope::new(
+            self.object_id,
+            self.range,
+            actor,
+            self.request_id,
+            self.operation_id,
+            self.update_version,
+            CrdtOperationKind::SetCreate,
+            CrdtPayload::None,
+        )
+        .map_err(|_| ())
+    }
+
+    fn unchecked_envelope(&self, actor: impl Into<NodeId>) -> CrdtOperationEnvelope {
+        CrdtOperationEnvelope {
+            object_type: alopex_cluster::CrdtObjectType::Set,
+            object_id: self.object_id.clone(),
+            range: self.range.clone(),
+            state_epoch: self.range.data_epoch,
+            actor: actor.into(),
+            request_id: self.request_id.clone(),
+            operation_id: self.operation_id.clone(),
+            update_version: self.update_version,
+            operation: CrdtOperationKind::SetCreate,
+            payload: CrdtPayload::None,
+        }
+    }
+}
+
 impl CounterReadRequest {
     fn into_envelope(
         self,
@@ -813,6 +968,41 @@ fn counter_projection_failure(
     )
 }
 
+fn set_projection_failure(
+    envelope: &CrdtOperationEnvelope,
+    metadata_version: u64,
+    error: CrdtSetError,
+) -> CrdtOutcome {
+    let (failure_class, reason) = match error {
+        CrdtSetError::AlreadyExists { .. } => (FailureClass::Conflict, "set_already_exists"),
+        CrdtSetError::InvalidSetPayload
+        | CrdtSetError::NonCanonicalMember
+        | CrdtSetError::NonCanonicalOperationId
+        | CrdtSetError::WrongOperation { .. } => {
+            (FailureClass::InvalidRequest, "set_payload_invalid")
+        }
+        CrdtSetError::ResourceLimit { .. } => (FailureClass::InvalidRequest, "resource_limit"),
+        CrdtSetError::EpochMismatch { .. } => (FailureClass::EpochMismatch, "epoch_mismatch"),
+        CrdtSetError::MissingProjection { .. }
+        | CrdtSetError::Ledger(_)
+        | CrdtSetError::Storage(_)
+        | CrdtSetError::Encode(_)
+        | CrdtSetError::Decode(_) => (FailureClass::Internal, "set_projection_failed"),
+    };
+    set_rejection(
+        envelope,
+        OperationState::Rejected,
+        failure_class,
+        RoutingOutcome::new(
+            RoutingOutcomeKind::Blocked,
+            Some(envelope.range.clone()),
+            metadata_version,
+            reason,
+        ),
+        false,
+    )
+}
+
 fn counter_rejection(
     envelope: &CrdtOperationEnvelope,
     state: OperationState,
@@ -835,6 +1025,30 @@ fn counter_rejection(
         },
     );
     CrdtOutcome::counter_unavailable(common, reason)
+}
+
+fn set_rejection(
+    envelope: &CrdtOperationEnvelope,
+    state: OperationState,
+    failure_class: FailureClass,
+    routing: RoutingOutcome,
+    retryable: bool,
+) -> CrdtOutcome {
+    let reason = routing.reason_code.clone();
+    let common = envelope.common_fields(
+        state,
+        Some(failure_class),
+        routing,
+        retryable,
+        IdempotencyResult {
+            operation_id: envelope.operation_id.clone(),
+            request_id: envelope.request_id.clone(),
+            first_outcome: reason.clone(),
+            state,
+            duplicate_count: 0,
+        },
+    );
+    CrdtOutcome::set_unavailable(common, reason)
 }
 
 fn crdt_response(outcome: CrdtOutcome, max_response_size: usize) -> Response {

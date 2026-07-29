@@ -64,6 +64,7 @@ impl Drop for QueueWaitGuard<'_> {
 pub fn router(state: Arc<ServerState>) -> Router {
     let api = Router::new()
         .route("/crdt/counters", axum::routing::post(crdt::create_counter))
+        .route("/crdt/sets", axum::routing::post(crdt::create_set))
         .route(
             "/crdt/counters/{object_id}/read",
             axum::routing::post(crdt::read_counter),
