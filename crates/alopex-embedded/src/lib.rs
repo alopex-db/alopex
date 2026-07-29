@@ -468,6 +468,19 @@ impl Database {
         Ok(state.create_set(self.store.as_ref(), envelope))
     }
 
+    /// Adds one canonical member to a local Set through the Phase 2 durable
+    /// projection.
+    pub fn add_set(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        let mut state = self
+            .cluster_state
+            .write()
+            .map_err(|_| Error::ClusterStateLockPoisoned)?;
+        Ok(state.add_set(self.store.as_ref(), envelope))
+    }
+
     /// Reads a local Set through the canonical Phase 2 projection.
     ///
     /// A successful embedded read is explicitly `local_only` and does not
@@ -2177,6 +2190,22 @@ mod tests {
         .expect("valid Set read envelope")
     }
 
+    fn set_add_envelope(operation_id: &str, member: &str) -> CrdtOperationEnvelope {
+        CrdtOperationEnvelope::new(
+            "set-a",
+            RangeIdentity::new("embedded-local", 7, "range-a", None, None, 1, 9),
+            "embedded-actor",
+            "request-set-add",
+            operation_id,
+            2,
+            CrdtOperationKind::SetAdd,
+            CrdtPayload::Set {
+                member: Some(member.to_string()),
+            },
+        )
+        .expect("valid Set add envelope")
+    }
+
     #[test]
     fn embedded_counter_create_preserves_the_canonical_local_outcome() {
         let db = Database::new();
@@ -2395,6 +2424,42 @@ mod tests {
             .create_set(set_create_envelope("operation-set-create"))
             .expect("read must not alter the Set ledger");
         assert_eq!(replay.common().idempotency.duplicate_count, 1);
+    }
+
+    #[test]
+    fn embedded_set_add_preserves_canonical_membership_and_idempotency() {
+        let db = Database::new();
+        db.create_set(set_create_envelope("operation-set-create"))
+            .expect("create Set");
+
+        let operation_id = "00000000-0000-0000-0000-000000000155";
+        let first = db
+            .add_set(set_add_envelope(operation_id, "alice"))
+            .expect("add Set member");
+        assert_eq!(first.common().object_type, CrdtObjectType::Set);
+        assert_eq!(first.common().state, OperationState::Committed);
+        assert_eq!(first.common().routing.kind, RoutingOutcomeKind::LocalOnly);
+        assert_eq!(first.common().idempotency.duplicate_count, 0);
+        match first.value() {
+            Some(CrdtValue::Set {
+                members,
+                member_versions,
+                accepted_operation_versions,
+            }) => {
+                assert_eq!(members, &["alice"]);
+                assert_eq!(member_versions["alice"].update_version, 2);
+                assert!(member_versions["alice"].present);
+                assert_eq!(member_versions["alice"].operation_id, operation_id);
+                assert_eq!(accepted_operation_versions[operation_id], 2);
+            }
+            value => panic!("expected Set add outcome, got {value:?}"),
+        }
+
+        let replay = db
+            .add_set(set_add_envelope(operation_id, "alice"))
+            .expect("idempotent Set add replay");
+        assert_eq!(replay.common().idempotency.duplicate_count, 1);
+        assert_eq!(replay.value(), first.value());
     }
 
     #[test]
