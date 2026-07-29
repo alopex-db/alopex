@@ -533,6 +533,18 @@ impl Database {
         Ok(owned_session::unsupported_async_set_add(envelope))
     }
 
+    /// Returns the explicit async capability result for Set remove.
+    ///
+    /// The owned-session boundary has no native async CRDT executor, so this
+    /// method preserves the named async capability contract and does not call
+    /// [`Self::remove_set`] synchronously.
+    pub async fn remove_set_async(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        Ok(owned_session::unsupported_async_set_remove(envelope))
+    }
+
     /// Returns the explicit async capability result for Set read.
     ///
     /// The owned-session boundary has no native async CRDT executor, so this
@@ -2614,6 +2626,43 @@ mod tests {
         assert!(matches!(
             sync.value(),
             Some(CrdtValue::Set { members, .. }) if members == &vec!["alice".to_string()]
+        ));
+    }
+
+    #[test]
+    fn embedded_async_set_remove_is_explicitly_unsupported_without_a_sync_fallback() {
+        let db = Database::new();
+        db.create_set(set_create_envelope("operation-set-create"))
+            .expect("create Set");
+        db.add_set(set_add_envelope(
+            "00000000-0000-0000-0000-000000000155",
+            "alice",
+        ))
+        .expect("add Set member");
+
+        let operation_id = "00000000-0000-0000-0000-000000000165";
+        let outcome =
+            poll_immediately(db.remove_set_async(set_remove_envelope(operation_id, "alice")))
+                .expect("canonical unsupported outcome");
+        assert_eq!(outcome.common().object_type, CrdtObjectType::Set);
+        assert_eq!(outcome.common().state, OperationState::Rejected);
+        assert_eq!(
+            outcome.common().failure_class,
+            Some(FailureClass::InvalidRequest)
+        );
+        assert_eq!(
+            outcome.common().routing.kind,
+            RoutingOutcomeKind::Unsupported
+        );
+        assert!(outcome.value().is_none());
+
+        let sync = db
+            .remove_set(set_remove_envelope(operation_id, "alice"))
+            .expect("unsupported async result must not write the Set ledger");
+        assert_eq!(sync.common().idempotency.duplicate_count, 0);
+        assert!(matches!(
+            sync.value(),
+            Some(CrdtValue::Set { members, .. }) if members.is_empty()
         ));
     }
 

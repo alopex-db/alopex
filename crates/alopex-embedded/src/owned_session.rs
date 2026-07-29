@@ -192,6 +192,34 @@ pub(crate) fn unsupported_async_set_add(envelope: CrdtOperationEnvelope) -> Crdt
     CrdtOutcome::unsupported(common, reason)
 }
 
+/// Builds the explicit async capability response for a Set remove.
+///
+/// The owned-session boundary has no native async CRDT executor. In
+/// particular, this must not invoke the synchronous Set-remove path because
+/// that would mutate the durable operation ledger behind an async-named API.
+pub(crate) fn unsupported_async_set_remove(envelope: CrdtOperationEnvelope) -> CrdtOutcome {
+    let reason = "embedded_async_crdt_unavailable";
+    let common = envelope.common_fields(
+        OperationState::Rejected,
+        Some(FailureClass::InvalidRequest),
+        RoutingOutcome::new(
+            RoutingOutcomeKind::Unsupported,
+            Some(envelope.range.clone()),
+            envelope.state_epoch,
+            reason,
+        ),
+        false,
+        IdempotencyResult {
+            operation_id: envelope.operation_id.clone(),
+            request_id: envelope.request_id.clone(),
+            first_outcome: reason.to_owned(),
+            state: OperationState::Rejected,
+            duplicate_count: 0,
+        },
+    );
+    CrdtOutcome::unsupported(common, reason)
+}
+
 /// Builds the explicit async capability response for a Set read.
 ///
 /// Read operations must not silently call the synchronous embedded projection
