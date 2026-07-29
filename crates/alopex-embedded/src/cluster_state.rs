@@ -1,5 +1,6 @@
 use alopex_cluster::crdt::{
     CrdtCounterError, CrdtCounterProjection, CrdtOperationEnvelope, CrdtOperationKind, CrdtOutcome,
+    CrdtSetError, CrdtSetProjection,
 };
 use alopex_cluster::{
     CatalogTableRef, CatalogTableSnapshot, ClusterManager, ClusterStatusSnapshot, PlanId,
@@ -171,6 +172,41 @@ impl EmbeddedClusterState {
         }
     }
 
+    /// Creates a Set through the shared durable projection and returns the
+    /// canonical local-only outcome for the standalone embedded database.
+    pub(crate) fn create_set(
+        &mut self,
+        store: &AnyKV,
+        envelope: CrdtOperationEnvelope,
+    ) -> CrdtOutcome {
+        if envelope.operation != CrdtOperationKind::SetCreate {
+            return self.set_rejection(
+                &envelope,
+                FailureClass::InvalidRequest,
+                "set_create_envelope_required",
+            );
+        }
+
+        let projection = CrdtSetProjection::new(EmbeddedCrdtStore(store));
+        match projection.apply(&envelope, envelope.state_epoch) {
+            Ok(result) => {
+                let common = envelope.common_fields(
+                    result.ledger.first_state,
+                    result.ledger.first_failure_class,
+                    self.set_routing(
+                        &envelope,
+                        RoutingOutcomeKind::LocalOnly,
+                        "embedded_local_only",
+                    ),
+                    false,
+                    result.ledger.idempotency_result(),
+                );
+                CrdtOutcome::set(common, result.value)
+            }
+            Err(error) => self.set_projection_failure(&envelope, error),
+        }
+    }
+
     /// Reads a Counter projection without admitting a new ledger record.
     ///
     /// The standalone embedded database is intentionally local-only. A read
@@ -329,6 +365,66 @@ impl EmbeddedClusterState {
     }
 
     fn counter_routing(
+        &self,
+        envelope: &CrdtOperationEnvelope,
+        kind: RoutingOutcomeKind,
+        reason: impl Into<String>,
+    ) -> RoutingOutcome {
+        RoutingOutcome::new(
+            kind,
+            Some(envelope.range.clone()),
+            self.manager.identity().update_epoch,
+            reason,
+        )
+    }
+
+    fn set_projection_failure(
+        &self,
+        envelope: &CrdtOperationEnvelope,
+        error: CrdtSetError,
+    ) -> CrdtOutcome {
+        let (failure_class, reason) = match error {
+            CrdtSetError::AlreadyExists { .. } => (FailureClass::Conflict, "set_already_exists"),
+            CrdtSetError::InvalidSetPayload
+            | CrdtSetError::NonCanonicalMember
+            | CrdtSetError::NonCanonicalOperationId
+            | CrdtSetError::WrongOperation { .. } => {
+                (FailureClass::InvalidRequest, "set_payload_invalid")
+            }
+            CrdtSetError::ResourceLimit { .. } => (FailureClass::InvalidRequest, "resource_limit"),
+            CrdtSetError::EpochMismatch { .. } => (FailureClass::EpochMismatch, "epoch_mismatch"),
+            CrdtSetError::MissingProjection { .. }
+            | CrdtSetError::Ledger(_)
+            | CrdtSetError::Storage(_)
+            | CrdtSetError::Encode(_)
+            | CrdtSetError::Decode(_) => (FailureClass::Internal, "set_projection_failed"),
+        };
+        self.set_rejection(envelope, failure_class, reason)
+    }
+
+    fn set_rejection(
+        &self,
+        envelope: &CrdtOperationEnvelope,
+        failure_class: FailureClass,
+        reason: &str,
+    ) -> CrdtOutcome {
+        let common = envelope.common_fields(
+            OperationState::Rejected,
+            Some(failure_class),
+            self.set_routing(envelope, RoutingOutcomeKind::Blocked, reason),
+            false,
+            IdempotencyResult {
+                operation_id: envelope.operation_id.clone(),
+                request_id: envelope.request_id.clone(),
+                first_outcome: reason.to_string(),
+                state: OperationState::Rejected,
+                duplicate_count: 0,
+            },
+        );
+        CrdtOutcome::set_unavailable(common, reason)
+    }
+
+    fn set_routing(
         &self,
         envelope: &CrdtOperationEnvelope,
         kind: RoutingOutcomeKind,

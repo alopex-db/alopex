@@ -456,6 +456,18 @@ impl Database {
         Ok(state.decrement_counter(self.store.as_ref(), envelope))
     }
 
+    /// Creates a local Set from the canonical Phase 2 envelope.
+    pub fn create_set(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        let mut state = self
+            .cluster_state
+            .write()
+            .map_err(|_| Error::ClusterStateLockPoisoned)?;
+        Ok(state.create_set(self.store.as_ref(), envelope))
+    }
+
     /// Returns the explicit async capability result for Counter decrement.
     ///
     /// The owned-session boundary has no native async CRDT executor, so this
@@ -2098,6 +2110,20 @@ mod tests {
         .expect("valid counter decrement envelope")
     }
 
+    fn set_create_envelope(operation_id: &str) -> CrdtOperationEnvelope {
+        CrdtOperationEnvelope::new(
+            "set-a",
+            RangeIdentity::new("embedded-local", 7, "range-a", None, None, 1, 9),
+            "embedded-actor",
+            "request-set-create",
+            operation_id,
+            1,
+            CrdtOperationKind::SetCreate,
+            CrdtPayload::None,
+        )
+        .expect("valid Set create envelope")
+    }
+
     #[test]
     fn embedded_counter_create_preserves_the_canonical_local_outcome() {
         let db = Database::new();
@@ -2252,6 +2278,37 @@ mod tests {
             replay.value(),
             Some(CrdtValue::Counter { value: -7, .. })
         ));
+    }
+
+    #[test]
+    fn embedded_set_create_preserves_the_canonical_local_outcome() {
+        let db = Database::new();
+        let first = db
+            .create_set(set_create_envelope("operation-set-create"))
+            .expect("create Set");
+
+        assert_eq!(first.common().object_type, CrdtObjectType::Set);
+        assert_eq!(first.common().object_id, "set-a");
+        assert_eq!(first.common().state, OperationState::Committed);
+        assert_eq!(first.common().routing.kind, RoutingOutcomeKind::LocalOnly);
+        assert_eq!(first.common().idempotency.duplicate_count, 0);
+        match first.value() {
+            Some(CrdtValue::Set {
+                members,
+                member_versions,
+                ..
+            }) => {
+                assert!(members.is_empty());
+                assert!(member_versions.is_empty());
+            }
+            value => panic!("expected empty Set outcome, got {value:?}"),
+        }
+
+        let replay = db
+            .create_set(set_create_envelope("operation-set-create"))
+            .expect("idempotent Set create replay");
+        assert_eq!(replay.common().state, OperationState::Committed);
+        assert_eq!(replay.common().idempotency.duplicate_count, 1);
     }
 
     #[test]
