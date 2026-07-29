@@ -420,6 +420,48 @@ impl EmbeddedClusterState {
         }
     }
 
+    /// Lists the canonical Set membership without changing the durable
+    /// projection or admitting a Set ledger operation.
+    pub(crate) fn list_set(&self, store: &AnyKV, envelope: CrdtOperationEnvelope) -> CrdtOutcome {
+        if envelope.operation != CrdtOperationKind::SetList {
+            return self.set_rejection(
+                &envelope,
+                FailureClass::InvalidRequest,
+                "set_list_envelope_required",
+            );
+        }
+
+        let projection = CrdtSetProjection::new(EmbeddedCrdtStore(store));
+        match projection.list(&envelope) {
+            Ok(value) => {
+                let common = envelope.common_fields(
+                    OperationState::Committed,
+                    None,
+                    self.set_routing(
+                        &envelope,
+                        RoutingOutcomeKind::LocalOnly,
+                        "embedded_local_only",
+                    ),
+                    false,
+                    IdempotencyResult {
+                        operation_id: envelope.operation_id.clone(),
+                        request_id: envelope.request_id.clone(),
+                        first_outcome: "set_list".to_string(),
+                        state: OperationState::Committed,
+                        duplicate_count: 0,
+                    },
+                );
+                CrdtOutcome::set(common, value)
+            }
+            Err(CrdtSetError::MissingProjection { .. }) => self.set_rejection(
+                &envelope,
+                FailureClass::PrerequisiteMissing,
+                "set_not_found",
+            ),
+            Err(error) => self.set_projection_failure(&envelope, error),
+        }
+    }
+
     pub(crate) fn status_snapshot(&self, catalog_epoch: u64) -> ClusterStatusSnapshot {
         let mut snapshot = self.manager.status_snapshot();
         let epoch = snapshot

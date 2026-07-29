@@ -105,6 +105,17 @@ fn contains(object_id: &str, operation_id: &str, queried_member: &str) -> CrdtOp
     )
 }
 
+fn list(object_id: &str, operation_id: &str) -> CrdtOperationEnvelope {
+    envelope(
+        object_id,
+        operation_id,
+        0,
+        9,
+        CrdtOperationKind::SetList,
+        CrdtPayload::None,
+    )
+}
+
 #[test]
 fn add_remove_readd_is_total_ordered_and_independent_of_arrival_order() {
     let forward = CrdtSetProjection::new(MemoryKV::new());
@@ -277,6 +288,37 @@ fn contains_returns_canonical_membership_without_a_ledger_or_projection_mutation
     let ledger = CrdtOperationLedger::new(projection.into_store());
     assert!(ledger.read(contains_id).unwrap().is_none());
     assert!(ledger.read(invalid_id).unwrap().is_none());
+}
+
+#[test]
+fn list_returns_canonical_membership_without_a_ledger_or_projection_mutation() {
+    let projection = CrdtSetProjection::new(MemoryKV::new());
+    projection.apply(&create("set-list"), 30).unwrap();
+    projection
+        .apply(
+            &member(
+                "set-list",
+                ADD_V7_ID,
+                7,
+                9,
+                CrdtOperationKind::SetAdd,
+                "member",
+            ),
+            30,
+        )
+        .unwrap();
+
+    let list_id = "list-members";
+    let value = projection
+        .list(&list("set-list", list_id))
+        .expect("read-only list result");
+    assert_eq!(value.members, vec!["member"]);
+    assert!(value.member_versions["member"].present);
+    assert!(!value.accepted_operation_versions.contains_key(list_id));
+    assert_eq!(projection.read(&read("set-list")).unwrap(), value);
+
+    let ledger = CrdtOperationLedger::new(projection.into_store());
+    assert!(ledger.read(list_id).unwrap().is_none());
 }
 
 #[test]

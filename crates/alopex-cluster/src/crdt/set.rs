@@ -252,6 +252,28 @@ impl<S: KVStore> CrdtSetProjection<S> {
         Ok(state.as_value())
     }
 
+    /// Lists the durable Set membership without adding a ledger record or
+    /// changing the projection. The dedicated SetList envelope keeps this
+    /// query distinct from a generic Set read on every public surface.
+    pub fn list(&self, envelope: &CrdtOperationEnvelope) -> Result<SetValue, CrdtSetError> {
+        if envelope.operation != CrdtOperationKind::SetList {
+            return Err(CrdtSetError::WrongOperation {
+                operation: envelope.operation,
+            });
+        }
+        let mut transaction = self.store.begin(TxnMode::ReadOnly)?;
+        let state = transaction
+            .get(&set_key(envelope))?
+            .map(|encoded| decode_state(&encoded))
+            .transpose()?
+            .ok_or(CrdtSetError::MissingProjection {
+                object_id: envelope.object_id.clone(),
+            })?;
+        self.validate_epoch(envelope, &state)?;
+        transaction.rollback_self()?;
+        Ok(state.as_value())
+    }
+
     fn validate_mutation(
         &self,
         envelope: &CrdtOperationEnvelope,

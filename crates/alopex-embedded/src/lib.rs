@@ -522,6 +522,19 @@ impl Database {
         Ok(state.contains_set(self.store.as_ref(), envelope))
     }
 
+    /// Lists a local Set without mutating its durable projection or recording
+    /// an additional Set operation in the ledger.
+    pub fn list_set(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        let state = self
+            .cluster_state
+            .read()
+            .map_err(|_| Error::ClusterStateLockPoisoned)?;
+        Ok(state.list_set(self.store.as_ref(), envelope))
+    }
+
     /// Returns the explicit async capability result for Set create.
     ///
     /// The owned-session boundary has no native async CRDT executor, so this
@@ -2268,6 +2281,20 @@ mod tests {
         .expect("valid Set contains envelope")
     }
 
+    fn set_list_envelope(operation_id: &str) -> CrdtOperationEnvelope {
+        CrdtOperationEnvelope::new(
+            "set-a",
+            RangeIdentity::new("embedded-local", 7, "range-a", None, None, 1, 9),
+            "embedded-actor",
+            "request-set-list",
+            operation_id,
+            0,
+            CrdtOperationKind::SetList,
+            CrdtPayload::None,
+        )
+        .expect("valid Set list envelope")
+    }
+
     fn set_add_envelope(operation_id: &str, member: &str) -> CrdtOperationEnvelope {
         CrdtOperationEnvelope::new(
             "set-a",
@@ -2563,6 +2590,45 @@ mod tests {
             absent.value(),
             Some(CrdtValue::Set { members, .. }) if members == &vec!["alice".to_string()]
         ));
+    }
+
+    #[test]
+    fn embedded_set_list_returns_membership_without_a_ledger_mutation() {
+        let db = Database::new();
+        db.create_set(set_create_envelope("operation-set-create"))
+            .expect("create Set");
+        db.add_set(set_add_envelope(
+            "00000000-0000-0000-0000-000000000156",
+            "alice",
+        ))
+        .expect("add Set member");
+
+        let outcome = db
+            .list_set(set_list_envelope("operation-set-list"))
+            .expect("list Set members");
+        assert_eq!(outcome.common().object_type, CrdtObjectType::Set);
+        assert_eq!(outcome.common().object_id, "set-a");
+        assert_eq!(outcome.common().state, OperationState::Committed);
+        assert_eq!(outcome.common().routing.kind, RoutingOutcomeKind::LocalOnly);
+        assert_eq!(outcome.common().idempotency.first_outcome, "set_list");
+        assert_eq!(outcome.common().idempotency.duplicate_count, 0);
+        match outcome.value() {
+            Some(CrdtValue::Set {
+                members,
+                member_versions,
+                accepted_operation_versions,
+            }) => {
+                assert_eq!(members, &["alice"]);
+                assert!(member_versions["alice"].present);
+                assert!(!accepted_operation_versions.contains_key("operation-set-list"));
+            }
+            value => panic!("expected Set list outcome, got {value:?}"),
+        }
+
+        let replay = db
+            .create_set(set_create_envelope("operation-set-create"))
+            .expect("list must not alter the Set ledger");
+        assert_eq!(replay.common().idempotency.duplicate_count, 1);
     }
 
     #[test]
