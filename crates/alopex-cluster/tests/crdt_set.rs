@@ -94,6 +94,17 @@ fn read(object_id: &str) -> CrdtOperationEnvelope {
     )
 }
 
+fn contains(object_id: &str, operation_id: &str, queried_member: &str) -> CrdtOperationEnvelope {
+    member(
+        object_id,
+        operation_id,
+        0,
+        9,
+        CrdtOperationKind::SetContains,
+        queried_member,
+    )
+}
+
 #[test]
 fn add_remove_readd_is_total_ordered_and_independent_of_arrival_order() {
     let forward = CrdtSetProjection::new(MemoryKV::new());
@@ -227,6 +238,45 @@ fn non_nfc_size_and_epoch_fail_before_ledger_mutation() {
     assert!(ledger.read(non_nfc_id).unwrap().is_none());
     assert!(ledger.read(too_large_id).unwrap().is_none());
     assert!(ledger.read(stale_epoch_id).unwrap().is_none());
+}
+
+#[test]
+fn contains_returns_canonical_membership_without_a_ledger_or_projection_mutation() {
+    let projection = CrdtSetProjection::new(MemoryKV::new());
+    projection.apply(&create("set-contains"), 30).unwrap();
+    projection
+        .apply(
+            &member(
+                "set-contains",
+                ADD_V7_ID,
+                7,
+                9,
+                CrdtOperationKind::SetAdd,
+                "member",
+            ),
+            30,
+        )
+        .unwrap();
+
+    let contains_id = "contains-member";
+    let value = projection
+        .contains(&contains("set-contains", contains_id, "member"))
+        .expect("read-only contains result");
+    assert_eq!(value.members, vec!["member"]);
+    assert!(value.member_versions["member"].present);
+    assert!(!value.accepted_operation_versions.contains_key(contains_id));
+
+    let invalid_id = "contains-invalid-member";
+    assert!(
+        projection
+            .contains(&contains("set-contains", invalid_id, "e\u{301}"))
+            .is_err()
+    );
+    assert_eq!(projection.read(&read("set-contains")).unwrap(), value);
+
+    let ledger = CrdtOperationLedger::new(projection.into_store());
+    assert!(ledger.read(contains_id).unwrap().is_none());
+    assert!(ledger.read(invalid_id).unwrap().is_none());
 }
 
 #[test]

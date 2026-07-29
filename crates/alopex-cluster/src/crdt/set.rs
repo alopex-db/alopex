@@ -228,6 +228,30 @@ impl<S: KVStore> CrdtSetProjection<S> {
         Ok(state.as_value())
     }
 
+    /// Checks a member against the durable Set projection without adding a
+    /// ledger record or changing the projection.  The returned canonical
+    /// membership and winner evidence let every adapter evaluate the supplied
+    /// member against the same deterministic state.
+    pub fn contains(&self, envelope: &CrdtOperationEnvelope) -> Result<SetValue, CrdtSetError> {
+        if envelope.operation != CrdtOperationKind::SetContains {
+            return Err(CrdtSetError::WrongOperation {
+                operation: envelope.operation,
+            });
+        }
+        self.validate_contains_member(envelope)?;
+        let mut transaction = self.store.begin(TxnMode::ReadOnly)?;
+        let state = transaction
+            .get(&set_key(envelope))?
+            .map(|encoded| decode_state(&encoded))
+            .transpose()?
+            .ok_or(CrdtSetError::MissingProjection {
+                object_id: envelope.object_id.clone(),
+            })?;
+        self.validate_epoch(envelope, &state)?;
+        transaction.rollback_self()?;
+        Ok(state.as_value())
+    }
+
     fn validate_mutation(
         &self,
         envelope: &CrdtOperationEnvelope,
@@ -261,6 +285,27 @@ impl<S: KVStore> CrdtSetProjection<S> {
                 operation: envelope.operation,
             }),
         }
+    }
+
+    fn validate_contains_member(
+        &self,
+        envelope: &CrdtOperationEnvelope,
+    ) -> Result<(), CrdtSetError> {
+        let member = match &envelope.payload {
+            CrdtPayload::Set {
+                member: Some(member),
+            } => member,
+            _ => return Err(CrdtSetError::InvalidSetPayload),
+        };
+        if member.is_empty() || !is_nfc(member) {
+            return Err(CrdtSetError::NonCanonicalMember);
+        }
+        if member.len() > self.limits.max_member_bytes {
+            return Err(CrdtSetError::ResourceLimit {
+                limit: self.limits.max_member_bytes,
+            });
+        }
+        Ok(())
     }
 
     fn preflight(

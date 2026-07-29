@@ -509,6 +509,19 @@ impl Database {
         Ok(state.read_set(self.store.as_ref(), envelope))
     }
 
+    /// Checks one member against a local Set without mutating its durable
+    /// projection or recording an additional Set operation in the ledger.
+    pub fn contains_set(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        let state = self
+            .cluster_state
+            .read()
+            .map_err(|_| Error::ClusterStateLockPoisoned)?;
+        Ok(state.contains_set(self.store.as_ref(), envelope))
+    }
+
     /// Returns the explicit async capability result for Set create.
     ///
     /// The owned-session boundary has no native async CRDT executor, so this
@@ -2227,6 +2240,22 @@ mod tests {
         .expect("valid Set read envelope")
     }
 
+    fn set_contains_envelope(operation_id: &str, member: &str) -> CrdtOperationEnvelope {
+        CrdtOperationEnvelope::new(
+            "set-a",
+            RangeIdentity::new("embedded-local", 7, "range-a", None, None, 1, 9),
+            "embedded-actor",
+            "request-set-contains",
+            operation_id,
+            0,
+            CrdtOperationKind::SetContains,
+            CrdtPayload::Set {
+                member: Some(member.to_string()),
+            },
+        )
+        .expect("valid Set contains envelope")
+    }
+
     fn set_add_envelope(operation_id: &str, member: &str) -> CrdtOperationEnvelope {
         CrdtOperationEnvelope::new(
             "set-a",
@@ -2477,6 +2506,51 @@ mod tests {
             .create_set(set_create_envelope("operation-set-create"))
             .expect("read must not alter the Set ledger");
         assert_eq!(replay.common().idempotency.duplicate_count, 1);
+    }
+
+    #[test]
+    fn embedded_set_contains_returns_membership_without_a_ledger_mutation() {
+        let db = Database::new();
+        db.create_set(set_create_envelope("operation-set-create"))
+            .expect("create Set");
+        db.add_set(set_add_envelope(
+            "00000000-0000-0000-0000-000000000155",
+            "alice",
+        ))
+        .expect("add Set member");
+
+        let outcome = db
+            .contains_set(set_contains_envelope("operation-set-contains", "alice"))
+            .expect("contains Set member");
+        assert_eq!(outcome.common().object_type, CrdtObjectType::Set);
+        assert_eq!(outcome.common().object_id, "set-a");
+        assert_eq!(outcome.common().state, OperationState::Committed);
+        assert_eq!(outcome.common().routing.kind, RoutingOutcomeKind::LocalOnly);
+        assert_eq!(outcome.common().idempotency.first_outcome, "set_contains");
+        assert_eq!(outcome.common().idempotency.duplicate_count, 0);
+        match outcome.value() {
+            Some(CrdtValue::Set {
+                members,
+                member_versions,
+                accepted_operation_versions,
+            }) => {
+                assert_eq!(members, &["alice"]);
+                assert!(member_versions["alice"].present);
+                assert!(!accepted_operation_versions.contains_key("operation-set-contains"));
+            }
+            value => panic!("expected Set contains outcome, got {value:?}"),
+        }
+
+        let absent = db
+            .contains_set(set_contains_envelope(
+                "operation-set-contains-absent",
+                "bob",
+            ))
+            .expect("read absent Set member");
+        assert!(matches!(
+            absent.value(),
+            Some(CrdtValue::Set { members, .. }) if members == &vec!["alice".to_string()]
+        ));
     }
 
     #[test]
