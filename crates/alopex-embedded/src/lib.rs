@@ -468,6 +468,21 @@ impl Database {
         Ok(state.create_set(self.store.as_ref(), envelope))
     }
 
+    /// Reads a local Set through the canonical Phase 2 projection.
+    ///
+    /// A successful embedded read is explicitly `local_only` and does not
+    /// record another Set operation in the durable ledger.
+    pub fn read_set(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        let state = self
+            .cluster_state
+            .read()
+            .map_err(|_| Error::ClusterStateLockPoisoned)?;
+        Ok(state.read_set(self.store.as_ref(), envelope))
+    }
+
     /// Returns the explicit async capability result for Set create.
     ///
     /// The owned-session boundary has no native async CRDT executor, so this
@@ -2136,6 +2151,20 @@ mod tests {
         .expect("valid Set create envelope")
     }
 
+    fn set_read_envelope(operation_id: &str) -> CrdtOperationEnvelope {
+        CrdtOperationEnvelope::new(
+            "set-a",
+            RangeIdentity::new("embedded-local", 7, "range-a", None, None, 1, 9),
+            "embedded-actor",
+            "request-set-read",
+            operation_id,
+            1,
+            CrdtOperationKind::SetRead,
+            CrdtPayload::None,
+        )
+        .expect("valid Set read envelope")
+    }
+
     #[test]
     fn embedded_counter_create_preserves_the_canonical_local_outcome() {
         let db = Database::new();
@@ -2321,6 +2350,54 @@ mod tests {
             .expect("idempotent Set create replay");
         assert_eq!(replay.common().state, OperationState::Committed);
         assert_eq!(replay.common().idempotency.duplicate_count, 1);
+    }
+
+    #[test]
+    fn embedded_set_read_returns_canonical_membership_without_a_ledger_mutation() {
+        let db = Database::new();
+        db.create_set(set_create_envelope("operation-set-create"))
+            .expect("create Set");
+
+        let read = db
+            .read_set(set_read_envelope("operation-set-read"))
+            .expect("read Set");
+        assert_eq!(read.common().object_type, CrdtObjectType::Set);
+        assert_eq!(read.common().object_id, "set-a");
+        assert_eq!(read.common().state, OperationState::Committed);
+        assert_eq!(read.common().routing.kind, RoutingOutcomeKind::LocalOnly);
+        assert_eq!(read.common().idempotency.first_outcome, "set_read");
+        assert_eq!(read.common().idempotency.duplicate_count, 0);
+        match read.value() {
+            Some(CrdtValue::Set {
+                members,
+                member_versions,
+                ..
+            }) => {
+                assert!(members.is_empty());
+                assert!(member_versions.is_empty());
+            }
+            value => panic!("expected empty Set read outcome, got {value:?}"),
+        }
+
+        let replay = db
+            .create_set(set_create_envelope("operation-set-create"))
+            .expect("read must not alter the Set ledger");
+        assert_eq!(replay.common().idempotency.duplicate_count, 1);
+    }
+
+    #[test]
+    fn embedded_set_read_reports_missing_projection_without_claiming_success() {
+        let db = Database::new();
+        let outcome = db
+            .read_set(set_read_envelope("operation-set-read"))
+            .expect("canonical missing Set outcome");
+        assert_eq!(outcome.common().state, OperationState::Rejected);
+        assert_eq!(
+            outcome.common().failure_class,
+            Some(FailureClass::PrerequisiteMissing)
+        );
+        assert_eq!(outcome.common().routing.kind, RoutingOutcomeKind::Blocked);
+        assert!(outcome.value().is_none());
     }
 
     #[test]
