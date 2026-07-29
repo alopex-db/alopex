@@ -78,6 +78,10 @@ pub fn router(state: Arc<ServerState>) -> Router {
             axum::routing::post(crdt::add_set),
         )
         .route(
+            "/crdt/sets/{object_id}/remove",
+            axum::routing::post(crdt::remove_set),
+        )
+        .route(
             "/crdt/counters/{object_id}/increment",
             axum::routing::post(crdt::increment_counter),
         )

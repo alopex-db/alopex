@@ -130,6 +130,23 @@ fn set_add_request() -> Request<Body> {
         .expect("valid Set add request")
 }
 
+fn set_remove_request() -> Request<Body> {
+    let payload = json!({
+        "range": RangeIdentity::new("local", 7, "range-http", None, None, 1, 9),
+        "request_id": "request-set-http-remove",
+        "operation_id": "00000000-0000-0000-0000-000000000166",
+        "update_version": 2,
+        "member": "alice",
+    });
+    Request::builder()
+        .method("POST")
+        .uri("/api/crdt/sets/set-http/remove")
+        .header("content-type", "application/json")
+        .header("x-api-key", "crdt-key")
+        .body(Body::from(payload.to_string()))
+        .expect("valid Set remove request")
+}
+
 #[tokio::test]
 async fn set_create_uses_the_authenticated_api_prefix_and_replays_once() {
     let data_dir = tempdir().expect("data directory");
@@ -271,6 +288,73 @@ async fn set_add_uses_the_authenticated_path_and_replays_once() {
         .oneshot(set_add_request())
         .await
         .expect("add replay response");
+    assert_eq!(replay.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(replay.into_body(), usize::MAX)
+        .await
+        .expect("replay body");
+    let replay: Value = serde_json::from_slice(&body).expect("replay outcome");
+    assert_eq!(replay["idempotency"]["duplicate_count"], 1);
+    assert_eq!(replay["value"], outcome["value"]);
+}
+
+#[tokio::test]
+async fn set_remove_uses_the_authenticated_path_and_replays_once() {
+    let data_dir = tempdir().expect("data directory");
+    let server = Server::new(ServerConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        api_prefix: "/api".into(),
+        auth_mode: AuthMode::Dev {
+            api_key: "crdt-key".into(),
+        },
+        audit_log_enabled: false,
+        ..ServerConfig::default()
+    })
+    .expect("server");
+
+    let create = http::router(server.state.clone())
+        .oneshot(set_create_request())
+        .await
+        .expect("create response");
+    assert_eq!(create.status(), StatusCode::OK);
+    let add = http::router(server.state.clone())
+        .oneshot(set_add_request())
+        .await
+        .expect("add response");
+    assert_eq!(add.status(), StatusCode::OK);
+
+    let response = http::router(server.state.clone())
+        .oneshot(set_remove_request())
+        .await
+        .expect("remove response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let outcome: Value = serde_json::from_slice(&body).expect("canonical Set remove response");
+    assert_eq!(outcome["object_type"], "set");
+    assert_eq!(outcome["object_id"], "set-http");
+    assert_eq!(outcome["actor"], "dev");
+    assert_eq!(outcome["state"], "committed");
+    assert_eq!(outcome["routing"]["kind"], "local_only");
+    assert_eq!(outcome["value"]["members"], json!([]));
+    assert_eq!(
+        outcome["value"]["member_versions"]["alice"]["update_version"],
+        2
+    );
+    assert_eq!(
+        outcome["value"]["member_versions"]["alice"]["operation_id"],
+        "00000000-0000-0000-0000-000000000166"
+    );
+    assert_eq!(
+        outcome["value"]["member_versions"]["alice"]["present"],
+        false
+    );
+    assert_eq!(outcome["idempotency"]["duplicate_count"], 0);
+
+    let replay = http::router(server.state)
+        .oneshot(set_remove_request())
+        .await
+        .expect("remove replay response");
     assert_eq!(replay.status(), StatusCode::OK);
     let body = axum::body::to_bytes(replay.into_body(), usize::MAX)
         .await
