@@ -349,6 +349,39 @@ class AsyncDatabase(_AsyncLocalHandle):
             actor=actor,
         )
 
+    async def read_set(
+        self,
+        object_id: str,
+        *,
+        cluster_id: str,
+        table_id: int,
+        range_id: str,
+        schema_version: int,
+        data_epoch: int,
+        request_id: str,
+        operation_id: str,
+        update_version: int,
+        actor: str = "alopex-python-local",
+    ) -> dict[str, Any]:
+        """Read a local CRDT Set with the canonical Phase 2 outcome mapping.
+
+        The facade forwards the read identity to the GIL-releasing native
+        binding without creating a Python worker, remote client, or a
+        Python-side Set projection.
+        """
+        return self._handle.read_set(
+            object_id,
+            cluster_id=cluster_id,
+            table_id=table_id,
+            range_id=range_id,
+            schema_version=schema_version,
+            data_epoch=data_epoch,
+            request_id=request_id,
+            operation_id=operation_id,
+            update_version=update_version,
+            actor=actor,
+        )
+
     async def increment_counter(
         self,
         object_id: str,

@@ -79,3 +79,10 @@ def test_i22_set_create_has_async_implementation_and_stub() -> None:
         assert re.search(
             r"^    async def create_set\s*\(", source, re.MULTILINE
         ), "missing public AsyncDatabase.create_set"
+
+
+def test_i22_set_read_has_async_implementation_and_stub() -> None:
+    for source in (ASYNCIO_SOURCE, ASYNCIO_STUB_SOURCE):
+        assert re.search(
+            r"^    async def read_set\s*\(", source, re.MULTILINE
+        ), "missing public AsyncDatabase.read_set"
