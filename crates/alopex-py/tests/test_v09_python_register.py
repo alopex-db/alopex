@@ -72,3 +72,10 @@ def test_i22_counter_mutation_has_async_implementation_and_stub() -> None:
                 source,
                 re.MULTILINE,
             ), f"missing public AsyncDatabase.{method}"
+
+
+def test_i22_set_create_has_async_implementation_and_stub() -> None:
+    for source in (ASYNCIO_SOURCE, ASYNCIO_STUB_SOURCE):
+        assert re.search(
+            r"^    async def create_set\s*\(", source, re.MULTILINE
+        ), "missing public AsyncDatabase.create_set"

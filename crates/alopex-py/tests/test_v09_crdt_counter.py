@@ -55,6 +55,39 @@ def test_i27_python_sync_set_create_preserves_canonical_empty_membership_and_ide
     assert duplicate["idempotency"]["duplicate_count"] == 1
 
 
+def test_i27_python_async_set_create_preserves_canonical_empty_membership_and_idempotency() -> None:
+    async def scenario() -> None:
+        db = await AsyncDatabase.open_in_memory()
+        try:
+            kwargs = dict(
+                cluster_id="cluster-a",
+                table_id=7,
+                range_id="range-a",
+                schema_version=1,
+                data_epoch=9,
+                request_id="request-set-async-a",
+                operation_id="operation-set-async-a",
+                update_version=12,
+            )
+            first = await db.create_set("set-async-a", **kwargs)
+            duplicate = await db.create_set("set-async-a", **kwargs)
+            assert first["object_type"] == "set"
+            assert first["state"] == "committed"
+            assert first["routing"]["kind"] == "local_only"
+            assert first["value"] == {
+                "value_type": "set",
+                "members": [],
+                "member_versions": {},
+                "accepted_operation_versions": {"operation-set-async-a": 12},
+            }
+            assert first["idempotency"]["duplicate_count"] == 0
+            assert duplicate["idempotency"]["duplicate_count"] == 1
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def _read_counter(db: Database, operation_id: str = "operation-read") -> dict:
     return db.read_counter(
         "counter-a",
