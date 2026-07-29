@@ -495,6 +495,18 @@ impl Database {
         Ok(owned_session::unsupported_async_set_create(envelope))
     }
 
+    /// Returns the explicit async capability result for Set read.
+    ///
+    /// The owned-session boundary has no native async CRDT executor, so this
+    /// method preserves the named async capability contract and does not call
+    /// [`Self::read_set`] synchronously.
+    pub async fn read_set_async(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        Ok(owned_session::unsupported_async_set_read(envelope))
+    }
+
     /// Returns the explicit async capability result for Counter decrement.
     ///
     /// The owned-session boundary has no native async CRDT executor, so this
@@ -2398,6 +2410,33 @@ mod tests {
         );
         assert_eq!(outcome.common().routing.kind, RoutingOutcomeKind::Blocked);
         assert!(outcome.value().is_none());
+    }
+
+    #[test]
+    fn embedded_async_set_read_is_explicitly_unsupported_without_a_sync_fallback() {
+        let db = Database::new();
+        db.create_set(set_create_envelope("operation-set-create"))
+            .expect("create Set");
+
+        let outcome = poll_immediately(db.read_set_async(set_read_envelope("operation-set-read")))
+            .expect("canonical unsupported outcome");
+        assert_eq!(outcome.common().object_type, CrdtObjectType::Set);
+        assert_eq!(outcome.common().state, OperationState::Rejected);
+        assert_eq!(
+            outcome.common().failure_class,
+            Some(FailureClass::InvalidRequest)
+        );
+        assert_eq!(
+            outcome.common().routing.kind,
+            RoutingOutcomeKind::Unsupported
+        );
+        assert!(outcome.value().is_none());
+
+        let sync = db
+            .read_set(set_read_envelope("operation-set-read"))
+            .expect("unsupported async result must not replace the Set read outcome");
+        assert_eq!(sync.common().state, OperationState::Committed);
+        assert!(matches!(sync.value(), Some(CrdtValue::Set { .. })));
     }
 
     #[test]

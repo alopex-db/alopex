@@ -164,6 +164,35 @@ pub(crate) fn unsupported_async_set_create(envelope: CrdtOperationEnvelope) -> C
     CrdtOutcome::unsupported(common, reason)
 }
 
+/// Builds the explicit async capability response for a Set read.
+///
+/// Read operations must not silently call the synchronous embedded projection
+/// from an async-named API. Until an owned async CRDT executor exists, the
+/// capability is explicitly unsupported and leaves the durable projection
+/// untouched.
+pub(crate) fn unsupported_async_set_read(envelope: CrdtOperationEnvelope) -> CrdtOutcome {
+    let reason = "embedded_async_crdt_unavailable";
+    let common = envelope.common_fields(
+        OperationState::Rejected,
+        Some(FailureClass::InvalidRequest),
+        RoutingOutcome::new(
+            RoutingOutcomeKind::Unsupported,
+            Some(envelope.range.clone()),
+            envelope.state_epoch,
+            reason,
+        ),
+        false,
+        IdempotencyResult {
+            operation_id: envelope.operation_id.clone(),
+            request_id: envelope.request_id.clone(),
+            first_outcome: reason.to_owned(),
+            state: OperationState::Rejected,
+            duplicate_count: 0,
+        },
+    );
+    CrdtOutcome::unsupported(common, reason)
+}
+
 /// Factory for owned local read and transaction sessions from one embedded database.
 ///
 /// The factory owns the same `Arc<AnyKV>` as its source [`Database`]. Consequently, a session
