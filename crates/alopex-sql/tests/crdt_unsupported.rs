@@ -31,6 +31,7 @@ fn crdt_scalar_names_are_not_registered_as_sql_functions() {
         "crdt_counter_increment('requests', 1)",
         "crdt_counter_decrement('requests', 1)",
         "crdt_set_create('members')",
+        "crdt_set_read('members')",
         "crdt_set_add('members', 'alice')",
         "crdt_set_contains('members', 'alice')",
     ] {
@@ -124,6 +125,22 @@ fn set_create_is_rejected_during_planning_before_any_execution() {
     assert!(scalar::signature(function).is_none());
     let error = plan_sql_for_routing(&catalog, "SELECT crdt_set_create('members')")
         .expect_err("Set create must be rejected before SQL execution");
+    assert!(matches!(error, SqlError::Plan { .. }));
+    assert_eq!(error.code(), "ALOPEX-F001");
+    assert!(error.message().contains(function));
+}
+
+#[test]
+fn set_read_is_rejected_during_planning_before_any_execution() {
+    let function = "crdt_set_read";
+    let catalog = MemoryCatalog::new();
+
+    // A read-looking Set identifier is not a SQL query escape hatch.  It
+    // remains absent from the scalar registry, so planning fails before any
+    // executable plan, transaction, or Set projection is reached.
+    assert!(scalar::signature(function).is_none());
+    let error = plan_sql_for_routing(&catalog, "SELECT crdt_set_read('members')")
+        .expect_err("Set read must be rejected before SQL execution");
     assert!(matches!(error, SqlError::Plan { .. }));
     assert_eq!(error.code(), "ALOPEX-F001");
     assert!(error.message().contains(function));
