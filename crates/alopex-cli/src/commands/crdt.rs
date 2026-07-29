@@ -187,41 +187,79 @@ pub fn execute_local<W: Write>(
             }
         }
         CrdtCommand::Set { command } => {
-            let SetCommand::Create {
-                object_id,
-                cluster_id,
-                table_id,
-                range_id,
-                schema_version,
-                data_epoch,
-                request_id,
-                operation_id,
-                update_version,
-                actor,
-            } = command.ok_or_else(|| {
+            let command = command.ok_or_else(|| {
                 CliError::InvalidArgument("Missing CRDT Set subcommand".to_string())
             })?;
-            let envelope = CrdtOperationEnvelope::new(
-                object_id,
-                RangeIdentity::new(
+            match command {
+                SetCommand::Create {
+                    object_id,
                     cluster_id,
                     table_id,
                     range_id,
-                    None,
-                    None,
                     schema_version,
                     data_epoch,
-                ),
-                actor,
-                request_id,
-                operation_id,
-                update_version,
-                CrdtOperationKind::SetCreate,
-                CrdtPayload::None,
-            )
-            .map_err(|error| CliError::InvalidArgument(error.to_string()))?;
-            let outcome = db.create_set(envelope)?;
-            render_and_classify(&outcome, writer, output_format, quiet)
+                    request_id,
+                    operation_id,
+                    update_version,
+                    actor,
+                } => {
+                    let envelope = CrdtOperationEnvelope::new(
+                        object_id,
+                        RangeIdentity::new(
+                            cluster_id,
+                            table_id,
+                            range_id,
+                            None,
+                            None,
+                            schema_version,
+                            data_epoch,
+                        ),
+                        actor,
+                        request_id,
+                        operation_id,
+                        update_version,
+                        CrdtOperationKind::SetCreate,
+                        CrdtPayload::None,
+                    )
+                    .map_err(|error| CliError::InvalidArgument(error.to_string()))?;
+                    let outcome = db.create_set(envelope)?;
+                    render_and_classify(&outcome, writer, output_format, quiet)
+                }
+                SetCommand::Read {
+                    object_id,
+                    cluster_id,
+                    table_id,
+                    range_id,
+                    schema_version,
+                    data_epoch,
+                    request_id,
+                    operation_id,
+                    update_version,
+                    actor,
+                } => {
+                    let envelope = CrdtOperationEnvelope::new(
+                        object_id,
+                        RangeIdentity::new(
+                            cluster_id,
+                            table_id,
+                            range_id,
+                            None,
+                            None,
+                            schema_version,
+                            data_epoch,
+                        ),
+                        actor,
+                        request_id,
+                        operation_id,
+                        update_version,
+                        CrdtOperationKind::SetRead,
+                        CrdtPayload::None,
+                    )
+                    .map_err(|error| CliError::InvalidArgument(error.to_string()))?;
+                    let outcome = db.read_set(envelope)?;
+                    render_and_classify(&outcome, writer, output_format, quiet)
+                }
+            }
         }
     }
 }
@@ -387,40 +425,76 @@ pub async fn execute_remote<W: Write>(
             }
         }
         CrdtCommand::Set { command } => {
-            let SetCommand::Create {
-                object_id,
-                cluster_id,
-                table_id,
-                range_id,
-                schema_version,
-                data_epoch,
-                request_id,
-                operation_id,
-                update_version,
-                ..
-            } = command.as_ref().ok_or_else(|| {
+            let command = command.as_ref().ok_or_else(|| {
                 CliError::InvalidArgument("Missing CRDT Set subcommand".to_string())
             })?;
-            let request = RemoteSetCreateRequest {
-                object_id,
-                range: RangeIdentity::new(
-                    cluster_id.clone(),
-                    *table_id,
-                    range_id.clone(),
-                    None,
-                    None,
-                    *schema_version,
-                    *data_epoch,
-                ),
-                request_id,
-                operation_id,
-                update_version: *update_version,
-            };
-            let outcome: CrdtOutcome = client
-                .post_json("api/crdt/sets", &request)
-                .await
-                .map_err(map_client_error)?;
-            render_and_classify(&outcome, writer, output_format, quiet)
+            match command {
+                SetCommand::Create {
+                    object_id,
+                    cluster_id,
+                    table_id,
+                    range_id,
+                    schema_version,
+                    data_epoch,
+                    request_id,
+                    operation_id,
+                    update_version,
+                    ..
+                } => {
+                    let request = RemoteSetCreateRequest {
+                        object_id,
+                        range: RangeIdentity::new(
+                            cluster_id.clone(),
+                            *table_id,
+                            range_id.clone(),
+                            None,
+                            None,
+                            *schema_version,
+                            *data_epoch,
+                        ),
+                        request_id,
+                        operation_id,
+                        update_version: *update_version,
+                    };
+                    let outcome: CrdtOutcome = client
+                        .post_json("api/crdt/sets", &request)
+                        .await
+                        .map_err(map_client_error)?;
+                    render_and_classify(&outcome, writer, output_format, quiet)
+                }
+                SetCommand::Read {
+                    object_id,
+                    cluster_id,
+                    table_id,
+                    range_id,
+                    schema_version,
+                    data_epoch,
+                    request_id,
+                    operation_id,
+                    update_version,
+                    ..
+                } => {
+                    let request = RemoteSetReadRequest {
+                        range: RangeIdentity::new(
+                            cluster_id.clone(),
+                            *table_id,
+                            range_id.clone(),
+                            None,
+                            None,
+                            *schema_version,
+                            *data_epoch,
+                        ),
+                        request_id,
+                        operation_id,
+                        update_version: *update_version,
+                    };
+                    let outcome: CrdtOutcome = client
+                        .post_json(&format!("api/crdt/sets/{object_id}/read"), &request)
+                        .await
+                        .map_err(map_client_error)?;
+                    render_and_classify(&outcome, writer, output_format, quiet)
+                }
+            }
         }
     }
 }
@@ -438,6 +512,14 @@ struct RemoteCounterCreateRequest<'a> {
 #[derive(Serialize)]
 struct RemoteSetCreateRequest<'a> {
     object_id: &'a str,
+    range: RangeIdentity,
+    request_id: &'a str,
+    operation_id: &'a str,
+    update_version: u64,
+}
+
+#[derive(Serialize)]
+struct RemoteSetReadRequest<'a> {
     range: RangeIdentity,
     request_id: &'a str,
     operation_id: &'a str,

@@ -136,6 +136,32 @@ const SET_CREATE: [&str; 24] = [
     "12",
 ];
 
+const SET_READ: [&str; 23] = [
+    "--output",
+    "json",
+    "crdt",
+    "set",
+    "read",
+    "--object-id",
+    "set-a",
+    "--cluster-id",
+    "cluster-a",
+    "--table-id",
+    "7",
+    "--range-id",
+    "range-a",
+    "--schema-version",
+    "1",
+    "--data-epoch",
+    "9",
+    "--request-id",
+    "request-set-read",
+    "--operation-id",
+    "operation-set-read",
+    "--update-version",
+    "12",
+];
+
 #[test]
 fn i27_cli_set_create_preserves_canonical_empty_membership() {
     let parsed = Cli::try_parse_from(std::iter::once("alopex").chain(SET_CREATE));
@@ -163,6 +189,54 @@ fn i27_cli_set_create_preserves_canonical_empty_membership() {
     assert_eq!(outcome["routing"]["kind"], "local_only");
     assert_eq!(outcome["value"]["value_type"], "set");
     assert_eq!(outcome["value"]["members"], serde_json::json!([]));
+    assert_eq!(outcome["idempotency"]["duplicate_count"], 0);
+}
+
+#[test]
+fn i27_cli_set_read_preserves_canonical_membership_without_mutating_the_projection() {
+    let data_dir = tempdir().expect("temporary Set data directory");
+    let data_dir = data_dir.path().to_str().expect("UTF-8 data path");
+    let mut create_args = vec!["--data-dir", data_dir];
+    create_args.extend(
+        SET_CREATE
+            .iter()
+            .copied()
+            .filter(|argument| *argument != "--in-memory"),
+    );
+    let create = ProcessCommand::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(create_args)
+        .output()
+        .expect("run Set create before read");
+    assert!(
+        create.status.success(),
+        "Set create failed: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    let mut args = vec!["--data-dir", data_dir];
+    args.extend(SET_READ);
+    assert!(Cli::try_parse_from(std::iter::once("alopex").chain(args.iter().copied())).is_ok());
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(args)
+        .output()
+        .expect("run Set read");
+    assert!(
+        output.status.success(),
+        "Set read failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).expect("Set read JSON");
+    let outcome = rows
+        .as_array()
+        .and_then(|rows| rows.first())
+        .expect("one Set read outcome");
+    assert_eq!(outcome["object_type"], "set");
+    assert_eq!(outcome["object_id"], "set-a");
+    assert_eq!(outcome["state"], "committed");
+    assert_eq!(outcome["routing"]["kind"], "local_only");
+    assert_eq!(outcome["value"]["members"], serde_json::json!([]));
+    assert_eq!(outcome["value"]["member_versions"], serde_json::json!({}));
+    assert_eq!(outcome["idempotency"]["first_outcome"], "set_read");
     assert_eq!(outcome["idempotency"]["duplicate_count"], 0);
 }
 
