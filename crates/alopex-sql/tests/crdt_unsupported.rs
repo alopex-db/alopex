@@ -30,6 +30,7 @@ fn crdt_scalar_names_are_not_registered_as_sql_functions() {
         "crdt_counter_read('requests')",
         "crdt_counter_increment('requests', 1)",
         "crdt_counter_decrement('requests', 1)",
+        "crdt_set_create('members')",
         "crdt_set_add('members', 'alice')",
         "crdt_set_contains('members', 'alice')",
     ] {
@@ -107,6 +108,22 @@ fn counter_decrement_is_rejected_during_planning_before_any_execution() {
     assert!(scalar::signature(function).is_none());
     let error = plan_sql_for_routing(&catalog, "SELECT crdt_counter_decrement('requests', 1)")
         .expect_err("Counter decrement must be rejected before SQL execution");
+    assert!(matches!(error, SqlError::Plan { .. }));
+    assert_eq!(error.code(), "ALOPEX-F001");
+    assert!(error.message().contains(function));
+}
+
+#[test]
+fn set_create_is_rejected_during_planning_before_any_execution() {
+    let function = "crdt_set_create";
+    let catalog = MemoryCatalog::new();
+
+    // Set creation has no SQL scalar registration. The planner must reject
+    // this identifier before it can produce an executable plan or mutate a
+    // Set projection through the SQL surface.
+    assert!(scalar::signature(function).is_none());
+    let error = plan_sql_for_routing(&catalog, "SELECT crdt_set_create('members')")
+        .expect_err("Set create must be rejected before SQL execution");
     assert!(matches!(error, SqlError::Plan { .. }));
     assert_eq!(error.code(), "ALOPEX-F001");
     assert!(error.message().contains(function));
