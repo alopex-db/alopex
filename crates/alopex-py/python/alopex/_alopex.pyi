@@ -516,6 +516,21 @@ class Database:
         update_version: int,
         actor: str = "alopex-python-local",
     ) -> Dict[str, Any]: ...
+    def add_set(
+        self,
+        object_id: str,
+        *,
+        cluster_id: str,
+        table_id: int,
+        range_id: str,
+        schema_version: int,
+        data_epoch: int,
+        request_id: str,
+        operation_id: str,
+        update_version: int,
+        member: str,
+        actor: str = "alopex-python-local",
+    ) -> Dict[str, Any]: ...
     def read_set(
         self,
         object_id: str,

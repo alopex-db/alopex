@@ -160,6 +160,24 @@ def _read_set(db: Database, operation_id: str = "operation-set-read") -> dict:
     )
 
 
+def _add_set(
+    db: Database,
+    operation_id: str = "00000000-0000-0000-0000-000000000160",
+) -> dict:
+    return db.add_set(
+        "set-a",
+        cluster_id="cluster-a",
+        table_id=7,
+        range_id="range-a",
+        schema_version=1,
+        data_epoch=9,
+        request_id="request-set-add",
+        operation_id=operation_id,
+        update_version=13,
+        member="alice",
+    )
+
+
 def _increment_counter(db: Database, operation_id: str = "operation-increment") -> dict:
     return db.increment_counter(
         "counter-a",
@@ -278,6 +296,42 @@ def test_i27_python_sync_set_read_preserves_canonical_membership_without_mutatio
     }
     assert outcome["idempotency"]["first_outcome"] == "set_read"
     assert outcome["idempotency"]["duplicate_count"] == 0
+
+
+def test_i27_python_sync_set_add_preserves_canonical_membership_and_idempotency() -> None:
+    db = Database.open_in_memory()
+    _create_set(db)
+
+    first = _add_set(db)
+    duplicate = _add_set(db)
+
+    assert first["object_type"] == "set"
+    assert first["object_id"] == "set-a"
+    assert first["range"]["cluster_id"] == "cluster-a"
+    assert first["range"]["table_id"] == 7
+    assert first["range"]["range_id"] == "range-a"
+    assert first["request_id"] == "request-set-add"
+    assert first["operation_id"] == "00000000-0000-0000-0000-000000000160"
+    assert first["state"] == "committed"
+    assert first["routing"]["kind"] == "local_only"
+    assert first["value"] == {
+        "value_type": "set",
+        "members": ["alice"],
+        "member_versions": {
+            "alice": {
+                "update_version": 13,
+                "operation_id": "00000000-0000-0000-0000-000000000160",
+                "present": True,
+            }
+        },
+        "accepted_operation_versions": {
+            "operation-set-a": 12,
+            "00000000-0000-0000-0000-000000000160": 13,
+        },
+    }
+    assert first["idempotency"]["duplicate_count"] == 0
+    assert duplicate["value"] == first["value"]
+    assert duplicate["idempotency"]["duplicate_count"] == 1
 
 
 def test_i27_python_sync_counter_increment_preserves_canonical_outcome_and_idempotency() -> None:
