@@ -16,6 +16,7 @@ fn crdt_dataframe_operation_names_are_rejected_before_execution() {
         "crdt_set_create",
         "crdt_set_read",
         "crdt_set_add",
+        "crdt_set_remove",
         "crdt_set_contains",
         "crdt_merge",
         "crdt_reconcile",
@@ -103,6 +104,17 @@ fn set_add_has_a_stable_pre_execution_unsupported_classification() {
     assert_eq!(
         error.to_string(),
         "invalid operation: dataframe CRDT operation 'crdt_set_add' is unsupported: pre_execution_unsupported"
+    );
+}
+
+#[test]
+fn set_remove_has_a_stable_pre_execution_unsupported_classification() {
+    let operation = "crdt_set_remove";
+    let error = preflight(operation).expect_err("Set remove is not a DataFrame operation");
+    assert!(matches!(error, DataFrameError::InvalidOperation { .. }));
+    assert_eq!(
+        error.to_string(),
+        "invalid operation: dataframe CRDT operation 'crdt_set_remove' is unsupported: pre_execution_unsupported"
     );
 }
 
