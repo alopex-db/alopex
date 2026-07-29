@@ -109,6 +109,63 @@ const COUNTER_DECREMENT: [&str; 23] = [
     "12",
 ];
 
+const SET_CREATE: [&str; 24] = [
+    "--in-memory",
+    "--output",
+    "json",
+    "crdt",
+    "set",
+    "create",
+    "--object-id",
+    "set-a",
+    "--cluster-id",
+    "cluster-a",
+    "--table-id",
+    "7",
+    "--range-id",
+    "range-a",
+    "--schema-version",
+    "1",
+    "--data-epoch",
+    "9",
+    "--request-id",
+    "request-set-a",
+    "--operation-id",
+    "operation-set-a",
+    "--update-version",
+    "12",
+];
+
+#[test]
+fn i27_cli_set_create_preserves_canonical_empty_membership() {
+    let parsed = Cli::try_parse_from(std::iter::once("alopex").chain(SET_CREATE));
+    assert!(
+        parsed.is_ok(),
+        "Set create must be a registered CLI operation"
+    );
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(SET_CREATE)
+        .output()
+        .expect("run Set create");
+    assert!(
+        output.status.success(),
+        "Set create failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).expect("Set create JSON");
+    let outcome = rows
+        .as_array()
+        .and_then(|rows| rows.first())
+        .expect("one Set outcome");
+    assert_eq!(outcome["object_type"], "set");
+    assert_eq!(outcome["object_id"], "set-a");
+    assert_eq!(outcome["state"], "committed");
+    assert_eq!(outcome["routing"]["kind"], "local_only");
+    assert_eq!(outcome["value"]["value_type"], "set");
+    assert_eq!(outcome["value"]["members"], serde_json::json!([]));
+    assert_eq!(outcome["idempotency"]["duplicate_count"], 0);
+}
+
 #[test]
 fn i27_cli_counter_create_preserves_canonical_outcome_and_negative_value() {
     let mut args = COUNTER_CREATE.to_vec();

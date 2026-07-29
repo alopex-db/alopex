@@ -201,6 +201,11 @@ pub enum CrdtCommand {
         #[command(subcommand)]
         command: Option<CounterCommand>,
     },
+    /// Set operations
+    Set {
+        #[command(subcommand)]
+        command: Option<SetCommand>,
+    },
 }
 
 /// Counter CRDT commands.
@@ -343,6 +348,35 @@ pub enum CounterCommand {
         /// Signed amount to subtract from the Counter
         #[arg(long, allow_hyphen_values = true)]
         delta: i64,
+        /// Local actor identity. Remote requests derive this from transport authentication.
+        #[arg(long, default_value = "alopex-cli-local")]
+        actor: String,
+    },
+}
+
+/// Set CRDT commands.
+#[derive(Subcommand, Debug)]
+pub enum SetCommand {
+    /// Create an empty Set with an explicit durable operation identity
+    Create {
+        #[arg(long)]
+        object_id: String,
+        #[arg(long)]
+        cluster_id: String,
+        #[arg(long)]
+        table_id: u32,
+        #[arg(long)]
+        range_id: String,
+        #[arg(long)]
+        schema_version: u64,
+        #[arg(long)]
+        data_epoch: u64,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        update_version: u64,
         /// Local actor identity. Remote requests derive this from transport authentication.
         #[arg(long, default_value = "alopex-cli-local")]
         actor: String,
