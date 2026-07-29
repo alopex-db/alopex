@@ -570,6 +570,18 @@ impl Database {
         Ok(owned_session::unsupported_async_set_read(envelope))
     }
 
+    /// Returns the explicit async capability result for Set contains.
+    ///
+    /// The owned-session boundary has no native async CRDT executor, so this
+    /// method preserves the named async capability contract and does not call
+    /// [`Self::contains_set`] synchronously.
+    pub async fn contains_set_async(
+        &self,
+        envelope: alopex_cluster::crdt::CrdtOperationEnvelope,
+    ) -> Result<alopex_cluster::crdt::CrdtOutcome> {
+        Ok(owned_session::unsupported_async_set_contains(envelope))
+    }
+
     /// Returns the explicit async capability result for Counter decrement.
     ///
     /// The owned-session boundary has no native async CRDT executor, so this
@@ -2737,6 +2749,50 @@ mod tests {
         assert!(matches!(
             sync.value(),
             Some(CrdtValue::Set { members, .. }) if members.is_empty()
+        ));
+    }
+
+    #[test]
+    fn embedded_async_set_contains_is_explicitly_unsupported_without_a_sync_fallback() {
+        let db = Database::new();
+        db.create_set(set_create_envelope("operation-set-create"))
+            .expect("create Set");
+        db.add_set(set_add_envelope(
+            "00000000-0000-0000-0000-000000000155",
+            "alice",
+        ))
+        .expect("add Set member");
+
+        let outcome = poll_immediately(
+            db.contains_set_async(set_contains_envelope("operation-set-contains", "alice")),
+        )
+        .expect("canonical unsupported outcome");
+        assert_eq!(outcome.common().object_type, CrdtObjectType::Set);
+        assert_eq!(outcome.common().state, OperationState::Rejected);
+        assert_eq!(
+            outcome.common().failure_class,
+            Some(FailureClass::InvalidRequest)
+        );
+        assert_eq!(
+            outcome.common().routing.kind,
+            RoutingOutcomeKind::Unsupported
+        );
+        assert!(outcome.value().is_none());
+        assert_eq!(
+            outcome.membership_unavailable(),
+            Some("embedded_async_crdt_unavailable")
+        );
+
+        let sync = db
+            .contains_set(set_contains_envelope(
+                "operation-set-contains-sync",
+                "alice",
+            ))
+            .expect("unsupported async result must not replace the Set contains outcome");
+        assert_eq!(sync.common().state, OperationState::Committed);
+        assert!(matches!(
+            sync.value(),
+            Some(CrdtValue::Set { members, .. }) if members == &vec!["alice".to_string()]
         ));
     }
 
