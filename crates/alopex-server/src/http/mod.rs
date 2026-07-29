@@ -70,6 +70,10 @@ pub fn router(state: Arc<ServerState>) -> Router {
             axum::routing::post(crdt::read_counter),
         )
         .route(
+            "/crdt/sets/{object_id}/read",
+            axum::routing::post(crdt::read_set),
+        )
+        .route(
             "/crdt/counters/{object_id}/increment",
             axum::routing::post(crdt::increment_counter),
         )
