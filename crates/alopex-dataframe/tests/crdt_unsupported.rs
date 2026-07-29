@@ -13,6 +13,7 @@ fn crdt_dataframe_operation_names_are_rejected_before_execution() {
         "crdt_counter_increment",
         "crdt_counter_decrement",
         "crdt_counter_read",
+        "crdt_set_create",
         "crdt_set_add",
         "crdt_set_contains",
         "crdt_merge",
@@ -68,6 +69,17 @@ fn counter_decrement_has_a_stable_pre_execution_unsupported_classification() {
     assert_eq!(
         error.to_string(),
         "invalid operation: dataframe CRDT operation 'crdt_counter_decrement' is unsupported: pre_execution_unsupported"
+    );
+}
+
+#[test]
+fn set_create_has_a_stable_pre_execution_unsupported_classification() {
+    let operation = "crdt_set_create";
+    let error = preflight(operation).expect_err("Set create is not a DataFrame operation");
+    assert!(matches!(error, DataFrameError::InvalidOperation { .. }));
+    assert_eq!(
+        error.to_string(),
+        "invalid operation: dataframe CRDT operation 'crdt_set_create' is unsupported: pre_execution_unsupported"
     );
 }
 

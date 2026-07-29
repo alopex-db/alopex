@@ -156,12 +156,13 @@ impl DataFrameError {
                 "dataframe operation '{operation}' is planned and unavailable: pre_execution_unsupported"
             ))),
             // Phase 2 deliberately has no DataFrame CRDT namespace.  Classify
-            // Counter create/read/increment/decrement explicitly so callers receive a stable boundary
-            // result before any eager or lazy plan can be built.
+            // Counter and Set create/read/increment/decrement operations explicitly so callers
+            // receive a stable boundary result before any eager or lazy plan can be built.
             "crdt_counter_create"
             | "crdt_counter_read"
             | "crdt_counter_increment"
-            | "crdt_counter_decrement" => {
+            | "crdt_counter_decrement"
+            | "crdt_set_create" => {
                 Err(Self::invalid_operation(format!(
                 "dataframe CRDT operation '{operation}' is unsupported: pre_execution_unsupported"
                 )))
