@@ -33,6 +33,7 @@ fn crdt_scalar_names_are_not_registered_as_sql_functions() {
         "crdt_set_create('members')",
         "crdt_set_read('members')",
         "crdt_set_add('members', 'alice')",
+        "crdt_set_remove('members', 'alice')",
         "crdt_set_contains('members', 'alice')",
     ] {
         // The parser may represent an arbitrary identifier as a function
@@ -157,6 +158,22 @@ fn set_add_is_rejected_during_planning_before_any_execution() {
     assert!(scalar::signature(function).is_none());
     let error = plan_sql_for_routing(&catalog, "SELECT crdt_set_add('members', 'alice')")
         .expect_err("Set add must be rejected before SQL execution");
+    assert!(matches!(error, SqlError::Plan { .. }));
+    assert_eq!(error.code(), "ALOPEX-F001");
+    assert!(error.message().contains(function));
+}
+
+#[test]
+fn set_remove_is_rejected_during_planning_before_any_execution() {
+    let function = "crdt_set_remove";
+    let catalog = MemoryCatalog::new();
+
+    // Set membership removal is intentionally absent from the SQL scalar
+    // register. Planning must reject the identifier before an executable
+    // plan, transaction, or Set projection can be created.
+    assert!(scalar::signature(function).is_none());
+    let error = plan_sql_for_routing(&catalog, "SELECT crdt_set_remove('members', 'alice')")
+        .expect_err("Set remove must be rejected before SQL execution");
     assert!(matches!(error, SqlError::Plan { .. }));
     assert_eq!(error.code(), "ALOPEX-F001");
     assert!(error.message().contains(function));
