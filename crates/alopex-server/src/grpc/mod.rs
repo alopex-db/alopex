@@ -825,6 +825,37 @@ impl AlopexService for AlopexServiceImpl {
         Ok(Response::new(response))
     }
 
+    async fn create_set(
+        &self,
+        request: Request<proto::CreateSetRequest>,
+    ) -> std::result::Result<Response<proto::SetOutcome>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        let request = request.into_inner();
+        let range = request
+            .range
+            .ok_or_else(|| Status::invalid_argument("range is required"))?;
+        let core_request = crate::http::crdt::SetCreateRequest {
+            object_id: request.object_id,
+            range: range_identity_from_proto(range),
+            request_id: request.request_id.into(),
+            operation_id: request.operation_id,
+            update_version: request.update_version,
+        };
+        let http_context = crate::http::RequestContext {
+            correlation_id: ctx.correlation_id.clone(),
+            actor: ctx.actor.clone(),
+        };
+        let outcome =
+            crate::http::crdt::create_set_outcome(self.state.as_ref(), &http_context, core_request);
+        let response = set_outcome_to_proto(&outcome);
+        let status = outcome.surface_status();
+        if status.grpc_code != "OK" {
+            return Err(crdt_status(status.grpc_code, &ctx.correlation_id));
+        }
+        Ok(Response::new(response))
+    }
+
     async fn read_counter(
         &self,
         request: Request<proto::ReadCounterRequest>,
@@ -995,6 +1026,58 @@ fn counter_outcome_to_proto(outcome: &CrdtOutcome) -> proto::CounterOutcome {
         accepted_delta_total,
         value,
         value_unavailable: outcome.value_unavailable().unwrap_or_default().to_owned(),
+    }
+}
+
+fn set_outcome_to_proto(outcome: &CrdtOutcome) -> proto::SetOutcome {
+    let common = outcome.common();
+    let (has_value, members, member_versions) = match outcome.value() {
+        Some(CrdtValue::Set {
+            members,
+            member_versions,
+            ..
+        }) => (
+            true,
+            members.clone(),
+            member_versions
+                .iter()
+                .map(|(member, version)| proto::SetMemberVersion {
+                    member: member.clone(),
+                    update_version: version.update_version,
+                    operation_id: version.operation_id.clone(),
+                    present: version.present,
+                })
+                .collect(),
+        ),
+        _ => (false, Vec::new(), Vec::new()),
+    };
+    proto::SetOutcome {
+        object_type: enum_wire(&common.object_type),
+        object_id: common.object_id.clone(),
+        range: Some(range_identity_to_proto(&common.range)),
+        state_epoch: common.state_epoch,
+        actor: common.actor.as_str().to_owned(),
+        request_id: common.request_id.as_str().to_owned(),
+        operation_id: common.operation_id.clone(),
+        state: enum_wire(&common.state),
+        failure_class: common
+            .failure_class
+            .as_ref()
+            .map(enum_wire)
+            .unwrap_or_default(),
+        routing_kind: enum_wire(&common.routing.kind),
+        routing_metadata_version: common.routing.metadata_version,
+        routing_reason_code: common.routing.reason_code.clone(),
+        retryable: common.retryable,
+        original_operation_id: common.idempotency.operation_id.clone(),
+        original_request_id: common.idempotency.request_id.as_str().to_owned(),
+        first_outcome: common.idempotency.first_outcome.clone(),
+        first_state: enum_wire(&common.idempotency.state),
+        duplicate_count: common.idempotency.duplicate_count,
+        has_value,
+        members,
+        member_versions,
+        membership_unavailable: outcome.value_unavailable().unwrap_or_default().to_owned(),
     }
 }
 

@@ -186,6 +186,14 @@ message DecrementCounterRequest {
   sint64 delta = 6;
 }
 
+message CreateSetRequest {
+  string object_id = 1;
+  CrdtRangeIdentity range = 2;
+  string request_id = 3;
+  string operation_id = 4;
+  uint64 update_version = 5;
+}
+
 // The flattened common contract mirrors the HTTP/embedded CrdtOutcome. A
 // non-OK gRPC status carries this exact encoded message in Status.details.
 message CounterOutcome {
@@ -212,6 +220,38 @@ message CounterOutcome {
   sint64 accepted_delta_total = 21;
   sint64 value = 22;
   string value_unavailable = 23;
+}
+
+message SetMemberVersion {
+  string member = 1;
+  uint64 update_version = 2;
+  string operation_id = 3;
+  bool present = 4;
+}
+
+message SetOutcome {
+  string object_type = 1;
+  string object_id = 2;
+  CrdtRangeIdentity range = 3;
+  uint64 state_epoch = 4;
+  string actor = 5;
+  string request_id = 6;
+  string operation_id = 7;
+  string state = 8;
+  string failure_class = 9;
+  string routing_kind = 10;
+  uint64 routing_metadata_version = 11;
+  string routing_reason_code = 12;
+  bool retryable = 13;
+  string original_operation_id = 14;
+  string original_request_id = 15;
+  string first_outcome = 16;
+  string first_state = 17;
+  uint64 duplicate_count = 18;
+  bool has_value = 19;
+  repeated string members = 20;
+  repeated SetMemberVersion member_versions = 21;
+  string membership_unavailable = 22;
 }
 
 message Vector {
@@ -271,4 +311,5 @@ service AlopexService {
   rpc ReadCounter(ReadCounterRequest) returns (CounterOutcome);
   rpc IncrementCounter(IncrementCounterRequest) returns (CounterOutcome);
   rpc DecrementCounter(DecrementCounterRequest) returns (CounterOutcome);
+  rpc CreateSet(CreateSetRequest) returns (SetOutcome);
 }
