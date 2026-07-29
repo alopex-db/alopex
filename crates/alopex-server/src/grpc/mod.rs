@@ -856,6 +856,40 @@ impl AlopexService for AlopexServiceImpl {
         Ok(Response::new(response))
     }
 
+    async fn read_set(
+        &self,
+        request: Request<proto::ReadSetRequest>,
+    ) -> std::result::Result<Response<proto::SetOutcome>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        let request = request.into_inner();
+        let range = request
+            .range
+            .ok_or_else(|| Status::invalid_argument("range is required"))?;
+        let core_request = crate::http::crdt::SetReadRequest {
+            range: range_identity_from_proto(range),
+            request_id: request.request_id.into(),
+            operation_id: request.operation_id,
+            update_version: request.update_version,
+        };
+        let http_context = crate::http::RequestContext {
+            correlation_id: ctx.correlation_id.clone(),
+            actor: ctx.actor.clone(),
+        };
+        let outcome = crate::http::crdt::read_set_outcome(
+            self.state.as_ref(),
+            &http_context,
+            request.object_id,
+            core_request,
+        );
+        let response = set_outcome_to_proto(&outcome);
+        let status = outcome.surface_status();
+        if status.grpc_code != "OK" {
+            return Err(crdt_status(status.grpc_code, &ctx.correlation_id));
+        }
+        Ok(Response::new(response))
+    }
+
     async fn read_counter(
         &self,
         request: Request<proto::ReadCounterRequest>,

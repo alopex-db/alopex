@@ -194,6 +194,14 @@ message CreateSetRequest {
   uint64 update_version = 5;
 }
 
+message ReadSetRequest {
+  string object_id = 1;
+  CrdtRangeIdentity range = 2;
+  string request_id = 3;
+  string operation_id = 4;
+  uint64 update_version = 5;
+}
+
 // The flattened common contract mirrors the HTTP/embedded CrdtOutcome. A
 // non-OK gRPC status carries this exact encoded message in Status.details.
 message CounterOutcome {
@@ -312,4 +320,5 @@ service AlopexService {
   rpc IncrementCounter(IncrementCounterRequest) returns (CounterOutcome);
   rpc DecrementCounter(DecrementCounterRequest) returns (CounterOutcome);
   rpc CreateSet(CreateSetRequest) returns (SetOutcome);
+  rpc ReadSet(ReadSetRequest) returns (SetOutcome);
 }
