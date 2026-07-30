@@ -62,6 +62,9 @@ pub struct ServerConfig {
     pub audit_log_output: AuditLogOutput,
     /// Cluster-aware startup configuration.
     pub cluster: ClusterServerConfig,
+    /// Server-established authorization facts for changefeed lifecycle calls.
+    /// An empty policy set denies every changefeed request.
+    pub changefeed: ChangefeedServerConfig,
 }
 
 impl Default for ServerConfig {
@@ -86,8 +89,46 @@ impl Default for ServerConfig {
             audit_log_enabled: true,
             audit_log_output: AuditLogOutput::Stdout,
             cluster: ClusterServerConfig::default(),
+            changefeed: ChangefeedServerConfig::default(),
         }
     }
+}
+
+/// Changefeed HTTP authorization configuration.
+///
+/// These facts live in server configuration rather than in a request body so
+/// callers cannot grant themselves a tenant, range, or lifecycle scope.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChangefeedServerConfig {
+    /// Authorization facts indexed by authenticated actor and tenant.
+    pub authorizations: Vec<ChangefeedAuthorizationConfig>,
+}
+
+/// One server-established authorization grant for Durable changefeeds.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChangefeedAuthorizationConfig {
+    /// Authenticated subject as produced by the configured HTTP middleware.
+    pub subject: String,
+    /// Tenant that this grant covers.
+    pub tenant: String,
+    /// Range identifiers visible to the subject within the tenant.
+    pub allowed_ranges: Vec<String>,
+    /// Lifecycle scopes granted to the subject.
+    pub allowed_scopes: Vec<ChangefeedScopeConfig>,
+}
+
+/// String-stable configuration form of a changefeed authorization scope.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangefeedScopeConfig {
+    /// Permits create, subscribe, poll, stream, and resume.
+    Read,
+    /// Permits acknowledgement, cancellation, and close.
+    Ack,
+    /// Permits retention-administration operations.
+    RetentionAdmin,
 }
 
 /// Cluster-aware server configuration.
@@ -204,6 +245,21 @@ impl ServerConfig {
         let cluster_config = self.cluster_manager_config()?;
         ClusterManager::new(cluster_config)
             .map_err(|err| ServerError::InvalidConfig(err.to_string()))?;
+        for authorization in &self.changefeed.authorizations {
+            if authorization.subject.trim().is_empty()
+                || authorization.tenant.trim().is_empty()
+                || authorization.allowed_ranges.is_empty()
+                || authorization.allowed_scopes.is_empty()
+                || authorization
+                    .allowed_ranges
+                    .iter()
+                    .any(|range| range.trim().is_empty())
+            {
+                return Err(ServerError::InvalidConfig(
+                    "changefeed authorization requires subject, tenant, range, and scope".into(),
+                ));
+            }
+        }
         Ok(())
     }
 

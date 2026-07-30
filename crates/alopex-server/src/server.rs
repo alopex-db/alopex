@@ -1,11 +1,11 @@
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use alopex_cluster::{
-    ClusterManager, ClusterMode, ClusterStatusSnapshot, MembershipSource, NodeRole, NodeState,
-    TableLifecycleEffect,
+    changefeed::DurableProfileAdapter, ClusterManager, ClusterMode, ClusterStatusSnapshot,
+    MembershipSource, NodeRole, NodeState, TableLifecycleEffect,
 };
 use alopex_core::kv::any::AnyKV;
 use alopex_core::kv::async_adapter::{AsyncKVStoreAdapter, AsyncKVTransactionAdapter};
@@ -21,6 +21,7 @@ use crate::audit::AuditLogger;
 use crate::auth::AuthMiddleware;
 use crate::config::ServerConfig;
 use crate::error::{Result, ServerError};
+use crate::http::changefeed::ChangefeedRegistry;
 use crate::metrics::Metrics;
 use crate::ops::backup::BackupCoordinator;
 use crate::ops::distributed_read::{DistributedReadRegistry, RemoteReadWorkerAuthorizer};
@@ -50,6 +51,9 @@ pub struct ServerState {
     /// Coordinator-owned execution/cleanup registry shared by HTTP cancel,
     /// connection close, timeout, and range-worker cancellation delivery.
     pub distributed_read_registry: DistributedReadRegistry,
+    /// Canonical feed coordinator and server-established authorization facts
+    /// shared by all HTTP changefeed lifecycle handlers.
+    pub changefeed_registry: Arc<Mutex<ChangefeedRegistry>>,
     pub start_time: Instant,
     pub lifecycle_state: Arc<LifecycleStateManager>,
     pub recovery_info: RecoveryInfo,
@@ -78,6 +82,20 @@ pub struct ClusterStartupDiagnostics {
 
 impl Server {
     pub fn new(config: ServerConfig) -> Result<Self> {
+        Self::new_with_changefeed_adapter(config, DurableProfileAdapter::compiled())
+    }
+
+    /// Builds a server with independently verified Durable capability evidence.
+    ///
+    /// Production startup uses [`Self::new`], which obtains the compiled
+    /// evidence and therefore fails closed when the Durable profile is absent.
+    /// This constructor exists for an actual Durable integration or an
+    /// isolated contract test to inject verified evidence; it does not accept
+    /// caller-supplied HTTP authorization facts.
+    pub fn new_with_changefeed_adapter(
+        config: ServerConfig,
+        durable_adapter: DurableProfileAdapter,
+    ) -> Result<Self> {
         config.validate()?;
         let cluster_manager = Arc::new(RwLock::new(
             ClusterManager::new(config.cluster_manager_config()?)
@@ -99,6 +117,10 @@ impl Server {
         let remote_read_authorizer =
             RemoteReadWorkerAuthorizer::new(auth.local_read_authorization_recheck());
         let distributed_read_registry = DistributedReadRegistry::new();
+        let changefeed_registry = Arc::new(Mutex::new(ChangefeedRegistry::from_config(
+            durable_adapter,
+            &config.changefeed,
+        )?));
 
         let txn_factory = build_txn_factory(async_store.clone(), catalog.clone(), metrics.clone());
         let session_manager = Arc::new(SessionManager::new(
@@ -139,6 +161,7 @@ impl Server {
                 auth,
                 remote_read_authorizer,
                 distributed_read_registry,
+                changefeed_registry,
                 start_time: Instant::now(),
                 lifecycle_state,
                 recovery_info,

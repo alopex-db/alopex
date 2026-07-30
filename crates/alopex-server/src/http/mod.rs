@@ -221,6 +221,35 @@ pub fn router(state: Arc<ServerState>) -> Router {
     // stable even when an installation mounts existing SQL endpoints under a
     // compatibility prefix.
     let api = api
+        .route("/v1/changefeeds", axum::routing::post(changefeed::create))
+        .route(
+            "/v1/changefeeds/{id}/subscribe",
+            axum::routing::post(changefeed::subscribe),
+        )
+        .route(
+            "/v1/changefeeds/{id}/events",
+            axum::routing::get(changefeed::poll),
+        )
+        .route(
+            "/v1/changefeeds/{id}/stream",
+            axum::routing::get(changefeed::stream),
+        )
+        .route(
+            "/v1/changefeeds/{id}/ack",
+            axum::routing::post(changefeed::ack),
+        )
+        .route(
+            "/v1/changefeeds/{id}/resume",
+            axum::routing::post(changefeed::resume),
+        )
+        .route(
+            "/v1/changefeeds/{id}/cancel",
+            axum::routing::post(changefeed::cancel),
+        )
+        .route(
+            "/v1/changefeeds/{id}/close",
+            axum::routing::post(changefeed::close),
+        )
         .route(
             "/v1/sql/reads",
             axum::routing::post(sql::begin_distributed_read),
