@@ -166,7 +166,8 @@ impl DataFrameError {
             | "crdt_set_read"
             | "crdt_set_add"
             | "crdt_set_remove"
-            | "crdt_set_contains" => {
+            | "crdt_set_contains"
+            | "crdt_set_list" => {
                 Err(Self::invalid_operation(format!(
                 "dataframe CRDT operation '{operation}' is unsupported: pre_execution_unsupported"
                 )))

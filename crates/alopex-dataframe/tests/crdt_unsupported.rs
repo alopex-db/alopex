@@ -18,6 +18,7 @@ fn crdt_dataframe_operation_names_are_rejected_before_execution() {
         "crdt_set_add",
         "crdt_set_remove",
         "crdt_set_contains",
+        "crdt_set_list",
         "crdt_merge",
         "crdt_reconcile",
         "crdt_recover",
@@ -126,6 +127,17 @@ fn set_contains_has_a_stable_pre_execution_unsupported_classification() {
     assert_eq!(
         error.to_string(),
         "invalid operation: dataframe CRDT operation 'crdt_set_contains' is unsupported: pre_execution_unsupported"
+    );
+}
+
+#[test]
+fn set_list_has_a_stable_pre_execution_unsupported_classification() {
+    let operation = "crdt_set_list";
+    let error = preflight(operation).expect_err("Set list is not a DataFrame operation");
+    assert!(matches!(error, DataFrameError::InvalidOperation { .. }));
+    assert_eq!(
+        error.to_string(),
+        "invalid operation: dataframe CRDT operation 'crdt_set_list' is unsupported: pre_execution_unsupported"
     );
 }
 
