@@ -85,6 +85,8 @@ pub mod proto {
     tonic::include_proto!("alopex.v0");
 }
 
+mod changefeed;
+
 use proto::alopex_service_server::{AlopexService, AlopexServiceServer};
 
 #[derive(Clone)]
@@ -235,6 +237,7 @@ struct AlopexServiceImpl {
 impl AlopexService for AlopexServiceImpl {
     type ExecuteSqlStream =
         tokio_stream::Iter<std::vec::IntoIter<std::result::Result<proto::SqlResultSet, Status>>>;
+    type StreamChangefeedStream = changefeed::ChangefeedStream;
 
     async fn execute_sql(
         &self,
@@ -1131,6 +1134,78 @@ impl AlopexService for AlopexServiceImpl {
             return Err(crdt_status(status.grpc_code, &ctx.correlation_id));
         }
         Ok(Response::new(response))
+    }
+
+    async fn create_changefeed(
+        &self,
+        request: Request<proto::CreateChangefeedRequestV1>,
+    ) -> std::result::Result<Response<proto::ChangefeedOutcomeV1>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        changefeed::create(self.state.as_ref(), &ctx, request.into_inner())
+    }
+
+    async fn subscribe_changefeed(
+        &self,
+        request: Request<proto::SubscribeChangefeedRequestV1>,
+    ) -> std::result::Result<Response<proto::ChangefeedOutcomeV1>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        changefeed::subscribe(self.state.as_ref(), &ctx, request.into_inner())
+    }
+
+    async fn poll_changefeed(
+        &self,
+        request: Request<proto::DeliveryChangefeedRequestV1>,
+    ) -> std::result::Result<Response<proto::ChangefeedDeliveryV1>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        changefeed::poll(self.state.as_ref(), &ctx, request.into_inner())
+    }
+
+    async fn stream_changefeed(
+        &self,
+        request: Request<proto::DeliveryChangefeedRequestV1>,
+    ) -> std::result::Result<Response<Self::StreamChangefeedStream>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        changefeed::stream(self.state.as_ref(), &ctx, request.into_inner())
+    }
+
+    async fn ack_changefeed(
+        &self,
+        request: Request<proto::AckChangefeedRequestV1>,
+    ) -> std::result::Result<Response<proto::ChangefeedOutcomeV1>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        changefeed::ack(self.state.as_ref(), &ctx, request.into_inner())
+    }
+
+    async fn resume_changefeed(
+        &self,
+        request: Request<proto::ResumeChangefeedRequestV1>,
+    ) -> std::result::Result<Response<proto::ChangefeedDeliveryV1>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        changefeed::resume(self.state.as_ref(), &ctx, request.into_inner())
+    }
+
+    async fn cancel_changefeed(
+        &self,
+        request: Request<proto::LifecycleChangefeedRequestV1>,
+    ) -> std::result::Result<Response<proto::ChangefeedOutcomeV1>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        changefeed::cancel(self.state.as_ref(), &ctx, request.into_inner())
+    }
+
+    async fn close_changefeed(
+        &self,
+        request: Request<proto::LifecycleChangefeedRequestV1>,
+    ) -> std::result::Result<Response<proto::ChangefeedOutcomeV1>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
+        changefeed::close(self.state.as_ref(), &ctx, request.into_inner())
     }
 }
 

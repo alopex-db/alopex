@@ -297,6 +297,196 @@ message SetOutcome {
   string membership_unavailable = 22;
 }
 
+// v1 changefeed wire contract.  The contract version is explicit on every
+// request and response so later wire additions cannot silently change the
+// lifecycle semantics consumed by an older client.
+message ChangefeedRetentionV1 {
+  uint64 deadline_epoch = 1;
+  bool has_deadline_epoch = 2;
+  uint64 retained_through_position = 3;
+  bool has_retained_through_position = 4;
+}
+
+message ChangefeedPlacementV1 {
+  string owner_node = 1;
+  repeated string replica_nodes = 2;
+  string role = 3;
+  string readiness = 4;
+  uint64 placement_epoch = 5;
+}
+
+message ChangefeedFeedIdentityV1 {
+  string feed_id = 1;
+  CrdtRangeIdentity range = 2;
+  uint64 generation = 3;
+  ChangefeedPlacementV1 placement = 4;
+  string ordering_scope = 5;
+  ChangefeedRetentionV1 retention = 6;
+  string status = 7;
+}
+
+message ChangefeedRoutingOutcomeV1 {
+  string kind = 1;
+  CrdtRangeIdentity range = 2;
+  bool has_range = 3;
+  uint64 metadata_version = 4;
+  string reason_code = 5;
+}
+
+message ChangefeedIdempotencyResultV1 {
+  string operation_id = 1;
+  string request_id = 2;
+  string first_outcome = 3;
+  string state = 4;
+  uint64 duplicate_count = 5;
+}
+
+message ChangefeedCheckpointV1 {
+  string feed_id = 1;
+  string range_id = 2;
+  uint64 generation = 3;
+  uint64 commit_position = 4;
+  uint32 payload_ordinal = 5;
+  uint64 epoch = 6;
+  uint64 retention_deadline = 7;
+  bool has_retention_deadline = 8;
+}
+
+message ChangefeedAckResultV1 {
+  string ack_id = 1;
+  string ack_state = 2;
+  ChangefeedCheckpointV1 committed_checkpoint = 3;
+  bool has_committed_checkpoint = 4;
+  ChangefeedCheckpointV1 next_resume_position = 5;
+  bool has_next_resume_position = 6;
+  string operation_state = 7;
+  string failure_class = 8;
+  string reason_code = 9;
+  bool retryable = 10;
+  ChangefeedIdempotencyResultV1 idempotency = 11;
+}
+
+enum ChangefeedOperationTypeV1 {
+  CHANGEFEED_OPERATION_TYPE_V1_UNSPECIFIED = 0;
+  CHANGEFEED_OPERATION_TYPE_V1_INSERT = 1;
+  CHANGEFEED_OPERATION_TYPE_V1_UPDATE = 2;
+  CHANGEFEED_OPERATION_TYPE_V1_DELETE = 3;
+  CHANGEFEED_OPERATION_TYPE_V1_SCHEMA = 4;
+  CHANGEFEED_OPERATION_TYPE_V1_TOMBSTONE = 5;
+}
+
+message ChangefeedEventV1 {
+  string event_id = 1;
+  string feed_id = 2;
+  CrdtRangeIdentity range = 3;
+  uint64 generation = 4;
+  string operation_id = 5;
+  string request_id = 6;
+  uint64 commit_position = 7;
+  uint32 payload_ordinal = 8;
+  ChangefeedOperationTypeV1 operation_type = 9;
+  string key_or_hash = 10;
+  bytes payload = 11;
+  bool has_payload = 12;
+  string payload_unavailable = 13;
+  ChangefeedCheckpointV1 checkpoint = 14;
+  string operation_state = 15;
+  string failure_class = 16;
+  string reason_code = 17;
+  ChangefeedRoutingOutcomeV1 routing = 18;
+  bool retryable = 19;
+  ChangefeedIdempotencyResultV1 idempotency = 20;
+}
+
+message ChangefeedFeedResultV1 {}
+
+message ChangefeedOutcomeV1 {
+  uint32 contract_version = 1;
+  ChangefeedFeedIdentityV1 feed = 2;
+  string operation_id = 3;
+  string request_id = 4;
+  string operation_state = 5;
+  string failure_class = 6;
+  string reason_code = 7;
+  ChangefeedRoutingOutcomeV1 routing = 8;
+  bool retryable = 9;
+  ChangefeedIdempotencyResultV1 idempotency = 10;
+  // Exactly one typed result field is populated, selected by result_type.
+  // This avoids a generated Rust oneof enum large enough to obscure the
+  // canonical response payload in memory while retaining typed wire fields.
+  string result_type = 11;
+  ChangefeedFeedResultV1 feed_result = 12;
+  ChangefeedEventV1 event = 13;
+  ChangefeedAckResultV1 ack = 14;
+  string correlation_id = 15;
+}
+
+message ChangefeedDeliveryV1 {
+  uint32 contract_version = 1;
+  ChangefeedOutcomeV1 outcome = 2;
+  repeated ChangefeedEventV1 events = 3;
+  string correlation_id = 4;
+}
+
+message CreateChangefeedRequestV1 {
+  uint32 contract_version = 1;
+  string request_id = 2;
+  string tenant = 3;
+  string actor = 4;
+  oneof target {
+    string table = 5;
+    string range_id = 6;
+  }
+  ChangefeedRetentionV1 retention = 7;
+  repeated ChangefeedOperationTypeV1 change_kinds = 8;
+}
+
+message SubscribeChangefeedRequestV1 {
+  uint32 contract_version = 1;
+  string feed_id = 2;
+  string request_id = 3;
+  uint64 expected_generation = 4;
+  uint64 expected_epoch = 5;
+}
+
+message DeliveryChangefeedRequestV1 {
+  uint32 contract_version = 1;
+  string feed_id = 2;
+  string request_id = 3;
+  uint32 max_events = 4;
+  uint64 deadline_epoch = 5;
+}
+
+message AckChangefeedRequestV1 {
+  uint32 contract_version = 1;
+  string feed_id = 2;
+  string request_id = 3;
+  string ack_id = 4;
+  string checkpoint = 5;
+}
+
+message ResumeChangefeedRequestV1 {
+  uint32 contract_version = 1;
+  string feed_id = 2;
+  string request_id = 3;
+  string checkpoint = 4;
+}
+
+message LifecycleChangefeedRequestV1 {
+  uint32 contract_version = 1;
+  string feed_id = 2;
+  string request_id = 3;
+}
+
+message ChangefeedStreamItemV1 {
+  uint32 contract_version = 1;
+  string correlation_id = 2;
+  // Exactly one typed item field is populated, selected by item_type.
+  string item_type = 3;
+  ChangefeedEventV1 event = 4;
+  ChangefeedOutcomeV1 outcome = 5;
+}
+
 message Vector {
   repeated float values = 1;
 }
@@ -360,4 +550,12 @@ service AlopexService {
   rpc AddSet(AddSetRequest) returns (SetOutcome);
   rpc RemoveSet(RemoveSetRequest) returns (SetOutcome);
   rpc ContainsSet(ContainsSetRequest) returns (SetOutcome);
+  rpc CreateChangefeed(CreateChangefeedRequestV1) returns (ChangefeedOutcomeV1);
+  rpc SubscribeChangefeed(SubscribeChangefeedRequestV1) returns (ChangefeedOutcomeV1);
+  rpc PollChangefeed(DeliveryChangefeedRequestV1) returns (ChangefeedDeliveryV1);
+  rpc StreamChangefeed(DeliveryChangefeedRequestV1) returns (stream ChangefeedStreamItemV1);
+  rpc AckChangefeed(AckChangefeedRequestV1) returns (ChangefeedOutcomeV1);
+  rpc ResumeChangefeed(ResumeChangefeedRequestV1) returns (ChangefeedDeliveryV1);
+  rpc CancelChangefeed(LifecycleChangefeedRequestV1) returns (ChangefeedOutcomeV1);
+  rpc CloseChangefeed(LifecycleChangefeedRequestV1) returns (ChangefeedOutcomeV1);
 }

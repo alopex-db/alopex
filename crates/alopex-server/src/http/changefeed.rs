@@ -250,55 +250,32 @@ struct StreamEventLine {
     correlation_id: String,
 }
 
-/// Creates a feed after actor, tenant, range, scope, Durable, and target
-/// metadata checks. Rejected checks are returned as canonical outcomes rather
-/// than being remapped to successful empty JSON.
-pub async fn create(
-    Extension(state): Extension<std::sync::Arc<ServerState>>,
-    Extension(context): Extension<RequestContext>,
-    Json(request): Json<CreateChangefeedRequest>,
-) -> Response {
-    let request_id = match non_empty(&context, &request.request_id, "request_id") {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    if let Err(response) = validate_actor(&context, &request.actor) {
-        return response;
-    }
-    let target = match create_target(&context, &request) {
-        Ok(target) => target,
-        Err(response) => return response,
-    };
-    let subject = match authenticated_subject(&state, &context) {
-        Ok(subject) => subject,
-        Err(response) => return response,
-    };
+/// Executes the public create lifecycle against the shared coordinator.
+///
+/// HTTP and gRPC call this façade directly.  Keeping authorization, target
+/// resolution, Durable preflight, and canonical outcome construction here
+/// prevents either transport from acquiring a private, divergent lifecycle.
+pub(crate) fn create_changefeed(
+    state: &ServerState,
+    context: &RequestContext,
+    request: CreateChangefeedRequest,
+) -> Result<ChangefeedOutcome> {
+    let request_id = non_empty(&request.request_id, "request_id")?;
+    validate_actor(context, &request.actor)?;
+    let target = create_target(&request)?;
+    let subject = authenticated_subject(state, context)?;
     let operation = operation_id("create", request_id);
 
-    let mut registry = match state.changefeed_registry.lock() {
-        Ok(registry) => registry,
-        Err(_) => {
-            return error_response(
-                ServerError::Internal("changefeed registry lock poisoned".into()),
-                &context,
-            )
-        }
-    };
-    let authorization = registry.authorization_for(&subject, &request.tenant);
+    let mut registry_guard = registry(state)?;
+    let authorization = registry_guard.authorization_for(&subject, &request.tenant);
     let synthetic = redacted_feed(&feed_id_for(request_id), &target, request.retention.clone());
     let synthetic_routing = redacted_routing(&synthetic);
-    let create_request = match feed_request(&context, &operation, request_id) {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
+    let create_request = feed_request(&operation, request_id)?;
     let Some(authorization) = authorization else {
-        return denied_response(synthetic, synthetic_routing, create_request, &context);
+        return denied_outcome(synthetic, synthetic_routing, create_request);
     };
     let resolved = if target.table.is_some() {
-        match resolve_feed(&state, &context, &target, request.retention.clone()) {
-            Ok(metadata) => Some(metadata),
-            Err(response) => return response,
-        }
+        Some(resolve_feed(state, &target, request.retention.clone())?)
     } else {
         None
     };
@@ -310,55 +287,33 @@ pub async fn create(
         tenant: request.tenant.clone(),
         range_id: candidate_feed.range.range_id.clone(),
     };
-    if !authorize_changefeed(&context, &authorization, access).permits() {
-        return denied_response(synthetic, synthetic_routing, create_request, &context);
+    if !authorize_changefeed(context, &authorization, access).permits() {
+        return denied_outcome(synthetic, synthetic_routing, create_request);
     }
-    if let Some(response) = unsupported_change_kind_response(
+    if let Some(outcome) = unsupported_change_kind_outcome(
         &request.change_kinds,
         candidate_feed.clone(),
         candidate_routing.clone(),
         create_request.clone(),
-        &context,
     ) {
-        return response;
+        return Ok(outcome);
     }
-    if !registry.preflight_is_ready() {
-        let outcome =
-            match registry
-                .coordinator
-                .create(candidate_feed, candidate_routing, create_request)
-            {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    return error_response(ServerError::Internal(error.to_string()), &context)
-                }
-            };
-        return outcome_response(outcome, &context);
+    if !registry_guard.preflight_is_ready() {
+        return registry_guard
+            .coordinator
+            .create(candidate_feed, candidate_routing, create_request)
+            .map_err(|error| ServerError::Internal(error.to_string()));
     }
-    drop(registry);
+    drop(registry_guard);
 
     let (feed, routing) = match resolved {
         Some(metadata) => metadata,
-        None => match resolve_feed(&state, &context, &target, request.retention) {
-            Ok(metadata) => metadata,
-            Err(response) => return response,
-        },
+        None => resolve_feed(state, &target, request.retention)?,
     };
-    let mut registry = match state.changefeed_registry.lock() {
-        Ok(registry) => registry,
-        Err(_) => {
-            return error_response(
-                ServerError::Internal("changefeed registry lock poisoned".into()),
-                &context,
-            )
-        }
-    };
-    let create_request = match feed_request(&context, &operation, request_id) {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
+    let mut registry_guard = registry(state)?;
+    let create_request = feed_request(&operation, request_id)?;
     if !authorize_changefeed(
-        &context,
+        context,
         &authorization,
         ChangefeedAccessRequest {
             action: ChangefeedAction::Create,
@@ -368,19 +323,209 @@ pub async fn create(
     )
     .permits()
     {
-        return denied_response(synthetic, synthetic_routing, create_request, &context);
+        return denied_outcome(synthetic, synthetic_routing, create_request);
     }
-    let outcome = match registry
+    let outcome = registry_guard
         .coordinator
         .create(feed.clone(), routing.clone(), create_request)
-    {
-        Ok(outcome) => outcome,
-        Err(error) => return error_response(ServerError::Internal(error.to_string()), &context),
-    };
+        .map_err(|error| ServerError::Internal(error.to_string()))?;
     if outcome.failure_class.is_none() {
-        registry.register(feed, routing, authorization);
+        registry_guard.register(feed, routing, authorization);
     }
-    outcome_response(outcome, &context)
+    Ok(outcome)
+}
+
+/// Executes subscribe after generation/epoch and read-scope validation.
+pub(crate) fn subscribe_changefeed(
+    state: &ServerState,
+    context: &RequestContext,
+    feed_id: &str,
+    request: SubscribeChangefeedRequest,
+) -> Result<ChangefeedOutcome> {
+    let request_id = non_empty(&request.request_id, "request_id")?;
+    let mut registry = registry(state)?;
+    let feed_request = feed_request(&operation_id("subscribe", request_id), request_id)?;
+    let Some(registered) = authorized_existing(
+        state,
+        context,
+        &registry,
+        feed_id,
+        ChangefeedAction::Subscribe,
+        &feed_request,
+    ) else {
+        return denied_outcome(
+            redacted_feed_id(feed_id),
+            redacted_routing_for_id(feed_id),
+            feed_request,
+        );
+    };
+    registry
+        .coordinator
+        .subscribe(
+            feed_id,
+            request.expected_generation,
+            request.expected_epoch,
+            feed_request,
+        )
+        .map_err(|error| coordinator_error(error.to_string(), &registered))
+}
+
+/// Executes a bounded poll or stream delivery with the shared coordinator.
+pub(crate) fn deliver_changefeed(
+    state: &ServerState,
+    context: &RequestContext,
+    feed_id: &str,
+    query: DeliveryQuery,
+    action: ChangefeedAction,
+) -> Result<FeedDelivery> {
+    let request_id = non_empty(&query.request_id, "request_id")?;
+    if query.max_events == 0 || query.deadline_epoch == 0 {
+        return Err(ServerError::BadRequest(
+            "max_events and deadline_epoch are required".into(),
+        ));
+    }
+    let registry = registry(state)?;
+    let feed_request = feed_request(&operation_id(action_name(action), request_id), request_id)?;
+    let Some(registered) =
+        authorized_existing(state, context, &registry, feed_id, action, &feed_request)
+    else {
+        return denied_delivery(
+            redacted_feed_id(feed_id),
+            redacted_routing_for_id(feed_id),
+            feed_request,
+        );
+    };
+    match action {
+        ChangefeedAction::Poll => {
+            registry
+                .coordinator
+                .poll(feed_id, query.max_events, feed_request)
+        }
+        ChangefeedAction::Stream => {
+            registry
+                .coordinator
+                .stream(feed_id, query.max_events, feed_request)
+        }
+        _ => unreachable!("delivery helper accepts only poll or stream"),
+    }
+    .map_err(|error| coordinator_error(error.to_string(), &registered))
+}
+
+/// Validates checkpoint binding and accepts an acknowledgement through the
+/// coordinator. The coordinator deliberately reports `accepted`, never a
+/// fabricated durable checkpoint.
+pub(crate) fn ack_changefeed(
+    state: &ServerState,
+    context: &RequestContext,
+    feed_id: &str,
+    request: AckChangefeedRequest,
+) -> Result<ChangefeedOutcome> {
+    let request_id = non_empty(&request.request_id, "request_id")?;
+    if request.ack_id.trim().is_empty() || request.checkpoint.trim().is_empty() {
+        return Err(ServerError::BadRequest(
+            "missing ack_id or checkpoint".into(),
+        ));
+    }
+    let registry = registry(state)?;
+    let feed_request = feed_request(&operation_id("ack", request_id), request_id)?;
+    let Some(registered) = authorized_existing(
+        state,
+        context,
+        &registry,
+        feed_id,
+        ChangefeedAction::Ack,
+        &feed_request,
+    ) else {
+        return denied_outcome(
+            redacted_feed_id(feed_id),
+            redacted_routing_for_id(feed_id),
+            feed_request,
+        );
+    };
+    if alopex_cluster::changefeed::CheckpointCursor::decode_for(
+        &request.checkpoint,
+        &registered.feed.feed_id,
+        &registered.feed.range.range_id,
+    )
+    .is_err()
+    {
+        return Ok(invalid_checkpoint_outcome(&registered, feed_request));
+    }
+    registry
+        .coordinator
+        .ack(feed_id, request.ack_id, feed_request)
+        .map_err(|error| coordinator_error(error.to_string(), &registered))
+}
+
+/// Resumes strictly after the supplied checkpoint.
+pub(crate) fn resume_changefeed(
+    state: &ServerState,
+    context: &RequestContext,
+    feed_id: &str,
+    request: ResumeChangefeedRequest,
+) -> Result<FeedDelivery> {
+    let request_id = non_empty(&request.request_id, "request_id")?;
+    let registry = registry(state)?;
+    let feed_request = feed_request(&operation_id("resume", request_id), request_id)?;
+    let Some(registered) = authorized_existing(
+        state,
+        context,
+        &registry,
+        feed_id,
+        ChangefeedAction::Resume,
+        &feed_request,
+    ) else {
+        return denied_delivery(
+            redacted_feed_id(feed_id),
+            redacted_routing_for_id(feed_id),
+            feed_request,
+        );
+    };
+    registry
+        .coordinator
+        .resume(feed_id, &request.checkpoint, feed_request)
+        .map_err(|error| coordinator_error(error.to_string(), &registered))
+}
+
+/// Executes cancel or close through the canonical lifecycle transition.
+pub(crate) fn close_changefeed(
+    state: &ServerState,
+    context: &RequestContext,
+    feed_id: &str,
+    request: LifecycleRequest,
+    action: ChangefeedAction,
+) -> Result<ChangefeedOutcome> {
+    let request_id = non_empty(&request.request_id, "request_id")?;
+    let mut registry = registry(state)?;
+    let feed_request = feed_request(&operation_id(action_name(action), request_id), request_id)?;
+    let Some(registered) =
+        authorized_existing(state, context, &registry, feed_id, action, &feed_request)
+    else {
+        return denied_outcome(
+            redacted_feed_id(feed_id),
+            redacted_routing_for_id(feed_id),
+            feed_request,
+        );
+    };
+    let outcome = match action {
+        ChangefeedAction::Cancel => registry.coordinator.cancel(feed_id, feed_request),
+        ChangefeedAction::Close => registry.coordinator.close(feed_id, feed_request),
+        _ => unreachable!("close helper accepts only cancel or close"),
+    };
+    outcome.map_err(|error| coordinator_error(error.to_string(), &registered))
+}
+
+/// Creates a feed after actor, tenant, range, scope, Durable, and target
+/// metadata checks. Rejected checks stay canonical outcomes.
+pub async fn create(
+    Extension(state): Extension<std::sync::Arc<ServerState>>,
+    Extension(context): Extension<RequestContext>,
+    Json(request): Json<CreateChangefeedRequest>,
+) -> Response {
+    match create_changefeed(&state, &context, request) {
+        Ok(outcome) => outcome_response(outcome, &context),
+        Err(error) => error_response(error, &context),
+    }
 }
 
 /// Subscribes to a feed after generation/epoch and read-scope validation.
@@ -390,49 +535,10 @@ pub async fn subscribe(
     Path(feed_id): Path<String>,
     Json(request): Json<SubscribeChangefeedRequest>,
 ) -> Response {
-    let request_id = match non_empty(&context, &request.request_id, "request_id") {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    let mut registry = match state.changefeed_registry.lock() {
-        Ok(registry) => registry,
-        Err(_) => {
-            return error_response(
-                ServerError::Internal("changefeed registry lock poisoned".into()),
-                &context,
-            )
-        }
-    };
-    let feed_request =
-        match feed_request(&context, &operation_id("subscribe", request_id), request_id) {
-            Ok(request) => request,
-            Err(response) => return response,
-        };
-    let Some(registered) = authorized_existing(
-        &state,
-        &context,
-        &registry,
-        &feed_id,
-        ChangefeedAction::Subscribe,
-        &feed_request,
-    ) else {
-        return denied_response(
-            redacted_feed_id(&feed_id),
-            redacted_routing_for_id(&feed_id),
-            feed_request,
-            &context,
-        );
-    };
-    let outcome = match registry.coordinator.subscribe(
-        &feed_id,
-        request.expected_generation,
-        request.expected_epoch,
-        feed_request,
-    ) {
-        Ok(outcome) => outcome,
-        Err(error) => return coordinator_error_response(error.to_string(), &registered, &context),
-    };
-    outcome_response(outcome, &context)
+    match subscribe_changefeed(&state, &context, &feed_id, request) {
+        Ok(outcome) => outcome_response(outcome, &context),
+        Err(error) => error_response(error, &context),
+    }
 }
 
 /// Returns a bounded JSON delivery batch for one authorized feed.
@@ -442,7 +548,10 @@ pub async fn poll(
     Path(feed_id): Path<String>,
     Query(query): Query<DeliveryQuery>,
 ) -> Response {
-    delivery(state, context, feed_id, query, ChangefeedAction::Poll).await
+    match deliver_changefeed(&state, &context, &feed_id, query, ChangefeedAction::Poll) {
+        Ok(delivery) => delivery_response(delivery, &context),
+        Err(error) => error_response(error, &context),
+    }
 }
 
 /// Returns the same canonical delivery contract as poll, encoded as JSONL.
@@ -453,9 +562,9 @@ pub async fn stream(
     Query(query): Query<DeliveryQuery>,
 ) -> Response {
     let delivery =
-        match delivery_result(&state, &context, &feed_id, &query, ChangefeedAction::Stream) {
+        match deliver_changefeed(&state, &context, &feed_id, query, ChangefeedAction::Stream) {
             Ok(delivery) => delivery,
-            Err(response) => return response,
+            Err(error) => return error_response(error, &context),
         };
     let mut lines = Vec::new();
     for event in delivery.events {
@@ -502,61 +611,10 @@ pub async fn ack(
     Path(feed_id): Path<String>,
     Json(request): Json<AckChangefeedRequest>,
 ) -> Response {
-    let request_id = match non_empty(&context, &request.request_id, "request_id") {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    if request.ack_id.trim().is_empty() || request.checkpoint.trim().is_empty() {
-        return error_response(
-            ServerError::BadRequest("missing ack_id or checkpoint".into()),
-            &context,
-        );
+    match ack_changefeed(&state, &context, &feed_id, request) {
+        Ok(outcome) => outcome_response(outcome, &context),
+        Err(error) => error_response(error, &context),
     }
-    let registry = match state.changefeed_registry.lock() {
-        Ok(registry) => registry,
-        Err(_) => {
-            return error_response(
-                ServerError::Internal("changefeed registry lock poisoned".into()),
-                &context,
-            )
-        }
-    };
-    let feed_request = match feed_request(&context, &operation_id("ack", request_id), request_id) {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
-    let Some(registered) = authorized_existing(
-        &state,
-        &context,
-        &registry,
-        &feed_id,
-        ChangefeedAction::Ack,
-        &feed_request,
-    ) else {
-        return denied_response(
-            redacted_feed_id(&feed_id),
-            redacted_routing_for_id(&feed_id),
-            feed_request,
-            &context,
-        );
-    };
-    if alopex_cluster::changefeed::CheckpointCursor::decode_for(
-        &request.checkpoint,
-        &registered.feed.feed_id,
-        &registered.feed.range.range_id,
-    )
-    .is_err()
-    {
-        return invalid_checkpoint_response(&registered, feed_request, &context);
-    }
-    let outcome = match registry
-        .coordinator
-        .ack(&feed_id, request.ack_id, feed_request)
-    {
-        Ok(outcome) => outcome,
-        Err(error) => return coordinator_error_response(error.to_string(), &registered, &context),
-    };
-    outcome_response(outcome, &context)
 }
 
 /// Resumes strictly after the supplied checkpoint and returns a JSON batch.
@@ -566,47 +624,10 @@ pub async fn resume(
     Path(feed_id): Path<String>,
     Json(request): Json<ResumeChangefeedRequest>,
 ) -> Response {
-    let request_id = match non_empty(&context, &request.request_id, "request_id") {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    let registry = match state.changefeed_registry.lock() {
-        Ok(registry) => registry,
-        Err(_) => {
-            return error_response(
-                ServerError::Internal("changefeed registry lock poisoned".into()),
-                &context,
-            )
-        }
-    };
-    let feed_request = match feed_request(&context, &operation_id("resume", request_id), request_id)
-    {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
-    let Some(registered) = authorized_existing(
-        &state,
-        &context,
-        &registry,
-        &feed_id,
-        ChangefeedAction::Resume,
-        &feed_request,
-    ) else {
-        return denied_response(
-            redacted_feed_id(&feed_id),
-            redacted_routing_for_id(&feed_id),
-            feed_request,
-            &context,
-        );
-    };
-    let delivery = match registry
-        .coordinator
-        .resume(&feed_id, &request.checkpoint, feed_request)
-    {
-        Ok(delivery) => delivery,
-        Err(error) => return coordinator_error_response(error.to_string(), &registered, &context),
-    };
-    delivery_response(delivery, &context)
+    match resume_changefeed(&state, &context, &feed_id, request) {
+        Ok(delivery) => delivery_response(delivery, &context),
+        Err(error) => error_response(error, &context),
+    }
 }
 
 /// Cancels a feed exactly through the canonical lifecycle transition.
@@ -616,7 +637,16 @@ pub async fn cancel(
     Path(feed_id): Path<String>,
     Json(request): Json<LifecycleRequest>,
 ) -> Response {
-    close_like(state, context, feed_id, request, ChangefeedAction::Cancel).await
+    match close_changefeed(
+        &state,
+        &context,
+        &feed_id,
+        request,
+        ChangefeedAction::Cancel,
+    ) {
+        Ok(outcome) => outcome_response(outcome, &context),
+        Err(error) => error_response(error, &context),
+    }
 }
 
 /// Closes a feed exactly through the canonical lifecycle transition.
@@ -626,124 +656,14 @@ pub async fn close(
     Path(feed_id): Path<String>,
     Json(request): Json<LifecycleRequest>,
 ) -> Response {
-    close_like(state, context, feed_id, request, ChangefeedAction::Close).await
-}
-
-async fn delivery(
-    state: std::sync::Arc<ServerState>,
-    context: RequestContext,
-    feed_id: String,
-    query: DeliveryQuery,
-    action: ChangefeedAction,
-) -> Response {
-    match delivery_result(&state, &context, &feed_id, &query, action) {
-        Ok(delivery) => delivery_response(delivery, &context),
-        Err(response) => response,
-    }
-}
-
-#[allow(clippy::result_large_err)] // Axum Response is returned immediately by the route handler.
-fn delivery_result(
-    state: &std::sync::Arc<ServerState>,
-    context: &RequestContext,
-    feed_id: &str,
-    query: &DeliveryQuery,
-    action: ChangefeedAction,
-) -> std::result::Result<FeedDelivery, Response> {
-    let request_id = non_empty(context, &query.request_id, "request_id")?;
-    if query.max_events == 0 || query.deadline_epoch == 0 {
-        return Err(error_response(
-            ServerError::BadRequest("max_events and deadline_epoch are required".into()),
-            context,
-        ));
-    }
-    let registry = state.changefeed_registry.lock().map_err(|_| {
-        error_response(
-            ServerError::Internal("changefeed registry lock poisoned".into()),
-            context,
-        )
-    })?;
-    let feed_request = feed_request(
-        context,
-        &operation_id(action_name(action), request_id),
-        request_id,
-    )?;
-    let registered = authorized_existing(state, context, &registry, feed_id, action, &feed_request)
-        .ok_or_else(|| {
-            denied_response(
-                redacted_feed_id(feed_id),
-                redacted_routing_for_id(feed_id),
-                feed_request.clone(),
-                context,
-            )
-        })?;
-    match action {
-        ChangefeedAction::Poll => {
-            registry
-                .coordinator
-                .poll(feed_id, query.max_events, feed_request)
-        }
-        ChangefeedAction::Stream => {
-            registry
-                .coordinator
-                .stream(feed_id, query.max_events, feed_request)
-        }
-        _ => unreachable!("delivery helper accepts only poll or stream"),
-    }
-    .map_err(|error| coordinator_error_response(error.to_string(), &registered, context))
-}
-
-async fn close_like(
-    state: std::sync::Arc<ServerState>,
-    context: RequestContext,
-    feed_id: String,
-    request: LifecycleRequest,
-    action: ChangefeedAction,
-) -> Response {
-    let request_id = match non_empty(&context, &request.request_id, "request_id") {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    let mut registry = match state.changefeed_registry.lock() {
-        Ok(registry) => registry,
-        Err(_) => {
-            return error_response(
-                ServerError::Internal("changefeed registry lock poisoned".into()),
-                &context,
-            )
-        }
-    };
-    let feed_request = match feed_request(
-        &context,
-        &operation_id(action_name(action), request_id),
-        request_id,
-    ) {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
-    let Some(registered) =
-        authorized_existing(&state, &context, &registry, &feed_id, action, &feed_request)
-    else {
-        return denied_response(
-            redacted_feed_id(&feed_id),
-            redacted_routing_for_id(&feed_id),
-            feed_request,
-            &context,
-        );
-    };
-    let outcome = match action {
-        ChangefeedAction::Cancel => registry.coordinator.cancel(&feed_id, feed_request),
-        ChangefeedAction::Close => registry.coordinator.close(&feed_id, feed_request),
-        _ => unreachable!("close helper accepts only cancel or close"),
-    };
-    match outcome {
+    match close_changefeed(&state, &context, &feed_id, request, ChangefeedAction::Close) {
         Ok(outcome) => outcome_response(outcome, &context),
-        Err(error) => coordinator_error_response(error.to_string(), &registered, &context),
+        Err(error) => error_response(error, &context),
     }
 }
 
 fn authorized_existing(
-    state: &std::sync::Arc<ServerState>,
+    state: &ServerState,
     context: &RequestContext,
     registry: &ChangefeedRegistry,
     feed_id: &str,
@@ -772,27 +692,17 @@ fn authorized_existing(
     Some(registered)
 }
 
-#[allow(clippy::result_large_err)] // Axum Response is returned immediately by the route handler.
 fn authenticated_subject(
     state: &ServerState,
     context: &RequestContext,
-) -> std::result::Result<AuthenticatedSubject, Response> {
+) -> Result<AuthenticatedSubject> {
     state
         .auth
         .authenticated_subject(context.actor.as_deref())
-        .map_err(|_| {
-            error_response(
-                ServerError::Unauthorized("changefeed actor is not authenticated".into()),
-                context,
-            )
-        })
+        .map_err(|_| ServerError::Unauthorized("changefeed actor is not authenticated".into()))
 }
 
-#[allow(clippy::result_large_err)] // Axum Response is returned immediately by the route handler.
-fn create_target(
-    context: &RequestContext,
-    request: &CreateChangefeedRequest,
-) -> std::result::Result<ChangefeedTarget, Response> {
+fn create_target(request: &CreateChangefeedRequest) -> Result<ChangefeedTarget> {
     match (&request.table, &request.range_id) {
         (Some(table), None) if !table.trim().is_empty() => Ok(ChangefeedTarget {
             table: Some(table.trim().to_owned()),
@@ -802,9 +712,8 @@ fn create_target(
             table: None,
             range_id: range_id.trim().to_owned(),
         }),
-        _ => Err(error_response(
-            ServerError::BadRequest("exactly one of table or range_id is required".into()),
-            context,
+        _ => Err(ServerError::BadRequest(
+            "exactly one of table or range_id is required".into(),
         )),
     }
 }
@@ -815,16 +724,12 @@ struct ChangefeedTarget {
     range_id: String,
 }
 
-#[allow(clippy::result_large_err)] // Axum Response is returned immediately by the route handler.
 fn resolve_feed(
     state: &ServerState,
-    context: &RequestContext,
     target: &ChangefeedTarget,
     retention: RetentionWindow,
-) -> std::result::Result<(FeedIdentity, RoutingOutcome), Response> {
-    let snapshot = state
-        .cluster_status_snapshot()
-        .map_err(|error| error_response(error, context))?;
+) -> Result<(FeedIdentity, RoutingOutcome)> {
+    let snapshot = state.cluster_status_snapshot()?;
     let mut matches = snapshot
         .placement
         .placements
@@ -845,11 +750,8 @@ fn resolve_feed(
         })
         .collect::<Vec<_>>();
     if matches.len() != 1 {
-        return Err(error_response(
-            ServerError::CapabilityUnavailable(
-                "changefeed target does not resolve to one committed range".into(),
-            ),
-            context,
+        return Err(ServerError::CapabilityUnavailable(
+            "changefeed target does not resolve to one committed range".into(),
         ));
     }
     let (placement_metadata, logical_range) = matches.pop().expect("one match checked");
@@ -906,30 +808,27 @@ fn resolve_feed(
         retention,
         OperationState::Accepted,
     )
-    .map_err(|error| error_response(ServerError::BadRequest(error.to_string()), context))?;
+    .map_err(|error| ServerError::BadRequest(error.to_string()))?;
     Ok((feed, routing))
 }
 
-#[allow(clippy::result_large_err)] // Axum Response is returned immediately by the route handler.
-fn validate_actor(context: &RequestContext, actor: &str) -> std::result::Result<(), Response> {
+fn validate_actor(context: &RequestContext, actor: &str) -> Result<()> {
     let expected = context.actor.as_deref().unwrap_or("anonymous");
     if actor == expected {
         Ok(())
     } else {
-        Err(error_response(
-            ServerError::Unauthorized("changefeed actor differs from authenticated actor".into()),
-            context,
+        Err(ServerError::Unauthorized(
+            "changefeed actor differs from authenticated actor".into(),
         ))
     }
 }
 
-fn unsupported_change_kind_response(
+fn unsupported_change_kind_outcome(
     kinds: &[ChangeOperationType],
     feed: FeedIdentity,
     routing: RoutingOutcome,
     request: FeedRequest,
-    context: &RequestContext,
-) -> Option<Response> {
+) -> Option<ChangefeedOutcome> {
     if !kinds
         .iter()
         .any(|kind| matches!(kind, ChangeOperationType::Schema))
@@ -959,16 +858,15 @@ fn unsupported_change_kind_response(
         },
         alopex_cluster::ChangefeedResult::Feed,
     )
-    .ok()?;
-    Some(outcome_response(outcome, context))
+    .expect("fixed unsupported outcome is canonical");
+    Some(outcome)
 }
 
-fn invalid_checkpoint_response(
+fn invalid_checkpoint_outcome(
     registered: &RegisteredFeed,
     request: FeedRequest,
-    context: &RequestContext,
-) -> Response {
-    let outcome = ChangefeedOutcome::new(
+) -> ChangefeedOutcome {
+    ChangefeedOutcome::new(
         registered.feed.clone(),
         request.operation_id.clone(),
         request.request_id.clone(),
@@ -986,36 +884,33 @@ fn invalid_checkpoint_response(
         },
         alopex_cluster::ChangefeedResult::Feed,
     )
-    .expect("validated registered feed produces a canonical invalid checkpoint outcome");
-    outcome_response(outcome, context)
+    .expect("validated registered feed produces a canonical invalid checkpoint outcome")
 }
 
-fn denied_response(
+fn denied_outcome(
     feed: FeedIdentity,
     routing: RoutingOutcome,
     request: FeedRequest,
-    context: &RequestContext,
-) -> Response {
-    match ChangefeedAuthorizationDecision::Denied.denied_outcome(
-        feed,
-        routing,
-        request.operation_id,
-        request.request_id,
-    ) {
-        Ok(outcome) => outcome_response(outcome, context),
-        Err(error) => error_response(ServerError::Internal(error.to_string()), context),
-    }
+) -> Result<ChangefeedOutcome> {
+    ChangefeedAuthorizationDecision::Denied
+        .denied_outcome(feed, routing, request.operation_id, request.request_id)
+        .map_err(|error| ServerError::Internal(error.to_string()))
 }
 
-fn coordinator_error_response(
-    message: String,
-    registered: &RegisteredFeed,
-    context: &RequestContext,
-) -> Response {
-    error_response(
-        ServerError::BadRequest(format!("changefeed {}: {message}", registered.feed.feed_id)),
-        context,
-    )
+fn denied_delivery(
+    feed: FeedIdentity,
+    routing: RoutingOutcome,
+    request: FeedRequest,
+) -> Result<FeedDelivery> {
+    let outcome = denied_outcome(feed, routing, request)?;
+    Ok(FeedDelivery {
+        outcome,
+        events: Vec::new(),
+    })
+}
+
+fn coordinator_error(message: String, registered: &RegisteredFeed) -> ServerError {
+    ServerError::BadRequest(format!("changefeed {}: {message}", registered.feed.feed_id))
 }
 
 fn outcome_response(outcome: ChangefeedOutcome, context: &RequestContext) -> Response {
@@ -1046,30 +941,24 @@ fn status_code(outcome: &ChangefeedOutcome) -> StatusCode {
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-#[allow(clippy::result_large_err)] // Axum Response is returned immediately by the route handler.
-fn non_empty<'a>(
-    context: &RequestContext,
-    value: &'a str,
-    field: &str,
-) -> std::result::Result<&'a str, Response> {
+fn non_empty<'a>(value: &'a str, field: &str) -> Result<&'a str> {
     if value.trim().is_empty() {
-        Err(error_response(
-            ServerError::BadRequest(format!("missing {field}")),
-            context,
-        ))
+        Err(ServerError::BadRequest(format!("missing {field}")))
     } else {
         Ok(value)
     }
 }
 
-#[allow(clippy::result_large_err)] // Axum Response is returned immediately by the route handler.
-fn feed_request(
-    context: &RequestContext,
-    operation_id: &str,
-    request_id: &str,
-) -> std::result::Result<FeedRequest, Response> {
+fn feed_request(operation_id: &str, request_id: &str) -> Result<FeedRequest> {
     FeedRequest::new(operation_id, request_id)
-        .map_err(|error| error_response(ServerError::BadRequest(error.to_string()), context))
+        .map_err(|error| ServerError::BadRequest(error.to_string()))
+}
+
+fn registry(state: &ServerState) -> Result<std::sync::MutexGuard<'_, ChangefeedRegistry>> {
+    state
+        .changefeed_registry
+        .lock()
+        .map_err(|_| ServerError::Internal("changefeed registry lock poisoned".into()))
 }
 
 fn operation_id(action: &str, request_id: &str) -> String {
