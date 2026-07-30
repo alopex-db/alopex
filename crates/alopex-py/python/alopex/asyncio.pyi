@@ -1,6 +1,6 @@
 from typing import Any, AsyncIterator, Dict, Literal, Optional, Sequence, Union
 
-from . import DataFrame, LocalScan, ThreadMode, TxnMode
+from ._alopex import DataFrame, LocalScan, ThreadMode, TxnMode
 
 
 class AsyncSqlResultStream(AsyncIterator[Dict[str, Any]]):
