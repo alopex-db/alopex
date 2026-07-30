@@ -12,6 +12,7 @@ mod cursor;
 mod durable;
 mod journal_adapter;
 mod model;
+mod retention;
 
 pub use checkpoint::{
     AckProcessor, AckRequest, CheckpointError, CheckpointStore, ResumePlan, ResumePlanner,
@@ -31,4 +32,8 @@ pub use model::{
     AckResult, AckState, ChangeEventEnvelope, ChangeOperationType, ChangePayload,
     ChangefeedModelError, ChangefeedOutcome, ChangefeedResult, ChangefeedSurfaceStatus, Checkpoint,
     FeedIdentity, OrderingScope, RetentionWindow,
+};
+pub use retention::{
+    DeliveryBudget, DeliveryOutcome, DeliveryTransition, DeliveryUsage, RetentionError,
+    RetentionPolicy,
 };
