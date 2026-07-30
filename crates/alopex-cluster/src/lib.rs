@@ -5,6 +5,7 @@
 //! transactions.
 
 mod bootstrap;
+pub mod changefeed;
 mod control;
 pub mod crdt;
 pub mod distributed_read;
@@ -16,6 +17,11 @@ mod transport;
 pub use bootstrap::{
     ClusterBootstrapConfig, ClusterBootstrapMode, ClusterBootstrapOutcome,
     bootstrap_cluster_control,
+};
+pub use changefeed::{
+    AckResult, AckState, ChangeEventEnvelope, ChangeOperationType, ChangePayload,
+    ChangefeedModelError, ChangefeedOutcome, ChangefeedResult, ChangefeedSurfaceStatus, Checkpoint,
+    FeedIdentity, OrderingScope, RetentionWindow,
 };
 pub use control::{
     EnrollmentCredential, MembershipOperation, MembershipOperationKind, MembershipOperationStore,
