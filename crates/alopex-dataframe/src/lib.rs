@@ -6,6 +6,9 @@
 
 mod error;
 
+/// Explicit pre-execution unsupported boundary for changefeed requests.
+pub mod changefeed_boundary;
+
 /// Eager DataFrame and Series types.
 pub mod dataframe;
 /// Expression DSL used by both eager and lazy APIs.
