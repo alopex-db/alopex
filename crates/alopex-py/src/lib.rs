@@ -83,4 +83,37 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn exported_database_module_includes_the_sync_changefeed_type() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "_alopex_changefeed_export_test").unwrap();
+            super::_alopex(py, &module).unwrap();
+            let database = module.getattr("database").unwrap();
+            assert!(database.getattr("Database").is_ok());
+            assert!(database.getattr("Changefeed").is_ok());
+            let codes: Vec<String> = module
+                .getattr("ALOPEX_ERROR_CODES")
+                .unwrap()
+                .extract()
+                .unwrap();
+            for expected in [
+                "changefeed_unauthorized",
+                "changefeed_conflict",
+                "changefeed_unavailable",
+                "changefeed_prerequisite_missing",
+                "changefeed_timeout",
+                "changefeed_invalid_request",
+                "changefeed_internal",
+                "changefeed_cancelled",
+                "changefeed_unsupported",
+            ] {
+                assert!(
+                    codes.iter().any(|code| code == expected),
+                    "missing {expected}"
+                );
+            }
+        });
+    }
 }

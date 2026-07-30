@@ -347,6 +347,33 @@ class SqlResultStream:
     def __exit__(self, exc_type: Optional[Any], exc: Optional[Any], traceback: Optional[Any]) -> bool: ...
 
 
+class Changefeed(Iterator[Dict[str, Any]]):
+    """Synchronous embedded-local changefeed handle.
+
+    All lifecycle results retain the canonical `outcome`/`events` fields. A
+    classified failure raises ``AlopexError`` with ``code``, ``status``, and
+    ``failure_class`` attributes; this handle never opens a remote client or
+    substitutes an in-memory feed for Durable.
+    """
+
+    @property
+    def status(self) -> Dict[str, Any]: ...
+
+    def subscribe(
+        self, expected_generation: int, expected_epoch: int, request_id: str
+    ) -> Dict[str, Any]: ...
+    def poll(self, max_events: int, request_id: str) -> Dict[str, Any]: ...
+    def stream(self, max_events: int, request_id: str) -> Dict[str, Any]: ...
+    def ack(self, ack_id: str, checkpoint: str, request_id: str) -> Dict[str, Any]: ...
+    def resume(self, checkpoint: str, request_id: str) -> Dict[str, Any]: ...
+    def cancel(self, request_id: str) -> Dict[str, Any]: ...
+    def close(self, request_id: str) -> Dict[str, Any]: ...
+    def __iter__(self) -> "Changefeed": ...
+    def __next__(self) -> Dict[str, Any]: ...
+    def __enter__(self) -> "Changefeed": ...
+    def __exit__(self, exc_type: Optional[Any], exc: Optional[Any], traceback: Optional[Any]) -> bool: ...
+
+
 class DataFrameStream(Iterator[DataFrame]):
     @property
     def status(self) -> Dict[str, Any]: ...
@@ -502,6 +529,31 @@ class Database:
         initial_value: int,
         actor: str = "alopex-python-local",
     ) -> Dict[str, Any]: ...
+    def create_changefeed(
+        self,
+        feed_id: str,
+        *,
+        cluster_id: str,
+        table_id: int,
+        range_id: str,
+        generation: int,
+        schema_version: int,
+        data_epoch: int,
+        request_id: str,
+        tenant: str = "default",
+        actor: str = "alopex-python-local",
+        placement_node_id: str = "alopex-python-local",
+        placement_version: int = 0,
+        retention_deadline: Optional[int] = None,
+        retained_through_position: Optional[int] = None,
+    ) -> Changefeed:
+        """Create the embedded-local changefeed facade after Durable preflight.
+
+        The current compiled Durable integration is unavailable, so callers
+        receive ``AlopexError(code="changefeed_prerequisite_missing")`` with
+        the complete canonical status instead of a best-effort local feed.
+        """
+        ...
     def create_set(
         self,
         object_id: str,

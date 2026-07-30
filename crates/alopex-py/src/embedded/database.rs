@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -10,6 +11,7 @@ use crate::embedded::stream::{PySqlResultStream, StreamLeaseRegistry};
 use crate::embedded::thread_mode::{DatabaseControl, PyThreadMode, ThreadMode};
 use crate::embedded::transaction::{PyTransaction, PyTransactionInner};
 use crate::error;
+use crate::types::cluster::{changefeed_outcome_or_error, PyChangefeed};
 use crate::types::{
     crdt_outcome_to_py, DataFrameStreamRegistry, PyEmbeddedConfig, PyMemoryStats, PyTxnMode,
 };
@@ -335,6 +337,109 @@ impl PyDatabase {
         let db = self.ensure_open()?;
         let diagnostics = db.routing_diagnostics().map_err(error::embedded_err)?;
         crate::types::cluster::routing_diagnostics_to_py(py, &diagnostics)
+    }
+
+    /// Create an embedded-local Changefeed facade.
+    ///
+    /// The compiled build currently has no verified Chirps Durable profile, so
+    /// this returns the canonical `changefeed_prerequisite_missing` exception
+    /// with its full status payload rather than constructing an in-memory or
+    /// remote fallback.  When a verified embedded Durable adapter is supplied
+    /// by a future foundation, the same method returns the synchronous handle.
+    #[pyo3(
+        signature = (feed_id, *, cluster_id, table_id, range_id, generation, schema_version, data_epoch, request_id, tenant = "default", actor = "alopex-python-local", placement_node_id = "alopex-python-local", placement_version = 0, retention_deadline = None, retained_through_position = None)
+    )]
+    #[allow(clippy::too_many_arguments)]
+    fn create_changefeed(
+        &self,
+        py: Python<'_>,
+        feed_id: &str,
+        cluster_id: &str,
+        table_id: u32,
+        range_id: &str,
+        generation: u64,
+        schema_version: u64,
+        data_epoch: u64,
+        request_id: &str,
+        tenant: &str,
+        actor: &str,
+        placement_node_id: &str,
+        placement_version: u64,
+        retention_deadline: Option<u64>,
+        retained_through_position: Option<u64>,
+    ) -> PyResult<PyChangefeed> {
+        let db = self.ensure_open()?;
+        let range = alopex_cluster::RangeIdentity::new(
+            cluster_id,
+            table_id,
+            range_id,
+            None,
+            None,
+            schema_version,
+            data_epoch,
+        );
+        let feed = alopex_cluster::FeedIdentity::new(
+            feed_id,
+            range.clone(),
+            generation,
+            alopex_cluster::Placement::new(
+                placement_node_id,
+                Vec::new(),
+                alopex_cluster::PlacementRole::Owner,
+                alopex_cluster::PlacementReadiness::Ready,
+                placement_version,
+            ),
+            alopex_cluster::OrderingScope::Range,
+            alopex_cluster::RetentionWindow {
+                deadline_epoch: retention_deadline,
+                retained_through_position,
+            },
+            alopex_cluster::OperationState::Accepted,
+        )
+        .map_err(|source| error::to_py_err(source.to_string()))?;
+        let authorization = alopex_cluster::changefeed::ChangefeedAuthorization {
+            // Python embedded execution has no remote identity provider. This
+            // represents only the caller's in-process local authority and is
+            // still evaluated by the common facade before Durable preflight.
+            subject: alopex_cluster::AuthenticatedSubject::new(actor),
+            tenant: tenant.to_owned(),
+            allowed_ranges: BTreeSet::from([range.range_id.clone()]),
+            allowed_scopes: BTreeSet::from([
+                alopex_cluster::changefeed::ChangefeedScope::Read,
+                alopex_cluster::changefeed::ChangefeedScope::Ack,
+            ]),
+        };
+        let routing = alopex_cluster::RoutingOutcome::new(
+            alopex_cluster::RoutingOutcomeKind::SingleRange,
+            Some(range),
+            placement_version,
+            "embedded_local_changefeed",
+        );
+        let request = alopex_cluster::changefeed::FeedRequest::new(
+            format!("changefeed-create-{request_id}"),
+            request_id,
+        )
+        .map_err(|source| error::to_py_err(source.to_string()))?;
+        let created = py
+            .detach(move || {
+                db.create_changefeed(
+                    alopex_cluster::changefeed::DurableProfileAdapter::compiled(),
+                    authorization,
+                    tenant,
+                    feed,
+                    routing,
+                    request,
+                )
+            })
+            .map_err(error::embedded_err)?;
+        changefeed_outcome_or_error(py, &created.outcome)?;
+        let handle = created.changefeed.ok_or_else(|| {
+            error::with_code(
+                error::to_py_err("changefeed create succeeded without a usable handle"),
+                "changefeed_internal",
+            )
+        })?;
+        PyChangefeed::from_created(handle, &created.outcome)
     }
 
     /// Create a Counter through the shared local CRDT projection.
@@ -1126,6 +1231,7 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyThreadMode>()?;
     m.add_class::<PyDatabase>()?;
     m.add_class::<PySqlResultStream>()?;
+    m.add_class::<PyChangefeed>()?;
     m.add_class::<PyLocalScan>()?;
     Ok(())
 }
@@ -1255,6 +1361,52 @@ mod tests {
                 .extract()
                 .expect("code str");
             assert!(code.starts_with("ALOPEX-"), "unexpected code: {code}");
+        });
+    }
+
+    #[test]
+    fn create_changefeed_fails_closed_with_a_canonical_python_status() {
+        with_py(|py| {
+            let db = PyDatabase::new(None).expect("db");
+            let err = match db.create_changefeed(
+                py,
+                "feed-a",
+                "cluster-a",
+                7,
+                "range-a",
+                3,
+                4,
+                9,
+                "create-request",
+                "tenant-a",
+                "python-test",
+                "node-a",
+                11,
+                None,
+                None,
+            ) {
+                Ok(_) => panic!("compiled Durable integration must not fall back locally"),
+                Err(err) => err,
+            };
+            assert_eq!(
+                err.value(py)
+                    .getattr("code")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "changefeed_prerequisite_missing"
+            );
+            let status_value = err.value(py).getattr("status").unwrap();
+            let status = status_value.cast::<PyDict>().unwrap();
+            assert_eq!(
+                status
+                    .get_item("failure_class")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "prerequisite_missing"
+            );
         });
     }
 

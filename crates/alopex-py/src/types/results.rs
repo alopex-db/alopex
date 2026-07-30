@@ -19,7 +19,7 @@ pub(crate) fn crdt_outcome_to_py(
         .map_err(|_| crate::error::to_py_err("CRDT outcome must serialize to a Python dict"))
 }
 
-fn json_value_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<PyAny>> {
+pub(crate) fn json_value_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<PyAny>> {
     match value {
         serde_json::Value::Null => Ok(py.None()),
         serde_json::Value::Bool(value) => Ok(value.into_py_any(py)?),

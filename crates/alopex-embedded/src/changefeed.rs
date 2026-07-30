@@ -8,10 +8,11 @@ use std::sync::Mutex;
 use alopex_cluster::{
     changefeed::{
         ChangefeedAccessRequest, ChangefeedAction, ChangefeedAuthorization,
-        ChangefeedAuthorizationDecision, DurableProfileAdapter, FeedCoordinator, FeedDelivery,
-        FeedRequest,
+        ChangefeedAuthorizationDecision, ChangefeedResult, CheckpointCursor, DurableProfileAdapter,
+        FeedCoordinator, FeedDelivery, FeedRequest,
     },
-    ChangefeedOutcome, FeedIdentity, RoutingOutcome,
+    ChangefeedOutcome, FailureClass, FeedIdentity, IdempotencyResult, OperationState,
+    RoutingOutcome,
 };
 
 use crate::{Error, Result};
@@ -129,13 +130,42 @@ impl Changefeed {
     }
 
     /// Accepts an acknowledgement only under the `changefeed.ack` scope.
+    ///
+    /// The checkpoint is part of the public acknowledgement contract.  It is
+    /// decoded against this handle's exact feed and range before the
+    /// coordinator can accept the acknowledgement, so a cursor for another
+    /// feed never becomes an apparently successful local acknowledgement.
     pub fn ack(
         &self,
         ack_id: impl Into<String>,
+        checkpoint: &str,
         request: FeedRequest,
     ) -> Result<ChangefeedOutcome> {
         if let Some(denied) = self.denied(ChangefeedAction::Ack, &request)? {
             return Ok(denied);
+        }
+        if CheckpointCursor::decode_for(checkpoint, &self.feed.feed_id, &self.feed.range.range_id)
+            .is_err()
+        {
+            return ChangefeedOutcome::new(
+                self.feed.clone(),
+                request.operation_id.clone(),
+                request.request_id.clone(),
+                OperationState::TerminalFailure,
+                Some(FailureClass::InvalidRequest),
+                Some("invalid_checkpoint".to_owned()),
+                self.routing.clone(),
+                false,
+                IdempotencyResult {
+                    operation_id: request.operation_id,
+                    request_id: request.request_id,
+                    first_outcome: "invalid_checkpoint".to_owned(),
+                    state: OperationState::TerminalFailure,
+                    duplicate_count: 0,
+                },
+                ChangefeedResult::Feed,
+            )
+            .map_err(Error::ChangefeedModel);
         }
         self.coordinator()?
             .ack(&self.feed.feed_id, ack_id, request)

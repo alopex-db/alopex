@@ -2,11 +2,12 @@ use std::collections::BTreeSet;
 
 use alopex_cluster::{
     changefeed::{
-        ChangefeedAuthorization, ChangefeedResult, ChangefeedScope, DurableCapabilityVersion,
-        DurableProfileAdapter, DurableProfileEvidence, FeedRequest,
+        ChangefeedAuthorization, ChangefeedResult, ChangefeedScope, CheckpointCursor,
+        DurableCapabilityVersion, DurableProfileAdapter, DurableProfileEvidence, FeedRequest,
     },
-    AuthenticatedSubject, OperationState, OrderingScope, Placement, PlacementReadiness,
-    PlacementRole, RangeIdentity, RetentionWindow, RoutingOutcome, RoutingOutcomeKind,
+    AuthenticatedSubject, Checkpoint, FailureClass, OperationState, OrderingScope, Placement,
+    PlacementReadiness, PlacementRole, RangeIdentity, RetentionWindow, RoutingOutcome,
+    RoutingOutcomeKind,
 };
 use alopex_embedded::Database;
 
@@ -60,6 +61,13 @@ fn ready_adapter() -> DurableProfileAdapter {
     ))
 }
 
+fn checkpoint() -> String {
+    CheckpointCursor::new(Checkpoint::new("feed-a", "range-a", 3, 0, 0, 9, Some(90)).unwrap())
+        .unwrap()
+        .encode()
+        .unwrap()
+}
+
 #[test]
 fn embedded_lifecycle_uses_the_coordinator_after_authorized_preflight() {
     let database = Database::new();
@@ -88,7 +96,7 @@ fn embedded_lifecycle_uses_the_coordinator_after_authorized_preflight() {
     let poll = handle.poll(10, request("poll")).unwrap();
     assert_eq!(poll.outcome.operation_state, OperationState::Running);
     assert!(poll.events.is_empty());
-    let ack = handle.ack("ack-a", request("ack")).unwrap();
+    let ack = handle.ack("ack-a", &checkpoint(), request("ack")).unwrap();
     assert!(matches!(ack.result, ChangefeedResult::Ack(_)));
     assert_eq!(
         handle.cancel(request("cancel")).unwrap().operation_state,
@@ -114,13 +122,38 @@ fn embedded_scope_denial_never_mutates_or_exposes_ack_payload() {
         )
         .unwrap();
     let handle = created.changefeed.unwrap();
-    let denied = handle.ack("ack-a", request("ack")).unwrap();
+    let denied = handle
+        .ack("ack-a", "not-a-valid-checkpoint", request("ack"))
+        .unwrap();
     assert_eq!(
         denied.failure_class,
         Some(alopex_cluster::FailureClass::Unauthorized)
     );
     assert!(matches!(denied.result, ChangefeedResult::Feed));
     assert_eq!(denied.surface_status().http_status, 401);
+}
+
+#[test]
+fn embedded_ack_rejects_a_checkpoint_for_another_feed_before_acceptance() {
+    let database = Database::new();
+    let created = database
+        .create_changefeed(
+            ready_adapter(),
+            authorization(&[ChangefeedScope::Read, ChangefeedScope::Ack]),
+            "tenant-a",
+            feed(),
+            routing(),
+            request("create"),
+        )
+        .unwrap();
+    let handle = created.changefeed.unwrap();
+
+    let rejected = handle
+        .ack("ack-a", "not-a-valid-checkpoint", request("ack"))
+        .unwrap();
+    assert_eq!(rejected.failure_class, Some(FailureClass::InvalidRequest));
+    assert_eq!(rejected.reason_code.as_deref(), Some("invalid_checkpoint"));
+    assert!(matches!(rejected.result, ChangefeedResult::Feed));
 }
 
 #[test]

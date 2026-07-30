@@ -1,3 +1,6 @@
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
 use alopex_cluster::{
     ClusterDiagnostic, ClusterMetricsSource, ClusterMetricsSummary, ClusterMode,
     ClusterStatusSnapshot, ExcludedRoutingTarget, ExcludedTargetReason, LogicalRange, LogicalShard,
@@ -5,8 +8,336 @@ use alopex_cluster::{
     PlacementLifecycleState, PlacementMetadata, RawChirpsState, RetryPolicySummary,
     RoutingDecisionKind, RoutingDiagnostics, RoutingTarget, StableDiagnosticCode,
 };
+use pyo3::exceptions::PyStopIteration;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyDictMethods, PyList, PyListMethods};
+
+use crate::error;
+use crate::types::results::json_value_to_py;
+
+/// Convert a canonical changefeed outcome without redefining its result
+/// schema for Python.  The JSON shape is shared with the other public
+/// surfaces and remains the source of the exception `status` attribute.
+pub(crate) fn changefeed_outcome_to_py(
+    py: Python<'_>,
+    outcome: &alopex_cluster::ChangefeedOutcome,
+) -> PyResult<Py<PyDict>> {
+    let document =
+        serde_json::to_value(outcome).map_err(|source| error::to_py_err(source.to_string()))?;
+    let value = json_value_to_py(py, &document)?;
+    value
+        .into_bound(py)
+        .cast_into::<PyDict>()
+        .map(Bound::unbind)
+        .map_err(|_| error::to_py_err("changefeed outcome must serialize to a Python dict"))
+}
+
+/// Convert a poll, stream, or resume delivery while retaining both the
+/// lifecycle outcome and every event envelope.
+pub(crate) fn changefeed_delivery_to_py(
+    py: Python<'_>,
+    delivery: &alopex_cluster::changefeed::FeedDelivery,
+) -> PyResult<Py<PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("outcome", changefeed_outcome_to_py(py, &delivery.outcome)?)?;
+    let events = PyList::empty(py);
+    for event in &delivery.events {
+        let document =
+            serde_json::to_value(event).map_err(|source| error::to_py_err(source.to_string()))?;
+        events.append(json_value_to_py(py, &document)?)?;
+    }
+    result.set_item("events", events)?;
+    Ok(result.unbind())
+}
+
+/// Return the Python result for a successful canonical outcome or raise the
+/// stable changefeed exception while preserving the complete status mapping.
+pub(crate) fn changefeed_outcome_or_error(
+    py: Python<'_>,
+    outcome: &alopex_cluster::ChangefeedOutcome,
+) -> PyResult<Py<PyDict>> {
+    let status = changefeed_outcome_to_py(py, outcome)?;
+    if let Some(code) = outcome.surface_status().python_error_code {
+        let message = outcome
+            .reason_code
+            .as_deref()
+            .unwrap_or("changefeed operation failed");
+        let py_err = error::with_code(error::to_py_err(message), code);
+        py_err.value(py).setattr("status", status.clone_ref(py))?;
+        if let Some(failure) = status.bind(py).get_item("failure_class")? {
+            py_err.value(py).setattr("failure_class", failure)?;
+        } else {
+            py_err.value(py).setattr("failure_class", py.None())?;
+        }
+        return Err(py_err);
+    }
+    Ok(status)
+}
+
+#[derive(Default)]
+struct PyChangefeedState {
+    latest_status: Option<serde_json::Value>,
+    buffered_events: VecDeque<serde_json::Value>,
+    generated_request_count: u64,
+}
+
+/// Synchronous, embedded-only Changefeed facade.
+///
+/// It delegates every lifecycle transition to the common embedded handle;
+/// there is no endpoint parameter, remote client, or local-WAL fallback.
+#[pyclass(name = "Changefeed")]
+pub(crate) struct PyChangefeed {
+    handle: Arc<alopex_embedded::Changefeed>,
+    feed_id: String,
+    state: Mutex<PyChangefeedState>,
+}
+
+impl PyChangefeed {
+    pub(crate) fn from_created(
+        handle: alopex_embedded::Changefeed,
+        outcome: &alopex_cluster::ChangefeedOutcome,
+    ) -> PyResult<Self> {
+        let latest_status =
+            serde_json::to_value(outcome).map_err(|source| error::to_py_err(source.to_string()))?;
+        Ok(Self {
+            handle: Arc::new(handle),
+            feed_id: outcome.feed.feed_id.clone(),
+            state: Mutex::new(PyChangefeedState {
+                latest_status: Some(latest_status),
+                ..PyChangefeedState::default()
+            }),
+        })
+    }
+
+    fn request(
+        &self,
+        action: &str,
+        request_id: &str,
+    ) -> PyResult<alopex_cluster::changefeed::FeedRequest> {
+        alopex_cluster::changefeed::FeedRequest::new(
+            format!("changefeed-{action}-{request_id}"),
+            request_id,
+        )
+        .map_err(|source| error::to_py_err(source.to_string()))
+    }
+
+    fn generated_request_id(&self, action: &str) -> PyResult<String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| error::to_py_err("changefeed state lock poisoned"))?;
+        state.generated_request_count = state.generated_request_count.saturating_add(1);
+        Ok(format!(
+            "{action}-{}-{}",
+            self.feed_id, state.generated_request_count
+        ))
+    }
+
+    fn store_outcome(&self, outcome: &alopex_cluster::ChangefeedOutcome) -> PyResult<()> {
+        let latest_status =
+            serde_json::to_value(outcome).map_err(|source| error::to_py_err(source.to_string()))?;
+        self.state
+            .lock()
+            .map_err(|_| error::to_py_err("changefeed state lock poisoned"))?
+            .latest_status = Some(latest_status);
+        Ok(())
+    }
+
+    fn store_delivery(
+        &self,
+        delivery: &alopex_cluster::changefeed::FeedDelivery,
+        buffer_events: bool,
+    ) -> PyResult<()> {
+        self.store_outcome(&delivery.outcome)?;
+        if buffer_events {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| error::to_py_err("changefeed state lock poisoned"))?;
+            for event in &delivery.events {
+                state.buffered_events.push_back(
+                    serde_json::to_value(event)
+                        .map_err(|source| error::to_py_err(source.to_string()))?,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn outcome_result(
+        &self,
+        py: Python<'_>,
+        outcome: alopex_cluster::ChangefeedOutcome,
+    ) -> PyResult<Py<PyDict>> {
+        self.store_outcome(&outcome)?;
+        changefeed_outcome_or_error(py, &outcome)
+    }
+
+    fn delivery_result(
+        &self,
+        py: Python<'_>,
+        delivery: alopex_cluster::changefeed::FeedDelivery,
+        buffer_events: bool,
+    ) -> PyResult<Py<PyDict>> {
+        self.store_delivery(&delivery, buffer_events)?;
+        changefeed_outcome_or_error(py, &delivery.outcome)?;
+        changefeed_delivery_to_py(py, &delivery)
+    }
+
+    fn next_event(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(event) = self
+            .state
+            .lock()
+            .map_err(|_| error::to_py_err("changefeed state lock poisoned"))?
+            .buffered_events
+            .pop_front()
+        {
+            return json_value_to_py(py, &event);
+        }
+
+        let request_id = self.generated_request_id("iterator")?;
+        let delivery = self
+            .handle
+            .stream(1, self.request("stream", &request_id)?)
+            .map_err(error::embedded_err)?;
+        self.store_delivery(&delivery, true)?;
+        changefeed_outcome_or_error(py, &delivery.outcome)?;
+        let event = self
+            .state
+            .lock()
+            .map_err(|_| error::to_py_err("changefeed state lock poisoned"))?
+            .buffered_events
+            .pop_front()
+            .ok_or_else(|| PyStopIteration::new_err(()))?;
+        json_value_to_py(py, &event)
+    }
+}
+
+#[pymethods]
+impl PyChangefeed {
+    #[getter]
+    fn status(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let status = self
+            .state
+            .lock()
+            .map_err(|_| error::to_py_err("changefeed state lock poisoned"))?
+            .latest_status
+            .clone()
+            .ok_or_else(|| error::to_py_err("changefeed has no lifecycle status"))?;
+        json_value_to_py(py, &status)?
+            .into_bound(py)
+            .cast_into::<PyDict>()
+            .map(Bound::unbind)
+            .map_err(|_| error::to_py_err("changefeed status must be a Python dict"))
+    }
+
+    fn subscribe(
+        &self,
+        py: Python<'_>,
+        expected_generation: u64,
+        expected_epoch: u64,
+        request_id: &str,
+    ) -> PyResult<Py<PyDict>> {
+        let outcome = self
+            .handle
+            .subscribe(
+                expected_generation,
+                expected_epoch,
+                self.request("subscribe", request_id)?,
+            )
+            .map_err(error::embedded_err)?;
+        self.outcome_result(py, outcome)
+    }
+
+    fn poll(&self, py: Python<'_>, max_events: usize, request_id: &str) -> PyResult<Py<PyDict>> {
+        let delivery = self
+            .handle
+            .poll(max_events, self.request("poll", request_id)?)
+            .map_err(error::embedded_err)?;
+        self.delivery_result(py, delivery, false)
+    }
+
+    fn stream(&self, py: Python<'_>, max_events: usize, request_id: &str) -> PyResult<Py<PyDict>> {
+        let delivery = self
+            .handle
+            .stream(max_events, self.request("stream", request_id)?)
+            .map_err(error::embedded_err)?;
+        self.delivery_result(py, delivery, true)
+    }
+
+    fn ack(
+        &self,
+        py: Python<'_>,
+        ack_id: &str,
+        checkpoint: &str,
+        request_id: &str,
+    ) -> PyResult<Py<PyDict>> {
+        let outcome = self
+            .handle
+            .ack(ack_id, checkpoint, self.request("ack", request_id)?)
+            .map_err(error::embedded_err)?;
+        self.outcome_result(py, outcome)
+    }
+
+    fn resume(&self, py: Python<'_>, checkpoint: &str, request_id: &str) -> PyResult<Py<PyDict>> {
+        let delivery = self
+            .handle
+            .resume(checkpoint, self.request("resume", request_id)?)
+            .map_err(error::embedded_err)?;
+        self.delivery_result(py, delivery, true)
+    }
+
+    fn cancel(&self, py: Python<'_>, request_id: &str) -> PyResult<Py<PyDict>> {
+        let outcome = self
+            .handle
+            .cancel(self.request("cancel", request_id)?)
+            .map_err(error::embedded_err)?;
+        self.outcome_result(py, outcome)
+    }
+
+    fn close(&self, py: Python<'_>, request_id: &str) -> PyResult<Py<PyDict>> {
+        let outcome = self
+            .handle
+            .close(self.request("close", request_id)?)
+            .map_err(error::embedded_err)?;
+        self.outcome_result(py, outcome)
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.next_event(py)
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __exit__(
+        &self,
+        py: Python<'_>,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_value: Option<Py<PyAny>>,
+        _traceback: Option<Py<PyAny>>,
+    ) -> PyResult<bool> {
+        let request_id = self.generated_request_id("context-close")?;
+        let outcome = self
+            .handle
+            .close(self.request("close", &request_id)?)
+            .map_err(error::embedded_err)?;
+        self.store_outcome(&outcome)?;
+        // `close` has the canonical cancelled terminal state.  The explicit
+        // lifecycle method exposes that state as `changefeed_cancelled`, but
+        // context-manager cleanup must not mask an exception from its body or
+        // turn a normal scope exit into a second exception.
+        if outcome.surface_status().python_error_code != Some("changefeed_cancelled") {
+            changefeed_outcome_or_error(py, &outcome)?;
+        }
+        Ok(false)
+    }
+}
 
 pub(crate) fn cluster_status_to_py(
     py: Python<'_>,
@@ -489,8 +820,76 @@ fn excluded_target_reason_name(value: ExcludedTargetReason) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::stable_diagnostic_code_name;
-    use alopex_cluster::StableDiagnosticCode;
+    use std::collections::BTreeSet;
+
+    use alopex_cluster::{
+        changefeed::{
+            ChangefeedAuthorization, ChangefeedScope, CheckpointCursor, DurableCapabilityVersion,
+            DurableProfileAdapter, DurableProfileEvidence, FeedRequest,
+        },
+        AuthenticatedSubject, Checkpoint, FeedIdentity, OperationState, OrderingScope, Placement,
+        PlacementReadiness, PlacementRole, RangeIdentity, RetentionWindow, RoutingOutcome,
+        RoutingOutcomeKind, StableDiagnosticCode,
+    };
+    use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods};
+    use pyo3::{Py, Python};
+
+    use super::{stable_diagnostic_code_name, PyChangefeed};
+
+    fn ready_handle() -> (
+        alopex_embedded::Changefeed,
+        alopex_cluster::ChangefeedOutcome,
+    ) {
+        let range = RangeIdentity::new("cluster-a", 7, "range-a", None, None, 4, 9);
+        let feed = FeedIdentity::new(
+            "feed-a",
+            range.clone(),
+            3,
+            Placement::new(
+                "node-a",
+                vec![],
+                PlacementRole::Owner,
+                PlacementReadiness::Ready,
+                11,
+            ),
+            OrderingScope::Range,
+            RetentionWindow::unbounded(),
+            OperationState::Accepted,
+        )
+        .unwrap();
+        let routing = RoutingOutcome::new(
+            RoutingOutcomeKind::SingleRange,
+            Some(range.clone()),
+            12,
+            "placement_ready",
+        );
+        let authorization = ChangefeedAuthorization {
+            subject: AuthenticatedSubject::new("python-test"),
+            tenant: "tenant-a".to_owned(),
+            allowed_ranges: BTreeSet::from([range.range_id]),
+            allowed_scopes: BTreeSet::from([ChangefeedScope::Read, ChangefeedScope::Ack]),
+        };
+        let created = alopex_embedded::Database::new()
+            .create_changefeed(
+                DurableProfileAdapter::new(DurableProfileEvidence::complete(
+                    DurableCapabilityVersion::new(0, 7, 0),
+                )),
+                authorization,
+                "tenant-a",
+                feed,
+                routing,
+                FeedRequest::new("create", "create-request").unwrap(),
+            )
+            .unwrap();
+        (created.changefeed.unwrap(), created.outcome)
+    }
+
+    fn checkpoint() -> String {
+        CheckpointCursor::new(Checkpoint::new("feed-a", "range-a", 3, 0, 0, 9, None).unwrap())
+            .unwrap()
+            .encode()
+            .unwrap()
+    }
 
     #[test]
     fn phase_one_metadata_diagnostic_codes_have_stable_python_names() {
@@ -521,5 +920,138 @@ mod tests {
         for (code, expected) in cases {
             assert_eq!(stable_diagnostic_code_name(code), expected);
         }
+    }
+
+    #[test]
+    fn sync_changefeed_preserves_lifecycle_status_exception_and_context_contract() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let (handle, outcome) = ready_handle();
+            let handle = Py::new(py, PyChangefeed::from_created(handle, &outcome).unwrap())
+                .expect("Python Changefeed");
+            let handle = handle.bind(py);
+
+            let status_value = handle.getattr("status").unwrap();
+            let status = status_value.cast::<PyDict>().unwrap();
+            assert_eq!(
+                status
+                    .get_item("operation_state")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "accepted"
+            );
+
+            let subscribed_value = handle
+                .call_method1("subscribe", (3_u64, 9_u64, "subscribe-request"))
+                .unwrap();
+            let subscribed = subscribed_value.cast::<PyDict>().unwrap();
+            assert_eq!(
+                subscribed
+                    .get_item("operation_state")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "running"
+            );
+
+            for action in ["poll", "stream"] {
+                let delivery_value = handle
+                    .call_method1(action, (10_usize, format!("{action}-request")))
+                    .unwrap();
+                let delivery = delivery_value.cast::<PyDict>().unwrap();
+                assert!(delivery.get_item("outcome").unwrap().is_some());
+                assert!(delivery.get_item("events").unwrap().is_some());
+            }
+
+            let acknowledged_value = handle
+                .call_method1("ack", ("ack-a", checkpoint(), "ack-request"))
+                .unwrap();
+            let acknowledged = acknowledged_value.cast::<PyDict>().unwrap();
+            let result_value = acknowledged.get_item("result").unwrap().unwrap();
+            let result_envelope = result_value.cast::<PyDict>().unwrap();
+            assert_eq!(
+                result_envelope
+                    .get_item("result_type")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "ack"
+            );
+            let result_value = result_envelope.get_item("result").unwrap().unwrap();
+            let result = result_value.cast::<PyDict>().unwrap();
+            assert_eq!(
+                result
+                    .get_item("ack_state")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "accepted"
+            );
+
+            let invalid = handle
+                .call_method1("ack", ("ack-b", "not-a-checkpoint", "invalid-request"))
+                .expect_err("invalid checkpoint must be a classified Python error");
+            assert_eq!(
+                invalid
+                    .value(py)
+                    .getattr("code")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "changefeed_invalid_request"
+            );
+            let failure_status_value = invalid.value(py).getattr("status").unwrap();
+            let failure_status = failure_status_value.cast::<PyDict>().unwrap();
+            assert_eq!(
+                failure_status
+                    .get_item("reason_code")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "invalid_checkpoint"
+            );
+
+            handle
+                .call_method1("resume", (checkpoint(), "resume-request"))
+                .unwrap();
+            let exhausted = handle
+                .call_method0("__next__")
+                .expect_err("empty stream must end through iterator protocol");
+            assert!(exhausted.is_instance_of::<pyo3::exceptions::PyStopIteration>(py));
+
+            handle.call_method0("__enter__").unwrap();
+            let cancelled = handle
+                .call_method1("cancel", ("cancel-request",))
+                .expect_err("explicit cancellation must remain classified");
+            assert_eq!(
+                cancelled
+                    .value(py)
+                    .getattr("code")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "changefeed_cancelled"
+            );
+            handle
+                .call_method1("__exit__", (py.None(), py.None(), py.None()))
+                .unwrap();
+            let closed_value = handle.getattr("status").unwrap();
+            let closed = closed_value.cast::<PyDict>().unwrap();
+            assert_eq!(
+                closed
+                    .get_item("operation_state")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "cancelled"
+            );
+        });
     }
 }
