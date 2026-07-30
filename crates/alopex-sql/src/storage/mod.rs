@@ -1,6 +1,7 @@
 #[cfg(feature = "tokio")]
 pub mod async_storage;
 pub mod bridge;
+pub mod changefeed_journal;
 pub mod codec;
 #[cfg(feature = "tokio")]
 pub mod erased;
@@ -17,6 +18,7 @@ pub use bridge::{
     BorrowedSqlTransaction, LocalRangeChangeJournal, RangeChangeJournalScope, SqlTransaction,
     SqlTxn, TxnBridge, TxnContext,
 };
+pub use changefeed_journal::{ChangefeedJournalError, CommittedSqlChangeJournal};
 pub use codec::RowCodec;
 #[cfg(feature = "tokio")]
 pub use erased::ErasedAsyncSqlTransaction;
