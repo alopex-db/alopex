@@ -421,6 +421,39 @@ class AsyncDatabase(_AsyncLocalHandle):
             actor=actor,
         )
 
+    async def list_set(
+        self,
+        object_id: str,
+        *,
+        cluster_id: str,
+        table_id: int,
+        range_id: str,
+        schema_version: int,
+        data_epoch: int,
+        request_id: str,
+        operation_id: str,
+        update_version: int,
+        actor: str = "alopex-python-local",
+    ) -> dict[str, Any]:
+        """List Set members without mutating the durable operation ledger.
+
+        This facade forwards directly to the GIL-releasing native binding. It
+        does not create a Python worker, remote client, or Python-side Set
+        projection.
+        """
+        return self._handle.list_set(
+            object_id,
+            cluster_id=cluster_id,
+            table_id=table_id,
+            range_id=range_id,
+            schema_version=schema_version,
+            data_epoch=data_epoch,
+            request_id=request_id,
+            operation_id=operation_id,
+            update_version=update_version,
+            actor=actor,
+        )
+
     async def read_counter(
         self,
         object_id: str,

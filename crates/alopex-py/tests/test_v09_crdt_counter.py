@@ -341,6 +341,89 @@ def test_i27_python_async_set_contains_preserves_canonical_membership_without_a_
     asyncio.run(scenario())
 
 
+def test_i27_python_async_set_list_preserves_canonical_membership_without_a_ledger_mutation() -> None:
+    async def scenario() -> None:
+        db = await AsyncDatabase.open_in_memory()
+        try:
+            await db.create_set(
+                "set-async-list",
+                cluster_id="cluster-a",
+                table_id=7,
+                range_id="range-a",
+                schema_version=1,
+                data_epoch=9,
+                request_id="request-set-async-list-create",
+                operation_id="operation-set-async-list-create",
+                update_version=12,
+            )
+            await db.add_set(
+                "set-async-list",
+                cluster_id="cluster-a",
+                table_id=7,
+                range_id="range-a",
+                schema_version=1,
+                data_epoch=9,
+                request_id="request-set-async-list-add",
+                operation_id="00000000-0000-0000-0000-000000000163",
+                update_version=13,
+                member="alice",
+            )
+            kwargs = dict(
+                cluster_id="cluster-a",
+                table_id=7,
+                range_id="range-a",
+                schema_version=1,
+                data_epoch=9,
+                request_id="request-set-async-list",
+                operation_id="operation-set-async-list",
+                update_version=0,
+            )
+            first = await db.list_set("set-async-list", **kwargs)
+            repeated = await db.list_set("set-async-list", **kwargs)
+            assert first["object_type"] == "set"
+            assert first["object_id"] == "set-async-list"
+            assert first["range"] == {
+                "cluster_id": "cluster-a",
+                "table_id": 7,
+                "range_id": "range-a",
+                "lower_bound": None,
+                "upper_bound": None,
+                "schema_version": 1,
+                "data_epoch": 9,
+            }
+            assert first["request_id"] == "request-set-async-list"
+            assert first["operation_id"] == "operation-set-async-list"
+            assert first["state"] == "committed"
+            assert first["routing"]["kind"] == "local_only"
+            assert first["value"] == {
+                "value_type": "set",
+                "members": ["alice"],
+                "member_versions": {
+                    "alice": {
+                        "update_version": 13,
+                        "operation_id": "00000000-0000-0000-0000-000000000163",
+                        "present": True,
+                    }
+                },
+                "accepted_operation_versions": {
+                    "operation-set-async-list-create": 12,
+                    "00000000-0000-0000-0000-000000000163": 13,
+                },
+            }
+            assert first["idempotency"] == {
+                "first_outcome": "set_list",
+                "duplicate_count": 0,
+                "request_id": "request-set-async-list",
+                "operation_id": "operation-set-async-list",
+                "state": "committed",
+            }
+            assert repeated == first
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def _read_counter(db: Database, operation_id: str = "operation-read") -> dict:
     return db.read_counter(
         "counter-a",
