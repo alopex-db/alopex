@@ -9,6 +9,7 @@ DATABASE_SOURCE = (CRATE_ROOT / "src/embedded/database.rs").read_text(encoding="
 TRANSACTION_SOURCE = (CRATE_ROOT / "src/embedded/transaction.rs").read_text(encoding="utf-8")
 STREAM_SOURCE = (CRATE_ROOT / "src/embedded/stream.rs").read_text(encoding="utf-8")
 LOCAL_SCAN_SOURCE = (CRATE_ROOT / "src/embedded/local_scan.rs").read_text(encoding="utf-8")
+CHANGEFEED_SOURCE = (CRATE_ROOT / "src/types/cluster.rs").read_text(encoding="utf-8")
 STUB_SOURCE = (CRATE_ROOT / "python/alopex/_alopex.pyi").read_text(encoding="utf-8")
 ASYNCIO_SOURCE = (CRATE_ROOT / "python/alopex/asyncio.py").read_text(encoding="utf-8")
 ASYNCIO_STUB_SOURCE = (CRATE_ROOT / "python/alopex/asyncio.pyi").read_text(encoding="utf-8")
@@ -114,3 +115,29 @@ def test_i22_set_list_has_async_implementation_and_stub() -> None:
         assert re.search(
             r"^    async def list_set\s*\(", source, re.MULTILINE
         ), "missing public AsyncDatabase.list_set"
+
+
+def test_phase3_changefeed_public_stubs_and_binding_methods_are_exact() -> None:
+    """Keep the v0.9 lifecycle register from drifting away from PyO3/stubs."""
+    assert "impl PyDatabase" in DATABASE_SOURCE
+    assert _has_binding_method(DATABASE_SOURCE, "create_changefeed")
+    assert re.search(r"^    def create_changefeed\s*\(", STUB_SOURCE, re.MULTILINE)
+
+    lifecycle = ("subscribe", "poll", "stream", "ack", "resume", "cancel", "close")
+    assert "impl PyChangefeed" in CHANGEFEED_SOURCE
+    for method in lifecycle:
+        assert _has_binding_method(CHANGEFEED_SOURCE, method), (
+            f"missing PyChangefeed.{method} binding"
+        )
+        assert re.search(
+            rf"^    def {method}\s*\(", STUB_SOURCE, re.MULTILINE
+        ), f"missing Changefeed.{method} public stub"
+        for source in (ASYNCIO_SOURCE, ASYNCIO_STUB_SOURCE):
+            assert re.search(
+                rf"^    async def {method}\s*\(", source, re.MULTILINE
+            ), f"missing AsyncChangefeed.{method} public surface"
+
+    for source in (ASYNCIO_SOURCE, ASYNCIO_STUB_SOURCE):
+        assert re.search(
+            r"^    async def create_changefeed\s*\(", source, re.MULTILINE
+        ), "missing AsyncDatabase.create_changefeed public surface"
