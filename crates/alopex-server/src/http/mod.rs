@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod admin_api;
 pub mod admin_resources;
+pub mod changefeed;
 pub mod columnar;
 pub mod crdt;
 pub mod hnsw;

@@ -6,6 +6,7 @@
 //! tasks.  Keeping the contract here prevents a transport or a storage record
 //! from becoming the public feed schema by accident.
 
+mod authorization;
 mod checkpoint;
 mod coordinator;
 mod cursor;
@@ -14,6 +15,10 @@ mod journal_adapter;
 mod model;
 mod retention;
 
+pub use authorization::{
+    ChangefeedAccessRequest, ChangefeedAction, ChangefeedAuthorization,
+    ChangefeedAuthorizationDecision, ChangefeedScope,
+};
 pub use checkpoint::{
     AckProcessor, AckRequest, CheckpointError, CheckpointStore, ResumePlan, ResumePlanner,
     ResumeSourceStatus,
