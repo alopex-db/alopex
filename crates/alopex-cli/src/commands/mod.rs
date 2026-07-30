@@ -7,6 +7,7 @@
 //! - hnsw: HNSW index management
 //! - columnar: Columnar segment operations
 
+pub mod changefeed;
 pub mod columnar;
 pub mod crdt;
 pub mod hnsw;

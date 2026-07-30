@@ -31,6 +31,16 @@ pub enum ClientError {
 
 pub type ClientResult<T> = Result<T, ClientError>;
 
+/// A raw HTTP response retained for public contracts that carry a structured
+/// non-success outcome in their body. Callers must classify `status` rather
+/// than treating a non-2xx response as an unstructured transport failure.
+#[derive(Debug)]
+pub struct RawHttpResponse {
+    pub status: reqwest::StatusCode,
+    pub content_type: Option<String>,
+    pub body: String,
+}
+
 #[derive(Debug, Clone)]
 struct RetryPolicy {
     delays: Vec<Duration>,
@@ -107,6 +117,26 @@ impl HttpClient {
             .base_url
             .join(path)
             .map_err(|err| ClientError::InvalidUrl(err.to_string()))?;
+        let request = self.client.request(method, url);
+        Ok(self.auth.apply_to_request(request)?)
+    }
+
+    fn request_with_query(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> ClientResult<RequestBuilder> {
+        let mut url = self
+            .base_url
+            .join(path)
+            .map_err(|err| ClientError::InvalidUrl(err.to_string()))?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            for (key, value) in query {
+                pairs.append_pair(key, value);
+            }
+        }
         let request = self.client.request(method, url);
         Ok(self.auth.apply_to_request(request)?)
     }
@@ -203,6 +233,50 @@ impl HttpClient {
         self.send_and_check(|| self.request(Method::POST, path).map(|req| req.json(body)))
             .await
     }
+
+    /// Execute a JSON POST without discarding a structured non-2xx body.
+    pub async fn post_json_raw<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> ClientResult<RawHttpResponse> {
+        let response = self
+            .send_with_retry(|| self.request(Method::POST, path).map(|req| req.json(body)))
+            .await?;
+        raw_response(response).await
+    }
+
+    /// Execute a query-parameter GET without discarding a structured non-2xx
+    /// body. This is intentionally separate from `get_json`, whose legacy
+    /// callers treat every non-2xx response as a transport error.
+    pub async fn get_raw_with_query(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> ClientResult<RawHttpResponse> {
+        let response = self
+            .send_with_retry(|| self.request_with_query(Method::GET, path, query))
+            .await?;
+        raw_response(response).await
+    }
+}
+
+async fn raw_response(response: Response) -> ClientResult<RawHttpResponse> {
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    let body = response.text().await.map_err(|err| ClientError::Request {
+        retries: 0,
+        source: err,
+    })?;
+    Ok(RawHttpResponse {
+        status,
+        content_type,
+        body,
+    })
 }
 
 fn validate_base_url(base_url: &Url, insecure: bool) -> ClientResult<()> {

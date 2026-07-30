@@ -183,6 +183,11 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<CrdtCommand>,
     },
+    /// Durable changefeed lifecycle operations against a server profile
+    Changefeed {
+        #[command(subcommand)]
+        command: ChangefeedCommand,
+    },
     /// Show CLI and file format version information
     Version,
     /// Generate shell completion scripts
@@ -206,6 +211,141 @@ pub enum CrdtCommand {
         #[command(subcommand)]
         command: Option<SetCommand>,
     },
+}
+
+/// Durable changefeed lifecycle subcommands.
+///
+/// Changefeeds are only available through an explicitly configured server
+/// profile. The server derives the authenticated actor; the CLI deliberately
+/// does not expose an actor flag that could disagree with that identity.
+#[derive(Subcommand, Debug)]
+pub enum ChangefeedCommand {
+    /// Create a feed for exactly one table or range target
+    Create {
+        /// Table target (mutually exclusive with --range)
+        #[arg(long, required_unless_present = "range", conflicts_with = "range")]
+        table: Option<String>,
+        /// Explicit range target (mutually exclusive with --table)
+        #[arg(long, required_unless_present = "table", conflicts_with = "table")]
+        range: Option<String>,
+        /// Tenant context checked by the server-established authorization policy
+        #[arg(long)]
+        tenant: String,
+        /// Stable idempotency identity for this create operation
+        #[arg(long)]
+        request_id: String,
+        /// Optional retention deadline represented in the wire contract epoch
+        #[arg(long)]
+        deadline: Option<u64>,
+        /// Requested result format; rendering is applied by the output adapter
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
+    },
+    /// Subscribe using the generation and epoch observed by the consumer
+    Subscribe {
+        /// Feed identity returned by create
+        #[arg(long)]
+        feed_id: String,
+        /// Stable idempotency identity for this subscribe operation
+        #[arg(long)]
+        request_id: String,
+        /// Expected committed range generation
+        #[arg(long)]
+        generation: u64,
+        /// Expected committed range data epoch
+        #[arg(long)]
+        epoch: u64,
+        /// Requested result format; rendering is applied by the output adapter
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
+    },
+    /// Fetch one bounded event delivery batch
+    Poll {
+        #[command(flatten)]
+        request: ChangefeedDeliveryRequest,
+    },
+    /// Fetch one streaming event delivery batch
+    Stream {
+        #[command(flatten)]
+        request: ChangefeedDeliveryRequest,
+        /// Keep the CLI stream presentation open when the output adapter supports it
+        #[arg(long)]
+        follow: bool,
+    },
+    /// Acknowledge a feed checkpoint
+    Ack {
+        #[command(flatten)]
+        request: ChangefeedCheckpointRequest,
+        /// Stable acknowledgement identity
+        #[arg(long)]
+        ack_id: String,
+    },
+    /// Resume strictly after an acknowledged checkpoint
+    Resume {
+        #[command(flatten)]
+        request: ChangefeedCheckpointRequest,
+    },
+    /// Cancel a feed without silently advancing its checkpoint
+    Cancel {
+        #[command(flatten)]
+        request: ChangefeedLifecycleRequest,
+    },
+    /// Close a feed through its terminal lifecycle transition
+    Close {
+        #[command(flatten)]
+        request: ChangefeedLifecycleRequest,
+    },
+}
+
+/// Shared bounded-delivery input for poll and stream.
+#[derive(Args, Debug)]
+pub struct ChangefeedDeliveryRequest {
+    /// Feed identity returned by create
+    #[arg(long)]
+    pub feed_id: String,
+    /// Stable idempotency identity for this delivery operation
+    #[arg(long)]
+    pub request_id: String,
+    /// Maximum number of events to deliver in this response
+    #[arg(long)]
+    pub max_events: usize,
+    /// Caller deadline represented in the wire contract epoch
+    #[arg(long)]
+    pub deadline: u64,
+    /// Requested result format; rendering is applied by the output adapter
+    #[arg(long, value_enum)]
+    pub format: Option<OutputFormat>,
+}
+
+/// Shared checkpoint input for acknowledgement and resume.
+#[derive(Args, Debug)]
+pub struct ChangefeedCheckpointRequest {
+    /// Feed identity returned by create
+    #[arg(long)]
+    pub feed_id: String,
+    /// Stable idempotency identity for this operation
+    #[arg(long)]
+    pub request_id: String,
+    /// Encoded checkpoint returned by a prior delivery
+    #[arg(long)]
+    pub checkpoint: String,
+    /// Requested result format; rendering is applied by the output adapter
+    #[arg(long, value_enum)]
+    pub format: Option<OutputFormat>,
+}
+
+/// Shared input for terminal lifecycle operations.
+#[derive(Args, Debug)]
+pub struct ChangefeedLifecycleRequest {
+    /// Feed identity returned by create
+    #[arg(long)]
+    pub feed_id: String,
+    /// Stable idempotency identity for this operation
+    #[arg(long)]
+    pub request_id: String,
+    /// Requested result format; rendering is applied by the output adapter
+    #[arg(long, value_enum)]
+    pub format: Option<OutputFormat>,
 }
 
 /// Counter CRDT commands.
@@ -1315,6 +1455,189 @@ mod tests {
                 command: Some(ServerCommand::Leave)
             })
         ));
+    }
+
+    #[test]
+    fn test_parse_changefeed_lifecycle_commands_and_required_options() {
+        let create = Cli::try_parse_from([
+            "alopex",
+            "changefeed",
+            "create",
+            "--table",
+            "orders",
+            "--tenant",
+            "tenant-a",
+            "--request-id",
+            "create-1",
+            "--deadline",
+            "99",
+            "--format",
+            "json",
+        ])
+        .expect("create parses");
+        assert!(matches!(
+            create.command,
+            Some(Command::Changefeed {
+                command: ChangefeedCommand::Create {
+                    table: Some(table),
+                    range: None,
+                    tenant,
+                    request_id,
+                    deadline: Some(99),
+                    format: Some(OutputFormat::Json),
+                }
+            }) if table == "orders" && tenant == "tenant-a" && request_id == "create-1"
+        ));
+
+        let subscribe = Cli::try_parse_from([
+            "alopex",
+            "changefeed",
+            "subscribe",
+            "--feed-id",
+            "feed-a",
+            "--request-id",
+            "sub-1",
+            "--generation",
+            "7",
+            "--epoch",
+            "11",
+        ])
+        .expect("subscribe parses");
+        assert!(matches!(
+            subscribe.command,
+            Some(Command::Changefeed {
+                command: ChangefeedCommand::Subscribe {
+                    generation: 7,
+                    epoch: 11,
+                    ..
+                }
+            })
+        ));
+
+        let poll = Cli::try_parse_from([
+            "alopex",
+            "changefeed",
+            "poll",
+            "--feed-id",
+            "feed-a",
+            "--request-id",
+            "poll-1",
+            "--max-events",
+            "2",
+            "--deadline",
+            "11",
+        ])
+        .expect("poll parses");
+        assert!(matches!(
+            poll.command,
+            Some(Command::Changefeed {
+                command: ChangefeedCommand::Poll { request }
+            }) if request.max_events == 2 && request.deadline == 11
+        ));
+
+        let stream = Cli::try_parse_from([
+            "alopex",
+            "changefeed",
+            "stream",
+            "--feed-id",
+            "feed-a",
+            "--request-id",
+            "stream-1",
+            "--max-events",
+            "3",
+            "--deadline",
+            "12",
+            "--follow",
+            "--format",
+            "jsonl",
+        ])
+        .expect("stream parses");
+        assert!(matches!(
+            stream.command,
+            Some(Command::Changefeed {
+                command: ChangefeedCommand::Stream { follow: true, .. }
+            })
+        ));
+
+        let ack = Cli::try_parse_from([
+            "alopex",
+            "changefeed",
+            "ack",
+            "--feed-id",
+            "feed-a",
+            "--request-id",
+            "ack-1",
+            "--ack-id",
+            "ack-record-1",
+            "--checkpoint",
+            "checkpoint-a",
+        ])
+        .expect("ack parses");
+        assert!(matches!(
+            ack.command,
+            Some(Command::Changefeed {
+                command: ChangefeedCommand::Ack { ack_id, .. }
+            }) if ack_id == "ack-record-1"
+        ));
+
+        for args in [
+            vec![
+                "alopex",
+                "changefeed",
+                "resume",
+                "--feed-id",
+                "feed-a",
+                "--request-id",
+                "resume-1",
+                "--checkpoint",
+                "checkpoint-a",
+            ],
+            vec![
+                "alopex",
+                "changefeed",
+                "cancel",
+                "--feed-id",
+                "feed-a",
+                "--request-id",
+                "cancel-1",
+            ],
+            vec![
+                "alopex",
+                "changefeed",
+                "close",
+                "--feed-id",
+                "feed-a",
+                "--request-id",
+                "close-1",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+
+        assert!(Cli::try_parse_from([
+            "alopex",
+            "changefeed",
+            "create",
+            "--tenant",
+            "tenant-a",
+            "--request-id",
+            "create-1",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "alopex",
+            "changefeed",
+            "create",
+            "--table",
+            "orders",
+            "--range",
+            "range-a",
+            "--tenant",
+            "tenant-a",
+            "--request-id",
+            "create-1",
+        ])
+        .is_err());
     }
 
     #[test]

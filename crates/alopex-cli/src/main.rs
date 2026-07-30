@@ -389,6 +389,7 @@ fn run(cli: Cli) -> Result<()> {
     if resolved.connection_type == ConnectionType::Server {
         let data_dir = resolved.data_dir.as_deref().map(Path::new);
         if let Some(server_config) = resolved.server.as_ref() {
+            let is_changefeed = matches!(&command, Command::Changefeed { .. });
             match execute_server_command(
                 &command,
                 server_config,
@@ -402,7 +403,7 @@ fn run(cli: Cli) -> Result<()> {
             ) {
                 Ok(()) => return Ok(()),
                 Err(err) => {
-                    if matches!(err, CliError::ServerConnection(_)) {
+                    if matches!(err, CliError::ServerConnection(_)) && !is_changefeed {
                         if let Some(fallback) = resolved.fallback_local.clone() {
                             eprintln!(
                                 "Warning: Failed to connect to server, falling back to local mode"
@@ -501,6 +502,7 @@ fn is_write_command(command: &Command) -> bool {
             )
         ),
         Command::Crdt { .. } => true,
+        Command::Changefeed { .. } => false,
         Command::Server { .. }
         | Command::Lifecycle { .. }
         | Command::Profile { .. }
@@ -970,6 +972,14 @@ fn execute_server_command(
                 quiet,
             ))
         }
+        Command::Changefeed { command } => {
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            let actor = commands::changefeed::authenticated_actor(server_config);
+            let response =
+                runtime.block_on(commands::changefeed::invoke_remote(&client, command, actor))?;
+            commands::changefeed::write_canonical_json(&mut handle, &response)
+        }
         Command::Server {
             command: server_cmd,
         } => {
@@ -1396,6 +1406,9 @@ fn execute_command(
                 .ok_or_else(|| CliError::InvalidArgument("Missing CRDT subcommand".to_string()))?;
             commands::crdt::execute_local(db, crdt_cmd, &mut handle, output_format, quiet)
         }
+        Command::Changefeed { .. } => Err(CliError::ServerUnsupported(
+            "changefeed requires an explicitly configured Durable server profile".to_string(),
+        )),
         Command::Server { .. } => Err(CliError::InvalidArgument(
             "Server commands require a server profile".to_string(),
         )),
