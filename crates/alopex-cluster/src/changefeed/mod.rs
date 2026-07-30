@@ -6,12 +6,17 @@
 //! tasks.  Keeping the contract here prevents a transport or a storage record
 //! from becoming the public feed schema by accident.
 
+mod checkpoint;
 mod coordinator;
 mod cursor;
 mod durable;
 mod journal_adapter;
 mod model;
 
+pub use checkpoint::{
+    AckProcessor, AckRequest, CheckpointError, CheckpointStore, ResumePlan, ResumePlanner,
+    ResumeSourceStatus,
+};
 pub use coordinator::{
     CoordinatorError, DurablePreflightEvidence, FeedCoordinator, FeedDelivery, FeedPreflight,
     FeedRequest,
