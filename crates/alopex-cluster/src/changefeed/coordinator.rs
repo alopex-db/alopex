@@ -52,7 +52,9 @@ impl FeedRequest {
 /// local-WAL or best-effort feed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FeedPreflight {
-    Ready,
+    Ready {
+        _durable_evidence: DurablePreflightEvidence,
+    },
     Rejected {
         failure_class: FailureClass,
         reason_code: String,
@@ -60,7 +62,28 @@ pub enum FeedPreflight {
     },
 }
 
+/// Opaque marker carried by a successful Durable capability check.
+///
+/// Its tuple field is private, so public callers cannot construct a `Ready`
+/// preflight without passing through `DurableProfileAdapter`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurablePreflightEvidence(());
+
 impl FeedPreflight {
+    /// Produces a Ready state only for the in-crate Durable adapter after it
+    /// has verified all mandatory capability evidence.
+    pub(crate) const fn ready() -> Self {
+        Self::Ready {
+            _durable_evidence: DurablePreflightEvidence(()),
+        }
+    }
+
+    /// Reports whether Durable evidence passed every mandatory preflight check.
+    #[must_use]
+    pub const fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+
     pub fn rejected(
         failure_class: FailureClass,
         reason_code: impl Into<String>,

@@ -8,13 +8,18 @@
 
 mod coordinator;
 mod cursor;
+mod durable;
 mod journal_adapter;
 mod model;
 
 pub use coordinator::{
-    CoordinatorError, FeedCoordinator, FeedDelivery, FeedPreflight, FeedRequest,
+    CoordinatorError, DurablePreflightEvidence, FeedCoordinator, FeedDelivery, FeedPreflight,
+    FeedRequest,
 };
 pub use cursor::{CheckpointCursor, CheckpointPosition, CursorError, EventIdentity};
+pub use durable::{
+    DurableAuthorization, DurableCapabilityVersion, DurableProfileAdapter, DurableProfileEvidence,
+};
 pub use journal_adapter::{JournalAdapterError, JournalEventAdapter};
 
 pub use model::{

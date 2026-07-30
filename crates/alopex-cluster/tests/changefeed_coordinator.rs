@@ -3,7 +3,10 @@ use alopex_cluster::{
     FailureClass, FeedIdentity, IdempotencyResult, OperationState, OrderingScope, Placement,
     PlacementReadiness, PlacementRole, RangeIdentity, RetentionWindow, RoutingOutcome,
     RoutingOutcomeKind,
-    changefeed::{CoordinatorError, FeedCoordinator, FeedPreflight, FeedRequest},
+    changefeed::{
+        CoordinatorError, DurableCapabilityVersion, DurableProfileAdapter, DurableProfileEvidence,
+        FeedCoordinator, FeedPreflight, FeedRequest,
+    },
 };
 
 fn feed() -> FeedIdentity {
@@ -73,7 +76,11 @@ fn event(ordinal: u32, event_id: &str) -> ChangeEventEnvelope {
 }
 
 fn ready_coordinator() -> FeedCoordinator {
-    let mut coordinator = FeedCoordinator::new(FeedPreflight::Ready);
+    let preflight = DurableProfileAdapter::new(DurableProfileEvidence::complete(
+        DurableCapabilityVersion::new(0, 7, 0),
+    ))
+    .preflight();
+    let mut coordinator = FeedCoordinator::new(preflight);
     coordinator
         .create(feed(), routing(), request("create"))
         .unwrap();
