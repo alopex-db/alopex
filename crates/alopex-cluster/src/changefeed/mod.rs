@@ -6,7 +6,10 @@
 //! tasks.  Keeping the contract here prevents a transport or a storage record
 //! from becoming the public feed schema by accident.
 
+mod cursor;
 mod model;
+
+pub use cursor::{CheckpointCursor, CheckpointPosition, CursorError, EventIdentity};
 
 pub use model::{
     AckResult, AckState, ChangeEventEnvelope, ChangeOperationType, ChangePayload,
