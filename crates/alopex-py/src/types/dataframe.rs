@@ -1430,11 +1430,8 @@ mod tests {
 
     #[test]
     fn lazyframe_streams_csv_as_finite_python_dataframes() {
-        let path = std::env::temp_dir().join(format!(
-            "alopex-py-dataframe-stream-{}-{}.csv",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dataframe-stream.csv");
         std::fs::write(&path, "value\n1\n2\n").unwrap();
 
         pyo3::Python::initialize();
@@ -1477,7 +1474,6 @@ mod tests {
             );
             stream.close().unwrap();
         });
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
