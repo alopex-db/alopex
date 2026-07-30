@@ -5,6 +5,7 @@
 /// Catalog metadata API (in-memory, primarily for Python bindings).
 pub mod catalog;
 pub mod catalog_api;
+pub mod changefeed;
 mod cluster_state;
 pub mod columnar_api;
 mod dataframe_api;
@@ -24,6 +25,7 @@ pub use crate::catalog_api::{
     ColumnInfo, CreateCatalogRequest, CreateNamespaceRequest, CreateTableRequest, IndexInfo,
     NamespaceInfo, StorageInfo, TableInfo, CATALOG_MANIFEST_DELTA_FORMAT,
 };
+pub use crate::changefeed::{Changefeed, CreateChangefeedResult};
 pub use crate::columnar_api::{
     ColumnarIndexInfo, ColumnarIndexType, ColumnarRowIterator, EmbeddedConfig, StorageMode,
 };
@@ -136,6 +138,15 @@ pub enum Error {
     /// The embedded cluster state lock was poisoned.
     #[error("cluster state lock poisoned")]
     ClusterStateLockPoisoned,
+    /// The embedded changefeed coordinator lock was poisoned.
+    #[error("changefeed coordinator lock poisoned")]
+    ChangefeedLockPoisoned,
+    /// The changefeed coordinator rejected a lifecycle operation.
+    #[error("changefeed coordinator error: {0}")]
+    ChangefeedCoordinator(alopex_cluster::changefeed::CoordinatorError),
+    /// The canonical changefeed result could not be constructed.
+    #[error("changefeed model error: {0}")]
+    ChangefeedModel(alopex_cluster::ChangefeedModelError),
 }
 
 impl Error {
@@ -397,6 +408,31 @@ impl Database {
             .read()
             .map_err(|_| Error::ClusterStateLockPoisoned)?;
         Ok(state.routing_diagnostics(self.table_info_cache_epoch()))
+    }
+
+    /// Creates an embedded durable changefeed facade after explicit Durable
+    /// capability and tenant/range/scope authorization checks.
+    ///
+    /// A rejected authorization or unavailable Durable profile returns its
+    /// canonical outcome with no usable handle; this method never creates a
+    /// best-effort local feed.
+    pub fn create_changefeed(
+        &self,
+        adapter: alopex_cluster::changefeed::DurableProfileAdapter,
+        authorization: alopex_cluster::changefeed::ChangefeedAuthorization,
+        tenant: impl Into<String>,
+        feed: alopex_cluster::FeedIdentity,
+        routing: alopex_cluster::RoutingOutcome,
+        request: alopex_cluster::changefeed::FeedRequest,
+    ) -> Result<CreateChangefeedResult> {
+        Changefeed::create(
+            adapter,
+            authorization,
+            tenant.into(),
+            feed,
+            routing,
+            request,
+        )
     }
 
     /// Creates a local Counter from the canonical Phase 2 operation envelope.
