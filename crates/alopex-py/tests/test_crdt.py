@@ -143,3 +143,18 @@ def test_f2_python_async_register_covers_all_ten_crdt_operations_and_close_bound
             await db.close()
 
     asyncio.run(scenario())
+
+
+def test_f2_python_async_cancellation_has_the_native_terminal_boundary() -> None:
+    async def scenario() -> None:
+        db = await AsyncDatabase.open_in_memory()
+        try:
+            stream = await db.execute_sql_stream("SELECT 1 AS value")
+            await stream.cancel()
+            with pytest.raises(AlopexError) as cancelled:
+                await stream.__anext__()
+            assert cancelled.value.code == "stream_cancelled"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
