@@ -1,4 +1,4 @@
-use std::ffi::{CString, c_char, c_int, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::slice;
 use std::sync::Once;
 
@@ -33,6 +33,7 @@ unsafe extern "C" {
     fn alopex_parser_init();
     fn alopex_parse_sql(input: *const c_char, length: c_int) -> CParseResult;
     fn alopex_free_buffer(p: *mut c_void);
+    fn alopex_parser_version() -> *const c_char;
 }
 
 static INIT: Once = Once::new();
@@ -45,6 +46,20 @@ pub fn parse_sql(sql: &str) -> CParseResult {
     let input = CString::new(sql).expect("SQL input contains an interior NUL byte");
     let len = c_int::try_from(sql.len()).expect("SQL input is too large for Nim parser FFI");
     unsafe { alopex_parse_sql(input.as_ptr(), len) }
+}
+
+pub fn parser_contract_version() -> String {
+    INIT.call_once(|| unsafe {
+        alopex_parser_init();
+    });
+
+    let version = unsafe { alopex_parser_version() };
+    if version.is_null() {
+        return String::new();
+    }
+    unsafe { CStr::from_ptr(version) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 pub struct OwnedBuffer {

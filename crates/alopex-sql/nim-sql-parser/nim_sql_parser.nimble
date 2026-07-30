@@ -1,5 +1,5 @@
 # Package
-version       = "0.1.0"
+version       = "0.2.0"
 author        = "Alopex Team"
 description   = "SQL parser for Alopex DB — trial implementation in Nim"
 license       = "Apache-2.0"
@@ -13,6 +13,7 @@ requires "msgpack4nim"
 # Tasks
 task test, "Run tests":
   exec "nim c -r tests/test_parser.nim"
+  exec "nim c -r tests/test_promql_parser.nim"
   exec "nim c -r tests/test_msgpack_output.nim"
   exec "nim c -r tests/test_ffi_boundary.nim"
 

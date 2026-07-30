@@ -56,6 +56,7 @@ pub use ast::{
 // Dialect and parser types
 pub use dialect::{AlopexDialect, Dialect};
 pub use error::{ParserError, Result};
+pub use nim_bridge::parser_contract_version;
 pub use parser::Parser;
 pub use unified_error::SqlError;
 

@@ -57,6 +57,13 @@ proc expectIdent(p: var Parser; context = "identifier"): Token =
     p.error("expected " & context)
   result = p.advance()
 
+proc expectExprIdent(p: var Parser; context = "identifier"): Token =
+  ## FIRST/LAST/time are reserved by ORDER BY and type grammar, but SQL-TS
+  ## also uses them as ordinary function/column identifiers.
+  if p.current.kind notin {tkIdent, tkFirst, tkLast, tkTime}:
+    p.error("expected " & context)
+  result = p.advance()
+
 proc expectOptionValue(p: var Parser): Token =
   if p.current.kind notin OptionValueTokens:
     p.error("expected option value")
@@ -201,6 +208,11 @@ proc parsePrimary(p: var Parser): SqlNode =
   of tkString:
     let tok = p.advance()
     result = newStringLit(tok.value, tokenSpan(tok))
+  of tkInterval:
+    let intervalTok = p.advance()
+    let valueTok = p.expect(tkString)
+    result = newIntervalLit(valueTok.value,
+      Span(start: tokenSpan(intervalTok).start, `end`: tokenSpan(valueTok).`end`))
   of tkTrue:
     let tok = p.advance()
     result = newBoolLit(true, tokenSpan(tok))
@@ -238,13 +250,13 @@ proc parsePrimary(p: var Parser): SqlNode =
   of tkMinus:
     let tok = p.advance()
     result = newUnaryOp(opNeg, p.parsePrimary(), tokenSpan(tok))
-  of tkIdent:
+  of tkIdent, tkFirst, tkLast, tkTime:
     let tok = p.advance()
     if p.check(tkLParen):
       result = p.parseFunctionCall(tok)
     elif p.check(tkDot):
       discard p.advance()
-      let col = p.expectIdent("column name")
+      let col = p.expectExprIdent("column name")
       result = newNode(nkColumnRef, tokenSpan(tok))
       result.children.add(newIdent(tok.value, tokenSpan(tok)))
       result.children.add(newIdent(col.value, tokenSpan(col)))

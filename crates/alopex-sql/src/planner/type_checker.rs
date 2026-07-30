@@ -260,6 +260,13 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 (TypedExprKind::Literal(lit.clone()), resolved_type)
             }
             Literal::String(_) => (TypedExprKind::Literal(lit.clone()), ResolvedType::Text),
+            Literal::Interval(_) => {
+                return Err(PlannerError::unsupported_feature(
+                    "INTERVAL literals require a SQL-TS semantic layer",
+                    "0.9.0",
+                    span,
+                ));
+            }
             Literal::Boolean(_) => (TypedExprKind::Literal(lit.clone()), ResolvedType::Boolean),
             Literal::Null => (TypedExprKind::Literal(lit.clone()), ResolvedType::Null),
         };
