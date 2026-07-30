@@ -134,6 +134,15 @@ pub enum CliError {
         reason: String,
         exit_code: ExitCode,
     },
+
+    /// A changefeed command returned a canonical non-success or pending
+    /// outcome after its complete structured response was written to stdout.
+    #[error("Changefeed {outcome}: {reason}")]
+    ChangefeedOutcome {
+        outcome: String,
+        reason: String,
+        exit_code: ExitCode,
+    },
 }
 
 /// Type alias for CLI results.
@@ -160,6 +169,7 @@ impl CliError {
         match self {
             Self::ClusterManagementOutcome { exit_code, .. } => *exit_code,
             Self::CrdtOutcome { exit_code, .. } => *exit_code,
+            Self::ChangefeedOutcome { exit_code, .. } => *exit_code,
             Self::DistributedReadOutcome { exit_code, .. } => *exit_code,
             _ => ExitCode::Error,
         }

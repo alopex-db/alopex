@@ -1,4 +1,5 @@
 use crate::config::EXIT_CODE_INTERRUPTED;
+use serde_json::Value as JsonValue;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +103,147 @@ impl ClusterManagementOutcome {
     pub fn is_success(self) -> bool {
         matches!(self, Self::Succeeded)
     }
+}
+
+/// Normalized outcome classes for a canonical changefeed response. The CLI
+/// keeps the response document intact and uses this type only for its stable
+/// shell exit matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangefeedCliOutcome {
+    Success,
+    Pending,
+    RetryableFailure,
+    TerminalFailure,
+    AuthorizationFailure,
+    Unsupported,
+    Cancelled,
+}
+
+impl ChangefeedCliOutcome {
+    /// Classify canonical outcome documents without treating a non-2xx
+    /// response as a transport error. A response that lacks a canonical state
+    /// falls back to its HTTP status; an unknown canonical state fails closed.
+    pub fn from_changefeed_response(documents: &[JsonValue], http_status: u16) -> Self {
+        documents
+            .iter()
+            .filter_map(changefeed_document_outcome)
+            .fold(Self::from_http_status(http_status), Self::combine)
+    }
+
+    pub fn exit_code(self) -> ExitCode {
+        match self {
+            Self::Success => ExitCode::Success,
+            Self::Pending => ExitCode::Warning,
+            Self::RetryableFailure => ExitCode::Retryable,
+            Self::TerminalFailure => ExitCode::Error,
+            Self::AuthorizationFailure => ExitCode::Authorization,
+            Self::Unsupported => ExitCode::Unsupported,
+            Self::Cancelled => ExitCode::Interrupted,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Pending => "pending",
+            Self::RetryableFailure => "retryable_failure",
+            Self::TerminalFailure => "terminal_failure",
+            Self::AuthorizationFailure => "authorization_failure",
+            Self::Unsupported => "unsupported",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn from_http_status(status: u16) -> Self {
+        match status {
+            200..=201 => Self::Success,
+            202 => Self::Pending,
+            401 | 403 => Self::AuthorizationFailure,
+            408 | 429 | 503 => Self::RetryableFailure,
+            499 => Self::Cancelled,
+            501 => Self::Unsupported,
+            _ => Self::TerminalFailure,
+        }
+    }
+
+    fn combine(self, other: Self) -> Self {
+        if other.precedence() > self.precedence() {
+            other
+        } else {
+            self
+        }
+    }
+
+    fn precedence(self) -> u8 {
+        match self {
+            Self::Success => 0,
+            Self::Pending => 1,
+            Self::RetryableFailure => 2,
+            Self::TerminalFailure => 3,
+            Self::Unsupported => 4,
+            Self::AuthorizationFailure => 5,
+            Self::Cancelled => 6,
+        }
+    }
+}
+
+fn changefeed_document_outcome(document: &JsonValue) -> Option<ChangefeedCliOutcome> {
+    let state = document.get("operation_state").and_then(JsonValue::as_str);
+    let failure_class = document.get("failure_class").and_then(JsonValue::as_str);
+    let reason_code = document.get("reason_code").and_then(JsonValue::as_str);
+    let retryable = document
+        .get("retryable")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+    let routing_unsupported = document
+        .get("routing")
+        .and_then(|routing| routing.get("kind"))
+        .and_then(JsonValue::as_str)
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("unsupported"));
+
+    let has_canonical_outcome = state.is_some() || failure_class.is_some() || reason_code.is_some();
+    if !has_canonical_outcome {
+        return None;
+    }
+
+    if state.is_some_and(|state| state.eq_ignore_ascii_case("cancelled")) {
+        return Some(ChangefeedCliOutcome::Cancelled);
+    }
+    if failure_class.is_some_and(|class| class.eq_ignore_ascii_case("unauthorized")) {
+        return Some(ChangefeedCliOutcome::AuthorizationFailure);
+    }
+    if routing_unsupported || reason_code.is_some_and(|reason| reason.ends_with("_unsupported")) {
+        return Some(ChangefeedCliOutcome::Unsupported);
+    }
+    if state.is_some_and(|state| {
+        matches!(
+            state,
+            "accepted" | "running" | "recovery_pending" | "pending"
+        )
+    }) {
+        return Some(ChangefeedCliOutcome::Pending);
+    }
+    if retryable
+        || state.is_some_and(|state| state.eq_ignore_ascii_case("retryable_failure"))
+        || reason_code.is_some_and(|reason| reason.eq_ignore_ascii_case("backpressure"))
+    {
+        return Some(ChangefeedCliOutcome::RetryableFailure);
+    }
+    if failure_class.is_some_and(|class| class.eq_ignore_ascii_case("prerequisite_missing")) {
+        return Some(ChangefeedCliOutcome::Unsupported);
+    }
+    if failure_class.is_some()
+        || reason_code
+            .is_some_and(|reason| matches!(reason, "retention_expired" | "resource_limit"))
+        || state.is_some_and(|state| matches!(state, "rejected" | "terminal_failure" | "failed"))
+    {
+        return Some(ChangefeedCliOutcome::TerminalFailure);
+    }
+    if state.is_some_and(|state| state.eq_ignore_ascii_case("committed")) {
+        return Some(ChangefeedCliOutcome::Success);
+    }
+
+    Some(ChangefeedCliOutcome::TerminalFailure)
 }
 
 #[allow(dead_code)]

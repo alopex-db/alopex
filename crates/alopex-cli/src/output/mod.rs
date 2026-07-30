@@ -7,6 +7,7 @@
 //! - csv: CSV format (RFC 4180)
 //! - tsv: TSV format
 
+pub mod changefeed;
 pub mod collector;
 pub mod csv;
 pub mod formatter;

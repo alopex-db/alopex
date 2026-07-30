@@ -5,7 +5,8 @@ pub mod exit_code;
 pub use detector::{BatchMode, BatchModeSource};
 #[allow(unused_imports)]
 pub use exit_code::{
-    ClusterManagementOutcome, DistributedReadOutcome, ExitCode, ExitCodeCollector,
+    ChangefeedCliOutcome, ClusterManagementOutcome, DistributedReadOutcome, ExitCode,
+    ExitCodeCollector,
 };
 
 #[cfg(test)]

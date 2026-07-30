@@ -4,15 +4,13 @@
 //! canonical response documents. Format rendering and exit-code classification
 //! deliberately live in the later changefeed output adapter.
 
-use std::io::Write;
-
 use reqwest::StatusCode;
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::cli::{
     ChangefeedCheckpointRequest, ChangefeedCommand, ChangefeedDeliveryRequest,
-    ChangefeedLifecycleRequest,
+    ChangefeedLifecycleRequest, OutputFormat,
 };
 use crate::client::http::{ClientError, HttpClient, RawHttpResponse};
 use crate::error::{CliError, Result};
@@ -25,14 +23,14 @@ use crate::profile::config::{AuthType, ServerConfig};
 /// classification are introduced by the dedicated output adapter task.
 #[derive(Debug)]
 pub struct ChangefeedResponse {
-    /// Preserved for the output adapter's documented exit-code classification
-    /// in task 3.13. Task 3.12 deliberately does not reinterpret a canonical
-    /// non-success response as a transport failure.
-    #[allow(dead_code, reason = "task 3.13 owns exit-code classification")]
+    /// Retained even for non-success responses so the output adapter can map
+    /// the server's canonical outcome to the documented CLI exit matrix.
     pub status: StatusCode,
     pub documents: Vec<Value>,
     /// A follow stream must make each decoded record visible promptly.
     pub follow: bool,
+    /// Command-local format overrides the existing global output format.
+    pub format: Option<OutputFormat>,
 }
 
 /// Derive the actor assertion required by the current server contract from
@@ -172,21 +170,27 @@ pub async fn invoke_remote(
         status: raw.status,
         documents,
         follow,
+        format: requested_format(command),
     })
 }
 
-/// Temporary canonical JSON handoff until the dedicated output adapter maps
-/// all requested formats. It intentionally emits the server documents without
-/// table/CSV/exit-code reinterpretation.
-pub fn write_canonical_json<W: Write>(writer: &mut W, response: &ChangefeedResponse) -> Result<()> {
-    for document in &response.documents {
-        serde_json::to_writer(&mut *writer, document)?;
-        writeln!(writer)?;
-        if response.follow {
-            writer.flush()?;
+/// Returns the per-changefeed format override, if the caller supplied one.
+/// The output adapter falls back to the existing global CLI format otherwise.
+pub fn requested_format(command: &ChangefeedCommand) -> Option<OutputFormat> {
+    match command {
+        ChangefeedCommand::Create { format, .. } | ChangefeedCommand::Subscribe { format, .. } => {
+            *format
+        }
+        ChangefeedCommand::Poll { request } | ChangefeedCommand::Stream { request, .. } => {
+            request.format
+        }
+        ChangefeedCommand::Ack { request, .. } | ChangefeedCommand::Resume { request } => {
+            request.format
+        }
+        ChangefeedCommand::Cancel { request } | ChangefeedCommand::Close { request } => {
+            request.format
         }
     }
-    Ok(())
 }
 
 async fn delivery_request(

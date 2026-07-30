@@ -978,7 +978,7 @@ fn execute_server_command(
             let actor = commands::changefeed::authenticated_actor(server_config);
             let response =
                 runtime.block_on(commands::changefeed::invoke_remote(&client, command, actor))?;
-            commands::changefeed::write_canonical_json(&mut handle, &response)
+            output::changefeed::render_and_classify(&mut handle, &response, output_format)
         }
         Command::Server {
             command: server_cmd,
