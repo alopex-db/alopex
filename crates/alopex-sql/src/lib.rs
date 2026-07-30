@@ -29,6 +29,7 @@ pub mod ast;
 #[cfg(feature = "async")]
 pub mod async_api;
 pub mod catalog;
+pub mod changefeed_boundary;
 pub mod columnar;
 pub mod dialect;
 pub mod distributed_read;
