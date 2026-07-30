@@ -7,9 +7,11 @@
 //! from becoming the public feed schema by accident.
 
 mod cursor;
+mod journal_adapter;
 mod model;
 
 pub use cursor::{CheckpointCursor, CheckpointPosition, CursorError, EventIdentity};
+pub use journal_adapter::{JournalAdapterError, JournalEventAdapter};
 
 pub use model::{
     AckResult, AckState, ChangeEventEnvelope, ChangeOperationType, ChangePayload,
