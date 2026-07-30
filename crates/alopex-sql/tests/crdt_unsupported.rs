@@ -211,3 +211,63 @@ fn set_list_is_rejected_during_planning_before_any_execution() {
     assert_eq!(error.code(), "ALOPEX-F001");
     assert!(error.message().contains(function));
 }
+
+#[test]
+fn crdt_scalar_arity_statement_and_pragma_registers_reject_before_execution() {
+    let catalog = MemoryCatalog::new();
+
+    // Every arity spelling remains an unregistered SQL scalar.  These rows
+    // cover the public F2 name register rather than relying on only its
+    // nominal arity, so no accidental overload becomes a SQL escape hatch.
+    for sql in [
+        "SELECT crdt_counter_create()",
+        "SELECT crdt_counter_create('requests')",
+        "SELECT crdt_counter_create('requests', 0, 1)",
+        "SELECT crdt_counter_read()",
+        "SELECT crdt_counter_read('requests', 1)",
+        "SELECT crdt_counter_increment()",
+        "SELECT crdt_counter_increment('requests', 1, 2)",
+        "SELECT crdt_counter_decrement()",
+        "SELECT crdt_counter_decrement('requests', 1, 2)",
+        "SELECT crdt_set_create()",
+        "SELECT crdt_set_create('members', 1)",
+        "SELECT crdt_set_read()",
+        "SELECT crdt_set_read('members', 1)",
+        "SELECT crdt_set_add()",
+        "SELECT crdt_set_add('members', 'alice', 1)",
+        "SELECT crdt_set_remove()",
+        "SELECT crdt_set_remove('members', 'alice', 1)",
+        "SELECT crdt_set_contains()",
+        "SELECT crdt_set_contains('members', 'alice', 1)",
+        "SELECT crdt_set_list()",
+        "SELECT crdt_set_list('members', 1)",
+    ] {
+        let error = plan_sql_for_routing(&catalog, sql)
+            .expect_err("CRDT scalar arity must not create an executable plan");
+        assert!(matches!(error, SqlError::Plan { .. }), "{sql}: {error}");
+        assert_eq!(error.code(), "ALOPEX-F001", "{sql}: {error}");
+    }
+
+    let dialect = AlopexDialect;
+    for sql in [
+        "CREATE CRDT COUNTER requests",
+        "ALTER CRDT SET members",
+        "DROP CRDT COUNTER requests",
+    ] {
+        assert!(
+            Parser::parse_sql(&dialect, sql).is_err(),
+            "CRDT statement must be rejected before planning: {sql}"
+        );
+    }
+    for sql in [
+        "PRAGMA crdt_counter_create",
+        "PRAGMA crdt_counter_read = 1",
+        "PRAGMA crdt_set_add",
+        "PRAGMA crdt_set_list = 1",
+    ] {
+        assert!(
+            plan_sql_for_routing(&catalog, sql).is_err(),
+            "CRDT PRAGMA must not produce an executable plan: {sql}"
+        );
+    }
+}
