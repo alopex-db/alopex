@@ -35,6 +35,7 @@ fn crdt_scalar_names_are_not_registered_as_sql_functions() {
         "crdt_set_add('members', 'alice')",
         "crdt_set_remove('members', 'alice')",
         "crdt_set_contains('members', 'alice')",
+        "crdt_set_list('members')",
     ] {
         // The parser may represent an arbitrary identifier as a function
         // call, but it must never resolve it into an executable CRDT scalar.
@@ -190,6 +191,22 @@ fn set_contains_is_rejected_during_planning_before_any_execution() {
     assert!(scalar::signature(function).is_none());
     let error = plan_sql_for_routing(&catalog, "SELECT crdt_set_contains('members', 'alice')")
         .expect_err("Set contains must be rejected before SQL execution");
+    assert!(matches!(error, SqlError::Plan { .. }));
+    assert_eq!(error.code(), "ALOPEX-F001");
+    assert!(error.message().contains(function));
+}
+
+#[test]
+fn set_list_is_rejected_during_planning_before_any_execution() {
+    let function = "crdt_set_list";
+    let catalog = MemoryCatalog::new();
+
+    // Listing members is not an implicit SQL read capability. The function
+    // remains absent from the scalar registry, so planning must reject it
+    // before an executable plan, transaction, or Set projection is reached.
+    assert!(scalar::signature(function).is_none());
+    let error = plan_sql_for_routing(&catalog, "SELECT crdt_set_list('members')")
+        .expect_err("Set list must be rejected before SQL execution");
     assert!(matches!(error, SqlError::Plan { .. }));
     assert_eq!(error.code(), "ALOPEX-F001");
     assert!(error.message().contains(function));
