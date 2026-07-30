@@ -150,28 +150,16 @@ impl DataFrameError {
     /// adapters report the supported boundary instead of implying that a missing method ran and
     /// failed. `cse` and `concat` are backed by the existing optimizer/execution paths.
     pub fn preflight_dataframe_operation(operation: &str) -> Result<()> {
+        if is_crdt_operation(operation) {
+            return Err(Self::invalid_operation(format!(
+                "dataframe CRDT operation '{operation}' is unsupported: pre_execution_unsupported"
+            )));
+        }
         match operation {
             "cse" | "concat" => Ok(()),
             "cast" | "pivot" | "unpivot" | "window" => Err(Self::invalid_operation(format!(
                 "dataframe operation '{operation}' is planned and unavailable: pre_execution_unsupported"
             ))),
-            // Phase 2 deliberately has no DataFrame CRDT namespace.  Classify
-            // Counter and Set create/read/increment/decrement operations explicitly so callers
-            // receive a stable boundary result before any eager or lazy plan can be built.
-            "crdt_counter_create"
-            | "crdt_counter_read"
-            | "crdt_counter_increment"
-            | "crdt_counter_decrement"
-            | "crdt_set_create"
-            | "crdt_set_read"
-            | "crdt_set_add"
-            | "crdt_set_remove"
-            | "crdt_set_contains"
-            | "crdt_set_list" => {
-                Err(Self::invalid_operation(format!(
-                "dataframe CRDT operation '{operation}' is unsupported: pre_execution_unsupported"
-                )))
-            }
             _ => Err(Self::invalid_operation(format!(
                 "unknown dataframe operation '{operation}'"
             ))),
@@ -239,6 +227,38 @@ impl DataFrameError {
             reason: reason.into(),
         }
     }
+}
+
+fn is_crdt_operation(operation: &str) -> bool {
+    let operation = operation
+        .strip_prefix("expr.str.")
+        .or_else(|| operation.strip_prefix("expr.dt."))
+        .or_else(|| operation.strip_prefix("expr.list."))
+        .or_else(|| operation.strip_prefix("dataframe."))
+        .or_else(|| operation.strip_prefix("lazyframe."))
+        .or_else(|| operation.strip_prefix("expr."))
+        .or_else(|| operation.strip_prefix("io."))
+        .or_else(|| operation.strip_prefix("stream."))
+        .or_else(|| operation.strip_prefix("streaming."))
+        .unwrap_or(operation);
+    matches!(
+        operation,
+        "crdt_counter_create"
+            | "crdt_counter_read"
+            | "crdt_counter_increment"
+            | "crdt_counter_decrement"
+            | "crdt_set_create"
+            | "crdt_set_read"
+            | "crdt_set_add"
+            | "crdt_set_remove"
+            | "crdt_set_contains"
+            | "crdt_set_list"
+            | "crdt_merge"
+            | "crdt_reconcile"
+            | "crdt_recover"
+            | "crdt_retire"
+            | "crdt_cancel"
+    )
 }
 
 fn column_display(column: &Option<String>) -> String {

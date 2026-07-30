@@ -146,3 +146,43 @@ fn existing_dataframe_operation_preflight_is_unchanged() {
     assert!(preflight("cse").is_ok());
     assert!(preflight("concat").is_ok());
 }
+
+#[test]
+fn crdt_namespaces_and_streaming_operations_are_rejected_before_plan_construction() {
+    let operations = [
+        "crdt_counter_create",
+        "crdt_counter_read",
+        "crdt_counter_increment",
+        "crdt_counter_decrement",
+        "crdt_set_create",
+        "crdt_set_read",
+        "crdt_set_add",
+        "crdt_set_remove",
+        "crdt_set_contains",
+        "crdt_set_list",
+        "crdt_merge",
+        "crdt_reconcile",
+        "crdt_recover",
+        "crdt_retire",
+        "crdt_cancel",
+    ];
+    for namespace in [
+        "dataframe.",
+        "lazyframe.",
+        "expr.",
+        "expr.str.",
+        "expr.dt.",
+        "expr.list.",
+        "io.",
+        "stream.",
+        "streaming.",
+    ] {
+        for operation in operations {
+            let operation = format!("{namespace}{operation}");
+            let error = preflight(&operation).expect_err("CRDT namespace must be preflighted");
+            assert!(matches!(error, DataFrameError::InvalidOperation { .. }));
+            assert!(error.to_string().contains("pre_execution_unsupported"));
+            assert!(error.to_string().contains(&operation));
+        }
+    }
+}
