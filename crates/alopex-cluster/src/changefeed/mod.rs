@@ -6,10 +6,14 @@
 //! tasks.  Keeping the contract here prevents a transport or a storage record
 //! from becoming the public feed schema by accident.
 
+mod coordinator;
 mod cursor;
 mod journal_adapter;
 mod model;
 
+pub use coordinator::{
+    CoordinatorError, FeedCoordinator, FeedDelivery, FeedPreflight, FeedRequest,
+};
 pub use cursor::{CheckpointCursor, CheckpointPosition, CursorError, EventIdentity};
 pub use journal_adapter::{JournalAdapterError, JournalEventAdapter};
 
