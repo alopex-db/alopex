@@ -436,6 +436,21 @@ impl FeedCoordinator {
                 });
             }
         };
+        if cursor.checkpoint().generation != session.feed.generation
+            || cursor.checkpoint().epoch != session.feed.range.data_epoch
+        {
+            return Ok(FeedDelivery {
+                outcome: failure_outcome(
+                    &session.feed,
+                    &session.routing,
+                    &request,
+                    FailureClass::EpochMismatch,
+                    "range_order_gap",
+                    true,
+                )?,
+                events: Vec::new(),
+            });
+        }
         if let Some(failure) = &session.continuity_failure {
             return Ok(FeedDelivery {
                 outcome: failure_outcome(
