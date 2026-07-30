@@ -131,6 +131,94 @@ class AsyncSqlResultStream(_AsyncLocalHandle):
         return False
 
 
+class AsyncChangefeed(_AsyncLocalHandle):
+    """Async facade over the owned embedded-local ``Changefeed`` handle.
+
+    Lifecycle calls delegate directly to the native handle, preserving its
+    canonical outcome dictionaries and ``AlopexError`` status mapping.  The
+    facade has no remote client, Python queue, executor, or worker thread.
+    """
+
+    def __init__(self, changefeed: Any, single_thread: bool) -> None:
+        super().__init__(changefeed, single_thread)
+        self._next_lock = _asyncio.Lock()
+        self._cancel_request_count = 0
+
+    def __aiter__(self) -> "AsyncChangefeed":
+        return self
+
+    def _cancellation_request_id(self) -> str:
+        self._cancel_request_count += 1
+        return f"async-iterator-cancel-{self._cancel_request_count}"
+
+    def _cancel_after_task_cancellation(self) -> None:
+        """Request the native terminal transition without replacing cancellation.
+
+        Explicit ``cancel`` deliberately exposes the native classified
+        ``changefeed_cancelled`` error.  Task cancellation must instead retain
+        Python's ``CancelledError`` as its observable result, so cleanup is
+        best-effort here only.
+        """
+        try:
+            self._handle.cancel(self._cancellation_request_id())
+        except AlopexError:
+            pass
+
+    async def __anext__(self) -> Dict[str, Any]:
+        async with self._next_lock:
+            try:
+                # Yield once so task cancellation is observed before invoking
+                # the synchronous, caller-thread-owned native handle.
+                await _asyncio.sleep(0)
+                return next(self._handle)
+            except StopIteration:
+                raise StopAsyncIteration from None
+            except _asyncio.CancelledError:
+                self._cancel_after_task_cancellation()
+                raise
+
+    async def subscribe(
+        self, expected_generation: int, expected_epoch: int, request_id: str
+    ) -> Dict[str, Any]:
+        return self._handle.subscribe(expected_generation, expected_epoch, request_id)
+
+    async def poll(self, max_events: int, request_id: str) -> Dict[str, Any]:
+        return self._handle.poll(max_events, request_id)
+
+    async def stream(self, max_events: int, request_id: str) -> Dict[str, Any]:
+        return self._handle.stream(max_events, request_id)
+
+    async def ack(
+        self, ack_id: str, checkpoint: str, request_id: str
+    ) -> Dict[str, Any]:
+        return self._handle.ack(ack_id, checkpoint, request_id)
+
+    async def resume(self, checkpoint: str, request_id: str) -> Dict[str, Any]:
+        return self._handle.resume(checkpoint, request_id)
+
+    async def cancel(self, request_id: str) -> Dict[str, Any]:
+        return self._handle.cancel(request_id)
+
+    async def close(self, request_id: str) -> Dict[str, Any]:
+        return self._handle.close(request_id)
+
+    @property
+    def status(self) -> Dict[str, Any]:
+        return self._handle.status
+
+    async def __aenter__(self) -> "AsyncChangefeed":
+        return self
+
+    async def __aexit__(
+        self, exc_type: Optional[Any], exc: Optional[Any], traceback: Optional[Any]
+    ) -> bool:
+        # The synchronous handle's context exit already performs the safe
+        # terminal cleanup and does not let `changefeed_cancelled` mask the
+        # body exception or a normal context exit.
+        self._handle.__exit__(exc_type, exc, traceback)
+        return False
+
+
 class AsyncScanResultStream(AsyncSqlResultStream):
     """Async adapter for either a local SQL scan row stream or DataFrame batch stream."""
 
@@ -247,6 +335,48 @@ class AsyncDatabase(_AsyncLocalHandle):
         self, sql: str, params: Optional[Sequence[Any]] = None
     ) -> Union[list[dict[str, Any]], int, None]:
         return self._handle.execute_sql(sql, params)
+
+    async def create_changefeed(
+        self,
+        feed_id: str,
+        *,
+        cluster_id: str,
+        table_id: int,
+        range_id: str,
+        generation: int,
+        schema_version: int,
+        data_epoch: int,
+        request_id: str,
+        tenant: str = "default",
+        actor: str = "alopex-python-local",
+        placement_node_id: str = "alopex-python-local",
+        placement_version: int = 0,
+        retention_deadline: Optional[int] = None,
+        retained_through_position: Optional[int] = None,
+    ) -> AsyncChangefeed:
+        """Create an async facade after the native Durable preflight.
+
+        The current compiled profile reports the native
+        ``changefeed_prerequisite_missing`` error.  It is intentionally
+        propagated unchanged rather than replaced with a local fallback.
+        """
+        changefeed = self._handle.create_changefeed(
+            feed_id,
+            cluster_id=cluster_id,
+            table_id=table_id,
+            range_id=range_id,
+            generation=generation,
+            schema_version=schema_version,
+            data_epoch=data_epoch,
+            request_id=request_id,
+            tenant=tenant,
+            actor=actor,
+            placement_node_id=placement_node_id,
+            placement_version=placement_version,
+            retention_deadline=retention_deadline,
+            retained_through_position=retained_through_position,
+        )
+        return AsyncChangefeed(changefeed, self._single_thread)
 
     async def create_counter(
         self,
