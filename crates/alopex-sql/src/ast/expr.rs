@@ -107,6 +107,10 @@ pub enum Literal {
     String(String),
     Boolean(bool),
     Null,
+    /// SQL-TS interval text, preserved for a downstream semantic layer.
+    ///
+    /// Appended to preserve existing bincode discriminants.
+    Interval(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

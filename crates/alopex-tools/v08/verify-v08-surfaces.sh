@@ -16,7 +16,7 @@ if [[ -z "${PYTHON_BIN}" && -x /tmp/alopex-v08-python/bin/python ]] \
     PYTHON_BIN=/tmp/alopex-v08-python/bin/python
 fi
 if [[ -z "${PYTHON_BIN}" ]]; then
-    PYTHON_BIN="$(command -v python3 || true)"
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
 fi
 if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
     echo "[alopex-tools:v0.8] Python interpreter not found; set ALOPEX_PYTHON" >&2
@@ -30,6 +30,13 @@ fi
 PYTHON_LIB_DIR="$(${PYTHON_BIN} -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
 if [[ -n "${PYTHON_LIB_DIR}" && -d "${PYTHON_LIB_DIR}" ]]; then
     export LD_LIBRARY_PATH="${PYTHON_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+if [[ "${OS:-}" == "Windows_NT" ]]; then
+    PYTHONPATH_SEPARATOR=";"
+    PYTHON_PACKAGE_DIR="$(cygpath -w "${ROOT}/crates/alopex-py/python")"
+else
+    PYTHONPATH_SEPARATOR=":"
+    PYTHON_PACKAGE_DIR="${ROOT}/crates/alopex-py/python"
 fi
 
 run_cargo_test() {
@@ -68,7 +75,7 @@ run_cargo_test -p alopex-dataframe --tests
 run_cargo_test -p alopex-py --lib
 
 echo "[alopex-tools:v0.8] Python local/async/DataFrame interfaces (${PYTHON_BIN})" >&2
-PYTHONPATH="${ROOT}/crates/alopex-py/python${PYTHONPATH:+:${PYTHONPATH}}" \
+PYTHONPATH="${PYTHON_PACKAGE_DIR}${PYTHONPATH:+${PYTHONPATH_SEPARATOR}${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m pytest -q \
     "${ROOT}/crates/alopex-py/tests"
 

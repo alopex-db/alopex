@@ -1,6 +1,6 @@
 [package]
 name = "alopex-sql"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"  # Uses let chains feature
 license.workspace = true
 repository.workspace = true

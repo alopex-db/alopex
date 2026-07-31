@@ -12,6 +12,9 @@ import ../src/alopex_sql_parser
 proc callFfi(sql: string): CParseResult =
   alopex_parse_sql(cstring(sql), cint(sql.len))
 
+proc callPromQlFfi(query: string): CParseResult =
+  alopex_parse_promql(cstring(query), cint(query.len))
+
 proc takePayload(res: CParseResult): string =
   result = newString(res.buffer_len)
   if res.buffer_len > 0:
@@ -71,3 +74,63 @@ suite "FFI boundary (issue #40)":
     check res.buffer_len > 0
     let doc = toJsonNode(takePayload(res))
     check doc[0]["kind"]["variant"].getStr() == "Select"
+
+suite "Skulk query parser FFI contract":
+
+  test "contract version covers SQL-TS and PromQL payloads":
+    check $alopex_parser_version() == "0.2.0"
+
+  test "SQL-TS interval is emitted as an explicit literal variant":
+    let res = callFfi("SELECT NOW() - INTERVAL '24 hours'")
+    check res.kind == prkOk
+    let doc = toJsonNode(takePayload(res))
+    let expression = doc[0]["kind"]["projection"][0]["expr"]
+    check expression["kind"]["variant"].getStr() == "BinaryOp"
+    check expression["kind"]["right"]["kind"]["literal"]["variant"].getStr() == "Interval"
+    check expression["kind"]["right"]["kind"]["literal"]["value"].getStr() == "24 hours"
+
+  test "PromQL selector range and offset use the independent entrypoint":
+    let res = callPromQlFfi(
+      "rate(http_requests_total{job=~\"api.*\"}[5m] offset 1m)"
+    )
+    check res.kind == prkOk
+    let doc = toJsonNode(takePayload(res))
+    check doc["kind"]["variant"].getStr() == "FunctionCall"
+    check doc["kind"]["name"].getStr() == "rate"
+    let matrix = doc["kind"]["args"][0]
+    check matrix["kind"]["variant"].getStr() == "MatrixSelector"
+    check matrix["kind"]["range"]["milliseconds"].getInt() == 300_000
+    check matrix["kind"]["offset"]["milliseconds"].getInt() == 60_000
+    let selector = matrix["kind"]["selector"]
+    check selector["kind"]["metric"].getStr() == "http_requests_total"
+    check selector["kind"]["matchers"][0]["op"].getStr() == "Regex"
+    check selector["span"]["start"]["offset"].getInt() == 5
+
+  test "PromQL parse failure does not poison subsequent calls":
+    let failed = callPromQlFfi("metric{job=}")
+    check failed.kind == prkError
+    check takeError(failed).contains("offset 11")
+
+    let recovered = callPromQlFfi("metric")
+    check recovered.kind == prkOk
+    let doc = toJsonNode(takePayload(recovered))
+    check doc["kind"]["variant"].getStr() == "VectorSelector"
+
+  test "PromQL aggregate binary unary and grouping variants are stable":
+    let res = callPromQlFfi("sum by (job,) (rate(requests[5m])) + -2 ^ 2")
+    check res.kind == prkOk
+    let doc = toJsonNode(takePayload(res))
+    check doc["kind"]["variant"].getStr() == "BinaryOp"
+    check doc["kind"]["op"].getStr() == "Add"
+
+    let aggregate = doc["kind"]["left"]
+    check aggregate["kind"]["variant"].getStr() == "Aggregate"
+    check aggregate["kind"]["op"].getStr() == "sum"
+    check aggregate["kind"]["grouping"][0].getStr() == "job"
+    check aggregate["kind"]["without"].getBool() == false
+
+    let unary = doc["kind"]["right"]
+    check unary["kind"]["variant"].getStr() == "UnaryOp"
+    check unary["kind"]["op"].getStr() == "Minus"
+    check unary["kind"]["expr"]["kind"]["variant"].getStr() == "BinaryOp"
+    check unary["kind"]["expr"]["kind"]["op"].getStr() == "Pow"

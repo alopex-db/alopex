@@ -24,7 +24,7 @@ type
     tkUnique, tkCheck, tkDefault, tkConstraint, tkEscape, tkWith
     tkInt, tkBigint, tkSmallint, tkFloatType, tkDouble, tkDecimal
     tkVarchar, tkChar, tkText, tkBlob, tkBoolean, tkBool
-    tkTimestamp, tkDate, tkTime, tkVector
+    tkTimestamp, tkDate, tkTime, tkVector, tkInterval
     tkHnsw, tkBtree, tkCosine, tkL2
     tkIf, tkNotKw
     # Symbols
@@ -76,6 +76,7 @@ const Keywords = {
   "varchar": tkVarchar, "char": tkChar, "text": tkText,
   "blob": tkBlob, "boolean": tkBoolean, "bool": tkBool,
   "timestamp": tkTimestamp, "date": tkDate, "time": tkTime,
+  "interval": tkInterval,
   "vector": tkVector, "hnsw": tkHnsw, "btree": tkBtree,
   "cosine": tkCosine, "l2": tkL2,
   "if": tkIf,

@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.1]
+
+Parser and release-gate reliability release.
+
+### Added
+- PromQL and SQL-TS parser contracts through the Nim parser ABI 0.2.0, including
+  MessagePack FFI coverage and host-side Nim tests.
+
+### Fixed
+- Python DataFrame streaming tests now use portable temporary paths on Windows.
+- Python async type stubs import extension types directly, including compatibility
+  with mypy 2.3.
+- Cross-surface server tests serialize child-server startup, verify gRPC readiness,
+  and bound network waits so Windows release checks fail diagnostically instead of
+  hanging.
+
+### Changed
+- The v0.8 CI and tag release gates now run the full supported surface suite on
+  both Ubuntu and Windows, including the native Nim parser and Python bindings.
+
+### Breaking Changes
+- None intended.
+
 ## [0.8.0]
 
 Cluster-aware and streaming release.

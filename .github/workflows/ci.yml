@@ -345,14 +345,19 @@ jobs:
             target/release/alopex-cli
             target/release/alopex-cli.exe
 
-  v07-release-gate:
-    name: v0.7 Release Gate
-    runs-on: ubuntu-latest
+  v08-release-gate:
+    name: v0.8 Release Gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     env:
       PYO3_PYTHON: python
       PYTHON_SYS_EXECUTABLE: python
     steps:
       - name: Free disk space
+        if: runner.os == 'Linux'
         run: |
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
@@ -366,20 +371,77 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Setup Python venv
+        shell: bash
+        run: |
+          VENV_DIR="${RUNNER_TEMP:-/tmp}/alopex-v08-gate-venv"
+          rm -rf "$VENV_DIR"
+          python -m venv "$VENV_DIR"
+          VENV_ROOT=$(VENV_DIR="$VENV_DIR" python -c "import os; from pathlib import Path; print(Path(os.environ['VENV_DIR']).resolve().as_posix())")
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            VENV_BIN="$VENV_ROOT/Scripts"
+            VENV_PY="$VENV_BIN/python.exe"
+          else
+            VENV_BIN="$VENV_ROOT/bin"
+            VENV_PY="$VENV_BIN/python"
+          fi
+          test -x "$VENV_PY"
+          echo "$VENV_BIN" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$VENV_ROOT" >> "$GITHUB_ENV"
+          echo "PYO3_PYTHON=$VENV_PY" >> "$GITHUB_ENV"
+          echo "PYTHON_SYS_EXECUTABLE=$VENV_PY" >> "$GITHUB_ENV"
+          echo "ALOPEX_PYTHON=$VENV_PY" >> "$GITHUB_ENV"
+          echo "V07_GATE_VENV_DIR=$VENV_ROOT" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Python deps
         run: python -m pip install --upgrade pip maturin pytest numpy
-      - name: Build Nim SQL parser library
+      - name: Build Nim SQL parser library (Linux)
+        if: runner.os == 'Linux'
         run: bash scripts/build-nim-parser.sh --backend docker
-      - name: Run v0.7 release gate
+      - name: Setup Nim (Windows)
+        if: runner.os == 'Windows'
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Nim SQL parser library (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash scripts/build-nim-parser.sh --backend host
+      - name: Run Nim SQL parser tests
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            bash scripts/test-nim-parser.sh --backend host
+          else
+            bash scripts/test-nim-parser.sh --backend docker
+          fi
+      - name: Register Nim library directory (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          nim_lib_dir="$(cygpath -w "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}")"
+          echo "ALOPEX_DLL_DIR=${nim_lib_dir}" >> "$GITHUB_ENV"
+          echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
+      - name: Run v0.7 baseline gate (Linux)
+        if: runner.os == 'Linux'
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: bash scripts/release/v07_gate.sh
+      - name: Build Python extension for v0.8 gate (Windows)
+        if: runner.os == 'Windows'
+        run: maturin develop -m crates/alopex-py/Cargo.toml
+      - name: Run v0.8 release gate
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+        run: bash crates/alopex-tools/v08/verify-v08-surfaces.sh
 
   ci-success:
     name: CI Success
-    needs: [fmt, clippy, test, coverage, security-audit, build, v07-release-gate]
+    needs: [fmt, clippy, test, coverage, security-audit, build, v08-release-gate]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -391,7 +453,7 @@ jobs:
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
              [[ "${{ needs['security-audit'].result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
-             [[ "${{ needs['v07-release-gate'].result }}" != "success" ]]; then
+             [[ "${{ needs['v08-release-gate'].result }}" != "success" ]]; then
             echo "One or more jobs failed"
             echo "fmt: ${{ needs.fmt.result }}"
             echo "clippy: ${{ needs.clippy.result }}"
@@ -399,7 +461,7 @@ jobs:
             echo "coverage: ${{ needs.coverage.result }}"
             echo "security-audit: ${{ needs['security-audit'].result }}"
             echo "build: ${{ needs.build.result }}"
-            echo "v07-release-gate: ${{ needs['v07-release-gate'].result }}"
+            echo "v08-release-gate: ${{ needs['v08-release-gate'].result }}"
             exit 1
           fi
           echo "All CI jobs passed!"
