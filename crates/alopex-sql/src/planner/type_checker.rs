@@ -420,10 +420,13 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
 
         match op {
             // Arithmetic operators: require numeric types
-            Add | Sub | Mul | Div | Mod => {
+            Add | Sub | Mul | Div => {
                 let result = self.check_arithmetic_op(left, right, span)?;
                 Ok(result)
             }
+
+            // Remainder is defined only for integral operands.
+            Mod => self.check_modulo_op(left, right, span),
 
             // Comparison operators: require compatible types, return boolean
             Eq | Neq | Lt | Gt | LtEq | GtEq => {
@@ -477,6 +480,31 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
 
             _ => Err(PlannerError::InvalidOperator {
                 op: "arithmetic".to_string(),
+                type_name: format!("{} and {}", left.type_name(), right.type_name()),
+                line: span.start.line,
+                column: span.start.column,
+            }),
+        }
+    }
+
+    /// Check remainder operands and return the integral result type.
+    fn check_modulo_op(
+        &self,
+        left: &ResolvedType,
+        right: &ResolvedType,
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        use ResolvedType::*;
+
+        if matches!(left, Null) || matches!(right, Null) {
+            return Ok(Null);
+        }
+
+        match (left, right) {
+            (Integer, Integer) => Ok(Integer),
+            (Integer, BigInt) | (BigInt, Integer) | (BigInt, BigInt) => Ok(BigInt),
+            _ => Err(PlannerError::InvalidOperator {
+                op: "modulo".to_string(),
                 type_name: format!("{} and {}", left.type_name(), right.type_name()),
                 line: span.start.line,
                 column: span.start.column,
@@ -1332,7 +1360,9 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 arg.span,
             ));
         }
-        Ok(ResolvedType::Double)
+        Ok(crate::planner::aggregate_expr::sum_result_type(
+            &arg.resolved_type,
+        ))
     }
 
     fn check_total(
@@ -1718,6 +1748,9 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     value.span,
                 )?;
 
+                let typed_value =
+                    self.coerce_column_value(&col_meta.data_type, typed_value, value.span);
+
                 // For vector types, also check dimension
                 if let (
                     ResolvedType::Vector {
@@ -1777,6 +1810,8 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
 
         // Check type compatibility
         self.check_type_compatibility(&col_meta.data_type, &typed_value.resolved_type, value.span)?;
+
+        let typed_value = self.coerce_column_value(&col_meta.data_type, typed_value, value.span);
 
         // For vector types, also check dimension
         if let (
@@ -1868,6 +1903,26 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             line: span.start.line,
             column: span.start.column,
         })
+    }
+
+    /// Insert an execution-time coercion where a column accepts a value whose
+    /// source representation differs from its storage representation.
+    fn coerce_column_value(
+        &self,
+        expected: &ResolvedType,
+        value: TypedExpr,
+        span: Span,
+    ) -> TypedExpr {
+        if matches!(expected, ResolvedType::Timestamp)
+            && !matches!(
+                value.resolved_type,
+                ResolvedType::Timestamp | ResolvedType::Null
+            )
+        {
+            TypedExpr::cast(value, ResolvedType::Timestamp, span)
+        } else {
+            value
+        }
     }
 }
 

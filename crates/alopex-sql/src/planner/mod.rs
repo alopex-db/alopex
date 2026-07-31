@@ -1798,7 +1798,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     function: AggregateFunction::Sum,
                     arg: Some(arg.clone()),
                     distinct,
-                    result_type: ResolvedType::Double,
+                    result_type: crate::planner::aggregate_expr::sum_result_type(
+                        &arg.resolved_type,
+                    ),
                 };
                 let signature = aggregate_signature(name, distinct, star, Some(arg), None, expr);
                 Ok((agg, signature))
@@ -2082,6 +2084,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             // Validate type compatibility
             self.validate_type_assignment(&typed_value, &column_meta.data_type, value.span)?;
 
+            let typed_value =
+                self.coerce_assignment_value(typed_value, &column_meta.data_type, value.span);
+
             typed_values.push(typed_value);
         }
 
@@ -2129,9 +2134,30 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             (BigInt, Float) | (BigInt, Double) => true,
             // Float can be assigned to Double
             (Float, Double) => true,
+            // TIMESTAMP is stored as microseconds; text and numeric input is
+            // converted by the assignment expression at execution time.
+            (Text | Integer | BigInt | Float | Double, Timestamp) => true,
             // Vector dimensions must match
             (Vector { dimension: d1, .. }, Vector { dimension: d2, .. }) => d1 == d2,
             _ => false,
+        }
+    }
+
+    fn coerce_assignment_value(
+        &self,
+        value: TypedExpr,
+        target_type: &ResolvedType,
+        span: crate::ast::Span,
+    ) -> TypedExpr {
+        if matches!(target_type, ResolvedType::Timestamp)
+            && !matches!(
+                value.resolved_type,
+                ResolvedType::Timestamp | ResolvedType::Null
+            )
+        {
+            TypedExpr::cast(value, ResolvedType::Timestamp, span)
+        } else {
+            value
         }
     }
 
@@ -2171,6 +2197,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 &column_meta.data_type,
                 assignment.value.span,
             )?;
+
+            let typed_value = self.coerce_assignment_value(
+                typed_value,
+                &column_meta.data_type,
+                assignment.value.span,
+            );
 
             typed_assignments.push(TypedAssignment::new(
                 assignment.column.clone(),

@@ -16,6 +16,7 @@ pub(crate) mod numeric;
 pub(crate) mod pattern;
 pub mod registry;
 pub(crate) mod string;
+mod timestamp;
 pub(crate) mod type_fn;
 mod unary_op;
 pub mod vector_ops;
@@ -50,6 +51,9 @@ pub fn evaluate(expr: &TypedExpr, ctx: &EvalContext<'_>) -> Result<SqlValue> {
             distinct,
             star,
         } => function_call::evaluate_function_call(name, args, *distinct, *star, ctx),
+        TypedExprKind::Cast { expr, target_type } => {
+            timestamp::evaluate_cast(expr, target_type, ctx)
+        }
         TypedExprKind::Like {
             expr,
             pattern,

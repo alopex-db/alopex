@@ -43,11 +43,12 @@ impl AggregateExpr {
     }
 
     pub fn sum(arg: TypedExpr) -> Self {
+        let result_type = sum_result_type(&arg.resolved_type);
         Self {
             function: AggregateFunction::Sum,
             arg: Some(arg),
             distinct: false,
-            result_type: ResolvedType::Double,
+            result_type,
         }
     }
 
@@ -87,5 +88,18 @@ impl AggregateExpr {
             distinct: false,
             result_type,
         }
+    }
+}
+
+/// Return the SQL result type for `SUM` over a value of `input_type`.
+///
+/// Fixed-width integral inputs retain their integral type. All other numeric
+/// inputs accumulate and return DOUBLE, matching the historical floating-point
+/// behaviour and keeping `TOTAL`/`AVG` semantics distinct.
+pub fn sum_result_type(input_type: &ResolvedType) -> ResolvedType {
+    match input_type {
+        ResolvedType::Integer => ResolvedType::Integer,
+        ResolvedType::BigInt => ResolvedType::BigInt,
+        _ => ResolvedType::Double,
     }
 }

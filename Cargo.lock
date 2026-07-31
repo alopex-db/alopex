@@ -432,6 +432,7 @@ dependencies = [
  "arrow-schema 52.2.0",
  "base64 0.22.1",
  "bincode",
+ "chrono",
  "criterion",
  "futures",
  "futures-core",

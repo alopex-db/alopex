@@ -116,6 +116,7 @@ impl ResolvedType {
     /// - Numeric widening: `Integer` → `BigInt`, `Float`, `Double`
     /// - Numeric widening: `BigInt` → `Double`
     /// - Numeric widening: `Float` → `Double`
+    /// - TIMESTAMP accepts canonical timestamp text and integral epoch microseconds
     /// - `Vector` types require dimension check (done separately)
     ///
     /// # Examples
@@ -155,6 +156,11 @@ impl ResolvedType {
             (Integer, BigInt | Float | Double) => true,
             (BigInt, Double) => true,
             (Float, Double) => true,
+
+            // TIMESTAMP is stored as epoch microseconds. Text is parsed as a
+            // canonical UTC timestamp and numeric values must be integral
+            // microseconds at execution time.
+            (Text | Integer | BigInt | Float | Double, Timestamp) => true,
 
             // Vector types require dimension check (done separately in TypeChecker)
             (Vector { .. }, Vector { .. }) => false,

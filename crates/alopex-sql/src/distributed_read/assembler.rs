@@ -13,7 +13,7 @@ use alopex_core::sql::stream::ByteSized;
 use crate::catalog::ColumnMetadata;
 use crate::executor::ColumnInfo;
 use crate::executor::query::{
-    aggregate::{create_accumulator, encode_group_key, merge_exact_aggregate_states},
+    aggregate::{create_accumulator_for_aggregate, encode_group_key, merge_exact_aggregate_states},
     projected_columns,
 };
 use crate::planner::aggregate_expr::AggregateExpr;
@@ -630,7 +630,7 @@ fn prepare_ordered_aggregates(
                 accumulators: plan
                     .aggregates
                     .iter()
-                    .map(|aggregate| create_accumulator(&aggregate.function, aggregate.distinct))
+                    .map(create_accumulator_for_aggregate)
                     .collect(),
             });
         for (accumulator, value) in group
@@ -651,7 +651,7 @@ fn prepare_ordered_aggregates(
                 accumulators: plan
                     .aggregates
                     .iter()
-                    .map(|aggregate| create_accumulator(&aggregate.function, aggregate.distinct))
+                    .map(create_accumulator_for_aggregate)
                     .collect(),
             },
         );

@@ -12,7 +12,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
+    PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple,
 };
 use pyo3::IntoPyObjectExt;
 
@@ -200,6 +200,12 @@ fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<String> {
         let v = value.extract::<f64>()?;
         return render_f64(v).ok_or_else(|| non_finite_error(index, v));
     }
+    if is_naive_datetime(value)? {
+        let text = value
+            .call_method1("isoformat", (" ",))?
+            .extract::<String>()?;
+        return Ok(escape_text(&text));
+    }
     if value.is_instance_of::<PyString>() {
         let text = value.extract::<String>()?;
         // Nim FFI 境界（CString）は NUL を扱えないため明示的に拒否する。
@@ -234,6 +240,24 @@ fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<String> {
         return render_f64(v).ok_or_else(|| non_finite_error(index, v));
     }
     Err(unsupported_type_error(value, index))
+}
+
+/// Return true for Python's naive `datetime.datetime` values.
+///
+/// Alopex TIMESTAMP is fixed to UTC and does not implement time-zone offsets,
+/// so aware datetime values are rejected rather than silently reinterpreted.
+fn is_naive_datetime(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let datetime_type = PyModule::import(value.py(), "datetime")?.getattr("datetime")?;
+    if !value.is_instance(&datetime_type)? {
+        return Ok(false);
+    }
+    if !value.getattr("tzinfo")?.is_none() {
+        return Err(AlopexError::SqlParamInvalidValue(
+            "timezone-aware datetime は TIMESTAMP パラメータに使用できません".to_string(),
+        )
+        .into());
+    }
+    Ok(true)
 }
 
 /// 数値シーケンスをベクトルリテラル（`[1.0, 2.0]`）へ変換する。
@@ -303,7 +327,7 @@ fn non_finite_error(index: usize, value: f64) -> PyErr {
 fn unsupported_type_error(value: &Bound<'_, PyAny>, index: usize) -> PyErr {
     AlopexError::SqlParamUnsupportedType(format!(
         "params[{index}] は未対応の型です（実際: {}）。\
-         対応型: None / bool / int / float / str / 数値シーケンス（ベクトル）",
+         対応型: None / bool / int / float / str / naive datetime / 数値シーケンス（ベクトル）",
         type_name(value)
     ))
     .into()
@@ -346,7 +370,7 @@ pub(crate) fn sql_value_to_py(py: Python<'_>, value: SqlValue) -> PyResult<Py<Py
 mod tests {
     use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
     use pyo3::prelude::*;
-    use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
+    use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyTuple};
     use pyo3::IntoPyObjectExt;
 
     use super::bind_params;
@@ -405,6 +429,21 @@ mod tests {
             let sql =
                 bind_params("INSERT INTO t VALUES (?, ?, ?, ?)", Some(&params)).expect("bind");
             assert_eq!(sql, "INSERT INTO t VALUES (NULL, TRUE, 2.5, 2.0)");
+        });
+    }
+
+    #[test]
+    fn bind_params_datetime_uses_canonical_timestamp_text() {
+        with_py(|py| {
+            let datetime = PyModule::import(py, "datetime")
+                .expect("datetime module")
+                .getattr("datetime")
+                .expect("datetime class")
+                .call1((2025, 1, 15, 10, 30, 0, 123_456))
+                .expect("naive datetime");
+            let params = params_list(py, vec![datetime]);
+            let sql = bind_params("INSERT INTO ts VALUES (?)", Some(&params)).expect("bind");
+            assert_eq!(sql, "INSERT INTO ts VALUES ('2025-01-15 10:30:00.123456')");
         });
     }
 
