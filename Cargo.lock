@@ -193,9 +193,9 @@ dependencies = [
 
 [[package]]
 name = "alopex-cli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
- "alopex-core 0.8.0",
+ "alopex-core 0.8.1",
  "alopex-embedded",
  "alopex-server",
  "alopex-sql",
@@ -245,14 +245,14 @@ dependencies = [
 
 [[package]]
 name = "alopex-cluster"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "alopex-chirps",
  "alopex-chirps-core",
  "alopex-chirps-gossip-swim",
  "alopex-chirps-raft-storage",
  "alopex-chirps-transport-quic",
- "alopex-core 0.8.0",
+ "alopex-core 0.8.1",
  "alopex-sql",
  "serde",
  "serde_json",
@@ -278,7 +278,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "alopex-dataframe",
  "alopex-sql",
@@ -320,9 +320,9 @@ dependencies = [
 
 [[package]]
 name = "alopex-dataframe"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
- "alopex-core 0.8.0",
+ "alopex-core 0.8.1",
  "arrow",
  "arrow-csv",
  "parquet 53.4.1",
@@ -334,10 +334,10 @@ dependencies = [
 
 [[package]]
 name = "alopex-embedded"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "alopex-cluster",
- "alopex-core 0.8.0",
+ "alopex-core 0.8.1",
  "alopex-dataframe",
  "alopex-sql",
  "arrow",
@@ -359,10 +359,10 @@ dependencies = [
 
 [[package]]
 name = "alopex-py"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "alopex-cluster",
- "alopex-core 0.8.0",
+ "alopex-core 0.8.1",
  "alopex-dataframe",
  "alopex-embedded",
  "alopex-sql",
@@ -377,11 +377,11 @@ dependencies = [
 
 [[package]]
 name = "alopex-server"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "alopex-cli",
  "alopex-cluster",
- "alopex-core 0.8.0",
+ "alopex-core 0.8.1",
  "alopex-embedded",
  "alopex-sql",
  "anyhow",
@@ -425,9 +425,9 @@ dependencies = [
 
 [[package]]
 name = "alopex-sql"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
- "alopex-core 0.8.0",
+ "alopex-core 0.8.1",
  "arrow-array 52.2.0",
  "arrow-schema 52.2.0",
  "base64 0.22.1",
