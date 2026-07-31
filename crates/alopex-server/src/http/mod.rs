@@ -13,6 +13,10 @@ pub mod vector;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use alopex_cluster::{
+    ClusterReadPoint, FailureClass, IdempotencyResult, OperationState, RangeIdentity, RequestId,
+    RoutingOutcome, RoutingOutcomeKind, TransactionIsolation,
+};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
@@ -34,6 +38,222 @@ pub struct RequestContext {
     pub actor: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct TransactionRouteIdentity {
+    transaction_id: String,
+    operation: &'static str,
+}
+
+/// Internal marker used by the outer context middleware to distinguish a
+/// handler-produced v0.9 transaction error from an extractor/body-limit
+/// rejection. It never crosses the HTTP boundary.
+#[derive(Clone, Debug)]
+struct TransactionOutcomeResponseMarker;
+
+/// Mark a handler-built transaction response so the outer context middleware
+/// does not mistake a known execution outcome for an extractor rejection.
+/// The marker is purely in-process and never appears on the wire.
+pub(crate) fn mark_transaction_outcome_response(response: &mut Response) {
+    response
+        .extensions_mut()
+        .insert(TransactionOutcomeResponseMarker);
+}
+
+fn transaction_route_identity(
+    path: &str,
+    correlation_id: &str,
+    api_prefix: &str,
+) -> Option<TransactionRouteIdentity> {
+    // Legacy routes may be nested under a configured API prefix. Normalize to
+    // the route's declared path before applying the transaction boundary
+    // matrix; do not let a partial prefix such as `/apiary` match `/api`.
+    let path = if api_prefix.is_empty() {
+        path
+    } else {
+        path.strip_prefix(api_prefix)
+            .filter(|remaining| remaining.starts_with('/'))?
+    };
+    match path {
+        "/sql" | "/api/sql/query" => Some(TransactionRouteIdentity {
+            transaction_id: format!("local-sql:{correlation_id}"),
+            operation: "execute",
+        }),
+        "/session/begin" => Some(TransactionRouteIdentity {
+            transaction_id: format!("http-session:{correlation_id}"),
+            operation: "begin",
+        }),
+        _ => {
+            let segments: Vec<_> = path.trim_start_matches('/').split('/').collect();
+            match segments.as_slice() {
+                ["session", session_id, "commit"] => Some(TransactionRouteIdentity {
+                    transaction_id: (*session_id).to_owned(),
+                    operation: "commit",
+                }),
+                ["session", session_id, "rollback"] => Some(TransactionRouteIdentity {
+                    transaction_id: (*session_id).to_owned(),
+                    operation: "rollback",
+                }),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Convert an extractor/body-limit rejection into the existing error envelope
+/// plus the additive transaction outcome. The outer status and any established
+/// JSON `error.code`/`error.message` are preserved; plain Axum rejections use
+/// their original text as the legacy message.
+async fn transaction_rejection_response(
+    state: &ServerState,
+    identity: TransactionRouteIdentity,
+    response: Response,
+    correlation_id: &str,
+) -> Response {
+    let status = response.status();
+    let (_, body) = response.into_parts();
+    // This is an internal, bounded conversion of an already-generated Axum
+    // rejection. It must not inherit `max_response_size`: a deliberately tiny
+    // successful-response limit must not erase the legacy rejection message.
+    let bytes = axum::body::to_bytes(body, 64 * 1024)
+        .await
+        .unwrap_or_default();
+    let fallback_code = match status {
+        StatusCode::PAYLOAD_TOO_LARGE => "PAYLOAD_TOO_LARGE",
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => "UNSUPPORTED_MEDIA_TYPE",
+        StatusCode::UNPROCESSABLE_ENTITY => "UNPROCESSABLE_ENTITY",
+        _ => "INVALID_REQUEST",
+    };
+    let fallback_message = String::from_utf8(bytes.to_vec())
+        .ok()
+        .map(|message| message.trim().to_owned())
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| "invalid transaction request".to_owned());
+    let (code, message) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|body| {
+            let error = body.get("error")?;
+            Some((
+                error.get("code")?.as_str()?.to_owned(),
+                error.get("message")?.as_str()?.to_owned(),
+            ))
+        })
+        .unwrap_or_else(|| (fallback_code.to_owned(), fallback_message));
+    let request_id = transaction_request_id(None, &identity.transaction_id, identity.operation)
+        .expect("derived transaction request id is non-empty");
+    let reason_code = if status == StatusCode::PAYLOAD_TOO_LARGE {
+        "resource_limit"
+    } else {
+        "invalid_request"
+    };
+    let transaction = HttpTransactionOutcome::new(
+        identity.transaction_id,
+        request_id,
+        transaction_metadata_version(state),
+        OperationState::Rejected,
+        Some(FailureClass::InvalidRequest),
+        Some(reason_code.to_owned()),
+        RoutingOutcomeKind::LocalOnly,
+        reason_code,
+        false,
+    );
+    let mut response = (
+        status,
+        Json(TransactionErrorResponse {
+            error: ErrorBody {
+                code,
+                message,
+                correlation_id: correlation_id.to_owned(),
+            },
+            transaction,
+        }),
+    )
+        .into_response();
+    mark_transaction_outcome_response(&mut response);
+    response
+}
+
+/// Additive v0.9 projection for an HTTP transaction operation.
+///
+/// [`alopex_cluster::TransactionOutcome`] remains the authoritative result
+/// once a distributed coordinator has a committed participant set.  Legacy
+/// local HTTP sessions and pre-execution failures cannot manufacture that
+/// type: the former have no committed range fence and the latter must not
+/// pretend that a participant was enlisted.  This transport projection keeps
+/// every public field visible while making those absences explicit as
+/// `null`/an empty list and through the routing classification.
+#[derive(Clone, Debug, Serialize)]
+pub struct HttpTransactionOutcome {
+    /// Stable wire version for the additive field set.
+    pub outcome_version: &'static str,
+    pub transaction_id: String,
+    pub request_id: RequestId,
+    pub participating_ranges: Vec<RangeIdentity>,
+    pub read_point: Option<ClusterReadPoint>,
+    pub schema_version: Option<u64>,
+    pub data_epoch: Option<u64>,
+    pub isolation: TransactionIsolation,
+    pub state: OperationState,
+    pub failure_class: Option<FailureClass>,
+    pub reason_code: Option<String>,
+    pub routing: RoutingOutcome,
+    pub retryable: bool,
+    pub idempotency: IdempotencyResult,
+}
+
+impl HttpTransactionOutcome {
+    /// Construct an outcome for a local compatibility operation or a
+    /// pre-execution decision.  No caller may use this constructor to claim a
+    /// distributed commit: only a coordinator-produced `TransactionOutcome`
+    /// has participant and read-point evidence for that claim.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        transaction_id: impl Into<String>,
+        request_id: RequestId,
+        metadata_version: u64,
+        state: OperationState,
+        failure_class: Option<FailureClass>,
+        reason_code: Option<String>,
+        routing_kind: RoutingOutcomeKind,
+        routing_reason_code: impl Into<String>,
+        retryable: bool,
+    ) -> Self {
+        let transaction_id = transaction_id.into();
+        let first_outcome = match state {
+            OperationState::Accepted => "accepted",
+            OperationState::Running => "running",
+            OperationState::Committed => "committed",
+            OperationState::Rejected => "rejected",
+            OperationState::RetryableFailure => "retryable_failure",
+            OperationState::TerminalFailure => "terminal_failure",
+            OperationState::RecoveryPending => "recovery_pending",
+            OperationState::Cancelled => "cancelled",
+        }
+        .to_string();
+        Self {
+            outcome_version: "v0.9",
+            transaction_id: transaction_id.clone(),
+            request_id: request_id.clone(),
+            participating_ranges: Vec::new(),
+            read_point: None,
+            schema_version: None,
+            data_epoch: None,
+            isolation: TransactionIsolation::Snapshot,
+            state,
+            failure_class,
+            reason_code,
+            routing: RoutingOutcome::new(routing_kind, None, metadata_version, routing_reason_code),
+            retryable,
+            idempotency: IdempotencyResult {
+                operation_id: transaction_id,
+                request_id,
+                first_outcome,
+                state,
+                duplicate_count: 0,
+            },
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct ErrorBody {
     code: String,
@@ -44,6 +264,12 @@ struct ErrorBody {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: ErrorBody,
+}
+
+#[derive(Serialize)]
+struct TransactionErrorResponse {
+    error: ErrorBody,
+    transaction: HttpTransactionOutcome,
 }
 
 struct QueueWaitGuard<'a> {
@@ -294,6 +520,8 @@ pub async fn context_middleware(
 ) -> Response {
     let correlation_id =
         extract_correlation_id(req.headers()).unwrap_or_else(|| Uuid::new_v4().to_string());
+    let transaction_identity =
+        transaction_route_identity(req.uri().path(), &correlation_id, &state.config.api_prefix);
 
     let actor = match state.auth.validate_http(req.headers()) {
         Ok(actor) => actor,
@@ -308,16 +536,38 @@ pub async fn context_middleware(
                     details: serde_json::json!({ "error": err.to_string() }),
                 });
             }
-            return auth_error_response(err, &correlation_id);
+            return auth_error_response(&state, err, &correlation_id, transaction_identity);
         }
     };
 
     req.extensions_mut().insert(RequestContext {
         correlation_id: correlation_id.clone(),
-        actor,
+        actor: actor.clone(),
     });
 
     let mut res = next.run(req).await;
+    // `Json` extraction and request-size enforcement run beneath this
+    // middleware, so their rejections never reach the SQL/session handlers.
+    // Preserve the existing status/error envelope while attaching the same
+    // additive outcome used by handler-level transaction errors.
+    if let Some(identity) = transaction_identity {
+        let status = res.status();
+        let extractor_rejection = matches!(
+            status,
+            StatusCode::BAD_REQUEST
+                | StatusCode::PAYLOAD_TOO_LARGE
+                | StatusCode::UNSUPPORTED_MEDIA_TYPE
+                | StatusCode::UNPROCESSABLE_ENTITY
+        );
+        if extractor_rejection
+            && res
+                .extensions()
+                .get::<TransactionOutcomeResponseMarker>()
+                .is_none()
+        {
+            res = transaction_rejection_response(&state, identity, res, &correlation_id).await;
+        }
+    }
     let _ = res.headers_mut().insert(
         "x-correlation-id",
         HeaderValue::from_str(&correlation_id).unwrap_or_else(|_| HeaderValue::from_static("")),
@@ -371,8 +621,16 @@ pub async fn admission_middleware(
     res
 }
 
-fn auth_error_response(err: AuthError, correlation_id: &str) -> Response {
+fn auth_error_response(
+    state: &ServerState,
+    err: AuthError,
+    correlation_id: &str,
+    transaction_identity: Option<TransactionRouteIdentity>,
+) -> Response {
     let message = err.to_string();
+    if let Some(identity) = transaction_identity {
+        return transaction_auth_error_response(state, identity, message, correlation_id);
+    }
     let body = Json(ErrorResponse {
         error: ErrorBody {
             code: "UNAUTHORIZED".to_string(),
@@ -381,6 +639,37 @@ fn auth_error_response(err: AuthError, correlation_id: &str) -> Response {
         },
     });
     (StatusCode::UNAUTHORIZED, body).into_response()
+}
+
+/// Authentication is rejected before a handler has a `RequestContext`, but
+/// transaction endpoints still need the additive outcome. Keep the legacy
+/// message exactly as `AuthError::to_string()` produced it rather than routing
+/// it through `ServerError`'s display prefix.
+fn transaction_auth_error_response(
+    state: &ServerState,
+    identity: TransactionRouteIdentity,
+    legacy_message: String,
+    correlation_id: &str,
+) -> Response {
+    let error = ServerError::Unauthorized(legacy_message.clone());
+    let request_id = transaction_request_id(None, &identity.transaction_id, identity.operation)
+        .expect("derived transaction request id is non-empty");
+    let transaction =
+        transaction_failure_outcome(state, identity.transaction_id, request_id, &error);
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        Json(TransactionErrorResponse {
+            error: ErrorBody {
+                code: "UNAUTHORIZED".to_owned(),
+                message: legacy_message,
+                correlation_id: correlation_id.to_owned(),
+            },
+            transaction,
+        }),
+    )
+        .into_response();
+    mark_transaction_outcome_response(&mut response);
+    response
 }
 
 fn queue_overflow_response(correlation_id: &str) -> Response {
@@ -403,6 +692,156 @@ pub fn error_response(err: ServerError, ctx: &RequestContext) -> Response {
         },
     });
     (err.status_code(), body).into_response()
+}
+
+/// Return the legacy error envelope together with the additive v0.9
+/// transaction projection.  Keeping `error` unchanged lets v0.8 clients
+/// retain their existing parsing and status handling.
+pub fn transaction_error_response(
+    err: ServerError,
+    transaction: HttpTransactionOutcome,
+    ctx: &RequestContext,
+) -> Response {
+    let body = Json(TransactionErrorResponse {
+        error: ErrorBody {
+            code: err.error_code(),
+            message: err.to_string(),
+            correlation_id: ctx.correlation_id.clone(),
+        },
+        transaction,
+    });
+    let mut response = (err.status_code(), body).into_response();
+    mark_transaction_outcome_response(&mut response);
+    response
+}
+
+/// A public request id is either supplied by the caller or derived from a
+/// stable transaction identity and operation.  Empty caller values are an
+/// invalid pre-execution request rather than an implicit new identity.
+pub fn transaction_request_id(
+    supplied: Option<RequestId>,
+    transaction_id: &str,
+    operation: &str,
+) -> std::result::Result<RequestId, ServerError> {
+    match supplied {
+        Some(request_id) if request_id.as_str().trim().is_empty() => Err(ServerError::BadRequest(
+            "request_id must not be empty".into(),
+        )),
+        Some(request_id) => Ok(request_id),
+        None => Ok(RequestId::new(format!("{transaction_id}:{operation}"))),
+    }
+}
+
+/// The local/blocked adapter deliberately has no distributed read point.  It
+/// still reports the current metadata version used for the classification when
+/// it is available; zero means no committed metadata version was observable.
+pub fn transaction_metadata_version(state: &ServerState) -> u64 {
+    state
+        .cluster_status_snapshot()
+        .map(|snapshot| snapshot.placement.update_epoch)
+        .unwrap_or_default()
+}
+
+/// Map the existing HTTP/server error vocabulary to the Phase 1 transaction
+/// state vocabulary without changing the legacy HTTP status or `error.code`.
+pub fn transaction_failure_outcome(
+    state: &ServerState,
+    transaction_id: impl Into<String>,
+    request_id: RequestId,
+    error: &ServerError,
+) -> HttpTransactionOutcome {
+    let (operation_state, failure_class, routing_kind, reason_code, retryable) = match error {
+        ServerError::Unauthorized(_) => (
+            OperationState::Rejected,
+            FailureClass::Unauthorized,
+            RoutingOutcomeKind::Blocked,
+            "unauthorized",
+            false,
+        ),
+        ServerError::CapabilityUnavailable(_) => (
+            OperationState::Rejected,
+            FailureClass::PrerequisiteMissing,
+            RoutingOutcomeKind::Blocked,
+            "prerequisite_missing",
+            false,
+        ),
+        ServerError::FutureDistributedExecutionRequired(_) | ServerError::NotImplemented(_) => (
+            OperationState::Rejected,
+            FailureClass::InvalidRequest,
+            RoutingOutcomeKind::Unsupported,
+            "unsupported",
+            false,
+        ),
+        ServerError::Timeout(_) => (
+            OperationState::RetryableFailure,
+            FailureClass::Timeout,
+            RoutingOutcomeKind::Retryable,
+            "timeout",
+            true,
+        ),
+        ServerError::Conflict(_) | ServerError::RestoreIntegrityMismatch(_) => (
+            OperationState::RetryableFailure,
+            FailureClass::Conflict,
+            RoutingOutcomeKind::Retryable,
+            "conflict",
+            true,
+        ),
+        // `SqlError::Storage(TransactionConflict)` intentionally keeps its
+        // established HTTP 409/error code (`ALOPEX-S001`).  Its additive v0.9
+        // classification must agree with that retryable conflict boundary.
+        ServerError::Sql(error) if error.code() == "ALOPEX-S001" => (
+            OperationState::RetryableFailure,
+            FailureClass::Conflict,
+            RoutingOutcomeKind::Retryable,
+            "conflict",
+            true,
+        ),
+        ServerError::PayloadTooLarge(_) => (
+            OperationState::Rejected,
+            FailureClass::InvalidRequest,
+            RoutingOutcomeKind::LocalOnly,
+            "resource_limit",
+            false,
+        ),
+        ServerError::InvalidConfig(_)
+        | ServerError::BadRequest(_)
+        | ServerError::NotFound(_)
+        | ServerError::Sql(_) => (
+            OperationState::Rejected,
+            FailureClass::InvalidRequest,
+            RoutingOutcomeKind::LocalOnly,
+            "invalid_request",
+            false,
+        ),
+        ServerError::SessionExpired(_) => (
+            OperationState::Rejected,
+            FailureClass::InvalidRequest,
+            RoutingOutcomeKind::LocalOnly,
+            "session_expired",
+            false,
+        ),
+        ServerError::Core(_)
+        | ServerError::Catalog(_)
+        | ServerError::Io(_)
+        | ServerError::Internal(_) => (
+            OperationState::TerminalFailure,
+            FailureClass::Internal,
+            RoutingOutcomeKind::Unavailable,
+            "internal",
+            false,
+        ),
+    };
+    HttpTransactionOutcome::new(
+        transaction_id,
+        request_id,
+        transaction_metadata_version(state),
+        operation_state,
+        Some(failure_class),
+        Some(reason_code.to_string()),
+        routing_kind,
+        reason_code,
+        retryable,
+    )
 }
 
 fn make_trace_span<B>(request: &axum::http::Request<B>) -> Span {
@@ -434,6 +873,30 @@ pub fn json_response<T: Serialize>(value: T, max_size: usize, ctx: &RequestConte
             ctx,
         ),
         Err(err) => error_response(ServerError::Internal(err.to_string()), ctx),
+    }
+}
+
+/// Serialize a successful transaction adapter result without allowing a
+/// post-execution response-size failure to rewrite its known outcome as an
+/// unexecuted invalid request. The legacy HTTP error remains 413/500 while the
+/// additive transaction field reports the operation state reached before
+/// serialization failed.
+pub fn transaction_json_response<T: Serialize>(
+    value: T,
+    transaction: HttpTransactionOutcome,
+    max_size: usize,
+    ctx: &RequestContext,
+) -> Response {
+    match serde_json::to_vec(&value) {
+        Ok(bytes) if bytes.len() <= max_size => (StatusCode::OK, Json(value)).into_response(),
+        Ok(_) => transaction_error_response(
+            ServerError::PayloadTooLarge("response size exceeds limit".into()),
+            transaction,
+            ctx,
+        ),
+        Err(error) => {
+            transaction_error_response(ServerError::Internal(error.to_string()), transaction, ctx)
+        }
     }
 }
 

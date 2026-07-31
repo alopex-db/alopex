@@ -263,6 +263,7 @@ impl AlopexService for AlopexServiceImpl {
             } else {
                 Some(req.session_id)
             },
+            request_id: None,
             streaming: false,
         };
         let http_ctx = crate::http::RequestContext {

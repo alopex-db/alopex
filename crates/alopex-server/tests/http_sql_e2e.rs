@@ -231,6 +231,43 @@ async fn non_session_sql_rejects_future_distributed_routing() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
+async fn non_session_streaming_sql_rejects_future_distributed_routing_before_http_ok() {
+    let (state, _temp_dir) = cluster_aware_test_state();
+    let app = http::router(state.clone());
+
+    let create = serde_json::json!({
+        "sql": "CREATE TABLE distributed_stream_users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        "streaming": false
+    });
+    let (status, _) = send_json(&app, "/sql", create).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (table_ref, table_id) = table_ref_and_id(&state, "distributed_stream_users");
+    install_multi_node_placement(&state, &table_ref, table_id);
+
+    let stream = serde_json::json!({
+        "sql": "SELECT id, name FROM distributed_stream_users",
+        "streaming": true,
+        "request_id": "future-distributed-stream"
+    });
+    let (status, body) = send_json(&app, "/sql", stream).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+
+    let response = serde_json::from_str::<Value>(&body).expect("error");
+    assert_eq!(
+        response["error"]["code"],
+        "FUTURE_DISTRIBUTED_EXECUTION_REQUIRED"
+    );
+    assert_eq!(response["transaction"]["state"], "rejected");
+    assert_eq!(response["transaction"]["routing"]["kind"], "unsupported");
+    assert!(
+        response.get("done").is_none(),
+        "routing rejection must precede a JSONL stream success envelope"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
 async fn future_distributed_write_is_rejected_before_local_execution() {
     let (state, _temp_dir) = cluster_aware_test_state();
     let app = http::router(state.clone());
@@ -274,6 +311,22 @@ async fn future_distributed_write_is_rejected_before_local_execution() {
         response["error"]["code"],
         "FUTURE_DISTRIBUTED_EXECUTION_REQUIRED"
     );
+
+    let stream = serde_json::json!({
+        "sql": "SELECT id, name FROM distributed_writes",
+        "session_id": session_id,
+        "streaming": true,
+        "request_id": "session-future-distributed-stream"
+    });
+    let (status, body) = send_json(&app, "/sql", stream).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    let response = serde_json::from_str::<Value>(&body).expect("stream error");
+    assert_eq!(
+        response["error"]["code"],
+        "FUTURE_DISTRIBUTED_EXECUTION_REQUIRED"
+    );
+    assert_eq!(response["transaction"]["state"], "rejected");
+    assert_eq!(response["transaction"]["routing"]["kind"], "unsupported");
 
     let (status, _) = send_empty(&app, &format!("/session/{session_id}/rollback")).await;
     assert_eq!(status, StatusCode::OK);
@@ -537,7 +590,7 @@ async fn http_streaming_select_and_error_propagation() {
         "streaming": true
     });
     let (status, body) = send_json(&app, "/sql", stream).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "{body}");
     let mut saw_row = false;
     let mut saw_done = false;
     for line in body.lines() {
@@ -562,6 +615,8 @@ async fn http_streaming_select_and_error_propagation() {
     for line in body.lines() {
         let item = serde_json::from_str::<Value>(line).expect("stream item");
         if !item["error"].is_null() {
+            assert_eq!(item["transaction"]["state"], "rejected");
+            assert_eq!(item["transaction"]["failure_class"], "invalid_request");
             saw_error = true;
             break;
         }

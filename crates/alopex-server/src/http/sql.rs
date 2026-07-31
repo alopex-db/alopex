@@ -3,9 +3,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alopex_cluster::{
-    CatalogTableRef, CatalogTableSnapshot, PlacementCatalog, PlanId, QueryRouter,
+    CatalogTableRef, CatalogTableSnapshot, OperationState, PlacementCatalog, PlanId, QueryRouter,
     QueryRoutingRequest, QueryTableReference, QueryTableReferenceAccess, QueryTableReferenceSource,
-    RequestId, RoutingDecisionKind, RoutingDiagnostics, TableLifecycleEffect, TableRef,
+    RequestId, RoutingDecisionKind, RoutingDiagnostics, RoutingOutcomeKind, TableLifecycleEffect,
+    TableRef,
 };
 use alopex_core::kv::async_adapter::AsyncKVTransactionAdapter;
 use alopex_core::kv::{KVStore, KVTransaction};
@@ -29,7 +30,11 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{Result, ServerError};
-use crate::http::{error_response, json_response, RequestContext};
+use crate::http::{
+    error_response, json_response, transaction_error_response, transaction_failure_outcome,
+    transaction_json_response, transaction_metadata_version, transaction_request_id,
+    HttpTransactionOutcome, RequestContext,
+};
 use crate::ops::distributed_read::{
     PreparedReadLease, ReadCancellation, ReadExecutionOutcome, ReadExecutionSummary,
 };
@@ -41,6 +46,10 @@ use crate::session::{CatalogRollbackEffect, SessionId, TxnHandle};
 pub struct SqlRequest {
     pub sql: String,
     pub session_id: Option<String>,
+    /// Optional stable identity for retry-safe transaction adapters.  Legacy
+    /// callers may omit it and continue using the existing payload shape.
+    #[serde(default)]
+    pub request_id: Option<RequestId>,
     #[serde(default)]
     pub streaming: bool,
 }
@@ -68,6 +77,9 @@ pub struct SqlResponse {
     pub results: Vec<SqlResultResponse>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub routing_diagnostics: Vec<RoutingDiagnostics>,
+    /// Additive v0.9 transaction classification.  Legacy result fields above
+    /// remain byte-for-byte named as before.
+    pub transaction: HttpTransactionOutcome,
 }
 
 /// Explicit remote-read entry point. The coordinator registration is kept
@@ -107,6 +119,8 @@ struct StreamItem {
     row: Option<Vec<alopex_sql::storage::SqlValue>>,
     error: Option<StreamError>,
     done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transaction: Option<HttpTransactionOutcome>,
 }
 
 #[derive(Debug, Serialize)]
@@ -126,6 +140,81 @@ enum StreamSource {
 struct RoutingPlan {
     planned: Vec<PlannedStatement>,
     diagnostics: Vec<RoutingDiagnostics>,
+}
+
+#[derive(Clone)]
+struct SqlTransactionContext {
+    transaction_id: String,
+    request_id: RequestId,
+}
+
+fn sql_transaction_context(
+    request: &SqlRequest,
+    ctx: &RequestContext,
+) -> Result<SqlTransactionContext> {
+    let transaction_id = request.session_id.clone().unwrap_or_else(|| {
+        let identity = request
+            .request_id
+            .as_ref()
+            .filter(|request_id| !request_id.as_str().trim().is_empty())
+            .map(RequestId::as_str)
+            .unwrap_or(&ctx.correlation_id);
+        format!("local-sql:{identity}")
+    });
+    let request_id =
+        transaction_request_id(request.request_id.clone(), &transaction_id, "execute")?;
+    Ok(SqlTransactionContext {
+        transaction_id,
+        request_id,
+    })
+}
+
+fn local_sql_outcome(
+    state: &ServerState,
+    transaction: SqlTransactionContext,
+) -> HttpTransactionOutcome {
+    let (operation_state, reason_code) = if transaction.transaction_id.starts_with("local-sql:") {
+        (OperationState::Committed, "local_sql_autocommit")
+    } else {
+        (OperationState::Running, "local_session_sql")
+    };
+    HttpTransactionOutcome::new(
+        transaction.transaction_id,
+        transaction.request_id,
+        transaction_metadata_version(state),
+        operation_state,
+        None,
+        None,
+        RoutingOutcomeKind::LocalOnly,
+        reason_code,
+        false,
+    )
+}
+
+fn local_sql_stream_outcome(
+    state: &ServerState,
+    transaction: SqlTransactionContext,
+) -> HttpTransactionOutcome {
+    let reason_code = if transaction.transaction_id.starts_with("local-sql:") {
+        "local_sql_streaming"
+    } else {
+        "local_session_sql_streaming"
+    };
+    // A streaming response has not reached a durable commit decision.  The
+    // non-session source is rolled back on close and a session source remains
+    // owned by its session, so reporting `committed` here would turn a client
+    // disconnect or backpressure cancellation into a false success.
+    HttpTransactionOutcome::new(
+        transaction.transaction_id,
+        transaction.request_id,
+        transaction_metadata_version(state),
+        OperationState::Running,
+        None,
+        None,
+        RoutingOutcomeKind::LocalOnly,
+        reason_code,
+        false,
+    )
 }
 
 #[derive(Clone)]
@@ -159,21 +248,52 @@ pub async fn handle(
     Extension(ctx): Extension<RequestContext>,
     Json(request): Json<SqlRequest>,
 ) -> Response {
+    let transaction = match sql_transaction_context(&request, &ctx) {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            let transaction_id = request
+                .session_id
+                .clone()
+                .unwrap_or_else(|| format!("local-sql:{}", ctx.correlation_id));
+            let outcome = transaction_failure_outcome(
+                &state,
+                transaction_id,
+                RequestId::new(format!("{}:execute", ctx.correlation_id)),
+                &error,
+            );
+            return transaction_error_response(error, outcome, &ctx);
+        }
+    };
     if request.sql.trim().is_empty() {
-        return error_response(
-            ServerError::BadRequest("sql must not be empty".into()),
-            &ctx,
+        let error = ServerError::BadRequest("sql must not be empty".into());
+        let outcome = transaction_failure_outcome(
+            &state,
+            transaction.transaction_id,
+            transaction.request_id,
+            &error,
         );
+        return transaction_error_response(error, outcome, &ctx);
     }
 
     if request.streaming {
-        return stream_response(state, request, &ctx);
+        return stream_response(state, request, transaction, &ctx).await;
     }
 
     let result = execute_non_streaming(state.clone(), &request, &ctx).await;
     match result {
-        Ok(response) => json_response(response, state.config.max_response_size, &ctx),
-        Err(err) => error_response(err, &ctx),
+        Ok(response) => {
+            let transaction = response.transaction.clone();
+            transaction_json_response(response, transaction, state.config.max_response_size, &ctx)
+        }
+        Err(error) => {
+            let outcome = transaction_failure_outcome(
+                &state,
+                transaction.transaction_id,
+                transaction.request_id,
+                &error,
+            );
+            transaction_error_response(error, outcome, &ctx)
+        }
     }
 }
 
@@ -383,6 +503,7 @@ pub(crate) async fn execute_non_streaming(
     request: &SqlRequest,
     ctx: &RequestContext,
 ) -> Result<SqlResponse> {
+    let transaction = sql_transaction_context(request, ctx)?;
     let start = Instant::now();
     let sql = request.sql.as_str();
     let is_ddl = is_ddl(sql);
@@ -437,7 +558,11 @@ pub(crate) async fn execute_non_streaming(
 
     state.metrics.record_query(start.elapsed(), true);
 
-    Ok(map_execution_results(exec_result.0, exec_result.1))
+    Ok(map_execution_results(
+        exec_result.0,
+        exec_result.1,
+        local_sql_outcome(&state, transaction),
+    ))
 }
 
 pub(crate) async fn execute_session_statements_with_routing(
@@ -921,12 +1046,121 @@ fn table_key(catalog_name: &str, namespace_name: &str, table_name: &str) -> Vec<
     key
 }
 
-fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestContext) -> Response {
+async fn stream_response(
+    state: Arc<ServerState>,
+    request: SqlRequest,
+    transaction: SqlTransactionContext,
+    ctx: &RequestContext,
+) -> Response {
     if is_write_sql(&request.sql) {
-        if let Err(err) = state.lifecycle_state.check_write_allowed() {
-            return error_response(err, ctx);
+        if let Err(error) = state.lifecycle_state.check_write_allowed() {
+            let outcome = transaction_failure_outcome(
+                &state,
+                transaction.transaction_id,
+                transaction.request_id,
+                &error,
+            );
+            return transaction_error_response(error, outcome, ctx);
         }
     }
+
+    // Every streaming source crosses its normal routing fence *before* it
+    // sends an HTTP 200 or local-only running outcome. Otherwise a caller
+    // could make a future-distributed statement look locally admitted merely
+    // by switching `streaming` on. Keep the prepared source so planning and
+    // query execution use one snapshot/owned session handle.
+    let preflight_source = if let Some(id) = request.session_id.as_deref() {
+        let session_id = match id.parse::<SessionId>() {
+            Ok(session_id) => session_id,
+            Err(_) => {
+                let error = ServerError::BadRequest("invalid session_id".into());
+                let outcome = transaction_failure_outcome(
+                    &state,
+                    transaction.transaction_id.clone(),
+                    transaction.request_id.clone(),
+                    &error,
+                );
+                return transaction_error_response(error, outcome, ctx);
+            }
+        };
+        let handle = match state.session_manager.get_transaction(&session_id).await {
+            Ok(handle) => handle,
+            Err(error) => {
+                let outcome = transaction_failure_outcome(
+                    &state,
+                    transaction.transaction_id.clone(),
+                    transaction.request_id.clone(),
+                    &error,
+                );
+                return transaction_error_response(error, outcome, ctx);
+            }
+        };
+        match route_session_statement_for_execution(
+            &state,
+            &handle,
+            &request.sql,
+            &ctx.correlation_id,
+        )
+        .await
+        {
+            Ok(_) | Err(ServerError::Sql(_)) => StreamSource::Handle(handle),
+            Err(error) => {
+                let outcome = transaction_failure_outcome(
+                    &state,
+                    transaction.transaction_id.clone(),
+                    transaction.request_id.clone(),
+                    &error,
+                );
+                return transaction_error_response(error, outcome, ctx);
+            }
+        }
+    } else {
+        let txn = match state.begin_sql_txn().await {
+            Ok(txn) => txn,
+            Err(error) => {
+                let outcome = transaction_failure_outcome(
+                    &state,
+                    transaction.transaction_id.clone(),
+                    transaction.request_id.clone(),
+                    &error,
+                );
+                return transaction_error_response(error, outcome, ctx);
+            }
+        };
+        match route_non_session_sql(&state, &txn, &request.sql, &ctx.correlation_id).await {
+            Ok(routing_plan) => {
+                if let Some(diagnostic) = future_distributed_diagnostic(&routing_plan.diagnostics) {
+                    let error = future_distributed_error(diagnostic);
+                    let _ = txn.async_rollback().await;
+                    let outcome = transaction_failure_outcome(
+                        &state,
+                        transaction.transaction_id.clone(),
+                        transaction.request_id.clone(),
+                        &error,
+                    );
+                    return transaction_error_response(error, outcome, ctx);
+                }
+            }
+            // v0.8 streaming SQL reports a planner/executor SQL error as a
+            // JSONL item after the stream opens. A SQL planning error cannot
+            // identify a future multi-range plan, so preserve that established
+            // stream-error contract instead of turning it into a pre-stream
+            // HTTP error. Metadata/routing failures remain fail-closed.
+            Err(ServerError::Sql(_)) => {}
+            Err(error) => {
+                let _ = txn.async_rollback().await;
+                let outcome = transaction_failure_outcome(
+                    &state,
+                    transaction.transaction_id.clone(),
+                    transaction.request_id.clone(),
+                    &error,
+                );
+                return transaction_error_response(error, outcome, ctx);
+            }
+        }
+        StreamSource::Txn(txn)
+    };
+
     let (sender, receiver) = mpsc::channel(32);
     let sql = request.sql.clone();
     let correlation_id = ctx.correlation_id.clone();
@@ -939,59 +1173,26 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
         audit = Some(state.audit.clone());
     }
 
-    let session_id = request.session_id.clone();
     let state_clone = state.clone();
     let memory_policy = memory_policy.clone();
+    let initial_transaction = local_sql_stream_outcome(&state, transaction.clone());
     tokio::spawn(async move {
+        if sender
+            .send(StreamItem {
+                row: None,
+                error: None,
+                done: false,
+                transaction: Some(initial_transaction),
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
         let start = Instant::now();
         let mut bytes_sent = 0usize;
         let mut success = true;
-        let mut source = match session_id {
-            Some(id) => {
-                let parsed = match id.parse::<SessionId>() {
-                    Ok(id) => id,
-                    Err(_) => {
-                        let _ = sender
-                            .send(stream_item_error(
-                                ServerError::BadRequest("invalid session_id".into()),
-                                &correlation_id,
-                            ))
-                            .await;
-                        return;
-                    }
-                };
-                match state_clone.session_manager.get_transaction(&parsed).await {
-                    Ok(handle) => {
-                        match route_session_statement_for_execution(
-                            &state_clone,
-                            &handle,
-                            &sql,
-                            &correlation_id,
-                        )
-                        .await
-                        {
-                            Ok(_) => {}
-                            Err(err) => {
-                                let _ = sender.send(stream_item_error(err, &correlation_id)).await;
-                                return;
-                            }
-                        }
-                        StreamSource::Handle(handle)
-                    }
-                    Err(err) => {
-                        let _ = sender.send(stream_item_error(err, &correlation_id)).await;
-                        return;
-                    }
-                }
-            }
-            None => match state_clone.begin_sql_txn().await {
-                Ok(txn) => StreamSource::Txn(txn),
-                Err(err) => {
-                    let _ = sender.send(stream_item_error(err, &correlation_id)).await;
-                    return;
-                }
-            },
-        };
+        let mut source = preflight_source;
 
         let mut stream = match &mut source {
             StreamSource::Handle(handle) => handle.query(&sql),
@@ -1002,7 +1203,9 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 let _ = sender
-                    .send(stream_item_error(
+                    .send(stream_transaction_error(
+                        &state_clone,
+                        &transaction,
                         ServerError::Timeout("query timeout".into()),
                         &correlation_id,
                     ))
@@ -1021,7 +1224,9 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
                         Ok(value) => value,
                         Err(_) => {
                             let _ = sender
-                                .send(stream_item_error(
+                                .send(stream_transaction_error(
+                                    &state_clone,
+                                    &transaction,
                                     ServerError::Timeout("query timeout".into()),
                                     &correlation_id,
                                 ))
@@ -1037,6 +1242,7 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
                                 row: Some(row.values),
                                 error: None,
                                 done: false,
+                                transaction: None,
                             };
                             match serde_json::to_vec(&item) {
                                 Ok(bytes) => {
@@ -1045,14 +1251,21 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
                                         memory_policy.enforce_output_bytes(bytes_sent as u64)
                                     {
                                         let _ = sender
-                                            .send(stream_item_error(err, &correlation_id))
+                                            .send(stream_transaction_error(
+                                                &state_clone,
+                                                &transaction,
+                                                err,
+                                                &correlation_id,
+                                            ))
                                             .await;
                                         success = false;
                                         break;
                                     }
                                     if bytes_sent > max_response_size {
                                         let _ = sender
-                                            .send(stream_item_error(
+                                            .send(stream_transaction_error(
+                                                &state_clone,
+                                                &transaction,
                                                 ServerError::PayloadTooLarge(
                                                     "response size exceeds limit".into(),
                                                 ),
@@ -1065,7 +1278,9 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
                                 }
                                 Err(err) => {
                                     let _ = sender
-                                        .send(stream_item_error(
+                                        .send(stream_transaction_error(
+                                            &state_clone,
+                                            &transaction,
                                             ServerError::Internal(err.to_string()),
                                             &correlation_id,
                                         ))
@@ -1091,7 +1306,9 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
                         }
                         Some(Err(err)) => {
                             let _ = sender
-                                .send(stream_item_error(
+                                .send(stream_transaction_error(
+                                    &state_clone,
+                                    &transaction,
                                     ServerError::Sql(err.into()),
                                     &correlation_id,
                                 ))
@@ -1118,6 +1335,7 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
                 row: None,
                 error: None,
                 done: true,
+                transaction: None,
             })
             .await;
     });
@@ -1135,7 +1353,26 @@ fn stream_response(state: Arc<ServerState>, request: SqlRequest, ctx: &RequestCo
         .unwrap_or_else(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-fn stream_item_error(err: ServerError, correlation_id: &str) -> StreamItem {
+fn stream_transaction_error(
+    state: &ServerState,
+    transaction: &SqlTransactionContext,
+    err: ServerError,
+    correlation_id: &str,
+) -> StreamItem {
+    let outcome = transaction_failure_outcome(
+        state,
+        transaction.transaction_id.clone(),
+        transaction.request_id.clone(),
+        &err,
+    );
+    stream_item_error(err, correlation_id, Some(outcome))
+}
+
+fn stream_item_error(
+    err: ServerError,
+    correlation_id: &str,
+    transaction: Option<HttpTransactionOutcome>,
+) -> StreamItem {
     StreamItem {
         row: None,
         error: Some(StreamError {
@@ -1144,12 +1381,14 @@ fn stream_item_error(err: ServerError, correlation_id: &str) -> StreamItem {
             correlation_id: correlation_id.to_string(),
         }),
         done: false,
+        transaction,
     }
 }
 
 fn map_execution_results(
     exec_results: Vec<alopex_sql::executor::ExecutionResult>,
     routing_diagnostics: Vec<RoutingDiagnostics>,
+    transaction: HttpTransactionOutcome,
 ) -> SqlResponse {
     let results: Vec<SqlResultResponse> =
         exec_results.into_iter().map(map_execution_result).collect();
@@ -1165,6 +1404,7 @@ fn map_execution_results(
         last_result,
         results,
         routing_diagnostics,
+        transaction,
     }
 }
 

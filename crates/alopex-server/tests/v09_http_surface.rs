@@ -492,7 +492,7 @@ const API_ROUTES: [ApiRoute; 61] = [
         label: "POST /session/begin",
         path: "/session/begin",
         method: RouteMethod::Post,
-        request_schema: "NoBody",
+        request_schema: "OptionalSessionRequest",
         response_schema: "SessionBeginResponse",
         streaming: StreamBehavior::None,
     },
@@ -500,7 +500,7 @@ const API_ROUTES: [ApiRoute; 61] = [
         label: "POST /session/{id}/commit",
         path: "/session/test/commit",
         method: RouteMethod::Post,
-        request_schema: "SessionIdPath",
+        request_schema: "SessionIdPath + OptionalSessionRequest",
         response_schema: "SessionActionResponse",
         streaming: StreamBehavior::None,
     },
@@ -508,7 +508,7 @@ const API_ROUTES: [ApiRoute; 61] = [
         label: "POST /session/{id}/rollback",
         path: "/session/test/rollback",
         method: RouteMethod::Post,
-        request_schema: "SessionIdPath",
+        request_schema: "SessionIdPath + OptionalSessionRequest",
         response_schema: "SessionActionResponse",
         streaming: StreamBehavior::None,
     },
@@ -730,6 +730,30 @@ async fn i13_http_method_path_register_has_auth_and_status_boundaries() {
             "{} correlation id",
             row.label
         );
+        if matches!(
+            row.path,
+            "/sql"
+                | "/api/sql/query"
+                | "/session/begin"
+                | "/session/test/commit"
+                | "/session/test/rollback"
+        ) {
+            assert_eq!(
+                error["transaction"]["failure_class"], "unauthorized",
+                "{} transaction auth outcome",
+                row.label
+            );
+            assert_eq!(
+                error["transaction"]["routing"]["kind"], "blocked",
+                "{} transaction auth routing",
+                row.label
+            );
+            assert_eq!(
+                error["error"]["message"], "missing credentials",
+                "{} preserves the v0.8 auth message",
+                row.label
+            );
+        }
     }
 
     for row in ADMIN_ROUTES {
