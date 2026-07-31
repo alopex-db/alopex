@@ -4,6 +4,7 @@ use std::io::Read;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use alopex_cli::batch::{BatchMode, BatchModeSource};
@@ -24,7 +25,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use serde_json::{json, Value};
 use tempfile::tempdir;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tower::ServiceExt;
 
 struct ChildGuard {
@@ -38,6 +39,13 @@ impl ChildGuard {
 
     fn child_mut(&mut self) -> &mut Child {
         self.child.as_mut().expect("child missing")
+    }
+
+    fn stop_and_read_stderr(&mut self) -> String {
+        let child = self.child_mut();
+        let _ = child.kill();
+        let _ = child.wait();
+        read_stderr(child)
     }
 }
 
@@ -62,6 +70,11 @@ fn reserve_unique_port(used: &mut HashSet<u16>) -> u16 {
             return port;
         }
     }
+}
+
+fn server_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 fn toml_path(path: &Path) -> String {
@@ -117,7 +130,10 @@ async fn send_json(
         .header(CONTENT_TYPE, "application/json")
         .body(http_body_util::Full::new(axum::body::Bytes::from(bytes)))
         .expect("request");
-    let response = client.request(request).await.expect("response");
+    let response = timeout(Duration::from_secs(15), client.request(request))
+        .await
+        .expect("http response timeout")
+        .expect("response");
     let status = response.status();
     let body = response
         .into_body()
@@ -140,7 +156,10 @@ async fn try_send_empty(
         .uri(url)
         .body(http_body_util::Full::new(axum::body::Bytes::new()))
         .ok()?;
-    let response = client.request(request).await.ok()?;
+    let response = timeout(Duration::from_secs(1), client.request(request))
+        .await
+        .ok()?
+        .ok()?;
     Some(response.status())
 }
 
@@ -389,15 +408,17 @@ fn cluster_aware_config(data_dir: PathBuf, membership_source_available: bool) ->
     }
 }
 
-/// サーバーバイナリを起動し、admin と HTTP API 両方の readiness を待つ。
-/// (v0.7 以降は surface ごとに起動タイミングが異なるため両方を確認する)
+/// サーバーバイナリを起動し、admin、HTTP API、gRPC の readiness を待つ。
+/// (v0.7 以降は surface ごとに起動タイミングが異なるため、すべてを確認する)
 async fn spawn_server_and_wait(
     config_path: &Path,
     http_url: &str,
     admin_url: &str,
+    grpc_url: &str,
 ) -> (
     ChildGuard,
     Client<HttpConnector, http_body_util::Full<axum::body::Bytes>>,
+    tonic::transport::Channel,
 ) {
     let child = Command::new(env!("CARGO_BIN_EXE_alopex-server"))
         .arg("--config")
@@ -412,6 +433,10 @@ async fn spawn_server_and_wait(
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut admin_ready = false;
     let mut api_ready = false;
+    let grpc_endpoint = tonic::transport::Endpoint::from_shared(grpc_url.to_string())
+        .expect("grpc uri")
+        .connect_timeout(Duration::from_secs(1));
+    let mut grpc_channel = None;
     while Instant::now() < deadline {
         if let Ok(Some(status)) = guard.child_mut().try_wait() {
             let stderr_output = read_stderr(guard.child_mut());
@@ -435,16 +460,27 @@ async fn spawn_server_and_wait(
                 api_ready = status == StatusCode::OK;
             }
         }
-        if admin_ready && api_ready {
+        if grpc_channel.is_none() {
+            if let Ok(Ok(channel)) =
+                timeout(Duration::from_secs(2), grpc_endpoint.clone().connect()).await
+            {
+                grpc_channel = Some(channel);
+            }
+        }
+        if admin_ready && api_ready && grpc_channel.is_some() {
             break;
         }
         sleep(Duration::from_millis(100)).await;
     }
-    if !(admin_ready && api_ready) {
-        let stderr_output = read_stderr(guard.child_mut());
+    if !(admin_ready && api_ready && grpc_channel.is_some()) {
+        let stderr_output = guard.stop_and_read_stderr();
         panic!("alopex-server failed health check. stderr:\n{stderr_output}");
     }
-    (guard, client)
+    (
+        guard,
+        client,
+        grpc_channel.expect("gRPC channel must be ready"),
+    )
 }
 
 fn http_sql_value_to_i64(value: &Value) -> i64 {
@@ -474,6 +510,7 @@ fn grpc_sql_value_to_i64(value: &alopex_server::grpc::proto::Value) -> i64 {
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn grpc_execute_sql_matches_http_for_scalar_subquery_select() {
+    let _server_test_guard = server_test_lock().lock().await;
     let temp = tempdir().expect("tempdir");
     let mut used = HashSet::new();
     let http_port = reserve_unique_port(&mut used);
@@ -482,7 +519,9 @@ async fn grpc_execute_sql_matches_http_for_scalar_subquery_select() {
     let config_path = write_config(temp.path(), http_port, admin_port, grpc_port);
     let http_url = format!("http://127.0.0.1:{http_port}");
     let admin_url = format!("http://127.0.0.1:{admin_port}");
-    let (_guard, client) = spawn_server_and_wait(&config_path, &http_url, &admin_url).await;
+    let grpc_url = format!("http://127.0.0.1:{grpc_port}");
+    let (_guard, client, channel) =
+        spawn_server_and_wait(&config_path, &http_url, &admin_url, &grpc_url).await;
 
     for sql in [
         "CREATE TABLE parity_items (id INT PRIMARY KEY, val INT);",
@@ -529,25 +568,26 @@ async fn grpc_execute_sql_matches_http_for_scalar_subquery_select() {
         .collect();
     assert_eq!(http_rows, vec![vec![1, 250], vec![2, 250]]);
 
-    let channel = tonic::transport::Channel::from_shared(format!("http://127.0.0.1:{grpc_port}"))
-        .expect("grpc uri")
-        .connect()
-        .await
-        .expect("grpc connect");
     let mut grpc_client =
         alopex_server::grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
-    let mut stream = grpc_client
-        .execute_sql(alopex_server::grpc::proto::SqlRequest {
+    let mut stream = timeout(
+        Duration::from_secs(15),
+        grpc_client.execute_sql(alopex_server::grpc::proto::SqlRequest {
             sql: query.to_string(),
             session_id: String::new(),
-        })
-        .await
-        .expect("grpc execute_sql call")
-        .into_inner();
+        }),
+    )
+    .await
+    .expect("grpc execute_sql timeout")
+    .expect("grpc execute_sql call")
+    .into_inner();
 
     let mut grpc_rows: Vec<Vec<i64>> = Vec::new();
     loop {
-        match stream.message().await {
+        match timeout(Duration::from_secs(15), stream.message())
+            .await
+            .expect("grpc stream timeout")
+        {
             Ok(Some(result_set)) => {
                 grpc_rows.extend(
                     result_set
@@ -575,6 +615,7 @@ async fn grpc_execute_sql_matches_http_for_scalar_subquery_select() {
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn grpc_execute_sql_enforces_max_response_size_like_http() {
+    let _server_test_guard = server_test_lock().lock().await;
     let temp = tempdir().expect("tempdir");
     let mut used = HashSet::new();
     let http_port = reserve_unique_port(&mut used);
@@ -592,7 +633,9 @@ async fn grpc_execute_sql_enforces_max_response_size_like_http() {
     );
     let http_url = format!("http://127.0.0.1:{http_port}");
     let admin_url = format!("http://127.0.0.1:{admin_port}");
-    let (_guard, client) = spawn_server_and_wait(&config_path, &http_url, &admin_url).await;
+    let grpc_url = format!("http://127.0.0.1:{grpc_port}");
+    let (_guard, client, channel) =
+        spawn_server_and_wait(&config_path, &http_url, &admin_url, &grpc_url).await;
 
     let payload = "x".repeat(32 * 1024);
     for sql in [
@@ -624,26 +667,25 @@ async fn grpc_execute_sql_enforces_max_response_size_like_http() {
         "http must reject oversized response: {http_result}"
     );
 
-    let channel = tonic::transport::Channel::from_shared(format!("http://127.0.0.1:{grpc_port}"))
-        .expect("grpc uri")
-        .connect()
-        .await
-        .expect("grpc connect");
     let mut grpc_client =
         alopex_server::grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
-    let err = grpc_client
-        .execute_sql(alopex_server::grpc::proto::SqlRequest {
+    let err = timeout(
+        Duration::from_secs(15),
+        grpc_client.execute_sql(alopex_server::grpc::proto::SqlRequest {
             sql: query.to_string(),
             session_id: String::new(),
-        })
-        .await
-        .expect_err("grpc must reject oversized response");
+        }),
+    )
+    .await
+    .expect("grpc execute_sql timeout")
+    .expect_err("grpc must reject oversized response");
     assert_eq!(err.code(), tonic::Code::ResourceExhausted);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn cross_surface_consistency_cli_and_server_share_expected_results() {
+    let _server_test_guard = server_test_lock().lock().await;
     let expected = load_fixture("cross_surface_expected.json");
 
     let temp = tempdir().expect("tempdir");
@@ -654,54 +696,9 @@ async fn cross_surface_consistency_cli_and_server_share_expected_results() {
     let config_path = write_config(temp.path(), http_port, admin_port, grpc_port);
     let http_url = format!("http://127.0.0.1:{http_port}");
     let admin_url = format!("http://127.0.0.1:{admin_port}");
-
-    let child = Command::new(env!("CARGO_BIN_EXE_alopex-server"))
-        .arg("--config")
-        .arg(&config_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn server");
-    let mut guard = ChildGuard::new(child);
-
-    let client = Client::builder(TokioExecutor::new()).build_http();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let mut admin_ready = false;
-    let mut api_ready = false;
-    while Instant::now() < deadline {
-        if let Ok(Some(status)) = guard.child_mut().try_wait() {
-            let stderr_output = read_stderr(guard.child_mut());
-            panic!("alopex-server exited early ({status}). stderr:\n{stderr_output}");
-        }
-
-        if !admin_ready {
-            if let Some(status) =
-                try_send_empty(&client, Method::GET, &format!("{admin_url}/healthz")).await
-            {
-                admin_ready = status == StatusCode::OK;
-            }
-        }
-        if !api_ready {
-            if let Some(status) = try_send_empty(
-                &client,
-                Method::GET,
-                &format!("{http_url}/api/admin/health"),
-            )
-            .await
-            {
-                api_ready = status == StatusCode::OK;
-            }
-        }
-
-        if admin_ready && api_ready {
-            break;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    if !(admin_ready && api_ready) {
-        let stderr_output = read_stderr(guard.child_mut());
-        panic!("alopex-server failed health check. stderr:\n{stderr_output}");
-    }
+    let grpc_url = format!("http://127.0.0.1:{grpc_port}");
+    let (guard, client, _grpc_channel) =
+        spawn_server_and_wait(&config_path, &http_url, &admin_url, &grpc_url).await;
 
     let (status, _) = send_json(
         &client,
