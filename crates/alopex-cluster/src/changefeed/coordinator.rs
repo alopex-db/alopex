@@ -122,6 +122,7 @@ struct FeedSession {
     events: Vec<ChangeEventEnvelope>,
     continuity_failure: Option<ContinuityFailure>,
     create_request: FeedRequest,
+    lifecycle_replays: BTreeMap<String, LifecycleReplay>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +130,56 @@ struct ContinuityFailure {
     failure_class: FailureClass,
     reason_code: String,
     retryable: bool,
+}
+
+/// One replay-safe lifecycle request retained for the lifetime of a feed
+/// session.  The coordinator caches delivery batches as well as terminal
+/// outcomes so a repeated request cannot observe later events or apply a
+/// terminal transition twice.
+#[derive(Debug, Clone)]
+struct LifecycleReplay {
+    request: FeedRequest,
+    action: ReplayAction,
+    result: ReplayResult,
+    duplicate_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReplayAction {
+    Resume { checkpoint: String },
+    Close,
+}
+
+#[derive(Debug, Clone)]
+enum ReplayResult {
+    Delivery(FeedDelivery),
+    Outcome(ChangefeedOutcome),
+}
+
+impl LifecycleReplay {
+    fn is_same_request(&self, request: &FeedRequest, action: &ReplayAction) -> bool {
+        self.request == *request && self.action == *action
+    }
+
+    fn duplicate_delivery(&mut self) -> FeedDelivery {
+        self.duplicate_count = self.duplicate_count.saturating_add(1);
+        let ReplayResult::Delivery(delivery) = &self.result else {
+            unreachable!("delivery replay stored an outcome")
+        };
+        let mut duplicate = delivery.clone();
+        duplicate.outcome.idempotency.duplicate_count = self.duplicate_count;
+        duplicate
+    }
+
+    fn duplicate_outcome(&mut self) -> ChangefeedOutcome {
+        self.duplicate_count = self.duplicate_count.saturating_add(1);
+        let ReplayResult::Outcome(outcome) = &self.result else {
+            unreachable!("outcome replay stored a delivery")
+        };
+        let mut duplicate = outcome.clone();
+        duplicate.idempotency.duplicate_count = self.duplicate_count;
+        duplicate
+    }
 }
 
 impl FeedCoordinator {
@@ -219,6 +270,7 @@ impl FeedCoordinator {
                 events: Vec::new(),
                 continuity_failure: None,
                 create_request: request,
+                lifecycle_replays: BTreeMap::new(),
             },
         );
         Ok(created)
@@ -410,12 +462,23 @@ impl FeedCoordinator {
     }
 
     pub fn resume(
-        &self,
+        &mut self,
         feed_id: &str,
         checkpoint: &str,
         request: FeedRequest,
     ) -> Result<FeedDelivery, CoordinatorError> {
-        let session = self.session(feed_id)?;
+        let session = self.session_mut(feed_id)?;
+        let replay_key = request.request_id.as_str().to_string();
+        let action = ReplayAction::Resume {
+            checkpoint: checkpoint.to_string(),
+        };
+        if let Some(replay) = session.lifecycle_replays.get_mut(&replay_key) {
+            return if replay.is_same_request(&request, &action) {
+                Ok(replay.duplicate_delivery())
+            } else {
+                replay_conflict_delivery(session, &request)
+            };
+        }
         let cursor = match CheckpointCursor::decode_for(
             checkpoint,
             &session.feed.feed_id,
@@ -475,7 +538,7 @@ impl FeedCoordinator {
                 events.push(event.clone());
             }
         }
-        Ok(FeedDelivery {
+        let delivery = FeedDelivery {
             outcome: outcome(
                 session.feed.clone(),
                 session.routing.clone(),
@@ -488,7 +551,17 @@ impl FeedCoordinator {
                 ChangefeedResult::Feed,
             )?,
             events,
-        })
+        };
+        session.lifecycle_replays.insert(
+            replay_key,
+            LifecycleReplay {
+                request,
+                action,
+                result: ReplayResult::Delivery(delivery.clone()),
+                duplicate_count: 0,
+            },
+        );
+        Ok(delivery)
     }
 
     pub fn cancel(
@@ -505,8 +578,17 @@ impl FeedCoordinator {
         request: FeedRequest,
     ) -> Result<ChangefeedOutcome, CoordinatorError> {
         let session = self.session_mut(feed_id)?;
+        let replay_key = request.request_id.as_str().to_string();
+        let action = ReplayAction::Close;
+        if let Some(replay) = session.lifecycle_replays.get_mut(&replay_key) {
+            return if replay.is_same_request(&request, &action) {
+                Ok(replay.duplicate_outcome())
+            } else {
+                replay_conflict_outcome(session, &request)
+            };
+        }
         session.feed.status = OperationState::Cancelled;
-        outcome(
+        let closed = outcome(
             session.feed.clone(),
             session.routing.clone(),
             &request,
@@ -516,7 +598,17 @@ impl FeedCoordinator {
             false,
             0,
             ChangefeedResult::Feed,
-        )
+        )?;
+        session.lifecycle_replays.insert(
+            replay_key,
+            LifecycleReplay {
+                request,
+                action,
+                result: ReplayResult::Outcome(closed.clone()),
+                duplicate_count: 0,
+            },
+        );
+        Ok(closed)
     }
 
     pub fn status(
@@ -601,6 +693,30 @@ fn failure_outcome(
         0,
         ChangefeedResult::Feed,
     )
+}
+
+fn replay_conflict_outcome(
+    session: &FeedSession,
+    request: &FeedRequest,
+) -> Result<ChangefeedOutcome, CoordinatorError> {
+    failure_outcome(
+        &session.feed,
+        &session.routing,
+        request,
+        FailureClass::Conflict,
+        "request_idempotency_conflict",
+        false,
+    )
+}
+
+fn replay_conflict_delivery(
+    session: &FeedSession,
+    request: &FeedRequest,
+) -> Result<FeedDelivery, CoordinatorError> {
+    Ok(FeedDelivery {
+        outcome: replay_conflict_outcome(session, request)?,
+        events: Vec::new(),
+    })
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -465,7 +465,7 @@ pub(crate) fn resume_changefeed(
     request: ResumeChangefeedRequest,
 ) -> Result<FeedDelivery> {
     let request_id = non_empty(&request.request_id, "request_id")?;
-    let registry = registry(state)?;
+    let mut registry = registry(state)?;
     let feed_request = feed_request(&operation_id("resume", request_id), request_id)?;
     let Some(registered) = authorized_existing(
         state,
