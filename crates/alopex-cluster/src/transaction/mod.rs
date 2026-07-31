@@ -5,7 +5,12 @@
 //! must agree on.
 
 mod outcome;
+mod routing;
 
 pub use outcome::{
     TransactionIsolation, TransactionOutcome, TransactionOutcomeError, TransactionParticipant,
+};
+pub use routing::{
+    TransactionRoutePlan, TransactionRouteRequest, TransactionRouteTarget, TransactionRoutingError,
+    TransactionRoutingPlanner,
 };
