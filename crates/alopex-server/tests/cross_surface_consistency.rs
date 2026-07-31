@@ -575,6 +575,8 @@ async fn grpc_execute_sql_matches_http_for_scalar_subquery_select() {
         grpc_client.execute_sql(alopex_server::grpc::proto::SqlRequest {
             sql: query.to_string(),
             session_id: String::new(),
+            request_id: None,
+            require_distributed: None,
         }),
     )
     .await
@@ -674,6 +676,8 @@ async fn grpc_execute_sql_enforces_max_response_size_like_http() {
         grpc_client.execute_sql(alopex_server::grpc::proto::SqlRequest {
             sql: query.to_string(),
             session_id: String::new(),
+            request_id: None,
+            require_distributed: None,
         }),
     )
     .await

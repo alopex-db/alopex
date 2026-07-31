@@ -5,39 +5,168 @@ package alopex.v0;
 message SqlRequest {
   string sql = 1;
   string session_id = 2;
+  // Optional stable retry identity. Empty retains the v0.8 request shape.
+  optional string request_id = 3;
+  // Explicitly opt into a distributed execution; absence preserves v0.8 local SQL.
+  optional bool require_distributed = 4;
 }
 
 message DdlRequest {
   string sql = 1;
   string session_id = 2;
+  optional string request_id = 3;
+  optional bool require_distributed = 4;
 }
 
 message DmlRequest {
   string sql = 1;
   string session_id = 2;
+  optional string request_id = 3;
+  optional bool require_distributed = 4;
 }
 
 message DdlResponse {
   bool success = 1;
+  TransactionOutcomeV09 transaction = 2;
 }
 
 message DmlResponse {
   uint64 affected_rows = 1;
+  TransactionOutcomeV09 transaction = 2;
 }
 
-message BeginRequest {}
+message BeginRequest {
+  optional string request_id = 1;
+  optional bool require_distributed = 2;
+}
 
 message TransactionHandle {
   string session_id = 1;
   int64 expires_at_ms = 2;
+  optional string request_id = 3;
+  TransactionOutcomeV09 transaction = 4;
+  optional bool require_distributed = 5;
 }
 
 message CommitResponse {
   bool success = 1;
+  TransactionOutcomeV09 transaction = 2;
 }
 
 message RollbackResponse {
   bool success = 1;
+  TransactionOutcomeV09 transaction = 2;
+}
+
+// Versioned additive transaction projection for the existing v0 service.
+// The original response fields above remain stable for older clients.
+enum TransactionOperationStateV09 {
+  TRANSACTION_OPERATION_STATE_V09_UNSPECIFIED = 0;
+  TRANSACTION_OPERATION_STATE_V09_ACCEPTED = 1;
+  TRANSACTION_OPERATION_STATE_V09_RUNNING = 2;
+  TRANSACTION_OPERATION_STATE_V09_COMMITTED = 3;
+  TRANSACTION_OPERATION_STATE_V09_REJECTED = 4;
+  TRANSACTION_OPERATION_STATE_V09_RETRYABLE_FAILURE = 5;
+  TRANSACTION_OPERATION_STATE_V09_TERMINAL_FAILURE = 6;
+  TRANSACTION_OPERATION_STATE_V09_RECOVERY_PENDING = 7;
+  TRANSACTION_OPERATION_STATE_V09_CANCELLED = 8;
+}
+
+enum TransactionFailureClassV09 {
+  TRANSACTION_FAILURE_CLASS_V09_UNSPECIFIED = 0;
+  TRANSACTION_FAILURE_CLASS_V09_UNAUTHORIZED = 1;
+  TRANSACTION_FAILURE_CLASS_V09_STALE_METADATA = 2;
+  TRANSACTION_FAILURE_CLASS_V09_GAP = 3;
+  TRANSACTION_FAILURE_CLASS_V09_OVERLAP = 4;
+  TRANSACTION_FAILURE_CLASS_V09_EPOCH_MISMATCH = 5;
+  TRANSACTION_FAILURE_CLASS_V09_NOT_LEADER = 6;
+  TRANSACTION_FAILURE_CLASS_V09_NODE_UNAVAILABLE = 7;
+  TRANSACTION_FAILURE_CLASS_V09_PREREQUISITE_MISSING = 8;
+  TRANSACTION_FAILURE_CLASS_V09_TIMEOUT = 9;
+  TRANSACTION_FAILURE_CLASS_V09_CONFLICT = 10;
+  TRANSACTION_FAILURE_CLASS_V09_INVALID_REQUEST = 11;
+  TRANSACTION_FAILURE_CLASS_V09_INTERNAL = 12;
+}
+
+enum TransactionRoutingKindV09 {
+  TRANSACTION_ROUTING_KIND_V09_UNSPECIFIED = 0;
+  TRANSACTION_ROUTING_KIND_V09_LOCAL = 1;
+  TRANSACTION_ROUTING_KIND_V09_SINGLE_RANGE = 2;
+  TRANSACTION_ROUTING_KIND_V09_MULTI_RANGE = 3;
+  TRANSACTION_ROUTING_KIND_V09_LOCAL_ONLY = 4;
+  TRANSACTION_ROUTING_KIND_V09_UNSUPPORTED = 5;
+  TRANSACTION_ROUTING_KIND_V09_UNAVAILABLE = 6;
+  TRANSACTION_ROUTING_KIND_V09_RETRYABLE = 7;
+  TRANSACTION_ROUTING_KIND_V09_BLOCKED = 8;
+}
+
+enum TransactionIsolationV09 {
+  TRANSACTION_ISOLATION_V09_UNSPECIFIED = 0;
+  TRANSACTION_ISOLATION_V09_SNAPSHOT = 1;
+}
+
+message TransactionRangeIdentityV09 {
+  string cluster_id = 1;
+  uint32 table_id = 2;
+  string range_id = 3;
+  bytes lower_bound = 4;
+  bool has_lower_bound = 5;
+  bytes upper_bound = 6;
+  bool has_upper_bound = 7;
+  uint64 schema_version = 8;
+  uint64 data_epoch = 9;
+}
+
+message TransactionReadPointRangeV09 {
+  string range_id = 1;
+  uint64 value = 2;
+}
+
+message TransactionReadPointV09 {
+  uint64 data_epoch = 1;
+  uint64 metadata_version = 2;
+  string schema_manifest_id = 3;
+  bool has_schema_manifest_id = 4;
+  repeated TransactionReadPointRangeV09 range_generations = 5;
+  repeated TransactionReadPointRangeV09 index_epochs = 6;
+  string consistency = 7;
+}
+
+message TransactionRoutingOutcomeV09 {
+  TransactionRoutingKindV09 kind = 1;
+  TransactionRangeIdentityV09 range = 2;
+  bool has_range = 3;
+  uint64 metadata_version = 4;
+  string reason_code = 5;
+}
+
+message TransactionIdempotencyResultV09 {
+  string operation_id = 1;
+  string request_id = 2;
+  string first_outcome = 3;
+  TransactionOperationStateV09 state = 4;
+  uint64 duplicate_count = 5;
+}
+
+message TransactionOutcomeV09 {
+  string outcome_version = 1;
+  string transaction_id = 2;
+  string request_id = 3;
+  repeated TransactionRangeIdentityV09 participating_ranges = 4;
+  TransactionReadPointV09 read_point = 5;
+  uint64 schema_version = 6;
+  bool has_schema_version = 7;
+  uint64 data_epoch = 8;
+  bool has_data_epoch = 9;
+  TransactionIsolationV09 isolation = 10;
+  TransactionOperationStateV09 state = 11;
+  TransactionFailureClassV09 failure_class = 12;
+  bool has_failure_class = 13;
+  string reason_code = 14;
+  bool has_reason_code = 15;
+  TransactionRoutingOutcomeV09 routing = 16;
+  bool retryable = 17;
+  TransactionIdempotencyResultV09 idempotency = 18;
 }
 
 message VectorSearchRequest {
@@ -46,6 +175,8 @@ message VectorSearchRequest {
   uint32 k = 3;
   string index = 4;
   string column = 5;
+  optional string request_id = 6;
+  optional bool require_distributed = 7;
 }
 
 message VectorSearchResult {
@@ -56,6 +187,7 @@ message VectorSearchResult {
 
 message VectorSearchResponse {
   repeated VectorSearchResult results = 1;
+  TransactionOutcomeV09 transaction = 2;
 }
 
 message VectorUpsertRequest {
@@ -63,20 +195,26 @@ message VectorUpsertRequest {
   uint64 id = 2;
   repeated float vector = 3;
   string column = 4;
+  optional string request_id = 5;
+  optional bool require_distributed = 6;
 }
 
 message VectorUpsertResponse {
   bool success = 1;
+  TransactionOutcomeV09 transaction = 2;
 }
 
 message VectorDeleteRequest {
   string table = 1;
   uint64 id = 2;
   string column = 3;
+  optional string request_id = 4;
+  optional bool require_distributed = 5;
 }
 
 message VectorDeleteResponse {
   bool success = 1;
+  TransactionOutcomeV09 transaction = 2;
 }
 
 message VectorIndexCreateRequest {
@@ -86,6 +224,8 @@ message VectorIndexCreateRequest {
   string method = 4;
   map<string, string> options = 5;
   bool if_not_exists = 6;
+  optional string request_id = 7;
+  optional bool require_distributed = 8;
 }
 
 message VectorIndexUpdateRequest {
@@ -94,25 +234,33 @@ message VectorIndexUpdateRequest {
   string column = 3;
   string method = 4;
   map<string, string> options = 5;
+  optional string request_id = 6;
+  optional bool require_distributed = 7;
 }
 
 message VectorIndexDeleteRequest {
   string name = 1;
   bool if_exists = 2;
+  optional string request_id = 3;
+  optional bool require_distributed = 4;
 }
 
 message VectorIndexCompactRequest {
   string name = 1;
+  optional string request_id = 2;
+  optional bool require_distributed = 3;
 }
 
 message VectorIndexResponse {
   bool success = 1;
+  TransactionOutcomeV09 transaction = 2;
 }
 
 message HealthRequest {}
 
 message HealthResponse {
   string status = 1;
+  TransactionOutcomeV09 transaction = 2;
 }
 
 // The canonical cluster snapshot is serialized with the same JSON schema as
@@ -122,6 +270,7 @@ message ClusterStatusRequest {}
 
 message ClusterStatusResponse {
   string cluster_json = 1;
+  TransactionOutcomeV09 transaction = 2;
 }
 
 message ClusterJoinRequest {}
@@ -135,6 +284,7 @@ message ClusterOperationResponse {
   string operation_id = 3;
   string state = 4;
   string reason_code = 5;
+  TransactionOutcomeV09 transaction = 6;
 }
 
 // Versioned CRDT wire identity. Optional bounds are represented explicitly so
@@ -520,6 +670,7 @@ message SqlResultSet {
   uint64 affected_rows = 3;
   bool has_affected_rows = 4;
   bool success = 5;
+  TransactionOutcomeV09 transaction = 6;
 }
 
 service AlopexService {

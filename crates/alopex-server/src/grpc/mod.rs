@@ -1,14 +1,16 @@
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use futures::{future::BoxFuture, StreamExt};
 use prost::Message;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex, OwnedMutexGuard};
 use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::server::{Connected, TcpConnectInfo};
@@ -17,12 +19,18 @@ use tower::{Layer, Service};
 use uuid::Uuid;
 
 use alopex_cluster::crdt::{CrdtOutcome, CrdtValue};
-use alopex_cluster::RangeIdentity;
+use alopex_cluster::{FailureClass, OperationState, RangeIdentity, RequestId, RoutingOutcomeKind};
+use alopex_core::kv::{KVStore, KVTransaction};
+use alopex_core::types::TxnMode;
 
 use crate::error::{Result, ServerError};
 use crate::http::sql::{
     execute_non_session_statement_with_routing, execute_session_statement_with_routing,
     sync_catalog_to_store,
+};
+use crate::http::{
+    transaction_failure_outcome, transaction_metadata_version, transaction_request_id,
+    HttpTransactionOutcome,
 };
 use crate::metrics::Metrics;
 use crate::ops::memory::MemoryControlPolicy;
@@ -96,6 +104,505 @@ struct GrpcContext {
     span: tracing::Span,
 }
 
+// A gRPC retry may arrive on a fresh connection or after a server restart,
+// while local sessions deliberately remain process-local. Keep a durable
+// reservation before each explicit retry identity reaches a side effect. A
+// completed terminal response can be replayed after restart; a response that
+// still requires a live local transaction is converted to a retained
+// tombstone so it can never create or apply the operation again.
+const GRPC_IDEMPOTENCY_PREFIX: &[u8] = b"__alopex_internal/grpc-transaction-idempotency/v1/";
+static GRPC_IDEMPOTENCY_LOCK: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredGrpcResponse {
+    messages: Vec<Vec<u8>>,
+    #[serde(default)]
+    status: Option<StoredGrpcStatus>,
+    requires_active_transaction: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredGrpcStatus {
+    code: i32,
+    message: String,
+    details: Vec<u8>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GrpcLedgerRecord {
+    request_id: String,
+    operation: String,
+    fingerprint: String,
+    transaction_id: Option<String>,
+    duplicate_count: u64,
+    /// A missing response is a durable tombstone. It prevents a retry from
+    /// re-running a request when interruption occurred after reservation.
+    response: Option<StoredGrpcResponse>,
+}
+
+enum GrpcLedgerClaim {
+    Execute(GrpcLedgerReservation),
+    Replay(StoredGrpcResponse, u64),
+    Expired(Option<String>),
+    Conflict,
+}
+
+struct GrpcLedgerReservation {
+    key: Vec<u8>,
+    request_id: RequestId,
+    operation: String,
+    fingerprint: String,
+    _guard: OwnedMutexGuard<()>,
+}
+
+fn grpc_idempotency_lock() -> Arc<Mutex<()>> {
+    GRPC_IDEMPOTENCY_LOCK
+        .get_or_init(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+fn grpc_ledger_key(operation: &str, request_id: &RequestId) -> Vec<u8> {
+    let digest = Sha256::digest(format!("{operation}\n{}", request_id.as_str()).as_bytes());
+    let mut key = GRPC_IDEMPOTENCY_PREFIX.to_vec();
+    key.extend_from_slice(format!("{digest:x}").as_bytes());
+    key
+}
+
+fn grpc_request_fingerprint(
+    ctx: &GrpcContext,
+    operation: &str,
+    transaction_id: &str,
+    payload: &[u8],
+) -> String {
+    let mut canonical = Vec::new();
+    grpc_fingerprint_field(
+        &mut canonical,
+        "actor_present",
+        if ctx.actor.is_some() {
+            b"true"
+        } else {
+            b"false"
+        },
+    );
+    grpc_fingerprint_field(
+        &mut canonical,
+        "actor",
+        ctx.actor.as_deref().unwrap_or_default().as_bytes(),
+    );
+    grpc_fingerprint_field(&mut canonical, "operation", operation.as_bytes());
+    grpc_fingerprint_field(&mut canonical, "target", transaction_id.as_bytes());
+    grpc_fingerprint_field(&mut canonical, "payload", payload);
+    format!("{:x}", Sha256::digest(canonical))
+}
+
+/// Canonically encodes externally supplied fields without delimiter ambiguity.
+/// Field order is part of the operation contract; each name and value carries
+/// its byte length so arbitrary SQL, identifiers, and map keys cannot collide.
+fn grpc_canonical_payload(fields: &[(&str, String)]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for (name, value) in fields {
+        grpc_fingerprint_field(&mut payload, name, value.as_bytes());
+    }
+    payload
+}
+
+fn grpc_fingerprint_field(output: &mut Vec<u8>, name: &str, value: &[u8]) {
+    output.extend_from_slice(&(name.len() as u64).to_be_bytes());
+    output.extend_from_slice(name.as_bytes());
+    output.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    output.extend_from_slice(value);
+}
+
+fn grpc_string_map_fingerprint(options: &std::collections::HashMap<String, String>) -> String {
+    let mut pairs: Vec<_> = options.iter().collect();
+    pairs.sort_unstable_by_key(|(key, _)| *key);
+    let fields = pairs
+        .into_iter()
+        .map(|(key, value)| (key.as_str(), value.clone()))
+        .collect::<Vec<_>>();
+    grpc_canonical_payload(&fields)
+        .into_iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn grpc_f32_values_fingerprint(values: &[f32]) -> String {
+    values
+        .iter()
+        .map(|value| format!("{:08x}", value.to_bits()))
+        .collect()
+}
+
+fn read_grpc_ledger(state: &ServerState, key: &[u8]) -> Result<Option<GrpcLedgerRecord>> {
+    let mut txn = state.store.begin(TxnMode::ReadWrite)?;
+    let value = txn.get(&key.to_vec())?;
+    txn.rollback_self()?;
+    value
+        .map(|value| {
+            serde_json::from_slice(&value).map_err(|error| {
+                ServerError::Internal(format!("invalid gRPC idempotency ledger: {error}"))
+            })
+        })
+        .transpose()
+}
+
+fn write_grpc_ledger(state: &ServerState, key: Vec<u8>, record: &GrpcLedgerRecord) -> Result<()> {
+    let value = serde_json::to_vec(record).map_err(|error| {
+        ServerError::Internal(format!("encode gRPC idempotency ledger: {error}"))
+    })?;
+    let mut txn = state.store.begin(TxnMode::ReadWrite)?;
+    txn.put(key, value)?;
+    txn.commit_self()?;
+    Ok(())
+}
+
+async fn grpc_response_is_live(state: &ServerState, transaction_id: Option<&str>) -> bool {
+    let Some(transaction_id) = transaction_id else {
+        return false;
+    };
+    let Ok(session_id) = transaction_id.parse::<SessionId>() else {
+        return false;
+    };
+    matches!(
+        state.session_manager.get_session(&session_id).await,
+        Ok(snapshot) if snapshot.has_transaction
+    )
+}
+
+async fn claim_grpc_request(
+    state: &ServerState,
+    request_id: RequestId,
+    operation: &str,
+    fingerprint: String,
+) -> Result<GrpcLedgerClaim> {
+    let guard = grpc_idempotency_lock().lock_owned().await;
+    let key = grpc_ledger_key(operation, &request_id);
+    let Some(mut record) = read_grpc_ledger(state, &key)? else {
+        write_grpc_ledger(
+            state,
+            key.clone(),
+            &GrpcLedgerRecord {
+                request_id: request_id.as_str().to_owned(),
+                operation: operation.to_owned(),
+                fingerprint: fingerprint.clone(),
+                transaction_id: None,
+                duplicate_count: 0,
+                response: None,
+            },
+        )?;
+        return Ok(GrpcLedgerClaim::Execute(GrpcLedgerReservation {
+            key,
+            request_id,
+            operation: operation.to_owned(),
+            fingerprint,
+            _guard: guard,
+        }));
+    };
+
+    if record.request_id != request_id.as_str()
+        || record.operation != operation
+        || record.fingerprint != fingerprint
+    {
+        return Ok(GrpcLedgerClaim::Conflict);
+    }
+
+    let Some(response) = record.response.clone() else {
+        return Ok(GrpcLedgerClaim::Expired(record.transaction_id));
+    };
+    if response.requires_active_transaction
+        && !grpc_response_is_live(state, record.transaction_id.as_deref()).await
+    {
+        record.response = None;
+        let transaction_id = record.transaction_id.clone();
+        write_grpc_ledger(state, key, &record)?;
+        return Ok(GrpcLedgerClaim::Expired(transaction_id));
+    }
+    record.duplicate_count = record
+        .duplicate_count
+        .checked_add(1)
+        .ok_or_else(|| ServerError::Internal("gRPC idempotency duplicate overflow".into()))?;
+    let duplicate_count = record.duplicate_count;
+    write_grpc_ledger(state, key, &record)?;
+    Ok(GrpcLedgerClaim::Replay(response, duplicate_count))
+}
+
+impl GrpcLedgerReservation {
+    fn complete(
+        self,
+        state: &ServerState,
+        transaction_id: Option<String>,
+        response: StoredGrpcResponse,
+    ) -> Result<()> {
+        write_grpc_ledger(
+            state,
+            self.key,
+            &GrpcLedgerRecord {
+                request_id: self.request_id.as_str().to_owned(),
+                operation: self.operation,
+                fingerprint: self.fingerprint,
+                transaction_id,
+                duplicate_count: 0,
+                response: Some(response),
+            },
+        )
+    }
+}
+
+fn stored_grpc_message<M: Message>(
+    message: &M,
+    _requires_active_transaction: bool,
+) -> StoredGrpcResponse {
+    StoredGrpcResponse {
+        messages: vec![message.encode_to_vec()],
+        status: None,
+        requires_active_transaction: _requires_active_transaction,
+    }
+}
+
+fn stored_grpc_status(status: &Status, _requires_active_transaction: bool) -> StoredGrpcResponse {
+    StoredGrpcResponse {
+        messages: Vec::new(),
+        status: Some(StoredGrpcStatus {
+            code: status.code() as i32,
+            message: status.message().to_owned(),
+            details: status.details().to_vec(),
+        }),
+        requires_active_transaction: _requires_active_transaction,
+    }
+}
+
+fn replay_grpc_status(
+    response: &StoredGrpcResponse,
+    duplicate_count: u64,
+) -> Result<Option<Status>> {
+    let Some(stored) = &response.status else {
+        return Ok(None);
+    };
+    let mut details = stored.details.clone();
+    if let Ok(mut outcome) = proto::TransactionOutcomeV09::decode(details.as_slice()) {
+        if let Some(idempotency) = outcome.idempotency.as_mut() {
+            idempotency.duplicate_count = duplicate_count;
+        }
+        details = outcome.encode_to_vec();
+    }
+    Ok(Some(Status::with_details(
+        tonic::Code::from_i32(stored.code),
+        stored.message.clone(),
+        details.into(),
+    )))
+}
+
+fn complete_grpc_error(
+    reservation: &mut Option<GrpcLedgerReservation>,
+    state: &ServerState,
+    transaction_id: String,
+    status: &Status,
+    requires_active_transaction: bool,
+) -> Result<()> {
+    if let Some(reservation) = reservation.take() {
+        reservation.complete(
+            state,
+            Some(transaction_id),
+            stored_grpc_status(status, requires_active_transaction),
+        )?;
+    }
+    Ok(())
+}
+
+fn grpc_idempotency_persistence_pending_status(
+    state: &ServerState,
+    transaction_id: String,
+    request_id: RequestId,
+    correlation_id: &str,
+) -> Status {
+    let outcome = HttpTransactionOutcome::new(
+        transaction_id,
+        request_id,
+        transaction_metadata_version(state),
+        OperationState::RecoveryPending,
+        Some(FailureClass::Internal),
+        Some("idempotency_persistence_failed".to_owned()),
+        RoutingOutcomeKind::Unavailable,
+        "idempotency_persistence_failed",
+        false,
+    );
+    let status = map_status(
+        ServerError::Internal("gRPC idempotency outcome could not be durably stored".into()),
+        correlation_id,
+    );
+    Status::with_details(
+        status.code(),
+        status.message().to_owned(),
+        transaction_outcome_to_proto(&outcome)
+            .encode_to_vec()
+            .into(),
+    )
+}
+
+macro_rules! complete_grpc_error_or_recovery_pending {
+    ($reservation:expr, $state:expr, $transaction_id:expr, $request_id:expr, $status:expr, $correlation_id:expr, $requires_active_transaction:expr $(,)?) => {{
+        if complete_grpc_error(
+            $reservation,
+            $state,
+            $transaction_id.clone(),
+            $status,
+            $requires_active_transaction,
+        )
+        .is_err()
+        {
+            return Err(grpc_idempotency_persistence_pending_status(
+                $state,
+                $transaction_id.clone(),
+                $request_id.clone(),
+                $correlation_id,
+            ));
+        }
+    }};
+}
+
+macro_rules! complete_grpc_response_or_recovery_pending {
+    ($reservation:expr, $state:expr, $transaction_id:expr, $request_id:expr, $stored:expr, $correlation_id:expr $(,)?) => {{
+        if let Some(reservation) = $reservation {
+            if reservation
+                .complete($state, Some($transaction_id.clone()), $stored)
+                .is_err()
+            {
+                return Err(grpc_idempotency_persistence_pending_status(
+                    $state,
+                    $transaction_id.clone(),
+                    $request_id.clone(),
+                    $correlation_id,
+                ));
+            }
+        }
+    }};
+}
+
+fn decode_grpc_message<M: Message + Default>(response: &StoredGrpcResponse) -> Result<M> {
+    let Some(message) = response.messages.first() else {
+        return Err(ServerError::Internal(
+            "stored gRPC idempotency response is empty".into(),
+        ));
+    };
+    M::decode(message.as_slice()).map_err(|error| {
+        ServerError::Internal(format!("decode stored gRPC idempotency response: {error}"))
+    })
+}
+
+fn decode_grpc_messages<M: Message + Default>(response: &StoredGrpcResponse) -> Result<Vec<M>> {
+    response
+        .messages
+        .iter()
+        .map(|message| {
+            M::decode(message.as_slice()).map_err(|error| {
+                ServerError::Internal(format!("decode stored gRPC idempotency response: {error}"))
+            })
+        })
+        .collect()
+}
+
+fn set_transaction_duplicate_count(
+    transaction: &mut Option<proto::TransactionOutcomeV09>,
+    duplicate_count: u64,
+) {
+    if let Some(idempotency) = transaction
+        .as_mut()
+        .and_then(|outcome| outcome.idempotency.as_mut())
+    {
+        idempotency.duplicate_count = duplicate_count;
+    }
+}
+
+async fn claim_explicit_grpc_request(
+    state: &ServerState,
+    ctx: &GrpcContext,
+    transaction_id: &str,
+    request_id: &RequestId,
+    supplied_request_id: bool,
+    operation: &str,
+    payload: Vec<u8>,
+) -> std::result::Result<Option<GrpcLedgerClaim>, Status> {
+    if !supplied_request_id {
+        return Ok(None);
+    }
+    let fingerprint = grpc_request_fingerprint(ctx, operation, transaction_id, &payload);
+    claim_grpc_request(state, request_id.clone(), operation, fingerprint)
+        .await
+        .map(Some)
+        .map_err(|error| {
+            grpc_transaction_status(
+                state,
+                transaction_id.to_owned(),
+                request_id.clone(),
+                error,
+                &ctx.correlation_id,
+            )
+        })
+}
+
+macro_rules! claim_grpc_typed_response {
+    ($state:expr, $ctx:expr, $transaction_id:expr, $request_id:expr, $supplied:expr, $operation:expr, $payload:expr, $response_type:ty) => {{
+        match claim_explicit_grpc_request(
+            $state,
+            $ctx,
+            &$transaction_id,
+            &$request_id,
+            $supplied,
+            $operation,
+            $payload,
+        )
+        .await?
+        {
+            Some(GrpcLedgerClaim::Execute(reservation)) => Some(reservation),
+            Some(GrpcLedgerClaim::Replay(stored, duplicate_count)) => {
+                if let Some(status) = replay_grpc_status(&stored, duplicate_count).map_err(|error| {
+                    grpc_transaction_status(
+                        $state,
+                        $transaction_id.clone(),
+                        $request_id.clone(),
+                        error,
+                        &$ctx.correlation_id,
+                    )
+                })? {
+                    return Err(status);
+                }
+                let mut response = decode_grpc_message::<$response_type>(&stored).map_err(|error| {
+                    grpc_transaction_status(
+                        $state,
+                        $transaction_id.clone(),
+                        $request_id.clone(),
+                        error,
+                        &$ctx.correlation_id,
+                    )
+                })?;
+                set_transaction_duplicate_count(&mut response.transaction, duplicate_count);
+                return Ok(Response::new(response));
+            }
+            Some(GrpcLedgerClaim::Expired(stored_transaction_id)) => {
+                return Err(grpc_transaction_status(
+                    $state,
+                    stored_transaction_id.unwrap_or_else(|| $transaction_id.clone()),
+                    $request_id.clone(),
+                    ServerError::SessionExpired(
+                        "local transaction retry is unavailable after restart or terminal transition"
+                            .into(),
+                    ),
+                    &$ctx.correlation_id,
+                ));
+            }
+            Some(GrpcLedgerClaim::Conflict) => {
+                return Err(grpc_idempotency_conflict_status(
+                    $state,
+                    $transaction_id.clone(),
+                    $request_id.clone(),
+                    &$ctx.correlation_id,
+                ));
+            }
+            None => None,
+        }
+    }};
+}
+
 #[derive(Clone)]
 struct ConnectionMetricsLayer {
     metrics: Metrics,
@@ -161,13 +668,28 @@ pub async fn serve(
         state: state.clone(),
     };
     let auth = state.auth.clone();
+    let auth_state = state.clone();
     let interceptor = move |mut req: Request<()>| {
         let correlation_id =
             extract_correlation_id(req.metadata()).unwrap_or_else(|| Uuid::new_v4().to_string());
         let traceparent = extract_traceparent(req.metadata());
-        let actor = auth
-            .validate_grpc(req.metadata())
-            .map_err(|_| Status::unauthenticated("unauthorized"))?;
+        let actor = match auth.validate_grpc(req.metadata()) {
+            Ok(actor) => actor,
+            Err(_) => {
+                // Interceptors receive only `Request<()>`, so the generated
+                // RPC path/body is intentionally unavailable here.  Return a
+                // versioned blocked outcome with a correlation-scoped identity
+                // for every denied request rather than risking a method-specific
+                // auth bypass or losing the outcome on transaction RPCs.
+                let transaction_id = format!("grpc:unauthorized:{correlation_id}");
+                let request_id = RequestId::new(format!("{transaction_id}:authenticate"));
+                return Err(grpc_unauthenticated_status(
+                    &auth_state,
+                    transaction_id,
+                    request_id,
+                ));
+            }
+        };
         let span = tracing::info_span!(
             "grpc_request",
             correlation_id = %correlation_id,
@@ -247,8 +769,139 @@ impl AlopexService for AlopexServiceImpl {
         let span = ctx.span.clone();
         let _enter = span.enter();
         let req = request.into_inner();
+        let (error_transaction_id, error_request_id) = grpc_sql_identity(
+            &self.state,
+            &ctx,
+            &req.session_id,
+            req.request_id.as_deref(),
+        )?;
+        let legacy_request = req.request_id.is_none() && req.require_distributed.is_none();
+        let mut reservation = if req.request_id.is_some() {
+            let fingerprint = grpc_request_fingerprint(
+                &ctx,
+                "ExecuteSql",
+                &error_transaction_id,
+                &grpc_canonical_payload(&[
+                    ("session_id", req.session_id.clone()),
+                    ("sql", req.sql.clone()),
+                    (
+                        "require_distributed",
+                        format!("{:?}", req.require_distributed),
+                    ),
+                ]),
+            );
+            match claim_grpc_request(
+                &self.state,
+                error_request_id.clone(),
+                "ExecuteSql",
+                fingerprint,
+            )
+            .await
+            .map_err(|error| {
+                grpc_transaction_status(
+                    &self.state,
+                    error_transaction_id.clone(),
+                    error_request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                )
+            })? {
+                GrpcLedgerClaim::Execute(reservation) => Some(reservation),
+                GrpcLedgerClaim::Replay(stored, duplicate_count) => {
+                    if let Some(status) =
+                        replay_grpc_status(&stored, duplicate_count).map_err(|error| {
+                            grpc_transaction_status(
+                                &self.state,
+                                error_transaction_id.clone(),
+                                error_request_id.clone(),
+                                error,
+                                &ctx.correlation_id,
+                            )
+                        })?
+                    {
+                        return Err(status);
+                    }
+                    let mut messages = decode_grpc_messages::<proto::SqlResultSet>(&stored)
+                        .map_err(|error| {
+                            grpc_transaction_status(
+                                &self.state,
+                                error_transaction_id.clone(),
+                                error_request_id.clone(),
+                                error,
+                                &ctx.correlation_id,
+                            )
+                        })?;
+                    for message in &mut messages {
+                        set_transaction_duplicate_count(&mut message.transaction, duplicate_count);
+                    }
+                    return Ok(Response::new(tokio_stream::iter(
+                        messages.into_iter().map(Ok).collect::<Vec<_>>(),
+                    )));
+                }
+                GrpcLedgerClaim::Expired(stored_transaction_id) => {
+                    return Err(grpc_transaction_status(
+                        &self.state,
+                        stored_transaction_id.unwrap_or(error_transaction_id),
+                        error_request_id,
+                        ServerError::SessionExpired(
+                            "local transaction retry is unavailable after restart or terminal transition"
+                                .into(),
+                        ),
+                        &ctx.correlation_id,
+                    ));
+                }
+                GrpcLedgerClaim::Conflict => {
+                    return Err(grpc_idempotency_conflict_status(
+                        &self.state,
+                        error_transaction_id,
+                        error_request_id,
+                        &ctx.correlation_id,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        // Explicit requests reserve their idempotency record before any
+        // pre-execution rejection.  That makes unavailable/invalid outcomes
+        // durable and replayable just like successful execution.
+        if req.require_distributed.unwrap_or(false) {
+            let status = grpc_prerequisite_missing_status(
+                &self.state,
+                error_transaction_id.clone(),
+                error_request_id.clone(),
+                "ExecuteSql",
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                error_transaction_id,
+                error_request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
         if req.sql.trim().is_empty() {
-            return Err(Status::invalid_argument("sql must not be empty"));
+            let status = grpc_transaction_status(
+                &self.state,
+                error_transaction_id.clone(),
+                error_request_id.clone(),
+                ServerError::BadRequest("sql must not be empty".into()),
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                error_transaction_id,
+                error_request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
         }
 
         // issue #25: HTTP `/sql` (非ストリーミング) と同一の実行経路に統一する。
@@ -263,17 +916,48 @@ impl AlopexService for AlopexServiceImpl {
             } else {
                 Some(req.session_id)
             },
-            request_id: None,
+            request_id: req.request_id.map(RequestId::new),
             streaming: false,
         };
         let http_ctx = crate::http::RequestContext {
             correlation_id: ctx.correlation_id.clone(),
             actor: ctx.actor.clone(),
         };
-        let result =
-            crate::http::sql::execute_non_streaming(self.state.clone(), &http_request, &http_ctx)
-                .await
-                .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        let result = match crate::http::sql::execute_non_streaming(
+            self.state.clone(),
+            &http_request,
+            &http_ctx,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let error = if http_request.session_id.is_some() {
+                    grpc_local_session_liveness_error(error)
+                } else {
+                    error
+                };
+                let status = grpc_transaction_status(
+                    &self.state,
+                    error_transaction_id.clone(),
+                    error_request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    error_transaction_id,
+                    error_request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    http_request.session_id.is_some(),
+                );
+                return Err(status);
+            }
+        };
+        let transaction_outcome = result.transaction.clone();
+        let transaction = transaction_outcome_to_proto(&result.transaction);
 
         // Each statement is represented by one result-set message. This keeps
         // empty result sets and DDL/DML status results observable, while also
@@ -306,22 +990,69 @@ impl AlopexService for AlopexServiceImpl {
                 affected_rows,
                 has_affected_rows,
                 success: !has_affected_rows && !is_query,
+                transaction: (!legacy_request).then(|| transaction.clone()),
             };
             bytes_total = bytes_total.saturating_add(message.encoded_len());
-            memory_policy
-                .enforce_output_bytes(bytes_total as u64)
-                .map_err(|err| map_status(err, &ctx.correlation_id))?;
+            if let Err(error) = memory_policy.enforce_output_bytes(bytes_total as u64) {
+                let status =
+                    grpc_status_with_outcome(error, &transaction_outcome, &ctx.correlation_id);
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    error_transaction_id,
+                    error_request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    http_request.session_id.is_some(),
+                );
+                return Err(status);
+            }
             if bytes_total > self.state.config.max_response_size {
-                return Err(map_status(
+                let status = grpc_status_with_outcome(
                     ServerError::PayloadTooLarge("response size exceeds limit".into()),
+                    &transaction_outcome,
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    error_transaction_id,
+                    error_request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    http_request.session_id.is_some(),
+                );
+                return Err(status);
+            }
+            result_sets.push(message);
+        }
+
+        if let Some(reservation) = reservation {
+            let stored = StoredGrpcResponse {
+                messages: result_sets
+                    .iter()
+                    .map(|message| message.encode_to_vec())
+                    .collect(),
+                status: None,
+                requires_active_transaction: http_request.session_id.is_some(),
+            };
+            if reservation
+                .complete(&self.state, Some(error_transaction_id.clone()), stored)
+                .is_err()
+            {
+                return Err(grpc_idempotency_persistence_pending_status(
+                    &self.state,
+                    error_transaction_id,
+                    error_request_id,
                     &ctx.correlation_id,
                 ));
             }
-            result_sets.push(Ok(message));
         }
 
         // Return the result sets directly without an intermediate channel.
-        Ok(Response::new(tokio_stream::iter(result_sets)))
+        Ok(Response::new(tokio_stream::iter(
+            result_sets.into_iter().map(Ok).collect::<Vec<_>>(),
+        )))
     }
 
     async fn execute_ddl(
@@ -331,11 +1062,163 @@ impl AlopexService for AlopexServiceImpl {
         let ctx = read_context(&request);
         let _enter = ctx.span.enter();
         let req = request.into_inner();
-        if req.sql.trim().is_empty() {
-            return Err(Status::invalid_argument("sql must not be empty"));
+        let (transaction_id, request_id) = grpc_sql_identity(
+            &self.state,
+            &ctx,
+            &req.session_id,
+            req.request_id.as_deref(),
+        )?;
+        let mut reservation = if req.request_id.is_some() {
+            let fingerprint = grpc_request_fingerprint(
+                &ctx,
+                "ExecuteDdl",
+                &transaction_id,
+                &grpc_canonical_payload(&[
+                    ("sql", req.sql.clone()),
+                    (
+                        "require_distributed",
+                        format!("{:?}", req.require_distributed),
+                    ),
+                ]),
+            );
+            match claim_grpc_request(&self.state, request_id.clone(), "ExecuteDdl", fingerprint)
+                .await
+                .map_err(|error| {
+                    grpc_transaction_status(
+                        &self.state,
+                        transaction_id.clone(),
+                        request_id.clone(),
+                        error,
+                        &ctx.correlation_id,
+                    )
+                })? {
+                GrpcLedgerClaim::Execute(reservation) => Some(reservation),
+                GrpcLedgerClaim::Replay(stored, duplicate_count) => {
+                    if let Some(status) =
+                        replay_grpc_status(&stored, duplicate_count).map_err(|error| {
+                            grpc_transaction_status(
+                                &self.state,
+                                transaction_id.clone(),
+                                request_id.clone(),
+                                error,
+                                &ctx.correlation_id,
+                            )
+                        })?
+                    {
+                        return Err(status);
+                    }
+                    let mut response =
+                        decode_grpc_message::<proto::DdlResponse>(&stored).map_err(|error| {
+                            grpc_transaction_status(
+                                &self.state,
+                                transaction_id.clone(),
+                                request_id.clone(),
+                                error,
+                                &ctx.correlation_id,
+                            )
+                        })?;
+                    set_transaction_duplicate_count(&mut response.transaction, duplicate_count);
+                    return Ok(Response::new(response));
+                }
+                GrpcLedgerClaim::Expired(stored_transaction_id) => {
+                    return Err(grpc_transaction_status(
+                        &self.state,
+                        stored_transaction_id.unwrap_or(transaction_id),
+                        request_id,
+                        ServerError::SessionExpired(
+                            "local transaction retry is unavailable after restart or terminal transition"
+                                .into(),
+                        ),
+                        &ctx.correlation_id,
+                    ));
+                }
+                GrpcLedgerClaim::Conflict => {
+                    return Err(grpc_idempotency_conflict_status(
+                        &self.state,
+                        transaction_id,
+                        request_id,
+                        &ctx.correlation_id,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        if req.require_distributed.unwrap_or(false) {
+            let status = grpc_unsupported_distributed_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                "ExecuteDdl",
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
         }
-        if let Err(err) = self.state.lifecycle_state.check_write_allowed() {
-            return Err(map_status(err, &ctx.correlation_id));
+        if req.sql.trim().is_empty() {
+            let status = grpc_transaction_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                ServerError::BadRequest("sql must not be empty".into()),
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
+        if let Err(error) = validate_grpc_ddl(&req.sql) {
+            let status = grpc_transaction_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                error,
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
+        if let Err(error) = self.state.lifecycle_state.check_write_allowed() {
+            let status = grpc_transaction_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                error,
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
         }
         let start = Instant::now();
         let exec_result = if !req.session_id.is_empty() {
@@ -343,7 +1226,23 @@ impl AlopexService for AlopexServiceImpl {
                 Ok(id) => id,
                 Err(_) => {
                     self.state.metrics.record_query(start.elapsed(), false);
-                    return Err(Status::invalid_argument("invalid session_id"));
+                    let status = grpc_transaction_status(
+                        &self.state,
+                        transaction_id.clone(),
+                        request_id.clone(),
+                        ServerError::BadRequest("invalid session_id".into()),
+                        &ctx.correlation_id,
+                    );
+                    complete_grpc_error_or_recovery_pending!(
+                        &mut reservation,
+                        &self.state,
+                        transaction_id,
+                        request_id,
+                        &status,
+                        &ctx.correlation_id,
+                        true,
+                    );
+                    return Err(status);
                 }
             };
             let exec_result = execute_session_statement_with_routing(
@@ -355,11 +1254,29 @@ impl AlopexService for AlopexServiceImpl {
             )
             .await
             .map(|(result, _)| result)
-            .map_err(|err| map_status(err, &ctx.correlation_id));
+            .map_err(|err| {
+                let err = grpc_local_session_liveness_error(err);
+                grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    err,
+                    &ctx.correlation_id,
+                )
+            });
             match exec_result {
                 Ok(result) => result,
                 Err(err) => {
                     self.state.metrics.record_query(start.elapsed(), false);
+                    complete_grpc_error_or_recovery_pending!(
+                        &mut reservation,
+                        &self.state,
+                        transaction_id,
+                        request_id,
+                        &err,
+                        &ctx.correlation_id,
+                        true,
+                    );
                     return Err(err);
                 }
             }
@@ -374,8 +1291,23 @@ impl AlopexService for AlopexServiceImpl {
             {
                 Ok((result, _)) => result,
                 Err(err) => {
-                    let status = map_status(err, &ctx.correlation_id);
+                    let status = grpc_transaction_status(
+                        &self.state,
+                        transaction_id.clone(),
+                        request_id.clone(),
+                        err,
+                        &ctx.correlation_id,
+                    );
                     self.state.metrics.record_query(start.elapsed(), false);
+                    complete_grpc_error_or_recovery_pending!(
+                        &mut reservation,
+                        &self.state,
+                        transaction_id,
+                        request_id,
+                        &status,
+                        &ctx.correlation_id,
+                        false,
+                    );
                     return Err(status);
                 }
             }
@@ -389,15 +1321,77 @@ impl AlopexService for AlopexServiceImpl {
         if req.session_id.is_empty() {
             if let Err(err) = sync_catalog_to_store(&self.state) {
                 self.state.metrics.record_query(start.elapsed(), false);
-                return Err(map_status(err, &ctx.correlation_id));
+                let status = grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    err,
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    false,
+                );
+                return Err(status);
             }
         }
         self.state.metrics.record_query(start.elapsed(), true);
         match exec_result {
             alopex_sql::executor::ExecutionResult::Success => {
-                Ok(Response::new(proto::DdlResponse { success: true }))
+                let outcome = grpc_sql_outcome(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    if req.session_id.is_empty() {
+                        OperationState::Committed
+                    } else {
+                        OperationState::Running
+                    },
+                    if req.session_id.is_empty() {
+                        "local_sql_ddl"
+                    } else {
+                        "local_session_sql"
+                    },
+                );
+                let response = proto::DdlResponse {
+                    success: true,
+                    transaction: (!(req.request_id.is_none() && req.require_distributed.is_none()))
+                        .then(|| transaction_outcome_to_proto(&outcome)),
+                };
+                complete_grpc_response_or_recovery_pending!(
+                    reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    stored_grpc_message(&response, !req.session_id.is_empty()),
+                    &ctx.correlation_id,
+                );
+                Ok(Response::new(response))
             }
-            _ => Err(Status::invalid_argument("DDL returned unexpected result")),
+            _ => {
+                let status = grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    ServerError::BadRequest("DDL returned unexpected result".into()),
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    !req.session_id.is_empty(),
+                );
+                Err(status)
+            }
         }
     }
 
@@ -408,11 +1402,163 @@ impl AlopexService for AlopexServiceImpl {
         let ctx = read_context(&request);
         let _enter = ctx.span.enter();
         let req = request.into_inner();
-        if req.sql.trim().is_empty() {
-            return Err(Status::invalid_argument("sql must not be empty"));
+        let (transaction_id, request_id) = grpc_sql_identity(
+            &self.state,
+            &ctx,
+            &req.session_id,
+            req.request_id.as_deref(),
+        )?;
+        let mut reservation = if req.request_id.is_some() {
+            let fingerprint = grpc_request_fingerprint(
+                &ctx,
+                "ExecuteDml",
+                &transaction_id,
+                &grpc_canonical_payload(&[
+                    ("sql", req.sql.clone()),
+                    (
+                        "require_distributed",
+                        format!("{:?}", req.require_distributed),
+                    ),
+                ]),
+            );
+            match claim_grpc_request(&self.state, request_id.clone(), "ExecuteDml", fingerprint)
+                .await
+                .map_err(|error| {
+                    grpc_transaction_status(
+                        &self.state,
+                        transaction_id.clone(),
+                        request_id.clone(),
+                        error,
+                        &ctx.correlation_id,
+                    )
+                })? {
+                GrpcLedgerClaim::Execute(reservation) => Some(reservation),
+                GrpcLedgerClaim::Replay(stored, duplicate_count) => {
+                    if let Some(status) =
+                        replay_grpc_status(&stored, duplicate_count).map_err(|error| {
+                            grpc_transaction_status(
+                                &self.state,
+                                transaction_id.clone(),
+                                request_id.clone(),
+                                error,
+                                &ctx.correlation_id,
+                            )
+                        })?
+                    {
+                        return Err(status);
+                    }
+                    let mut response =
+                        decode_grpc_message::<proto::DmlResponse>(&stored).map_err(|error| {
+                            grpc_transaction_status(
+                                &self.state,
+                                transaction_id.clone(),
+                                request_id.clone(),
+                                error,
+                                &ctx.correlation_id,
+                            )
+                        })?;
+                    set_transaction_duplicate_count(&mut response.transaction, duplicate_count);
+                    return Ok(Response::new(response));
+                }
+                GrpcLedgerClaim::Expired(stored_transaction_id) => {
+                    return Err(grpc_transaction_status(
+                        &self.state,
+                        stored_transaction_id.unwrap_or(transaction_id),
+                        request_id,
+                        ServerError::SessionExpired(
+                            "local transaction retry is unavailable after restart or terminal transition"
+                                .into(),
+                        ),
+                        &ctx.correlation_id,
+                    ));
+                }
+                GrpcLedgerClaim::Conflict => {
+                    return Err(grpc_idempotency_conflict_status(
+                        &self.state,
+                        transaction_id,
+                        request_id,
+                        &ctx.correlation_id,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        if req.require_distributed.unwrap_or(false) {
+            let status = grpc_prerequisite_missing_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                "ExecuteDml",
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
         }
-        if let Err(err) = self.state.lifecycle_state.check_write_allowed() {
-            return Err(map_status(err, &ctx.correlation_id));
+        if req.sql.trim().is_empty() {
+            let status = grpc_transaction_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                ServerError::BadRequest("sql must not be empty".into()),
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
+        if let Err(error) = validate_grpc_dml(&req.sql) {
+            let status = grpc_transaction_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                error,
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
+        if let Err(error) = self.state.lifecycle_state.check_write_allowed() {
+            let status = grpc_transaction_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                error,
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
         }
         let start = Instant::now();
         let exec_result = if !req.session_id.is_empty() {
@@ -420,7 +1566,23 @@ impl AlopexService for AlopexServiceImpl {
                 Ok(id) => id,
                 Err(_) => {
                     self.state.metrics.record_query(start.elapsed(), false);
-                    return Err(Status::invalid_argument("invalid session_id"));
+                    let status = grpc_transaction_status(
+                        &self.state,
+                        transaction_id.clone(),
+                        request_id.clone(),
+                        ServerError::BadRequest("invalid session_id".into()),
+                        &ctx.correlation_id,
+                    );
+                    complete_grpc_error_or_recovery_pending!(
+                        &mut reservation,
+                        &self.state,
+                        transaction_id,
+                        request_id,
+                        &status,
+                        &ctx.correlation_id,
+                        true,
+                    );
+                    return Err(status);
                 }
             };
             let exec_result = execute_session_statement_with_routing(
@@ -432,11 +1594,29 @@ impl AlopexService for AlopexServiceImpl {
             )
             .await
             .map(|(result, _)| result)
-            .map_err(|err| map_status(err, &ctx.correlation_id));
+            .map_err(|err| {
+                let err = grpc_local_session_liveness_error(err);
+                grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    err,
+                    &ctx.correlation_id,
+                )
+            });
             match exec_result {
                 Ok(result) => result,
                 Err(err) => {
                     self.state.metrics.record_query(start.elapsed(), false);
+                    complete_grpc_error_or_recovery_pending!(
+                        &mut reservation,
+                        &self.state,
+                        transaction_id,
+                        request_id,
+                        &err,
+                        &ctx.correlation_id,
+                        true,
+                    );
                     return Err(err);
                 }
             }
@@ -451,8 +1631,23 @@ impl AlopexService for AlopexServiceImpl {
             {
                 Ok((result, _)) => result,
                 Err(err) => {
-                    let status = map_status(err, &ctx.correlation_id);
+                    let status = grpc_transaction_status(
+                        &self.state,
+                        transaction_id.clone(),
+                        request_id.clone(),
+                        err,
+                        &ctx.correlation_id,
+                    );
                     self.state.metrics.record_query(start.elapsed(), false);
+                    complete_grpc_error_or_recovery_pending!(
+                        &mut reservation,
+                        &self.state,
+                        transaction_id,
+                        request_id,
+                        &status,
+                        &ctx.correlation_id,
+                        false,
+                    );
                     return Err(status);
                 }
             }
@@ -461,11 +1656,55 @@ impl AlopexService for AlopexServiceImpl {
         self.state.metrics.record_query(start.elapsed(), true);
         match exec_result {
             alopex_sql::executor::ExecutionResult::RowsAffected(count) => {
-                Ok(Response::new(proto::DmlResponse {
+                let outcome = grpc_sql_outcome(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    if req.session_id.is_empty() {
+                        OperationState::Committed
+                    } else {
+                        OperationState::Running
+                    },
+                    if req.session_id.is_empty() {
+                        "local_sql_autocommit"
+                    } else {
+                        "local_session_sql"
+                    },
+                );
+                let response = proto::DmlResponse {
                     affected_rows: count,
-                }))
+                    transaction: (!(req.request_id.is_none() && req.require_distributed.is_none()))
+                        .then(|| transaction_outcome_to_proto(&outcome)),
+                };
+                complete_grpc_response_or_recovery_pending!(
+                    reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    stored_grpc_message(&response, !req.session_id.is_empty()),
+                    &ctx.correlation_id,
+                );
+                Ok(Response::new(response))
             }
-            _ => Err(Status::invalid_argument("DML returned unexpected result")),
+            _ => {
+                let status = grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    ServerError::BadRequest("DML returned unexpected result".into()),
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    !req.session_id.is_empty(),
+                );
+                Err(status)
+            }
         }
     }
 
@@ -475,32 +1714,218 @@ impl AlopexService for AlopexServiceImpl {
     ) -> std::result::Result<Response<proto::TransactionHandle>, Status> {
         let ctx = read_context(&request);
         let _enter = ctx.span.enter();
-        let session_id = self
-            .state
-            .session_manager
-            .create_session()
+        let requested = request.into_inner();
+        let provisional_transaction_id = format!("grpc:begin:{}", ctx.correlation_id);
+        // Validate explicit request IDs before creating a session.  A rejected
+        // request must not leave an otherwise invisible transaction behind.
+        let _preflight_request_id = grpc_request_id(
+            &self.state,
+            &ctx.correlation_id,
+            requested.request_id.as_deref(),
+            &provisional_transaction_id,
+            "begin",
+        )?;
+        let mut reservation = if requested.request_id.is_some() {
+            let fingerprint = grpc_request_fingerprint(
+                &ctx,
+                "BeginTransaction",
+                "grpc:begin",
+                &grpc_canonical_payload(&[(
+                    "require_distributed",
+                    format!("{:?}", requested.require_distributed),
+                )]),
+            );
+            match claim_grpc_request(
+                &self.state,
+                _preflight_request_id.clone(),
+                "BeginTransaction",
+                fingerprint,
+            )
             .await
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
-        self.state
+            .map_err(|error| {
+                grpc_transaction_status(
+                    &self.state,
+                    provisional_transaction_id.clone(),
+                    _preflight_request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                )
+            })? {
+                GrpcLedgerClaim::Execute(reservation) => Some(reservation),
+                GrpcLedgerClaim::Replay(stored, duplicate_count) => {
+                    if let Some(status) =
+                        replay_grpc_status(&stored, duplicate_count).map_err(|error| {
+                            grpc_transaction_status(
+                                &self.state,
+                                provisional_transaction_id.clone(),
+                                _preflight_request_id.clone(),
+                                error,
+                                &ctx.correlation_id,
+                            )
+                        })?
+                    {
+                        return Err(status);
+                    }
+                    let mut handle = decode_grpc_message::<proto::TransactionHandle>(&stored)
+                        .map_err(|error| {
+                            grpc_transaction_status(
+                                &self.state,
+                                provisional_transaction_id.clone(),
+                                _preflight_request_id.clone(),
+                                error,
+                                &ctx.correlation_id,
+                            )
+                        })?;
+                    set_transaction_duplicate_count(&mut handle.transaction, duplicate_count);
+                    return Ok(Response::new(handle));
+                }
+                GrpcLedgerClaim::Expired(transaction_id) => {
+                    return Err(grpc_transaction_status(
+                        &self.state,
+                        transaction_id.unwrap_or(provisional_transaction_id.clone()),
+                        _preflight_request_id,
+                        ServerError::SessionExpired(
+                            "local transaction retry is unavailable after restart or terminal transition"
+                                .into(),
+                        ),
+                        &ctx.correlation_id,
+                    ));
+                }
+                GrpcLedgerClaim::Conflict => {
+                    return Err(grpc_idempotency_conflict_status(
+                        &self.state,
+                        provisional_transaction_id,
+                        _preflight_request_id,
+                        &ctx.correlation_id,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        if requested.require_distributed.unwrap_or(false) {
+            let status = grpc_prerequisite_missing_status(
+                &self.state,
+                provisional_transaction_id.clone(),
+                _preflight_request_id.clone(),
+                "BeginTransaction",
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                provisional_transaction_id,
+                _preflight_request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
+        let session_id = match self.state.session_manager.create_session().await {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                let status = grpc_transaction_status(
+                    &self.state,
+                    provisional_transaction_id.clone(),
+                    _preflight_request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    provisional_transaction_id,
+                    _preflight_request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    false,
+                );
+                return Err(status);
+            }
+        };
+        if let Err(error) = self
+            .state
             .session_manager
             .begin_transaction(&session_id)
             .await
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
-        let snapshot = self
-            .state
-            .session_manager
-            .get_session(&session_id)
-            .await
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        {
+            let status = grpc_transaction_status(
+                &self.state,
+                provisional_transaction_id.clone(),
+                _preflight_request_id.clone(),
+                error,
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                session_id.to_string(),
+                _preflight_request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
+        let snapshot = match self.state.session_manager.get_session(&session_id).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let status = grpc_transaction_status(
+                    &self.state,
+                    provisional_transaction_id.clone(),
+                    _preflight_request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    session_id.to_string(),
+                    _preflight_request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    false,
+                );
+                return Err(status);
+            }
+        };
         let expires_at = snapshot
             .expires_at
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        Ok(Response::new(proto::TransactionHandle {
-            session_id: session_id.to_string(),
+        let session_id = session_id.to_string();
+        let request_id = grpc_request_id(
+            &self.state,
+            &ctx.correlation_id,
+            requested.request_id.as_deref(),
+            &session_id,
+            "begin",
+        )?;
+        let outcome = grpc_local_outcome(
+            &self.state,
+            session_id.clone(),
+            request_id.clone(),
+            OperationState::Running,
+            "session_started",
+        );
+        let response = proto::TransactionHandle {
+            session_id,
             expires_at_ms: expires_at,
-        }))
+            request_id: Some(request_id.as_str().to_owned()),
+            transaction: Some(transaction_outcome_to_proto(&outcome)),
+            require_distributed: requested.require_distributed,
+        };
+        complete_grpc_response_or_recovery_pending!(
+            reservation,
+            &self.state,
+            response.session_id,
+            request_id,
+            stored_grpc_message(&response, true),
+            &ctx.correlation_id,
+        );
+        Ok(Response::new(response))
     }
 
     async fn commit_transaction(
@@ -509,25 +1934,220 @@ impl AlopexService for AlopexServiceImpl {
     ) -> std::result::Result<Response<proto::CommitResponse>, Status> {
         let ctx = read_context(&request);
         let _enter = ctx.span.enter();
-        let session_id = request
-            .into_inner()
-            .session_id
-            .parse::<SessionId>()
-            .map_err(|_| Status::invalid_argument("invalid session_id"))?;
-        let effects = self
-            .state
-            .session_manager
-            .commit(&session_id)
+        let handle = request.into_inner();
+        let transaction_id = handle.session_id.clone();
+        let request_id = grpc_request_id(
+            &self.state,
+            &ctx.correlation_id,
+            handle.request_id.as_deref(),
+            &transaction_id,
+            "commit",
+        )?;
+        let mut reservation = if handle.request_id.is_some() {
+            let fingerprint = grpc_request_fingerprint(
+                &ctx,
+                "CommitTransaction",
+                &transaction_id,
+                &grpc_canonical_payload(&[
+                    ("expires_at_ms", handle.expires_at_ms.to_string()),
+                    (
+                        "require_distributed",
+                        format!("{:?}", handle.require_distributed),
+                    ),
+                ]),
+            );
+            match claim_grpc_request(
+                &self.state,
+                request_id.clone(),
+                "CommitTransaction",
+                fingerprint,
+            )
             .await
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
-        if !effects.is_empty() {
-            self.state
-                .apply_table_lifecycle_effects(effects)
-                .map_err(|err| map_status(err, &ctx.correlation_id))?;
-            sync_catalog_to_store(&self.state)
-                .map_err(|err| map_status(err, &ctx.correlation_id))?;
+            .map_err(|error| {
+                grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                )
+            })? {
+                GrpcLedgerClaim::Execute(reservation) => Some(reservation),
+                GrpcLedgerClaim::Replay(stored, duplicate_count) => {
+                    if let Some(status) =
+                        replay_grpc_status(&stored, duplicate_count).map_err(|error| {
+                            grpc_transaction_status(
+                                &self.state,
+                                transaction_id.clone(),
+                                request_id.clone(),
+                                error,
+                                &ctx.correlation_id,
+                            )
+                        })?
+                    {
+                        return Err(status);
+                    }
+                    let mut response = decode_grpc_message::<proto::CommitResponse>(&stored)
+                        .map_err(|error| {
+                            grpc_transaction_status(
+                                &self.state,
+                                transaction_id.clone(),
+                                request_id.clone(),
+                                error,
+                                &ctx.correlation_id,
+                            )
+                        })?;
+                    set_transaction_duplicate_count(&mut response.transaction, duplicate_count);
+                    return Ok(Response::new(response));
+                }
+                GrpcLedgerClaim::Expired(stored_transaction_id) => {
+                    return Err(grpc_transaction_status(
+                        &self.state,
+                        stored_transaction_id.unwrap_or(transaction_id),
+                        request_id,
+                        ServerError::SessionExpired(
+                            "local transaction retry is unavailable after restart or terminal transition"
+                                .into(),
+                        ),
+                        &ctx.correlation_id,
+                    ));
+                }
+                GrpcLedgerClaim::Conflict => {
+                    return Err(grpc_idempotency_conflict_status(
+                        &self.state,
+                        transaction_id,
+                        request_id,
+                        &ctx.correlation_id,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        if handle.require_distributed.unwrap_or(false) {
+            let status = grpc_prerequisite_missing_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                "CommitTransaction",
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
         }
-        Ok(Response::new(proto::CommitResponse { success: true }))
+        let session_id = match handle.session_id.parse::<SessionId>() {
+            Ok(session_id) => session_id,
+            Err(_) => {
+                let status = grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    ServerError::BadRequest("invalid session_id".into()),
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    false,
+                );
+                return Err(status);
+            }
+        };
+        let effects = match self.state.session_manager.commit(&session_id).await {
+            Ok(effects) => effects,
+            Err(error) => {
+                let error = grpc_local_session_liveness_error(error);
+                let status = grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    false,
+                );
+                return Err(status);
+            }
+        };
+        if !effects.is_empty() {
+            if let Err(error) = self.state.apply_table_lifecycle_effects(effects) {
+                let status = grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    false,
+                );
+                return Err(status);
+            }
+            if let Err(error) = sync_catalog_to_store(&self.state) {
+                let status = grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    false,
+                );
+                return Err(status);
+            }
+        }
+        let outcome = grpc_local_outcome(
+            &self.state,
+            transaction_id.clone(),
+            request_id.clone(),
+            OperationState::Committed,
+            "local_session_committed",
+        );
+        let response = proto::CommitResponse {
+            success: true,
+            transaction: Some(transaction_outcome_to_proto(&outcome)),
+        };
+        complete_grpc_response_or_recovery_pending!(
+            reservation,
+            &self.state,
+            transaction_id,
+            request_id,
+            stored_grpc_message(&response, false),
+            &ctx.correlation_id,
+        );
+        Ok(Response::new(response))
     }
 
     async fn rollback_transaction(
@@ -536,21 +2156,199 @@ impl AlopexService for AlopexServiceImpl {
     ) -> std::result::Result<Response<proto::RollbackResponse>, Status> {
         let ctx = read_context(&request);
         let _enter = ctx.span.enter();
-        let session_id = request
-            .into_inner()
-            .session_id
-            .parse::<SessionId>()
-            .map_err(|_| Status::invalid_argument("invalid session_id"))?;
-        let effects = self
-            .state
-            .session_manager
-            .rollback(&session_id)
+        let handle = request.into_inner();
+        let transaction_id = handle.session_id.clone();
+        let request_id = grpc_request_id(
+            &self.state,
+            &ctx.correlation_id,
+            handle.request_id.as_deref(),
+            &transaction_id,
+            "rollback",
+        )?;
+        let mut reservation = if handle.request_id.is_some() {
+            let fingerprint = grpc_request_fingerprint(
+                &ctx,
+                "RollbackTransaction",
+                &transaction_id,
+                &grpc_canonical_payload(&[
+                    ("expires_at_ms", handle.expires_at_ms.to_string()),
+                    (
+                        "require_distributed",
+                        format!("{:?}", handle.require_distributed),
+                    ),
+                ]),
+            );
+            match claim_grpc_request(
+                &self.state,
+                request_id.clone(),
+                "RollbackTransaction",
+                fingerprint,
+            )
             .await
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
-        self.state
-            .apply_catalog_rollback_effects(effects)
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
-        Ok(Response::new(proto::RollbackResponse { success: true }))
+            .map_err(|error| {
+                grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                )
+            })? {
+                GrpcLedgerClaim::Execute(reservation) => Some(reservation),
+                GrpcLedgerClaim::Replay(stored, duplicate_count) => {
+                    if let Some(status) =
+                        replay_grpc_status(&stored, duplicate_count).map_err(|error| {
+                            grpc_transaction_status(
+                                &self.state,
+                                transaction_id.clone(),
+                                request_id.clone(),
+                                error,
+                                &ctx.correlation_id,
+                            )
+                        })?
+                    {
+                        return Err(status);
+                    }
+                    let mut response = decode_grpc_message::<proto::RollbackResponse>(&stored)
+                        .map_err(|error| {
+                            grpc_transaction_status(
+                                &self.state,
+                                transaction_id.clone(),
+                                request_id.clone(),
+                                error,
+                                &ctx.correlation_id,
+                            )
+                        })?;
+                    set_transaction_duplicate_count(&mut response.transaction, duplicate_count);
+                    return Ok(Response::new(response));
+                }
+                GrpcLedgerClaim::Expired(stored_transaction_id) => {
+                    return Err(grpc_transaction_status(
+                        &self.state,
+                        stored_transaction_id.unwrap_or(transaction_id),
+                        request_id,
+                        ServerError::SessionExpired(
+                            "local transaction retry is unavailable after restart or terminal transition"
+                                .into(),
+                        ),
+                        &ctx.correlation_id,
+                    ));
+                }
+                GrpcLedgerClaim::Conflict => {
+                    return Err(grpc_idempotency_conflict_status(
+                        &self.state,
+                        transaction_id,
+                        request_id,
+                        &ctx.correlation_id,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        if handle.require_distributed.unwrap_or(false) {
+            let status = grpc_prerequisite_missing_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                "RollbackTransaction",
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
+        let session_id = match handle.session_id.parse::<SessionId>() {
+            Ok(session_id) => session_id,
+            Err(_) => {
+                let status = grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    ServerError::BadRequest("invalid session_id".into()),
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    false,
+                );
+                return Err(status);
+            }
+        };
+        let effects = match self.state.session_manager.rollback(&session_id).await {
+            Ok(effects) => effects,
+            Err(error) => {
+                let error = grpc_local_session_liveness_error(error);
+                let status = grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    false,
+                );
+                return Err(status);
+            }
+        };
+        if let Err(error) = self.state.apply_catalog_rollback_effects(effects) {
+            let status = grpc_transaction_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                error,
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
+        let outcome = grpc_local_outcome(
+            &self.state,
+            transaction_id.clone(),
+            request_id.clone(),
+            OperationState::Cancelled,
+            "local_session_rolled_back",
+        );
+        let response = proto::RollbackResponse {
+            success: true,
+            transaction: Some(transaction_outcome_to_proto(&outcome)),
+        };
+        complete_grpc_response_or_recovery_pending!(
+            reservation,
+            &self.state,
+            transaction_id,
+            request_id,
+            stored_grpc_message(&response, false),
+            &ctx.correlation_id,
+        );
+        Ok(Response::new(response))
     }
 
     async fn vector_search(
@@ -560,6 +2358,103 @@ impl AlopexService for AlopexServiceImpl {
         let ctx = read_context(&request);
         let _enter = ctx.span.enter();
         let req = request.into_inner();
+        let legacy_request = req.request_id.is_none() && req.require_distributed.is_none();
+        let (transaction_id, request_id) = grpc_surface_request_identity(
+            &self.state,
+            &ctx,
+            "vector_search",
+            req.request_id.as_deref(),
+        )?;
+        let mut reservation = match claim_explicit_grpc_request(
+            &self.state,
+            &ctx,
+            &transaction_id,
+            &request_id,
+            req.request_id.is_some(),
+            "VectorSearch",
+            grpc_canonical_payload(&[
+                ("table", req.table.clone()),
+                ("k", req.k.to_string()),
+                ("index", req.index.clone()),
+                ("column", req.column.clone()),
+                ("vector", grpc_f32_values_fingerprint(&req.vector)),
+                (
+                    "require_distributed",
+                    format!("{:?}", req.require_distributed),
+                ),
+            ]),
+        )
+        .await?
+        {
+            Some(GrpcLedgerClaim::Execute(reservation)) => Some(reservation),
+            Some(GrpcLedgerClaim::Replay(stored, duplicate_count)) => {
+                if let Some(status) =
+                    replay_grpc_status(&stored, duplicate_count).map_err(|error| {
+                        grpc_transaction_status(
+                            &self.state,
+                            transaction_id.clone(),
+                            request_id.clone(),
+                            error,
+                            &ctx.correlation_id,
+                        )
+                    })?
+                {
+                    return Err(status);
+                }
+                let mut response = decode_grpc_message::<proto::VectorSearchResponse>(&stored)
+                    .map_err(|error| {
+                        grpc_transaction_status(
+                            &self.state,
+                            transaction_id.clone(),
+                            request_id.clone(),
+                            error,
+                            &ctx.correlation_id,
+                        )
+                    })?;
+                set_transaction_duplicate_count(&mut response.transaction, duplicate_count);
+                return Ok(Response::new(response));
+            }
+            Some(GrpcLedgerClaim::Expired(stored_transaction_id)) => {
+                return Err(grpc_transaction_status(
+                    &self.state,
+                    stored_transaction_id.unwrap_or(transaction_id),
+                    request_id,
+                    ServerError::SessionExpired(
+                        "local transaction retry is unavailable after restart or terminal transition"
+                            .into(),
+                    ),
+                    &ctx.correlation_id,
+                ));
+            }
+            Some(GrpcLedgerClaim::Conflict) => {
+                return Err(grpc_idempotency_conflict_status(
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    &ctx.correlation_id,
+                ));
+            }
+            None => None,
+        };
+        if req.require_distributed.unwrap_or(false) {
+            let status = grpc_prerequisite_missing_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                "VectorSearch",
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
         let search_request = crate::http::vector::VectorSearchRequest {
             table: req.table,
             vector: req.vector,
@@ -575,9 +2470,29 @@ impl AlopexService for AlopexServiceImpl {
                 Some(req.column)
             },
         };
-        let results = crate::http::vector::search_impl(self.state.clone(), search_request)
-            .await
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+        let results =
+            match crate::http::vector::search_impl(self.state.clone(), search_request).await {
+                Ok(results) => results,
+                Err(error) => {
+                    let status = grpc_transaction_status(
+                        &self.state,
+                        transaction_id.clone(),
+                        request_id.clone(),
+                        error,
+                        &ctx.correlation_id,
+                    );
+                    complete_grpc_error_or_recovery_pending!(
+                        &mut reservation,
+                        &self.state,
+                        transaction_id,
+                        request_id,
+                        &status,
+                        &ctx.correlation_id,
+                        false,
+                    );
+                    return Err(status);
+                }
+            };
         let mapped = results
             .results
             .into_iter()
@@ -589,9 +2504,27 @@ impl AlopexService for AlopexServiceImpl {
                 }),
             })
             .collect();
-        Ok(Response::new(proto::VectorSearchResponse {
+        let response = proto::VectorSearchResponse {
             results: mapped,
-        }))
+            transaction: (!legacy_request).then(|| {
+                transaction_outcome_to_proto(&grpc_local_outcome(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    OperationState::Committed,
+                    "local_vector_search",
+                ))
+            }),
+        };
+        complete_grpc_response_or_recovery_pending!(
+            reservation,
+            &self.state,
+            transaction_id,
+            request_id,
+            stored_grpc_message(&response, false),
+            &ctx.correlation_id,
+        );
+        Ok(Response::new(response))
     }
 
     async fn vector_upsert(
@@ -601,6 +2534,51 @@ impl AlopexService for AlopexServiceImpl {
         let ctx = read_context(&request);
         let _enter = ctx.span.enter();
         let req = request.into_inner();
+        let legacy_request = req.request_id.is_none() && req.require_distributed.is_none();
+        let (transaction_id, request_id) = grpc_surface_request_identity(
+            &self.state,
+            &ctx,
+            "vector_upsert",
+            req.request_id.as_deref(),
+        )?;
+        let mut reservation = claim_grpc_typed_response!(
+            &self.state,
+            &ctx,
+            transaction_id,
+            request_id,
+            req.request_id.is_some(),
+            "VectorUpsert",
+            grpc_canonical_payload(&[
+                ("table", req.table.clone()),
+                ("id", req.id.to_string()),
+                ("column", req.column.clone()),
+                ("vector", grpc_f32_values_fingerprint(&req.vector)),
+                (
+                    "require_distributed",
+                    format!("{:?}", req.require_distributed)
+                ),
+            ]),
+            proto::VectorUpsertResponse
+        );
+        if req.require_distributed.unwrap_or(false) {
+            let status = grpc_prerequisite_missing_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                "VectorUpsert",
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
         let upsert_request = crate::http::vector::VectorUpsertRequest {
             table: req.table,
             id: req.id,
@@ -611,10 +2589,48 @@ impl AlopexService for AlopexServiceImpl {
                 Some(req.column)
             },
         };
-        crate::http::vector::upsert_impl(self.state.clone(), upsert_request)
-            .await
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
-        Ok(Response::new(proto::VectorUpsertResponse { success: true }))
+        if let Err(error) =
+            crate::http::vector::upsert_impl(self.state.clone(), upsert_request).await
+        {
+            let status = grpc_transaction_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                error,
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
+        let response = proto::VectorUpsertResponse {
+            success: true,
+            transaction: (!legacy_request).then(|| {
+                transaction_outcome_to_proto(&grpc_local_outcome(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    OperationState::Committed,
+                    "local_vector_upsert",
+                ))
+            }),
+        };
+        complete_grpc_response_or_recovery_pending!(
+            reservation,
+            &self.state,
+            transaction_id,
+            request_id,
+            stored_grpc_message(&response, false),
+            &ctx.correlation_id,
+        );
+        Ok(Response::new(response))
     }
 
     async fn vector_delete(
@@ -624,6 +2640,50 @@ impl AlopexService for AlopexServiceImpl {
         let ctx = read_context(&request);
         let _enter = ctx.span.enter();
         let req = request.into_inner();
+        let legacy_request = req.request_id.is_none() && req.require_distributed.is_none();
+        let (transaction_id, request_id) = grpc_surface_request_identity(
+            &self.state,
+            &ctx,
+            "vector_delete",
+            req.request_id.as_deref(),
+        )?;
+        let mut reservation = claim_grpc_typed_response!(
+            &self.state,
+            &ctx,
+            transaction_id,
+            request_id,
+            req.request_id.is_some(),
+            "VectorDelete",
+            grpc_canonical_payload(&[
+                ("table", req.table.clone()),
+                ("id", req.id.to_string()),
+                ("column", req.column.clone()),
+                (
+                    "require_distributed",
+                    format!("{:?}", req.require_distributed)
+                ),
+            ]),
+            proto::VectorDeleteResponse
+        );
+        if req.require_distributed.unwrap_or(false) {
+            let status = grpc_prerequisite_missing_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                "VectorDelete",
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
         let delete_request = crate::http::vector::VectorDeleteRequest {
             table: req.table,
             id: req.id,
@@ -633,12 +2693,50 @@ impl AlopexService for AlopexServiceImpl {
                 Some(req.column)
             },
         };
-        let response = crate::http::vector::delete_impl(self.state.clone(), delete_request)
-            .await
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
-        Ok(Response::new(proto::VectorDeleteResponse {
+        let response =
+            match crate::http::vector::delete_impl(self.state.clone(), delete_request).await {
+                Ok(response) => response,
+                Err(error) => {
+                    let status = grpc_transaction_status(
+                        &self.state,
+                        transaction_id.clone(),
+                        request_id.clone(),
+                        error,
+                        &ctx.correlation_id,
+                    );
+                    complete_grpc_error_or_recovery_pending!(
+                        &mut reservation,
+                        &self.state,
+                        transaction_id,
+                        request_id,
+                        &status,
+                        &ctx.correlation_id,
+                        false,
+                    );
+                    return Err(status);
+                }
+            };
+        let response = proto::VectorDeleteResponse {
             success: response.success,
-        }))
+            transaction: (!legacy_request).then(|| {
+                transaction_outcome_to_proto(&grpc_local_outcome(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    OperationState::Committed,
+                    "local_vector_delete",
+                ))
+            }),
+        };
+        complete_grpc_response_or_recovery_pending!(
+            reservation,
+            &self.state,
+            transaction_id,
+            request_id,
+            stored_grpc_message(&response, false),
+            &ctx.correlation_id,
+        );
+        Ok(Response::new(response))
     }
 
     async fn vector_index_create(
@@ -648,6 +2746,53 @@ impl AlopexService for AlopexServiceImpl {
         let ctx = read_context(&request);
         let _enter = ctx.span.enter();
         let req = request.into_inner();
+        let legacy_request = req.request_id.is_none() && req.require_distributed.is_none();
+        let (transaction_id, request_id) = grpc_surface_request_identity(
+            &self.state,
+            &ctx,
+            "vector_index_create",
+            req.request_id.as_deref(),
+        )?;
+        let mut reservation = claim_grpc_typed_response!(
+            &self.state,
+            &ctx,
+            transaction_id,
+            request_id,
+            req.request_id.is_some(),
+            "VectorIndexCreate",
+            grpc_canonical_payload(&[
+                ("name", req.name.clone()),
+                ("table", req.table.clone()),
+                ("column", req.column.clone()),
+                ("method", req.method.clone()),
+                ("options", grpc_string_map_fingerprint(&req.options)),
+                ("if_not_exists", req.if_not_exists.to_string()),
+                (
+                    "require_distributed",
+                    format!("{:?}", req.require_distributed)
+                ),
+            ]),
+            proto::VectorIndexResponse
+        );
+        if req.require_distributed.unwrap_or(false) {
+            let status = grpc_unsupported_distributed_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                "VectorIndexCreate",
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
         let create_request = crate::http::vector::VectorIndexCreateRequest {
             name: req.name,
             table: req.table,
@@ -660,12 +2805,54 @@ impl AlopexService for AlopexServiceImpl {
             options: req.options,
             if_not_exists: req.if_not_exists,
         };
-        let response = crate::http::vector::index_create_impl(self.state.clone(), create_request)
-            .await
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
-        Ok(Response::new(proto::VectorIndexResponse {
+        let response = match crate::http::vector::index_create_impl(
+            self.state.clone(),
+            create_request,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let status = grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    false,
+                );
+                return Err(status);
+            }
+        };
+        let response = proto::VectorIndexResponse {
             success: response.success,
-        }))
+            transaction: (!legacy_request).then(|| {
+                transaction_outcome_to_proto(&grpc_local_outcome(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    OperationState::Committed,
+                    "local_vector_index_create",
+                ))
+            }),
+        };
+        complete_grpc_response_or_recovery_pending!(
+            reservation,
+            &self.state,
+            transaction_id,
+            request_id,
+            stored_grpc_message(&response, false),
+            &ctx.correlation_id,
+        );
+        Ok(Response::new(response))
     }
 
     async fn vector_index_update(
@@ -675,6 +2862,52 @@ impl AlopexService for AlopexServiceImpl {
         let ctx = read_context(&request);
         let _enter = ctx.span.enter();
         let req = request.into_inner();
+        let legacy_request = req.request_id.is_none() && req.require_distributed.is_none();
+        let (transaction_id, request_id) = grpc_surface_request_identity(
+            &self.state,
+            &ctx,
+            "vector_index_update",
+            req.request_id.as_deref(),
+        )?;
+        let mut reservation = claim_grpc_typed_response!(
+            &self.state,
+            &ctx,
+            transaction_id,
+            request_id,
+            req.request_id.is_some(),
+            "VectorIndexUpdate",
+            grpc_canonical_payload(&[
+                ("name", req.name.clone()),
+                ("table", req.table.clone()),
+                ("column", req.column.clone()),
+                ("method", req.method.clone()),
+                ("options", grpc_string_map_fingerprint(&req.options)),
+                (
+                    "require_distributed",
+                    format!("{:?}", req.require_distributed)
+                ),
+            ]),
+            proto::VectorIndexResponse
+        );
+        if req.require_distributed.unwrap_or(false) {
+            let status = grpc_unsupported_distributed_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                "VectorIndexUpdate",
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
         let update_request = crate::http::vector::VectorIndexUpdateRequest {
             name: req.name,
             table: req.table,
@@ -686,12 +2919,54 @@ impl AlopexService for AlopexServiceImpl {
             },
             options: req.options,
         };
-        let response = crate::http::vector::index_update_impl(self.state.clone(), update_request)
-            .await
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
-        Ok(Response::new(proto::VectorIndexResponse {
+        let response = match crate::http::vector::index_update_impl(
+            self.state.clone(),
+            update_request,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let status = grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    false,
+                );
+                return Err(status);
+            }
+        };
+        let response = proto::VectorIndexResponse {
             success: response.success,
-        }))
+            transaction: (!legacy_request).then(|| {
+                transaction_outcome_to_proto(&grpc_local_outcome(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    OperationState::Committed,
+                    "local_vector_index_update",
+                ))
+            }),
+        };
+        complete_grpc_response_or_recovery_pending!(
+            reservation,
+            &self.state,
+            transaction_id,
+            request_id,
+            stored_grpc_message(&response, false),
+            &ctx.correlation_id,
+        );
+        Ok(Response::new(response))
     }
 
     async fn vector_index_delete(
@@ -701,16 +2976,101 @@ impl AlopexService for AlopexServiceImpl {
         let ctx = read_context(&request);
         let _enter = ctx.span.enter();
         let req = request.into_inner();
+        let legacy_request = req.request_id.is_none() && req.require_distributed.is_none();
+        let (transaction_id, request_id) = grpc_surface_request_identity(
+            &self.state,
+            &ctx,
+            "vector_index_delete",
+            req.request_id.as_deref(),
+        )?;
+        let mut reservation = claim_grpc_typed_response!(
+            &self.state,
+            &ctx,
+            transaction_id,
+            request_id,
+            req.request_id.is_some(),
+            "VectorIndexDelete",
+            grpc_canonical_payload(&[
+                ("name", req.name.clone()),
+                ("if_exists", req.if_exists.to_string()),
+                (
+                    "require_distributed",
+                    format!("{:?}", req.require_distributed)
+                ),
+            ]),
+            proto::VectorIndexResponse
+        );
+        if req.require_distributed.unwrap_or(false) {
+            let status = grpc_unsupported_distributed_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                "VectorIndexDelete",
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
         let delete_request = crate::http::vector::VectorIndexDeleteRequest {
             name: req.name,
             if_exists: req.if_exists,
         };
-        let response = crate::http::vector::index_delete_impl(self.state.clone(), delete_request)
-            .await
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
-        Ok(Response::new(proto::VectorIndexResponse {
+        let response = match crate::http::vector::index_delete_impl(
+            self.state.clone(),
+            delete_request,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let status = grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    false,
+                );
+                return Err(status);
+            }
+        };
+        let response = proto::VectorIndexResponse {
             success: response.success,
-        }))
+            transaction: (!legacy_request).then(|| {
+                transaction_outcome_to_proto(&grpc_local_outcome(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    OperationState::Committed,
+                    "local_vector_index_delete",
+                ))
+            }),
+        };
+        complete_grpc_response_or_recovery_pending!(
+            reservation,
+            &self.state,
+            transaction_id,
+            request_id,
+            stored_grpc_message(&response, false),
+            &ctx.correlation_id,
+        );
+        Ok(Response::new(response))
     }
 
     async fn vector_index_compact(
@@ -720,21 +3080,113 @@ impl AlopexService for AlopexServiceImpl {
         let ctx = read_context(&request);
         let _enter = ctx.span.enter();
         let req = request.into_inner();
+        let legacy_request = req.request_id.is_none() && req.require_distributed.is_none();
+        let (transaction_id, request_id) = grpc_surface_request_identity(
+            &self.state,
+            &ctx,
+            "vector_index_compact",
+            req.request_id.as_deref(),
+        )?;
+        let mut reservation = claim_grpc_typed_response!(
+            &self.state,
+            &ctx,
+            transaction_id,
+            request_id,
+            req.request_id.is_some(),
+            "VectorIndexCompact",
+            grpc_canonical_payload(&[
+                ("name", req.name.clone()),
+                (
+                    "require_distributed",
+                    format!("{:?}", req.require_distributed)
+                ),
+            ]),
+            proto::VectorIndexResponse
+        );
+        if req.require_distributed.unwrap_or(false) {
+            let status = grpc_unsupported_distributed_status(
+                &self.state,
+                transaction_id.clone(),
+                request_id.clone(),
+                "VectorIndexCompact",
+                &ctx.correlation_id,
+            );
+            complete_grpc_error_or_recovery_pending!(
+                &mut reservation,
+                &self.state,
+                transaction_id,
+                request_id,
+                &status,
+                &ctx.correlation_id,
+                false,
+            );
+            return Err(status);
+        }
         let compact_request = crate::http::vector::VectorIndexCompactRequest { name: req.name };
-        let response = crate::http::vector::index_compact_impl(self.state.clone(), compact_request)
-            .await
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
-        Ok(Response::new(proto::VectorIndexResponse {
+        let response = match crate::http::vector::index_compact_impl(
+            self.state.clone(),
+            compact_request,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let status = grpc_transaction_status(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    error,
+                    &ctx.correlation_id,
+                );
+                complete_grpc_error_or_recovery_pending!(
+                    &mut reservation,
+                    &self.state,
+                    transaction_id,
+                    request_id,
+                    &status,
+                    &ctx.correlation_id,
+                    false,
+                );
+                return Err(status);
+            }
+        };
+        let response = proto::VectorIndexResponse {
             success: response.success,
-        }))
+            transaction: (!legacy_request).then(|| {
+                transaction_outcome_to_proto(&grpc_local_outcome(
+                    &self.state,
+                    transaction_id.clone(),
+                    request_id.clone(),
+                    OperationState::Committed,
+                    "local_vector_index_compact",
+                ))
+            }),
+        };
+        complete_grpc_response_or_recovery_pending!(
+            reservation,
+            &self.state,
+            transaction_id,
+            request_id,
+            stored_grpc_message(&response, false),
+            &ctx.correlation_id,
+        );
+        Ok(Response::new(response))
     }
 
     async fn health(
         &self,
-        _request: Request<proto::HealthRequest>,
+        request: Request<proto::HealthRequest>,
     ) -> std::result::Result<Response<proto::HealthResponse>, Status> {
+        let ctx = read_context(&request);
+        let _enter = ctx.span.enter();
         Ok(Response::new(proto::HealthResponse {
             status: "ok".to_string(),
+            transaction: Some(transaction_outcome_to_proto(&grpc_surface_outcome(
+                &self.state,
+                &ctx,
+                "health",
+                "local_health",
+            ))),
         }))
     }
 
@@ -747,10 +3199,16 @@ impl AlopexService for AlopexServiceImpl {
         let cluster = self
             .state
             .cluster_status_snapshot()
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+            .map_err(|err| grpc_surface_status(&self.state, &ctx, "cluster_status", err))?;
         self.state.metrics.record_cluster_status(&cluster);
         Ok(Response::new(proto::ClusterStatusResponse {
             cluster_json: cluster_json(&cluster, &ctx.correlation_id)?,
+            transaction: Some(transaction_outcome_to_proto(&grpc_surface_outcome(
+                &self.state,
+                &ctx,
+                "cluster_status",
+                "local_cluster_status",
+            ))),
         }))
     }
 
@@ -763,7 +3221,7 @@ impl AlopexService for AlopexServiceImpl {
         let cluster = self
             .state
             .cluster_join()
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+            .map_err(|err| grpc_surface_status(&self.state, &ctx, "cluster_join", err))?;
         self.state.metrics.record_cluster_status(&cluster);
         Ok(Response::new(proto::ClusterOperationResponse {
             action: "join".to_string(),
@@ -771,6 +3229,12 @@ impl AlopexService for AlopexServiceImpl {
             operation_id: Uuid::new_v4().to_string(),
             state: "committed".to_string(),
             reason_code: "membership_changed".to_string(),
+            transaction: Some(transaction_outcome_to_proto(&grpc_surface_outcome(
+                &self.state,
+                &ctx,
+                "cluster_join",
+                "local_cluster_join",
+            ))),
         }))
     }
 
@@ -783,7 +3247,7 @@ impl AlopexService for AlopexServiceImpl {
         let cluster = self
             .state
             .cluster_leave()
-            .map_err(|err| map_status(err, &ctx.correlation_id))?;
+            .map_err(|err| grpc_surface_status(&self.state, &ctx, "cluster_leave", err))?;
         self.state.metrics.record_cluster_status(&cluster);
         Ok(Response::new(proto::ClusterOperationResponse {
             action: "leave".to_string(),
@@ -791,6 +3255,12 @@ impl AlopexService for AlopexServiceImpl {
             operation_id: Uuid::new_v4().to_string(),
             state: "committed".to_string(),
             reason_code: "membership_changed".to_string(),
+            transaction: Some(transaction_outcome_to_proto(&grpc_surface_outcome(
+                &self.state,
+                &ctx,
+                "cluster_leave",
+                "local_cluster_leave",
+            ))),
         }))
     }
 
@@ -1210,6 +3680,469 @@ impl AlopexService for AlopexServiceImpl {
     }
 }
 
+fn grpc_request_id(
+    state: &ServerState,
+    correlation_id: &str,
+    supplied_request_id: Option<&str>,
+    transaction_id: &str,
+    operation: &str,
+) -> std::result::Result<RequestId, Status> {
+    transaction_request_id(
+        supplied_request_id.map(|request_id| RequestId::new(request_id.to_owned())),
+        transaction_id,
+        operation,
+    )
+    .map_err(|error| {
+        grpc_transaction_status(
+            state,
+            transaction_id.to_owned(),
+            RequestId::new(format!("{transaction_id}:{operation}")),
+            error,
+            correlation_id,
+        )
+    })
+}
+
+fn grpc_local_outcome(
+    state: &ServerState,
+    transaction_id: String,
+    request_id: RequestId,
+    operation_state: OperationState,
+    reason_code: &str,
+) -> HttpTransactionOutcome {
+    HttpTransactionOutcome::new(
+        transaction_id,
+        request_id,
+        transaction_metadata_version(state),
+        operation_state,
+        None,
+        Some(reason_code.to_owned()),
+        RoutingOutcomeKind::LocalOnly,
+        reason_code,
+        false,
+    )
+}
+
+fn grpc_sql_outcome(
+    state: &ServerState,
+    transaction_id: String,
+    request_id: RequestId,
+    operation_state: OperationState,
+    reason_code: &str,
+) -> HttpTransactionOutcome {
+    grpc_local_outcome(
+        state,
+        transaction_id,
+        request_id,
+        operation_state,
+        reason_code,
+    )
+}
+
+fn grpc_local_session_liveness_error(error: ServerError) -> ServerError {
+    match error {
+        ServerError::NotFound(_) => ServerError::SessionExpired(
+            "local session is unavailable after restart or terminal transition".into(),
+        ),
+        error => error,
+    }
+}
+
+/// Resolve the durable identity before executing a gRPC SQL request.  This is
+/// deliberately shared by DDL/DML and error paths so invalid caller-supplied
+/// request IDs fail before a write and all outcomes use the same identity.
+fn grpc_sql_identity(
+    state: &ServerState,
+    ctx: &GrpcContext,
+    session_id: &str,
+    supplied_request_id: Option<&str>,
+) -> std::result::Result<(String, RequestId), Status> {
+    let provisional_transaction_id = if session_id.is_empty() {
+        format!("local-sql:{}", ctx.correlation_id)
+    } else {
+        session_id.to_owned()
+    };
+    let request_id = grpc_request_id(
+        state,
+        &ctx.correlation_id,
+        supplied_request_id,
+        &provisional_transaction_id,
+        "execute",
+    )?;
+    let transaction_id = if session_id.is_empty() && supplied_request_id.is_some() {
+        format!("local-sql:{}", request_id.as_str())
+    } else {
+        provisional_transaction_id
+    };
+    Ok((transaction_id, request_id))
+}
+
+fn grpc_surface_outcome(
+    state: &ServerState,
+    ctx: &GrpcContext,
+    operation: &str,
+    reason_code: &str,
+) -> HttpTransactionOutcome {
+    let (transaction_id, request_id) = grpc_surface_identity(ctx, operation);
+    grpc_local_outcome(
+        state,
+        transaction_id,
+        request_id,
+        OperationState::Committed,
+        reason_code,
+    )
+}
+
+fn grpc_surface_status(
+    state: &ServerState,
+    ctx: &GrpcContext,
+    operation: &str,
+    error: ServerError,
+) -> Status {
+    let (transaction_id, request_id) = grpc_surface_identity(ctx, operation);
+    grpc_transaction_status(
+        state,
+        transaction_id,
+        request_id,
+        error,
+        &ctx.correlation_id,
+    )
+}
+
+fn grpc_surface_request_identity(
+    state: &ServerState,
+    ctx: &GrpcContext,
+    operation: &str,
+    supplied_request_id: Option<&str>,
+) -> std::result::Result<(String, RequestId), Status> {
+    let (provisional_transaction_id, _) = grpc_surface_identity(ctx, operation);
+    let request_id = grpc_request_id(
+        state,
+        &ctx.correlation_id,
+        supplied_request_id,
+        &provisional_transaction_id,
+        operation,
+    )?;
+    let transaction_id = if supplied_request_id.is_some() {
+        format!("grpc:{operation}:{}", request_id.as_str())
+    } else {
+        provisional_transaction_id
+    };
+    Ok((transaction_id, request_id))
+}
+
+fn grpc_surface_identity(ctx: &GrpcContext, operation: &str) -> (String, RequestId) {
+    let transaction_id = format!("grpc:{operation}:{}", ctx.correlation_id);
+    let request_id = RequestId::new(format!("{transaction_id}:{operation}"));
+    (transaction_id, request_id)
+}
+
+fn grpc_transaction_status(
+    state: &ServerState,
+    transaction_id: impl Into<String>,
+    request_id: RequestId,
+    error: ServerError,
+    correlation_id: &str,
+) -> Status {
+    let outcome = transaction_failure_outcome(state, transaction_id, request_id, &error);
+    let status = map_status(error, correlation_id);
+    Status::with_details(
+        status.code(),
+        status.message().to_owned(),
+        transaction_outcome_to_proto(&outcome)
+            .encode_to_vec()
+            .into(),
+    )
+}
+
+fn grpc_idempotency_conflict_status(
+    state: &ServerState,
+    transaction_id: impl Into<String>,
+    request_id: RequestId,
+    correlation_id: &str,
+) -> Status {
+    let outcome = HttpTransactionOutcome::new(
+        transaction_id,
+        request_id,
+        transaction_metadata_version(state),
+        OperationState::Rejected,
+        Some(FailureClass::Conflict),
+        Some("idempotency_conflict".to_owned()),
+        RoutingOutcomeKind::LocalOnly,
+        "idempotency_conflict",
+        false,
+    );
+    let status = map_status(
+        ServerError::Conflict("request_id was already used for a different gRPC operation".into()),
+        correlation_id,
+    );
+    Status::with_details(
+        status.code(),
+        status.message().to_owned(),
+        transaction_outcome_to_proto(&outcome)
+            .encode_to_vec()
+            .into(),
+    )
+}
+
+/// Preserve the completed transaction outcome when response streaming or a
+/// transport limit fails after execution.  Reclassifying this as an unexecuted
+/// request would make a client retry a write whose result is already known.
+fn grpc_status_with_outcome(
+    error: ServerError,
+    outcome: &HttpTransactionOutcome,
+    correlation_id: &str,
+) -> Status {
+    let status = map_status(error, correlation_id);
+    Status::with_details(
+        status.code(),
+        status.message().to_owned(),
+        transaction_outcome_to_proto(outcome).encode_to_vec().into(),
+    )
+}
+
+fn grpc_prerequisite_missing_status(
+    state: &ServerState,
+    transaction_id: String,
+    request_id: RequestId,
+    operation: &str,
+    correlation_id: &str,
+) -> Status {
+    grpc_transaction_status(
+        state,
+        transaction_id,
+        request_id,
+        ServerError::CapabilityUnavailable(format!(
+            "gRPC {operation} requested distributed execution, but no approved range/TSO coordinator is available"
+        )),
+        correlation_id,
+    )
+}
+
+fn grpc_unsupported_distributed_status(
+    state: &ServerState,
+    transaction_id: String,
+    request_id: RequestId,
+    operation: &str,
+    correlation_id: &str,
+) -> Status {
+    grpc_transaction_status(
+        state,
+        transaction_id,
+        request_id,
+        ServerError::FutureDistributedExecutionRequired(format!(
+            "gRPC {operation} is pre-execution unsupported for distributed transactions"
+        )),
+        correlation_id,
+    )
+}
+
+fn validate_grpc_ddl(sql: &str) -> std::result::Result<(), ServerError> {
+    let statements = alopex_sql::parser::Parser::parse_sql(&alopex_sql::AlopexDialect, sql)
+        .map_err(|error| ServerError::BadRequest(error.to_string()))?;
+    let ddl_only = !statements.is_empty()
+        && statements.iter().all(|statement| {
+            matches!(
+                statement.kind,
+                alopex_sql::StatementKind::CreateTable(_)
+                    | alopex_sql::StatementKind::DropTable(_)
+                    | alopex_sql::StatementKind::CreateIndex(_)
+                    | alopex_sql::StatementKind::DropIndex(_)
+            )
+        });
+    if ddl_only {
+        Ok(())
+    } else {
+        Err(ServerError::BadRequest(
+            "ExecuteDdl accepts only CREATE/DROP TABLE or INDEX statements".into(),
+        ))
+    }
+}
+
+fn validate_grpc_dml(sql: &str) -> std::result::Result<(), ServerError> {
+    let statements = alopex_sql::parser::Parser::parse_sql(&alopex_sql::AlopexDialect, sql)
+        .map_err(|error| ServerError::BadRequest(error.to_string()))?;
+    let dml_only = !statements.is_empty()
+        && statements.iter().all(|statement| {
+            matches!(
+                statement.kind,
+                alopex_sql::StatementKind::Insert(_)
+                    | alopex_sql::StatementKind::Update(_)
+                    | alopex_sql::StatementKind::Delete(_)
+            )
+        });
+    if dml_only {
+        Ok(())
+    } else {
+        Err(ServerError::BadRequest(
+            "ExecuteDml accepts only INSERT, UPDATE, or DELETE statements".into(),
+        ))
+    }
+}
+
+fn grpc_unauthenticated_status(
+    state: &ServerState,
+    transaction_id: String,
+    request_id: RequestId,
+) -> Status {
+    let error = ServerError::Unauthorized("unauthorized".into());
+    let outcome = transaction_failure_outcome(state, transaction_id, request_id, &error);
+    Status::with_details(
+        tonic::Code::Unauthenticated,
+        "unauthorized",
+        transaction_outcome_to_proto(&outcome)
+            .encode_to_vec()
+            .into(),
+    )
+}
+
+fn transaction_range_identity_to_proto(
+    range: &RangeIdentity,
+) -> proto::TransactionRangeIdentityV09 {
+    proto::TransactionRangeIdentityV09 {
+        cluster_id: range.cluster_id.as_str().to_owned(),
+        table_id: range.table_id,
+        range_id: range.range_id.as_str().to_owned(),
+        lower_bound: range.lower_bound.clone().unwrap_or_default(),
+        has_lower_bound: range.lower_bound.is_some(),
+        upper_bound: range.upper_bound.clone().unwrap_or_default(),
+        has_upper_bound: range.upper_bound.is_some(),
+        schema_version: range.schema_version,
+        data_epoch: range.data_epoch,
+    }
+}
+
+fn transaction_state_to_proto(state: &OperationState) -> i32 {
+    use proto::TransactionOperationStateV09 as Wire;
+    match enum_wire(state).as_str() {
+        "accepted" => Wire::Accepted as i32,
+        "running" => Wire::Running as i32,
+        "committed" => Wire::Committed as i32,
+        "rejected" => Wire::Rejected as i32,
+        "retryable_failure" => Wire::RetryableFailure as i32,
+        "terminal_failure" => Wire::TerminalFailure as i32,
+        "recovery_pending" => Wire::RecoveryPending as i32,
+        "cancelled" => Wire::Cancelled as i32,
+        _ => Wire::Unspecified as i32,
+    }
+}
+
+fn transaction_failure_class_to_proto(failure_class: &alopex_cluster::FailureClass) -> i32 {
+    use proto::TransactionFailureClassV09 as Wire;
+    match enum_wire(failure_class).as_str() {
+        "unauthorized" => Wire::Unauthorized as i32,
+        "stale_metadata" => Wire::StaleMetadata as i32,
+        "gap" => Wire::Gap as i32,
+        "overlap" => Wire::Overlap as i32,
+        "epoch_mismatch" => Wire::EpochMismatch as i32,
+        "not_leader" => Wire::NotLeader as i32,
+        "node_unavailable" => Wire::NodeUnavailable as i32,
+        "prerequisite_missing" => Wire::PrerequisiteMissing as i32,
+        "timeout" => Wire::Timeout as i32,
+        "conflict" => Wire::Conflict as i32,
+        "invalid_request" => Wire::InvalidRequest as i32,
+        "internal" => Wire::Internal as i32,
+        _ => Wire::Unspecified as i32,
+    }
+}
+
+fn transaction_routing_kind_to_proto(kind: &alopex_cluster::RoutingOutcomeKind) -> i32 {
+    use proto::TransactionRoutingKindV09 as Wire;
+    match enum_wire(kind).as_str() {
+        "local" => Wire::Local as i32,
+        "single_range" => Wire::SingleRange as i32,
+        "multi_range" => Wire::MultiRange as i32,
+        "local_only" => Wire::LocalOnly as i32,
+        "unsupported" => Wire::Unsupported as i32,
+        "unavailable" => Wire::Unavailable as i32,
+        "retryable" => Wire::Retryable as i32,
+        "blocked" => Wire::Blocked as i32,
+        _ => Wire::Unspecified as i32,
+    }
+}
+
+fn transaction_outcome_to_proto(outcome: &HttpTransactionOutcome) -> proto::TransactionOutcomeV09 {
+    let read_point = outcome
+        .read_point
+        .as_ref()
+        .map(|read_point| proto::TransactionReadPointV09 {
+            data_epoch: read_point.data_epoch,
+            metadata_version: read_point.metadata_version,
+            schema_manifest_id: read_point
+                .schema_manifest_id
+                .as_ref()
+                .and_then(|id| {
+                    serde_json::to_value(id)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                })
+                .unwrap_or_default(),
+            has_schema_manifest_id: read_point.schema_manifest_id.is_some(),
+            range_generations: read_point
+                .range_generations
+                .iter()
+                .map(|(range_id, value)| proto::TransactionReadPointRangeV09 {
+                    range_id: range_id.as_str().to_owned(),
+                    value: *value,
+                })
+                .collect(),
+            index_epochs: read_point
+                .index_epochs
+                .iter()
+                .map(|(range_id, value)| proto::TransactionReadPointRangeV09 {
+                    range_id: range_id.as_str().to_owned(),
+                    value: *value,
+                })
+                .collect(),
+            consistency: enum_wire(&read_point.consistency),
+        });
+    let reason_code = outcome.reason_code.clone().unwrap_or_default();
+    proto::TransactionOutcomeV09 {
+        outcome_version: outcome.outcome_version.to_owned(),
+        transaction_id: outcome.transaction_id.clone(),
+        request_id: outcome.request_id.as_str().to_owned(),
+        participating_ranges: outcome
+            .participating_ranges
+            .iter()
+            .map(transaction_range_identity_to_proto)
+            .collect(),
+        read_point,
+        schema_version: outcome.schema_version.unwrap_or_default(),
+        has_schema_version: outcome.schema_version.is_some(),
+        data_epoch: outcome.data_epoch.unwrap_or_default(),
+        has_data_epoch: outcome.data_epoch.is_some(),
+        isolation: proto::TransactionIsolationV09::Snapshot as i32,
+        state: transaction_state_to_proto(&outcome.state),
+        failure_class: outcome
+            .failure_class
+            .as_ref()
+            .map(transaction_failure_class_to_proto)
+            .unwrap_or(proto::TransactionFailureClassV09::Unspecified as i32),
+        has_failure_class: outcome.failure_class.is_some(),
+        reason_code,
+        has_reason_code: outcome.reason_code.is_some(),
+        routing: Some(proto::TransactionRoutingOutcomeV09 {
+            kind: transaction_routing_kind_to_proto(&outcome.routing.kind),
+            range: outcome
+                .routing
+                .range_identity
+                .as_ref()
+                .map(transaction_range_identity_to_proto),
+            has_range: outcome.routing.range_identity.is_some(),
+            metadata_version: outcome.routing.metadata_version,
+            reason_code: outcome.routing.reason_code.clone(),
+        }),
+        retryable: outcome.retryable,
+        idempotency: Some(proto::TransactionIdempotencyResultV09 {
+            operation_id: outcome.idempotency.operation_id.clone(),
+            request_id: outcome.idempotency.request_id.as_str().to_owned(),
+            first_outcome: outcome.idempotency.first_outcome.clone(),
+            state: transaction_state_to_proto(&outcome.idempotency.state),
+            duplicate_count: outcome.idempotency.duplicate_count,
+        }),
+    }
+}
+
 fn range_identity_from_proto(range: proto::CrdtRangeIdentity) -> RangeIdentity {
     RangeIdentity::new(
         range.cluster_id,
@@ -1432,6 +4365,7 @@ fn map_status(err: ServerError, correlation_id: &str) -> Status {
         axum::http::StatusCode::REQUEST_TIMEOUT => tonic::Code::DeadlineExceeded,
         axum::http::StatusCode::PAYLOAD_TOO_LARGE => tonic::Code::ResourceExhausted,
         axum::http::StatusCode::NOT_IMPLEMENTED => tonic::Code::Unimplemented,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE => tonic::Code::Unavailable,
         axum::http::StatusCode::GONE => tonic::Code::NotFound,
         _ => tonic::Code::Internal,
     };
@@ -1441,4 +4375,46 @@ fn map_status(err: ServerError, correlation_id: &str) -> Status {
         format!("{} (correlation_id={})", err, correlation_id)
     };
     Status::new(code, message)
+}
+
+#[cfg(test)]
+mod idempotency_fingerprint_tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn context() -> GrpcContext {
+        GrpcContext {
+            correlation_id: "fingerprint-test".to_owned(),
+            actor: Some("test-actor".to_owned()),
+            span: tracing::info_span!("grpc_fingerprint_test"),
+        }
+    }
+
+    #[test]
+    fn length_delimited_fields_distinguish_delimiter_injection() {
+        let first = grpc_canonical_payload(&[("sql", "a=b\nc".to_owned())]);
+        let second = grpc_canonical_payload(&[("sql", "a\nb=c".to_owned())]);
+        assert_ne!(first, second);
+        assert_ne!(
+            grpc_request_fingerprint(&context(), "ExecuteSql", "target", &first),
+            grpc_request_fingerprint(&context(), "ExecuteSql", "target", &second),
+        );
+    }
+
+    #[test]
+    fn map_and_vector_payloads_preserve_exact_values() {
+        let mut first = HashMap::new();
+        first.insert("a=b".to_owned(), "c".to_owned());
+        let mut second = HashMap::new();
+        second.insert("a".to_owned(), "b=c".to_owned());
+        assert_ne!(
+            grpc_string_map_fingerprint(&first),
+            grpc_string_map_fingerprint(&second),
+        );
+        assert_ne!(
+            grpc_f32_values_fingerprint(&[0.0]),
+            grpc_f32_values_fingerprint(&[-0.0]),
+        );
+    }
 }

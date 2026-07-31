@@ -190,7 +190,7 @@ fn assert_local_outcome(
     assert_eq!(outcome["isolation"], "snapshot");
     assert_eq!(outcome["state"], state);
     assert_eq!(outcome["failure_class"], Value::Null);
-    assert_eq!(outcome["reason_code"], Value::Null);
+    assert_eq!(outcome["reason_code"], reason_code);
     assert_eq!(outcome["routing"]["kind"], "local_only");
     assert_eq!(outcome["routing"]["reason_code"], reason_code);
     assert_eq!(outcome["retryable"], false);

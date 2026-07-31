@@ -709,7 +709,7 @@ fn local_session_outcome(
         transaction_metadata_version(state),
         operation_state,
         None,
-        None,
+        Some(reason_code.clone()),
         RoutingOutcomeKind::LocalOnly,
         reason_code,
         false,

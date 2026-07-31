@@ -244,6 +244,23 @@ fn extract_int(value: &grpc::proto::Value) -> Option<i64> {
     }
 }
 
+fn assert_v09_local_outcome(
+    outcome: Option<grpc::proto::TransactionOutcomeV09>,
+    expected_reason: &str,
+) {
+    let outcome = outcome.expect("additive v0.9 transaction outcome");
+    assert_eq!(outcome.outcome_version, "v0.9");
+    assert!(!outcome.transaction_id.is_empty());
+    assert!(!outcome.request_id.is_empty());
+    assert_eq!(
+        outcome.routing.expect("routing outcome").kind,
+        grpc::proto::TransactionRoutingKindV09::LocalOnly as i32
+    );
+    assert_eq!(outcome.reason_code, expected_reason);
+    assert!(!outcome.has_failure_class);
+    assert!(!outcome.retryable);
+}
+
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[tokio::test]
 async fn grpc_sql_vector_transaction_flow() {
@@ -251,31 +268,48 @@ async fn grpc_sql_vector_transaction_flow() {
     let (channel, _handle) = spawn_grpc_server(state).await;
     let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
 
-    client
+    let ddl = client
         .execute_ddl(grpc::proto::DdlRequest {
             sql: "CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));".to_string(),
             session_id: String::new(),
+            request_id: None,
+            require_distributed: None,
         })
         .await
-        .expect("ddl");
+        .expect("legacy DDL")
+        .into_inner();
+    assert!(ddl.success, "legacy DDL success");
+    assert!(
+        ddl.transaction.is_none(),
+        "legacy DDL has no additive outcome"
+    );
     let dml = client
         .execute_dml(grpc::proto::DmlRequest {
             sql: "INSERT INTO items (id, embedding) VALUES (1, [0.0, 0.0]);".to_string(),
             session_id: String::new(),
+            request_id: Some("grpc-flow-dml-1".to_owned()),
+            require_distributed: Some(false),
         })
         .await
         .expect("dml");
-    assert_eq!(dml.into_inner().affected_rows, 1);
+    let dml = dml.into_inner();
+    assert_eq!(dml.affected_rows, 1);
+    assert_v09_local_outcome(dml.transaction, "local_sql_autocommit");
 
-    client
+    let upsert = client
         .vector_upsert(grpc::proto::VectorUpsertRequest {
             table: "items".to_string(),
             id: 2,
             vector: vec![1.0, 0.0],
             column: String::new(),
+            request_id: Some("grpc-flow-vector-upsert".to_owned()),
+            require_distributed: Some(false),
         })
         .await
-        .expect("vector upsert");
+        .expect("vector upsert")
+        .into_inner();
+    assert!(upsert.success);
+    assert_v09_local_outcome(upsert.transaction, "local_vector_upsert");
 
     let search = client
         .vector_search(grpc::proto::VectorSearchRequest {
@@ -284,50 +318,143 @@ async fn grpc_sql_vector_transaction_flow() {
             k: 2,
             index: String::new(),
             column: String::new(),
+            request_id: Some("grpc-flow-vector-search".to_owned()),
+            require_distributed: Some(false),
         })
         .await
         .expect("vector search")
         .into_inner();
     assert_eq!(search.results.len(), 2);
+    assert_v09_local_outcome(search.transaction, "local_vector_search");
+
+    let delete = client
+        .vector_delete(grpc::proto::VectorDeleteRequest {
+            table: "items".to_string(),
+            id: 2,
+            column: String::new(),
+            request_id: Some("grpc-flow-vector-delete".to_owned()),
+            require_distributed: Some(false),
+        })
+        .await
+        .expect("vector delete")
+        .into_inner();
+    assert!(delete.success);
+    assert_v09_local_outcome(delete.transaction, "local_vector_delete");
+
+    let index_create = client
+        .vector_index_create(grpc::proto::VectorIndexCreateRequest {
+            name: "items_embedding_hnsw".to_string(),
+            table: "items".to_string(),
+            column: "embedding".to_string(),
+            method: "hnsw".to_string(),
+            options: Default::default(),
+            if_not_exists: false,
+            request_id: Some("grpc-flow-index-create".to_owned()),
+            require_distributed: Some(false),
+        })
+        .await
+        .expect("legacy vector index create")
+        .into_inner();
+    assert!(index_create.success);
+    assert_v09_local_outcome(index_create.transaction, "local_vector_index_create");
+
+    let index_update = client
+        .vector_index_update(grpc::proto::VectorIndexUpdateRequest {
+            name: "items_embedding_hnsw".to_string(),
+            table: "items".to_string(),
+            column: "embedding".to_string(),
+            method: "hnsw".to_string(),
+            options: Default::default(),
+            request_id: Some("grpc-flow-index-update".to_owned()),
+            require_distributed: Some(false),
+        })
+        .await
+        .expect("legacy vector index update")
+        .into_inner();
+    assert!(index_update.success);
+    assert_v09_local_outcome(index_update.transaction, "local_vector_index_update");
+
+    let index_compact = client
+        .vector_index_compact(grpc::proto::VectorIndexCompactRequest {
+            name: "items_embedding_hnsw".to_string(),
+            request_id: Some("grpc-flow-index-compact".to_owned()),
+            require_distributed: Some(false),
+        })
+        .await
+        .expect("legacy vector index compact")
+        .into_inner();
+    assert!(index_compact.success);
+    assert_v09_local_outcome(index_compact.transaction, "local_vector_index_compact");
+
+    let index_delete = client
+        .vector_index_delete(grpc::proto::VectorIndexDeleteRequest {
+            name: "items_embedding_hnsw".to_string(),
+            if_exists: false,
+            request_id: Some("grpc-flow-index-delete".to_owned()),
+            require_distributed: Some(false),
+        })
+        .await
+        .expect("legacy vector index delete")
+        .into_inner();
+    assert!(index_delete.success);
+    assert_v09_local_outcome(index_delete.transaction, "local_vector_index_delete");
 
     let txn = client
-        .begin_transaction(grpc::proto::BeginRequest {})
+        .begin_transaction(grpc::proto::BeginRequest::default())
         .await
         .expect("begin")
         .into_inner();
-    client
+    assert_v09_local_outcome(txn.transaction.clone(), "session_started");
+    let session_dml = client
         .execute_dml(grpc::proto::DmlRequest {
             sql: "INSERT INTO items (id, embedding) VALUES (3, [0.2, 0.0]);".to_string(),
             session_id: txn.session_id.clone(),
+            request_id: Some("grpc-flow-session-dml-3".to_owned()),
+            require_distributed: Some(false),
         })
         .await
-        .expect("dml");
-    client
+        .expect("dml")
+        .into_inner();
+    assert_v09_local_outcome(session_dml.transaction, "local_session_sql");
+    let commit = client
         .commit_transaction(txn.clone())
         .await
-        .expect("commit");
+        .expect("commit")
+        .into_inner();
+    assert!(commit.success);
+    assert_v09_local_outcome(commit.transaction, "local_session_committed");
 
     let rollback_txn = client
-        .begin_transaction(grpc::proto::BeginRequest {})
+        .begin_transaction(grpc::proto::BeginRequest::default())
         .await
         .expect("begin")
         .into_inner();
-    client
+    assert_v09_local_outcome(rollback_txn.transaction.clone(), "session_started");
+    let rollback_dml = client
         .execute_dml(grpc::proto::DmlRequest {
             sql: "INSERT INTO items (id, embedding) VALUES (4, [0.4, 0.0]);".to_string(),
             session_id: rollback_txn.session_id.clone(),
+            request_id: Some("grpc-flow-session-dml-4".to_owned()),
+            require_distributed: Some(false),
         })
         .await
-        .expect("dml");
-    client
+        .expect("dml")
+        .into_inner();
+    assert_v09_local_outcome(rollback_dml.transaction, "local_session_sql");
+    let rollback = client
         .rollback_transaction(rollback_txn.clone())
         .await
-        .expect("rollback");
+        .expect("rollback")
+        .into_inner();
+    assert!(rollback.success);
+    assert_v09_local_outcome(rollback.transaction, "local_session_rolled_back");
 
     let mut stream = client
         .execute_sql(grpc::proto::SqlRequest {
             sql: "SELECT id FROM items ORDER BY id;".to_string(),
             session_id: String::new(),
+            request_id: Some("grpc-flow-select".to_owned()),
+            require_distributed: Some(false),
         })
         .await
         .expect("query")
@@ -335,12 +462,13 @@ async fn grpc_sql_vector_transaction_flow() {
 
     let mut ids = Vec::new();
     while let Some(result_set) = stream.message().await.expect("result set") {
+        assert_v09_local_outcome(result_set.transaction, "local_sql_autocommit");
         for row in result_set.rows {
             let value = row.values.first().expect("value");
             ids.push(extract_int(value).expect("int"));
         }
     }
-    assert_eq!(ids, vec![1, 2, 3]);
+    assert_eq!(ids, vec![1, 3]);
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -354,6 +482,8 @@ async fn grpc_multi_statement_returns_result_per_statement() {
         .execute_sql(grpc::proto::SqlRequest {
             sql: "SELECT 1; SELECT 2;".to_string(),
             session_id: String::new(),
+            request_id: None,
+            require_distributed: None,
         })
         .await
         .expect("query")
@@ -380,6 +510,8 @@ async fn grpc_invalid_sql_returns_invalid_argument() {
         .execute_dml(grpc::proto::DmlRequest {
             sql: String::new(),
             session_id: String::new(),
+            request_id: None,
+            require_distributed: None,
         })
         .await
         .expect_err("invalid sql");
@@ -393,13 +525,21 @@ async fn grpc_non_session_dml_rejects_future_distributed_routing() {
     let (channel, _handle) = spawn_grpc_server(state.clone()).await;
     let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
 
-    client
+    let ddl = client
         .execute_ddl(grpc::proto::DdlRequest {
             sql: "CREATE TABLE grpc_distributed_users (id INT PRIMARY KEY, name TEXT);".to_string(),
             session_id: String::new(),
+            request_id: None,
+            require_distributed: None,
         })
         .await
-        .expect("ddl");
+        .expect("legacy DDL")
+        .into_inner();
+    assert!(ddl.success, "legacy DDL success");
+    assert!(
+        ddl.transaction.is_none(),
+        "legacy DDL has no additive outcome"
+    );
     let (table_ref, table_id) = table_ref_and_id(&state, "grpc_distributed_users");
     install_multi_node_placement(&state, &table_ref, table_id);
 
@@ -407,6 +547,8 @@ async fn grpc_non_session_dml_rejects_future_distributed_routing() {
         .execute_dml(grpc::proto::DmlRequest {
             sql: "INSERT INTO grpc_distributed_users (id, name) VALUES (1, 'blocked');".to_string(),
             session_id: String::new(),
+            request_id: None,
+            require_distributed: None,
         })
         .await
         .expect_err("future distributed routing");
@@ -427,6 +569,7 @@ async fn grpc_health_returns_ok() {
         .expect("health")
         .into_inner();
     assert_eq!(response.status, "ok");
+    assert_v09_local_outcome(response.transaction, "local_health");
 }
 
 #[tokio::test]
@@ -445,6 +588,7 @@ async fn grpc_cluster_status_matches_server_snapshot_schema() {
     let actual: serde_json::Value =
         serde_json::from_str(&response.cluster_json).expect("cluster json");
     assert_eq!(actual, expected);
+    assert_v09_local_outcome(response.transaction, "local_cluster_status");
 }
 
 #[tokio::test]
@@ -463,6 +607,7 @@ async fn grpc_cluster_join_and_leave_return_operation_and_status() {
         serde_json::from_str(&joined.cluster_json).expect("join cluster json");
     assert_eq!(joined_json["mode"], "cluster_aware");
     assert_eq!(joined_json["identity"]["lifecycle_state"], "active");
+    assert_v09_local_outcome(joined.transaction, "local_cluster_join");
 
     let left = client
         .cluster_leave(grpc::proto::ClusterLeaveRequest {})
@@ -473,6 +618,7 @@ async fn grpc_cluster_join_and_leave_return_operation_and_status() {
     let left_json: serde_json::Value =
         serde_json::from_str(&left.cluster_json).expect("leave cluster json");
     assert_eq!(left_json["identity"]["lifecycle_state"], "leaving");
+    assert_v09_local_outcome(left.transaction, "local_cluster_leave");
 }
 
 #[tokio::test]
