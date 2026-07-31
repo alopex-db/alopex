@@ -1,0 +1,19 @@
+{
+  "schema_version": "alopex.phase-common-gate-input/v1",
+  "target_version": "v0.9.0",
+  "phase": 3,
+  "source_sha": "552e40be2fa36f5de3547b633786435a92487a60",
+  "verdict": "blocked",
+  "fail_closed": true,
+  "inputs": [
+    {"id":"phase3-manifest","path":"evidence/changefeed-manifest.json","sha256":"1ceafa131515da91b7bb52e9c25b5deab8d78ae5925eadb55c274c57ca989102"},
+    {"id":"phase3-inherited-ledger","path":"evidence/v09-phase3-inherited-ledger.json","sha256":"818251e39b398b8542e7942dd1c8501feb3a308cd9d9b4e0a3e06e6adc907815"},
+    {"id":"workspace-lock","path":"Cargo.lock","sha256":"1a0500c0ee90ed7182b598929463aeca933ee7a2c7ba1b23802706e2c2ec3195"},
+    {"id":"release-workflow","path":".github/workflows/release.yml","sha256":"116914ddb5425eb01a4d64eeeaa1ce3668aed3c7fe3e77b8839710e2e1d7d030"},
+    {"id":"verify-candidate","path":"scripts/release/verify-candidate/Cargo.toml","sha256":"6850c4d609eb19bae8f667be1b964ed5040e25be99bfc1b21d046e6f4f4df427"}
+  ],
+  "i24_tools": {"owner":"release-wide common gate / alopex-tools","status":"input-registered","evidence":"evidence/changefeed-manifest.json:inventories.internal_verifier_inventory","constraint":"existing v0.7/v0.8 gates are not a v0.9 substitute"},
+  "i25_durable": {"owner":"cluster/Durable owner","compiled_chirps_version":"0.5.1 when chirps feature is enabled; absent otherwise","status":"blocked","evidence":"crates/alopex-cluster/src/changefeed/durable.rs:compiled","blockers":["service_available=false","durable_storage=false","range_routing=false","retention=false","authenticated Durable dispatcher has not been verified"]},
+  "i26_docs_ci_release": {"owner":"release-wide common gate","status":"input-registered","evidence":[".github/workflows/release.yml","scripts/release/verify-candidate","docs/v09-phase3-inherited-evidence.md"],"constraint":"no tag, publish, Docker push, GitHub Release, or production deployment is authorized by this input"},
+  "required_next_step":"The target-version common gate must consume this Phase 3 input, verify input hashes against the same checkout, and retain a Blocked verdict until a compatible authenticated Chirps Durable implementation and approved/released identity are supplied."
+}
