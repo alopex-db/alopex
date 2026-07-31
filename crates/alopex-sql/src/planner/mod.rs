@@ -1849,10 +1849,10 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::Total,
                     arg: Some(arg.clone()),
-                    distinct: false,
+                    distinct,
                     result_type: ResolvedType::Double,
                 };
-                let signature = aggregate_signature(name, false, star, Some(arg), None, expr);
+                let signature = aggregate_signature(name, distinct, star, Some(arg), None, expr);
                 Ok((agg, signature))
             }
             "avg" => {

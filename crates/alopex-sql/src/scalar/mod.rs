@@ -456,6 +456,496 @@ pub fn v09_numeric_vector_hash_scalar(name: &str) -> Option<&'static V09ScalarRe
         .find(|entry| entry.name.eq_ignore_ascii_case(name))
 }
 
+/// Complete, non-abbreviated Phase 4.8 register for string, conditional,
+/// type, and system scalar functions.
+pub const V09_STRING_CONDITIONAL_SYSTEM_SCALAR_REGISTER: &[V09ScalarRegisterEntry] = &[
+    v09_scalar_entry(
+        "SQL-F-S01",
+        "length",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S02",
+        "char_length",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S03",
+        "octet_length",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S04",
+        "upper",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S05",
+        "lower",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S06",
+        "initcap",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S07",
+        "substr",
+        Arity::Range(2, 3),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S08",
+        "left",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S09",
+        "right",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S10",
+        "trim",
+        Arity::Range(1, 2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S11",
+        "ltrim",
+        Arity::Range(1, 2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S12",
+        "rtrim",
+        Arity::Range(1, 2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S13",
+        "replace",
+        Arity::Exact(3),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S14",
+        "instr",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S15",
+        "strpos",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S16",
+        "concat",
+        Arity::Variadic(0),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S17",
+        "concat_ws",
+        Arity::Variadic(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S18",
+        "repeat",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S19",
+        "reverse",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S20",
+        "lpad",
+        Arity::Range(2, 3),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S21",
+        "rpad",
+        Arity::Range(2, 3),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S22",
+        "split_part",
+        Arity::Exact(3),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S23",
+        "regexp_replace",
+        Arity::Exact(3),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S24",
+        "regexp_match",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-S25",
+        "regexp_matches",
+        Arity::Range(2, 3),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-C01",
+        "coalesce",
+        Arity::Variadic(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-C02",
+        "nullif",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-C03",
+        "ifnull",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-C04",
+        "iif",
+        Arity::Exact(3),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-C05",
+        "greatest",
+        Arity::Variadic(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-C06",
+        "least",
+        Arity::Variadic(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-C07",
+        "typeof",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-C08",
+        "pg_typeof",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-C09",
+        "quote",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-SYS01",
+        "memory_stats",
+        Arity::Exact(0),
+        SYSTEM_META,
+        V09ScalarExecutionStatus::LocalOnly,
+    ),
+    v09_scalar_entry(
+        "SQL-F-SYS02",
+        "io_stats",
+        Arity::Exact(0),
+        SYSTEM_META,
+        V09ScalarExecutionStatus::LocalOnly,
+    ),
+    v09_scalar_entry(
+        "SQL-F-SYS03",
+        "clear_cache",
+        Arity::Exact(0),
+        SYSTEM_SIDE_EFFECT_META,
+        V09ScalarExecutionStatus::LocalOnly,
+    ),
+];
+
+/// Returns every scalar row owned by Phase 4.8 in approval-table order.
+pub fn v09_string_conditional_system_scalar_register() -> &'static [V09ScalarRegisterEntry] {
+    V09_STRING_CONDITIONAL_SYSTEM_SCALAR_REGISTER
+}
+
+/// Finds a Phase 4.8 scalar matrix row by its public scalar identity.
+pub fn v09_string_conditional_system_scalar(name: &str) -> Option<&'static V09ScalarRegisterEntry> {
+    V09_STRING_CONDITIONAL_SYSTEM_SCALAR_REGISTER
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(name))
+}
+
+/// Public aggregate-call arity fixed by the Phase 4.8 matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V09AggregateArity {
+    /// `COUNT(*)` and `COUNT(expr)` are both accepted.
+    CountStarOrOne,
+    /// Exactly one aggregate argument is required.
+    ExactOne,
+    /// A text argument and an optional literal text separator are accepted.
+    OneOrTwoWithLiteralTextSeparator,
+    /// A text argument and a literal text separator are both required.
+    ExactlyTwoWithLiteralTextSeparator,
+}
+
+/// Input and result type contract for a Phase 4.8 aggregate row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V09AggregateTypeContract {
+    /// Any input type is counted and the result is a `BigInt`.
+    AnyInputToBigInt,
+    /// A numeric input is accumulated into a `Double` result.
+    NumericInputToDouble,
+    /// The result preserves the single input type.
+    InputTypeToSameType,
+    /// A text input yields a text result.
+    TextInputToText,
+}
+
+/// NULL/empty-input behavior for a Phase 4.8 aggregate row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V09AggregateNullContract {
+    /// Count rows for `*`, or count only non-NULL values for an expression.
+    CountsRowsOrNonNullValues,
+    /// Ignore NULL values and return NULL when no non-NULL value remains.
+    IgnoresNullAndReturnsNullWhenEmpty,
+    /// Ignore NULL values and return zero when no non-NULL value remains.
+    IgnoresNullAndReturnsZeroWhenEmpty,
+}
+
+/// Whether the final result is independent of input order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V09AggregateOrdering {
+    /// Global ordering cannot change the final aggregate result.
+    InputOrderIndependent,
+    /// Inputs must be replayed in their global logical order.
+    GlobalInputOrder,
+}
+
+/// Coordinator finalization path required by a Phase 4.8 aggregate row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V09AggregateFinalization {
+    /// A non-DISTINCT aggregate may merge its proven exact partial state;
+    /// DISTINCT still uses ordered replay.
+    ExactPartialWhenProven,
+    /// The coordinator must replay raw inputs in global logical order.
+    OrderedInputReplay,
+}
+
+/// Optimizer-relevant metadata for a Phase 4.8 aggregate row.
+///
+/// This is intentionally separate from [`FnMeta`]: aggregate rows consume a
+/// relation and are never scalar-foldable. `reorderable` describes whether
+/// reordering aggregate inputs preserves the current SQL result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct V09AggregateMeta {
+    pub deterministic: bool,
+    pub volatile: bool,
+    pub side_effecting: bool,
+    pub foldable: bool,
+    pub reorderable: bool,
+}
+
+/// Metadata for COUNT/MIN/MAX, whose aggregate result is input-order
+/// independent but still cannot be scalar-folded.
+pub const V09_ORDER_INDEPENDENT_AGGREGATE_META: V09AggregateMeta = V09AggregateMeta {
+    deterministic: true,
+    volatile: false,
+    side_effecting: false,
+    foldable: false,
+    reorderable: true,
+};
+
+/// Metadata for aggregates that must retain their global logical input order.
+pub const V09_ORDERED_AGGREGATE_META: V09AggregateMeta = V09AggregateMeta {
+    deterministic: true,
+    volatile: false,
+    side_effecting: false,
+    foldable: false,
+    reorderable: false,
+};
+
+/// A named row from the approved v0.9 Phase 4 aggregate support matrix.
+///
+/// The row makes the public aggregate contract explicit while leaving SQL
+/// execution to the existing planner, accumulator, and distributed assembler.
+/// In particular, `finalization` describes the coordinator path after all
+/// planned ranges have completed and acknowledged cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct V09AggregateRegisterEntry {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub arity: V09AggregateArity,
+    pub type_contract: V09AggregateTypeContract,
+    pub null_contract: V09AggregateNullContract,
+    pub distinct_supported: bool,
+    pub ordering: V09AggregateOrdering,
+    pub finalization: V09AggregateFinalization,
+    pub execution_status: V09ScalarExecutionStatus,
+    pub metadata: V09AggregateMeta,
+}
+
+/// Complete Phase 4.8 aggregate register in approval-table order.
+pub const V09_AGGREGATE_REGISTER: &[V09AggregateRegisterEntry] = &[
+    V09AggregateRegisterEntry {
+        id: "SQL-A01",
+        name: "count",
+        arity: V09AggregateArity::CountStarOrOne,
+        type_contract: V09AggregateTypeContract::AnyInputToBigInt,
+        null_contract: V09AggregateNullContract::CountsRowsOrNonNullValues,
+        distinct_supported: true,
+        ordering: V09AggregateOrdering::InputOrderIndependent,
+        finalization: V09AggregateFinalization::ExactPartialWhenProven,
+        execution_status: V09ScalarExecutionStatus::Distributed,
+        metadata: V09_ORDER_INDEPENDENT_AGGREGATE_META,
+    },
+    V09AggregateRegisterEntry {
+        id: "SQL-A02",
+        name: "sum",
+        arity: V09AggregateArity::ExactOne,
+        type_contract: V09AggregateTypeContract::NumericInputToDouble,
+        null_contract: V09AggregateNullContract::IgnoresNullAndReturnsNullWhenEmpty,
+        distinct_supported: true,
+        ordering: V09AggregateOrdering::GlobalInputOrder,
+        finalization: V09AggregateFinalization::OrderedInputReplay,
+        execution_status: V09ScalarExecutionStatus::Distributed,
+        metadata: V09_ORDERED_AGGREGATE_META,
+    },
+    V09AggregateRegisterEntry {
+        id: "SQL-A03",
+        name: "total",
+        arity: V09AggregateArity::ExactOne,
+        type_contract: V09AggregateTypeContract::NumericInputToDouble,
+        null_contract: V09AggregateNullContract::IgnoresNullAndReturnsZeroWhenEmpty,
+        distinct_supported: true,
+        ordering: V09AggregateOrdering::GlobalInputOrder,
+        finalization: V09AggregateFinalization::OrderedInputReplay,
+        execution_status: V09ScalarExecutionStatus::Distributed,
+        metadata: V09_ORDERED_AGGREGATE_META,
+    },
+    V09AggregateRegisterEntry {
+        id: "SQL-A04",
+        name: "avg",
+        arity: V09AggregateArity::ExactOne,
+        type_contract: V09AggregateTypeContract::NumericInputToDouble,
+        null_contract: V09AggregateNullContract::IgnoresNullAndReturnsNullWhenEmpty,
+        distinct_supported: true,
+        ordering: V09AggregateOrdering::GlobalInputOrder,
+        finalization: V09AggregateFinalization::OrderedInputReplay,
+        execution_status: V09ScalarExecutionStatus::Distributed,
+        metadata: V09_ORDERED_AGGREGATE_META,
+    },
+    V09AggregateRegisterEntry {
+        id: "SQL-A05",
+        name: "min",
+        arity: V09AggregateArity::ExactOne,
+        type_contract: V09AggregateTypeContract::InputTypeToSameType,
+        null_contract: V09AggregateNullContract::IgnoresNullAndReturnsNullWhenEmpty,
+        distinct_supported: true,
+        ordering: V09AggregateOrdering::InputOrderIndependent,
+        finalization: V09AggregateFinalization::ExactPartialWhenProven,
+        execution_status: V09ScalarExecutionStatus::Distributed,
+        metadata: V09_ORDER_INDEPENDENT_AGGREGATE_META,
+    },
+    V09AggregateRegisterEntry {
+        id: "SQL-A06",
+        name: "max",
+        arity: V09AggregateArity::ExactOne,
+        type_contract: V09AggregateTypeContract::InputTypeToSameType,
+        null_contract: V09AggregateNullContract::IgnoresNullAndReturnsNullWhenEmpty,
+        distinct_supported: true,
+        ordering: V09AggregateOrdering::InputOrderIndependent,
+        finalization: V09AggregateFinalization::ExactPartialWhenProven,
+        execution_status: V09ScalarExecutionStatus::Distributed,
+        metadata: V09_ORDER_INDEPENDENT_AGGREGATE_META,
+    },
+    V09AggregateRegisterEntry {
+        id: "SQL-A07",
+        name: "group_concat",
+        arity: V09AggregateArity::OneOrTwoWithLiteralTextSeparator,
+        type_contract: V09AggregateTypeContract::TextInputToText,
+        null_contract: V09AggregateNullContract::IgnoresNullAndReturnsNullWhenEmpty,
+        distinct_supported: true,
+        ordering: V09AggregateOrdering::GlobalInputOrder,
+        finalization: V09AggregateFinalization::OrderedInputReplay,
+        execution_status: V09ScalarExecutionStatus::Distributed,
+        metadata: V09_ORDERED_AGGREGATE_META,
+    },
+    V09AggregateRegisterEntry {
+        id: "SQL-A08",
+        name: "string_agg",
+        arity: V09AggregateArity::ExactlyTwoWithLiteralTextSeparator,
+        type_contract: V09AggregateTypeContract::TextInputToText,
+        null_contract: V09AggregateNullContract::IgnoresNullAndReturnsNullWhenEmpty,
+        distinct_supported: true,
+        ordering: V09AggregateOrdering::GlobalInputOrder,
+        finalization: V09AggregateFinalization::OrderedInputReplay,
+        execution_status: V09ScalarExecutionStatus::Distributed,
+        metadata: V09_ORDERED_AGGREGATE_META,
+    },
+];
+
+/// Returns every aggregate row owned by Phase 4.8 in approval-table order.
+pub fn v09_aggregate_register() -> &'static [V09AggregateRegisterEntry] {
+    V09_AGGREGATE_REGISTER
+}
+
 fn is_numeric(ty: &ResolvedType) -> bool {
     matches!(
         ty,

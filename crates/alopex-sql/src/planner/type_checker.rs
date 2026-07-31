@@ -1460,7 +1460,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     fn check_total(
         &self,
         args: &[TypedExpr],
-        distinct: bool,
+        _distinct: bool,
         star: bool,
         span: Span,
     ) -> Result<ResolvedType, PlannerError> {
@@ -1468,13 +1468,6 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             return Err(PlannerError::type_mismatch(
                 "numeric argument",
                 "COUNT(*) style",
-                span,
-            ));
-        }
-        if distinct {
-            return Err(PlannerError::unsupported_feature(
-                "TOTAL(DISTINCT ...)",
-                "future",
                 span,
             ));
         }

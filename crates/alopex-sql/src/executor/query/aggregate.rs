@@ -318,12 +318,21 @@ impl Accumulator for SumAccumulator {
 #[derive(Debug, Clone)]
 pub struct TotalAccumulator {
     sum: Option<f64>,
+    distinct_values: Option<HashSet<Vec<u8>>>,
 }
 
 impl TotalAccumulator {
     /// Create a new total accumulator.
     pub fn new() -> Self {
-        Self { sum: None }
+        Self::with_distinct(false)
+    }
+
+    /// Create a new total accumulator with optional DISTINCT filtering.
+    pub fn with_distinct(distinct: bool) -> Self {
+        Self {
+            sum: None,
+            distinct_values: if distinct { Some(HashSet::new()) } else { None },
+        }
     }
 }
 
@@ -339,6 +348,9 @@ impl Accumulator for TotalAccumulator {
             return Ok(());
         };
         if value.is_null() {
+            return Ok(());
+        }
+        if !distinct_allows(&mut self.distinct_values, &value)? {
             return Ok(());
         }
         let numeric = numeric_to_f64(&value)?;
@@ -744,7 +756,7 @@ pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<d
     match function {
         AggregateFunction::Count => Box::new(CountAccumulator::new(distinct)),
         AggregateFunction::Sum => Box::new(SumAccumulator::with_distinct(distinct)),
-        AggregateFunction::Total => Box::new(TotalAccumulator::new()),
+        AggregateFunction::Total => Box::new(TotalAccumulator::with_distinct(distinct)),
         AggregateFunction::Avg => Box::new(AvgAccumulator::with_distinct(distinct)),
         AggregateFunction::Min => Box::new(MinMaxAccumulator::with_distinct(true, distinct)),
         AggregateFunction::Max => Box::new(MinMaxAccumulator::with_distinct(false, distinct)),
