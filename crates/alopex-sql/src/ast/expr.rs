@@ -89,6 +89,20 @@ pub enum ExprKind {
         quantifier: Quantifier,
         subquery: Box<super::Statement>,
     },
+    /// SQL `CASE` expression.  `operand` is present for simple CASE and
+    /// absent for searched CASE; branch order is observable and lazy.
+    Case {
+        operand: Option<Box<Expr>>,
+        branches: Vec<CaseWhen>,
+        else_expr: Option<Box<Expr>>,
+    },
+}
+
+/// One ordered `WHEN … THEN …` branch of a SQL CASE expression.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseWhen {
+    pub when: Expr,
+    pub then: Expr,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -65,6 +65,34 @@ proc firstIdent(node: SqlNode): string =
   case node.kind
   of nkIdentifier, nkStringLit:
     node.strVal
+  of nkIntervalLit:
+    node.strVal
+  of nkIntLit, nkFloatLit, nkBoolLit, nkNull, nkStar:
+    ""
+  of nkBinaryOp:
+    node.binLeft.firstIdent()
+  of nkUnaryOp:
+    node.unOperand.firstIdent()
+  of nkJoin, nkFromJoin:
+    node.joinLeft.firstIdent()
+  of nkAlias:
+    node.aliasExpr.firstIdent()
+  of nkColumnDef:
+    node.colName
+  of nkCase:
+    let operand = node.caseOperand.firstIdent()
+    if operand.len > 0:
+      return operand
+    for branch in node.caseBranches:
+      let branchIdent = branch.firstIdent()
+      if branchIdent.len > 0:
+        return branchIdent
+    node.caseElse.firstIdent()
+  of nkCaseWhen:
+    let whenIdent = node.caseWhen.firstIdent()
+    if whenIdent.len > 0:
+      return whenIdent
+    node.caseThen.firstIdent()
   else:
     if node.children.len > 0:
       firstIdent(node.children[0])
@@ -576,6 +604,22 @@ proc writeExpr(s: MsgStream; node: SqlNode) =
     s.pack_type(node.funcDistinct)
     s.writeKey("star")
     s.pack_type(node.funcStar)
+  of nkCase:
+    s.pack_map(4)
+    s.writeKey("variant")
+    s.pack_type("Case")
+    s.writeKey("operand")
+    s.writeExpr(node.caseOperand)
+    s.writeKey("branches")
+    s.pack_array(node.caseBranches.len)
+    for branch in node.caseBranches:
+      s.pack_map(2)
+      s.writeKey("when")
+      s.writeExpr(branch.caseWhen)
+      s.writeKey("then")
+      s.writeExpr(branch.caseThen)
+    s.writeKey("else_expr")
+    s.writeExpr(node.caseElse)
   of nkVectorLiteral:
     s.pack_map(2)
     s.writeKey("variant")
@@ -1202,4 +1246,4 @@ proc alopex_free_buffer*(p: pointer) {.exportc, dynlib, cdecl.} =
 
 proc alopex_parser_version*(): cstring {.exportc, dynlib, cdecl.} =
   ## Return SQL/PromQL wire contract version. Do NOT free this - it is static.
-  "0.2.0"
+  "0.3.0"

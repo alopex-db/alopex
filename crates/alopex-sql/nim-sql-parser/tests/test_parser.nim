@@ -168,6 +168,44 @@ suite "Expressions — literals":
     let cols = ast.children[0]
     check cols.children[0].kind == nkNull
 
+suite "Expressions — CASE":
+
+  test "searched CASE preserves ordered branches and ELSE":
+    let ast = parseSql("SELECT CASE WHEN TRUE THEN 1 WHEN FALSE THEN 2 ELSE 3 END")
+    let caseExpr = ast.children[0].children[0]
+    check caseExpr.kind == nkCase
+    check caseExpr.caseOperand == nil
+    check caseExpr.caseBranches.len == 2
+    check caseExpr.caseBranches[0].kind == nkCaseWhen
+    check caseExpr.caseBranches[0].caseWhen.kind == nkBoolLit
+    check caseExpr.caseBranches[0].caseThen.intVal == 1
+    check caseExpr.caseElse.intVal == 3
+
+  test "simple CASE preserves its operand":
+    let ast = parseSql("SELECT CASE id WHEN 1 THEN 'one' ELSE 'other' END FROM users")
+    let caseExpr = ast.children[0].children[0]
+    check caseExpr.kind == nkCase
+    check caseExpr.caseOperand.kind == nkIdentifier
+    check caseExpr.caseOperand.strVal == "id"
+    check caseExpr.caseBranches.len == 1
+    check caseExpr.caseBranches[0].caseWhen.intVal == 1
+
+  test "CASE debug output traverses discriminated-union fields":
+    let ast = parseSql("SELECT CASE id WHEN 1 THEN 'one' ELSE 'other' END FROM users")
+    let caseExpr = ast.children[0].children[0]
+    check $caseExpr == "Case(operand=Ident(id), When(Int(1), Str('one')), ELSE Str('other'))"
+
+  test "CASE requires at least one WHEN branch":
+    expect ParseError:
+      discard parseSql("SELECT CASE ELSE 1 END")
+
+  test "CASE supports nested expressions and an omitted ELSE":
+    let ast = parseSql("SELECT CASE WHEN TRUE THEN CASE WHEN FALSE THEN 1 ELSE 2 END END")
+    let outerCase = ast.children[0].children[0]
+    check outerCase.kind == nkCase
+    check outerCase.caseElse == nil
+    check outerCase.caseBranches[0].caseThen.kind == nkCase
+
 suite "Expressions — unary operators":
 
   test "NOT operator":

@@ -6,7 +6,7 @@ Nim parser boundary.
 
 ## Contract Overview
 
-- Contract version: `0.2.0`, returned by `alopex_parser_version()`.
+- Contract version: `0.3.0`, returned by `alopex_parser_version()`.
 - SQL entrypoint: `alopex_parse_sql`, returning an array of SQL statements.
 - PromQL entrypoint: `alopex_parse_promql`, returning one PromQL expression.
 - Both parse entrypoints return `CParseResult` and allocate success/error
@@ -100,6 +100,7 @@ Nim parser boundary.
 | `Like` | `expr: Expr`, `pattern: Expr`, `escape: Expr?`, `negated: bool` |
 | `InList` | `expr: Expr`, `list: [Expr]`, `negated: bool` |
 | `IsNull` | `expr: Expr`, `negated: bool` |
+| `Case` | `operand: Expr?`, `branches: [CaseWhen]`, `else_expr: Expr?`; `branches` is non-empty and evaluated in order |
 | `VectorLiteral` | `values: [float]` |
 | `ScalarSubquery` | `subquery: Statement` |
 | `InSubquery` | `expr: Expr`, `subquery: Statement`, `negated: bool` |
@@ -122,6 +123,12 @@ Nim parser boundary.
 `UnaryOp` is a string: `Not` or `Minus`.
 
 `Quantifier` is a string: `Any` or `All`.
+
+`CaseWhen = { "when": Expr, "then": Expr }`. `operand` is present for a
+simple `CASE operand WHEN …` expression and absent for a searched
+`CASE WHEN …` expression. `else_expr` is absent when SQL's implicit `NULL`
+else branch applies. The C ABI remains unchanged; `0.3.0` explicitly signals
+this additive AST variant to consumers.
 
 ## DDL Types
 
@@ -175,6 +182,7 @@ Nim parser boundary.
 | `nkInSubquery` | `ExprKind.variant = "InSubquery"` | `ExprKind::InSubquery` |
 | `nkExists` | `ExprKind.variant = "Exists"` | `ExprKind::Exists` |
 | `nkQuantified` | `ExprKind.variant = "Quantified"` | `ExprKind::Quantified` |
+| `nkCase` / `nkCaseWhen` | `ExprKind.variant = "Case"` with ordered `CaseWhen` maps | `ExprKind::Case` / `CaseWhen` |
 | `nkDataTypeVector` / `VECTOR(...)` type node | `DataType.variant = "Vector"` | `DataType::Vector` |
 
 The Nim implementation uses msgpack4nim low-level map writers so Rust-facing

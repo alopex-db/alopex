@@ -43,6 +43,7 @@ pub mod scalar;
 pub mod storage;
 #[cfg(all(feature = "tokio", not(target_arch = "wasm32")))]
 pub mod tokio_adapter;
+pub mod transaction_classifier;
 pub mod unified_error;
 
 // AST types
@@ -73,7 +74,7 @@ pub use planner::{
     LogicalPlan, NameResolver, PlannedStatement, Planner, PlannerError, PlanningDiagnostic,
     PlanningDiagnosticSeverity, ProjectedColumn, Projection, ResolvedColumn, ResolvedType,
     RoutingInput, SortExpr, TableReference, TableReferenceAccess, TableReferenceExtractor,
-    TableReferenceSource, TypeChecker, TypedAssignment, TypedExpr, TypedExprKind,
+    TableReferenceSource, TypeChecker, TypedAssignment, TypedCaseWhen, TypedExpr, TypedExprKind,
     plan_sql_for_routing, plan_statement_for_routing,
 };
 
@@ -99,6 +100,18 @@ pub use executor::{
 pub use async_api::{AsyncResult, AsyncRowStream, AsyncSqlTransaction, AsyncTxnBridge};
 #[cfg(all(feature = "tokio", not(target_arch = "wasm32")))]
 pub use tokio_adapter::{TokioAsyncSqlTransaction, TokioAsyncTxnBridge};
+pub use transaction_classifier::{
+    TRANSACTION_SQL_STATEMENT_MATRIX, TransactionCopyFormat, TransactionParsedStatement,
+    TransactionPlannedStatement, TransactionSqlCatalogV0_9, TransactionSqlClassification,
+    TransactionSqlControl, TransactionSqlParseError, TransactionSqlPlanningError,
+    TransactionSqlPreflightError, TransactionSqlPreflightFailure, TransactionSqlPreflightResult,
+    TransactionSqlRow, TransactionSqlRowMetadata, TransactionSqlStatus,
+    TransactionUnsupportedConstruct, classify_transaction_control, classify_transaction_copy,
+    classify_transaction_sql, classify_transaction_statement,
+    classify_unsupported_transaction_construct, parse_and_preflight_transaction_statement,
+    plan_transaction_statement_for_routing, preflight_transaction_copy, preflight_transaction_sql,
+    preflight_transaction_statement, transaction_sql_statement_matrix,
+};
 
 /// `ExecutionResult` の公開 API 名。
 pub type SqlResult = ExecutionResult;

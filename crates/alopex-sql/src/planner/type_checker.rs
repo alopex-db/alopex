@@ -15,7 +15,7 @@ use crate::planner::aggregate_expr::{AggregateExpr, AggregateFunction};
 use crate::planner::error::PlannerError;
 use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::name_resolver::NameResolver;
-use crate::planner::typed_expr::{Quantifier, TypedExpr, TypedExprKind};
+use crate::planner::typed_expr::{Quantifier, TypedCaseWhen, TypedExpr, TypedExprKind};
 use crate::planner::types::ResolvedType;
 
 /// A table visible to expression name resolution.
@@ -239,7 +239,112 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     span,
                 })
             }
+            ExprKind::Case {
+                operand,
+                branches,
+                else_expr,
+            } => self.infer_case_type_with_scope(
+                operand.as_deref(),
+                branches,
+                else_expr.as_deref(),
+                scope,
+                plan_subquery,
+                span,
+            ),
         }
+    }
+
+    fn infer_case_type_with_scope(
+        &self,
+        operand: Option<&Expr>,
+        branches: &[crate::ast::CaseWhen],
+        else_expr: Option<&Expr>,
+        scope: &[ScopedTable],
+        plan_subquery: &SubqueryPlanner<'_>,
+        span: Span,
+    ) -> Result<TypedExpr, PlannerError> {
+        if branches.is_empty() {
+            return Err(PlannerError::invalid_expression(
+                "CASE requires at least one WHEN branch".to_string(),
+            ));
+        }
+        let operand = operand
+            .map(|expr| self.infer_type_with_scope(expr, scope, plan_subquery))
+            .transpose()?;
+        let mut typed_branches = Vec::with_capacity(branches.len());
+        let mut result_type = ResolvedType::Null;
+
+        for branch in branches {
+            let when = self.infer_type_with_scope(&branch.when, scope, plan_subquery)?;
+            if let Some(operand) = &operand {
+                self.check_comparison_op(&operand.resolved_type, &when.resolved_type, when.span)?;
+            } else if !matches!(
+                when.resolved_type,
+                ResolvedType::Boolean | ResolvedType::Null
+            ) {
+                return Err(PlannerError::type_mismatch(
+                    "Boolean or Null",
+                    when.resolved_type.type_name().to_string(),
+                    when.span,
+                ));
+            }
+            let then = self.infer_type_with_scope(&branch.then, scope, plan_subquery)?;
+            result_type =
+                self.unify_case_result_type(&result_type, &then.resolved_type, then.span)?;
+            typed_branches.push(TypedCaseWhen { when, then });
+        }
+
+        let else_expr = else_expr
+            .map(|expr| self.infer_type_with_scope(expr, scope, plan_subquery))
+            .transpose()?;
+        if let Some(else_expr) = &else_expr {
+            result_type = self.unify_case_result_type(
+                &result_type,
+                &else_expr.resolved_type,
+                else_expr.span,
+            )?;
+        }
+
+        Ok(TypedExpr {
+            kind: TypedExprKind::Case {
+                operand: operand.map(Box::new),
+                branches: typed_branches,
+                else_expr: else_expr.map(Box::new),
+            },
+            resolved_type: result_type,
+            span,
+        })
+    }
+
+    fn unify_case_result_type(
+        &self,
+        current: &ResolvedType,
+        next: &ResolvedType,
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        if matches!(current, ResolvedType::Null) {
+            return Ok(next.clone());
+        }
+        if matches!(next, ResolvedType::Null) {
+            return Ok(current.clone());
+        }
+        if matches!(
+            (current, next),
+            (
+                ResolvedType::Integer
+                    | ResolvedType::BigInt
+                    | ResolvedType::Float
+                    | ResolvedType::Double,
+                ResolvedType::Integer
+                    | ResolvedType::BigInt
+                    | ResolvedType::Float
+                    | ResolvedType::Double,
+            )
+        ) {
+            return self.check_arithmetic_op(current, next, span);
+        }
+        self.check_comparison_op(current, next, span)?;
+        Ok(current.clone())
     }
 
     /// Infer the type of a literal value.
@@ -1262,6 +1367,23 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 }
                 TypedExprKind::IsNull { expr, .. } => {
                     walk(expr, group_key_indices, aggregate_signatures)
+                }
+                TypedExprKind::Case {
+                    operand,
+                    branches,
+                    else_expr,
+                } => {
+                    if let Some(operand) = operand {
+                        walk(operand, group_key_indices, aggregate_signatures)?;
+                    }
+                    for branch in branches {
+                        walk(&branch.when, group_key_indices, aggregate_signatures)?;
+                        walk(&branch.then, group_key_indices, aggregate_signatures)?;
+                    }
+                    if let Some(else_expr) = else_expr {
+                        walk(else_expr, group_key_indices, aggregate_signatures)?;
+                    }
+                    Ok(())
                 }
                 _ => Ok(()),
             }

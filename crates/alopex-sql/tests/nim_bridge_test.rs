@@ -7,7 +7,7 @@ use alopex_sql::{
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.2.0");
+    assert_eq!(parser_contract_version(), "0.3.0");
 }
 
 #[test]
@@ -32,6 +32,36 @@ fn parses_sql_ts_interval_as_a_distinct_literal() {
                 literal: Literal::Interval(value)
             } if value == "24 hours"
         )
+    ));
+}
+
+#[test]
+fn parses_case_expression_over_the_nim_messagepack_boundary() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT CASE id WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'other' END FROM users",
+    )
+    .expect("CASE should cross the Nim MessagePack boundary");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected Select");
+    };
+    assert!(matches!(
+        &select.projection[0],
+        SelectItem::Expr {
+            expr:
+                alopex_sql::Expr {
+                    kind: ExprKind::Case {
+                        operand: Some(operand),
+                        branches,
+                        else_expr: Some(_),
+                    },
+                    ..
+                },
+            ..
+        } if matches!(
+            &operand.kind,
+            ExprKind::ColumnRef { table: None, column } if column == "id"
+        ) && branches.len() == 2
     ));
 }
 

@@ -1608,3 +1608,102 @@ fn test_unknown_function_error() {
         matches!(err, PlannerError::UnsupportedFeature { feature, .. } if feature.contains("unknown_func"))
     );
 }
+
+#[test]
+fn test_infer_case_unifies_branch_types_and_keeps_simple_operand() {
+    let catalog = create_test_catalog();
+    let type_checker = TypeChecker::new(&catalog);
+    let table = catalog.get_table("users").unwrap();
+    let number = |value: &str| Expr {
+        kind: ExprKind::Literal {
+            literal: Literal::Number(value.to_string()),
+        },
+        span: test_span(),
+    };
+    let expr = Expr {
+        kind: ExprKind::Case {
+            operand: Some(Box::new(Expr {
+                kind: ExprKind::ColumnRef {
+                    table: None,
+                    column: "id".to_string(),
+                },
+                span: test_span(),
+            })),
+            branches: vec![
+                crate::ast::CaseWhen {
+                    when: number("1"),
+                    then: number("1.5"),
+                },
+                crate::ast::CaseWhen {
+                    when: number("2"),
+                    then: number("2"),
+                },
+            ],
+            else_expr: Some(Box::new(number("3"))),
+        },
+        span: test_span(),
+    };
+
+    let typed = type_checker.infer_type(&expr, table).unwrap();
+    assert_eq!(typed.resolved_type, ResolvedType::Double);
+    assert!(matches!(
+        typed.kind,
+        TypedExprKind::Case {
+            operand: Some(_),
+            branches,
+            else_expr: Some(_),
+        } if branches.len() == 2
+    ));
+}
+
+#[test]
+fn test_infer_searched_case_rejects_non_boolean_when() {
+    let catalog = create_test_catalog();
+    let type_checker = TypeChecker::new(&catalog);
+    let table = catalog.get_table("users").unwrap();
+    let expr = Expr {
+        kind: ExprKind::Case {
+            operand: None,
+            branches: vec![crate::ast::CaseWhen {
+                when: Expr {
+                    kind: ExprKind::Literal {
+                        literal: Literal::Number("1".to_string()),
+                    },
+                    span: test_span(),
+                },
+                then: Expr {
+                    kind: ExprKind::Literal {
+                        literal: Literal::String("not reached".to_string()),
+                    },
+                    span: test_span(),
+                },
+            }],
+            else_expr: None,
+        },
+        span: test_span(),
+    };
+
+    assert!(type_checker.infer_type(&expr, table).is_err());
+}
+
+#[test]
+fn test_infer_case_rejects_an_empty_branch_list_from_a_programmatic_ast() {
+    let catalog = create_test_catalog();
+    let type_checker = TypeChecker::new(&catalog);
+    let table = catalog.get_table("users").unwrap();
+    let expr = Expr {
+        kind: ExprKind::Case {
+            operand: None,
+            branches: Vec::new(),
+            else_expr: Some(Box::new(Expr {
+                kind: ExprKind::Literal {
+                    literal: Literal::Number("1".to_string()),
+                },
+                span: test_span(),
+            })),
+        },
+        span: test_span(),
+    };
+
+    assert!(type_checker.infer_type(&expr, table).is_err());
+}

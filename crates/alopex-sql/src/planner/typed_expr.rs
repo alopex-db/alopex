@@ -186,6 +186,20 @@ pub enum TypedExprKind {
         /// Planned subquery.
         subquery: Box<LogicalPlan>,
     },
+
+    /// A lazily evaluated SQL CASE expression.
+    Case {
+        operand: Option<Box<TypedExpr>>,
+        branches: Vec<TypedCaseWhen>,
+        else_expr: Option<Box<TypedExpr>>,
+    },
+}
+
+/// One ordered, typed `WHEN … THEN …` branch in a CASE expression.
+#[derive(Debug, Clone)]
+pub struct TypedCaseWhen {
+    pub when: TypedExpr,
+    pub then: TypedExpr,
 }
 
 /// Quantifier for quantified subquery comparisons.

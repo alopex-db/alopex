@@ -32,5 +32,14 @@ pub use range_read::{
 pub use table::{TableScanIterator, TableStorage};
 pub use value::SqlValue;
 
+// A transaction adapter must complete this parser/classifier boundary before
+// it asks storage to acquire a distributed participant.  Re-exporting it at
+// the storage boundary keeps that precondition visible without altering the
+// legacy local `SqlTransaction` API.
+pub use crate::transaction_classifier::{
+    TransactionSqlClassification, TransactionSqlPreflightError, TransactionSqlPreflightFailure,
+    TransactionSqlPreflightResult, preflight_transaction_sql, preflight_transaction_statement,
+};
+
 #[cfg(test)]
 mod disk;

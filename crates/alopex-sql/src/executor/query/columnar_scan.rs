@@ -910,6 +910,22 @@ fn collect_column_indices(expr: &TypedExpr, acc: &mut BTreeSet<usize>) {
                 collect_column_indices(arg, acc);
             }
         }
+        TypedExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            if let Some(operand) = operand {
+                collect_column_indices(operand, acc);
+            }
+            for branch in branches {
+                collect_column_indices(&branch.when, acc);
+                collect_column_indices(&branch.then, acc);
+            }
+            if let Some(else_expr) = else_expr {
+                collect_column_indices(else_expr, acc);
+            }
+        }
         _ => {}
     }
 }

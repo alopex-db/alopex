@@ -78,7 +78,17 @@ suite "FFI boundary (issue #40)":
 suite "Skulk query parser FFI contract":
 
   test "contract version covers SQL-TS and PromQL payloads":
-    check $alopex_parser_version() == "0.2.0"
+    check $alopex_parser_version() == "0.3.0"
+
+  test "malformed CASE returns prkError without poisoning subsequent calls":
+    let failed = callFfi("SELECT CASE ELSE 1 END")
+    check failed.kind == prkError
+    check takeError(failed).len > 0
+
+    let recovered = callFfi("SELECT CASE WHEN TRUE THEN 1 ELSE 0 END")
+    check recovered.kind == prkOk
+    let doc = toJsonNode(takePayload(recovered))
+    check doc[0]["kind"]["projection"][0]["expr"]["kind"]["variant"].getStr() == "Case"
 
   test "SQL-TS interval is emitted as an explicit literal variant":
     let res = callFfi("SELECT NOW() - INTERVAL '24 hours'")

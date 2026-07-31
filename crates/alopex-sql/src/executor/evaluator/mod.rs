@@ -5,6 +5,7 @@
 //! via [`EvalContext`] and returns [`SqlValue`] results or [`ExecutorError`].
 
 pub(crate) mod binary_op;
+mod case_expr;
 mod column_ref;
 pub(crate) mod conditional;
 mod context;
@@ -50,6 +51,11 @@ pub fn evaluate(expr: &TypedExpr, ctx: &EvalContext<'_>) -> Result<SqlValue> {
             distinct,
             star,
         } => function_call::evaluate_function_call(name, args, *distinct, *star, ctx),
+        TypedExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => case_expr::evaluate_case(operand.as_deref(), branches, else_expr.as_deref(), ctx),
         TypedExprKind::Like {
             expr,
             pattern,

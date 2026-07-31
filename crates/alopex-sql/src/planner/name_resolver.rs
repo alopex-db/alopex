@@ -340,6 +340,23 @@ impl<'a, C: Catalog + ?Sized> NameResolver<'a, C> {
             }
 
             ExprKind::IsNull { expr: e, .. } => self.resolve_expr_recursive(e, table),
+            ExprKind::Case {
+                operand,
+                branches,
+                else_expr,
+            } => {
+                if let Some(operand) = operand {
+                    self.resolve_expr_recursive(operand, table)?;
+                }
+                for branch in branches {
+                    self.resolve_expr_recursive(&branch.when, table)?;
+                    self.resolve_expr_recursive(&branch.then, table)?;
+                }
+                if let Some(else_expr) = else_expr {
+                    self.resolve_expr_recursive(else_expr, table)?;
+                }
+                Ok(())
+            }
             ExprKind::ScalarSubquery { .. }
             | ExprKind::InSubquery { .. }
             | ExprKind::Exists { .. }

@@ -1,5 +1,5 @@
 # Package
-version       = "0.2.0"
+version       = "0.3.0"
 author        = "Alopex Team"
 description   = "SQL parser for Alopex DB — trial implementation in Nim"
 license       = "Apache-2.0"

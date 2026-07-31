@@ -62,6 +62,8 @@ type
     nkInSubquery
     nkExists
     nkQuantified
+    nkCase
+    nkCaseWhen
 
   BinaryOpKind* = enum
     opEq, opNeq, opLt, opLe, opGt, opGe
@@ -118,6 +120,13 @@ type
       colName*: string
       colType*: SqlNode
       colConstraints*: seq[SqlNode]
+    of nkCase:
+      caseOperand*: SqlNode
+      caseBranches*: seq[SqlNode]
+      caseElse*: SqlNode
+    of nkCaseWhen:
+      caseWhen*: SqlNode
+      caseThen*: SqlNode
     else:
       children*: seq[SqlNode]
 
@@ -199,6 +208,14 @@ proc fillMissingSpans*(node: SqlNode; fallback: Span) =
     node.colType.fillMissingSpans(node.span)
     for child in node.colConstraints:
       child.fillMissingSpans(node.span)
+  of nkCase:
+    node.caseOperand.fillMissingSpans(node.span)
+    for branch in node.caseBranches:
+      branch.fillMissingSpans(node.span)
+    node.caseElse.fillMissingSpans(node.span)
+  of nkCaseWhen:
+    node.caseWhen.fillMissingSpans(node.span)
+    node.caseThen.fillMissingSpans(node.span)
   else:
     for child in node.children:
       child.fillMissingSpans(node.span)
@@ -241,6 +258,21 @@ proc `$`*(node: SqlNode): string =
     result = "Alias(" & $node.aliasExpr & " AS " & node.aliasName & ")"
   of nkColumnDef:
     result = "ColDef(" & node.colName & " " & $node.colType & ")"
+  of nkCase:
+    result = "Case("
+    if node.caseOperand != nil:
+      result &= "operand=" & $node.caseOperand
+    for branch in node.caseBranches:
+      if result != "Case(":
+        result &= ", "
+      result &= $branch
+    if node.caseElse != nil:
+      if result != "Case(":
+        result &= ", "
+      result &= "ELSE " & $node.caseElse
+    result &= ")"
+  of nkCaseWhen:
+    result = "When(" & $node.caseWhen & ", " & $node.caseThen & ")"
   else:
     result = $node.kind & "("
     for i, child in node.children:

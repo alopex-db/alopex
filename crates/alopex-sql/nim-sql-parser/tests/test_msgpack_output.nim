@@ -107,6 +107,21 @@ suite "MessagePack output - contract shape":
     check vectorExpr["variant"].getStr() == "VectorLiteral"
     check vectorExpr["values"].len == 3
 
+  test "CASE emits simple operand, ordered branches, and optional ELSE":
+    let caseExpr = selectKind("SELECT CASE id WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'other' END FROM users")["projection"][0]["expr"]["kind"]
+    check caseExpr["variant"].getStr() == "Case"
+    check caseExpr["operand"]["kind"]["variant"].getStr() == "ColumnRef"
+    check caseExpr["branches"].len == 2
+    check caseExpr["branches"][0]["when"]["kind"]["literal"]["value"].getStr() == "1"
+    check caseExpr["branches"][1]["then"]["kind"]["literal"]["value"].getStr() == "two"
+    check caseExpr["else_expr"]["kind"]["literal"]["value"].getStr() == "other"
+
+  test "CASE emits nil for omitted operand and ELSE":
+    let caseExpr = selectKind("SELECT CASE WHEN TRUE THEN 1 END")["projection"][0]["expr"]["kind"]
+    check caseExpr["variant"].getStr() == "Case"
+    check caseExpr["operand"].kind == JNull
+    check caseExpr["else_expr"].kind == JNull
+
   test "CREATE INDEX emits method and WITH options":
     let doc = payloadJson("CREATE INDEX idx_doc_embedding ON documents (embedding) USING HNSW WITH (m = 16, ef_construction = 200)")
     let create = doc.stmtKind()
