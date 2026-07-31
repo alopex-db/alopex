@@ -1,0 +1,144 @@
+{
+  "schema_version": "alopex.phase3-completion/v0.9",
+  "target_version": "v0.9.0",
+  "phase": 3,
+  "assessment_kind": "independent static evidence gate",
+  "assessed_source_sha": "c5fa8f16f80d0bdd3536b22ffc78393330befab8",
+  "task_execution": {
+    "task": "3.30",
+    "status": "completed-with-blocked-verdict",
+    "feature_completion_claim": false,
+    "release_authorization": "none"
+  },
+  "evidence_audit": {
+    "implementation_logs": {
+      "expected_tasks": 29,
+      "found_logs": 29,
+      "task_range": "3.1-3.29",
+      "status": "pass"
+    },
+    "task_markers_before_completion": {
+      "completed": 29,
+      "in_progress": ["3.30"],
+      "status": "pass"
+    },
+    "manifest": {
+      "path": "evidence/changefeed-manifest.json",
+      "sha256": "1ceafa131515da91b7bb52e9c25b5deab8d78ae5925eadb55c274c57ca989102",
+      "lifecycle_rows": 64,
+      "change_kind_rows": 11,
+      "source_snapshot_hashes_verified": 20,
+      "status": "pass"
+    },
+    "inherited_ledger": {
+      "path": "evidence/v09-phase3-inherited-ledger.json",
+      "sha256": "818251e39b398b8542e7942dd1c8501feb3a308cd9d9b4e0a3e06e6adc907815",
+      "rows": 33,
+      "coverage": "I-01-I-26 including suffix rows, plus F2/F3/F4",
+      "status": "pass"
+    },
+    "requirements_crosswalk": {
+      "path": "evidence/v09-phase3-crosswalk.json",
+      "sha256": "7022e877a023737e7c22918ef45168f8a4ae9d47eb5f41411613f478ad25f607",
+      "criteria": 18,
+      "verification_views_per_criterion": ["unit", "integration", "cross_surface"],
+      "status": "pass"
+    },
+    "surface_parity_fixture": {
+      "path": "tests/fixtures/changefeed_surface_parity.json",
+      "sha256": "2036e884e6d4ece5849158102074ee6c4acb97026fea28b5b898fe79db68509f",
+      "status": "pass"
+    },
+    "recorded_test_evidence": {
+      "source": "Implementation Logs/task-3-20 through task-3-25 and the crosswalk verification references",
+      "covers": ["committed journal/restart", "range movement/catch-up/reorder/node failure", "retention/lag/backpressure/close/reconnect", "ack/resume/cancel three-attempt replay", "unsupported SQL/DataFrame/change kinds", "embedded/HTTP/gRPC/CLI/Python sync/async parity"],
+      "fresh_cargo_or_python_run": false,
+      "reason": "This gate changes only evidence documents. The referenced tests were recorded by their implementation tasks; source commit c5fa8f1 pre-commit all-target Clippy passed. Avoiding a redundant cache-generating rebuild does not substitute for the recorded fixture evidence.",
+      "status": "evidence-present"
+    }
+  },
+  "completion_criteria": [
+    {
+      "id": "event-schema-and-range-order",
+      "evidence": ["evidence/changefeed-manifest.json", "crates/alopex-cluster/tests/changefeed_durability.rs", "crates/alopex-cluster/tests/changefeed_range_movement.rs"],
+      "status": "evidence-present"
+    },
+    {
+      "id": "checkpoint-ack-resume-and-idempotency",
+      "evidence": ["crates/alopex-cluster/tests/changefeed_checkpoint.rs", "crates/alopex-cluster/tests/changefeed_ack_replay_three_attempts.rs"],
+      "status": "evidence-present"
+    },
+    {
+      "id": "retention-backpressure-and-terminal-outcomes",
+      "evidence": ["crates/alopex-cluster/tests/changefeed_backpressure.rs"],
+      "status": "evidence-present"
+    },
+    {
+      "id": "public-surface-parity-and-unsupported-boundary",
+      "evidence": ["evidence/changefeed-manifest.json", "tests/fixtures/changefeed_surface_parity.json", "crates/alopex-sql/tests/changefeed_boundary.rs", "crates/alopex-dataframe/tests/changefeed_boundary.rs"],
+      "status": "evidence-present"
+    },
+    {
+      "id": "whole-workspace-ledger-and-criterion-crosswalk",
+      "evidence": ["evidence/v09-phase3-inherited-ledger.json", "evidence/v09-phase3-crosswalk.json"],
+      "status": "evidence-present"
+    },
+    {
+      "id": "Durable-prerequisite",
+      "evidence": ["evidence/v09-phase3-common-gate.json", "crates/alopex-cluster/src/changefeed/durable.rs:compiled"],
+      "status": "blocked",
+      "blockers": ["service_available=false", "durable_storage=false", "range_routing=false", "retention=false", "authenticated Durable dispatcher has not been verified"]
+    },
+    {
+      "id": "target-version-verifier-report",
+      "evidence": ["evidence/v09-phase3-verifier-input.json", "docs/v09-phase3-verifier-handoff.md"],
+      "status": "blocked",
+      "blockers": ["The handoff is an input contract, not an executed v0.9 common-gate report.", "Candidate Rust/Python artifact identity and digest are not supplied.", "The common-gate source_sha and verifier-input source_sha do not equal assessed_source_sha; the eventual gate must hash and run from its candidate checkout."]
+    },
+    {
+      "id": "cross-phase-and-release-wide-boundary",
+      "evidence": ["evidence/v09-phase3-common-gate.json", "docs/v09-phase3-gate-input.md"],
+      "status": "blocked-outside-phase-3",
+      "blockers": ["Phase 1 range-contract approval/evidence is not asserted by this Phase 3 audit.", "Phase 2 CRDT and Phase 4 distributed-transaction status belong to the release-wide gate.", "No target-version v0.9 release-wide gate has run."]
+    }
+  ],
+  "handoff_input_integrity": {
+    "common_gate": {
+      "path": "evidence/v09-phase3-common-gate.json",
+      "sha256": "21d987362993501067ab3dadd08594beccaabf0ae3fa3e4937317ee32e488785",
+      "input_hashes_verified": 5,
+      "fail_closed": true,
+      "verdict": "blocked",
+      "recorded_source_sha": "552e40be2fa36f5de3547b633786435a92487a60",
+      "matches_assessed_source_sha": false
+    },
+    "verifier_handoff": {
+      "path": "evidence/v09-phase3-verifier-input.json",
+      "sha256": "7d712001e523e3765bc09ca11c196a203268c04876ec323536111a1aa3cf5827",
+      "input_hashes_verified": 5,
+      "durable_verdict": "blocked",
+      "recorded_source_sha": "35777be637a0b9095b76bd7667e2af56fc229489",
+      "matches_assessed_source_sha": false
+    },
+    "legacy_gate_substitution": "forbidden; v0.7/v0.8 gates and verifiers are not a v0.9 target-version result"
+  },
+  "verdict": {
+    "phase3_feature": "blocked",
+    "release_ready": "not-assessed-and-not-authorized",
+    "rationale": "The implementation and regression-evidence inputs are present, but the required compatible authenticated Durable capability, current-checkout target-version verifier report, and release-wide dependency decision are absent."
+  },
+  "next_owners": [
+    {
+      "owner": "cluster/Durable owner",
+      "required_result": "Supply a compatible authenticated Chirps Durable profile with verified service availability, durable storage, range routing, retention, and dispatcher evidence."
+    },
+    {
+      "owner": "release-wide common gate / alopex-tools",
+      "required_result": "Consume the v0.9 manifest, ledger, crosswalk, and fixture from one candidate checkout; validate hashes and missing/unknown/duplicate rows; record candidate Rust/Python artifact identities and an explicit target-version verdict."
+    },
+    {
+      "owner": "Phase 1, Phase 2, Phase 4, and release-wide gate owners",
+      "required_result": "Provide their approved evidence and perform the separate v0.9 release-wide decision. This Phase 3 handoff supplies no substitute and grants no release action."
+    }
+  ]
+}
