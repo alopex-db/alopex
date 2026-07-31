@@ -35,6 +35,15 @@ The build output is one of:
 - macOS: `libalopex_sql_parser.dylib`
 - Windows: `alopex_sql_parser.dll`
 
+The library exports `alopex_parse_sql`, `alopex_parse_promql`,
+`alopex_parser_version`, `alopex_parser_init`, and `alopex_free_buffer`.
+The current SQL/PromQL MessagePack contract version is `0.2.0`.
+
+For Skulk development, copy the host artifact into
+`crates/skulk/nim-parser/vendor/<target-triple>/` in the Skulk repository.
+Skulk's build script also accepts `SKULK_NIM_PARSER_LIB_DIR` for an explicit
+artifact directory.
+
 ## Rust checks
 
 Cargo automatically discovers the generated library in the parser directory.

@@ -2,6 +2,11 @@ use crate::ast::{Statement, StatementKind};
 use crate::error::{ParserError, Result};
 use crate::nim_ffi::{self, OwnedBuffer, ParseResultKind};
 
+/// Return the SQL/PromQL MessagePack wire contract version exported by Nim.
+pub fn parser_contract_version() -> String {
+    nim_ffi::parser_contract_version()
+}
+
 pub fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
     if sql.as_bytes().contains(&0) {
         return Err(ParserError::UnexpectedToken {

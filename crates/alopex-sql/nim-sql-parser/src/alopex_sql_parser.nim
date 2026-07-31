@@ -6,7 +6,7 @@
 
 import std/[strutils]
 import msgpack4nim
-import ast, parser
+import ast, parser, promql_ast, promql_parser
 
 # --- C ABI types ---
 
@@ -186,6 +186,12 @@ proc writeLiteralKind(s: MsgStream; node: SqlNode) =
     s.pack_map(2)
     s.writeKey("variant")
     s.pack_type("String")
+    s.writeKey("value")
+    s.pack_type(node.strVal)
+  of nkIntervalLit:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Interval")
     s.writeKey("value")
     s.pack_type(node.strVal)
   of nkBoolLit:
@@ -450,7 +456,7 @@ proc writeExpr(s: MsgStream; node: SqlNode) =
   s.writeKey("kind")
 
   case node.kind
-  of nkIntLit, nkFloatLit, nkStringLit, nkBoolLit, nkNull:
+  of nkIntLit, nkFloatLit, nkStringLit, nkIntervalLit, nkBoolLit, nkNull:
     s.pack_map(2)
     s.writeKey("variant")
     s.pack_type("Literal")
@@ -945,6 +951,172 @@ proc encodeSqlToMsgPack*(sql: string): string =
   ## Parse SQL and encode it as MessagePack bytes.
   astToMsgPack(parseSqlStatements(sql))
 
+# --- PromQL MessagePack contract ---
+
+proc writePromPosition(s: MsgStream; position: PromPosition) =
+  s.pack_map(3)
+  s.writeKey("line")
+  s.pack_type(position.line)
+  s.writeKey("column")
+  s.pack_type(position.column)
+  s.writeKey("offset")
+  s.pack_type(position.offset)
+
+proc writePromSpan(s: MsgStream; span: PromSpan) =
+  s.pack_map(2)
+  s.writeKey("start")
+  s.writePromPosition(span.start)
+  s.writeKey("end")
+  s.writePromPosition(span.`end`)
+
+proc writePromDuration(s: MsgStream; duration: PromDuration) =
+  s.pack_map(2)
+  s.writeKey("raw")
+  s.pack_type(duration.raw)
+  s.writeKey("milliseconds")
+  s.pack_type(duration.milliseconds)
+
+proc normalizedMatchOp(op: PromMatchOp): string =
+  case op
+  of pmEqual: "Equal"
+  of pmNotEqual: "NotEqual"
+  of pmRegex: "Regex"
+  of pmNotRegex: "NotRegex"
+
+proc normalizedPromBinaryOp(op: PromBinaryOp): string =
+  case op
+  of pbAdd: "Add"
+  of pbSub: "Sub"
+  of pbMul: "Mul"
+  of pbDiv: "Div"
+  of pbMod: "Mod"
+  of pbPow: "Pow"
+
+proc normalizedPromUnaryOp(op: PromUnaryOp): string =
+  case op
+  of puPlus: "Plus"
+  of puMinus: "Minus"
+
+proc writePromExpr(s: MsgStream; expr: PromExpr)
+
+proc writePromMatcher(s: MsgStream; matcher: PromLabelMatcher) =
+  s.pack_map(4)
+  s.writeKey("name")
+  s.pack_type(matcher.name)
+  s.writeKey("op")
+  s.pack_type(normalizedMatchOp(matcher.op))
+  s.writeKey("value")
+  s.pack_type(matcher.value)
+  s.writeKey("span")
+  s.writePromSpan(matcher.span)
+
+proc writePromExprKind(s: MsgStream; expr: PromExpr) =
+  case expr.kind
+  of peVectorSelector:
+    s.pack_map(4)
+    s.writeKey("variant")
+    s.pack_type("VectorSelector")
+    s.writeKey("metric")
+    s.writeStringOpt(expr.metric)
+    s.writeKey("matchers")
+    s.pack_array(expr.matchers.len)
+    for matcher in expr.matchers:
+      s.writePromMatcher(matcher)
+    s.writeKey("offset")
+    if expr.hasOffset:
+      s.writePromDuration(expr.offset)
+    else:
+      s.writeNil()
+  of peMatrixSelector:
+    s.pack_map(4)
+    s.writeKey("variant")
+    s.pack_type("MatrixSelector")
+    s.writeKey("selector")
+    s.writePromExpr(expr.inner)
+    s.writeKey("range")
+    s.writePromDuration(expr.range)
+    s.writeKey("offset")
+    if expr.hasOffset:
+      s.writePromDuration(expr.offset)
+    else:
+      s.writeNil()
+  of peNumberLiteral:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("NumberLiteral")
+    s.writeKey("value")
+    s.pack_type(expr.numberRaw)
+  of peStringLiteral:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("StringLiteral")
+    s.writeKey("value")
+    s.pack_type(expr.stringValue)
+  of peFunctionCall:
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("FunctionCall")
+    s.writeKey("name")
+    s.pack_type(expr.name)
+    s.writeKey("args")
+    s.pack_array(expr.args.len)
+    for argument in expr.args:
+      s.writePromExpr(argument)
+  of peAggregate:
+    s.pack_map(5)
+    s.writeKey("variant")
+    s.pack_type("Aggregate")
+    s.writeKey("op")
+    s.pack_type(expr.name)
+    s.writeKey("expr")
+    s.writePromExpr(expr.args[0])
+    s.writeKey("grouping")
+    if expr.groupingKind == pgNone:
+      s.writeNil()
+    else:
+      s.pack_array(expr.groupingLabels.len)
+      for label in expr.groupingLabels:
+        s.pack_type(label)
+    s.writeKey("without")
+    s.pack_type(expr.groupingKind == pgWithout)
+  of peBinary:
+    s.pack_map(4)
+    s.writeKey("variant")
+    s.pack_type("BinaryOp")
+    s.writeKey("left")
+    s.writePromExpr(expr.left)
+    s.writeKey("op")
+    s.pack_type(normalizedPromBinaryOp(expr.binaryOp))
+    s.writeKey("right")
+    s.writePromExpr(expr.right)
+  of peUnary:
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("UnaryOp")
+    s.writeKey("op")
+    s.pack_type(normalizedPromUnaryOp(expr.unaryOp))
+    s.writeKey("expr")
+    s.writePromExpr(expr.operand)
+  of peParen:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Paren")
+    s.writeKey("expr")
+    s.writePromExpr(expr.inner)
+
+proc writePromExpr(s: MsgStream; expr: PromExpr) =
+  s.pack_map(2)
+  s.writeKey("kind")
+  s.writePromExprKind(expr)
+  s.writeKey("span")
+  s.writePromSpan(expr.span)
+
+proc encodePromQlToMsgPack*(query: string): string =
+  ## Parse one PromQL expression and encode its independent wire AST.
+  var stream = MsgStream.init()
+  stream.writePromExpr(parsePromQl(query))
+  result = stream.data
+
 # --- Nim runtime initialization ---
 
 proc NimMain() {.importc.}
@@ -1005,11 +1177,29 @@ proc alopex_parse_sql*(input: cstring, length: cint): CParseResult {.exportc, dy
   except Defect:
     result = errorResult(internalDefectPrefix & getCurrentExceptionMsg())
 
+proc alopex_parse_promql*(input: cstring, length: cint): CParseResult {.exportc, dynlib, cdecl.} =
+  ## Parse one PromQL expression and return MessagePack-serialized AST bytes.
+  ## Caller must free buffer_ptr or error_ptr with alopex_free_buffer.
+  try:
+    let query = if length > 0: ($input)[0 ..< length] else: $input
+    let payload = encodePromQlToMsgPack(query)
+    result = CParseResult(
+      kind: prkOk,
+      buffer_ptr: copyToOwnedBuffer(payload),
+      buffer_len: cint(payload.len),
+      error_ptr: nil,
+      error_len: 0,
+    )
+  except CatchableError:
+    result = errorResult(getCurrentExceptionMsg())
+  except Defect:
+    result = errorResult(internalDefectPrefix & getCurrentExceptionMsg())
+
 proc alopex_free_buffer*(p: pointer) {.exportc, dynlib, cdecl.} =
   ## Free a buffer returned by alopex_parse_sql.
   if p != nil:
     dealloc(p)
 
 proc alopex_parser_version*(): cstring {.exportc, dynlib, cdecl.} =
-  ## Return parser version string. Do NOT free this - it is static.
-  "0.1.0"
+  ## Return SQL/PromQL wire contract version. Do NOT free this - it is static.
+  "0.2.0"

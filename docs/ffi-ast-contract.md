@@ -1,8 +1,18 @@
-# Alopex SQL FFI AST MessagePack Contract
+# Alopex Query Parser FFI AST MessagePack Contract
 
-This document defines the MessagePack payload emitted by
-`nim-sql-parser/src/alopex_sql_parser.nim` and consumed by the future Rust FFI
-bridge. It is the wire contract for the Nim parser boundary.
+This document defines the SQL and PromQL MessagePack payloads emitted by
+`nim-sql-parser/src/alopex_sql_parser.nim`. It is the wire contract for the
+Nim parser boundary.
+
+## Contract Overview
+
+- Contract version: `0.2.0`, returned by `alopex_parser_version()`.
+- SQL entrypoint: `alopex_parse_sql`, returning an array of SQL statements.
+- PromQL entrypoint: `alopex_parse_promql`, returning one PromQL expression.
+- Both parse entrypoints return `CParseResult` and allocate success/error
+  buffers that the caller releases with `alopex_free_buffer`.
+- A non-zero parse error is returned as `prkError`; no Nim exception crosses
+  the C ABI boundary.
 
 ## Encoding Rules
 
@@ -102,6 +112,7 @@ bridge. It is the wire contract for the Nim parser boundary.
 | --- | --- |
 | `Number` | `value: string` |
 | `String` | `value: string` |
+| `Interval` | `value: string` |
 | `Boolean` | `value: bool` |
 | `Null` | none |
 
@@ -169,3 +180,68 @@ bridge. It is the wire contract for the Nim parser boundary.
 The Nim implementation uses msgpack4nim low-level map writers so Rust-facing
 keys can remain `distinct`, `from`, `end`, and other Rust AST names without
 using Nim reserved words as Nim identifiers.
+
+## PromQL Payload
+
+The PromQL root is one `PromExpr`:
+
+`PromExpr = { "kind": PromExprKind, "span": PromSpan }`
+
+PromQL positions use zero-based byte offsets and one-based lines/columns.
+The end position is exclusive.
+
+`PromPosition`
+
+| Field | Type |
+| --- | --- |
+| `line` | integer |
+| `column` | integer |
+| `offset` | integer |
+
+`PromSpan = { "start": PromPosition, "end": PromPosition }`
+
+`PromDuration`
+
+| Field | Type |
+| --- | --- |
+| `raw` | string |
+| `milliseconds` | signed 64-bit integer |
+
+Durations accept descending, non-repeated `ms/s/m/h/d/w/y` units. `y` is
+365 days and `w` is 7 days. Range durations are positive; an offset duration
+may have a leading sign.
+
+`PromExprKind` variants:
+
+| Variant | Fields |
+| --- | --- |
+| `VectorSelector` | `metric: string?`, `matchers: [PromLabelMatcher]`, `offset: PromDuration?` |
+| `MatrixSelector` | `selector: PromExpr`, `range: PromDuration`, `offset: PromDuration?` |
+| `NumberLiteral` | `value: string` |
+| `StringLiteral` | `value: string` |
+| `FunctionCall` | `name: string`, `args: [PromExpr]` |
+| `Aggregate` | `op: string`, `expr: PromExpr`, `grouping: [string]?`, `without: bool` |
+| `BinaryOp` | `left: PromExpr`, `op: PromBinaryOp`, `right: PromExpr` |
+| `UnaryOp` | `op: PromUnaryOp`, `expr: PromExpr` |
+| `Paren` | `expr: PromExpr` |
+
+`PromLabelMatcher`
+
+| Field | Type |
+| --- | --- |
+| `name` | string |
+| `op` | `Equal`, `NotEqual`, `Regex`, or `NotRegex` |
+| `value` | string |
+| `span` | `PromSpan` |
+
+`PromBinaryOp` is `Add`, `Sub`, `Mul`, `Div`, `Mod`, or `Pow`. Precedence
+matches Prometheus: addition/subtraction, then multiplication/division/modulo,
+then right-associative power.
+
+`PromUnaryOp` is `Plus` or `Minus`.
+
+The grammar entrypoint accepts metric selectors, all four label matcher
+operators, range selectors, offset, function calls, `sum/avg/max/min/count`
+aggregation with `by` or `without`, numeric/string literals, parentheses, and
+the arithmetic operators above. Expression nesting is limited to 64. Syntax
+errors report line, column, byte offset, and the nearby token.

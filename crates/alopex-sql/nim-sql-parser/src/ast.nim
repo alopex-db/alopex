@@ -26,6 +26,7 @@ type
     nkStatementList
     nkIdentifier
     nkStringLit
+    nkIntervalLit
     nkIntLit
     nkFloatLit
     nkBoolLit
@@ -92,7 +93,7 @@ type
     nullsFirst*: int        ## -1 = omitted, 0 = LAST, 1 = FIRST
     quantifier*: QuantifierKind
     case kind*: SqlNodeKind
-    of nkIdentifier, nkStringLit:
+    of nkIdentifier, nkStringLit, nkIntervalLit:
       strVal*: string
     of nkIntLit:
       intVal*: int64
@@ -142,6 +143,9 @@ proc newIdent*(name: string; span: Span = emptySpan()): SqlNode =
 proc newStringLit*(val: string; span: Span = emptySpan()): SqlNode =
   SqlNode(kind: nkStringLit, strVal: val, span: span, orderAsc: -1, nullsFirst: -1)
 
+proc newIntervalLit*(val: string; span: Span = emptySpan()): SqlNode =
+  SqlNode(kind: nkIntervalLit, strVal: val, span: span, orderAsc: -1, nullsFirst: -1)
+
 proc newIntLit*(val: int64; span: Span = emptySpan()): SqlNode =
   SqlNode(kind: nkIntLit, intVal: val, span: span, orderAsc: -1, nullsFirst: -1)
 
@@ -178,7 +182,7 @@ proc fillMissingSpans*(node: SqlNode; fallback: Span) =
   if node.span.isEmpty:
     node.span = fallback
   case node.kind
-  of nkIdentifier, nkStringLit, nkIntLit, nkFloatLit, nkBoolLit, nkNull, nkStar:
+  of nkIdentifier, nkStringLit, nkIntervalLit, nkIntLit, nkFloatLit, nkBoolLit, nkNull, nkStar:
     discard
   of nkBinaryOp:
     node.binLeft.fillMissingSpans(node.span)
@@ -208,6 +212,8 @@ proc `$`*(node: SqlNode): string =
     result = "Ident(" & node.strVal & ")"
   of nkStringLit:
     result = "Str('" & node.strVal & "')"
+  of nkIntervalLit:
+    result = "Interval('" & node.strVal & "')"
   of nkIntLit:
     result = "Int(" & $node.intVal & ")"
   of nkFloatLit:

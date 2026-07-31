@@ -96,6 +96,29 @@ suite "Tokenizer":
 
 suite "Expressions — literals":
 
+  test "SQL-TS INTERVAL literal is preserved":
+    let ast = parseSql("SELECT NOW() - INTERVAL '24 hours'")
+    let expr = ast.children[0].children[0]
+    check expr.kind == nkBinaryOp
+    check expr.binRight.kind == nkIntervalLit
+    check expr.binRight.strVal == "24 hours"
+
+  test "SQL-TS reserved names are accepted as functions and columns":
+    let ast = parseSql(
+      "SELECT TIME_BUCKET(INTERVAL '1 hour', time) AS bucket, " &
+      "FIRST(value, time), LAST(value, time), RATE(value), DELTA(value), " &
+      "DERIVATIVE(value), HISTOGRAM_QUANTILE(0.95, value) " &
+      "FROM cpu WHERE time > NOW() - INTERVAL '24 hours' " &
+      "GROUP BY bucket ORDER BY bucket LIMIT 24"
+    )
+    check ast.kind == nkSelect
+    check ast.children[0].children.len == 7
+
+  test "qualified time column is accepted":
+    let ast = parseSql("SELECT samples.time FROM samples WHERE samples.time > NOW()")
+    check ast.kind == nkSelect
+    check ast.children[0].children[0].kind == nkColumnRef
+
   test "PRAGMA accepts integer and string values":
     let integerPragma = parseSql("PRAGMA cache_size = 16")
     check integerPragma.kind == nkPragma

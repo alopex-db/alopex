@@ -2,8 +2,38 @@
 
 use alopex_sql::{
     AlopexDialect, DataType, ExprKind, FromItem, JoinType, Literal, Parser, SelectItem,
-    StatementKind, VectorMetric,
+    StatementKind, VectorMetric, parser_contract_version,
 };
+
+#[test]
+fn exposes_the_nim_wire_contract_version() {
+    assert_eq!(parser_contract_version(), "0.2.0");
+}
+
+#[test]
+fn parses_sql_ts_interval_as_a_distinct_literal() {
+    let statements = Parser::parse_sql(&AlopexDialect, "SELECT NOW() - INTERVAL '24 hours'")
+        .expect("SQL-TS INTERVAL should cross the Nim MessagePack boundary");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected Select");
+    };
+    assert!(matches!(
+        &select.projection[0],
+        SelectItem::Expr {
+            expr:
+                alopex_sql::Expr {
+                    kind: ExprKind::BinaryOp { right, .. },
+                    ..
+                },
+            ..
+        } if matches!(
+            &right.kind,
+            ExprKind::Literal {
+                literal: Literal::Interval(value)
+            } if value == "24 hours"
+        )
+    ));
+}
 
 #[test]
 fn parse_join_subquery_and_vector_variants_from_nim() {
