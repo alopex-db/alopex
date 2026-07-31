@@ -8,6 +8,7 @@ pub(crate) mod binary_op;
 mod column_ref;
 pub(crate) mod conditional;
 mod context;
+pub(crate) mod datetime;
 mod function_call;
 pub(crate) mod hash;
 mod is_null;
@@ -23,6 +24,7 @@ pub mod vector_ops;
 pub use vector_ops::{VectorError, VectorMetric, vector_distance, vector_similarity};
 
 pub use context::EvalContext;
+pub(crate) use context::begin_statement;
 
 use crate::executor::{EvaluationError, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;

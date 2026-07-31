@@ -1,7 +1,8 @@
 use alopex_core::kv::KVStore;
 
 use crate::ast::ddl::IndexMethod;
-use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
+use crate::ast::expr::{Expr, ExprKind};
+use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
@@ -33,12 +34,13 @@ pub fn execute_insert<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
         .partition(|idx| matches!(idx.method, Some(IndexMethod::Hnsw)));
 
     let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::with_capacity(values.len());
+    let ctx = EvalContext::new(&[]);
 
     // Insert into table using a single handle; stage for index population.
     {
         let mut table_storage = txn.table_storage(&table);
         for row_exprs in values {
-            let row = build_row(&table, &columns, row_exprs)?;
+            let row = build_row(&table, &columns, row_exprs, &ctx)?;
             let row_id = table_storage
                 .next_row_id()
                 .map_err(|e| map_storage_error(&table, e))?;
@@ -64,14 +66,13 @@ fn validate_columns(table: &TableMetadata, columns: &[String]) -> Result<()> {
         }
     }
 
-    // DEFAULT is not supported; missing columns are an error.
-    if columns.len() != table.column_count() {
-        let missing = table
+    if columns.len() != table.column_count()
+        && let Some(missing) = table
             .columns
             .iter()
-            .find(|c| !columns.iter().any(|col| col == &c.name))
+            .find(|c| !columns.iter().any(|col| col == &c.name) && c.default.is_none())
             .map(|c| c.name.clone())
-            .unwrap_or_else(|| "unknown".to_string());
+    {
         return Err(ExecutorError::ColumnRequired { column: missing });
     }
 
@@ -82,6 +83,7 @@ fn build_row(
     table: &TableMetadata,
     columns: &[String],
     exprs: Vec<TypedExpr>,
+    ctx: &EvalContext<'_>,
 ) -> Result<Vec<SqlValue>> {
     if exprs.len() != columns.len() {
         return Err(ExecutorError::InvalidOperation {
@@ -95,18 +97,68 @@ fn build_row(
     }
 
     let mut row = vec![SqlValue::Null; table.column_count()];
-    let ctx = EvalContext::new(&[]);
 
     for (idx, expr) in exprs.into_iter().enumerate() {
         let col_name = &columns[idx];
         let col_index = table
             .get_column_index(col_name)
             .ok_or_else(|| ExecutorError::ColumnNotFound(col_name.clone()))?;
-        let value = evaluate(&expr, &ctx)?;
+        let value = evaluate(&expr, ctx)?;
         row[col_index] = value;
     }
 
+    for (col_index, column) in table.columns.iter().enumerate() {
+        if columns.iter().any(|name| name == &column.name) {
+            continue;
+        }
+        let default = column
+            .default
+            .as_ref()
+            .ok_or_else(|| ExecutorError::ColumnRequired {
+                column: column.name.clone(),
+            })?;
+        row[col_index] = evaluate_default(default, column, ctx)?;
+    }
+
     Ok(row)
+}
+
+fn evaluate_default(
+    default: &Expr,
+    column: &ColumnMetadata,
+    ctx: &EvalContext<'_>,
+) -> Result<SqlValue> {
+    let typed = match &default.kind {
+        ExprKind::Literal { literal } => TypedExpr {
+            kind: crate::planner::typed_expr::TypedExprKind::Literal(literal.clone()),
+            resolved_type: column.data_type.clone(),
+            span: default.span,
+        },
+        ExprKind::FunctionCall {
+            name,
+            args,
+            distinct,
+            star,
+        } if name.eq_ignore_ascii_case("now") && args.is_empty() && !distinct && !star => {
+            TypedExpr {
+                kind: crate::planner::typed_expr::TypedExprKind::FunctionCall {
+                    name: name.clone(),
+                    args: Vec::new(),
+                    distinct: false,
+                    star: false,
+                },
+                resolved_type: crate::planner::types::ResolvedType::Timestamp,
+                span: default.span,
+            }
+        }
+        _ => {
+            return Err(ExecutorError::UnsupportedOperation(format!(
+                "DEFAULT expression for column '{}'",
+                column.name
+            )));
+        }
+    };
+    evaluate(&typed, ctx)
 }
 
 fn map_storage_error(table: &TableMetadata, err: StorageError) -> ExecutorError {

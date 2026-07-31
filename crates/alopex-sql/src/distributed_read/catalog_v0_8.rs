@@ -97,6 +97,7 @@ pub const REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS: &[&str] = &[
     "vector_dims",
     "vector_norm",
     "random",
+    "now",
     "gen_random_uuid",
     "uuidv7",
     "memory_stats",
