@@ -112,6 +112,350 @@ pub struct ScalarSignature {
     pub meta: FnMeta,
 }
 
+/// The fixed Phase 4.7 transaction status for a scalar identity.
+///
+/// `Distributed` is deliberately narrower than ordinary local registration:
+/// it means the identity is admitted by the closed v0.8 RemoteRead catalog.
+/// `LocalOnly` preserves the local scalar contract while prohibiting an
+/// implicit distributed or multi-range execution claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V09ScalarExecutionStatus {
+    Distributed,
+    LocalOnly,
+}
+
+/// A named row from the approved v0.9 Phase 4 scalar support matrix.
+///
+/// The linked [`ScalarSignature`] remains the single source of truth for
+/// argument type/null checking and return typing. This row fixes its public
+/// matrix identity, exact arity, optimizer metadata, and transaction scope so
+/// adapters cannot infer remote eligibility from local registration alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct V09ScalarRegisterEntry {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub arity: Arity,
+    pub metadata: FnMeta,
+    pub execution_status: V09ScalarExecutionStatus,
+}
+
+const fn v09_scalar_entry(
+    id: &'static str,
+    name: &'static str,
+    arity: Arity,
+    metadata: FnMeta,
+    execution_status: V09ScalarExecutionStatus,
+) -> V09ScalarRegisterEntry {
+    V09ScalarRegisterEntry {
+        id,
+        name,
+        arity,
+        metadata,
+        execution_status,
+    }
+}
+
+/// Complete, non-abbreviated Phase 4.7 register for vector, numeric,
+/// hash, and encoding scalar functions.
+///
+/// Later Phase 4 tasks add separate registers for the remaining approved
+/// scalar and aggregate rows. They must not alter the closed status of any row
+/// listed here.
+pub const V09_NUMERIC_VECTOR_HASH_SCALAR_REGISTER: &[V09ScalarRegisterEntry] = &[
+    v09_scalar_entry(
+        "SQL-F-V01",
+        "vector_similarity",
+        Arity::Exact(3),
+        PURE_META,
+        V09ScalarExecutionStatus::LocalOnly,
+    ),
+    v09_scalar_entry(
+        "SQL-F-V02",
+        "vector_distance",
+        Arity::Exact(3),
+        PURE_META,
+        V09ScalarExecutionStatus::LocalOnly,
+    ),
+    v09_scalar_entry(
+        "SQL-F-V03",
+        "vector_dims",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::LocalOnly,
+    ),
+    v09_scalar_entry(
+        "SQL-F-V04",
+        "vector_norm",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::LocalOnly,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N01",
+        "abs",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N02",
+        "sign",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N03",
+        "round",
+        Arity::Range(1, 2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N04",
+        "floor",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N05",
+        "ceil",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N06",
+        "ceiling",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N07",
+        "trunc",
+        Arity::Range(1, 2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N08",
+        "mod",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N09",
+        "power",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N10",
+        "pow",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N11",
+        "sqrt",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N12",
+        "exp",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N13",
+        "ln",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N14",
+        "log",
+        Arity::Range(1, 2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N15",
+        "log10",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N16",
+        "random",
+        Arity::Exact(0),
+        RANDOM_META,
+        V09ScalarExecutionStatus::LocalOnly,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N17",
+        "sin",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N18",
+        "cos",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N19",
+        "tan",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N20",
+        "asin",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N21",
+        "acos",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N22",
+        "atan",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N23",
+        "atan2",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N24",
+        "degrees",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N25",
+        "radians",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-N26",
+        "pi",
+        Arity::Exact(0),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-H01",
+        "sha256",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-H02",
+        "md5",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-H03",
+        "simhash",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-H04",
+        "hamming_distance",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-H05",
+        "gen_random_uuid",
+        Arity::Exact(0),
+        RANDOM_META,
+        V09ScalarExecutionStatus::LocalOnly,
+    ),
+    v09_scalar_entry(
+        "SQL-F-H06",
+        "uuidv7",
+        Arity::Exact(0),
+        RANDOM_META,
+        V09ScalarExecutionStatus::LocalOnly,
+    ),
+    v09_scalar_entry(
+        "SQL-F-H07",
+        "hex",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-H08",
+        "unhex",
+        Arity::Exact(1),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-H09",
+        "encode",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+    v09_scalar_entry(
+        "SQL-F-H10",
+        "decode",
+        Arity::Exact(2),
+        PURE_META,
+        V09ScalarExecutionStatus::Distributed,
+    ),
+];
+
+/// Returns every scalar row owned by Phase 4.7 in approval-table order.
+pub fn v09_numeric_vector_hash_scalar_register() -> &'static [V09ScalarRegisterEntry] {
+    V09_NUMERIC_VECTOR_HASH_SCALAR_REGISTER
+}
+
+/// Finds a Phase 4.7 matrix row by its public scalar identity.
+pub fn v09_numeric_vector_hash_scalar(name: &str) -> Option<&'static V09ScalarRegisterEntry> {
+    V09_NUMERIC_VECTOR_HASH_SCALAR_REGISTER
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(name))
+}
+
 fn is_numeric(ty: &ResolvedType) -> bool {
     matches!(
         ty,
