@@ -1066,7 +1066,14 @@ impl Database {
         LargeValueReader::open(path).map_err(Error::Core)
     }
 
-    /// Begins a new transaction.
+    /// Begins a new single-range embedded transaction.
+    ///
+    /// This API is the API-E01 compatibility boundary: it opens only the
+    /// database's local KV/WAL transaction and does not select a cluster
+    /// profile, contact a remote participant, or enlist multiple ranges.
+    /// Callers that require a distributed transaction must use an explicit
+    /// cluster-facing surface; embedded success never represents a distributed
+    /// commit.
     pub fn begin(&self, mode: TxnMode) -> Result<Transaction<'_>> {
         let mut txn = self.store.begin(mode).map_err(Error::Core)?;
         let journal = if mode == TxnMode::ReadWrite
@@ -1101,7 +1108,13 @@ impl Default for Database {
     }
 }
 
-/// A database transaction.
+/// A local database transaction.
+///
+/// `Transaction` preserves the v0.8 embedded API contract. Key-value methods
+/// are single-range-only and SQL/terminal operations are local-only: this type
+/// has no remote participant or multi-range coordinator fallback. In
+/// particular, `commit` and `rollback` decide only the local KV/WAL
+/// transaction represented by this handle.
 pub struct Transaction<'a> {
     inner: Option<AnyKVTransaction<'a>>,
     db: &'a Database,
@@ -1142,12 +1155,12 @@ impl<'a> Transaction<'a> {
         let txn = self.inner.as_ref().ok_or(Error::TxnCompleted)?;
         Ok(txn.mode())
     }
-    /// Retrieves the value for a given key.
+    /// Retrieves the value for a given key in this single-range-only handle.
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         self.inner_mut()?.get(&key.to_vec()).map_err(Error::Core)
     }
 
-    /// Sets a value for a given key.
+    /// Sets a value for a given key in this single-range-only handle.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.vector_cache_invalidated = true;
         self.vector_cache_updates.clear();
@@ -1157,7 +1170,7 @@ impl<'a> Transaction<'a> {
             .map_err(Error::Core)
     }
 
-    /// Deletes a key-value pair.
+    /// Deletes a key-value pair in this single-range-only handle.
     pub fn delete(&mut self, key: &[u8]) -> Result<()> {
         self.vector_cache_deletes.push(key.to_vec());
         self.inner_mut()?.delete(key.to_vec()).map_err(Error::Core)
@@ -1513,7 +1526,10 @@ impl<'a> Transaction<'a> {
             .map_err(Error::Core)
     }
 
-    /// Commits the transaction, applying all changes.
+    /// Commits the local transaction, applying all changes.
+    ///
+    /// This is a local-only terminal operation. It never reports a
+    /// distributed outcome or falls back from a requested cluster transaction.
     pub fn commit(mut self) -> Result<()> {
         {
             let txn = self.inner.as_mut().ok_or(Error::TxnCompleted)?;
@@ -1612,7 +1628,10 @@ impl<'a> Transaction<'a> {
         Ok(())
     }
 
-    /// Rolls back the transaction, discarding all changes.
+    /// Rolls back the local transaction, discarding all changes.
+    ///
+    /// This is a local-only terminal operation and does not contact remote
+    /// transaction participants.
     pub fn rollback(mut self) -> Result<()> {
         if let Some(txn) = self.inner.take() {
             for (index, state) in self.hnsw_indices.values_mut() {
@@ -3126,6 +3145,33 @@ mod tests {
         let mut txn = db.begin(TxnMode::ReadOnly).unwrap();
         let val = txn.get(b"non-existent-key").unwrap();
         assert!(val.is_none());
+    }
+
+    #[test]
+    fn embedded_transaction_preserves_the_local_routing_boundary() {
+        let db = Database::new();
+        assert_eq!(
+            db.routing_diagnostics().unwrap().decision,
+            alopex_cluster::RoutingDecisionKind::LocalOnly
+        );
+
+        let mut write = db.begin(TxnMode::ReadWrite).unwrap();
+        write.put(b"local-only", b"staged").unwrap();
+        assert_eq!(write.get(b"local-only").unwrap(), Some(b"staged".to_vec()));
+
+        let mut outside = db.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(outside.get(b"local-only").unwrap(), None);
+        outside.rollback().unwrap();
+
+        write.commit().unwrap();
+        let mut reader = db.begin(TxnMode::ReadOnly).unwrap();
+        assert_eq!(reader.get(b"local-only").unwrap(), Some(b"staged".to_vec()));
+        reader.rollback().unwrap();
+
+        assert_eq!(
+            db.routing_diagnostics().unwrap().decision,
+            alopex_cluster::RoutingDecisionKind::LocalOnly
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

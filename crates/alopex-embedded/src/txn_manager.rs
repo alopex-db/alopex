@@ -38,7 +38,12 @@ enum TxnWrite {
     Delete,
 }
 
-/// Manages persisted KV transactions for CLI usage.
+/// Manages persisted single-range KV transactions for CLI usage.
+///
+/// This is the API-E02 compatibility adapter. It persists staging metadata in
+/// the selected embedded store and applies it through that store's local
+/// KV/WAL boundary only. It neither creates a distributed coordinator nor
+/// treats a local commit as a multi-range success.
 pub struct TransactionManager;
 
 impl TransactionManager {
@@ -54,7 +59,7 @@ impl TransactionManager {
         db.store.read_at_capability()
     }
 
-    /// Begins a new transaction with the given timeout and returns its ID.
+    /// Begins a new single-range transaction with the given timeout and returns its ID.
     pub fn begin_with_timeout(db: &Database, timeout: Duration) -> Result<String> {
         let txn_id = generate_txn_id();
         let meta = TxnMeta {
@@ -145,7 +150,7 @@ impl TransactionManager {
         Ok(())
     }
 
-    /// Commits staged writes and finalizes the transaction.
+    /// Commits staged writes through the local store and finalizes the transaction.
     pub fn commit(db: &Database, txn_id: &str) -> Result<()> {
         let mut txn = db.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
         let _ = load_meta(&mut txn, txn_id)?;
@@ -187,7 +192,7 @@ impl TransactionManager {
         Ok(())
     }
 
-    /// Rolls back staged writes and removes transaction metadata.
+    /// Rolls back local staged writes and removes transaction metadata.
     pub fn rollback(db: &Database, txn_id: &str) -> Result<()> {
         let mut txn = db.store.begin(TxnMode::ReadWrite).map_err(Error::Core)?;
         let _ = load_meta(&mut txn, txn_id)?;
