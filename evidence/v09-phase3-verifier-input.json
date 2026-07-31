@@ -1,0 +1,18 @@
+{
+  "schema_version": "alopex.v09-phase3-verifier-input/v1",
+  "target_version": "v0.9.0",
+  "phase": 3,
+  "source_sha": "35777be637a0b9095b76bd7667e2af56fc229489",
+  "inputs": [
+    {"path":"evidence/changefeed-manifest.json","sha256":"1ceafa131515da91b7bb52e9c25b5deab8d78ae5925eadb55c274c57ca989102","role":"surface/change-kind/lifecycle inventory"},
+    {"path":"evidence/v09-phase3-inherited-ledger.json","sha256":"818251e39b398b8542e7942dd1c8501feb3a308cd9d9b4e0a3e06e6adc907815","role":"I-01-I-26/F2-F4 ownership crosswalk"},
+    {"path":"evidence/v09-phase3-common-gate.json","sha256":"21d987362993501067ab3dadd08594beccaabf0ae3fa3e4937317ee32e488785","role":"I-24-I-26 fail-closed common-gate input"},
+    {"path":"tests/fixtures/changefeed_surface_parity.json","sha256":"2036e884e6d4ece5849158102074ee6c4acb97026fea28b5b898fe79db68509f","role":"embedded/HTTP/gRPC/CLI/Python parity fixture"},
+    {"path":"Cargo.lock","sha256":"1a0500c0ee90ed7182b598929463aeca933ee7a2c7ba1b23802706e2c2ec3195","role":"workspace dependency identity"}
+  ],
+  "manifest_contract": {"row_key":"kind + ':' + id","required_statuses":["supported","local-only","unsupported"],"reject":["missing source entry","unknown manifest entry","duplicate row key","unsupported row promoted to supported"]},
+  "artifact_identity": {"rust_packages":["alopex-cluster","alopex-server","alopex-cli","alopex-py","alopex-tools"],"python_package":"alopex","rule":"candidate artifact filenames/digests must be supplied by the release-wide gate; this handoff does not invent or publish artifacts"},
+  "durable_capability": {"evidence":"crates/alopex-cluster/src/changefeed/durable.rs:compiled","compiled_version":"0.5.1 only with chirps feature; otherwise absent","required":["service_available","durable_storage","range_routing","retention","authenticated_dispatcher"],"current_verdict":"blocked"},
+  "expected_report": {"must_include":["source SHA","all input hashes","inventory row counts","missing/unknown/duplicate findings","fixture hash","artifact identity","Durable capability verdict","Phase 3 verdict"],"reproducibility":"same checkout plus the listed input hashes","success_condition":"all inventory checks pass and compatible Durable evidence is verified","failure_condition":"missing input/hash drift/unknown or duplicate row/missing capability returns Blocked"},
+  "constraints":["alopex-tools is the common-gate owner; Phase 3 adds no verifier binary","v0.7/v0.8 gates cannot substitute for target-version v0.9 verification","no release action is authorized by this handoff"]
+}
