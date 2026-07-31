@@ -1,0 +1,342 @@
+{
+  "schema_version": "alopex.phase3-crosswalk/v0.9",
+  "target_version": "v0.9.0",
+  "phase": "3",
+  "scope": "Durable-profile changefeed requirements-to-design-to-task-to-evidence crosswalk",
+  "collected_from_source_sha": "3ef854e236da5ba289c7174621a276a76d1cec49",
+  "feature_availability": {
+    "state": "blocked",
+    "reason": "The checked-in Chirps profile has no authenticated, durable, range-routed retention evidence. Every public lifecycle must therefore return the canonical prerequisite failure rather than advertise a usable feed.",
+    "release_authorization": "none",
+    "old_gate_substitution": "v0.7 and v0.8 gates/verifiers are not evidence for this v0.9 target."
+  },
+  "criterion_rows": [
+    {
+      "id": "R1.1",
+      "requirement_outcome": "An authorized create/subscribe exposes feed identity, table/range, schema/data epoch, ordering, retention, and status.",
+      "design_responsibility": "FeedCoordinator and FeedIdentity canonical response model",
+      "owner_task": "3.1",
+      "contributing_tasks": ["3.5", "3.9", "3.10", "3.11", "3.12", "3.14", "3.15"],
+      "verification": {
+        "unit": ["crates/alopex-cluster/tests/changefeed_coordinator.rs::lifecycle_preserves_range_order_and_exposes_at_least_once_duplicates"],
+        "integration": ["crates/alopex-embedded/tests/changefeed.rs::embedded_lifecycle_uses_the_coordinator_after_authorized_preflight"],
+        "cross_surface": ["crates/alopex-cluster/tests/changefeed_surface_parity.rs::embedded_durable_preflight_is_the_canonical_cross_surface_oracle"]
+      },
+      "evidence": ["evidence/changefeed-manifest.json", "tests/fixtures/changefeed_surface_parity.json"],
+      "implementation_evidence": "present",
+      "feature_gate": "blocked-on-Durable-prerequisite"
+    },
+    {
+      "id": "R1.2",
+      "requirement_outcome": "A committed publishable change exposes stable event identity, operation type, commit position, payload availability, checkpoint, and source range; uncommitted changes do not.",
+      "design_responsibility": "JournalEventAdapter committed-journal conversion and event/cursor schema",
+      "owner_task": "3.4",
+      "contributing_tasks": ["3.2", "3.3", "3.20"],
+      "verification": {
+        "unit": ["crates/alopex-cluster/tests/changefeed_adapter.rs"],
+        "integration": ["crates/alopex-cluster/tests/changefeed_durability.rs::memorykv_sql_journal_restart_repairs_torn_tail_without_changing_event_identity", "crates/alopex-cluster/tests/changefeed_durability.rs::lsm_sql_journal_restart_keeps_fsynced_commit_and_excludes_uncommitted_record"],
+        "cross_surface": ["crates/alopex-server/tests/changefeed_http.rs::create_reports_compiled_durable_prerequisite_in_the_canonical_envelope", "crates/alopex-server/tests/changefeed_grpc.rs::create_preserves_canonical_durable_failure_in_typed_status_details"]
+      },
+      "evidence": ["evidence/changefeed-manifest.json", "docs/changefeed-support-matrix.md"],
+      "implementation_evidence": "present; delete/local commit are represented, while unclassified insert/update and DDL are explicitly not published",
+      "feature_gate": "blocked-on-Durable-prerequisite"
+    },
+    {
+      "id": "R1.3",
+      "requirement_outcome": "Range movement, replica catch-up, and restart classify order, gap, duplicate, and replay so a consumer can decide whether to continue.",
+      "design_responsibility": "Range-order coordinator, routing outcome, and ResumePlanner failure classification",
+      "owner_task": "3.21",
+      "contributing_tasks": ["3.2", "3.5"],
+      "verification": {
+        "unit": ["crates/alopex-cluster/tests/changefeed_cursor.rs"],
+        "integration": ["crates/alopex-cluster/tests/changefeed_range_movement.rs::range_transfer_catchup_and_reconnect_fence_a_stale_cursor", "crates/alopex-cluster/tests/changefeed_range_movement.rs::duplicate_replay_stays_identifiable_and_reordered_delivery_is_rejected", "crates/alopex-cluster/tests/changefeed_range_movement.rs::unprovable_replica_catchup_returns_gap_instead_of_empty_success"],
+        "cross_surface": ["tests/fixtures/changefeed_surface_parity.json"]
+      },
+      "evidence": ["evidence/v09-phase3-inherited-ledger.json", "evidence/changefeed-manifest.json"],
+      "implementation_evidence": "present",
+      "feature_gate": "blocked-on-Phase-1-range-contract-and-Durable-prerequisite"
+    },
+    {
+      "id": "R1.4",
+      "requirement_outcome": "Every table/range, DDL, bulk, vector/columnar, and transaction change kind has an explicit support-matrix row; unsupported kinds stop before execution.",
+      "design_responsibility": "Change-kind support matrix and SQL/DataFrame pre-execution boundary",
+      "owner_task": "3.19",
+      "contributing_tasks": ["3.3", "3.16", "3.17", "3.24"],
+      "verification": {
+        "unit": ["crates/alopex-sql/tests/changefeed_boundary.rs::every_sql_lifecycle_and_unsupported_change_kind_stops_before_execution"],
+        "integration": ["crates/alopex-cluster/tests/changefeed_unsupported.rs::unsupported_schema_cannot_be_adapted_or_advertised_by_any_surface"],
+        "cross_surface": ["crates/alopex-dataframe/tests/changefeed_boundary.rs::every_dataframe_changefeed_lifecycle_and_source_is_rejected_before_execution"]
+      },
+      "evidence": ["evidence/changefeed-manifest.json", "docs/changefeed-support-matrix.md"],
+      "implementation_evidence": "present",
+      "feature_gate": "blocked-on-Durable-prerequisite-for-supported-lifecycle"
+    },
+    {
+      "id": "R2.1",
+      "requirement_outcome": "Ack/checkpoint returns identity, acceptance state, durable checkpoint, and next resume position; only committed is durable.",
+      "design_responsibility": "CheckpointStore and AckProcessor durable-state boundary",
+      "owner_task": "3.7",
+      "contributing_tasks": ["3.23"],
+      "verification": {
+        "unit": ["crates/alopex-cluster/tests/changefeed_checkpoint.rs"],
+        "integration": ["crates/alopex-cluster/tests/changefeed_ack_replay_three_attempts.rs"],
+        "cross_surface": ["crates/alopex-cli/tests/changefeed_command_test.rs::changefeed_cli_invokes_all_eight_http_contracts_and_retains_rejections"]
+      },
+      "evidence": ["evidence/changefeed-manifest.json", "tests/fixtures/changefeed_surface_parity.json"],
+      "implementation_evidence": "present",
+      "feature_gate": "blocked-on-Durable-prerequisite"
+    },
+    {
+      "id": "R2.2",
+      "requirement_outcome": "Repeated ack, resume, and cancel are side-effect free and return the same idempotency/status result.",
+      "design_responsibility": "Lifecycle replay cache and terminal outcome idempotency",
+      "owner_task": "3.23",
+      "contributing_tasks": ["3.5", "3.7"],
+      "verification": {
+        "unit": ["crates/alopex-cluster/tests/changefeed_coordinator.rs::cancel_and_close_are_idempotent_terminal_lifecycle_operations"],
+        "integration": ["crates/alopex-cluster/tests/changefeed_ack_replay_three_attempts.rs"],
+        "cross_surface": ["crates/alopex-cli/tests/changefeed_surface_parity.rs::cli_preserves_the_canonical_durable_preflight_fixture"]
+      },
+      "evidence": ["tests/fixtures/changefeed_surface_parity.json", "evidence/changefeed-manifest.json"],
+      "implementation_evidence": "present",
+      "feature_gate": "blocked-on-Durable-prerequisite"
+    },
+    {
+      "id": "R2.3",
+      "requirement_outcome": "Resume returns only range-ordered events after the checkpoint or an explicit retention/gap/epoch/prerequisite outcome.",
+      "design_responsibility": "ResumePlanner and canonical failure mapping",
+      "owner_task": "3.7",
+      "contributing_tasks": ["3.2", "3.21", "3.23"],
+      "verification": {
+        "unit": ["crates/alopex-cluster/tests/changefeed_coordinator.rs::resume_is_strictly_after_checkpoint_and_gap_is_never_an_empty_success"],
+        "integration": ["crates/alopex-cluster/tests/changefeed_range_movement.rs::range_transfer_catchup_and_reconnect_fence_a_stale_cursor", "crates/alopex-cluster/tests/changefeed_ack_replay_three_attempts.rs"],
+        "cross_surface": ["crates/alopex-py/tests/test_changefeed_async.py"]
+      },
+      "evidence": ["evidence/changefeed-manifest.json", "docs/changefeed-support-matrix.md"],
+      "implementation_evidence": "present",
+      "feature_gate": "blocked-on-Durable-prerequisite"
+    },
+    {
+      "id": "R2.4",
+      "requirement_outcome": "First, duplicate, and post-reconnect/process-restart attempts make duplicates identifiable and never hide a gap as success.",
+      "design_responsibility": "Three-attempt replay fixture and recovered idempotency state",
+      "owner_task": "3.23",
+      "contributing_tasks": ["3.7"],
+      "verification": {
+        "unit": ["crates/alopex-cluster/tests/changefeed_checkpoint.rs"],
+        "integration": ["crates/alopex-cluster/tests/changefeed_ack_replay_three_attempts.rs"],
+        "cross_surface": ["tests/fixtures/changefeed_surface_parity.json"]
+      },
+      "evidence": ["evidence/changefeed-manifest.json", "tests/fixtures/changefeed_surface_parity.json"],
+      "implementation_evidence": "present",
+      "feature_gate": "blocked-on-Durable-prerequisite"
+    },
+    {
+      "id": "R3.1",
+      "requirement_outcome": "Retention, lag, buffer, and storage limits report classified outcomes rather than silently dropping an event.",
+      "design_responsibility": "RetentionPolicy and DeliveryBudget outcome mapping",
+      "owner_task": "3.8",
+      "contributing_tasks": ["3.22"],
+      "verification": {
+        "unit": ["crates/alopex-cluster/tests/changefeed_retention.rs"],
+        "integration": ["crates/alopex-cluster/tests/changefeed_backpressure.rs::retention_expiry_is_terminal_and_preserves_the_durable_checkpoint_without_rewind", "crates/alopex-cluster/tests/changefeed_backpressure.rs::lag_and_every_buffer_limit_are_retryable_without_dropping_the_durable_checkpoint"],
+        "cross_surface": ["crates/alopex-cli/tests/changefeed_command_test.rs::changefeed_cli_invokes_all_eight_http_contracts_and_retains_rejections"]
+      },
+      "evidence": ["evidence/changefeed-manifest.json", "docs/changefeed-support-matrix.md"],
+      "implementation_evidence": "present",
+      "feature_gate": "blocked-on-Durable-prerequisite"
+    },
+    {
+      "id": "R3.2",
+      "requirement_outcome": "Early close, timeout, cancel, and reconnect expose the last committed checkpoint and resume possibility.",
+      "design_responsibility": "Terminal lifecycle handling and last-committed-checkpoint preservation",
+      "owner_task": "3.8",
+      "contributing_tasks": ["3.5", "3.7", "3.22", "3.23"],
+      "verification": {
+        "unit": ["crates/alopex-cluster/tests/changefeed_coordinator.rs::cancel_and_close_are_idempotent_terminal_lifecycle_operations"],
+        "integration": ["crates/alopex-cluster/tests/changefeed_backpressure.rs::close_timeout_cancel_and_reconnect_keep_one_explicit_resume_position", "crates/alopex-cluster/tests/changefeed_ack_replay_three_attempts.rs"],
+        "cross_surface": ["crates/alopex-py/tests/test_changefeed_async.py"]
+      },
+      "evidence": ["evidence/changefeed-manifest.json", "tests/fixtures/changefeed_surface_parity.json"],
+      "implementation_evidence": "present",
+      "feature_gate": "blocked-on-Durable-prerequisite"
+    },
+    {
+      "id": "R3.3",
+      "requirement_outcome": "Missing or incompatible Durable, storage, authorization, or range metadata never advertises a supported feed.",
+      "design_responsibility": "DurableProfileAdapter preflight and authorization fail-closed boundary",
+      "owner_task": "3.6",
+      "contributing_tasks": ["3.18", "3.25", "3.27"],
+      "verification": {
+        "unit": ["crates/alopex-cluster/tests/changefeed_durable_preflight.rs"],
+        "integration": ["crates/alopex-embedded/tests/changefeed.rs::unavailable_durable_profile_returns_outcome_without_embedded_handle", "crates/alopex-server/tests/changefeed_http.rs::create_reports_compiled_durable_prerequisite_in_the_canonical_envelope"],
+        "cross_surface": ["crates/alopex-cluster/tests/changefeed_surface_parity.rs::embedded_durable_preflight_is_the_canonical_cross_surface_oracle", "crates/alopex-py/tests/test_changefeed_async.py"]
+      },
+      "evidence": ["evidence/v09-phase3-common-gate.json", "tests/fixtures/changefeed_surface_parity.json"],
+      "implementation_evidence": "present",
+      "feature_gate": "blocked-by-design-until-Durable-evidence-exists"
+    },
+    {
+      "id": "R4.1",
+      "requirement_outcome": "Every public HTTP, gRPC, CLI, embedded, Python sync/async lifecycle is registered; unexposed SQL/DataFrame lifecycle is explicitly unsupported.",
+      "design_responsibility": "Exact public lifecycle register and closed SQL/DataFrame registries",
+      "owner_task": "3.19",
+      "contributing_tasks": ["3.9", "3.10", "3.11", "3.12", "3.14", "3.15", "3.16", "3.17"],
+      "verification": {
+        "unit": ["crates/alopex-sql/tests/changefeed_boundary.rs::every_sql_lifecycle_and_unsupported_change_kind_stops_before_execution", "crates/alopex-dataframe/tests/changefeed_boundary.rs::every_dataframe_changefeed_lifecycle_and_source_is_rejected_before_execution"],
+        "integration": ["crates/alopex-server/tests/changefeed_http.rs::changefeed_routes_are_exact_and_protected_by_existing_http_auth", "crates/alopex-server/tests/changefeed_grpc.rs::changefeed_grpc_register_enforces_existing_auth_for_all_eight_operations"],
+        "cross_surface": ["crates/alopex-cli/tests/changefeed_command_test.rs::changefeed_cli_invokes_all_eight_http_contracts_and_retains_rejections", "crates/alopex-py/tests/test_changefeed_async.py"]
+      },
+      "evidence": ["evidence/changefeed-manifest.json", "docs/changefeed-support-matrix.md"],
+      "implementation_evidence": "present",
+      "feature_gate": "blocked-on-Durable-prerequisite-for-operational-lifecycles"
+    },
+    {
+      "id": "R4.2",
+      "requirement_outcome": "CLI formats, HTTP/gRPC payloads, and Python result/exception preserve canonical event, checkpoint, status, and failure fields.",
+      "design_responsibility": "Surface serializers and canonical status/exit-code/exception mapping",
+      "owner_task": "3.13",
+      "contributing_tasks": ["3.10", "3.11", "3.14", "3.15", "3.25"],
+      "verification": {
+        "unit": ["crates/alopex-cli/tests/changefeed_command_test.rs"],
+        "integration": ["crates/alopex-server/tests/changefeed_http.rs::create_reports_compiled_durable_prerequisite_in_the_canonical_envelope", "crates/alopex-server/tests/changefeed_grpc.rs::create_preserves_canonical_durable_failure_in_typed_status_details"],
+        "cross_surface": ["crates/alopex-cli/tests/changefeed_surface_parity.rs::cli_preserves_the_canonical_durable_preflight_fixture", "crates/alopex-py/tests/test_changefeed_async.py"]
+      },
+      "evidence": ["tests/fixtures/changefeed_surface_parity.json", "evidence/changefeed-manifest.json"],
+      "implementation_evidence": "present",
+      "feature_gate": "blocked-on-Durable-prerequisite"
+    },
+    {
+      "id": "R4.3",
+      "requirement_outcome": "Changefeed does not imply CRDT, distributed-transaction, or distributed-DataFrame support; the matrix says what is unsupported.",
+      "design_responsibility": "SQL/DataFrame unsupported boundary and change-kind support matrix",
+      "owner_task": "3.16",
+      "contributing_tasks": ["3.17", "3.19", "3.24"],
+      "verification": {
+        "unit": ["crates/alopex-sql/tests/changefeed_boundary.rs::every_sql_lifecycle_and_unsupported_change_kind_stops_before_execution", "crates/alopex-dataframe/tests/changefeed_boundary.rs::every_dataframe_changefeed_lifecycle_and_source_is_rejected_before_execution"],
+        "integration": ["crates/alopex-cluster/tests/changefeed_unsupported.rs::unsupported_schema_cannot_be_adapted_or_advertised_by_any_surface"],
+        "cross_surface": ["crates/alopex-dataframe/tests/changefeed_boundary.rs::local_eager_lazy_and_streaming_behavior_remain_available"]
+      },
+      "evidence": ["evidence/changefeed-manifest.json", "docs/changefeed-support-matrix.md"],
+      "implementation_evidence": "present",
+      "feature_gate": "not-a-Phase-3-support-claim"
+    },
+    {
+      "id": "R5.1",
+      "requirement_outcome": "Every I-01–I-26 and F2–F4 row has a requirements/design/task/test-or-evidence crosswalk, including inherited regressions.",
+      "design_responsibility": "Whole-workspace consistency ledger and requirements-to-design crosswalk",
+      "owner_task": "3.29",
+      "contributing_tasks": ["3.26"],
+      "verification": {
+        "unit": ["evidence/v09-phase3-inherited-ledger.json"],
+        "integration": ["docs/v09-phase3-inherited-evidence.md"],
+        "cross_surface": ["evidence/changefeed-manifest.json"]
+      },
+      "evidence": ["evidence/v09-phase3-inherited-ledger.json", "evidence/v09-phase3-crosswalk.json", "docs/v09-phase3-inherited-evidence.md"],
+      "implementation_evidence": "present; release identity and approval are intentionally not asserted",
+      "feature_gate": "pending-independent-completion-gate"
+    },
+    {
+      "id": "R5.2",
+      "requirement_outcome": "The exact SQL, CLI, HTTP/gRPC, embedded/Python, DataFrame, Chirps, and alopex-tools register detects missing, unknown, and duplicate rows.",
+      "design_responsibility": "Manifest integrity contract and v0.9 verifier handoff",
+      "owner_task": "3.28",
+      "contributing_tasks": ["3.19"],
+      "verification": {
+        "unit": ["evidence/changefeed-manifest.json"],
+        "integration": ["evidence/v09-phase3-verifier-input.json"],
+        "cross_surface": ["tests/fixtures/changefeed_surface_parity.json"]
+      },
+      "evidence": ["evidence/changefeed-manifest.json", "evidence/v09-phase3-verifier-input.json", "docs/v09-phase3-verifier-handoff.md"],
+      "implementation_evidence": "handoff-present; release-wide alopex-tools report has not yet run",
+      "feature_gate": "blocked-pending-common-gate-verifier"
+    },
+    {
+      "id": "R5.3",
+      "requirement_outcome": "Fixtures cover ordering, duplicate/reorder, retention, movement, node failure, restart/reconnect, backpressure, unauthorized, invalid checkpoint, and Durable unavailable.",
+      "design_responsibility": "Reproducible unit/integration/cross-surface fixture suite",
+      "owner_task": "3.29",
+      "contributing_tasks": ["3.20", "3.21", "3.22", "3.23", "3.24", "3.25"],
+      "verification": {
+        "unit": ["crates/alopex-cluster/tests/changefeed_durable_preflight.rs", "crates/alopex-cluster/tests/changefeed_checkpoint.rs"],
+        "integration": ["crates/alopex-cluster/tests/changefeed_durability.rs", "crates/alopex-cluster/tests/changefeed_range_movement.rs", "crates/alopex-cluster/tests/changefeed_backpressure.rs", "crates/alopex-cluster/tests/changefeed_ack_replay_three_attempts.rs", "crates/alopex-cluster/tests/changefeed_unsupported.rs"],
+        "cross_surface": ["tests/fixtures/changefeed_surface_parity.json", "crates/alopex-cluster/tests/changefeed_surface_parity.rs", "crates/alopex-cli/tests/changefeed_surface_parity.rs", "crates/alopex-py/tests/test_changefeed_async.py"]
+      },
+      "evidence": ["evidence/changefeed-manifest.json", "evidence/v09-phase3-verifier-input.json"],
+      "implementation_evidence": "present",
+      "feature_gate": "blocked-on-Durable-prerequisite-and-independent-common-gate"
+    },
+    {
+      "id": "R5.4",
+      "requirement_outcome": "Missing Phase 1 range evidence or Chirps/Durable capability blocks Phase 3; Phase 2/4 remain release-wide dependencies, not a circular Phase 3 dependency.",
+      "design_responsibility": "Fail-closed Durable preflight and separate target-version common gate",
+      "owner_task": "3.27",
+      "contributing_tasks": ["3.6", "3.30"],
+      "verification": {
+        "unit": ["crates/alopex-cluster/tests/changefeed_durable_preflight.rs"],
+        "integration": ["crates/alopex-embedded/tests/changefeed.rs::unavailable_durable_profile_returns_outcome_without_embedded_handle"],
+        "cross_surface": ["crates/alopex-cluster/tests/changefeed_surface_parity.rs::embedded_durable_preflight_is_the_canonical_cross_surface_oracle"]
+      },
+      "evidence": ["evidence/v09-phase3-common-gate.json", "docs/v09-phase3-gate-input.md", "evidence/v09-phase3-verifier-input.json"],
+      "implementation_evidence": "present and intentionally blocked",
+      "feature_gate": "blocked; no tag, publish, Docker release action, or target-version release verdict is authorized by this artifact"
+    }
+  ],
+  "completion_gate_items": [
+    {
+      "item": "event-schema-and-range-order",
+      "owner_task": "3.30",
+      "input_tasks": ["3.1", "3.2", "3.4", "3.5", "3.20", "3.21"],
+      "evidence": ["evidence/changefeed-manifest.json", "crates/alopex-cluster/tests/changefeed_durability.rs", "crates/alopex-cluster/tests/changefeed_range_movement.rs"],
+      "status_before_3_30": "evidence-present"
+    },
+    {
+      "item": "checkpoint-ack-resume-and-idempotency",
+      "owner_task": "3.30",
+      "input_tasks": ["3.7", "3.23"],
+      "evidence": ["crates/alopex-cluster/tests/changefeed_checkpoint.rs", "crates/alopex-cluster/tests/changefeed_ack_replay_three_attempts.rs"],
+      "status_before_3_30": "evidence-present"
+    },
+    {
+      "item": "retention-backpressure-and-terminal-outcomes",
+      "owner_task": "3.30",
+      "input_tasks": ["3.8", "3.22"],
+      "evidence": ["crates/alopex-cluster/tests/changefeed_backpressure.rs"],
+      "status_before_3_30": "evidence-present"
+    },
+    {
+      "item": "public-surface-parity-and-explicit-unsupported-boundary",
+      "owner_task": "3.30",
+      "input_tasks": ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15", "3.16", "3.17", "3.24", "3.25"],
+      "evidence": ["evidence/changefeed-manifest.json", "tests/fixtures/changefeed_surface_parity.json", "crates/alopex-sql/tests/changefeed_boundary.rs", "crates/alopex-dataframe/tests/changefeed_boundary.rs"],
+      "status_before_3_30": "evidence-present"
+    },
+    {
+      "item": "whole-workspace-ledger-and-crosswalk",
+      "owner_task": "3.30",
+      "input_tasks": ["3.26", "3.29"],
+      "evidence": ["evidence/v09-phase3-inherited-ledger.json", "evidence/v09-phase3-crosswalk.json"],
+      "status_before_3_30": "evidence-present"
+    },
+    {
+      "item": "Durable-prerequisite-and-v0.9-verifier-report",
+      "owner_task": "3.30",
+      "input_tasks": ["3.6", "3.27", "3.28"],
+      "evidence": ["evidence/v09-phase3-common-gate.json", "evidence/v09-phase3-verifier-input.json"],
+      "status_before_3_30": "blocked; common gate must independently run the target-version verifier and receive authenticated Durable evidence"
+    },
+    {
+      "item": "Phase-1-2-4-and-release-wide-boundary",
+      "owner_task": "release-wide common gate",
+      "input_tasks": ["3.27", "3.30"],
+      "evidence": ["evidence/v09-phase3-common-gate.json", "docs/v09-phase3-gate-input.md"],
+      "status_before_3_30": "blocked; not satisfiable by a Phase 3 artifact and not a release authorization"
+    }
+  ],
+  "validation_contract": {
+    "expected_criterion_ids": ["R1.1", "R1.2", "R1.3", "R1.4", "R2.1", "R2.2", "R2.3", "R2.4", "R3.1", "R3.2", "R3.3", "R4.1", "R4.2", "R4.3", "R5.1", "R5.2", "R5.3", "R5.4"],
+    "required_row_fields": ["id", "requirement_outcome", "design_responsibility", "owner_task", "verification", "evidence", "implementation_evidence", "feature_gate"],
+    "required_verification_views": ["unit", "integration", "cross_surface"],
+    "failure_conditions": ["criterion is absent or duplicated", "owner task is absent", "a verification viewpoint is omitted", "evidence path is missing", "the document claims feature completion or release authorization while Durable/common-gate prerequisites are blocked"]
+  }
+}
