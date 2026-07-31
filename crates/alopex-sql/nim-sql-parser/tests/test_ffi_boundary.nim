@@ -80,6 +80,42 @@ suite "Skulk query parser FFI contract":
   test "contract version covers SQL-TS and PromQL payloads":
     check $alopex_parser_version() == "0.3.0"
 
+  test "PRAGMA variants retain their SQL MessagePack C ABI boundary":
+    for sql in [
+      "PRAGMA cache_size = 16",
+      "PRAGMA memory_limit = '100MiB'",
+      "PRAGMA memory_limit = 8192",
+      "PRAGMA memory_limit",
+      "PRAGMA io_stats",
+    ]:
+      let res = callFfi(sql)
+      check res.kind == prkOk
+      check res.buffer_len > 0
+      let kind = toJsonNode(takePayload(res))[0]["kind"]
+      check kind["variant"].getStr() == "Pragma"
+      check kind["name"].getStr() in ["cache_size", "memory_limit", "io_stats"]
+
+    let cache = toJsonNode(takePayload(callFfi("PRAGMA cache_size = 16")))[0]["kind"]
+    check cache["value"].getInt() == 16
+    let memory = toJsonNode(takePayload(callFfi("PRAGMA memory_limit = '100MiB'")))[0]["kind"]
+    check memory["value"].getStr() == "100MiB"
+    let memoryInteger = toJsonNode(takePayload(callFfi("PRAGMA memory_limit = 8192")))[0]["kind"]
+    check memoryInteger["value"].getInt() == 8192
+    let memoryUnset = toJsonNode(takePayload(callFfi("PRAGMA memory_limit")))[0]["kind"]
+    check memoryUnset["value"].kind == JNull
+    let stats = toJsonNode(takePayload(callFfi("PRAGMA io_stats")))[0]["kind"]
+    check stats["value"].kind == JNull
+
+  test "malformed PRAGMA returns prkError without poisoning the C ABI":
+    let failed = callFfi("PRAGMA cache_size = TRUE")
+    check failed.kind == prkError
+    check takeError(failed).len > 0
+
+    let recovered = callFfi("PRAGMA io_stats")
+    check recovered.kind == prkOk
+    let doc = toJsonNode(takePayload(recovered))
+    check doc[0]["kind"]["variant"].getStr() == "Pragma"
+
   test "malformed CASE returns prkError without poisoning subsequent calls":
     let failed = callFfi("SELECT CASE ELSE 1 END")
     check failed.kind == prkError

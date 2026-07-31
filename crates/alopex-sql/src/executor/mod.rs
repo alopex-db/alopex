@@ -722,18 +722,39 @@ mod tests {
     }
 
     #[test]
-    fn system_pragma_and_stats_function_use_the_store() {
+    fn system_pragmas_and_stats_function_use_the_store() {
         let mut executor = create_executor();
         let catalog = MemoryCatalog::new();
 
-        let pragma = crate::Parser::parse_sql(&crate::AlopexDialect, "PRAGMA cache_size = 8")
+        for sql in [
+            "PRAGMA cache_size = 8",
+            "PRAGMA memory_limit = '8MiB'",
+            "PRAGMA memory_limit = 8192",
+            "PRAGMA memory_limit",
+        ] {
+            let pragma = crate::Parser::parse_sql(&crate::AlopexDialect, sql)
+                .unwrap()
+                .pop()
+                .unwrap();
+            let plan = crate::Planner::new(&catalog).plan(&pragma).unwrap();
+            assert!(matches!(
+                executor.execute(plan),
+                Ok(ExecutionResult::Success)
+            ));
+        }
+
+        let io_stats = crate::Parser::parse_sql(&crate::AlopexDialect, "PRAGMA io_stats")
             .unwrap()
             .pop()
             .unwrap();
-        let plan = crate::Planner::new(&catalog).plan(&pragma).unwrap();
+        let plan = crate::Planner::new(&catalog).plan(&io_stats).unwrap();
+        let ExecutionResult::Query(io_stats) = executor.execute(plan).unwrap() else {
+            panic!("PRAGMA io_stats must retain its local query result");
+        };
+        assert_eq!(io_stats.columns[0].name, "io_stats");
         assert!(matches!(
-            executor.execute(plan),
-            Ok(ExecutionResult::Success)
+            &io_stats.rows[0][0],
+            crate::SqlValue::Text(_) | crate::SqlValue::Null
         ));
 
         let select = crate::Parser::parse_sql(&crate::AlopexDialect, "SELECT memory_stats()")

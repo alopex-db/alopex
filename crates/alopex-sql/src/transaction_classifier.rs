@@ -666,19 +666,12 @@ pub fn classify_transaction_sql(sql: &str) -> TransactionSqlClassification {
     }
 
     if first == "COPY" {
-        let row = if scan.contains("CSV") {
-            Some(TransactionSqlRow::CopyCsv)
-        } else if scan.contains("PARQUET") {
-            Some(TransactionSqlRow::CopyParquet)
-        } else {
-            None
-        };
-        return match row {
+        return match scan.copy_format_row() {
             Some(row) => accepted([row]),
             None => rejected(
                 [],
-                "copy_format_not_in_transaction_matrix",
-                "only COPY CSV and COPY Parquet are approved transaction rows",
+                "copy_syntax_not_in_transaction_matrix",
+                "COPY must use the established single-source CSV or Parquet adapter form",
             ),
         };
     }
@@ -798,14 +791,20 @@ pub fn classify_unsupported_transaction_construct(
 #[derive(Debug, Default)]
 struct TransactionSqlTextScan {
     keywords: Vec<String>,
+    lexemes: Vec<TransactionSqlLexeme>,
     statement_count: usize,
 }
 
-impl TransactionSqlTextScan {
-    fn contains(&self, keyword: &str) -> bool {
-        self.keywords.iter().any(|item| item == keyword)
-    }
+/// The deliberately small token set used only by the raw COPY admission
+/// boundary. Regular statements retain the Nim parser as their sole parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TransactionSqlLexeme {
+    Word(String),
+    Quoted,
+    Other,
+}
 
+impl TransactionSqlTextScan {
     fn contains_sequence(&self, sequence: &[&str]) -> bool {
         self.keywords.windows(sequence.len()).any(|window| {
             window
@@ -813,6 +812,36 @@ impl TransactionSqlTextScan {
                 .map(String::as_str)
                 .eq(sequence.iter().copied())
         })
+    }
+
+    /// Recognize only the established raw COPY boundary that is intentionally
+    /// outside the Nim statement AST. This is an admission check, not a
+    /// second SQL parser: the COPY adapter retains path, schema, and execution
+    /// validation after it resolves the target range.
+    ///
+    /// The exact lexeme sequence is `COPY <target> FROM <quoted-source>
+    /// <CSV|PARQUET>`. Keeping the quoted source in its actual position (not
+    /// just counting quotation marks) prevents a decoy literal or a second
+    /// `FROM` clause from entering the single-range path.
+    fn copy_format_row(&self) -> Option<TransactionSqlRow> {
+        let [
+            TransactionSqlLexeme::Word(copy),
+            TransactionSqlLexeme::Word(_target),
+            TransactionSqlLexeme::Word(from),
+            TransactionSqlLexeme::Quoted,
+            TransactionSqlLexeme::Word(format),
+        ] = self.lexemes.as_slice()
+        else {
+            return None;
+        };
+        if copy != "COPY" || from != "FROM" {
+            return None;
+        }
+        match format.as_str() {
+            "CSV" => Some(TransactionSqlRow::CopyCsv),
+            "PARQUET" => Some(TransactionSqlRow::CopyParquet),
+            _ => None,
+        }
     }
 }
 
@@ -869,6 +898,7 @@ fn scan_transaction_sql(sql: &str) -> Result<TransactionSqlTextScan, String> {
                         "unterminated quoted token beginning at byte {start}"
                     ));
                 }
+                scan.lexemes.push(TransactionSqlLexeme::Quoted);
             }
             b';' => {
                 if statement_has_keyword {
@@ -885,10 +915,16 @@ fn scan_transaction_sql(sql: &str) -> Result<TransactionSqlTextScan, String> {
                 {
                     index += 1;
                 }
-                scan.keywords.push(sql[start..index].to_ascii_uppercase());
+                let keyword = sql[start..index].to_ascii_uppercase();
+                scan.keywords.push(keyword.clone());
+                scan.lexemes.push(TransactionSqlLexeme::Word(keyword));
                 statement_has_keyword = true;
             }
-            _ => index += 1,
+            byte if byte.is_ascii_whitespace() => index += 1,
+            _ => {
+                scan.lexemes.push(TransactionSqlLexeme::Other);
+                index += 1;
+            }
         }
     }
     if statement_has_keyword {
@@ -1679,6 +1715,29 @@ mod tests {
         let copy = classify_transaction_sql("COPY records FROM 'records.csv' CSV");
         assert_eq!(copy.status, TransactionSqlStatus::SingleRange);
         assert_eq!(copy.primary_row.unwrap().row, TransactionSqlRow::CopyCsv);
+
+        for sql in [
+            "COPY records FROM records.csv CSV",
+            "COPY records FROM 'records.csv' CSV trailing",
+            "COPY records FROM 'records.csv' CSV PARQUET",
+            "COPY records FROM records.csv CSV 'decoy'",
+            "COPY records FROM 'records.csv' FROM other CSV",
+            "COPY records FROM 'records.json' JSON",
+        ] {
+            let classification = classify_transaction_sql(sql);
+            assert_eq!(
+                classification.status,
+                TransactionSqlStatus::PreExecutionReject,
+                "{sql} must not reach the single-range COPY adapter"
+            );
+            assert_eq!(
+                classification
+                    .preflight_rejection
+                    .as_ref()
+                    .map(|rejection| rejection.code.as_str()),
+                Some("copy_syntax_not_in_transaction_matrix")
+            );
+        }
 
         let case = classify_transaction_sql("SELECT CASE WHEN true THEN 1 ELSE 0 END");
         assert_eq!(case.status, TransactionSqlStatus::Distributed);
