@@ -17,17 +17,36 @@ use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::name_resolver::NameResolver;
 use crate::planner::typed_expr::{Quantifier, TypedExpr, TypedExprKind};
 use crate::planner::types::ResolvedType;
+use std::collections::{BTreeSet, HashSet};
 
 /// A table visible to expression name resolution.
 #[derive(Debug, Clone)]
 pub struct ScopedTable {
     pub table: TableMetadata,
     pub start_index: usize,
+    /// Lexical nesting level; zero is the current SELECT and larger values
+    /// are successively enclosing SELECT scopes.
+    pub scope_level: usize,
+    /// Columns coalesced by a JOIN ... USING or NATURAL JOIN. They remain
+    /// addressable by a qualified right-hand reference, but are not candidates
+    /// for an unqualified reference because the left-hand output column owns
+    /// the merged name.
+    pub hidden_unqualified_columns: HashSet<String>,
 }
 
 impl ScopedTable {
     pub fn new(table: TableMetadata, start_index: usize) -> Self {
-        Self { table, start_index }
+        Self {
+            table,
+            start_index,
+            scope_level: 0,
+            hidden_unqualified_columns: HashSet::new(),
+        }
+    }
+
+    pub fn hide_unqualified_columns(&mut self, columns: &[String]) {
+        self.hidden_unqualified_columns
+            .extend(columns.iter().cloned());
     }
 }
 
@@ -317,23 +336,76 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         column_name: &str,
         span: Span,
     ) -> Result<TypedExpr, PlannerError> {
-        let tables = scope.iter().map(|s| &s.table).collect::<Vec<_>>();
         let resolver = NameResolver::new(self.catalog);
-        let resolved =
-            resolver.resolve_column_with_scope(&tables, table_qualifier, column_name, span)?;
-        let scoped = scope
+        let levels = scope
             .iter()
-            .find(|s| s.table.name == resolved.table_name)
-            .ok_or_else(|| PlannerError::table_not_found(&resolved.table_name, span))?;
-        Ok(TypedExpr {
-            kind: TypedExprKind::ColumnRef {
-                table: resolved.table_name,
-                column: resolved.column_name,
-                column_index: scoped.start_index + resolved.column_index,
-            },
-            resolved_type: resolved.resolved_type,
-            span,
-        })
+            .map(|table| table.scope_level)
+            .collect::<BTreeSet<_>>();
+        let mut qualifier_found = false;
+
+        for level in levels {
+            let candidates = scope
+                .iter()
+                .filter(|table| table.scope_level == level)
+                .filter(|table| {
+                    table_qualifier.is_some()
+                        || !table.hidden_unqualified_columns.contains(column_name)
+                })
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                continue;
+            }
+            if let Some(qualifier) = table_qualifier {
+                if !candidates.iter().any(|table| table.table.name == qualifier) {
+                    continue;
+                }
+                qualifier_found = true;
+            }
+
+            let tables = candidates
+                .iter()
+                .map(|table| &table.table)
+                .collect::<Vec<_>>();
+            match resolver.resolve_column_with_scope(&tables, table_qualifier, column_name, span) {
+                Ok(resolved) => {
+                    let scoped = candidates
+                        .into_iter()
+                        .find(|table| table.table.name == resolved.table_name)
+                        .ok_or_else(|| PlannerError::table_not_found(&resolved.table_name, span))?;
+                    let column_index =
+                        scoped.table.get_column_index(column_name).ok_or_else(|| {
+                            PlannerError::column_not_found(column_name, &scoped.table.name, span)
+                        })?;
+                    let column = &scoped.table.columns[column_index];
+                    return Ok(TypedExpr {
+                        kind: TypedExprKind::ColumnRef {
+                            table: scoped.table.name.clone(),
+                            column: column_name.to_string(),
+                            column_index: scoped.start_index + column_index,
+                        },
+                        resolved_type: column.data_type.clone(),
+                        span,
+                    });
+                }
+                Err(PlannerError::ColumnNotFound { .. }) if table_qualifier.is_none() => {
+                    // A missing local name may be a correlated reference. Only
+                    // this case falls back to the next enclosing scope.
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        let table = scope
+            .iter()
+            .min_by_key(|table| table.scope_level)
+            .map(|table| table.table.name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        if let Some(qualifier) = table_qualifier
+            && !qualifier_found
+        {
+            return Err(PlannerError::table_not_found(qualifier, span));
+        }
+        Err(PlannerError::column_not_found(column_name, table, span))
     }
 
     /// Infer the type of a binary operation.
