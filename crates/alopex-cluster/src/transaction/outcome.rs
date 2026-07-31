@@ -21,6 +21,8 @@ pub enum TransactionIsolation {
 #[serde(deny_unknown_fields)]
 pub struct TransactionParticipant {
     pub range: RangeIdentity,
+    /// Committed range generation captured by the fixed read point.
+    pub range_generation: u64,
     pub placement: Placement,
 }
 
@@ -34,7 +36,13 @@ impl TransactionParticipant {
         require_non_empty(
             "participant.placement.owner_node",
             self.placement.owner_node.as_str(),
-        )
+        )?;
+        if self.range_generation == 0 {
+            return Err(TransactionOutcomeError::InvalidRangeGeneration {
+                range_id: self.range.range_id.as_str().to_string(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -125,9 +133,17 @@ impl TransactionOutcome {
                     range_id: range_id.as_str().to_string(),
                 });
             }
-            if !self.read_point.range_generations.contains_key(&range_id) {
+            let Some(read_point_generation) = self.read_point.range_generations.get(&range_id)
+            else {
                 return Err(TransactionOutcomeError::ReadPointMissingRange {
                     range_id: range_id.as_str().to_string(),
+                });
+            };
+            if *read_point_generation != participant.range_generation {
+                return Err(TransactionOutcomeError::RangeGenerationMismatch {
+                    range_id: range_id.as_str().to_string(),
+                    participant_generation: participant.range_generation,
+                    read_point_generation: *read_point_generation,
                 });
             }
             if participant.range.schema_version != self.schema_version {
@@ -158,6 +174,16 @@ impl TransactionOutcome {
                 read_point_version: self.read_point.metadata_version,
             });
         }
+        match (
+            self.participating_ranges.len(),
+            self.routing.kind,
+            &self.routing.range_identity,
+        ) {
+            (1, crate::RoutingOutcomeKind::SingleRange, Some(identity))
+                if identity == &self.participating_ranges[0].range => {}
+            (count, crate::RoutingOutcomeKind::MultiRange, None) if count > 1 => {}
+            _ => return Err(TransactionOutcomeError::RoutingParticipantMismatch),
+        }
 
         validate_state_failure(self.state, self.failure_class, self.reason_code.as_deref())?;
         validate_retryability(self.state, self.retryable)?;
@@ -179,8 +205,18 @@ pub enum TransactionOutcomeError {
     MissingParticipants,
     #[error("range {range_id} appears more than once in the participant set")]
     DuplicateParticipant { range_id: String },
+    #[error("range {range_id} has no committed generation")]
+    InvalidRangeGeneration { range_id: String },
     #[error("read point does not cover participating range {range_id}")]
     ReadPointMissingRange { range_id: String },
+    #[error(
+        "range {range_id} generation {participant_generation} differs from read point generation {read_point_generation}"
+    )]
+    RangeGenerationMismatch {
+        range_id: String,
+        participant_generation: u64,
+        read_point_generation: u64,
+    },
     #[error(
         "participant {range_id} schema version {participant_schema_version} differs from outcome schema version {outcome_schema_version}"
     )]
@@ -209,6 +245,8 @@ pub enum TransactionOutcomeError {
         routing_version: u64,
         read_point_version: u64,
     },
+    #[error("routing outcome does not exactly describe the immutable participant set")]
+    RoutingParticipantMismatch,
     #[error("failure and recovery-pending states require failure_class and reason_code")]
     MissingFailureDetails,
     #[error("non-failure transaction state cannot carry failure_class or reason_code")]
@@ -294,6 +332,7 @@ mod tests {
     fn participant(range_id: &str) -> TransactionParticipant {
         TransactionParticipant {
             range: RangeIdentity::new("cluster-a", 7, range_id, None, None, 3, 11),
+            range_generation: 1,
             placement: Placement::new(
                 "node-a",
                 Vec::new(),
@@ -329,10 +368,11 @@ mod tests {
         reason_code: Option<&str>,
         retryable: bool,
     ) -> TransactionOutcome {
+        let participating_ranges = vec![participant("range-a")];
         TransactionOutcome::new(
             "txn-1",
             RequestId::from("request-1"),
-            vec![participant("range-a")],
+            participating_ranges.clone(),
             read_point(&["range-a"]),
             3,
             11,
@@ -342,7 +382,7 @@ mod tests {
             reason_code.map(str::to_owned),
             RoutingOutcome::new(
                 RoutingOutcomeKind::SingleRange,
-                None,
+                Some(participating_ranges[0].range.clone()),
                 8,
                 "transaction_route",
             ),

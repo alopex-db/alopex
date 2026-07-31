@@ -235,6 +235,7 @@ fn participant(
             1,
             data_epoch,
         ),
+        range_generation: definition.generation,
         placement: Placement::new(
             owner.node_id.clone(),
             replica_nodes,

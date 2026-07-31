@@ -80,7 +80,12 @@ pub use read_point::{
     ReadPointFailure, ReadPointRequest,
 };
 pub use transaction::{
-    TransactionIsolation, TransactionOutcome, TransactionOutcomeError, TransactionParticipant,
+    BlockedTransactionAdmissionVerifier, CommittedMetadataProvider,
+    CommittedTransactionAdmissionVerifier, TransactionActorAuthorizer, TransactionAdmissionError,
+    TransactionAdmissionVerifier, TransactionCoordinator, TransactionCoordinatorError,
+    TransactionDecision, TransactionIntent, TransactionIsolation, TransactionOutcome,
+    TransactionOutcomeError, TransactionParticipant, TransactionParticipantAck,
+    TransactionParticipantDriver, TransactionRecoveryError,
 };
 pub use transport::{
     ClusterFrameDispatchError, ClusterFrameDispatcher, ClusterFrameHandler,
