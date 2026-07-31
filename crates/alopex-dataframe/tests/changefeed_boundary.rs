@@ -22,8 +22,22 @@ fn every_dataframe_changefeed_lifecycle_and_source_is_rejected_before_execution(
     let unique: BTreeSet<_> = requests.iter().map(|request| request.id()).collect();
     assert_eq!(unique.len(), requests.len());
 
+    let expected_rows: BTreeSet<_> = DATAFRAME_CHANGEFEED_TARGETS
+        .iter()
+        .flat_map(|target| {
+            DATAFRAME_CHANGEFEED_LIFECYCLES
+                .iter()
+                .map(move |lifecycle| (target.id(), lifecycle.id()))
+        })
+        .collect();
+    assert_eq!(
+        unique, expected_rows,
+        "no source or lifecycle may be omitted"
+    );
+
     for request in requests {
         let rejection = preflight_dataframe_changefeed_request(request).unwrap_err();
+        assert_eq!(rejection.boundary_version, "v0.9");
         assert_eq!(
             rejection.classification,
             DataFrameChangefeedClassification::PreExecutionUnsupported
