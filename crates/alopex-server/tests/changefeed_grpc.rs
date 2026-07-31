@@ -20,6 +20,13 @@ use tonic::{Code, Request};
 const API_KEY: &str = "changefeed-grpc-key";
 const CONTRACT_VERSION: u32 = 1;
 
+fn parity_fixture() -> serde_json::Value {
+    serde_json::from_str(include_str!(
+        "../../../tests/fixtures/changefeed_surface_parity.json"
+    ))
+    .expect("valid parity fixture")
+}
+
 async fn build_state() -> (Arc<ServerState>, tempfile::TempDir) {
     let temp = tempdir().expect("tempdir");
     let server = Server::new(ServerConfig {
@@ -179,22 +186,30 @@ async fn changefeed_grpc_register_enforces_existing_auth_for_all_eight_operation
 
 #[tokio::test]
 async fn create_preserves_canonical_durable_failure_in_typed_status_details() {
+    let fixture = parity_fixture();
     let (state, _temp) = build_state().await;
     let (channel, shutdown, handle) = spawn_network_grpc_server(state).await;
     let mut client = grpc::proto::alopex_service_client::AlopexServiceClient::new(channel);
 
     let error = client
-        .create_changefeed(authenticated(create()))
+        .create_changefeed(authenticated(grpc::proto::CreateChangefeedRequestV1 {
+            request_id: fixture["request_id"].as_str().unwrap().to_owned(),
+            ..create()
+        }))
         .await
         .expect_err("compiled Durable profile must fail closed");
+    assert_eq!(fixture["grpc_code"], "FAILED_PRECONDITION");
     assert_eq!(error.code(), Code::FailedPrecondition);
     let outcome = grpc::proto::ChangefeedOutcomeV1::decode(error.details())
         .expect("typed canonical outcome in gRPC status details");
     assert_eq!(outcome.contract_version, CONTRACT_VERSION);
-    assert_eq!(outcome.failure_class, "prerequisite_missing");
-    assert!(outcome.reason_code.starts_with("durable_"));
-    assert_eq!(outcome.operation_state, "terminal_failure");
-    assert_eq!(outcome.request_id, "grpc-create");
+    assert_eq!(outcome.failure_class, fixture["failure_class"]);
+    assert!(outcome
+        .reason_code
+        .starts_with(fixture["reason_prefix"].as_str().unwrap()));
+    assert_eq!(outcome.operation_state, fixture["operation_state"]);
+    assert_eq!(outcome.request_id, fixture["request_id"]);
+    assert!(!outcome.retryable);
     assert!(outcome.feed.is_some());
     assert!(outcome.routing.is_some());
     assert!(outcome.idempotency.is_some());

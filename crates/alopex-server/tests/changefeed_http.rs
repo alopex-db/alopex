@@ -26,6 +26,13 @@ const CHANGEFEED_ROUTES: [(&str, Method); 8] = [
     ("/v1/changefeeds/feed-a/close", Method::POST),
 ];
 
+fn parity_fixture() -> Value {
+    serde_json::from_str(include_str!(
+        "../../../tests/fixtures/changefeed_surface_parity.json"
+    ))
+    .expect("valid parity fixture")
+}
+
 fn server() -> Server {
     let temp = tempdir().expect("temporary data directory");
     Server::new(ServerConfig {
@@ -104,10 +111,11 @@ async fn changefeed_routes_are_exact_and_protected_by_existing_http_auth() {
 
 #[tokio::test]
 async fn create_reports_compiled_durable_prerequisite_in_the_canonical_envelope() {
+    let fixture = parity_fixture();
     let server = server();
     let api = http::router(server.state);
     let request = json!({
-        "request_id": "request-create",
+        "request_id": fixture["request_id"],
         "tenant": "tenant-a",
         "actor": "dev",
         "range_id": "range-a"
@@ -121,13 +129,20 @@ async fn create_reports_compiled_durable_prerequisite_in_the_canonical_envelope(
     )
     .await;
 
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        status.as_u16(),
+        fixture["http_status"].as_u64().unwrap() as u16
+    );
     let outcome: Value = serde_json::from_slice(&body).expect("canonical JSON outcome");
-    assert_eq!(outcome["failure_class"], "prerequisite_missing");
+    assert_eq!(outcome["request_id"], fixture["request_id"]);
+    assert_eq!(outcome["operation_state"], fixture["operation_state"]);
+    assert_eq!(outcome["failure_class"], fixture["failure_class"]);
+    assert_eq!(outcome["retryable"], fixture["retryable"]);
     assert!(outcome["reason_code"]
         .as_str()
-        .is_some_and(|code| code.starts_with("durable_")));
-    assert_eq!(outcome["result"]["result_type"], "feed");
+        .is_some_and(|code| code.starts_with(fixture["reason_prefix"].as_str().unwrap())));
+    assert_eq!(outcome["result"]["result_type"], fixture["result_type"]);
+    assert_eq!(outcome["idempotency"]["request_id"], fixture["request_id"]);
     assert!(outcome["correlation_id"]
         .as_str()
         .is_some_and(|id| !id.is_empty()));

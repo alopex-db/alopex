@@ -1,0 +1,20 @@
+{
+  "fixture_id": "v09-durable-preflight-parity",
+  "feed_id": "parity-feed",
+  "request_id": "parity-request",
+  "cluster_id": "cluster-a",
+  "table_id": 7,
+  "range_id": "range-a",
+  "generation": 3,
+  "schema_version": 4,
+  "data_epoch": 9,
+  "operation_state": "terminal_failure",
+  "failure_class": "prerequisite_missing",
+  "reason_prefix": "durable_",
+  "retryable": false,
+  "result_type": "feed",
+  "http_status": 503,
+  "grpc_code": "FAILED_PRECONDITION",
+  "cli_exit_code": 5,
+  "python_error_code": "changefeed_prerequisite_missing"
+}

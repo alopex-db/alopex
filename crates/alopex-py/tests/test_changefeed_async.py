@@ -1,9 +1,16 @@
 import asyncio
+import json
+from pathlib import Path
 
 import pytest
 
-from alopex import AlopexError
+from alopex import AlopexError, Database
 from alopex.asyncio import AsyncChangefeed, AsyncDatabase
+
+
+def _parity_fixture() -> dict[str, object]:
+    path = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "changefeed_surface_parity.json"
+    return json.loads(path.read_text())
 
 
 class _FakeChangefeed:
@@ -151,3 +158,41 @@ def test_async_database_preserves_native_changefeed_prerequisite_failure():
             await database.close()
 
     asyncio.run(scenario())
+
+
+def test_sync_and_async_embedded_changefeed_share_the_durable_preflight_fixture():
+    fixture = _parity_fixture()
+    kwargs = {
+        "cluster_id": fixture["cluster_id"],
+        "table_id": fixture["table_id"],
+        "range_id": fixture["range_id"],
+        "generation": fixture["generation"],
+        "schema_version": fixture["schema_version"],
+        "data_epoch": fixture["data_epoch"],
+        "request_id": fixture["request_id"],
+    }
+
+    database = Database.open_in_memory()
+    try:
+        with pytest.raises(AlopexError) as sync_failure:
+            database.create_changefeed(fixture["feed_id"], **kwargs)
+    finally:
+        database.close()
+
+    async def scenario() -> AlopexError:
+        database = await AsyncDatabase.open_in_memory()
+        try:
+            with pytest.raises(AlopexError) as async_failure:
+                await database.create_changefeed(fixture["feed_id"], **kwargs)
+            return async_failure.value
+        finally:
+            await database.close()
+
+    async_failure = asyncio.run(scenario())
+    for failure in (sync_failure.value, async_failure):
+        assert failure.code == fixture["python_error_code"]
+        assert failure.status["failure_class"] == fixture["failure_class"]
+        assert failure.status["operation_state"] == fixture["operation_state"]
+        assert failure.status["request_id"] == fixture["request_id"]
+        assert failure.status["retryable"] is fixture["retryable"]
+        assert failure.status["reason_code"].startswith(fixture["reason_prefix"])
