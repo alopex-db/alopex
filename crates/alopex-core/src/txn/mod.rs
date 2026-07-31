@@ -1,5 +1,14 @@
 //! Transaction management traits.
 
+mod participant;
+
+pub use participant::{
+    ParticipantDecision, ParticipantDecisionRecord, ParticipantDecisionResult,
+    ParticipantDecisionStore, ParticipantIdentity, ParticipantJournalPhase, ParticipantOpenResult,
+    ParticipantTransaction, ParticipantTransactionError, ParticipantTransactionState,
+    WalParticipantDecisionStore,
+};
+
 use crate::error::Result;
 use crate::types::TxnMode;
 

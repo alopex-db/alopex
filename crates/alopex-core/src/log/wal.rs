@@ -19,6 +19,56 @@ pub enum WalRecord {
     Delete(TxnId, Key),
     /// Commits a transaction.
     Commit(TxnId),
+    /// Durable state of a distributed transaction participant. These records
+    /// belong in a dedicated participant journal, never a KV data WAL.
+    ParticipantState {
+        /// Stable distributed transaction identifier.
+        transaction_id: String,
+        /// Stable idempotency key for this participant decision request.
+        request_id: String,
+        /// Digest of the authenticated participant request payload.
+        request_fingerprint: String,
+        /// Fenced user-data epoch.
+        data_epoch: u64,
+        /// Fenced committed metadata version.
+        metadata_version: u64,
+        /// Fenced schema epoch.
+        schema_epoch: u64,
+        /// Fenced index epoch.
+        index_epoch: u64,
+        /// The complete participant write set captured at prepare time.
+        writes: Vec<ParticipantWalWrite>,
+        /// The one-way participant journal phase.
+        state: ParticipantWalState,
+    },
+}
+
+/// One staged write preserved by a durable participant journal record.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ParticipantWalWrite {
+    /// Key affected by the participant transaction.
+    pub key: Key,
+    /// Value to write, or `None` for a deletion.
+    pub value: Option<Value>,
+}
+
+/// One durable phase of a distributed transaction participant decision.
+///
+/// `CommitDecision` and `AbortDecision` are intentionally distinct from their
+/// `Applied` acknowledgements: a crash or fsync failure after a decision but
+/// before the local terminal action must recover as uncertain, never success.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParticipantWalState {
+    /// The participant has durably accepted its immutable read point and write set.
+    Prepared,
+    /// A commit decision is durable but may not yet be locally applied.
+    CommitDecision,
+    /// The local commit completed and its acknowledgement is durable.
+    CommitApplied,
+    /// An abort decision is durable but local rollback may not yet be acknowledged.
+    AbortDecision,
+    /// The local rollback completed and its acknowledgement is durable.
+    AbortApplied,
 }
 
 /// A writer for the Write-Ahead Log.

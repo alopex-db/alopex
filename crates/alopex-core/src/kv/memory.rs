@@ -653,6 +653,11 @@ impl MemoryTxnManager {
                         }
                     }
                 }
+                WalRecord::ParticipantState { .. } => {
+                    return Err(Error::InvalidFormat(
+                        "participant decision record found in KV data WAL".to_owned(),
+                    ));
+                }
             }
         }
 

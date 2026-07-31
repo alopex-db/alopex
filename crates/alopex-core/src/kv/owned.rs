@@ -9,6 +9,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::error::{Error, Result};
+use crate::kv::read_at::{ReadAtCapability, ReadAtPoint, ReadAtResult};
 use crate::kv::KVTransaction;
 use crate::txn::{OwnedLeaseOutcome, OwnedReadSessionStatus, OwnedTransactionSessionStatus};
 use crate::types::{Key, TxnId, TxnMode, Value};
@@ -154,6 +155,30 @@ pub trait OwnedKVStore: Send + Sync + 'static {
         self: Arc<Self>,
         mode: TxnMode,
     ) -> Result<Box<dyn OwnedKVTransaction>>;
+
+    /// Reports whether this store can bind an owned transaction to a retained
+    /// cluster read point. A normal local owned transaction is never evidence
+    /// for a distributed snapshot, so the safe default is unavailable.
+    fn owned_read_at_capability(&self) -> ReadAtCapability {
+        ReadAtCapability::unavailable("owned backend does not prove retained cluster read points")
+    }
+
+    /// Begin an owned transaction at one complete, cluster-issued read point.
+    ///
+    /// Backends must override this only after proving the requested data,
+    /// metadata, schema, and index epochs are retained together. The default
+    /// deliberately refuses to substitute [`Self::begin_owned_kv_transaction`]
+    /// for `point`.
+    fn begin_owned_kv_transaction_at(
+        self: Arc<Self>,
+        point: &ReadAtPoint,
+        _mode: TxnMode,
+    ) -> ReadAtResult<Box<dyn OwnedKVTransaction>> {
+        Err(self.owned_read_at_capability().unavailable_error(
+            point,
+            "owned backend did not implement begin_owned_kv_transaction_at",
+        ))
+    }
 }
 
 /// Options shared by owned read session factories.
@@ -175,6 +200,20 @@ pub trait OwnedSessionFactory: OwnedKVStore {
     /// Begin an owned transaction session.
     fn begin_owned_transaction(self: Arc<Self>, mode: TxnMode) -> Result<OwnedTransactionSession> {
         let transaction = self.begin_owned_kv_transaction(mode)?;
+        Ok(OwnedTransactionSession::new(transaction))
+    }
+
+    /// Begin an owned transaction at the supplied immutable cluster read point.
+    ///
+    /// This is the only owned-session entry point available to a distributed
+    /// participant. It preserves the local API above while rejecting backends
+    /// that have not proven retention of the complete read fence.
+    fn begin_owned_transaction_at(
+        self: Arc<Self>,
+        point: &ReadAtPoint,
+        mode: TxnMode,
+    ) -> ReadAtResult<OwnedTransactionSession> {
+        let transaction = self.begin_owned_kv_transaction_at(point, mode)?;
         Ok(OwnedTransactionSession::new(transaction))
     }
 }
