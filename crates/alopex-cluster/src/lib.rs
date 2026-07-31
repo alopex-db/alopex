@@ -12,6 +12,7 @@ pub mod distributed_read;
 mod metadata;
 mod projection;
 mod read_point;
+pub mod transaction;
 mod transport;
 
 pub use bootstrap::{
@@ -77,6 +78,9 @@ pub use projection::{
 pub use read_point::{
     ClusterReadPoint, ClusterReadPointAuthority, RangeReplicaReadWatermark, ReadConsistencyMode,
     ReadPointFailure, ReadPointRequest,
+};
+pub use transaction::{
+    TransactionIsolation, TransactionOutcome, TransactionOutcomeError, TransactionParticipant,
 };
 pub use transport::{
     ClusterFrameDispatchError, ClusterFrameDispatcher, ClusterFrameHandler,
