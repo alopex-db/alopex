@@ -590,8 +590,12 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             // Integer operations
             (Integer, Integer) => Ok(Integer),
             (Integer, BigInt) | (BigInt, Integer) | (BigInt, BigInt) => Ok(BigInt),
-            (Integer, Float) | (Float, Integer) | (Float, Float) => Ok(Float),
-            (Integer, Double)
+            (Float, Float) => Ok(Float),
+            // f32 has 24 bits of mantissa and cannot hold the whole i32 range,
+            // so an INTEGER mixed with FLOAT widens to DOUBLE.
+            (Integer, Float)
+            | (Float, Integer)
+            | (Integer, Double)
             | (Double, Integer)
             | (BigInt, Float)
             | (Float, BigInt)

@@ -97,7 +97,8 @@ fn sum_integer_preserves_integer_while_total_and_avg_remain_floating_point() {
             .query_sql("SELECT SUM(i), TOTAL(i), AVG(i), MIN(i), MAX(i), COUNT(i) FROM n")
             .rows,
         vec![vec![
-            SqlValue::Integer(30),
+            // SUM widens INTEGER to BIGINT so the accumulator cannot overflow.
+            SqlValue::BigInt(30),
             SqlValue::Double(30.0),
             SqlValue::Double(15.0),
             SqlValue::Integer(10),
@@ -132,5 +133,36 @@ fn timestamp_columns_accept_canonical_text_and_epoch_micros() {
             vec![SqlValue::Timestamp(0)],
             vec![SqlValue::Timestamp(1_736_937_000_000_000)],
         ]
+    );
+}
+
+/// SUM over INTEGER must accumulate in a wider type. PostgreSQL sums int4 into
+/// int8 and DuckDB widens to hugeint precisely because a 32-bit accumulator
+/// overflows on ordinary data: two rows near i32::MAX are enough.
+#[test]
+fn sum_over_integer_accumulates_without_overflowing_the_column_type() {
+    let mut harness = SqlHarness::new();
+    harness.execute_sql(
+        "CREATE TABLE wide (i INTEGER); INSERT INTO wide VALUES (2000000000), (2000000000);",
+    );
+
+    assert_eq!(
+        harness.query_sql("SELECT SUM(i) FROM wide").rows,
+        vec![vec![SqlValue::BigInt(4_000_000_000)]]
+    );
+}
+
+/// FLOAT and INTEGER mix in arithmetic. A 32-bit float cannot represent the whole
+/// i32 range, so the result promotes to DOUBLE rather than losing magnitude.
+#[test]
+fn integer_and_float_arithmetic_promotes_to_double() {
+    let mut harness = SqlHarness::new();
+    harness.execute_sql(
+        "CREATE TABLE mixed (i INTEGER, f FLOAT); INSERT INTO mixed VALUES (2000000001, 1.5);",
+    );
+
+    assert_eq!(
+        harness.query_sql("SELECT i * f FROM mixed").rows,
+        vec![vec![SqlValue::Double(3_000_000_001.5)]]
     );
 }

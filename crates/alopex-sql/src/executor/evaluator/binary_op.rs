@@ -161,8 +161,10 @@ fn numeric_operands(left: &SqlValue, right: &SqlValue) -> Option<NumericOperands
         (Integer(a), BigInt(b)) => Some(NumericOperands::BigInt(i64::from(*a), *b)),
         (BigInt(a), Integer(b)) => Some(NumericOperands::BigInt(*a, i64::from(*b))),
         (BigInt(a), BigInt(b)) => Some(NumericOperands::BigInt(*a, *b)),
-        (Integer(a), Float(b)) => Some(NumericOperands::Float(*a as f32, *b)),
-        (Float(a), Integer(b)) => Some(NumericOperands::Float(*a, *b as f32)),
+        // f32 has 24 bits of mantissa and cannot hold the whole i32 range, so an
+        // INTEGER mixed with FLOAT widens to DOUBLE instead of losing magnitude.
+        (Integer(a), Float(b)) => Some(NumericOperands::Double(f64::from(*a), f64::from(*b))),
+        (Float(a), Integer(b)) => Some(NumericOperands::Double(f64::from(*a), f64::from(*b))),
         (Float(a), Float(b)) => Some(NumericOperands::Float(*a, *b)),
         (BigInt(a), Float(b)) => Some(NumericOperands::Double(*a as f64, f64::from(*b))),
         (Float(a), BigInt(b)) => Some(NumericOperands::Double(f64::from(*a), *b as f64)),

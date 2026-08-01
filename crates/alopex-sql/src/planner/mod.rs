@@ -2279,6 +2279,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             (BigInt, Float) | (BigInt, Double) => true,
             // Float can be assigned to Double
             (Float, Double) => true,
+            // A decimal literal is typed DOUBLE, so a FLOAT column needs this
+            // narrowing; the value is rounded to f32 at execution time.
+            (Double, Float) => true,
             // TIMESTAMP is stored as microseconds; text and numeric input is
             // converted by the assignment expression at execution time.
             (Text | Integer | BigInt | Float | Double, Timestamp) => true,

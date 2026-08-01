@@ -96,10 +96,13 @@ impl AggregateExpr {
 /// Fixed-width integral inputs retain their integral type. All other numeric
 /// inputs accumulate and return DOUBLE, matching the historical floating-point
 /// behaviour and keeping `TOTAL`/`AVG` semantics distinct.
+/// `SUM` keeps integer inputs exact, but accumulates them in a wider type: a
+/// 32-bit accumulator overflows on ordinary data, so summing INTEGER yields
+/// BIGINT. PostgreSQL sums int4 into int8 for the same reason, and DuckDB
+/// widens further to hugeint.
 pub fn sum_result_type(input_type: &ResolvedType) -> ResolvedType {
     match input_type {
-        ResolvedType::Integer => ResolvedType::Integer,
-        ResolvedType::BigInt => ResolvedType::BigInt,
+        ResolvedType::Integer | ResolvedType::BigInt => ResolvedType::BigInt,
         _ => ResolvedType::Double,
     }
 }
