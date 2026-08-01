@@ -69,7 +69,7 @@ fn dml_nodes_carry_spans() {
     let insert = Insert {
         table: "t".into(),
         columns: None,
-        values: vec![],
+        source: alopex_sql::ast::InsertSource::Values { values: vec![] },
         span: span(2, 1),
     };
     assert_eq!(insert.span().start.line, 2);

@@ -23,6 +23,44 @@ pub fn execute_insert<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
 
     validate_columns(&table, &columns)?;
 
+    let rows = values
+        .into_iter()
+        .map(|row_exprs| build_row(&table, &columns, row_exprs))
+        .collect::<Result<Vec<_>>>()?;
+
+    insert_rows(txn, catalog, &table, table_name, rows)
+}
+
+/// Insert already-evaluated SELECT output rows.
+pub fn execute_insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    catalog: &C,
+    table_name: &str,
+    columns: Vec<String>,
+    values: Vec<Vec<SqlValue>>,
+) -> Result<ExecutionResult> {
+    let table = catalog
+        .get_table(table_name)
+        .cloned()
+        .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+
+    validate_columns(&table, &columns)?;
+
+    let rows = values
+        .into_iter()
+        .map(|row_values| build_row_from_values(&table, &columns, row_values))
+        .collect::<Result<Vec<_>>>()?;
+
+    insert_rows(txn, catalog, &table, table_name, rows)
+}
+
+fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    catalog: &C,
+    table: &TableMetadata,
+    table_name: &str,
+    rows: Vec<Vec<SqlValue>>,
+) -> Result<ExecutionResult> {
     let indexes: Vec<IndexMetadata> = catalog
         .get_indexes_for_table(table_name)
         .into_iter()
@@ -32,26 +70,25 @@ pub fn execute_insert<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
         .into_iter()
         .partition(|idx| matches!(idx.method, Some(IndexMethod::Hnsw)));
 
-    let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::with_capacity(values.len());
+    let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
 
     // Insert into table using a single handle; stage for index population.
     {
-        let mut table_storage = txn.table_storage(&table);
-        for row_exprs in values {
-            let row = build_row(&table, &columns, row_exprs)?;
+        let mut table_storage = txn.table_storage(table);
+        for row in rows {
             let row_id = table_storage
                 .next_row_id()
-                .map_err(|e| map_storage_error(&table, e))?;
+                .map_err(|e| map_storage_error(table, e))?;
             table_storage
                 .insert(row_id, &row)
-                .map_err(|e| map_storage_error(&table, e))?;
+                .map_err(|e| map_storage_error(table, e))?;
             staged.push((row_id, row));
         }
     }
 
     // Populate indexes using one handle per index for the whole batch.
     populate_indexes(txn, &btree_indexes, &staged)?;
-    populate_hnsw_indexes(txn, &table, &hnsw_indexes, &staged)?;
+    populate_hnsw_indexes(txn, table, &hnsw_indexes, &staged)?;
 
     Ok(ExecutionResult::RowsAffected(staged.len() as u64))
 }
@@ -83,26 +120,36 @@ fn build_row(
     columns: &[String],
     exprs: Vec<TypedExpr>,
 ) -> Result<Vec<SqlValue>> {
-    if exprs.len() != columns.len() {
+    let ctx = EvalContext::new(&[]);
+    let values = exprs
+        .into_iter()
+        .map(|expr| evaluate(&expr, &ctx))
+        .collect::<Result<Vec<_>>>()?;
+    build_row_from_values(table, columns, values)
+}
+
+fn build_row_from_values(
+    table: &TableMetadata,
+    columns: &[String],
+    values: Vec<SqlValue>,
+) -> Result<Vec<SqlValue>> {
+    if values.len() != columns.len() {
         return Err(ExecutorError::InvalidOperation {
             operation: "INSERT".into(),
             reason: format!(
                 "column/value count mismatch: {} vs {}",
                 columns.len(),
-                exprs.len()
+                values.len()
             ),
         });
     }
 
     let mut row = vec![SqlValue::Null; table.column_count()];
-    let ctx = EvalContext::new(&[]);
-
-    for (idx, expr) in exprs.into_iter().enumerate() {
+    for (idx, value) in values.into_iter().enumerate() {
         let col_name = &columns[idx];
         let col_index = table
             .get_column_index(col_name)
             .ok_or_else(|| ExecutorError::ColumnNotFound(col_name.clone()))?;
-        let value = evaluate(&expr, &ctx)?;
         row[col_index] = value;
     }
 

@@ -36,7 +36,8 @@ suite "FFI boundary (issue #40)":
     let doc = toJsonNode(takePayload(res))
     check doc[0]["kind"]["variant"].getStr() == "Insert"
     check doc[0]["kind"]["columns"].kind == JNull
-    check doc[0]["kind"]["values"].len == 2
+    check doc[0]["kind"]["source"]["variant"].getStr() == "Values"
+    check doc[0]["kind"]["source"]["values"].len == 2
 
   test "non-ParseError failure maps to prkError instead of leaking":
     # parseBiggestInt は桁あふれの整数リテラルで ValueError (非 ParseError)
@@ -78,7 +79,7 @@ suite "FFI boundary (issue #40)":
 suite "Skulk query parser FFI contract":
 
   test "contract version covers SQL-TS and PromQL payloads":
-    check $alopex_parser_version() == "0.2.0"
+    check $alopex_parser_version() == "0.3.0"
 
   test "SQL-TS interval is emitted as an explicit literal variant":
     let res = callFfi("SELECT NOW() - INTERVAL '24 hours'")

@@ -525,6 +525,22 @@ where
                 let guard = catalog.read().expect("catalog lock poisoned");
                 dml::execute_insert(txn, &*guard, &table, columns, values)?
             }
+            LogicalPlan::InsertSelect {
+                table,
+                columns,
+                source,
+            } => {
+                ensure_write(mode, op_name)?;
+                let guard = catalog.read().expect("catalog lock poisoned");
+                let ExecutionResult::Query(result) = query::execute_query(txn, &*guard, *source)?
+                else {
+                    return Err(ExecutorError::InvalidOperation {
+                        operation: "INSERT ... SELECT".into(),
+                        reason: "SELECT source did not return query rows".into(),
+                    });
+                };
+                dml::execute_insert_rows(txn, &*guard, &table, columns, result.rows)?
+            }
             LogicalPlan::Update {
                 table,
                 assignments,

@@ -1,3 +1,4 @@
+use super::ddl::DataType;
 use super::span::{Span, Spanned};
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +45,10 @@ pub enum ExprKind {
         args: Vec<Expr>,
         distinct: bool,
         star: bool,
+    },
+    Cast {
+        expr: Box<Expr>,
+        target_type: DataType,
     },
     Between {
         expr: Box<Expr>,

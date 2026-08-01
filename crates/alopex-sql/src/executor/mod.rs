@@ -170,6 +170,11 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 columns,
                 values,
             } => self.execute_insert(&table, columns, values),
+            LogicalPlan::InsertSelect {
+                table,
+                columns,
+                source,
+            } => self.execute_insert_select(&table, columns, *source),
             LogicalPlan::Update {
                 table,
                 assignments,
@@ -247,6 +252,25 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
     ) -> Result<ExecutionResult> {
         let catalog = self.catalog.read().expect("catalog lock poisoned");
         self.run_in_write_txn(|txn| dml::execute_insert(txn, &*catalog, table, columns, values))
+    }
+
+    fn execute_insert_select(
+        &mut self,
+        table: &str,
+        columns: Vec<String>,
+        source: LogicalPlan,
+    ) -> Result<ExecutionResult> {
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            let ExecutionResult::Query(result) = query::execute_query(txn, &*catalog, source)?
+            else {
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "INSERT ... SELECT".into(),
+                    reason: "SELECT source did not return query rows".into(),
+                });
+            };
+            dml::execute_insert_rows(txn, &*catalog, table, columns, result.rows)
+        })
     }
 
     fn execute_update(
@@ -354,6 +378,22 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
                 dml::execute_insert(&mut sql_txn, &view, &table, columns, values)
+            }
+            LogicalPlan::InsertSelect {
+                table,
+                columns,
+                source,
+            } => {
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                let ExecutionResult::Query(result) =
+                    query::execute_query(&mut sql_txn, &view, *source)?
+                else {
+                    return Err(ExecutorError::InvalidOperation {
+                        operation: "INSERT ... SELECT".into(),
+                        reason: "SELECT source did not return query rows".into(),
+                    });
+                };
+                dml::execute_insert_rows(&mut sql_txn, &view, &table, columns, result.rows)
             }
             LogicalPlan::Update {
                 table,

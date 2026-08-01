@@ -25,6 +25,10 @@ pub enum SelectItem {
     Wildcard {
         span: Span,
     },
+    QualifiedWildcard {
+        table: String,
+        span: Span,
+    },
     Expr {
         expr: Expr,
         alias: Option<String>,
@@ -79,8 +83,16 @@ pub struct OrderByExpr {
 pub struct Insert {
     pub table: String,
     pub columns: Option<Vec<String>>,
-    pub values: Vec<Vec<Expr>>,
+    pub source: InsertSource,
     pub span: Span,
+}
+
+/// The row source for an INSERT statement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
+pub enum InsertSource {
+    Values { values: Vec<Vec<Expr>> },
+    Select { select: Box<Select> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,7 +126,7 @@ impl Spanned for Select {
 impl Spanned for SelectItem {
     fn span(&self) -> Span {
         match self {
-            SelectItem::Wildcard { span } => *span,
+            SelectItem::Wildcard { span } | SelectItem::QualifiedWildcard { span, .. } => *span,
             SelectItem::Expr { span, .. } => *span,
         }
     }

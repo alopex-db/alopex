@@ -32,10 +32,12 @@ type
     nkBoolLit
     nkNull
     nkStar
+    nkQualifiedStar
     nkColumnRef
     nkBinaryOp
     nkUnaryOp
     nkFunctionCall
+    nkCast
     nkAlias
     nkFromClause
     nkFromTable
