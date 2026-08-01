@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {"id":"F4-RCV-DUP-01","transaction_id":"f4-rcv-duplicate-001","request_id":"f4-rcv-duplicate-request-001","expected_state":"committed","coverage":["first","second_duplicate","post_restart_duplicate"]},
+    {"id":"F4-RCV-TIMEOUT-01","transaction_id":"f4-rcv-timeout-001","request_id":"f4-rcv-timeout-request-001","expected_state":"retryable_failure","coverage":["timeout","retry"]},
+    {"id":"F4-RCV-CONFLICT-01","transaction_id":"f4-rcv-conflict-001","request_id":"f4-rcv-conflict-request-001","expected_state":"terminal_failure","coverage":["conflict","abort"]},
+    {"id":"F4-RCV-STALE-01","transaction_id":"f4-rcv-stale-001","request_id":"f4-rcv-stale-request-001","expected_state":"rejected","coverage":["stale_metadata"]},
+    {"id":"F4-RCV-NOT-LEADER-01","transaction_id":"f4-rcv-not-leader-001","request_id":"f4-rcv-not-leader-request-001","expected_state":"rejected","coverage":["not_leader"]},
+    {"id":"F4-RCV-NODE-LOSS-01","transaction_id":"f4-rcv-node-loss-001","request_id":"f4-rcv-node-loss-request-001","expected_state":"rejected","coverage":["node_loss"]},
+    {"id":"F4-RCV-IN-DOUBT-01","transaction_id":"f4-rcv-in-doubt-001","request_id":"f4-rcv-in-doubt-request-001","expected_state":"recovery_pending","coverage":["in_doubt_decision","status_lookup","recover_lookup"]},
+    {"id":"F4-RCV-SPLIT-01","transaction_id":"f4-rcv-split-001","request_id":"f4-rcv-split-request-001","expected_state":"rejected","coverage":["range_split"]},
+    {"id":"F4-RCV-MERGE-01","transaction_id":"f4-rcv-merge-001","request_id":"f4-rcv-merge-request-001","expected_state":"rejected","coverage":["range_merge"]},
+    {"id":"F4-RCV-MOVE-01","transaction_id":"f4-rcv-move-001","request_id":"f4-rcv-move-request-001","expected_state":"rejected","coverage":["range_move"]},
+    {"id":"F4-RCV-RESTART-01","transaction_id":"f4-rcv-restart-001","request_id":"f4-rcv-restart-request-001","expected_state":"committed","coverage":["restart","reconnect"]},
+    {"id":"F4-RCV-UNAUTHORIZED-01","transaction_id":"f4-rcv-unauthorized-001","request_id":"f4-rcv-unauthorized-request-001","expected_state":"rejected","coverage":["unauthorized"]},
+    {"id":"F4-RCV-PREREQUISITE-01","transaction_id":"f4-rcv-prerequisite-001","request_id":"f4-rcv-prerequisite-request-001","expected_state":"rejected","coverage":["prerequisite_missing"]},
+    {"id":"F4-RCV-BACKPRESSURE-01","transaction_id":"f4-rcv-backpressure-001","request_id":"f4-rcv-backpressure-request-001","expected_state":"retryable_failure","coverage":["backpressure","retry"]},
+    {"id":"F4-RCV-CANCELLATION-01","transaction_id":"f4-rcv-cancellation-001","request_id":"f4-rcv-cancellation-request-001","expected_state":"rejected","coverage":["cancellation","pre_execution_unsupported"]}
+  ]
+}
