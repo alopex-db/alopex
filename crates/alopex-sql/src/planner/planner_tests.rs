@@ -12,7 +12,7 @@ use crate::ast::ddl::{
     IndexMethod,
 };
 use crate::ast::dml::{
-    Assignment, Delete, FromItem, Insert, OrderByExpr, Select, SelectItem, Update,
+    Assignment, Delete, FromItem, Insert, InsertSource, OrderByExpr, Select, SelectItem, Update,
 };
 use crate::ast::expr::{BinaryOp, Expr, ExprKind, Literal};
 use crate::ast::span::Span;
@@ -729,7 +729,9 @@ fn test_plan_insert_with_columns() {
     let insert = Insert {
         table: "users".to_string(),
         columns: Some(vec!["id".to_string(), "name".to_string()]),
-        values: vec![vec![int_lit(1), str_lit("Alice")]],
+        source: InsertSource::Values {
+            values: vec![vec![int_lit(1), str_lit("Alice")]],
+        },
         span: span(),
     };
 
@@ -759,7 +761,9 @@ fn test_plan_insert_without_columns() {
     let insert = Insert {
         table: "products".to_string(),
         columns: None,
-        values: vec![vec![int_lit(1), str_lit("Widget"), int_lit(100)]],
+        source: InsertSource::Values {
+            values: vec![vec![int_lit(1), str_lit("Widget"), int_lit(100)]],
+        },
         span: span(),
     };
 
@@ -782,11 +786,13 @@ fn test_plan_insert_multiple_rows() {
     let insert = Insert {
         table: "products".to_string(),
         columns: Some(vec!["id".to_string(), "name".to_string()]),
-        values: vec![
-            vec![int_lit(1), str_lit("Widget")],
-            vec![int_lit(2), str_lit("Gadget")],
-            vec![int_lit(3), str_lit("Gizmo")],
-        ],
+        source: InsertSource::Values {
+            values: vec![
+                vec![int_lit(1), str_lit("Widget")],
+                vec![int_lit(2), str_lit("Gadget")],
+                vec![int_lit(3), str_lit("Gizmo")],
+            ],
+        },
         span: span(),
     };
 
@@ -808,7 +814,9 @@ fn test_plan_insert_column_count_mismatch() {
     let insert = Insert {
         table: "users".to_string(),
         columns: Some(vec!["id".to_string(), "name".to_string()]),
-        values: vec![vec![int_lit(1)]], // Missing value
+        source: InsertSource::Values {
+            values: vec![vec![int_lit(1)]], // Missing value
+        },
         span: span(),
     };
 
@@ -831,7 +839,9 @@ fn test_plan_insert_null_constraint_violation() {
     let insert = Insert {
         table: "users".to_string(),
         columns: Some(vec!["id".to_string(), "name".to_string()]),
-        values: vec![vec![int_lit(1), null_lit()]], // name is NOT NULL
+        source: InsertSource::Values {
+            values: vec![vec![int_lit(1), null_lit()]], // name is NOT NULL
+        },
         span: span(),
     };
 
@@ -1011,7 +1021,9 @@ fn test_plan_insert_type_compatible() {
             "name".to_string(),
             "price".to_string(),
         ]),
-        values: vec![vec![int_lit(1), str_lit("Widget"), int_lit(100)]],
+        source: InsertSource::Values {
+            values: vec![vec![int_lit(1), str_lit("Widget"), int_lit(100)]],
+        },
         span: span(),
     };
 

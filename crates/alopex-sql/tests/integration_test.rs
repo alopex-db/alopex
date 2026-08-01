@@ -1,4 +1,4 @@
-use alopex_sql::{AlopexDialect, ExprKind, Parser, StatementKind};
+use alopex_sql::{AlopexDialect, ExprKind, InsertSource, Parser, StatementKind};
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
@@ -18,8 +18,11 @@ fn vector_literal_parses_via_dialect_prefix() {
     let stmts = Parser::parse_sql(&AlopexDialect, sql).unwrap();
     match &stmts[0].kind {
         StatementKind::Insert(ins) => {
-            assert_eq!(ins.values.len(), 1);
-            match ins.values[0][0].kind {
+            let InsertSource::Values { values } = &ins.source else {
+                panic!("expected VALUES source");
+            };
+            assert_eq!(values.len(), 1);
+            match values[0][0].kind {
                 ExprKind::VectorLiteral { values: ref v } => assert_eq!(v, &vec![0.1, -0.2]),
                 ref other => panic!("expected vector literal, got {:?}", other),
             }

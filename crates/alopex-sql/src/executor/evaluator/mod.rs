@@ -57,9 +57,90 @@ pub fn evaluate(expr: &TypedExpr, ctx: &EvalContext<'_>) -> Result<SqlValue> {
             negated,
             kind,
         } => pattern::evaluate_pattern(expr, pattern, escape.as_deref(), *negated, *kind, ctx),
+        TypedExprKind::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => evaluate_between(expr, low, high, *negated, ctx),
+        TypedExprKind::InList {
+            expr,
+            list,
+            negated,
+        } => evaluate_in_list(expr, list, *negated, ctx),
         // Unsupported expressions return a clear error message.
         other => Err(ExecutorError::Evaluation(
             EvaluationError::UnsupportedExpression(format!("{other:?}")),
         )),
+    }
+}
+
+fn evaluate_between(
+    expr: &TypedExpr,
+    low: &TypedExpr,
+    high: &TypedExpr,
+    negated: bool,
+    ctx: &EvalContext<'_>,
+) -> Result<SqlValue> {
+    let value = evaluate(expr, ctx)?;
+    let lower = binary_op::eval_binary_values(
+        &crate::ast::expr::BinaryOp::GtEq,
+        value.clone(),
+        evaluate(low, ctx)?,
+    )?;
+    let upper = binary_op::eval_binary_values(
+        &crate::ast::expr::BinaryOp::LtEq,
+        value,
+        evaluate(high, ctx)?,
+    )?;
+    let result = binary_op::eval_binary_values(&crate::ast::expr::BinaryOp::And, lower, upper)?;
+    negate_predicate(result, negated)
+}
+
+fn evaluate_in_list(
+    expr: &TypedExpr,
+    list: &[TypedExpr],
+    negated: bool,
+    ctx: &EvalContext<'_>,
+) -> Result<SqlValue> {
+    let value = evaluate(expr, ctx)?;
+    let mut unknown = false;
+
+    for item in list {
+        match binary_op::eval_binary_values(
+            &crate::ast::expr::BinaryOp::Eq,
+            value.clone(),
+            evaluate(item, ctx)?,
+        )? {
+            SqlValue::Boolean(true) => return Ok(SqlValue::Boolean(!negated)),
+            SqlValue::Boolean(false) => {}
+            SqlValue::Null => unknown = true,
+            other => {
+                return Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {
+                    expected: "Boolean".into(),
+                    actual: other.type_name().into(),
+                }));
+            }
+        }
+    }
+
+    if unknown {
+        Ok(SqlValue::Null)
+    } else {
+        Ok(SqlValue::Boolean(negated))
+    }
+}
+
+fn negate_predicate(value: SqlValue, negated: bool) -> Result<SqlValue> {
+    if !negated {
+        return Ok(value);
+    }
+    match value {
+        SqlValue::Boolean(value) => Ok(SqlValue::Boolean(!value)),
+        SqlValue::Null => Ok(SqlValue::Null),
+        other => Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {
+            expected: "Boolean".into(),
+            actual: other.type_name().into(),
+        })),
     }
 }

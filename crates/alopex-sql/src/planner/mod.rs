@@ -36,7 +36,7 @@ use crate::ast::ddl::{
     ColumnConstraint, ColumnDef, CreateIndex, CreateTable, DropIndex, DropTable,
 };
 use crate::ast::dml::{
-    Delete, FromItem, Insert, LITERAL_TABLE, OrderByExpr, Select, SelectItem, Update,
+    Delete, FromItem, Insert, InsertSource, LITERAL_TABLE, OrderByExpr, Select, SelectItem, Update,
 };
 use crate::ast::expr::Literal;
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
@@ -373,6 +373,21 @@ impl TableReferenceExtractor {
                         self.extract_typed_expr(value, diagnostics, references);
                     }
                 }
+            }
+            LogicalPlan::InsertSelect { table, source, .. } => {
+                push_table_reference(
+                    references,
+                    table,
+                    root_access,
+                    TableReferenceSource::LogicalPlanMutationTarget,
+                );
+                self.extract_plan(
+                    source,
+                    TableReferenceAccess::Read,
+                    scan_source,
+                    diagnostics,
+                    references,
+                );
             }
             LogicalPlan::Update {
                 table,
@@ -1397,6 +1412,26 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         projected_columns.push(ProjectedColumn::new(typed_expr));
                     }
                 }
+                SelectItem::QualifiedWildcard {
+                    table: qualifier,
+                    span,
+                } => {
+                    if qualifier != &table.name {
+                        return Err(PlannerError::invalid_expression(format!(
+                            "table '{qualifier}' is not available for wildcard projection"
+                        )));
+                    }
+                    for col in &table.columns {
+                        let column_index = table.get_column_index(&col.name).unwrap();
+                        projected_columns.push(ProjectedColumn::new(TypedExpr::column_ref(
+                            table.name.clone(),
+                            col.name.clone(),
+                            column_index,
+                            col.data_type.clone(),
+                            *span,
+                        )));
+                    }
+                }
                 SelectItem::Expr { expr, alias, .. } => {
                     let typed_expr = self.type_checker.infer_type(expr, table)?;
                     let projected = if let Some(alias) = alias {
@@ -1437,6 +1472,42 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                                 col.data_type.clone(),
                                 *span,
                             )));
+                        }
+                    }
+                }
+                SelectItem::QualifiedWildcard { table, span } => {
+                    let scoped = scope
+                        .iter()
+                        .filter(|scoped| scoped.table.name == *table)
+                        .collect::<Vec<_>>();
+                    match scoped.as_slice() {
+                        [] => {
+                            return Err(PlannerError::invalid_expression(format!(
+                                "table '{table}' is not available for wildcard projection"
+                            )));
+                        }
+                        [scoped] => {
+                            for (local_idx, col) in scoped.table.columns.iter().enumerate() {
+                                projected_columns.push(ProjectedColumn::new(
+                                    TypedExpr::column_ref(
+                                        scoped.table.name.clone(),
+                                        col.name.clone(),
+                                        scoped.start_index + local_idx,
+                                        col.data_type.clone(),
+                                        *span,
+                                    ),
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(PlannerError::ambiguous_column(
+                                table,
+                                scoped
+                                    .iter()
+                                    .map(|scoped| scoped.table.name.clone())
+                                    .collect(),
+                                *span,
+                            ));
                         }
                     }
                 }
@@ -1496,7 +1567,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
     fn select_contains_aggregate(&self, stmt: &Select) -> bool {
         stmt.projection.iter().any(|item| match item {
-            SelectItem::Wildcard { .. } => false,
+            SelectItem::Wildcard { .. } | SelectItem::QualifiedWildcard { .. } => false,
             SelectItem::Expr { expr, .. } => expr_contains_aggregate(expr),
         }) || stmt
             .group_by
@@ -1574,7 +1645,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let mut projected = Vec::new();
         for item in items {
             match item {
-                SelectItem::Wildcard { .. } => {
+                SelectItem::Wildcard { .. } | SelectItem::QualifiedWildcard { .. } => {
                     return Err(PlannerError::invalid_expression(
                         "wildcard projection not supported with GROUP BY/aggregate".to_string(),
                     ));
@@ -1599,7 +1670,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let mut projected = Vec::new();
         for item in items {
             match item {
-                SelectItem::Wildcard { .. } => {
+                SelectItem::Wildcard { .. } | SelectItem::QualifiedWildcard { .. } => {
                     return Err(PlannerError::invalid_expression(
                         "wildcard projection not supported with GROUP BY/aggregate".to_string(),
                     ));
@@ -2026,29 +2097,62 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             table.column_names().into_iter().map(String::from).collect()
         };
 
-        // Validate and type-check each row of values
-        let mut typed_values: Vec<Vec<TypedExpr>> = Vec::new();
+        match &stmt.source {
+            InsertSource::Values { values } => {
+                let mut typed_values: Vec<Vec<TypedExpr>> = Vec::new();
 
-        for row in &stmt.values {
-            // Check column count matches
-            if row.len() != columns.len() {
-                return Err(PlannerError::column_value_count_mismatch(
-                    columns.len(),
-                    row.len(),
-                    stmt.span,
-                ));
+                for row in values {
+                    if row.len() != columns.len() {
+                        return Err(PlannerError::column_value_count_mismatch(
+                            columns.len(),
+                            row.len(),
+                            stmt.span,
+                        ));
+                    }
+
+                    typed_values.push(self.type_check_insert_values(row, &columns, table)?);
+                }
+
+                Ok(LogicalPlan::Insert {
+                    table: table.name.clone(),
+                    columns,
+                    values: typed_values,
+                })
             }
+            InsertSource::Select { select } => {
+                let source = self.plan_select_relation(select, &[])?;
+                if source.schema.len() != columns.len() {
+                    return Err(PlannerError::column_value_count_mismatch(
+                        columns.len(),
+                        source.schema.len(),
+                        stmt.span,
+                    ));
+                }
 
-            // Type-check each value
-            let typed_row = self.type_check_insert_values(row, &columns, table)?;
-            typed_values.push(typed_row);
+                for (source_column, target_column) in source.schema.iter().zip(&columns) {
+                    let target = table
+                        .get_column(target_column)
+                        .expect("validated target column");
+                    if target.not_null && source_column.data_type == ResolvedType::Null {
+                        return Err(PlannerError::null_constraint_violation(
+                            target_column,
+                            stmt.span,
+                        ));
+                    }
+                    self.validate_resolved_type_assignment(
+                        &source_column.data_type,
+                        &target.data_type,
+                        stmt.span,
+                    )?;
+                }
+
+                Ok(LogicalPlan::InsertSelect {
+                    table: table.name.clone(),
+                    columns,
+                    source: Box::new(source.plan),
+                })
+            }
         }
-
-        Ok(LogicalPlan::Insert {
-            table: table.name.clone(),
-            columns,
-            values: typed_values,
-        })
     }
 
     /// Type-check INSERT values against column definitions.
@@ -2095,19 +2199,28 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         target_type: &ResolvedType,
         span: crate::ast::Span,
     ) -> Result<(), PlannerError> {
+        self.validate_resolved_type_assignment(&value.resolved_type, target_type, span)
+    }
+
+    fn validate_resolved_type_assignment(
+        &self,
+        source_type: &ResolvedType,
+        target_type: &ResolvedType,
+        span: crate::ast::Span,
+    ) -> Result<(), PlannerError> {
         // NULL can be assigned to any nullable column
-        if value.resolved_type == ResolvedType::Null {
+        if *source_type == ResolvedType::Null {
             return Ok(());
         }
 
         // Check for exact match or implicit conversion compatibility
-        if self.types_compatible(&value.resolved_type, target_type) {
+        if self.types_compatible(source_type, target_type) {
             return Ok(());
         }
 
         Err(PlannerError::type_mismatch(
             target_type.to_string(),
-            value.resolved_type.to_string(),
+            source_type.to_string(),
             span,
         ))
     }
@@ -2259,6 +2372,7 @@ fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
             expr_contains_aggregate(left) || expr_contains_aggregate(right)
         }
         ExprKind::UnaryOp { operand, .. } => expr_contains_aggregate(operand),
+        ExprKind::Cast { expr, .. } => expr_contains_aggregate(expr),
         ExprKind::Between {
             expr, low, high, ..
         } => {

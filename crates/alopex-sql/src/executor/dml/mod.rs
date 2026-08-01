@@ -8,5 +8,5 @@ mod insert;
 mod update;
 
 pub use delete::execute_delete;
-pub use insert::execute_insert;
+pub use insert::{execute_insert, execute_insert_rows};
 pub use update::execute_update;
