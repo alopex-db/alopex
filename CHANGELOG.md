@@ -15,8 +15,18 @@ not work, or a documented plan that did not match the implementation.
   rejected rather than silently reinterpreted, because the dialect is UTC-only.
 - Arithmetic between `DOUBLE` and `INTEGER` promotes to `DOUBLE`. Comparison
   already promoted, so `v > 2` worked while `v * 2` failed.
-- `SUM(INTEGER)` returns an integer instead of a double, and overflow is
-  reported rather than silently losing precision. `TOTAL` remains floating point.
+- `SUM(INTEGER)` returns `BIGINT` instead of a double. A 32-bit accumulator
+  overflows on ordinary data, so the sum is widened the way PostgreSQL sums
+  int4 into int8. `TOTAL` remains floating point.
+- `INTEGER` mixed with `FLOAT` in arithmetic promotes to `DOUBLE`. Promoting to
+  `FLOAT` silently lost magnitude because a 24-bit mantissa cannot hold the
+  whole `INTEGER` range.
+- A decimal literal can be assigned to a `FLOAT` column. Every decimal literal
+  is typed `DOUBLE`, and the narrowing was rejected, so `FLOAT` columns could
+  not be populated at all.
+- `USING` and `NATURAL` common columns are merged. An unqualified reference
+  bound to the left input, so under `RIGHT` and `FULL` joins it returned the
+  left side's NULL instead of the key present on the right, with no error.
 - `CAST(expr AS type)` executes for every target type in the grammar. The syntax
   parsed but only the `TIMESTAMP` coercion was wired to the evaluator, so all
   other casts failed at runtime.
@@ -43,8 +53,9 @@ not work, or a documented plan that did not match the implementation.
   functions and `UNION` are consistently recorded as v0.9+.
 
 ### Breaking Changes
-- `SUM` over an integer column now returns an integer. Consumers that relied on
-  the previous floating-point result should use `TOTAL`.
+- `SUM` over an `INTEGER` column returns `BIGINT` rather than a double.
+  Consumers that relied on the previous floating-point result should use
+  `TOTAL`.
 
 ## [0.8.1]
 
