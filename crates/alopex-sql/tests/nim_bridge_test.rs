@@ -1,13 +1,13 @@
 #![cfg(target_os = "linux")]
 
 use alopex_sql::{
-    AlopexDialect, DataType, ExprKind, FromItem, JoinType, Literal, Parser, SelectItem,
-    StatementKind, VectorMetric, parser_contract_version,
+    AlopexDialect, DataType, ExprKind, FromItem, InsertSource, JoinType, Literal, Parser,
+    SelectItem, StatementKind, VectorMetric, parser_contract_version,
 };
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.2.0");
+    assert_eq!(parser_contract_version(), "0.3.0");
 }
 
 #[test]
@@ -106,16 +106,19 @@ fn parse_multi_row_insert_without_column_list_from_nim() {
     };
     assert_eq!(insert.table, "t1");
     assert!(insert.columns.is_none());
-    assert_eq!(insert.values.len(), 2);
-    assert_eq!(insert.values[0].len(), 2);
+    let InsertSource::Values { values } = &insert.source else {
+        panic!("expected VALUES source");
+    };
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0].len(), 2);
     assert!(matches!(
-        &insert.values[0][0].kind,
+        &values[0][0].kind,
         ExprKind::Literal {
             literal: Literal::Number(value)
         } if value == "1"
     ));
     assert!(matches!(
-        &insert.values[1][1].kind,
+        &values[1][1].kind,
         ExprKind::Literal {
             literal: Literal::String(value)
         } if value == "b"
@@ -135,9 +138,12 @@ fn parse_multi_row_all_string_insert_without_column_list_from_nim() {
         panic!("expected Insert, got {:?}", statements[0].kind);
     };
     assert!(insert.columns.is_none());
-    assert_eq!(insert.values.len(), 2);
+    let InsertSource::Values { values } = &insert.source else {
+        panic!("expected VALUES source");
+    };
+    assert_eq!(values.len(), 2);
     assert!(matches!(
-        &insert.values[0][0].kind,
+        &values[0][0].kind,
         ExprKind::Literal {
             literal: Literal::String(value)
         } if value == "a"

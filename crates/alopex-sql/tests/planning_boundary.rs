@@ -125,6 +125,7 @@ fn join_plan_extracts_both_table_references() {
                 join_type: JoinType::Inner,
                 condition: None,
                 using: None,
+                natural: false,
                 span: Span::empty(),
             }],
             selection: None,

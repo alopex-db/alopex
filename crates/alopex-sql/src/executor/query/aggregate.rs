@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize};
 use crate::catalog::ColumnMetadata;
 use crate::executor::evaluator::EvalContext;
 use crate::executor::memory::{MemoryPolicy, MemoryTracker, map_core_memory_error};
-use crate::executor::{ExecutorError, Result};
+use crate::executor::{EvaluationError, ExecutorError, Result};
 use crate::planner::aggregate_expr::{AggregateExpr, AggregateFunction};
 use crate::planner::typed_expr::TypedExpr;
 use crate::planner::types::ResolvedType;
@@ -251,7 +251,8 @@ impl Accumulator for CountAccumulator {
 /// Accumulator for SUM.
 #[derive(Debug, Clone)]
 pub struct SumAccumulator {
-    sum: Option<f64>,
+    sum: Option<SqlValue>,
+    result_type: ResolvedType,
     distinct_values: Option<HashSet<Vec<u8>>>,
 }
 
@@ -262,10 +263,59 @@ impl SumAccumulator {
     }
 
     pub fn with_distinct(distinct: bool) -> Self {
+        Self::with_distinct_for_type(distinct, ResolvedType::Double)
+    }
+
+    pub fn with_distinct_for_type(distinct: bool, result_type: ResolvedType) -> Self {
         Self {
             sum: None,
+            result_type,
             distinct_values: if distinct { Some(HashSet::new()) } else { None },
         }
+    }
+
+    fn add_value(&mut self, value: SqlValue) -> Result<()> {
+        let next = match &self.result_type {
+            ResolvedType::Integer => {
+                let SqlValue::Integer(value) = value else {
+                    return sum_type_mismatch("Integer", &value);
+                };
+                let sum = match self.sum.as_ref() {
+                    None => value,
+                    Some(SqlValue::Integer(current)) => current
+                        .checked_add(value)
+                        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?,
+                    Some(other) => return sum_type_mismatch("Integer", other),
+                };
+                SqlValue::Integer(sum)
+            }
+            ResolvedType::BigInt => {
+                let value = match value {
+                    SqlValue::Integer(value) => i64::from(value),
+                    SqlValue::BigInt(value) => value,
+                    other => return sum_type_mismatch("BigInt", &other),
+                };
+                let sum = match self.sum.as_ref() {
+                    None => value,
+                    Some(SqlValue::BigInt(current)) => current
+                        .checked_add(value)
+                        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?,
+                    Some(other) => return sum_type_mismatch("BigInt", other),
+                };
+                SqlValue::BigInt(sum)
+            }
+            _ => {
+                let value = numeric_to_f64(&value)?;
+                let sum = match self.sum.as_ref() {
+                    None => value,
+                    Some(SqlValue::Double(current)) => *current + value,
+                    Some(other) => return sum_type_mismatch("Double", other),
+                };
+                SqlValue::Double(sum)
+            }
+        };
+        self.sum = Some(next);
+        Ok(())
     }
 }
 
@@ -286,17 +336,15 @@ impl Accumulator for SumAccumulator {
         if !distinct_allows(&mut self.distinct_values, &value)? {
             return Ok(());
         }
-        let numeric = numeric_to_f64(&value)?;
-        self.sum = Some(self.sum.unwrap_or(0.0) + numeric);
-        Ok(())
+        self.add_value(value)
     }
 
     fn finalize(&self) -> Result<SqlValue> {
-        Ok(self.sum.map_or(SqlValue::Null, SqlValue::Double))
+        Ok(self.sum.clone().unwrap_or(SqlValue::Null))
     }
 
     fn state(&self) -> Result<Vec<SqlValue>> {
-        Ok(vec![self.sum.map_or(SqlValue::Null, SqlValue::Double)])
+        Ok(vec![self.sum.clone().unwrap_or(SqlValue::Null)])
     }
 
     fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
@@ -304,9 +352,7 @@ impl Accumulator for SumAccumulator {
         if state[0].is_null() {
             return Ok(());
         }
-        let numeric = numeric_to_f64(&state[0])?;
-        self.sum = Some(self.sum.unwrap_or(0.0) + numeric);
-        Ok(())
+        self.add_value(state[0].clone())
     }
 
     fn clone_box(&self) -> Box<dyn Accumulator> {
@@ -460,6 +506,13 @@ fn numeric_to_f64(value: &SqlValue) -> Result<f64> {
             },
         )),
     }
+}
+
+fn sum_type_mismatch<T>(expected: &str, actual: &SqlValue) -> Result<T> {
+    Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {
+        expected: expected.into(),
+        actual: actual.type_name().into(),
+    }))
 }
 
 /// Accumulator for MIN / MAX.
@@ -759,6 +812,17 @@ pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<d
     }
 }
 
+/// Create an accumulator using the aggregate expression's resolved result type.
+pub fn create_accumulator_for_aggregate(aggregate: &AggregateExpr) -> Box<dyn Accumulator> {
+    match &aggregate.function {
+        AggregateFunction::Sum => Box::new(SumAccumulator::with_distinct_for_type(
+            aggregate.distinct,
+            aggregate.result_type.clone(),
+        )),
+        _ => create_accumulator(&aggregate.function, aggregate.distinct),
+    }
+}
+
 /// Returns whether an aggregate's partial state can be merged without
 /// changing the current local SQL result. Floating-point, DISTINCT, and
 /// order-sensitive aggregates must instead be replayed from ordered inputs.
@@ -792,7 +856,7 @@ pub fn merge_exact_aggregate_states(
 
     let mut accumulators = aggregates
         .iter()
-        .map(|aggregate| create_accumulator(&aggregate.function, false))
+        .map(create_accumulator_for_aggregate)
         .collect::<Vec<_>>();
     for states in partial_rows {
         if states.len() != accumulators.len() {
@@ -947,10 +1011,10 @@ impl<'a> AggregateIterator<'a> {
                     .aggregates
                     .iter()
                     .map(|agg| {
-                        create_accumulator(
-                            &agg.function,
-                            matches!(self.mode, AggregateMode::Single) && agg.distinct,
-                        )
+                        let mut aggregate = agg.clone();
+                        aggregate.distinct =
+                            matches!(self.mode, AggregateMode::Single) && agg.distinct;
+                        create_accumulator_for_aggregate(&aggregate)
                     })
                     .collect::<Vec<_>>();
                 table.insert(
@@ -1027,10 +1091,9 @@ impl<'a> AggregateIterator<'a> {
                 .aggregates
                 .iter()
                 .map(|agg| {
-                    create_accumulator(
-                        &agg.function,
-                        matches!(self.mode, AggregateMode::Single) && agg.distinct,
-                    )
+                    let mut aggregate = agg.clone();
+                    aggregate.distinct = matches!(self.mode, AggregateMode::Single) && agg.distinct;
+                    create_accumulator_for_aggregate(&aggregate)
                 })
                 .collect::<Vec<_>>();
             table.insert(
@@ -1166,7 +1229,7 @@ impl<'a> StreamingAggregateIterator<'a> {
     fn init_accumulators(&self) -> Vec<Box<dyn Accumulator>> {
         self.aggregates
             .iter()
-            .map(|agg| create_accumulator(&agg.function, agg.distinct))
+            .map(create_accumulator_for_aggregate)
             .collect()
     }
 
@@ -1294,7 +1357,7 @@ impl<'a> RowIterator for StreamingAggregateIterator<'a> {
 fn aggregate_state_types(agg: &AggregateExpr) -> Vec<ResolvedType> {
     match &agg.function {
         AggregateFunction::Count => vec![ResolvedType::BigInt],
-        AggregateFunction::Sum => vec![ResolvedType::Double],
+        AggregateFunction::Sum => vec![agg.result_type.clone()],
         AggregateFunction::Total => vec![ResolvedType::Double],
         AggregateFunction::Avg => vec![ResolvedType::Double, ResolvedType::BigInt],
         AggregateFunction::Min | AggregateFunction::Max => vec![agg.result_type.clone()],

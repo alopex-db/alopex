@@ -37,7 +37,7 @@ The build output is one of:
 
 The library exports `alopex_parse_sql`, `alopex_parse_promql`,
 `alopex_parser_version`, `alopex_parser_init`, and `alopex_free_buffer`.
-The current SQL/PromQL MessagePack contract version is `0.2.0`.
+The current SQL/PromQL MessagePack contract version is `0.3.0`.
 
 For Skulk development, copy the host artifact into
 `crates/skulk/nim-parser/vendor/<target-triple>/` in the Skulk repository.

@@ -97,6 +97,7 @@ pub const REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS: &[&str] = &[
     "vector_dims",
     "vector_norm",
     "random",
+    "now",
     "gen_random_uuid",
     "uuidv7",
     "memory_stats",
@@ -466,12 +467,13 @@ fn validate_plan(
             "pragma_local_only",
             "PRAGMA remains available only to the local executor",
         )),
-        LogicalPlan::Insert { .. } | LogicalPlan::Update { .. } | LogicalPlan::Delete { .. } => {
-            Err(RemoteReadRejection::unsupported(
-                "dml_not_supported_remote",
-                "DML is outside the read-only remote-read catalog",
-            ))
-        }
+        LogicalPlan::Insert { .. }
+        | LogicalPlan::InsertSelect { .. }
+        | LogicalPlan::Update { .. }
+        | LogicalPlan::Delete { .. } => Err(RemoteReadRejection::unsupported(
+            "dml_not_supported_remote",
+            "DML is outside the read-only remote-read catalog",
+        )),
         LogicalPlan::CreateTable { .. }
         | LogicalPlan::DropTable { .. }
         | LogicalPlan::CreateIndex { .. }

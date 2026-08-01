@@ -17,17 +17,48 @@ use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::name_resolver::NameResolver;
 use crate::planner::typed_expr::{Quantifier, TypedExpr, TypedExprKind};
 use crate::planner::types::ResolvedType;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// A table visible to expression name resolution.
 #[derive(Debug, Clone)]
 pub struct ScopedTable {
     pub table: TableMetadata,
     pub start_index: usize,
+    /// Lexical nesting level; zero is the current SELECT and larger values
+    /// are successively enclosing SELECT scopes.
+    pub scope_level: usize,
+    /// Columns coalesced by a JOIN ... USING or NATURAL JOIN. They remain
+    /// addressable by a qualified right-hand reference, but are not candidates
+    /// for an unqualified reference because the merged output column owns
+    /// the name.
+    pub hidden_unqualified_columns: HashSet<String>,
+    /// For a column merged by USING or NATURAL, the output index of the other
+    /// side. An unqualified reference to a merged name resolves to
+    /// `COALESCE(left, right)` so that RIGHT and FULL joins report the key from
+    /// whichever side is present instead of the left side's NULL.
+    pub merged_column_partners: HashMap<String, usize>,
 }
 
 impl ScopedTable {
     pub fn new(table: TableMetadata, start_index: usize) -> Self {
-        Self { table, start_index }
+        Self {
+            table,
+            start_index,
+            scope_level: 0,
+            hidden_unqualified_columns: HashSet::new(),
+            merged_column_partners: HashMap::new(),
+        }
+    }
+
+    pub fn hide_unqualified_columns(&mut self, columns: &[String]) {
+        self.hidden_unqualified_columns
+            .extend(columns.iter().cloned());
+    }
+
+    /// Record that `column` is merged with the output column at `partner_index`.
+    pub fn merge_column_with(&mut self, column: &str, partner_index: usize) {
+        self.merged_column_partners
+            .insert(column.to_string(), partner_index);
     }
 }
 
@@ -129,6 +160,15 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 plan_subquery,
                 span,
             ),
+
+            ExprKind::Cast { expr, target_type } => {
+                let typed_expr = self.infer_type_with_scope(expr, scope, plan_subquery)?;
+                Ok(TypedExpr::cast(
+                    typed_expr,
+                    ResolvedType::from_ast(target_type),
+                    span,
+                ))
+            }
 
             ExprKind::Between {
                 expr,
@@ -317,23 +357,106 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         column_name: &str,
         span: Span,
     ) -> Result<TypedExpr, PlannerError> {
-        let tables = scope.iter().map(|s| &s.table).collect::<Vec<_>>();
         let resolver = NameResolver::new(self.catalog);
-        let resolved =
-            resolver.resolve_column_with_scope(&tables, table_qualifier, column_name, span)?;
-        let scoped = scope
+        let levels = scope
             .iter()
-            .find(|s| s.table.name == resolved.table_name)
-            .ok_or_else(|| PlannerError::table_not_found(&resolved.table_name, span))?;
-        Ok(TypedExpr {
-            kind: TypedExprKind::ColumnRef {
-                table: resolved.table_name,
-                column: resolved.column_name,
-                column_index: scoped.start_index + resolved.column_index,
-            },
-            resolved_type: resolved.resolved_type,
-            span,
-        })
+            .map(|table| table.scope_level)
+            .collect::<BTreeSet<_>>();
+        let mut qualifier_found = false;
+
+        for level in levels {
+            let candidates = scope
+                .iter()
+                .filter(|table| table.scope_level == level)
+                .filter(|table| {
+                    table_qualifier.is_some()
+                        || !table.hidden_unqualified_columns.contains(column_name)
+                })
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                continue;
+            }
+            if let Some(qualifier) = table_qualifier {
+                if !candidates.iter().any(|table| table.table.name == qualifier) {
+                    continue;
+                }
+                qualifier_found = true;
+            }
+
+            let tables = candidates
+                .iter()
+                .map(|table| &table.table)
+                .collect::<Vec<_>>();
+            match resolver.resolve_column_with_scope(&tables, table_qualifier, column_name, span) {
+                Ok(resolved) => {
+                    let scoped = candidates
+                        .into_iter()
+                        .find(|table| table.table.name == resolved.table_name)
+                        .ok_or_else(|| PlannerError::table_not_found(&resolved.table_name, span))?;
+                    let column_index =
+                        scoped.table.get_column_index(column_name).ok_or_else(|| {
+                            PlannerError::column_not_found(column_name, &scoped.table.name, span)
+                        })?;
+                    let column = &scoped.table.columns[column_index];
+                    let own_ref = TypedExpr {
+                        kind: TypedExprKind::ColumnRef {
+                            table: scoped.table.name.clone(),
+                            column: column_name.to_string(),
+                            column_index: scoped.start_index + column_index,
+                        },
+                        resolved_type: column.data_type.clone(),
+                        span,
+                    };
+
+                    // A USING/NATURAL common column is one output column formed
+                    // from both inputs. An unqualified reference must see the
+                    // merged value, otherwise a RIGHT or FULL join reports the
+                    // left side's NULL for rows that only exist on the right.
+                    if table_qualifier.is_none()
+                        && let Some(&partner_index) = scoped.merged_column_partners.get(column_name)
+                    {
+                        let partner = TypedExpr {
+                            kind: TypedExprKind::ColumnRef {
+                                table: scoped.table.name.clone(),
+                                column: column_name.to_string(),
+                                column_index: partner_index,
+                            },
+                            resolved_type: column.data_type.clone(),
+                            span,
+                        };
+                        return Ok(TypedExpr {
+                            kind: TypedExprKind::FunctionCall {
+                                name: "coalesce".to_string(),
+                                args: vec![own_ref, partner],
+                                distinct: false,
+                                star: false,
+                            },
+                            resolved_type: column.data_type.clone(),
+                            span,
+                        });
+                    }
+
+                    return Ok(own_ref);
+                }
+                Err(PlannerError::ColumnNotFound { .. }) if table_qualifier.is_none() => {
+                    // A missing local name may be a correlated reference. Only
+                    // this case falls back to the next enclosing scope.
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        let table = scope
+            .iter()
+            .min_by_key(|table| table.scope_level)
+            .map(|table| table.table.name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        if let Some(qualifier) = table_qualifier
+            && !qualifier_found
+        {
+            return Err(PlannerError::table_not_found(qualifier, span));
+        }
+        Err(PlannerError::column_not_found(column_name, table, span))
     }
 
     /// Infer the type of a binary operation.
@@ -420,10 +543,13 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
 
         match op {
             // Arithmetic operators: require numeric types
-            Add | Sub | Mul | Div | Mod => {
+            Add | Sub | Mul | Div => {
                 let result = self.check_arithmetic_op(left, right, span)?;
                 Ok(result)
             }
+
+            // Remainder is defined only for integral operands.
+            Mod => self.check_modulo_op(left, right, span),
 
             // Comparison operators: require compatible types, return boolean
             Eq | Neq | Lt | Gt | LtEq | GtEq => {
@@ -464,8 +590,12 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             // Integer operations
             (Integer, Integer) => Ok(Integer),
             (Integer, BigInt) | (BigInt, Integer) | (BigInt, BigInt) => Ok(BigInt),
-            (Integer, Float) | (Float, Integer) | (Float, Float) => Ok(Float),
-            (Integer, Double)
+            (Float, Float) => Ok(Float),
+            // f32 has 24 bits of mantissa and cannot hold the whole i32 range,
+            // so an INTEGER mixed with FLOAT widens to DOUBLE.
+            (Integer, Float)
+            | (Float, Integer)
+            | (Integer, Double)
             | (Double, Integer)
             | (BigInt, Float)
             | (Float, BigInt)
@@ -477,6 +607,31 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
 
             _ => Err(PlannerError::InvalidOperator {
                 op: "arithmetic".to_string(),
+                type_name: format!("{} and {}", left.type_name(), right.type_name()),
+                line: span.start.line,
+                column: span.start.column,
+            }),
+        }
+    }
+
+    /// Check remainder operands and return the integral result type.
+    fn check_modulo_op(
+        &self,
+        left: &ResolvedType,
+        right: &ResolvedType,
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        use ResolvedType::*;
+
+        if matches!(left, Null) || matches!(right, Null) {
+            return Ok(Null);
+        }
+
+        match (left, right) {
+            (Integer, Integer) => Ok(Integer),
+            (Integer, BigInt) | (BigInt, Integer) | (BigInt, BigInt) => Ok(BigInt),
+            _ => Err(PlannerError::InvalidOperator {
+                op: "modulo".to_string(),
                 type_name: format!("{} and {}", left.type_name(), right.type_name()),
                 line: span.start.line,
                 column: span.start.column,
@@ -1332,7 +1487,9 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 arg.span,
             ));
         }
-        Ok(ResolvedType::Double)
+        Ok(crate::planner::aggregate_expr::sum_result_type(
+            &arg.resolved_type,
+        ))
     }
 
     fn check_total(
@@ -1718,6 +1875,9 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     value.span,
                 )?;
 
+                let typed_value =
+                    self.coerce_column_value(&col_meta.data_type, typed_value, value.span);
+
                 // For vector types, also check dimension
                 if let (
                     ResolvedType::Vector {
@@ -1777,6 +1937,8 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
 
         // Check type compatibility
         self.check_type_compatibility(&col_meta.data_type, &typed_value.resolved_type, value.span)?;
+
+        let typed_value = self.coerce_column_value(&col_meta.data_type, typed_value, value.span);
 
         // For vector types, also check dimension
         if let (
@@ -1868,6 +2030,26 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             line: span.start.line,
             column: span.start.column,
         })
+    }
+
+    /// Insert an execution-time coercion where a column accepts a value whose
+    /// source representation differs from its storage representation.
+    fn coerce_column_value(
+        &self,
+        expected: &ResolvedType,
+        value: TypedExpr,
+        span: Span,
+    ) -> TypedExpr {
+        if matches!(expected, ResolvedType::Timestamp)
+            && !matches!(
+                value.resolved_type,
+                ResolvedType::Timestamp | ResolvedType::Null
+            )
+        {
+            TypedExpr::cast(value, ResolvedType::Timestamp, span)
+        } else {
+            value
+        }
     }
 }
 

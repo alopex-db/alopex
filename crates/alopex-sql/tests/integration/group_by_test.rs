@@ -84,17 +84,19 @@ fn group_by_multi_column_sum() {
         let SqlValue::Text(region) = &row[1] else {
             panic!("expected text region");
         };
-        let SqlValue::Double(sum) = row[2] else {
-            panic!("expected double sum");
+        // SUM over an INTEGER column yields BIGINT so the accumulator cannot
+        // overflow; see the v0.8.2 changelog.
+        let SqlValue::BigInt(sum) = row[2] else {
+            panic!("expected bigint sum");
         };
         sums.insert((category.clone(), region.clone()), sum);
     }
 
-    assert_eq!(sums.get(&("book".into(), "us".into())), Some(&25.0));
-    assert_eq!(sums.get(&("book".into(), "eu".into())), Some(&5.0));
-    assert_eq!(sums.get(&("game".into(), "us".into())), Some(&20.0));
-    assert_eq!(sums.get(&("game".into(), "eu".into())), Some(&7.0));
-    assert_eq!(sums.get(&("toy".into(), "jp".into())), Some(&3.0));
+    assert_eq!(sums.get(&("book".into(), "us".into())), Some(&25));
+    assert_eq!(sums.get(&("book".into(), "eu".into())), Some(&5));
+    assert_eq!(sums.get(&("game".into(), "us".into())), Some(&20));
+    assert_eq!(sums.get(&("game".into(), "eu".into())), Some(&7));
+    assert_eq!(sums.get(&("toy".into(), "jp".into())), Some(&3));
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

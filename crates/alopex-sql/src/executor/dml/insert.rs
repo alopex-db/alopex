@@ -1,7 +1,8 @@
 use alopex_core::kv::KVStore;
 
 use crate::ast::ddl::IndexMethod;
-use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
+use crate::ast::expr::{Expr, ExprKind};
+use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
@@ -23,37 +24,14 @@ pub fn execute_insert<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
 
     validate_columns(&table, &columns)?;
 
-    let indexes: Vec<IndexMetadata> = catalog
-        .get_indexes_for_table(table_name)
+    // NOW() and other statement-scoped values are evaluated once per statement.
+    let ctx = EvalContext::new(&[]);
+    let rows = values
         .into_iter()
-        .cloned()
-        .collect();
-    let (hnsw_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
-        .into_iter()
-        .partition(|idx| matches!(idx.method, Some(IndexMethod::Hnsw)));
+        .map(|row_exprs| build_row(&table, &columns, row_exprs, &ctx))
+        .collect::<Result<Vec<_>>>()?;
 
-    let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::with_capacity(values.len());
-
-    // Insert into table using a single handle; stage for index population.
-    {
-        let mut table_storage = txn.table_storage(&table);
-        for row_exprs in values {
-            let row = build_row(&table, &columns, row_exprs)?;
-            let row_id = table_storage
-                .next_row_id()
-                .map_err(|e| map_storage_error(&table, e))?;
-            table_storage
-                .insert(row_id, &row)
-                .map_err(|e| map_storage_error(&table, e))?;
-            staged.push((row_id, row));
-        }
-    }
-
-    // Populate indexes using one handle per index for the whole batch.
-    populate_indexes(txn, &btree_indexes, &staged)?;
-    populate_hnsw_indexes(txn, &table, &hnsw_indexes, &staged)?;
-
-    Ok(ExecutionResult::RowsAffected(staged.len() as u64))
+    insert_rows(txn, catalog, &table, table_name, rows)
 }
 
 fn validate_columns(table: &TableMetadata, columns: &[String]) -> Result<()> {
@@ -64,24 +42,114 @@ fn validate_columns(table: &TableMetadata, columns: &[String]) -> Result<()> {
         }
     }
 
-    // DEFAULT is not supported; missing columns are an error.
-    if columns.len() != table.column_count() {
-        let missing = table
+    if columns.len() != table.column_count()
+        && let Some(missing) = table
             .columns
             .iter()
-            .find(|c| !columns.iter().any(|col| col == &c.name))
+            .find(|c| !columns.iter().any(|col| col == &c.name) && c.default.is_none())
             .map(|c| c.name.clone())
-            .unwrap_or_else(|| "unknown".to_string());
+    {
         return Err(ExecutorError::ColumnRequired { column: missing });
     }
 
     Ok(())
 }
 
+/// Insert already-evaluated SELECT output rows.
+pub fn execute_insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    catalog: &C,
+    table_name: &str,
+    columns: Vec<String>,
+    values: Vec<Vec<SqlValue>>,
+) -> Result<ExecutionResult> {
+    let table = catalog
+        .get_table(table_name)
+        .cloned()
+        .ok_or_else(|| ExecutorError::TableNotFound(table_name.to_string()))?;
+
+    validate_columns(&table, &columns)?;
+
+    let rows = values
+        .into_iter()
+        .map(|row_values| build_row_from_values(&table, &columns, row_values))
+        .collect::<Result<Vec<_>>>()?;
+
+    insert_rows(txn, catalog, &table, table_name, rows)
+}
+
+fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    catalog: &C,
+    table: &TableMetadata,
+    table_name: &str,
+    rows: Vec<Vec<SqlValue>>,
+) -> Result<ExecutionResult> {
+    let indexes: Vec<IndexMetadata> = catalog
+        .get_indexes_for_table(table_name)
+        .into_iter()
+        .cloned()
+        .collect();
+    let (hnsw_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
+        .into_iter()
+        .partition(|idx| matches!(idx.method, Some(IndexMethod::Hnsw)));
+
+    let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
+
+    // Insert into table using a single handle; stage for index population.
+    {
+        let mut table_storage = txn.table_storage(table);
+        for row in rows {
+            let row_id = table_storage
+                .next_row_id()
+                .map_err(|e| map_storage_error(table, e))?;
+            table_storage
+                .insert(row_id, &row)
+                .map_err(|e| map_storage_error(table, e))?;
+            staged.push((row_id, row));
+        }
+    }
+
+    // Populate indexes using one handle per index for the whole batch.
+    populate_indexes(txn, &btree_indexes, &staged)?;
+    populate_hnsw_indexes(txn, table, &hnsw_indexes, &staged)?;
+
+    Ok(ExecutionResult::RowsAffected(staged.len() as u64))
+}
+
+fn build_row_from_values(
+    table: &TableMetadata,
+    columns: &[String],
+    values: Vec<SqlValue>,
+) -> Result<Vec<SqlValue>> {
+    if values.len() != columns.len() {
+        return Err(ExecutorError::InvalidOperation {
+            operation: "INSERT".into(),
+            reason: format!(
+                "column/value count mismatch: {} vs {}",
+                columns.len(),
+                values.len()
+            ),
+        });
+    }
+
+    let mut row = vec![SqlValue::Null; table.column_count()];
+    for (idx, value) in values.into_iter().enumerate() {
+        let col_name = &columns[idx];
+        let col_index = table
+            .get_column_index(col_name)
+            .ok_or_else(|| ExecutorError::ColumnNotFound(col_name.clone()))?;
+        row[col_index] = value;
+    }
+
+    Ok(row)
+}
+
 fn build_row(
     table: &TableMetadata,
     columns: &[String],
     exprs: Vec<TypedExpr>,
+    ctx: &EvalContext<'_>,
 ) -> Result<Vec<SqlValue>> {
     if exprs.len() != columns.len() {
         return Err(ExecutorError::InvalidOperation {
@@ -95,18 +163,68 @@ fn build_row(
     }
 
     let mut row = vec![SqlValue::Null; table.column_count()];
-    let ctx = EvalContext::new(&[]);
 
     for (idx, expr) in exprs.into_iter().enumerate() {
         let col_name = &columns[idx];
         let col_index = table
             .get_column_index(col_name)
             .ok_or_else(|| ExecutorError::ColumnNotFound(col_name.clone()))?;
-        let value = evaluate(&expr, &ctx)?;
+        let value = evaluate(&expr, ctx)?;
         row[col_index] = value;
     }
 
+    for (col_index, column) in table.columns.iter().enumerate() {
+        if columns.iter().any(|name| name == &column.name) {
+            continue;
+        }
+        let default = column
+            .default
+            .as_ref()
+            .ok_or_else(|| ExecutorError::ColumnRequired {
+                column: column.name.clone(),
+            })?;
+        row[col_index] = evaluate_default(default, column, ctx)?;
+    }
+
     Ok(row)
+}
+
+fn evaluate_default(
+    default: &Expr,
+    column: &ColumnMetadata,
+    ctx: &EvalContext<'_>,
+) -> Result<SqlValue> {
+    let typed = match &default.kind {
+        ExprKind::Literal { literal } => TypedExpr {
+            kind: crate::planner::typed_expr::TypedExprKind::Literal(literal.clone()),
+            resolved_type: column.data_type.clone(),
+            span: default.span,
+        },
+        ExprKind::FunctionCall {
+            name,
+            args,
+            distinct,
+            star,
+        } if name.eq_ignore_ascii_case("now") && args.is_empty() && !distinct && !star => {
+            TypedExpr {
+                kind: crate::planner::typed_expr::TypedExprKind::FunctionCall {
+                    name: name.clone(),
+                    args: Vec::new(),
+                    distinct: false,
+                    star: false,
+                },
+                resolved_type: crate::planner::types::ResolvedType::Timestamp,
+                span: default.span,
+            }
+        }
+        _ => {
+            return Err(ExecutorError::UnsupportedOperation(format!(
+                "DEFAULT expression for column '{}'",
+                column.name
+            )));
+        }
+    };
+    evaluate(&typed, ctx)
 }
 
 fn map_storage_error(table: &TableMetadata, err: StorageError) -> ExecutorError {

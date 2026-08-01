@@ -237,6 +237,16 @@ proc writeSelectItem(s: MsgStream; node: SqlNode) =
     s.writeSpan(node.span)
     return
 
+  if node.kind == nkQualifiedStar:
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("QualifiedWildcard")
+    s.writeKey("table")
+    s.pack_type(node.children[0].firstIdent())
+    s.writeKey("span")
+    s.writeSpan(node.span)
+    return
+
   let exprNode = if node.kind == nkAlias: node.aliasExpr else: node
   s.pack_map(4)
   s.writeKey("variant")
@@ -576,6 +586,14 @@ proc writeExpr(s: MsgStream; node: SqlNode) =
     s.pack_type(node.funcDistinct)
     s.writeKey("star")
     s.pack_type(node.funcStar)
+  of nkCast:
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("Cast")
+    s.writeKey("expr")
+    s.writeExpr(node.children[0])
+    s.writeKey("target_type")
+    s.writeDataType(node.children[1])
   of nkVectorLiteral:
     s.pack_map(2)
     s.writeKey("variant")
@@ -728,11 +746,23 @@ proc writeInsertKind(s: MsgStream; node: SqlNode) =
       s.pack_type(col.firstIdent())
   else:
     s.writeNil()
-  s.writeKey("values")
   let firstRow = if hasColumns: 2 else: 1
-  s.pack_array(max(node.children.len - firstRow, 0))
-  for i in firstRow ..< node.children.len:
-    s.writeExprSeq(node.children[i].children)
+  let source = if node.children.len > firstRow: node.children[firstRow] else: nil
+  s.writeKey("source")
+  if source != nil and source.kind == nkSelect:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Select")
+    s.writeKey("select")
+    s.writeSelectKind(source)
+  else:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Values")
+    s.writeKey("values")
+    s.pack_array(max(node.children.len - firstRow, 0))
+    for i in firstRow ..< node.children.len:
+      s.writeExprSeq(node.children[i].children)
   s.writeKey("span")
   s.writeSpan(node.span)
 
@@ -1202,4 +1232,4 @@ proc alopex_free_buffer*(p: pointer) {.exportc, dynlib, cdecl.} =
 
 proc alopex_parser_version*(): cstring {.exportc, dynlib, cdecl.} =
   ## Return SQL/PromQL wire contract version. Do NOT free this - it is static.
-  "0.2.0"
+  "0.3.0"

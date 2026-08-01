@@ -36,86 +36,146 @@ pub(crate) fn eval_binary_values(op: &BinaryOp, l: SqlValue, r: SqlValue) -> Res
 }
 
 fn add(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
-    match (left, right) {
-        (SqlValue::Null, _) | (_, SqlValue::Null) => Ok(SqlValue::Null),
-        (SqlValue::Integer(a), SqlValue::Integer(b)) => a
+    if left.is_null() || right.is_null() {
+        return Ok(SqlValue::Null);
+    }
+    match numeric_operands(&left, &right) {
+        Some(NumericOperands::Integer(a, b)) => a
             .checked_add(b)
             .map(SqlValue::Integer)
             .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
-        (SqlValue::BigInt(a), SqlValue::BigInt(b)) => a
+        Some(NumericOperands::BigInt(a, b)) => a
             .checked_add(b)
             .map(SqlValue::BigInt)
             .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
-        (SqlValue::Float(a), SqlValue::Float(b)) => Ok(SqlValue::Float(a + b)),
-        (SqlValue::Double(a), SqlValue::Double(b)) => Ok(SqlValue::Double(a + b)),
-        (l, r) => type_mismatch("Numeric", &l, &r),
+        Some(NumericOperands::Float(a, b)) => Ok(SqlValue::Float(a + b)),
+        Some(NumericOperands::Double(a, b)) => Ok(SqlValue::Double(a + b)),
+        None => type_mismatch("Numeric", &left, &right),
     }
 }
 
 fn sub(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
-    match (left, right) {
-        (SqlValue::Null, _) | (_, SqlValue::Null) => Ok(SqlValue::Null),
-        (SqlValue::Integer(a), SqlValue::Integer(b)) => a
+    if left.is_null() || right.is_null() {
+        return Ok(SqlValue::Null);
+    }
+    match numeric_operands(&left, &right) {
+        Some(NumericOperands::Integer(a, b)) => a
             .checked_sub(b)
             .map(SqlValue::Integer)
             .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
-        (SqlValue::BigInt(a), SqlValue::BigInt(b)) => a
+        Some(NumericOperands::BigInt(a, b)) => a
             .checked_sub(b)
             .map(SqlValue::BigInt)
             .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
-        (SqlValue::Float(a), SqlValue::Float(b)) => Ok(SqlValue::Float(a - b)),
-        (SqlValue::Double(a), SqlValue::Double(b)) => Ok(SqlValue::Double(a - b)),
-        (l, r) => type_mismatch("Numeric", &l, &r),
+        Some(NumericOperands::Float(a, b)) => Ok(SqlValue::Float(a - b)),
+        Some(NumericOperands::Double(a, b)) => Ok(SqlValue::Double(a - b)),
+        None => type_mismatch("Numeric", &left, &right),
     }
 }
 
 fn mul(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
-    match (left, right) {
-        (SqlValue::Null, _) | (_, SqlValue::Null) => Ok(SqlValue::Null),
-        (SqlValue::Integer(a), SqlValue::Integer(b)) => a
+    if left.is_null() || right.is_null() {
+        return Ok(SqlValue::Null);
+    }
+    match numeric_operands(&left, &right) {
+        Some(NumericOperands::Integer(a, b)) => a
             .checked_mul(b)
             .map(SqlValue::Integer)
             .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
-        (SqlValue::BigInt(a), SqlValue::BigInt(b)) => a
+        Some(NumericOperands::BigInt(a, b)) => a
             .checked_mul(b)
             .map(SqlValue::BigInt)
             .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
-        (SqlValue::Float(a), SqlValue::Float(b)) => Ok(SqlValue::Float(a * b)),
-        (SqlValue::Double(a), SqlValue::Double(b)) => Ok(SqlValue::Double(a * b)),
-        (l, r) => type_mismatch("Numeric", &l, &r),
+        Some(NumericOperands::Float(a, b)) => Ok(SqlValue::Float(a * b)),
+        Some(NumericOperands::Double(a, b)) => Ok(SqlValue::Double(a * b)),
+        None => type_mismatch("Numeric", &left, &right),
     }
 }
 
 fn div(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
-    match (left, right) {
-        (SqlValue::Null, _) | (_, SqlValue::Null) => Ok(SqlValue::Null),
-        (_, SqlValue::Integer(0)) => {
+    if left.is_null() || right.is_null() {
+        return Ok(SqlValue::Null);
+    }
+    match numeric_operands(&left, &right) {
+        Some(NumericOperands::Integer(_, 0)) | Some(NumericOperands::BigInt(_, 0)) => {
             Err(ExecutorError::Evaluation(EvaluationError::DivisionByZero))
         }
-        (_, SqlValue::BigInt(0)) => Err(ExecutorError::Evaluation(EvaluationError::DivisionByZero)),
-        (_, SqlValue::Float(0.0)) => {
+        Some(NumericOperands::Float(_, 0.0)) => {
             Err(ExecutorError::Evaluation(EvaluationError::DivisionByZero))
         }
-        (_, SqlValue::Double(0.0)) => {
+        Some(NumericOperands::Double(_, 0.0)) => {
             Err(ExecutorError::Evaluation(EvaluationError::DivisionByZero))
         }
-        (SqlValue::Integer(a), SqlValue::Integer(b)) => Ok(SqlValue::Integer(a / b)),
-        (SqlValue::BigInt(a), SqlValue::BigInt(b)) => Ok(SqlValue::BigInt(a / b)),
-        (SqlValue::Float(a), SqlValue::Float(b)) => Ok(SqlValue::Float(a / b)),
-        (SqlValue::Double(a), SqlValue::Double(b)) => Ok(SqlValue::Double(a / b)),
-        (l, r) => type_mismatch("Numeric", &l, &r),
+        Some(NumericOperands::Integer(a, b)) => a
+            .checked_div(b)
+            .map(SqlValue::Integer)
+            .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
+        Some(NumericOperands::BigInt(a, b)) => a
+            .checked_div(b)
+            .map(SqlValue::BigInt)
+            .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
+        Some(NumericOperands::Float(a, b)) => Ok(SqlValue::Float(a / b)),
+        Some(NumericOperands::Double(a, b)) => Ok(SqlValue::Double(a / b)),
+        None => type_mismatch("Numeric", &left, &right),
     }
 }
 
 fn r#mod(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
-    match (left, right) {
-        (SqlValue::Null, _) | (_, SqlValue::Null) => Ok(SqlValue::Null),
-        (_, SqlValue::Integer(0) | SqlValue::BigInt(0)) => {
+    if left.is_null() || right.is_null() {
+        return Ok(SqlValue::Null);
+    }
+    match numeric_operands(&left, &right) {
+        Some(NumericOperands::Integer(_, 0)) | Some(NumericOperands::BigInt(_, 0)) => {
             Err(ExecutorError::Evaluation(EvaluationError::DivisionByZero))
         }
-        (SqlValue::Integer(a), SqlValue::Integer(b)) => Ok(SqlValue::Integer(a % b)),
-        (SqlValue::BigInt(a), SqlValue::BigInt(b)) => Ok(SqlValue::BigInt(a % b)),
-        (l, r) => type_mismatch("Integer/BigInt", &l, &r),
+        Some(NumericOperands::Integer(a, b)) => a
+            .checked_rem(b)
+            .map(SqlValue::Integer)
+            .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
+        Some(NumericOperands::BigInt(a, b)) => a
+            .checked_rem(b)
+            .map(SqlValue::BigInt)
+            .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
+        Some(NumericOperands::Float(..) | NumericOperands::Double(..)) | None => {
+            type_mismatch("Integer/BigInt", &left, &right)
+        }
+    }
+}
+
+/// Runtime operands promoted with the same numeric hierarchy used by the planner.
+///
+/// INTEGER and BIGINT retain integral arithmetic where possible; FLOAT with
+/// BIGINT promotes to DOUBLE because an i64 cannot be represented exactly by f32.
+enum NumericOperands {
+    Integer(i32, i32),
+    BigInt(i64, i64),
+    Float(f32, f32),
+    Double(f64, f64),
+}
+
+fn numeric_operands(left: &SqlValue, right: &SqlValue) -> Option<NumericOperands> {
+    use SqlValue::*;
+
+    match (left, right) {
+        (Integer(a), Integer(b)) => Some(NumericOperands::Integer(*a, *b)),
+        (Integer(a), BigInt(b)) => Some(NumericOperands::BigInt(i64::from(*a), *b)),
+        (BigInt(a), Integer(b)) => Some(NumericOperands::BigInt(*a, i64::from(*b))),
+        (BigInt(a), BigInt(b)) => Some(NumericOperands::BigInt(*a, *b)),
+        // f32 has 24 bits of mantissa and cannot hold the whole i32 range, so an
+        // INTEGER mixed with FLOAT widens to DOUBLE instead of losing magnitude.
+        (Integer(a), Float(b)) => Some(NumericOperands::Double(f64::from(*a), f64::from(*b))),
+        (Float(a), Integer(b)) => Some(NumericOperands::Double(f64::from(*a), f64::from(*b))),
+        (Float(a), Float(b)) => Some(NumericOperands::Float(*a, *b)),
+        (BigInt(a), Float(b)) => Some(NumericOperands::Double(*a as f64, f64::from(*b))),
+        (Float(a), BigInt(b)) => Some(NumericOperands::Double(f64::from(*a), *b as f64)),
+        (Integer(a), Double(b)) => Some(NumericOperands::Double(f64::from(*a), *b)),
+        (Double(a), Integer(b)) => Some(NumericOperands::Double(*a, f64::from(*b))),
+        (BigInt(a), Double(b)) => Some(NumericOperands::Double(*a as f64, *b)),
+        (Double(a), BigInt(b)) => Some(NumericOperands::Double(*a, *b as f64)),
+        (Float(a), Double(b)) => Some(NumericOperands::Double(f64::from(*a), *b)),
+        (Double(a), Float(b)) => Some(NumericOperands::Double(*a, f64::from(*b))),
+        (Double(a), Double(b)) => Some(NumericOperands::Double(*a, *b)),
+        _ => None,
     }
 }
 

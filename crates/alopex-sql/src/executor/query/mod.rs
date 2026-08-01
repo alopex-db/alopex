@@ -792,12 +792,25 @@ fn column_name_from_projection(
     projected: &crate::planner::typed_expr::ProjectedColumn,
     idx: usize,
 ) -> String {
+    use crate::planner::typed_expr::TypedExprKind;
+
     projected
         .alias
         .clone()
         .or_else(|| match &projected.expr.kind {
-            crate::planner::typed_expr::TypedExprKind::ColumnRef { column, .. } => {
-                Some(column.clone())
+            TypedExprKind::ColumnRef { column, .. } => Some(column.clone()),
+            // A USING/NATURAL common column is planned as
+            // COALESCE(left, right); it still names the merged column.
+            TypedExprKind::FunctionCall { name, args, .. }
+                if name == "coalesce" && args.len() == 2 =>
+            {
+                match (&args[0].kind, &args[1].kind) {
+                    (
+                        TypedExprKind::ColumnRef { column: left, .. },
+                        TypedExprKind::ColumnRef { column: right, .. },
+                    ) if left == right => Some(left.clone()),
+                    _ => None,
+                }
             }
             _ => None,
         })

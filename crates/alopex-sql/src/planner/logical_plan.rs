@@ -177,6 +177,16 @@ pub enum LogicalPlan {
         values: Vec<Vec<TypedExpr>>,
     },
 
+    /// INSERT rows produced by a SELECT query.
+    InsertSelect {
+        /// Target table name.
+        table: String,
+        /// Column names (always populated, never empty).
+        columns: Vec<String>,
+        /// Query that produces one row per inserted row.
+        source: Box<LogicalPlan>,
+    },
+
     /// UPDATE operation.
     ///
     /// Updates rows in a table that match an optional filter.
@@ -255,6 +265,7 @@ impl LogicalPlan {
             | LogicalPlan::Sort { .. }
             | LogicalPlan::Limit { .. } => "SELECT",
             LogicalPlan::Insert { .. } => "INSERT",
+            LogicalPlan::InsertSelect { .. } => "INSERT",
             LogicalPlan::Update { .. } => "UPDATE",
             LogicalPlan::Delete { .. } => "DELETE",
             LogicalPlan::CreateTable { .. } => "CREATE TABLE",
@@ -406,6 +417,7 @@ impl LogicalPlan {
             LogicalPlan::Sort { .. } => "Sort",
             LogicalPlan::Limit { .. } => "Limit",
             LogicalPlan::Insert { .. } => "Insert",
+            LogicalPlan::InsertSelect { .. } => "InsertSelect",
             LogicalPlan::Update { .. } => "Update",
             LogicalPlan::Delete { .. } => "Delete",
             LogicalPlan::CreateTable { .. } => "CreateTable",
@@ -433,7 +445,10 @@ impl LogicalPlan {
     pub fn is_dml(&self) -> bool {
         matches!(
             self,
-            LogicalPlan::Insert { .. } | LogicalPlan::Update { .. } | LogicalPlan::Delete { .. }
+            LogicalPlan::Insert { .. }
+                | LogicalPlan::InsertSelect { .. }
+                | LogicalPlan::Update { .. }
+                | LogicalPlan::Delete { .. }
         )
     }
 
@@ -467,6 +482,7 @@ impl LogicalPlan {
         match self {
             LogicalPlan::Scan { table, .. }
             | LogicalPlan::Insert { table, .. }
+            | LogicalPlan::InsertSelect { table, .. }
             | LogicalPlan::Update { table, .. }
             | LogicalPlan::Delete { table, .. } => Some(table),
             LogicalPlan::CreateTable { table, .. } => Some(&table.name),

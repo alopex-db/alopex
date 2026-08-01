@@ -189,8 +189,7 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
 
 proc parseCastExpr(p: var Parser): SqlNode =
   let tok = p.expect(tkCast)
-  result = newNode(nkFunctionCall, tokenSpan(tok))
-  result.children.add(newIdent("CAST", tokenSpan(tok)))
+  result = newNode(nkCast, tokenSpan(tok))
   discard p.expect(tkLParen)
   result.children.add(p.parseExpr())
   discard p.expect(tkAs)
@@ -256,10 +255,15 @@ proc parsePrimary(p: var Parser): SqlNode =
       result = p.parseFunctionCall(tok)
     elif p.check(tkDot):
       discard p.advance()
-      let col = p.expectExprIdent("column name")
-      result = newNode(nkColumnRef, tokenSpan(tok))
-      result.children.add(newIdent(tok.value, tokenSpan(tok)))
-      result.children.add(newIdent(col.value, tokenSpan(col)))
+      if p.check(tkStar):
+        discard p.advance()
+        result = newNode(nkQualifiedStar, tokenSpan(tok))
+        result.children.add(newIdent(tok.value, tokenSpan(tok)))
+      else:
+        let col = p.expectExprIdent("column name")
+        result = newNode(nkColumnRef, tokenSpan(tok))
+        result.children.add(newIdent(tok.value, tokenSpan(tok)))
+        result.children.add(newIdent(col.value, tokenSpan(col)))
     else:
       result = newIdent(tok.value, tokenSpan(tok))
   of tkNow, tkVector:
@@ -636,20 +640,25 @@ proc parseInsertStmt(p: var Parser): SqlNode =
     discard p.expect(tkRParen)
     result.children.add(cols)
 
-  discard p.expect(tkValues)
-  while true:
-    discard p.expect(tkLParen)
-    let row = newNode(nkExprList)
-    row.children.add(p.parseExpr())
-    while p.check(tkComma):
-      discard p.advance()
+  if p.check(tkValues):
+    discard p.advance()
+    while true:
+      discard p.expect(tkLParen)
+      let row = newNode(nkExprList)
       row.children.add(p.parseExpr())
-    discard p.expect(tkRParen)
-    result.children.add(row)
-    if p.check(tkComma):
-      discard p.advance()
-    else:
-      break
+      while p.check(tkComma):
+        discard p.advance()
+        row.children.add(p.parseExpr())
+      discard p.expect(tkRParen)
+      result.children.add(row)
+      if p.check(tkComma):
+        discard p.advance()
+      else:
+        break
+  elif p.check(tkSelect):
+    result.children.add(p.parseSelectStmt())
+  else:
+    discard p.expect(tkValues)
 
 proc parseUpdateStmt(p: var Parser): SqlNode =
   let start = p.expect(tkUpdate)

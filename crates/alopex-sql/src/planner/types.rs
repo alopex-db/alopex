@@ -116,6 +116,7 @@ impl ResolvedType {
     /// - Numeric widening: `Integer` → `BigInt`, `Float`, `Double`
     /// - Numeric widening: `BigInt` → `Double`
     /// - Numeric widening: `Float` → `Double`
+    /// - TIMESTAMP accepts canonical timestamp text and integral epoch microseconds
     /// - `Vector` types require dimension check (done separately)
     ///
     /// # Examples
@@ -155,6 +156,16 @@ impl ResolvedType {
             (Integer, BigInt | Float | Double) => true,
             (BigInt, Double) => true,
             (Float, Double) => true,
+
+            // A decimal literal is typed DOUBLE, so assigning one to a FLOAT
+            // column needs this narrowing; the value is rounded to f32 at
+            // execution time.
+            (Double, Float) => true,
+
+            // TIMESTAMP is stored as epoch microseconds. Text is parsed as a
+            // canonical UTC timestamp and numeric values must be integral
+            // microseconds at execution time.
+            (Text | Integer | BigInt | Float | Double, Timestamp) => true,
 
             // Vector types require dimension check (done separately in TypeChecker)
             (Vector { .. }, Vector { .. }) => false,
@@ -294,7 +305,13 @@ mod tests {
 
         // Numeric narrowing not allowed
         assert!(!ResolvedType::BigInt.can_cast_to(&ResolvedType::Integer));
-        assert!(!ResolvedType::Double.can_cast_to(&ResolvedType::Float));
+    }
+
+    #[test]
+    fn double_narrows_to_float_because_decimal_literals_are_double() {
+        // The lexer types every decimal literal as DOUBLE, so rejecting this
+        // narrowing would make FLOAT columns impossible to populate.
+        assert!(ResolvedType::Double.can_cast_to(&ResolvedType::Float));
     }
 
     #[test]

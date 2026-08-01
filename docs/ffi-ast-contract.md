@@ -6,7 +6,7 @@ Nim parser boundary.
 
 ## Contract Overview
 
-- Contract version: `0.2.0`, returned by `alopex_parser_version()`.
+- Contract version: `0.3.0`, returned by `alopex_parser_version()`.
 - SQL entrypoint: `alopex_parse_sql`, returning an array of SQL statements.
 - PromQL entrypoint: `alopex_parse_promql`, returning one PromQL expression.
 - Both parse entrypoints return `CParseResult` and allocate success/error
@@ -52,7 +52,7 @@ Nim parser boundary.
 | Variant | Fields |
 | --- | --- |
 | `Select` | `distinct: bool`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [Expr]?`, `having: Expr?`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?` |
-| `Insert` | `table: string`, `columns: [string]?`, `values: [[Expr]]`, `span: Span` |
+| `Insert` | `table: string`, `columns: [string]?`, `source: InsertSource`, `span: Span` |
 | `Update` | `table: string`, `assignments: [Assignment]`, `selection: Expr?`, `span: Span` |
 | `Delete` | `table: string`, `selection: Expr?`, `span: Span` |
 | `CreateTable` | `if_not_exists: bool`, `name: string`, `columns: [ColumnDef]`, `constraints: [TableConstraint]`, `with_options: [IndexOption]`, `span: Span` |
@@ -65,7 +65,15 @@ Nim parser boundary.
 | Variant | Fields |
 | --- | --- |
 | `Wildcard` | `span: Span` |
+| `QualifiedWildcard` | `table: string`, `span: Span` |
 | `Expr` | `expr: Expr`, `alias: string?`, `span: Span` |
+
+`InsertSource` variants:
+
+| Variant | Fields |
+| --- | --- |
+| `Values` | `values: [[Expr]]` |
+| `Select` | `select: Select` |
 
 `OrderByExpr = { "expr": Expr, "asc": bool?, "nulls_first": bool?, "span": Span }`
 
@@ -96,6 +104,7 @@ Nim parser boundary.
 | `BinaryOp` | `left: Expr`, `op: BinaryOp`, `right: Expr` |
 | `UnaryOp` | `op: UnaryOp`, `operand: Expr` |
 | `FunctionCall` | `name: string`, `args: [Expr]`, `distinct: bool`, `star: bool` |
+| `Cast` | `expr: Expr`, `target_type: DataType` |
 | `Between` | `expr: Expr`, `low: Expr`, `high: Expr`, `negated: bool` |
 | `Like` | `expr: Expr`, `pattern: Expr`, `escape: Expr?`, `negated: bool` |
 | `InList` | `expr: Expr`, `list: [Expr]`, `negated: bool` |

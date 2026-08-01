@@ -693,7 +693,9 @@ impl KVStore for AnyKV {
     }
 }
 
-#[cfg(test)]
+// Every test here exercises disk-backed persistence across a restart, which
+// wasm32 has no filesystem for; `tempfile` is also excluded from that target.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::path::Path;
     use std::sync::Arc;

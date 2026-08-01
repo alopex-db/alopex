@@ -147,6 +147,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
     ///
     /// - `Scan`, `Filter`, `Sort`, `Limit`: SELECT query execution
     pub fn execute(&mut self, plan: LogicalPlan) -> Result<ExecutionResult> {
+        let _statement_timestamp = evaluator::begin_statement();
         match plan {
             LogicalPlan::Pragma { name, value } => {
                 system::execute_pragma(&self.bridge, &name, value.as_ref())
@@ -170,6 +171,11 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
                 columns,
                 values,
             } => self.execute_insert(&table, columns, values),
+            LogicalPlan::InsertSelect {
+                table,
+                columns,
+                source,
+            } => self.execute_insert_select(&table, columns, *source),
             LogicalPlan::Update {
                 table,
                 assignments,
@@ -249,6 +255,25 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
         self.run_in_write_txn(|txn| dml::execute_insert(txn, &*catalog, table, columns, values))
     }
 
+    fn execute_insert_select(
+        &mut self,
+        table: &str,
+        columns: Vec<String>,
+        source: LogicalPlan,
+    ) -> Result<ExecutionResult> {
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        self.run_in_write_txn(|txn| {
+            let ExecutionResult::Query(result) = query::execute_query(txn, &*catalog, source)?
+            else {
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "INSERT ... SELECT".into(),
+                    reason: "SELECT source did not return query rows".into(),
+                });
+            };
+            dml::execute_insert_rows(txn, &*catalog, table, columns, result.rows)
+        })
+    }
+
     fn execute_update(
         &mut self,
         table: &str,
@@ -304,6 +329,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             });
         }
 
+        let _statement_timestamp = evaluator::begin_statement();
         let mut catalog = self.catalog.write().expect("catalog lock poisoned");
         let (mut sql_txn, overlay) = txn.split_parts();
 
@@ -354,6 +380,22 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);
                 dml::execute_insert(&mut sql_txn, &view, &table, columns, values)
+            }
+            LogicalPlan::InsertSelect {
+                table,
+                columns,
+                source,
+            } => {
+                let view = TxnCatalogView::new(&*catalog, &*overlay);
+                let ExecutionResult::Query(result) =
+                    query::execute_query(&mut sql_txn, &view, *source)?
+                else {
+                    return Err(ExecutorError::InvalidOperation {
+                        operation: "INSERT ... SELECT".into(),
+                        reason: "SELECT source did not return query rows".into(),
+                    });
+                };
+                dml::execute_insert_rows(&mut sql_txn, &view, &table, columns, result.rows)
             }
             LogicalPlan::Update {
                 table,

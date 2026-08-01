@@ -1,6 +1,6 @@
 [package]
 name = "alopex-sql"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2024"  # Uses let chains feature
 license.workspace = true
 repository.workspace = true
@@ -43,6 +43,7 @@ hex = "0.4"
 md-5 = "0.10"
 sha2 = "0.10"
 uuid.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 alopex-core.workspace = true
 parquet = { version = "52", features = ["arrow"] }
 arrow-array = "52"

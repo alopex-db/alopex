@@ -150,3 +150,142 @@ fn nested_loop_and_hash_join_match_for_equi_join() {
     let hashed = hash_join(&left, &right, 0, 0, JoinType::Inner).unwrap();
     assert_eq!(nested, hashed);
 }
+
+#[test]
+fn natural_join_coalesces_common_columns_and_other_join_forms_remain_available() {
+    let natural = last_query(
+        r#"
+        CREATE TABLE t (s TEXT, left_value INT);
+        CREATE TABLE u (s TEXT, right_value INT);
+        INSERT INTO t VALUES ('shared', 1), ('left-only', 2);
+        INSERT INTO u VALUES ('shared', 10), ('right-only', 20);
+        SELECT s, left_value, right_value FROM t NATURAL JOIN u;
+        "#,
+    );
+    assert_eq!(
+        natural.rows,
+        vec![vec![
+            SqlValue::Text("shared".into()),
+            SqlValue::Integer(1),
+            SqlValue::Integer(10),
+        ]]
+    );
+
+    let natural_star = last_query(
+        r#"
+        CREATE TABLE t (s TEXT, left_value INT);
+        CREATE TABLE u (s TEXT, right_value INT);
+        INSERT INTO t VALUES ('shared', 1);
+        INSERT INTO u VALUES ('shared', 10);
+        SELECT * FROM t NATURAL JOIN u;
+        "#,
+    );
+    assert_eq!(
+        natural_star
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["s", "left_value", "right_value"]
+    );
+    assert_eq!(
+        natural_star.rows,
+        vec![vec![
+            SqlValue::Text("shared".into()),
+            SqlValue::Integer(1),
+            SqlValue::Integer(10),
+        ]]
+    );
+
+    let using = last_query(
+        r#"
+        CREATE TABLE t (s TEXT, left_value INT);
+        CREATE TABLE u (s TEXT, right_value INT);
+        INSERT INTO t VALUES ('shared', 1);
+        INSERT INTO u VALUES ('shared', 10);
+        SELECT s FROM t JOIN u USING (s);
+        "#,
+    );
+    assert_eq!(using.rows, vec![vec![SqlValue::Text("shared".into())]]);
+
+    for sql in [
+        "SELECT t.s FROM t INNER JOIN u ON t.s = u.s",
+        "SELECT t.s FROM t LEFT JOIN u ON t.s = u.s",
+        "SELECT u.s FROM t RIGHT JOIN u ON t.s = u.s",
+        "SELECT t.s FROM t FULL JOIN u ON t.s = u.s",
+        "SELECT t.s FROM t CROSS JOIN u",
+        "SELECT t.s FROM t, u",
+    ] {
+        let query = last_query(&format!(
+            "
+            CREATE TABLE t (s TEXT);
+            CREATE TABLE u (s TEXT);
+            INSERT INTO t VALUES ('shared');
+            INSERT INTO u VALUES ('shared');
+            {sql};
+            "
+        ));
+        assert_eq!(query.rows.len(), 1, "{sql}");
+    }
+}
+
+/// USING and NATURAL merge their common columns, so an unqualified reference must
+/// resolve to the merged value, not to the left input. Under RIGHT and FULL joins
+/// the left side is NULL for right-only rows, so binding to the left silently
+/// returns NULL where the key exists.
+#[test]
+fn using_and_natural_common_columns_merge_under_outer_joins() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "
+        CREATE TABLE p (k INT PRIMARY KEY, a TEXT);
+        CREATE TABLE q (k INT PRIMARY KEY, b TEXT);
+        INSERT INTO p (k, a) VALUES (1, 'p1'), (2, 'p2');
+        INSERT INTO q (k, b) VALUES (2, 'q2'), (3, 'q3');
+        SELECT k FROM p RIGHT JOIN q USING (k) ORDER BY k;
+        SELECT k FROM p FULL JOIN q USING (k) ORDER BY k;
+        SELECT k FROM p NATURAL RIGHT JOIN q ORDER BY k;
+        SELECT k FROM p NATURAL FULL JOIN q ORDER BY k;
+        ",
+    )
+    .expect("parse outer joins");
+
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let store = Arc::new(MemoryKV::new());
+    let mut executor = Executor::new(store, catalog.clone());
+    let mut queries = Vec::new();
+    let mut names: Vec<Vec<String>> = Vec::new();
+
+    for statement in statements {
+        let guard = catalog.read().expect("catalog lock");
+        let plan = Planner::new(&*guard)
+            .plan(&statement)
+            .expect("plan outer joins");
+        drop(guard);
+        if let ExecutionResult::Query(query) = executor.execute(plan).expect("execute outer joins")
+        {
+            names.push(
+                query
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect::<Vec<_>>(),
+            );
+            queries.push(query.rows);
+        }
+    }
+
+    // The merged column keeps its name; it must not degrade to col_0.
+    assert!(
+        names.iter().all(|columns| columns == &["k"]),
+        "merged column lost its name: {names:?}"
+    );
+
+    let right = vec![vec![SqlValue::Integer(2)], vec![SqlValue::Integer(3)]];
+    let full = vec![
+        vec![SqlValue::Integer(1)],
+        vec![SqlValue::Integer(2)],
+        vec![SqlValue::Integer(3)],
+    ];
+    assert_eq!(queries, vec![right.clone(), full.clone(), right, full]);
+}
