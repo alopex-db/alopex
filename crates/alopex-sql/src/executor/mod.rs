@@ -147,6 +147,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
     ///
     /// - `Scan`, `Filter`, `Sort`, `Limit`: SELECT query execution
     pub fn execute(&mut self, plan: LogicalPlan) -> Result<ExecutionResult> {
+        let _statement_timestamp = evaluator::begin_statement();
         match plan {
             LogicalPlan::Pragma { name, value } => {
                 system::execute_pragma(&self.bridge, &name, value.as_ref())
@@ -328,6 +329,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             });
         }
 
+        let _statement_timestamp = evaluator::begin_statement();
         let mut catalog = self.catalog.write().expect("catalog lock poisoned");
         let (mut sql_txn, overlay) = txn.split_parts();
 

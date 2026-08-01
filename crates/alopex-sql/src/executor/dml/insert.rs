@@ -1,7 +1,8 @@
 use alopex_core::kv::KVStore;
 
 use crate::ast::ddl::IndexMethod;
-use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
+use crate::ast::expr::{Expr, ExprKind};
+use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::executor::evaluator::{EvalContext, evaluate};
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
@@ -23,12 +24,35 @@ pub fn execute_insert<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
 
     validate_columns(&table, &columns)?;
 
+    // NOW() and other statement-scoped values are evaluated once per statement.
+    let ctx = EvalContext::new(&[]);
     let rows = values
         .into_iter()
-        .map(|row_exprs| build_row(&table, &columns, row_exprs))
+        .map(|row_exprs| build_row(&table, &columns, row_exprs, &ctx))
         .collect::<Result<Vec<_>>>()?;
 
     insert_rows(txn, catalog, &table, table_name, rows)
+}
+
+fn validate_columns(table: &TableMetadata, columns: &[String]) -> Result<()> {
+    // All provided columns must exist.
+    for col in columns {
+        if table.get_column(col).is_none() {
+            return Err(ExecutorError::ColumnNotFound(col.clone()));
+        }
+    }
+
+    if columns.len() != table.column_count()
+        && let Some(missing) = table
+            .columns
+            .iter()
+            .find(|c| !columns.iter().any(|col| col == &c.name) && c.default.is_none())
+            .map(|c| c.name.clone())
+    {
+        return Err(ExecutorError::ColumnRequired { column: missing });
+    }
+
+    Ok(())
 }
 
 /// Insert already-evaluated SELECT output rows.
@@ -93,41 +117,6 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
     Ok(ExecutionResult::RowsAffected(staged.len() as u64))
 }
 
-fn validate_columns(table: &TableMetadata, columns: &[String]) -> Result<()> {
-    // All provided columns must exist.
-    for col in columns {
-        if table.get_column(col).is_none() {
-            return Err(ExecutorError::ColumnNotFound(col.clone()));
-        }
-    }
-
-    // DEFAULT is not supported; missing columns are an error.
-    if columns.len() != table.column_count() {
-        let missing = table
-            .columns
-            .iter()
-            .find(|c| !columns.iter().any(|col| col == &c.name))
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| "unknown".to_string());
-        return Err(ExecutorError::ColumnRequired { column: missing });
-    }
-
-    Ok(())
-}
-
-fn build_row(
-    table: &TableMetadata,
-    columns: &[String],
-    exprs: Vec<TypedExpr>,
-) -> Result<Vec<SqlValue>> {
-    let ctx = EvalContext::new(&[]);
-    let values = exprs
-        .into_iter()
-        .map(|expr| evaluate(&expr, &ctx))
-        .collect::<Result<Vec<_>>>()?;
-    build_row_from_values(table, columns, values)
-}
-
 fn build_row_from_values(
     table: &TableMetadata,
     columns: &[String],
@@ -154,6 +143,88 @@ fn build_row_from_values(
     }
 
     Ok(row)
+}
+
+fn build_row(
+    table: &TableMetadata,
+    columns: &[String],
+    exprs: Vec<TypedExpr>,
+    ctx: &EvalContext<'_>,
+) -> Result<Vec<SqlValue>> {
+    if exprs.len() != columns.len() {
+        return Err(ExecutorError::InvalidOperation {
+            operation: "INSERT".into(),
+            reason: format!(
+                "column/value count mismatch: {} vs {}",
+                columns.len(),
+                exprs.len()
+            ),
+        });
+    }
+
+    let mut row = vec![SqlValue::Null; table.column_count()];
+
+    for (idx, expr) in exprs.into_iter().enumerate() {
+        let col_name = &columns[idx];
+        let col_index = table
+            .get_column_index(col_name)
+            .ok_or_else(|| ExecutorError::ColumnNotFound(col_name.clone()))?;
+        let value = evaluate(&expr, ctx)?;
+        row[col_index] = value;
+    }
+
+    for (col_index, column) in table.columns.iter().enumerate() {
+        if columns.iter().any(|name| name == &column.name) {
+            continue;
+        }
+        let default = column
+            .default
+            .as_ref()
+            .ok_or_else(|| ExecutorError::ColumnRequired {
+                column: column.name.clone(),
+            })?;
+        row[col_index] = evaluate_default(default, column, ctx)?;
+    }
+
+    Ok(row)
+}
+
+fn evaluate_default(
+    default: &Expr,
+    column: &ColumnMetadata,
+    ctx: &EvalContext<'_>,
+) -> Result<SqlValue> {
+    let typed = match &default.kind {
+        ExprKind::Literal { literal } => TypedExpr {
+            kind: crate::planner::typed_expr::TypedExprKind::Literal(literal.clone()),
+            resolved_type: column.data_type.clone(),
+            span: default.span,
+        },
+        ExprKind::FunctionCall {
+            name,
+            args,
+            distinct,
+            star,
+        } if name.eq_ignore_ascii_case("now") && args.is_empty() && !distinct && !star => {
+            TypedExpr {
+                kind: crate::planner::typed_expr::TypedExprKind::FunctionCall {
+                    name: name.clone(),
+                    args: Vec::new(),
+                    distinct: false,
+                    star: false,
+                },
+                resolved_type: crate::planner::types::ResolvedType::Timestamp,
+                span: default.span,
+            }
+        }
+        _ => {
+            return Err(ExecutorError::UnsupportedOperation(format!(
+                "DEFAULT expression for column '{}'",
+                column.name
+            )));
+        }
+    };
+    evaluate(&typed, ctx)
 }
 
 fn map_storage_error(table: &TableMetadata, err: StorageError) -> ExecutorError {

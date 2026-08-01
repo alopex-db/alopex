@@ -8,7 +8,7 @@ use crate::planner::typed_expr::TypedExpr;
 use crate::scalar::{self, ScalarSignature};
 use crate::storage::SqlValue;
 
-use super::{EvalContext, conditional, hash, numeric, string, type_fn};
+use super::{EvalContext, conditional, datetime, hash, numeric, string, type_fn};
 
 pub type EvalFn = fn(&[SqlValue]) -> Result<SqlValue>;
 pub type LazyEvalFn = fn(&[TypedExpr], &EvalContext<'_>) -> Result<SqlValue>;
@@ -77,6 +77,7 @@ fn system_placeholder(_values: &[SqlValue]) -> Result<SqlValue> {
 fn evaluator_for(name: &str) -> (EvalFn, Option<LazyEvalFn>) {
     match name {
         "memory_stats" | "io_stats" | "clear_cache" => (system_placeholder, None),
+        "now" => (datetime::eval_now_values, Some(datetime::eval_now_lazy)),
         "vector_similarity" => (super::function_call::eval_vector_similarity_values, None),
         "vector_distance" => (super::function_call::eval_vector_distance_values, None),
         "vector_dims" => (super::function_call::eval_vector_dims_values, None),

@@ -85,6 +85,16 @@ pub const RANDOM_META: FnMeta = FnMeta {
     reorderable: true,
 };
 
+/// Metadata for values that vary between statements but are fixed within one.
+pub const STATEMENT_STABLE_META: FnMeta = FnMeta {
+    deterministic: false,
+    volatile: false,
+    side_effecting: false,
+    foldable: false,
+    cacheable: false,
+    reorderable: true,
+};
+
 pub const SYSTEM_META: FnMeta = FnMeta {
     deterministic: false,
     volatile: true,
@@ -462,6 +472,13 @@ static SIGNATURES: &[ScalarSignature] = &[
         check_numeric,
         ReturnRule::Fixed(ResolvedType::Double),
         RANDOM_META,
+    ),
+    sig_meta(
+        "now",
+        Arity::Exact(0),
+        check_no_args,
+        ReturnRule::Fixed(ResolvedType::Timestamp),
+        STATEMENT_STABLE_META,
     ),
     sig(
         "sin",

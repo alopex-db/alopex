@@ -302,6 +302,9 @@ fn annotate_expr_natural_joins(expr: &mut Expr, natural_markers: &mut impl Itera
                 annotate_expr_natural_joins(item, natural_markers);
             }
         }
+        ExprKind::Cast { expr, .. } => {
+            annotate_expr_natural_joins(expr, natural_markers);
+        }
         ExprKind::Literal { .. } | ExprKind::ColumnRef { .. } | ExprKind::VectorLiteral { .. } => {}
     }
 }
