@@ -113,7 +113,10 @@ async fn http_local_and_explicit_distributed_preflight_share_the_common_outcome_
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(local["success"], true);
+    // The legacy KV transaction adapter returns its transaction identifier at
+    // the top level; v0.9 adds the common outcome under `transaction` rather
+    // than replacing that response shape with a generic `success` field.
+    assert!(local["txn_id"].is_string());
     assert_common_outcome_shape(&local["transaction"]);
     assert_eq!(local["transaction"]["routing"]["kind"], "single_range");
     assert_eq!(local["transaction"]["state"], "running");
