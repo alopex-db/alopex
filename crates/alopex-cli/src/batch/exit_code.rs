@@ -27,6 +27,164 @@ pub enum DistributedReadOutcome {
     Cancelled,
 }
 
+/// Normalized terminal class for a versioned transaction outcome returned by
+/// the HTTP adapters. The CLI keeps the complete outcome document in its
+/// additive output column; this type only decides the stable shell exit code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionCliOutcome {
+    Success,
+    Pending,
+    RetryableFailure,
+    TerminalFailure,
+    AuthorizationFailure,
+    Unsupported,
+    Cancelled,
+}
+
+impl TransactionCliOutcome {
+    /// Classify a transaction envelope without guessing a success from a 2xx
+    /// status. Unknown states and incomplete canonical data fail closed.
+    pub fn from_transaction(transaction: Option<&JsonValue>, http_status: u16) -> Self {
+        let Some(transaction) = transaction else {
+            return Self::from_http_status(http_status);
+        };
+        if !is_canonical_transaction_outcome(transaction) {
+            return Self::TerminalFailure;
+        }
+        let state = transaction
+            .get("state")
+            .and_then(JsonValue::as_str)
+            .map(str::to_ascii_lowercase);
+        let failure_class = transaction
+            .get("failure_class")
+            .and_then(JsonValue::as_str)
+            .map(str::to_ascii_lowercase);
+        let reason_code = transaction
+            .get("reason_code")
+            .and_then(JsonValue::as_str)
+            .map(str::to_ascii_lowercase);
+        let routing_kind = transaction
+            .get("routing")
+            .and_then(|routing| routing.get("kind"))
+            .and_then(JsonValue::as_str)
+            .map(str::to_ascii_lowercase);
+        let retryable = transaction
+            .get("retryable")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false);
+
+        if state.as_deref() == Some("cancelled") {
+            return Self::Cancelled;
+        }
+        if failure_class.as_deref() == Some("unauthorized") {
+            return Self::AuthorizationFailure;
+        }
+        if matches!(
+            routing_kind.as_deref(),
+            Some("unsupported") | Some("blocked")
+        ) || failure_class.as_deref() == Some("prerequisite_missing")
+            || reason_code
+                .as_deref()
+                .is_some_and(|reason| reason.ends_with("_unsupported"))
+        {
+            return Self::Unsupported;
+        }
+        if retryable || state.as_deref() == Some("retryable_failure") {
+            return Self::RetryableFailure;
+        }
+        match state.as_deref() {
+            Some("committed") => Self::Success,
+            Some("accepted") | Some("running") | Some("recovery_pending") => Self::Pending,
+            Some("rejected") | Some("terminal_failure") | None => Self::TerminalFailure,
+            Some(_) => Self::TerminalFailure,
+        }
+    }
+
+    pub fn exit_code(self) -> ExitCode {
+        match self {
+            Self::Success => ExitCode::Success,
+            Self::Pending => ExitCode::Warning,
+            Self::RetryableFailure => ExitCode::Retryable,
+            Self::TerminalFailure => ExitCode::Error,
+            Self::AuthorizationFailure => ExitCode::Authorization,
+            Self::Unsupported => ExitCode::Unsupported,
+            Self::Cancelled => ExitCode::Interrupted,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Pending => "pending",
+            Self::RetryableFailure => "retryable_failure",
+            Self::TerminalFailure => "terminal_failure",
+            Self::AuthorizationFailure => "authorization_failure",
+            Self::Unsupported => "unsupported",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn from_http_status(status: u16) -> Self {
+        match status {
+            200..=201 => Self::Success,
+            202 => Self::Pending,
+            401 | 403 => Self::AuthorizationFailure,
+            408 | 409 | 429 | 503 => Self::RetryableFailure,
+            499 => Self::Cancelled,
+            501 => Self::Unsupported,
+            _ => Self::TerminalFailure,
+        }
+    }
+}
+
+/// A transaction document is authoritative only when it contains the complete
+/// versioned contract. A partial object must not turn a failed request into a
+/// successful or retryable shell outcome merely because it has a familiar
+/// `state` field.
+fn is_canonical_transaction_outcome(transaction: &JsonValue) -> bool {
+    let non_empty_string = |field: &str| {
+        transaction
+            .get(field)
+            .and_then(JsonValue::as_str)
+            .is_some_and(|value| !value.is_empty())
+    };
+    let routing = transaction.get("routing");
+    let idempotency = transaction.get("idempotency");
+
+    transaction
+        .get("outcome_version")
+        .and_then(JsonValue::as_str)
+        == Some("v0.9")
+        && non_empty_string("transaction_id")
+        && non_empty_string("request_id")
+        && non_empty_string("state")
+        && transaction
+            .get("participating_ranges")
+            .is_some_and(JsonValue::is_array)
+        && transaction.get("failure_class").is_some()
+        && non_empty_string("reason_code")
+        && transaction
+            .get("retryable")
+            .and_then(JsonValue::as_bool)
+            .is_some()
+        && routing
+            .and_then(|routing| routing.get("kind"))
+            .and_then(JsonValue::as_str)
+            .is_some_and(|kind| !kind.is_empty())
+        && idempotency
+            .and_then(|idempotency| idempotency.get("operation_id"))
+            .and_then(JsonValue::as_str)
+            .is_some_and(|operation_id| !operation_id.is_empty())
+        && idempotency
+            .and_then(|idempotency| idempotency.get("request_id"))
+            .and_then(JsonValue::as_str)
+            .is_some_and(|request_id| !request_id.is_empty())
+        && idempotency
+            .and_then(|idempotency| idempotency.get("state"))
+            .and_then(JsonValue::as_str)
+            .is_some_and(|state| !state.is_empty())
+}
+
 impl DistributedReadOutcome {
     pub fn exit_code(self) -> ExitCode {
         match self {
@@ -281,6 +439,25 @@ impl ExitCodeCollector {
 mod tests {
     use super::*;
 
+    fn canonical_transaction(state: &str) -> JsonValue {
+        serde_json::json!({
+            "outcome_version": "v0.9",
+            "transaction_id": "txn-1",
+            "request_id": "request-1",
+            "participating_ranges": [],
+            "state": state,
+            "failure_class": null,
+            "reason_code": "transaction_outcome",
+            "routing": {"kind": "single_range"},
+            "retryable": false,
+            "idempotency": {
+                "operation_id": "txn-1",
+                "request_id": "request-1",
+                "state": state,
+            },
+        })
+    }
+
     #[test]
     fn exit_code_values() {
         assert_eq!(ExitCode::Success.as_i32(), 0);
@@ -378,6 +555,44 @@ mod tests {
         assert_eq!(
             DistributedReadOutcome::Cancelled.exit_code(),
             ExitCode::Interrupted
+        );
+    }
+
+    #[test]
+    fn transaction_outcomes_use_the_documented_exit_matrix_and_fail_closed() {
+        let committed = canonical_transaction("committed");
+        let running = canonical_transaction("running");
+        let mut blocked = canonical_transaction("rejected");
+        blocked["failure_class"] = serde_json::json!("prerequisite_missing");
+        blocked["routing"]["kind"] = serde_json::json!("blocked");
+        let mut retryable = canonical_transaction("retryable_failure");
+        retryable["retryable"] = serde_json::json!(true);
+        let unknown = canonical_transaction("future_state");
+        let incomplete = serde_json::json!({"state": "committed"});
+
+        assert_eq!(
+            TransactionCliOutcome::from_transaction(Some(&committed), 200).exit_code(),
+            ExitCode::Success
+        );
+        assert_eq!(
+            TransactionCliOutcome::from_transaction(Some(&running), 200).exit_code(),
+            ExitCode::Warning
+        );
+        assert_eq!(
+            TransactionCliOutcome::from_transaction(Some(&blocked), 501).exit_code(),
+            ExitCode::Unsupported
+        );
+        assert_eq!(
+            TransactionCliOutcome::from_transaction(Some(&retryable), 409).exit_code(),
+            ExitCode::Retryable
+        );
+        assert_eq!(
+            TransactionCliOutcome::from_transaction(Some(&unknown), 200).exit_code(),
+            ExitCode::Error
+        );
+        assert_eq!(
+            TransactionCliOutcome::from_transaction(Some(&incomplete), 200).exit_code(),
+            ExitCode::Error
         );
     }
 }

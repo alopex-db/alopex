@@ -116,6 +116,16 @@ pub enum CliError {
         exit_code: ExitCode,
     },
 
+    /// A versioned transaction response completed with a non-success or
+    /// non-terminal outcome. The canonical outcome was already rendered to
+    /// stdout before this error is returned.
+    #[error("Transaction {outcome}: {reason}")]
+    TransactionOutcome {
+        outcome: String,
+        reason: String,
+        exit_code: ExitCode,
+    },
+
     /// A cluster management request completed with a classified non-success
     /// outcome. The response was already written to stdout before this error
     /// is returned, preserving the operation ID for automation.
@@ -171,6 +181,7 @@ impl CliError {
             Self::CrdtOutcome { exit_code, .. } => *exit_code,
             Self::ChangefeedOutcome { exit_code, .. } => *exit_code,
             Self::DistributedReadOutcome { exit_code, .. } => *exit_code,
+            Self::TransactionOutcome { exit_code, .. } => *exit_code,
             _ => ExitCode::Error,
         }
     }

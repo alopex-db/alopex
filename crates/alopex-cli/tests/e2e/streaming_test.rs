@@ -137,6 +137,7 @@ async fn e2e_streaming_large_dataset() {
         fetch_size: Some(200),
         max_rows: None,
         deadline: None,
+        request_id: None,
         read_mode: None,
         routing_report: None,
         tui: false,

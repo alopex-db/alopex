@@ -222,6 +222,7 @@ mod tests {
             command: Some(KvCommand::Txn(KvTxnCommand::Delete {
                 key: "key".into(),
                 txn_id: "txn".into(),
+                request_id: None,
             })),
         };
         let columnar_index_drop = Command::Columnar {

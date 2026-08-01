@@ -230,6 +230,7 @@ fn run_cli_sql_rows(db: &Database, query: &str) -> Vec<Value> {
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        request_id: None,
         read_mode: None,
         routing_report: None,
         tui: false,

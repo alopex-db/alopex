@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 
 use alopex_embedded::Database;
 
-use crate::batch::{BatchMode, DistributedReadOutcome};
+use crate::batch::{BatchMode, DistributedReadOutcome, TransactionCliOutcome};
 use crate::cli::{OutputFormat, RoutingReportFormat, SqlCommand, SqlReadMode};
 use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
@@ -24,6 +24,7 @@ use crate::tui::{is_tty, TuiApp};
 use crate::ui::mode::UiMode;
 use futures_util::StreamExt;
 use reqwest::Response;
+use serde_json::Value as JsonValue;
 
 #[doc(hidden)]
 pub struct SqlExecutionOptions<'a> {
@@ -228,7 +229,28 @@ fn execute_with_output_control<W: Write>(
 }
 
 fn is_select_query(sql: &str) -> Result<bool> {
-    use alopex_sql::{AlopexDialect, Parser, StatementKind};
+    use alopex_sql::{
+        classify_transaction_sql, AlopexDialect, Parser, StatementKind, TransactionSqlRow,
+    };
+
+    // BEGIN/COMMIT/ROLLBACK/ABORT are approved v0.9 transaction-control
+    // rows, but the legacy SQL AST intentionally does not model them.  They
+    // must reach profile routing as non-SELECT operations so a cluster profile
+    // produces the documented pre-execution unsupported result instead of a
+    // parser failure or a local fallback.
+    if matches!(
+        classify_transaction_sql(sql)
+            .primary_row
+            .map(|metadata| metadata.row),
+        Some(
+            TransactionSqlRow::Begin
+                | TransactionSqlRow::Commit
+                | TransactionSqlRow::Rollback
+                | TransactionSqlRow::Abort
+        )
+    ) {
+        return Ok(false);
+    }
 
     let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(&dialect, sql).map_err(|e| CliError::Parse(format!("{}", e)))?;
@@ -577,16 +599,7 @@ async fn execute_remote_with_formatter_impl<W: Write>(
     options: &SqlExecutionOptions<'_>,
 ) -> Result<()> {
     if is_select_query(sql)? && output.supports_streaming() {
-        return execute_remote_streaming(
-            client,
-            sql,
-            writer,
-            output,
-            options,
-            cmd.fetch_size,
-            cmd.max_rows,
-        )
-        .await;
+        return execute_remote_streaming(client, sql, writer, output, options, cmd).await;
     }
 
     let request = RemoteSqlRequest {
@@ -594,6 +607,7 @@ async fn execute_remote_with_formatter_impl<W: Write>(
         streaming: false,
         fetch_size: cmd.fetch_size,
         max_rows: cmd.max_rows,
+        request_id: cmd.request_id.clone(),
     };
     let response: RemoteSqlResponse = tokio::select! {
         result = tokio::time::timeout(options.deadline.remaining(), client.post_json("api/sql/query", &request)) => {
@@ -619,6 +633,7 @@ async fn execute_remote_with_formatter_impl<W: Write>(
     if json_array {
         writeln!(writer, "[")?;
     }
+    let transaction = response.transaction.clone();
     let mut emitted = false;
     for response in response.into_results() {
         if response.columns.is_empty() && options.quiet {
@@ -637,7 +652,8 @@ async fn execute_remote_with_formatter_impl<W: Write>(
             if json_array {
                 writeln!(writer, "[")?;
             }
-            let columns = sql_status_columns();
+            let mut columns = sql_status_columns();
+            append_transaction_column(&mut columns, transaction.as_ref());
             {
                 let mut streaming_writer = StreamingWriter::new(
                     &mut *writer,
@@ -647,8 +663,9 @@ async fn execute_remote_with_formatter_impl<W: Write>(
                 )
                 .with_quiet(options.quiet);
                 streaming_writer.prepare(Some(1))?;
-                let row = Row::new(vec![Value::Text("OK".to_string()), Value::Text(message)]);
-                streaming_writer.write_row(row)?;
+                let mut values = vec![Value::Text("OK".to_string()), Value::Text(message)];
+                append_transaction_value(&mut values, transaction.as_ref());
+                streaming_writer.write_row(Row::new(values))?;
                 streaming_writer.finish()?;
             }
             if json_array {
@@ -657,11 +674,12 @@ async fn execute_remote_with_formatter_impl<W: Write>(
             continue;
         }
 
-        let columns: Vec<Column> = response
+        let mut columns: Vec<Column> = response
             .columns
             .iter()
             .map(|col| Column::new(&col.name, data_type_from_string(&col.data_type)))
             .collect();
+        append_transaction_column(&mut columns, transaction.as_ref());
         if json_array {
             writeln!(writer, "[")?;
         }
@@ -680,7 +698,8 @@ async fn execute_remote_with_formatter_impl<W: Write>(
                     return Err(CliError::Cancelled);
                 }
                 options.deadline.check()?;
-                let values = row.into_iter().map(remote_value_to_value).collect();
+                let mut values = row.into_iter().map(remote_value_to_value).collect();
+                append_transaction_value(&mut values, transaction.as_ref());
                 match streaming_writer.write_row(Row::new(values))? {
                     WriteStatus::LimitReached => break,
                     WriteStatus::Continue => {}
@@ -695,7 +714,7 @@ async fn execute_remote_with_formatter_impl<W: Write>(
     if json_array {
         writeln!(writer, "]")?;
     }
-    Ok(())
+    classify_transaction_response(transaction.as_ref(), 200)
 }
 
 fn execute_tui_local_or_fallback<'a, W: Write>(
@@ -813,9 +832,15 @@ async fn execute_tui_remote<'a>(
     admin_launcher: Option<Box<dyn FnMut() -> Result<()> + 'a>>,
 ) -> Result<()> {
     if is_select_query(sql)? {
-        let (columns, rows) =
-            collect_remote_streaming_rows(client, sql, options, cmd.fetch_size, cmd.max_rows)
-                .await?;
+        let (columns, rows) = collect_remote_streaming_rows(
+            client,
+            sql,
+            options,
+            cmd.fetch_size,
+            cmd.max_rows,
+            cmd.request_id.clone(),
+        )
+        .await?;
         let app = TuiApp::new(columns, rows, "server", false)
             .with_context_message(Some(sql_context_message(sql)))
             .with_admin_launcher(admin_launcher);
@@ -827,6 +852,7 @@ async fn execute_tui_remote<'a>(
         streaming: false,
         fetch_size: cmd.fetch_size,
         max_rows: cmd.max_rows,
+        request_id: cmd.request_id.clone(),
     };
 
     let response: RemoteSqlResponse = tokio::select! {
@@ -848,12 +874,13 @@ async fn execute_tui_remote<'a>(
         }
     };
 
+    let transaction = response.transaction.clone();
     let response = response
         .into_results()
         .into_iter()
         .last()
         .unwrap_or_default();
-    let (columns, rows) = if response.columns.is_empty() {
+    let (mut columns, mut rows) = if response.columns.is_empty() {
         let columns = sql_status_columns();
         let message = match response.affected_rows {
             Some(count) => format!("{count} row(s) affected"),
@@ -877,11 +904,16 @@ async fn execute_tui_remote<'a>(
         }
         (columns, rows)
     };
+    append_transaction_column(&mut columns, transaction.as_ref());
+    for row in &mut rows {
+        append_transaction_value(&mut row.columns, transaction.as_ref());
+    }
 
     let app = TuiApp::new(columns, rows, "server", false)
         .with_context_message(Some(sql_context_message(sql)))
         .with_admin_launcher(admin_launcher);
-    app.run()
+    app.run()?;
+    classify_transaction_response(transaction.as_ref(), 200)
 }
 
 async fn collect_remote_streaming_rows(
@@ -890,12 +922,14 @@ async fn collect_remote_streaming_rows(
     options: &SqlExecutionOptions<'_>,
     fetch_size: Option<usize>,
     max_rows: Option<usize>,
+    request_id: Option<String>,
 ) -> Result<(Vec<Column>, Vec<Row>)> {
     let request = RemoteSqlRequest {
         sql: sql.to_string(),
         streaming: true,
         fetch_size,
         max_rows,
+        request_id,
     };
 
     let response = tokio::select! {
@@ -1171,6 +1205,7 @@ async fn collect_remote_non_streaming_rows(
         streaming: false,
         fetch_size,
         max_rows,
+        request_id: None,
     };
     let response: RemoteSqlResponse = tokio::select! {
         result = tokio::time::timeout(options.deadline.remaining(), client.post_json("api/sql/query", &request)) => {
@@ -1228,14 +1263,14 @@ async fn execute_remote_streaming<W: Write>(
     writer: &mut W,
     output: &mut SqlOutput<'_>,
     options: &SqlExecutionOptions<'_>,
-    fetch_size: Option<usize>,
-    max_rows: Option<usize>,
+    cmd: &SqlCommand,
 ) -> Result<()> {
     let request = RemoteSqlRequest {
         sql: sql.to_string(),
         streaming: true,
-        fetch_size,
-        max_rows,
+        fetch_size: cmd.fetch_size,
+        max_rows: cmd.max_rows,
+        request_id: cmd.request_id.clone(),
     };
 
     let response = tokio::select! {
@@ -1627,6 +1662,9 @@ async fn collect_remote_jsonl_rows(
         while let Some(newline) = buffer.iter().position(|&b| b == b'\n') {
             let line = buffer.drain(..=newline).collect::<Vec<u8>>();
             if let Some(item) = parse_jsonl_line(&line)? {
+                if item.is_initial_transaction_outcome() {
+                    continue;
+                }
                 if let Some(error) = item.error {
                     return Err(CliError::InvalidArgument(format!(
                         "Server error: {}",
@@ -1659,6 +1697,9 @@ async fn collect_remote_jsonl_rows(
 
     if !done {
         if let Some(item) = parse_jsonl_line(&buffer)? {
+            if item.is_initial_transaction_outcome() {
+                return Ok((columns.unwrap_or_default(), rows));
+            }
             if let Some(error) = item.error {
                 return Err(CliError::InvalidArgument(format!(
                     "Server error: {}",
@@ -1754,6 +1795,9 @@ async fn execute_remote_jsonl_streaming<W: Write>(
         while let Some(newline) = buffer.iter().position(|&b| b == b'\n') {
             let line = buffer.drain(..=newline).collect::<Vec<u8>>();
             if let Some(item) = parse_jsonl_line(&line)? {
+                if item.is_initial_transaction_outcome() {
+                    continue;
+                }
                 if let Some(error) = item.error {
                     return Err(CliError::InvalidArgument(format!(
                         "Server error: {}",
@@ -1795,6 +1839,9 @@ async fn execute_remote_jsonl_streaming<W: Write>(
 
     if !done {
         if let Some(item) = parse_jsonl_line(&buffer)? {
+            if item.is_initial_transaction_outcome() {
+                return Ok(());
+            }
             if let Some(error) = item.error {
                 return Err(CliError::InvalidArgument(format!(
                     "Server error: {}",
@@ -2193,6 +2240,8 @@ struct RemoteSqlRequest {
     fetch_size: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_rows: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -2223,6 +2272,8 @@ struct RemoteSqlResponse {
     results: Vec<RemoteSqlResult>,
     #[serde(flatten)]
     legacy: RemoteSqlResult,
+    #[serde(default)]
+    transaction: Option<JsonValue>,
 }
 
 impl RemoteSqlResponse {
@@ -2241,11 +2292,78 @@ struct RemoteStreamItem {
     error: Option<RemoteStreamError>,
     #[serde(default)]
     done: bool,
+    #[serde(default)]
+    transaction: Option<JsonValue>,
+}
+
+impl RemoteStreamItem {
+    /// v0.9 servers send the canonical outcome before the first row. It is
+    /// metadata, not a result row, so legacy streaming formatters must skip it
+    /// while retaining the normal row/done protocol.
+    fn is_initial_transaction_outcome(&self) -> bool {
+        self.transaction.is_some() && self.row.is_none() && self.error.is_none() && !self.done
+    }
 }
 
 #[derive(serde::Deserialize)]
 struct RemoteStreamError {
     message: String,
+}
+
+fn append_transaction_column(columns: &mut Vec<Column>, transaction: Option<&JsonValue>) {
+    if transaction.is_some() {
+        columns.push(Column::new("Transaction", DataType::Text));
+    }
+}
+
+fn append_transaction_value(values: &mut Vec<Value>, transaction: Option<&JsonValue>) {
+    if let Some(transaction) = transaction {
+        let canonical = serde_json::to_string(transaction)
+            .unwrap_or_else(|_| "{\"outcome\":\"serialization_error\"}".to_string());
+        values.push(Value::Text(canonical));
+    }
+}
+
+fn classify_transaction_response(transaction: Option<&JsonValue>, status: u16) -> Result<()> {
+    let Some(transaction) = transaction else {
+        return Ok(());
+    };
+    let outcome = TransactionCliOutcome::from_transaction(Some(transaction), status);
+    if outcome == TransactionCliOutcome::Success {
+        return Ok(());
+    }
+    let reason = transaction
+        .get("reason_code")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("transaction outcome is not committed")
+        .to_string();
+    Err(CliError::TransactionOutcome {
+        outcome: outcome.as_str().to_string(),
+        reason,
+        exit_code: outcome.exit_code(),
+    })
+}
+
+fn transaction_error_from_http(status: u16, body: &str) -> Option<CliError> {
+    let document = serde_json::from_str::<JsonValue>(body).ok()?;
+    let transaction = document.get("transaction")?;
+    let outcome = TransactionCliOutcome::from_transaction(Some(transaction), status);
+    let reason = transaction
+        .get("reason_code")
+        .and_then(JsonValue::as_str)
+        .or_else(|| {
+            document
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(JsonValue::as_str)
+        })
+        .unwrap_or("transaction request failed")
+        .to_string();
+    Some(CliError::TransactionOutcome {
+        outcome: outcome.as_str().to_string(),
+        reason,
+        exit_code: outcome.exit_code(),
+    })
 }
 
 fn map_client_error(err: ClientError) -> CliError {
@@ -2257,7 +2375,13 @@ fn map_client_error(err: ClientError) -> CliError {
         ClientError::Build(message) => CliError::InvalidArgument(message),
         ClientError::Auth(err) => CliError::InvalidArgument(err.to_string()),
         ClientError::HttpStatus { status, body } => {
-            CliError::InvalidArgument(format!("Server error: HTTP {} - {}", status.as_u16(), body))
+            transaction_error_from_http(status.as_u16(), &body).unwrap_or_else(|| {
+                CliError::InvalidArgument(format!(
+                    "Server error: HTTP {} - {}",
+                    status.as_u16(),
+                    body
+                ))
+            })
         }
     }
 }
@@ -2700,6 +2824,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            request_id: None,
             read_mode: None,
             routing_report: None,
             tui: false,
@@ -2720,6 +2845,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            request_id: None,
             read_mode: None,
             routing_report: None,
             tui: false,
@@ -2737,6 +2863,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            request_id: None,
             read_mode: None,
             routing_report: None,
             tui: false,
@@ -2754,6 +2881,7 @@ mod tests {
             fetch_size: None,
             max_rows: None,
             deadline: None,
+            request_id: None,
             read_mode: None,
             routing_report: None,
             tui: false,
@@ -2764,5 +2892,44 @@ mod tests {
             err,
             CliError::InvalidArgument(msg) if msg == "Cannot specify both query and file"
         ));
+    }
+
+    #[test]
+    fn sql_request_serialization_keeps_request_identity_and_stream_metadata_is_not_a_row() {
+        let request = RemoteSqlRequest {
+            sql: "COMMIT".to_string(),
+            streaming: false,
+            fetch_size: None,
+            max_rows: None,
+            request_id: Some("sql-commit-retry-1".to_string()),
+        };
+        let document = serde_json::to_value(request).unwrap();
+        assert_eq!(document["request_id"], "sql-commit-retry-1");
+
+        let initial = RemoteStreamItem {
+            row: None,
+            error: None,
+            done: false,
+            transaction: Some(serde_json::json!({"state": "running"})),
+        };
+        assert!(initial.is_initial_transaction_outcome());
+
+        let row = RemoteStreamItem {
+            row: Some(vec![alopex_sql::storage::SqlValue::Integer(1)]),
+            error: None,
+            done: false,
+            transaction: None,
+        };
+        assert!(!row.is_initial_transaction_outcome());
+    }
+
+    #[test]
+    fn transaction_control_statements_reach_profile_routing_without_parser_rejection() {
+        for statement in ["BEGIN", "COMMIT", "ROLLBACK", "ABORT"] {
+            assert!(
+                !is_select_query(statement).expect("transaction control is a recognized SQL row"),
+                "{statement} must be routed as a non-SELECT operation"
+            );
+        }
     }
 }

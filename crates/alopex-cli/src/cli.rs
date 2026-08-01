@@ -718,6 +718,9 @@ pub enum KvTxnCommand {
         /// Transaction timeout in seconds (default: 60)
         #[arg(long)]
         timeout_secs: Option<u64>,
+        /// Stable request identity for retry-safe transaction execution
+        #[arg(long)]
+        request_id: Option<String>,
     },
     /// Get a value within a transaction
     Get {
@@ -726,6 +729,9 @@ pub enum KvTxnCommand {
         /// Transaction ID
         #[arg(long)]
         txn_id: String,
+        /// Stable request identity for retry-safe transaction execution
+        #[arg(long)]
+        request_id: Option<String>,
     },
     /// Put a key-value pair within a transaction
     Put {
@@ -736,6 +742,9 @@ pub enum KvTxnCommand {
         /// Transaction ID
         #[arg(long)]
         txn_id: String,
+        /// Stable request identity for retry-safe transaction execution
+        #[arg(long)]
+        request_id: Option<String>,
     },
     /// Delete a key within a transaction
     Delete {
@@ -744,18 +753,27 @@ pub enum KvTxnCommand {
         /// Transaction ID
         #[arg(long)]
         txn_id: String,
+        /// Stable request identity for retry-safe transaction execution
+        #[arg(long)]
+        request_id: Option<String>,
     },
     /// Commit a transaction
     Commit {
         /// Transaction ID
         #[arg(long)]
         txn_id: String,
+        /// Stable request identity for retry-safe transaction execution
+        #[arg(long)]
+        request_id: Option<String>,
     },
     /// Roll back a transaction
     Rollback {
         /// Transaction ID
         #[arg(long)]
         txn_id: String,
+        /// Stable request identity for retry-safe transaction execution
+        #[arg(long)]
+        request_id: Option<String>,
     },
 }
 
@@ -787,6 +805,10 @@ pub struct SqlCommand {
     /// Deadline for query execution (e.g. 60s, 5m)
     #[arg(long)]
     pub deadline: Option<String>,
+
+    /// Stable request identity for retry-safe SQL transaction execution
+    #[arg(long)]
+    pub request_id: Option<String>,
 
     /// Read routing mode. Non-local modes require an explicit cluster profile.
     #[arg(long, value_enum)]
@@ -1826,7 +1848,8 @@ mod tests {
             cli.command,
             Some(Command::Kv {
                 command: Some(KvCommand::Txn(KvTxnCommand::Begin {
-                    timeout_secs: Some(30)
+                    timeout_secs: Some(30),
+                    ..
                 }))
             })
         ));
@@ -1847,7 +1870,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Kv {
-                command: Some(KvCommand::Txn(KvTxnCommand::Get { key, txn_id }))
+                command: Some(KvCommand::Txn(KvTxnCommand::Get { key, txn_id, .. }))
             }) if key == "mykey" && txn_id == "txn123"
         ));
     }

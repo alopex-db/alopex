@@ -7,9 +7,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use alopex_embedded::{Database, TransactionManager as Transaction, TxnMode};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
-use crate::batch::BatchMode;
+use crate::batch::{BatchMode, TransactionCliOutcome};
 use crate::cli::{KvCommand, KvTxnCommand, OutputFormat};
 use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
@@ -46,12 +48,16 @@ struct RemoteKvListRequest {
 #[derive(Debug, Serialize)]
 struct RemoteKvTxnBeginRequest {
     timeout_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct RemoteKvTxnGetRequest {
     txn_id: String,
     key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,27 +65,37 @@ struct RemoteKvTxnPutRequest {
     txn_id: String,
     key: String,
     value: Vec<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct RemoteKvTxnDeleteRequest {
     txn_id: String,
     key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct RemoteKvTxnCommitRequest {
     txn_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct RemoteKvTxnRollbackRequest {
     txn_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RemoteKvGetResponse {
     value: Option<Vec<u8>>,
+    #[serde(default)]
+    transaction: Option<JsonValue>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,11 +112,20 @@ struct RemoteKvListResponse {
 #[derive(Debug, Deserialize)]
 struct RemoteKvStatusResponse {
     success: bool,
+    #[serde(default)]
+    transaction: Option<JsonValue>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RemoteKvTxnBeginResponse {
     txn_id: String,
+    #[serde(default)]
+    transaction: Option<JsonValue>,
+}
+
+enum RemoteTransactionResponse<T> {
+    Success(T),
+    Failure { status: u16, document: JsonValue },
 }
 
 /// Execute a KV command.
@@ -321,122 +346,227 @@ async fn execute_remote_txn_command<W: Write>(
     quiet: bool,
 ) -> Result<()> {
     match cmd {
-        KvTxnCommand::Begin { timeout_secs } => {
+        KvTxnCommand::Begin {
+            timeout_secs,
+            request_id,
+        } => {
             let request = RemoteKvTxnBeginRequest {
                 timeout_secs: *timeout_secs,
+                request_id: request_id.clone(),
             };
-            let response: RemoteKvTxnBeginResponse = client
-                .post_json("kv/txn/begin", &request)
-                .await
-                .map_err(map_client_error)?;
-            let columns = kv_columns();
+            let response = match post_transaction_json::<_, RemoteKvTxnBeginResponse>(
+                client,
+                "kv/txn/begin",
+                &request,
+            )
+            .await?
+            {
+                RemoteTransactionResponse::Success(response) => response,
+                RemoteTransactionResponse::Failure { status, document } => {
+                    return render_remote_transaction_failure(
+                        writer, formatter, limit, quiet, status, &document,
+                    );
+                }
+            };
+            let mut columns = kv_columns();
+            append_transaction_column(&mut columns, response.transaction.as_ref());
             let mut streaming_writer =
                 StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
             streaming_writer.prepare(Some(1))?;
-            let row = Row::new(vec![
+            let mut values = vec![
                 Value::Text("txn_id".to_string()),
                 Value::Text(response.txn_id),
-            ]);
-            streaming_writer.write_row(row)?;
-            streaming_writer.finish()
+            ];
+            append_transaction_value(&mut values, response.transaction.as_ref());
+            streaming_writer.write_row(Row::new(values))?;
+            streaming_writer.finish()?;
+            classify_transaction_response(response.transaction.as_ref(), 200)
         }
-        KvTxnCommand::Get { key, txn_id } => {
+        KvTxnCommand::Get {
+            key,
+            txn_id,
+            request_id,
+        } => {
             let request = RemoteKvTxnGetRequest {
                 txn_id: txn_id.clone(),
                 key: key.clone(),
+                request_id: request_id.clone(),
             };
-            let response: RemoteKvGetResponse = client
-                .post_json("kv/txn/get", &request)
-                .await
-                .map_err(map_client_error)?;
-            let Some(value) = response.value else {
-                return Err(CliError::InvalidArgument(format!("Key not found: {}", key)));
+            let response = match post_transaction_json::<_, RemoteKvGetResponse>(
+                client,
+                "kv/txn/get",
+                &request,
+            )
+            .await?
+            {
+                RemoteTransactionResponse::Success(response) => response,
+                RemoteTransactionResponse::Failure { status, document } => {
+                    return render_remote_transaction_failure(
+                        writer, formatter, limit, quiet, status, &document,
+                    );
+                }
             };
-            let columns = kv_columns();
-            let mut streaming_writer =
-                StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
-            streaming_writer.prepare(Some(1))?;
-            let row = Row::new(vec![Value::Text(key.clone()), bytes_to_value(value)]);
-            streaming_writer.write_row(row)?;
-            streaming_writer.finish()
+            write_remote_kv_value(
+                writer,
+                formatter,
+                limit,
+                quiet,
+                key,
+                response.value,
+                response.transaction.as_ref(),
+            )?;
+            classify_transaction_response(response.transaction.as_ref(), 200)
         }
-        KvTxnCommand::Put { key, value, txn_id } => {
+        KvTxnCommand::Put {
+            key,
+            value,
+            txn_id,
+            request_id,
+        } => {
             let request = RemoteKvTxnPutRequest {
                 txn_id: txn_id.clone(),
                 key: key.clone(),
                 value: value.as_bytes().to_vec(),
+                request_id: request_id.clone(),
             };
-            let response: RemoteKvStatusResponse = client
-                .post_json("kv/txn/put", &request)
-                .await
-                .map_err(map_client_error)?;
+            let response = match post_transaction_json::<_, RemoteKvStatusResponse>(
+                client,
+                "kv/txn/put",
+                &request,
+            )
+            .await?
+            {
+                RemoteTransactionResponse::Success(response) => response,
+                RemoteTransactionResponse::Failure { status, document } => {
+                    return render_remote_transaction_failure(
+                        writer, formatter, limit, quiet, status, &document,
+                    );
+                }
+            };
             if response.success {
-                let columns = kv_status_columns();
-                let mut streaming_writer =
-                    StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
-                write_status_if_needed(&mut streaming_writer, &format!("Staged key: {}", key))
+                write_remote_transaction_status(
+                    writer,
+                    formatter,
+                    limit,
+                    quiet,
+                    "OK",
+                    &format!("Staged key: {}", key),
+                    response.transaction.as_ref(),
+                )?;
+                classify_transaction_response(response.transaction.as_ref(), 200)
             } else {
                 Err(CliError::InvalidArgument("Failed to stage key".to_string()))
             }
         }
-        KvTxnCommand::Delete { key, txn_id } => {
+        KvTxnCommand::Delete {
+            key,
+            txn_id,
+            request_id,
+        } => {
             let request = RemoteKvTxnDeleteRequest {
                 txn_id: txn_id.clone(),
                 key: key.clone(),
+                request_id: request_id.clone(),
             };
-            let response: RemoteKvStatusResponse = client
-                .post_json("kv/txn/delete", &request)
-                .await
-                .map_err(map_client_error)?;
+            let response = match post_transaction_json::<_, RemoteKvStatusResponse>(
+                client,
+                "kv/txn/delete",
+                &request,
+            )
+            .await?
+            {
+                RemoteTransactionResponse::Success(response) => response,
+                RemoteTransactionResponse::Failure { status, document } => {
+                    return render_remote_transaction_failure(
+                        writer, formatter, limit, quiet, status, &document,
+                    );
+                }
+            };
             if response.success {
-                let columns = kv_status_columns();
-                let mut streaming_writer =
-                    StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
-                write_status_if_needed(&mut streaming_writer, &format!("Staged delete: {}", key))
+                write_remote_transaction_status(
+                    writer,
+                    formatter,
+                    limit,
+                    quiet,
+                    "OK",
+                    &format!("Staged delete: {}", key),
+                    response.transaction.as_ref(),
+                )?;
+                classify_transaction_response(response.transaction.as_ref(), 200)
             } else {
                 Err(CliError::InvalidArgument(
                     "Failed to stage delete".to_string(),
                 ))
             }
         }
-        KvTxnCommand::Commit { txn_id } => {
+        KvTxnCommand::Commit { txn_id, request_id } => {
             let request = RemoteKvTxnCommitRequest {
                 txn_id: txn_id.clone(),
+                request_id: request_id.clone(),
             };
-            let response: RemoteKvStatusResponse = client
-                .post_json("kv/txn/commit", &request)
-                .await
-                .map_err(map_client_error)?;
+            let response = match post_transaction_json::<_, RemoteKvStatusResponse>(
+                client,
+                "kv/txn/commit",
+                &request,
+            )
+            .await
+            {
+                Ok(RemoteTransactionResponse::Success(response)) => response,
+                Ok(RemoteTransactionResponse::Failure { status, document }) => {
+                    return render_remote_transaction_failure(
+                        writer, formatter, limit, quiet, status, &document,
+                    );
+                }
+                Err(error) => return Err(error),
+            };
             if response.success {
-                let columns = kv_status_columns();
-                let mut streaming_writer =
-                    StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
-                write_status_if_needed(
-                    &mut streaming_writer,
+                write_remote_transaction_status(
+                    writer,
+                    formatter,
+                    limit,
+                    quiet,
+                    "OK",
                     &format!("Committed transaction: {}", txn_id),
-                )
+                    response.transaction.as_ref(),
+                )?;
+                classify_transaction_response(response.transaction.as_ref(), 200)
             } else {
                 Err(CliError::InvalidArgument(
                     "Failed to commit transaction".to_string(),
                 ))
             }
         }
-        KvTxnCommand::Rollback { txn_id } => {
+        KvTxnCommand::Rollback { txn_id, request_id } => {
             let request = RemoteKvTxnRollbackRequest {
                 txn_id: txn_id.clone(),
+                request_id: request_id.clone(),
             };
-            let response: RemoteKvStatusResponse = client
-                .post_json("kv/txn/rollback", &request)
-                .await
-                .map_err(map_client_error)?;
+            let response = match post_transaction_json::<_, RemoteKvStatusResponse>(
+                client,
+                "kv/txn/rollback",
+                &request,
+            )
+            .await
+            {
+                Ok(RemoteTransactionResponse::Success(response)) => response,
+                Ok(RemoteTransactionResponse::Failure { status, document }) => {
+                    return render_remote_transaction_failure(
+                        writer, formatter, limit, quiet, status, &document,
+                    );
+                }
+                Err(error) => return Err(error),
+            };
             if response.success {
-                let columns = kv_status_columns();
-                let mut streaming_writer =
-                    StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
-                write_status_if_needed(
-                    &mut streaming_writer,
+                write_remote_transaction_status(
+                    writer,
+                    formatter,
+                    limit,
+                    quiet,
+                    "OK",
                     &format!("Rolled back transaction: {}", txn_id),
-                )
+                    response.transaction.as_ref(),
+                )?;
+                classify_transaction_response(response.transaction.as_ref(), 200)
             } else {
                 Err(CliError::InvalidArgument(
                     "Failed to rollback transaction".to_string(),
@@ -444,6 +574,156 @@ async fn execute_remote_txn_command<W: Write>(
             }
         }
     }
+}
+
+async fn post_transaction_json<B: Serialize, T: DeserializeOwned>(
+    client: &HttpClient,
+    path: &str,
+    request: &B,
+) -> Result<RemoteTransactionResponse<T>> {
+    let raw = client
+        .post_json_raw(path, request)
+        .await
+        .map_err(map_client_error)?;
+    let status = raw.status.as_u16();
+    let document = serde_json::from_str(&raw.body).unwrap_or(JsonValue::String(raw.body));
+    if (200..300).contains(&status) {
+        return serde_json::from_value(document)
+            .map(RemoteTransactionResponse::Success)
+            .map_err(CliError::Json);
+    }
+    Ok(RemoteTransactionResponse::Failure { status, document })
+}
+
+fn render_remote_transaction_failure<W: Write>(
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+    status: u16,
+    document: &JsonValue,
+) -> Result<()> {
+    if let Some(transaction) = document.get("transaction") {
+        let message = transaction_reason(document, transaction, status);
+        write_remote_transaction_status(
+            writer,
+            formatter,
+            limit,
+            quiet,
+            "ERROR",
+            &message,
+            Some(transaction),
+        )?;
+    }
+    Err(transaction_response_error(status, document))
+}
+
+fn transaction_response_error(status: u16, document: &JsonValue) -> CliError {
+    let Some(transaction) = document.get("transaction") else {
+        return CliError::InvalidArgument(format!("Server error: HTTP {status} - {document}"));
+    };
+    let outcome = TransactionCliOutcome::from_transaction(Some(transaction), status);
+    CliError::TransactionOutcome {
+        outcome: outcome.as_str().to_string(),
+        reason: transaction_reason(document, transaction, status),
+        exit_code: outcome.exit_code(),
+    }
+}
+
+fn classify_transaction_response(transaction: Option<&JsonValue>, status: u16) -> Result<()> {
+    let Some(transaction) = transaction else {
+        return Ok(());
+    };
+    let outcome = TransactionCliOutcome::from_transaction(Some(transaction), status);
+    if outcome == TransactionCliOutcome::Success {
+        return Ok(());
+    }
+    let reason = transaction
+        .get("reason_code")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("transaction outcome is not committed")
+        .to_string();
+    Err(CliError::TransactionOutcome {
+        outcome: outcome.as_str().to_string(),
+        reason,
+        exit_code: outcome.exit_code(),
+    })
+}
+
+fn transaction_reason(document: &JsonValue, transaction: &JsonValue, status: u16) -> String {
+    transaction
+        .get("reason_code")
+        .and_then(JsonValue::as_str)
+        .or_else(|| {
+            document
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(JsonValue::as_str)
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("HTTP {status}"))
+}
+
+fn append_transaction_column(columns: &mut Vec<Column>, transaction: Option<&JsonValue>) {
+    if transaction.is_some() {
+        columns.push(Column::new("Transaction", DataType::Text));
+    }
+}
+
+fn append_transaction_value(values: &mut Vec<Value>, transaction: Option<&JsonValue>) {
+    if let Some(transaction) = transaction {
+        let canonical = serde_json::to_string(transaction)
+            .unwrap_or_else(|_| "{\"outcome\":\"serialization_error\"}".to_string());
+        values.push(Value::Text(canonical));
+    }
+}
+
+fn write_remote_kv_value<W: Write>(
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+    key: &str,
+    value: Option<Vec<u8>>,
+    transaction: Option<&JsonValue>,
+) -> Result<()> {
+    let Some(value) = value else {
+        return Err(CliError::InvalidArgument(format!("Key not found: {key}")));
+    };
+    let mut columns = kv_columns();
+    append_transaction_column(&mut columns, transaction);
+    let mut streaming_writer =
+        StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+    streaming_writer.prepare(Some(1))?;
+    let mut values = vec![Value::Text(key.to_string()), bytes_to_value(value)];
+    append_transaction_value(&mut values, transaction);
+    streaming_writer.write_row(Row::new(values))?;
+    streaming_writer.finish()
+}
+
+fn write_remote_transaction_status<W: Write>(
+    writer: &mut W,
+    formatter: Box<dyn Formatter>,
+    limit: Option<usize>,
+    quiet: bool,
+    status: &str,
+    message: &str,
+    transaction: Option<&JsonValue>,
+) -> Result<()> {
+    if quiet {
+        return Ok(());
+    }
+    let mut columns = kv_status_columns();
+    append_transaction_column(&mut columns, transaction);
+    let mut streaming_writer = StreamingWriter::new(writer, formatter, columns, limit);
+    streaming_writer.prepare(Some(1))?;
+    let mut values = vec![
+        Value::Text(status.to_string()),
+        Value::Text(message.to_string()),
+    ];
+    append_transaction_value(&mut values, transaction);
+    streaming_writer.write_row(Row::new(values))?;
+    streaming_writer.finish()
 }
 
 fn map_client_error(err: ClientError) -> CliError {
@@ -455,7 +735,36 @@ fn map_client_error(err: ClientError) -> CliError {
         ClientError::Build(message) => CliError::InvalidArgument(message),
         ClientError::Auth(err) => CliError::InvalidArgument(err.to_string()),
         ClientError::HttpStatus { status, body } => {
-            CliError::InvalidArgument(format!("Server error: HTTP {} - {}", status.as_u16(), body))
+            let document = serde_json::from_str::<JsonValue>(&body).ok();
+            let transaction = document
+                .as_ref()
+                .and_then(|document| document.get("transaction"));
+            if let Some(transaction) = transaction {
+                let outcome =
+                    TransactionCliOutcome::from_transaction(Some(transaction), status.as_u16());
+                let reason = document
+                    .as_ref()
+                    .and_then(|document| {
+                        document
+                            .get("error")
+                            .and_then(|error| error.get("message"))
+                            .and_then(JsonValue::as_str)
+                    })
+                    .or_else(|| transaction.get("reason_code").and_then(JsonValue::as_str))
+                    .unwrap_or("transaction request failed")
+                    .to_string();
+                CliError::TransactionOutcome {
+                    outcome: outcome.as_str().to_string(),
+                    reason,
+                    exit_code: outcome.exit_code(),
+                }
+            } else {
+                CliError::InvalidArgument(format!(
+                    "Server error: HTTP {} - {}",
+                    status.as_u16(),
+                    body
+                ))
+            }
         }
     }
 }
@@ -470,21 +779,23 @@ fn kv_command_context(cmd: &KvCommand) -> String {
             None => "kv list".to_string(),
         },
         KvCommand::Txn(command) => match command {
-            KvTxnCommand::Begin { timeout_secs } => match timeout_secs {
+            KvTxnCommand::Begin { timeout_secs, .. } => match timeout_secs {
                 Some(secs) => format!("kv txn begin --timeout-secs {secs}"),
                 None => "kv txn begin".to_string(),
             },
-            KvTxnCommand::Get { key, txn_id } => {
+            KvTxnCommand::Get { key, txn_id, .. } => {
                 format!("kv txn get {key} --txn-id {txn_id}")
             }
             KvTxnCommand::Put { key, txn_id, .. } => {
                 format!("kv txn put {key} --txn-id {txn_id}")
             }
-            KvTxnCommand::Delete { key, txn_id } => {
+            KvTxnCommand::Delete { key, txn_id, .. } => {
                 format!("kv txn delete {key} --txn-id {txn_id}")
             }
-            KvTxnCommand::Commit { txn_id } => format!("kv txn commit --txn-id {txn_id}"),
-            KvTxnCommand::Rollback { txn_id } => format!("kv txn rollback --txn-id {txn_id}"),
+            KvTxnCommand::Commit { txn_id, .. } => format!("kv txn commit --txn-id {txn_id}"),
+            KvTxnCommand::Rollback { txn_id, .. } => {
+                format!("kv txn rollback --txn-id {txn_id}")
+            }
         },
     }
 }
@@ -527,14 +838,14 @@ fn execute_txn_command<W: Write>(
     writer: &mut StreamingWriter<W>,
 ) -> Result<()> {
     match cmd {
-        KvTxnCommand::Begin { timeout_secs } => execute_txn_begin(db, timeout_secs, writer),
-        KvTxnCommand::Get { key, txn_id } => execute_txn_get(db, &key, &txn_id, writer),
-        KvTxnCommand::Put { key, value, txn_id } => {
-            execute_txn_put(db, &key, &value, &txn_id, writer)
-        }
-        KvTxnCommand::Delete { key, txn_id } => execute_txn_delete(db, &key, &txn_id, writer),
-        KvTxnCommand::Commit { txn_id } => execute_txn_commit(db, &txn_id, writer),
-        KvTxnCommand::Rollback { txn_id } => execute_txn_rollback(db, &txn_id, writer),
+        KvTxnCommand::Begin { timeout_secs, .. } => execute_txn_begin(db, timeout_secs, writer),
+        KvTxnCommand::Get { key, txn_id, .. } => execute_txn_get(db, &key, &txn_id, writer),
+        KvTxnCommand::Put {
+            key, value, txn_id, ..
+        } => execute_txn_put(db, &key, &value, &txn_id, writer),
+        KvTxnCommand::Delete { key, txn_id, .. } => execute_txn_delete(db, &key, &txn_id, writer),
+        KvTxnCommand::Commit { txn_id, .. } => execute_txn_commit(db, &txn_id, writer),
+        KvTxnCommand::Rollback { txn_id, .. } => execute_txn_rollback(db, &txn_id, writer),
     }
 }
 
@@ -950,5 +1261,45 @@ mod tests {
         let result = String::from_utf8(output).unwrap();
         // Empty output is fine
         assert!(result.is_empty() || result.lines().count() == 0);
+    }
+
+    #[test]
+    fn transaction_request_serialization_and_nonterminal_classification_are_stable() {
+        let request = RemoteKvTxnCommitRequest {
+            txn_id: "txn-1".to_string(),
+            request_id: Some("commit-retry-1".to_string()),
+        };
+        let document = serde_json::to_value(request).unwrap();
+        assert_eq!(document["txn_id"], "txn-1");
+        assert_eq!(document["request_id"], "commit-retry-1");
+
+        let pending = serde_json::json!({
+            "outcome_version": "v0.9",
+            "transaction_id": "txn-1",
+            "request_id": "commit-retry-1",
+            "participating_ranges": [],
+            "state": "running",
+            "failure_class": null,
+            "reason_code": "local_kv_transaction_write",
+            "routing": {"kind": "single_range"},
+            "retryable": false,
+            "idempotency": {
+                "operation_id": "txn-1",
+                "request_id": "commit-retry-1",
+                "state": "running",
+            },
+        });
+        let error = classify_transaction_response(Some(&pending), 200).unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::TransactionOutcome {
+                exit_code: crate::batch::ExitCode::Warning,
+                ..
+            }
+        ));
+
+        let mut columns = kv_status_columns();
+        append_transaction_column(&mut columns, Some(&pending));
+        assert_eq!(columns.last().unwrap().name, "Transaction");
     }
 }

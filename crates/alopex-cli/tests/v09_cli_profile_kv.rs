@@ -36,12 +36,16 @@ fn i17_profile_and_kv_commands_options_have_fixed_registers() {
     assert_eq!(subcommand_names(txn), KV_TXN_COMMANDS);
     assert_eq!(
         long_options(txn.find_subcommand("begin").expect("txn begin")),
-        ["timeout-secs"]
+        ["timeout-secs", "request-id"]
     );
     for action in ["get", "put", "delete", "commit", "rollback"] {
         assert!(
             long_options(txn.find_subcommand(action).expect("txn action")).contains(&"txn-id"),
             "{action} must require a transaction identity"
+        );
+        assert!(
+            long_options(txn.find_subcommand(action).expect("txn action")).contains(&"request-id"),
+            "{action} must accept a stable retry identity"
         );
     }
 }

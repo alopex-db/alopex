@@ -2541,6 +2541,7 @@ fn build_sql_command(
         fetch_size: None,
         max_rows: None,
         deadline: None,
+        request_id: None,
         read_mode: None,
         routing_report: None,
         tui: false,

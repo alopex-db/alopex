@@ -1,11 +1,12 @@
 use alopex_cli::cli::Cli;
 use clap::CommandFactory;
 
-const SQL_OPTIONS: [&str; 7] = [
+const SQL_OPTIONS: [&str; 8] = [
     "file",
     "fetch-size",
     "max-rows",
     "deadline",
+    "request-id",
     "read-mode",
     "routing-report",
     "tui",
