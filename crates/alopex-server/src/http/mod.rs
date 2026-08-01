@@ -42,6 +42,7 @@ pub struct RequestContext {
 struct TransactionRouteIdentity {
     transaction_id: String,
     operation: &'static str,
+    routing_kind: RoutingOutcomeKind,
 }
 
 /// Internal marker used by the outer context middleware to distinguish a
@@ -77,10 +78,17 @@ fn transaction_route_identity(
         "/sql" | "/api/sql/query" => Some(TransactionRouteIdentity {
             transaction_id: format!("local-sql:{correlation_id}"),
             operation: "execute",
+            routing_kind: RoutingOutcomeKind::LocalOnly,
         }),
         "/session/begin" => Some(TransactionRouteIdentity {
             transaction_id: format!("http-session:{correlation_id}"),
             operation: "begin",
+            routing_kind: RoutingOutcomeKind::LocalOnly,
+        }),
+        "/kv/txn/begin" => Some(TransactionRouteIdentity {
+            transaction_id: format!("local-kv:{correlation_id}"),
+            operation: "begin",
+            routing_kind: RoutingOutcomeKind::SingleRange,
         }),
         _ => {
             let segments: Vec<_> = path.trim_start_matches('/').split('/').collect();
@@ -88,11 +96,31 @@ fn transaction_route_identity(
                 ["session", session_id, "commit"] => Some(TransactionRouteIdentity {
                     transaction_id: (*session_id).to_owned(),
                     operation: "commit",
+                    routing_kind: RoutingOutcomeKind::LocalOnly,
                 }),
                 ["session", session_id, "rollback"] => Some(TransactionRouteIdentity {
                     transaction_id: (*session_id).to_owned(),
                     operation: "rollback",
+                    routing_kind: RoutingOutcomeKind::LocalOnly,
                 }),
+                ["kv", "txn", operation @ ("get" | "put" | "delete" | "commit" | "rollback")] => {
+                    let operation = match *operation {
+                        "get" => "get",
+                        "put" => "put",
+                        "delete" => "delete",
+                        "commit" => "commit",
+                        "rollback" => "rollback",
+                        _ => unreachable!("transaction route was matched above"),
+                    };
+                    Some(TransactionRouteIdentity {
+                        // Extractor rejections occur before a JSON body can
+                        // safely expose `txn_id`; retain a correlation-bound
+                        // identity instead of manufacturing a transaction.
+                        transaction_id: format!("local-kv:{correlation_id}"),
+                        operation,
+                        routing_kind: RoutingOutcomeKind::SingleRange,
+                    })
+                }
                 _ => None,
             }
         }
@@ -152,7 +180,7 @@ async fn transaction_rejection_response(
         OperationState::Rejected,
         Some(FailureClass::InvalidRequest),
         Some(reason_code.to_owned()),
-        RoutingOutcomeKind::LocalOnly,
+        identity.routing_kind,
         reason_code,
         false,
     );

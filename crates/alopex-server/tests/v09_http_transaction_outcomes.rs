@@ -95,6 +95,35 @@ async fn send(
     (status, value)
 }
 
+async fn send_with_correlation(
+    router: axum::Router,
+    method: Method,
+    path: &str,
+    body: Value,
+    correlation_id: &str,
+) -> (StatusCode, Value) {
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .header("x-correlation-id", correlation_id)
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (
+        status,
+        serde_json::from_slice(&body).expect("JSON response"),
+    )
+}
+
 async fn send_jsonl(router: axum::Router, path: &str, body: Value) -> (StatusCode, String) {
     let response = router
         .oneshot(
@@ -198,6 +227,520 @@ fn assert_local_outcome(
     assert_eq!(outcome["idempotency"]["request_id"], request_id);
     assert_eq!(outcome["idempotency"]["state"], state);
     assert_eq!(outcome["idempotency"]["duplicate_count"], 0);
+}
+
+fn assert_kv_transaction_outcome(
+    outcome: &Value,
+    transaction_id: &str,
+    request_id: &str,
+    state: &str,
+    reason_code: &str,
+    duplicate_count: u64,
+) {
+    assert_eq!(outcome["outcome_version"], "v0.9");
+    assert_eq!(outcome["transaction_id"], transaction_id);
+    assert_eq!(outcome["request_id"], request_id);
+    assert_eq!(outcome["participating_ranges"], json!([]));
+    assert_eq!(outcome["read_point"], Value::Null);
+    assert_eq!(outcome["schema_version"], Value::Null);
+    assert_eq!(outcome["data_epoch"], Value::Null);
+    assert_eq!(outcome["isolation"], "snapshot");
+    assert_eq!(outcome["state"], state);
+    assert_eq!(outcome["failure_class"], Value::Null);
+    assert_eq!(outcome["reason_code"], reason_code);
+    assert_eq!(outcome["routing"]["kind"], "single_range");
+    assert_eq!(outcome["routing"]["reason_code"], reason_code);
+    assert_eq!(outcome["retryable"], false);
+    assert_eq!(outcome["idempotency"]["operation_id"], transaction_id);
+    assert_eq!(outcome["idempotency"]["request_id"], request_id);
+    assert_eq!(outcome["idempotency"]["state"], state);
+    assert_eq!(
+        outcome["idempotency"]["duplicate_count"],
+        json!(duplicate_count)
+    );
+}
+
+#[tokio::test]
+async fn kv_transaction_outcomes_are_additive_durable_and_never_fallback_to_distributed() {
+    let temp = tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let first_state = local_server_at(data_dir.clone());
+    let first_router = http::router(first_state.clone());
+
+    // The v0.8 payload remains valid; its response merely gains the v0.9
+    // transaction outcome.
+    let (status, legacy_begin) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/begin",
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let legacy_txn_id = legacy_begin["txn_id"]
+        .as_str()
+        .expect("legacy transaction id")
+        .to_owned();
+    assert_kv_transaction_outcome(
+        &legacy_begin["transaction"],
+        &legacy_txn_id,
+        &format!("{legacy_txn_id}:begin:1"),
+        "running",
+        "local_kv_transaction_started",
+        0,
+    );
+    // Omitting request_id must not change v0.8's ability to issue multiple
+    // writes of the same kind in one transaction. The adapter assigns a
+    // distinct, returned statement ordinal to each such operation.
+    let (status, legacy_put_first) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/put",
+        Some(json!({ "txn_id": legacy_txn_id, "key": "legacy-first", "value": [1] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_kv_transaction_outcome(
+        &legacy_put_first["transaction"],
+        &legacy_txn_id,
+        &format!("{legacy_txn_id}:put:1"),
+        "running",
+        "local_kv_transaction_write",
+        0,
+    );
+    let (status, legacy_put_second) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/put",
+        Some(json!({ "txn_id": legacy_txn_id, "key": "legacy-second", "value": [2] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_kv_transaction_outcome(
+        &legacy_put_second["transaction"],
+        &legacy_txn_id,
+        &format!("{legacy_txn_id}:put:2"),
+        "running",
+        "local_kv_transaction_write",
+        0,
+    );
+    let (status, legacy_commit) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/commit",
+        Some(json!({ "txn_id": legacy_txn_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_kv_transaction_outcome(
+        &legacy_commit["transaction"],
+        &legacy_txn_id,
+        &format!("{legacy_txn_id}:commit:1"),
+        "committed",
+        "local_kv_transaction_committed",
+        0,
+    );
+
+    let begin_request = json!({
+        "timeout_secs": 600,
+        "request_id": "kv-v09-begin",
+        "require_distributed": false
+    });
+    let (status, first_begin) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/begin",
+        Some(begin_request.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let transaction_id = first_begin["txn_id"]
+        .as_str()
+        .expect("transaction id")
+        .to_owned();
+    assert_kv_transaction_outcome(
+        &first_begin["transaction"],
+        &transaction_id,
+        "kv-v09-begin",
+        "running",
+        "local_kv_transaction_started",
+        0,
+    );
+
+    let (status, replay_begin) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/begin",
+        Some(begin_request.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay_begin["txn_id"], transaction_id);
+    assert_kv_transaction_outcome(
+        &replay_begin["transaction"],
+        &transaction_id,
+        "kv-v09-begin",
+        "running",
+        "local_kv_transaction_started",
+        1,
+    );
+
+    let put_request = json!({
+        "txn_id": transaction_id,
+        "key": "v09-committed-key",
+        "value": [7],
+        "request_id": "kv-v09-put",
+        "require_distributed": false
+    });
+    let (status, first_put) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/put",
+        Some(put_request.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first_put["success"], true, "legacy success field");
+    assert_kv_transaction_outcome(
+        &first_put["transaction"],
+        &transaction_id,
+        "kv-v09-put",
+        "running",
+        "local_kv_transaction_write",
+        0,
+    );
+    let (status, replay_put) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/put",
+        Some(put_request),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay_put["success"], true);
+    assert_kv_transaction_outcome(
+        &replay_put["transaction"],
+        &transaction_id,
+        "kv-v09-put",
+        "running",
+        "local_kv_transaction_write",
+        1,
+    );
+
+    // Request IDs are global across the HTTP KV transaction operation set;
+    // reusing one for a different operation is never a second apply.
+    let (status, operation_conflict) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/delete",
+        Some(json!({
+            "txn_id": transaction_id,
+            "key": "v09-committed-key",
+            "request_id": "kv-v09-put"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        operation_conflict["transaction"]["reason_code"],
+        "idempotency_conflict"
+    );
+
+    // Field presence is part of the request fingerprint: a malformed body
+    // must not replay merely because its omitted key/value serialize like an
+    // explicitly empty pair.
+    let (status, _) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/put",
+        Some(json!({
+            "txn_id": transaction_id,
+            "request_id": "kv-v09-shape-conflict"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, shape_conflict) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/put",
+        Some(json!({
+            "txn_id": transaction_id,
+            "key": "",
+            "value": [],
+            "request_id": "kv-v09-shape-conflict"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(shape_conflict["transaction"]["failure_class"], "conflict");
+    assert_eq!(
+        shape_conflict["transaction"]["reason_code"],
+        "idempotency_conflict"
+    );
+
+    let get_request = json!({
+        "txn_id": transaction_id,
+        "key": "v09-committed-key",
+        "request_id": "kv-v09-get"
+    });
+    let (status, get) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/get",
+        Some(get_request),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(get["value"], json!([7]), "legacy read value");
+    assert_kv_transaction_outcome(
+        &get["transaction"],
+        &transaction_id,
+        "kv-v09-get",
+        "running",
+        "local_kv_transaction_read",
+        0,
+    );
+
+    let commit_request = json!({
+        "txn_id": transaction_id,
+        "request_id": "kv-v09-commit"
+    });
+    let (status, first_commit) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/commit",
+        Some(commit_request.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first_commit["success"], true, "legacy success field");
+    assert_kv_transaction_outcome(
+        &first_commit["transaction"],
+        &transaction_id,
+        "kv-v09-commit",
+        "committed",
+        "local_kv_transaction_committed",
+        0,
+    );
+
+    let (status, replay_commit) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/commit",
+        Some(commit_request.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay_commit["success"], true);
+    assert_kv_transaction_outcome(
+        &replay_commit["transaction"],
+        &transaction_id,
+        "kv-v09-commit",
+        "committed",
+        "local_kv_transaction_committed",
+        1,
+    );
+
+    // Begin a second transaction to prove delete and rollback retain the
+    // existing value, while both success envelopes receive outcomes.
+    let (status, rollback_begin) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/begin",
+        Some(json!({ "request_id": "kv-v09-rollback-begin" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rollback_transaction_id = rollback_begin["txn_id"]
+        .as_str()
+        .expect("rollback transaction id")
+        .to_owned();
+    let (status, delete) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/delete",
+        Some(json!({
+            "txn_id": rollback_transaction_id,
+            "key": "v09-committed-key",
+            "request_id": "kv-v09-delete"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(delete["success"], true);
+    assert_kv_transaction_outcome(
+        &delete["transaction"],
+        &rollback_transaction_id,
+        "kv-v09-delete",
+        "running",
+        "local_kv_transaction_delete",
+        0,
+    );
+    let rollback_request = json!({
+        "txn_id": rollback_transaction_id,
+        "request_id": "kv-v09-rollback"
+    });
+    let (status, rollback) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/rollback",
+        Some(rollback_request),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rollback["success"], true);
+    assert_kv_transaction_outcome(
+        &rollback["transaction"],
+        &rollback_transaction_id,
+        "kv-v09-rollback",
+        "cancelled",
+        "local_kv_transaction_rolled_back",
+        0,
+    );
+    let (status, restored) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/get",
+        Some(json!({ "key": "v09-committed-key" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(restored["value"], json!([7]));
+
+    // A caller may request a distributed transaction explicitly, but this
+    // compatibility adapter must reject it before creating local state.
+    let distributed_begin = json!({
+        "request_id": "kv-v09-distributed",
+        "require_distributed": true
+    });
+    let (status, unsupported) = send_with_correlation(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/begin",
+        distributed_begin.clone(),
+        "kv-first-correlation",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(unsupported["error"]["code"], "NOT_IMPLEMENTED");
+    assert_eq!(unsupported["transaction"]["state"], "rejected");
+    assert_eq!(
+        unsupported["transaction"]["failure_class"],
+        "invalid_request"
+    );
+    assert_eq!(unsupported["transaction"]["routing"]["kind"], "unsupported");
+    assert_eq!(unsupported["transaction"]["reason_code"], "unsupported");
+    let (status, unsupported_replay) = send_with_correlation(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/begin",
+        distributed_begin,
+        "kv-replay-correlation",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(
+        unsupported_replay["transaction"]["idempotency"]["duplicate_count"],
+        1
+    );
+    assert_eq!(
+        unsupported_replay["error"]["correlation_id"],
+        "kv-replay-correlation"
+    );
+
+    // Same request ID and a different canonical payload are a conflict, not
+    // a second local apply.
+    let (status, conflict) = send(
+        first_router.clone(),
+        Method::POST,
+        "/kv/txn/begin",
+        Some(json!({
+            "request_id": "kv-v09-distributed",
+            "require_distributed": false
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["transaction"]["failure_class"], "conflict");
+    assert_eq!(
+        conflict["transaction"]["reason_code"],
+        "idempotency_conflict"
+    );
+
+    // Ledger-backed answers survive restart and return the original payload
+    // plus the incremented duplicate count, without committing again.
+    drop(first_router);
+    drop(first_state);
+    let second_state = local_server_at(data_dir);
+    let second_router = http::router(second_state);
+    let (status, restarted_begin) = send(
+        second_router.clone(),
+        Method::POST,
+        "/kv/txn/begin",
+        Some(begin_request),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(restarted_begin["txn_id"], transaction_id);
+    assert_kv_transaction_outcome(
+        &restarted_begin["transaction"],
+        &transaction_id,
+        "kv-v09-begin",
+        "running",
+        "local_kv_transaction_started",
+        2,
+    );
+    let (status, restarted_commit) = send(
+        second_router.clone(),
+        Method::POST,
+        "/kv/txn/commit",
+        Some(commit_request),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(restarted_commit["success"], true);
+    assert_kv_transaction_outcome(
+        &restarted_commit["transaction"],
+        &transaction_id,
+        "kv-v09-commit",
+        "committed",
+        "local_kv_transaction_committed",
+        2,
+    );
+    let (status, persisted) = send(
+        second_router.clone(),
+        Method::POST,
+        "/kv/get",
+        Some(json!({ "key": "v09-committed-key" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(persisted["value"], json!([7]));
+
+    // Public raw and transaction routes cannot read, write, delete, list, or
+    // stage values in the reserved control namespace that holds the durable
+    // response ledger.
+    let internal_key = "__alopex_internal/http-kv-transaction-idempotency/v1/forbidden";
+    for (path, body) in [
+        ("/kv/get", json!({ "key": internal_key })),
+        ("/kv/put", json!({ "key": internal_key, "value": [1] })),
+        ("/kv/delete", json!({ "key": internal_key })),
+        ("/kv/list", json!({ "prefix": internal_key })),
+        (
+            "/kv/txn/put",
+            json!({
+                "txn_id": transaction_id,
+                "key": internal_key,
+                "value": [1],
+                "request_id": "kv-v09-reserved-key"
+            }),
+        ),
+    ] {
+        let (status, rejected) = send(second_router.clone(), Method::POST, path, Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(rejected["error"]["code"], "INVALID_REQUEST", "{path}");
+    }
 }
 
 #[tokio::test]
@@ -506,6 +1049,25 @@ async fn transaction_route_middleware_classifies_json_and_body_limit_rejections(
     assert_eq!(malformed["error"]["code"], "INVALID_REQUEST");
     assert_eq!(malformed["transaction"]["state"], "rejected");
     assert_eq!(malformed["transaction"]["failure_class"], "invalid_request");
+
+    let (status, kv_malformed) = send_raw_json(
+        router.clone(),
+        "/kv/txn/put",
+        "application/json",
+        Body::from("{"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(kv_malformed["error"]["code"], "INVALID_REQUEST");
+    assert_eq!(kv_malformed["transaction"]["state"], "rejected");
+    assert_eq!(
+        kv_malformed["transaction"]["failure_class"],
+        "invalid_request"
+    );
+    assert_eq!(
+        kv_malformed["transaction"]["routing"]["kind"],
+        "single_range"
+    );
 
     let (status, unsupported_media_type) = send_raw_json(
         router.clone(),
