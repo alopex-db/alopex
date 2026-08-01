@@ -1,14 +1,16 @@
+from typing import Dict, Optional
+
 import pytest
 
 from alopex import AlopexError, Database, TxnMode
 
 
 def _assert_local_outcome(
-    outcome: dict[str, object],
+    outcome: Dict[str, object],
     request_id: str,
     state: str,
     operation: str,
-    failure_class: str | None = None,
+    failure_class: Optional[str] = None,
 ) -> None:
     assert outcome["outcome_version"] == "v0.9"
     assert outcome["transaction_id"].startswith("local-python-txn-")

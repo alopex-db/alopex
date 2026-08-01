@@ -720,13 +720,14 @@ impl PyTransaction {
     /// Internal native bridge factory used only by `alopex.asyncio`.
     #[pyo3(
         name = "_open_native_async_sql_stream",
-        signature = (sql, params = None, *, resource_limit_bytes = None, timeout = None, prefetch_batches = 1, max_buffered_batches = 1, consumer_idle_timeout = None)
+        signature = (sql, params = None, *, request_id = None, resource_limit_bytes = None, timeout = None, prefetch_batches = 1, max_buffered_batches = 1, consumer_idle_timeout = None)
     )]
     #[allow(clippy::too_many_arguments)]
     fn open_native_async_sql_stream(
         &self,
         sql: &str,
         params: Option<Bound<'_, PyAny>>,
+        request_id: Option<String>,
         resource_limit_bytes: Option<usize>,
         timeout: Option<f64>,
         prefetch_batches: usize,
@@ -738,7 +739,8 @@ impl PyTransaction {
             max_buffered_batches,
             consumer_idle_timeout,
         )?;
-        let stream = self.execute_sql_stream(sql, params, None, resource_limit_bytes, timeout)?;
+        let stream =
+            self.execute_sql_stream(sql, params, request_id, resource_limit_bytes, timeout)?;
         PyNativeAsyncSqlResultStream::new(
             stream,
             self.control.thread_mode(),

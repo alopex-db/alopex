@@ -224,25 +224,34 @@ class AsyncScanResultStream(AsyncSqlResultStream):
 
 
 class AsyncTransaction(_AsyncLocalHandle):
-    async def get(self, key: bytes) -> Optional[bytes]:
-        return self._handle.get(key)
+    async def get(
+        self, key: bytes, *, request_id: Optional[str] = None
+    ) -> Optional[bytes]:
+        return self._handle.get(key, request_id=request_id)
 
-    async def put(self, key: bytes, value: bytes) -> None:
-        self._handle.put(key, value)
+    async def put(
+        self, key: bytes, value: bytes, *, request_id: Optional[str] = None
+    ) -> None:
+        self._handle.put(key, value, request_id=request_id)
 
-    async def delete(self, key: bytes) -> None:
-        self._handle.delete(key)
+    async def delete(self, key: bytes, *, request_id: Optional[str] = None) -> None:
+        self._handle.delete(key, request_id=request_id)
 
     async def execute_sql(
-        self, sql: str, params: Optional[Sequence[Any]] = None
+        self,
+        sql: str,
+        params: Optional[Sequence[Any]] = None,
+        *,
+        request_id: Optional[str] = None,
     ) -> Union[list[dict[str, Any]], int, None]:
-        return self._handle.execute_sql(sql, params)
+        return self._handle.execute_sql(sql, params, request_id=request_id)
 
     async def execute_sql_stream(
         self,
         sql: str,
         params: Optional[Sequence[Any]] = None,
         *,
+        request_id: Optional[str] = None,
         resource_limit_bytes: Optional[int] = None,
         timeout: Optional[float] = None,
         prefetch_batches: int = 1,
@@ -257,6 +266,7 @@ class AsyncTransaction(_AsyncLocalHandle):
         stream = self._handle._open_native_async_sql_stream(
             sql,
             params,
+            request_id=request_id,
             resource_limit_bytes=resource_limit_bytes,
             timeout=timeout,
             prefetch_batches=prefetch_batches,
@@ -290,11 +300,11 @@ class AsyncTransaction(_AsyncLocalHandle):
         )
         return AsyncScanResultStream(stream, self._single_thread)
 
-    async def commit(self) -> None:
-        self._handle.commit()
+    async def commit(self, *, request_id: Optional[str] = None) -> None:
+        self._handle.commit(request_id=request_id)
 
-    async def rollback(self) -> None:
-        self._handle.rollback()
+    async def rollback(self, *, request_id: Optional[str] = None) -> None:
+        self._handle.rollback(request_id=request_id)
 
     @property
     def status(self) -> Any:
@@ -721,8 +731,10 @@ class AsyncDatabase(_AsyncLocalHandle):
             actor=actor,
         )
 
-    async def begin(self, mode: Optional[TxnMode] = None) -> AsyncTransaction:
-        transaction = self._handle.begin(mode)
+    async def begin(
+        self, mode: Optional[TxnMode] = None, *, request_id: Optional[str] = None
+    ) -> AsyncTransaction:
+        transaction = self._handle.begin(mode, request_id=request_id)
         return AsyncTransaction(transaction, self._single_thread)
 
     async def execute_sql_stream(
