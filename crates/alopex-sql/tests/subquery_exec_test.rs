@@ -117,3 +117,123 @@ fn scalar_subquery_rejects_multiple_rows() {
     .unwrap_err();
     assert!(err.to_string().contains("multiple rows"));
 }
+
+#[test]
+fn local_subquery_columns_shadow_outer_scope_across_all_forms() {
+    let setup = r#"
+        CREATE TABLE a (id INT PRIMARY KEY, x TEXT);
+        CREATE TABLE b (id INT PRIMARY KEY, y INT);
+        INSERT INTO a (id, x) VALUES (1, 'one'), (2, 'two');
+        INSERT INTO b (id, y) VALUES (1, 1), (2, 2);
+    "#;
+
+    for (predicate, expected) in [
+        ("id > (SELECT MIN(id) FROM b)", 2),
+        ("id IN (SELECT id FROM b WHERE b.id = 2)", 2),
+        ("id NOT IN (SELECT id FROM b WHERE b.id = 1)", 2),
+        ("id = ANY (SELECT id FROM b WHERE b.id = 2)", 2),
+        ("id > ALL (SELECT id FROM b WHERE b.id = 1)", 2),
+    ] {
+        let query = last_query(&format!("{setup} SELECT id FROM a WHERE {predicate};"));
+        assert_eq!(query.rows, vec![vec![SqlValue::Integer(expected)]]);
+    }
+
+    let self_reference = last_query(
+        r#"
+        CREATE TABLE t (v INT);
+        INSERT INTO t VALUES (1), (3);
+        SELECT v FROM t WHERE v > (SELECT AVG(v) FROM t);
+        "#,
+    );
+    assert_eq!(self_reference.rows, vec![vec![SqlValue::Integer(3)]]);
+}
+
+#[test]
+fn correlated_and_non_overlapping_subquery_names_remain_valid() {
+    let exists = last_query(
+        r#"
+        CREATE TABLE a (id INT PRIMARY KEY, x TEXT);
+        CREATE TABLE b (id INT PRIMARY KEY, y INT);
+        INSERT INTO a VALUES (1, 'one'), (2, 'two');
+        INSERT INTO b VALUES (1, 10);
+        SELECT id FROM a WHERE EXISTS (SELECT 1 FROM b WHERE b.id = a.id);
+        "#,
+    );
+    assert_eq!(exists.rows, vec![vec![SqlValue::Integer(1)]]);
+
+    let not_exists = last_query(
+        r#"
+        CREATE TABLE a (id INT PRIMARY KEY, x TEXT);
+        CREATE TABLE b (id INT PRIMARY KEY, y INT);
+        INSERT INTO a VALUES (1, 'one'), (2, 'two');
+        INSERT INTO b VALUES (1, 10);
+        SELECT id FROM a WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.id = a.id);
+        "#,
+    );
+    assert_eq!(not_exists.rows, vec![vec![SqlValue::Integer(2)]]);
+
+    let scalar = last_query(
+        r#"
+        CREATE TABLE a (id INT PRIMARY KEY, x TEXT);
+        CREATE TABLE b (id INT PRIMARY KEY, y INT);
+        INSERT INTO a VALUES (1, 'one'), (2, 'two');
+        INSERT INTO b VALUES (1, 10), (2, 20);
+        SELECT a.id, (SELECT y FROM b WHERE b.id = a.id) AS y FROM a ORDER BY a.id;
+        "#,
+    );
+    assert_eq!(
+        scalar.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(10)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(20)],
+        ]
+    );
+
+    let explicit_self_reference = last_query(
+        r#"
+        CREATE TABLE t (v INT);
+        INSERT INTO t VALUES (1), (3);
+        SELECT o.v FROM t AS o WHERE o.v > (SELECT AVG(i.v) FROM t AS i);
+        "#,
+    );
+    assert_eq!(
+        explicit_self_reference.rows,
+        vec![vec![SqlValue::Integer(3)]]
+    );
+
+    let derived = last_query(
+        r#"
+        CREATE TABLE a (id INT PRIMARY KEY, x TEXT);
+        INSERT INTO a VALUES (1, 'one'), (2, 'two');
+        SELECT d.id FROM (SELECT id FROM a) AS d ORDER BY d.id;
+        "#,
+    );
+    assert_eq!(
+        derived.rows,
+        vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]
+    );
+
+    let unique_inner_name = last_query(
+        r#"
+        CREATE TABLE a (id INT PRIMARY KEY);
+        CREATE TABLE b (id INT PRIMARY KEY, y INT);
+        INSERT INTO a VALUES (2);
+        INSERT INTO b VALUES (1, 1);
+        SELECT id FROM a WHERE id > (SELECT MIN(y) FROM b);
+        "#,
+    );
+    assert_eq!(unique_inner_name.rows, vec![vec![SqlValue::Integer(2)]]);
+}
+
+#[test]
+fn double_quoted_identifier_resolves_to_the_column_value() {
+    let query = last_query(
+        r#"
+        CREATE TABLE t (s TEXT);
+        INSERT INTO t VALUES ('hello world');
+        SELECT "s" FROM t;
+        "#,
+    );
+
+    assert_eq!(query.rows, vec![vec![SqlValue::Text("hello world".into())]]);
+}

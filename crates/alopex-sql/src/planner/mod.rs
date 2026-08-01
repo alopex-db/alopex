@@ -1195,6 +1195,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 join_type,
                 condition,
                 using,
+                natural,
                 span,
             } => {
                 let left_relation = self.plan_from_item(left, start_index, outer_scope)?;
@@ -1213,6 +1214,14 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         left_relation.schema.len() + right_relation.schema.len(),
                     ))
                     .collect::<Vec<_>>();
+                let using = if *natural {
+                    Some(natural_join_columns(
+                        &left_relation.schema,
+                        &right_relation.schema,
+                    ))
+                } else {
+                    using.clone()
+                };
                 let typed_condition = if let Some(expr) = condition {
                     let typed = self.infer_expr_with_scope(expr, &expr_scope)?;
                     if typed.resolved_type != ResolvedType::Boolean {
@@ -1236,7 +1245,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     right_relation,
                     map_join_type(*join_type),
                     typed_condition,
-                    using.clone(),
+                    using,
                     *span,
                 )
             }
@@ -1283,7 +1292,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let mut schema = left.schema.clone();
         schema.extend(right.schema.clone());
         let mut scope = left.scope.clone();
-        scope.extend(right.scope.clone());
+        let mut right_scope = right.scope.clone();
+        if let Some(columns) = &using {
+            for table in &mut right_scope {
+                table.hide_unqualified_columns(columns);
+            }
+        }
+        scope.extend(right_scope);
         Ok(PlannedRelation {
             plan: LogicalPlan::Join {
                 left: Box::new(left.plan),
@@ -1419,9 +1434,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         scope: &[ScopedTable],
     ) -> Result<Projection, PlannerError> {
         if items.len() == 1 && matches!(&items[0], SelectItem::Wildcard { .. }) {
-            return Ok(Projection::All(
-                schema.iter().map(|col| col.name.clone()).collect(),
-            ));
+            return Ok(Projection::All(visible_wildcard_columns(schema, scope)));
         }
 
         let mut projected_columns = Vec::new();
@@ -2416,8 +2429,9 @@ fn projection_schema(
             .iter()
             .enumerate()
             .map(|(idx, name)| {
-                let ty = input_schema
-                    .get(idx)
+                let ty = (names.len() == input_schema.len())
+                    .then(|| input_schema.get(idx))
+                    .flatten()
                     .or_else(|| input_schema.iter().find(|col| &col.name == name))
                     .map(|col| col.data_type.clone())
                     .unwrap_or(ResolvedType::Null);
@@ -2442,14 +2456,41 @@ fn projection_schema(
     }
 }
 
+fn visible_wildcard_columns(schema: &[ColumnMetadata], scope: &[ScopedTable]) -> Vec<String> {
+    schema
+        .iter()
+        .enumerate()
+        .filter(|(index, column)| {
+            !scope.iter().any(|table| {
+                *index >= table.start_index
+                    && *index < table.start_index + table.table.columns.len()
+                    && table.hidden_unqualified_columns.contains(&column.name)
+            })
+        })
+        .map(|(_, column)| column.name.clone())
+        .collect()
+}
+
 fn offset_scope(scope: &[ScopedTable], offset: usize) -> Vec<ScopedTable> {
     scope
         .iter()
         .cloned()
         .map(|mut table| {
             table.start_index += offset;
+            table.scope_level += 1;
             table
         })
+        .collect()
+}
+
+fn natural_join_columns(
+    left_schema: &[ColumnMetadata],
+    right_schema: &[ColumnMetadata],
+) -> Vec<String> {
+    left_schema
+        .iter()
+        .filter(|left| right_schema.iter().any(|right| right.name == left.name))
+        .map(|column| column.name.clone())
         .collect()
 }
 

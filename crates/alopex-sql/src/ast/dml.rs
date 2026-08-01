@@ -47,6 +47,8 @@ pub enum FromItem {
         join_type: JoinType,
         condition: Option<Expr>,
         using: Option<Vec<String>>,
+        #[serde(default)]
+        natural: bool,
         span: Span,
     },
     Derived {

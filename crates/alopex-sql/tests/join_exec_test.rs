@@ -150,3 +150,81 @@ fn nested_loop_and_hash_join_match_for_equi_join() {
     let hashed = hash_join(&left, &right, 0, 0, JoinType::Inner).unwrap();
     assert_eq!(nested, hashed);
 }
+
+#[test]
+fn natural_join_coalesces_common_columns_and_other_join_forms_remain_available() {
+    let natural = last_query(
+        r#"
+        CREATE TABLE t (s TEXT, left_value INT);
+        CREATE TABLE u (s TEXT, right_value INT);
+        INSERT INTO t VALUES ('shared', 1), ('left-only', 2);
+        INSERT INTO u VALUES ('shared', 10), ('right-only', 20);
+        SELECT s, left_value, right_value FROM t NATURAL JOIN u;
+        "#,
+    );
+    assert_eq!(
+        natural.rows,
+        vec![vec![
+            SqlValue::Text("shared".into()),
+            SqlValue::Integer(1),
+            SqlValue::Integer(10),
+        ]]
+    );
+
+    let natural_star = last_query(
+        r#"
+        CREATE TABLE t (s TEXT, left_value INT);
+        CREATE TABLE u (s TEXT, right_value INT);
+        INSERT INTO t VALUES ('shared', 1);
+        INSERT INTO u VALUES ('shared', 10);
+        SELECT * FROM t NATURAL JOIN u;
+        "#,
+    );
+    assert_eq!(
+        natural_star
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["s", "left_value", "right_value"]
+    );
+    assert_eq!(
+        natural_star.rows,
+        vec![vec![
+            SqlValue::Text("shared".into()),
+            SqlValue::Integer(1),
+            SqlValue::Integer(10),
+        ]]
+    );
+
+    let using = last_query(
+        r#"
+        CREATE TABLE t (s TEXT, left_value INT);
+        CREATE TABLE u (s TEXT, right_value INT);
+        INSERT INTO t VALUES ('shared', 1);
+        INSERT INTO u VALUES ('shared', 10);
+        SELECT s FROM t JOIN u USING (s);
+        "#,
+    );
+    assert_eq!(using.rows, vec![vec![SqlValue::Text("shared".into())]]);
+
+    for sql in [
+        "SELECT t.s FROM t INNER JOIN u ON t.s = u.s",
+        "SELECT t.s FROM t LEFT JOIN u ON t.s = u.s",
+        "SELECT u.s FROM t RIGHT JOIN u ON t.s = u.s",
+        "SELECT t.s FROM t FULL JOIN u ON t.s = u.s",
+        "SELECT t.s FROM t CROSS JOIN u",
+        "SELECT t.s FROM t, u",
+    ] {
+        let query = last_query(&format!(
+            "
+            CREATE TABLE t (s TEXT);
+            CREATE TABLE u (s TEXT);
+            INSERT INTO t VALUES ('shared');
+            INSERT INTO u VALUES ('shared');
+            {sql};
+            "
+        ));
+        assert_eq!(query.rows.len(), 1, "{sql}");
+    }
+}
