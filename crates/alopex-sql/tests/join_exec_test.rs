@@ -89,6 +89,49 @@ fn duplicate_join_qualifiers_are_rejected_as_ambiguous() {
     }
 }
 
+/// A merged key from one JOIN remains the single left-side key of the next
+/// USING/NATURAL JOIN, rather than becoming an ambiguous pair of input keys.
+#[test]
+fn chained_using_and_natural_joins_keep_the_merged_key_visible() {
+    let results = try_run_sql(
+        r#"
+        CREATE TABLE a (k INT PRIMARY KEY, a_value TEXT);
+        CREATE TABLE b (k INT PRIMARY KEY, b_value TEXT);
+        CREATE TABLE c (k INT PRIMARY KEY, c_value TEXT);
+        INSERT INTO a VALUES (1, 'a');
+        INSERT INTO b VALUES (1, 'b'), (2, 'b-only');
+        INSERT INTO c VALUES (1, 'c'), (2, 'bc-only'), (3, 'c-only');
+        SELECT k FROM a JOIN b USING (k) JOIN c USING (k);
+        SELECT k FROM a NATURAL JOIN b NATURAL JOIN c;
+        SELECT k FROM a FULL JOIN b USING (k) FULL JOIN c USING (k) ORDER BY k;
+        "#,
+    )
+    .expect("plan and execute chained merged joins");
+
+    let queries = results
+        .into_iter()
+        .filter_map(|result| match result {
+            ExecutionResult::Query(query) => Some(query),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(queries.len(), 3);
+    for query in &queries[..2] {
+        assert_eq!(query.columns[0].name, "k");
+        assert_eq!(query.rows, vec![vec![SqlValue::Integer(1)]]);
+    }
+    assert_eq!(queries[2].columns[0].name, "k");
+    assert_eq!(
+        queries[2].rows,
+        vec![
+            vec![SqlValue::Integer(1)],
+            vec![SqlValue::Integer(2)],
+            vec![SqlValue::Integer(3)],
+        ]
+    );
+}
+
 #[test]
 fn outer_and_cross_joins_cover_unmatched_rows() {
     let left = last_query(&setup_sql(

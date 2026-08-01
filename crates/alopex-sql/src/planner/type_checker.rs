@@ -32,11 +32,11 @@ pub struct ScopedTable {
     /// for an unqualified reference because the merged output column owns
     /// the name.
     pub hidden_unqualified_columns: HashSet<String>,
-    /// For a column merged by USING or NATURAL, the output index of the other
-    /// side. An unqualified reference to a merged name resolves to
-    /// `COALESCE(left, right)` so that RIGHT and FULL joins report the key from
-    /// whichever side is present instead of the left side's NULL.
-    pub merged_column_partners: HashMap<String, usize>,
+    /// For a column merged by USING or NATURAL, the output indexes of every
+    /// other side. An unqualified reference to a merged name resolves to
+    /// `COALESCE(left, right, ...)` so that RIGHT and FULL joins report the key
+    /// from whichever joined input is present.
+    pub merged_column_partners: HashMap<String, Vec<usize>>,
 }
 
 impl ScopedTable {
@@ -57,8 +57,13 @@ impl ScopedTable {
 
     /// Record that `column` is merged with the output column at `partner_index`.
     pub fn merge_column_with(&mut self, column: &str, partner_index: usize) {
-        self.merged_column_partners
-            .insert(column.to_string(), partner_index);
+        let partners = self
+            .merged_column_partners
+            .entry(column.to_string())
+            .or_default();
+        if !partners.contains(&partner_index) {
+            partners.push(partner_index);
+        }
     }
 }
 
@@ -427,9 +432,12 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     // merged value, otherwise a RIGHT or FULL join reports the
                     // left side's NULL for rows that only exist on the right.
                     if table_qualifier.is_none()
-                        && let Some(&partner_index) = scoped.merged_column_partners.get(column_name)
+                        && let Some(partner_indices) =
+                            scoped.merged_column_partners.get(column_name)
                     {
-                        let partner = TypedExpr {
+                        let mut args = Vec::with_capacity(partner_indices.len() + 1);
+                        args.push(own_ref);
+                        args.extend(partner_indices.iter().map(|&partner_index| TypedExpr {
                             kind: TypedExprKind::ColumnRef {
                                 table: scoped.table.name.clone(),
                                 column: column_name.to_string(),
@@ -437,11 +445,11 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                             },
                             resolved_type: column.data_type.clone(),
                             span,
-                        };
+                        }));
                         return Ok(TypedExpr {
                             kind: TypedExprKind::FunctionCall {
                                 name: "coalesce".to_string(),
-                                args: vec![own_ref, partner],
+                                args,
                                 distinct: false,
                                 star: false,
                             },

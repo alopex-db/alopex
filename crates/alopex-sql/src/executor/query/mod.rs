@@ -802,15 +802,20 @@ fn column_name_from_projection(
             // A USING/NATURAL common column is planned as
             // COALESCE(left, right); it still names the merged column.
             TypedExprKind::FunctionCall { name, args, .. }
-                if name == "coalesce" && args.len() == 2 =>
+                if name == "coalesce" && !args.is_empty() =>
             {
-                match (&args[0].kind, &args[1].kind) {
-                    (
-                        TypedExprKind::ColumnRef { column: left, .. },
-                        TypedExprKind::ColumnRef { column: right, .. },
-                    ) if left == right => Some(left.clone()),
+                let first_column = match &args[0].kind {
+                    TypedExprKind::ColumnRef { column, .. } => Some(column),
                     _ => None,
-                }
+                };
+                first_column.filter(|column| {
+                    args.iter().all(|arg| {
+                        matches!(
+                            &arg.kind,
+                            TypedExprKind::ColumnRef { column: other, .. } if other == *column
+                        )
+                    })
+                }).cloned()
             }
             _ => None,
         })

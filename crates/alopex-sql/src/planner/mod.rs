@@ -1360,20 +1360,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         for column in columns {
             let left_col = find_scoped_column(&left.scope, column, span)?;
             let right_col = find_scoped_column(&right.scope, column, span)?;
-            let left_expr = TypedExpr::column_ref(
-                left_col.table,
-                column.clone(),
-                left_col.index,
-                left_col.ty.clone(),
-                span,
-            );
-            let right_expr = TypedExpr::column_ref(
-                right_col.table,
-                column.clone(),
-                right_col.index,
-                right_col.ty.clone(),
-                span,
-            );
+            let left_expr = merged_scoped_column_expr(&left_col, column, span);
+            let right_expr = merged_scoped_column_expr(&right_col, column, span);
             self.type_checker
                 .check_comparison_op(&left_col.ty, &right_col.ty, span)?;
             let eq = TypedExpr::binary_op(
@@ -2527,6 +2515,7 @@ struct FoundScopedColumn {
     table: String,
     index: usize,
     ty: ResolvedType,
+    partner_indices: Vec<usize>,
 }
 
 fn find_scoped_column(
@@ -2536,12 +2525,20 @@ fn find_scoped_column(
 ) -> Result<FoundScopedColumn, PlannerError> {
     let mut matches = Vec::new();
     for table in scope {
+        if table.hidden_unqualified_columns.contains(column) {
+            continue;
+        }
         if let Some(local_idx) = table.table.get_column_index(column) {
             let meta = &table.table.columns[local_idx];
             matches.push(FoundScopedColumn {
                 table: table.table.name.clone(),
                 index: table.start_index + local_idx,
                 ty: meta.data_type.clone(),
+                partner_indices: table
+                    .merged_column_partners
+                    .get(column)
+                    .cloned()
+                    .unwrap_or_default(),
             });
         }
     }
@@ -2553,6 +2550,45 @@ fn find_scoped_column(
             scope.iter().map(|s| s.table.name.clone()).collect(),
             span,
         )),
+    }
+}
+
+fn merged_scoped_column_expr(
+    found: &FoundScopedColumn,
+    column: &str,
+    span: crate::ast::Span,
+) -> TypedExpr {
+    let own = TypedExpr::column_ref(
+        found.table.clone(),
+        column.to_string(),
+        found.index,
+        found.ty.clone(),
+        span,
+    );
+    if found.partner_indices.is_empty() {
+        return own;
+    }
+
+    let mut args = Vec::with_capacity(found.partner_indices.len() + 1);
+    args.push(own);
+    args.extend(found.partner_indices.iter().map(|&index| {
+        TypedExpr::column_ref(
+            found.table.clone(),
+            column.to_string(),
+            index,
+            found.ty.clone(),
+            span,
+        )
+    }));
+    TypedExpr {
+        kind: TypedExprKind::FunctionCall {
+            name: "coalesce".to_string(),
+            args,
+            distinct: false,
+            star: false,
+        },
+        resolved_type: found.ty.clone(),
+        span,
     }
 }
 
@@ -2587,15 +2623,21 @@ fn projection_schema(
                         // COALESCE(left, right); it still names the merged
                         // column, not an anonymous expression.
                         TypedExprKind::FunctionCall { name, args, .. }
-                            if name == "coalesce" && args.len() == 2 =>
+                            if name == "coalesce" && !args.is_empty() =>
                         {
-                            match (&args[0].kind, &args[1].kind) {
-                                (
-                                    TypedExprKind::ColumnRef { column: left, .. },
-                                    TypedExprKind::ColumnRef { column: right, .. },
-                                ) if left == right => Some(left.clone()),
+                            let first_column = match &args[0].kind {
+                                TypedExprKind::ColumnRef { column, .. } => Some(column),
                                 _ => None,
-                            }
+                            };
+                            first_column.filter(|column| {
+                                args.iter().all(|arg| {
+                                    matches!(
+                                        &arg.kind,
+                                        TypedExprKind::ColumnRef { column: other, .. }
+                                            if other == *column
+                                    )
+                                })
+                            }).cloned()
                         }
                         _ => None,
                     })
