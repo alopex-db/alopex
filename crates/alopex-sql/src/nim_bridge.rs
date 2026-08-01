@@ -115,6 +115,19 @@ fn normalize_quoted_identifiers(sql: &str) -> String {
                     previous = comment_ch;
                 }
             }
+            ch if ch.is_ascii_alphabetic() || ch == '_' => {
+                let mut identifier = String::from(ch);
+                while chars
+                    .peek()
+                    .is_some_and(|next| next.is_ascii_alphanumeric() || *next == '_')
+                {
+                    identifier.push(chars.next().expect("peeked identifier character"));
+                }
+                // PostgreSQL folds bare identifiers to lowercase. Delimited
+                // identifiers take the `\"` branch above and keep their exact
+                // spelling for case-sensitive resolution.
+                normalized.push_str(&identifier.to_ascii_lowercase());
+            }
             _ => normalized.push(ch),
         }
     }

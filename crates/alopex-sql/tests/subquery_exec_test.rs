@@ -237,3 +237,37 @@ fn double_quoted_identifier_resolves_to_the_column_value() {
 
     assert_eq!(query.rows, vec![vec![SqlValue::Text("hello world".into())]]);
 }
+
+/// PostgreSQL-style identifiers fold only when they are unquoted: a delimited
+/// identifier keeps its case while bare spellings resolve as lowercase.
+#[test]
+fn quoted_identifiers_preserve_case_while_unquoted_identifiers_fold() {
+    let query = last_query(
+        r#"
+        CREATE TABLE t ("Col" INT, PLAIN INT);
+        INSERT INTO t ("Col", PLAIN) VALUES (10, 20);
+        SELECT "Col", plain, PLAIN FROM t;
+        "#,
+    );
+    assert_eq!(
+        query.rows,
+        vec![vec![
+            SqlValue::Integer(10),
+            SqlValue::Integer(20),
+            SqlValue::Integer(20),
+        ]]
+    );
+
+    let err = execute_sql(
+        r#"
+        CREATE TABLE t ("Col" INT);
+        INSERT INTO t ("Col") VALUES (10);
+        SELECT col FROM t;
+        "#,
+    )
+    .expect_err("unquoted col must not resolve the case-sensitive quoted column");
+    assert!(
+        err.to_string().contains("ALOPEX-C003"),
+        "expected C003 for an unquoted case mismatch, got: {err}"
+    );
+}
