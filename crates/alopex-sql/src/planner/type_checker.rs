@@ -17,7 +17,7 @@ use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::name_resolver::NameResolver;
 use crate::planner::typed_expr::{Quantifier, TypedExpr, TypedExprKind};
 use crate::planner::types::ResolvedType;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// A table visible to expression name resolution.
 #[derive(Debug, Clone)]
@@ -29,9 +29,14 @@ pub struct ScopedTable {
     pub scope_level: usize,
     /// Columns coalesced by a JOIN ... USING or NATURAL JOIN. They remain
     /// addressable by a qualified right-hand reference, but are not candidates
-    /// for an unqualified reference because the left-hand output column owns
-    /// the merged name.
+    /// for an unqualified reference because the merged output column owns
+    /// the name.
     pub hidden_unqualified_columns: HashSet<String>,
+    /// For a column merged by USING or NATURAL, the output index of the other
+    /// side. An unqualified reference to a merged name resolves to
+    /// `COALESCE(left, right)` so that RIGHT and FULL joins report the key from
+    /// whichever side is present instead of the left side's NULL.
+    pub merged_column_partners: HashMap<String, usize>,
 }
 
 impl ScopedTable {
@@ -41,12 +46,19 @@ impl ScopedTable {
             start_index,
             scope_level: 0,
             hidden_unqualified_columns: HashSet::new(),
+            merged_column_partners: HashMap::new(),
         }
     }
 
     pub fn hide_unqualified_columns(&mut self, columns: &[String]) {
         self.hidden_unqualified_columns
             .extend(columns.iter().cloned());
+    }
+
+    /// Record that `column` is merged with the output column at `partner_index`.
+    pub fn merge_column_with(&mut self, column: &str, partner_index: usize) {
+        self.merged_column_partners
+            .insert(column.to_string(), partner_index);
     }
 }
 
@@ -386,7 +398,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                             PlannerError::column_not_found(column_name, &scoped.table.name, span)
                         })?;
                     let column = &scoped.table.columns[column_index];
-                    return Ok(TypedExpr {
+                    let own_ref = TypedExpr {
                         kind: TypedExprKind::ColumnRef {
                             table: scoped.table.name.clone(),
                             column: column_name.to_string(),
@@ -394,7 +406,37 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                         },
                         resolved_type: column.data_type.clone(),
                         span,
-                    });
+                    };
+
+                    // A USING/NATURAL common column is one output column formed
+                    // from both inputs. An unqualified reference must see the
+                    // merged value, otherwise a RIGHT or FULL join reports the
+                    // left side's NULL for rows that only exist on the right.
+                    if table_qualifier.is_none()
+                        && let Some(&partner_index) = scoped.merged_column_partners.get(column_name)
+                    {
+                        let partner = TypedExpr {
+                            kind: TypedExprKind::ColumnRef {
+                                table: scoped.table.name.clone(),
+                                column: column_name.to_string(),
+                                column_index: partner_index,
+                            },
+                            resolved_type: column.data_type.clone(),
+                            span,
+                        };
+                        return Ok(TypedExpr {
+                            kind: TypedExprKind::FunctionCall {
+                                name: "coalesce".to_string(),
+                                args: vec![own_ref, partner],
+                                distinct: false,
+                                star: false,
+                            },
+                            resolved_type: column.data_type.clone(),
+                            span,
+                        });
+                    }
+
+                    return Ok(own_ref);
                 }
                 Err(PlannerError::ColumnNotFound { .. }) if table_qualifier.is_none() => {
                     // A missing local name may be a correlated reference. Only

@@ -1309,6 +1309,25 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let mut scope = left.scope.clone();
         let mut right_scope = right.scope.clone();
         if let Some(columns) = &using {
+            // The right-hand copy of a common column stops being an unqualified
+            // candidate, and the surviving left-hand column records where its
+            // partner lives so that an unqualified reference can merge the two.
+            for column in columns {
+                let right_index = right_scope.iter().find_map(|table| {
+                    table
+                        .table
+                        .get_column_index(column)
+                        .map(|index| table.start_index + index)
+                });
+                let Some(right_index) = right_index else {
+                    continue;
+                };
+                for table in &mut scope {
+                    if table.table.get_column_index(column).is_some() {
+                        table.merge_column_with(column, right_index);
+                    }
+                }
+            }
             for table in &mut right_scope {
                 table.hide_unqualified_columns(columns);
             }
@@ -2561,6 +2580,20 @@ fn projection_schema(
                     .clone()
                     .or_else(|| match &col.expr.kind {
                         TypedExprKind::ColumnRef { column, .. } => Some(column.clone()),
+                        // A USING/NATURAL common column is planned as
+                        // COALESCE(left, right); it still names the merged
+                        // column, not an anonymous expression.
+                        TypedExprKind::FunctionCall { name, args, .. }
+                            if name == "coalesce" && args.len() == 2 =>
+                        {
+                            match (&args[0].kind, &args[1].kind) {
+                                (
+                                    TypedExprKind::ColumnRef { column: left, .. },
+                                    TypedExprKind::ColumnRef { column: right, .. },
+                                ) if left == right => Some(left.clone()),
+                                _ => None,
+                            }
+                        }
                         _ => None,
                     })
                     .unwrap_or_else(|| format!("col_{idx}"));
