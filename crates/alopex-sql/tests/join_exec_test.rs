@@ -4,14 +4,14 @@ use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::MemoryCatalog;
 use alopex_sql::dialect::AlopexDialect;
 use alopex_sql::executor::query::join::{hash_join, nested_loop_join};
-use alopex_sql::executor::{ExecutionResult, Executor, Row};
+use alopex_sql::executor::{ExecutionResult, Executor, ExecutorError, Row};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::logical_plan::JoinType;
 use alopex_sql::planner::typed_expr::TypedExpr;
 use alopex_sql::planner::{Planner, ResolvedType};
 use alopex_sql::storage::SqlValue;
 
-fn run_sql(sql: &str) -> Vec<ExecutionResult> {
+fn try_run_sql(sql: &str) -> Result<Vec<ExecutionResult>, ExecutorError> {
     let dialect = AlopexDialect;
     let statements = Parser::parse_sql(&dialect, sql).expect("parse sql");
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
@@ -20,11 +20,15 @@ fn run_sql(sql: &str) -> Vec<ExecutionResult> {
     let mut results = Vec::new();
     for stmt in statements {
         let guard = catalog.read().unwrap();
-        let plan = Planner::new(&*guard).plan(&stmt).expect("plan");
+        let plan = Planner::new(&*guard).plan(&stmt)?;
         drop(guard);
-        results.push(executor.execute(plan).expect("execute"));
+        results.push(executor.execute(plan)?);
     }
-    results
+    Ok(results)
+}
+
+fn run_sql(sql: &str) -> Vec<ExecutionResult> {
+    try_run_sql(sql).expect("execute sql")
 }
 
 fn last_query(sql: &str) -> alopex_sql::executor::QueryResult {
@@ -63,6 +67,26 @@ fn inner_join_uses_equi_condition() {
             vec![SqlValue::Text("bob".into()), SqlValue::Integer(20)],
         ]
     );
+}
+
+/// A duplicate range-variable name cannot identify one input of a self join.
+/// Resolving it to the first table would silently read the wrong column.
+#[test]
+fn duplicate_join_qualifiers_are_rejected_as_ambiguous() {
+    for (from, reference) in [
+        ("t AS x JOIN t AS x ON 1 = 1", "x.id"),
+        ("t JOIN t ON 1 = 1", "t.id"),
+    ] {
+        let err = try_run_sql(&format!(
+            "CREATE TABLE t (id INT PRIMARY KEY); SELECT {reference} FROM {from};"
+        ))
+        .expect_err("duplicate relation names must not bind a qualified column to the first input");
+
+        assert!(
+            err.to_string().contains("ALOPEX-C004"),
+            "expected C004 for {from}, got: {err}"
+        );
+    }
 }
 
 #[test]

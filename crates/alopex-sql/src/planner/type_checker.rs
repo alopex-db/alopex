@@ -377,10 +377,24 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 continue;
             }
             if let Some(qualifier) = table_qualifier {
-                if !candidates.iter().any(|table| table.table.name == qualifier) {
-                    continue;
+                let qualified = candidates
+                    .iter()
+                    .filter(|table| table.table.name == qualifier)
+                    .collect::<Vec<_>>();
+                match qualified.len() {
+                    0 => continue,
+                    1 => qualifier_found = true,
+                    _ => {
+                        return Err(PlannerError::ambiguous_column(
+                            column_name,
+                            qualified
+                                .iter()
+                                .map(|table| table.table.name.clone())
+                                .collect(),
+                            span,
+                        ));
+                    }
                 }
-                qualifier_found = true;
             }
 
             let tables = candidates
