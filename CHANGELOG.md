@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.2]
+
+SQL correctness release. Every fix below addresses a documented feature that did
+not work, or a documented plan that did not match the implementation.
+
+### Fixed
+- `TIMESTAMP` columns accept the literal form the dialect specification defines
+  (`'2025-01-15 10:30:00'`, with optional fractional seconds) and Python
+  `datetime` parameters. Previously no literal or bound parameter of any type
+  could be written to a `TIMESTAMP` column. Time-zone-aware `datetime` values are
+  rejected rather than silently reinterpreted, because the dialect is UTC-only.
+- Arithmetic between `DOUBLE` and `INTEGER` promotes to `DOUBLE`. Comparison
+  already promoted, so `v > 2` worked while `v * 2` failed.
+- `SUM(INTEGER)` returns an integer instead of a double, and overflow is
+  reported rather than silently losing precision. `TOTAL` remains floating point.
+- `CAST(expr AS type)` executes for every target type in the grammar. The syntax
+  parsed but only the `TIMESTAMP` coercion was wired to the evaluator, so all
+  other casts failed at runtime.
+- Subquery column resolution follows lexical scope. Scalar, `IN`, `NOT IN`,
+  `ANY`, and `ALL` subqueries all failed with an ambiguous-column error whenever
+  the inner and outer relations shared a column name.
+- `NATURAL JOIN` coalesces its common columns instead of reporting them as
+  ambiguous.
+- Double-quoted names resolve as identifiers per the SQL standard. They were
+  parsed as string literals, so `SELECT "col"` silently returned the column name
+  instead of the column value.
+- `IN` lists and `BETWEEN` evaluate on the row-scan path. Both parsed and
+  type-checked but had no evaluator arm outside the subquery and columnar paths.
+- `INSERT INTO ... SELECT` and table-qualified wildcards (`t.*`) are accepted.
+- `NOW()` is implemented and `DEFAULT NOW()` is evaluated on insert. The value is
+  fixed for the duration of a statement, so every row and subquery in one
+  statement observes the same timestamp.
+
+### Changed
+- The SQL dialect specification and milestone document now describe the shipped
+  implementation: `JOIN`, subqueries, and `GROUP BY`/`HAVING` were still listed
+  as unsupported despite shipping in v0.7.3 and v0.7.4, the `SELECT` grammar and
+  BNF omitted them entirely, and parameter binding was undocumented. Window
+  functions and `UNION` are consistently recorded as v0.9+.
+
+### Breaking Changes
+- `SUM` over an integer column now returns an integer. Consumers that relied on
+  the previous floating-point result should use `TOTAL`.
+
 ## [0.8.1]
 
 Parser and release-gate reliability release.
