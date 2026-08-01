@@ -86,3 +86,51 @@ fn cast_is_wired_to_the_existing_typed_cast_expression() {
         }
     ));
 }
+
+/// CAST must survive planning *and* execution. The parser-level tests above only
+/// prove the grammar and the typed expression; they passed while every CAST still
+/// failed at runtime with `unsupported expression: cast to ...`.
+#[test]
+fn cast_evaluates_at_execution_for_column_and_literal_inputs() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "
+        CREATE TABLE casts (id INT PRIMARY KEY, v DOUBLE, s TEXT);
+        INSERT INTO casts (id, v, s) VALUES (1, 1.5, '123');
+        SELECT CAST(v AS INTEGER) FROM casts;
+        SELECT CAST(s AS INTEGER) FROM casts;
+        SELECT CAST(id AS DOUBLE) FROM casts;
+        SELECT CAST(v AS TEXT) FROM casts;
+        SELECT CAST('123' AS INTEGER) FROM casts;
+        ",
+    )
+    .expect("parse casts");
+
+    let catalog = std::sync::Arc::new(std::sync::RwLock::new(MemoryCatalog::new()));
+    let store = std::sync::Arc::new(alopex_core::kv::memory::MemoryKV::new());
+    let mut executor = alopex_sql::executor::Executor::new(store, catalog.clone());
+    let mut queries = Vec::new();
+
+    for statement in statements {
+        let guard = catalog.read().expect("catalog lock");
+        let plan = Planner::new(&*guard).plan(&statement).expect("plan casts");
+        drop(guard);
+        if let alopex_sql::executor::ExecutionResult::Query(query) =
+            executor.execute(plan).expect("execute casts")
+        {
+            queries.push(query.rows);
+        }
+    }
+
+    use alopex_sql::storage::SqlValue;
+    assert_eq!(
+        queries,
+        vec![
+            vec![vec![SqlValue::Integer(1)]],
+            vec![vec![SqlValue::Integer(123)]],
+            vec![vec![SqlValue::Double(1.0)]],
+            vec![vec![SqlValue::Text("1.5".into())]],
+            vec![vec![SqlValue::Integer(123)]],
+        ]
+    );
+}
