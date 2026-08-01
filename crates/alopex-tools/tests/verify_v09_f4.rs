@@ -87,3 +87,30 @@ fn rejects_duplicate_and_non_fixed_matrix_rows() {
     );
     fs::remove_dir_all(directory).expect("remove temporary directory");
 }
+
+#[test]
+fn relative_repo_root_finds_the_approved_external_spec_workflow() {
+    let directory = temp_dir();
+    let manifest = directory.join("f4.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_verify-v09-f4"))
+        .current_dir(repo_root())
+        .args([
+            "--repo-root",
+            ".",
+            "--target-version",
+            "0.9.0",
+            "--phase",
+            "4",
+            "--manifest",
+            manifest.to_str().expect("UTF-8 manifest"),
+            "--generate",
+        ])
+        .output()
+        .expect("verifier process");
+    assert!(
+        output.status.success(),
+        "relative root generation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(directory).expect("remove temporary directory");
+}

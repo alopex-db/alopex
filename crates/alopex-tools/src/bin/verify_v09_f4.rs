@@ -677,9 +677,15 @@ fn parse_args() -> Result<Config, String> {
 }
 
 fn run(config: Config) -> Result<(), String> {
-    verify_source_contract(&config.repo_root)?;
+    let repo_root = config.repo_root.canonicalize().map_err(|error| {
+        format!(
+            "repo root を解決できない {}: {error}",
+            config.repo_root.display()
+        )
+    })?;
+    verify_source_contract(&repo_root)?;
     if config.generate {
-        let manifest = build_manifest(&config.repo_root)?;
+        let manifest = build_manifest(&repo_root)?;
         validate_manifest(&manifest)?;
         if let Some(parent) = config.manifest.parent() {
             fs::create_dir_all(parent)
@@ -705,7 +711,7 @@ fn run(config: Config) -> Result<(), String> {
     let manifest = serde_json::from_slice::<Manifest>(&bytes)
         .map_err(|error| format!("manifest schema が不正: {error}"))?;
     validate_manifest(&manifest)?;
-    let source_sha = candidate_sha(&config.repo_root)?;
+    let source_sha = candidate_sha(&repo_root)?;
     if manifest.source_sha != source_sha
         || manifest
             .entries
