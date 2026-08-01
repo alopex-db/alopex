@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "id": "F4-TXN-LOCAL-01",
+      "transaction_id": "f4-local-001",
+      "request_id": "f4-local-request-001",
+      "ranges": ["local-range"],
+      "expected_state": "committed",
+      "coverage": ["local_only", "snapshot", "read_your_writes"]
+    },
+    {
+      "id": "F4-TXN-SINGLE-01",
+      "transaction_id": "f4-single-001",
+      "request_id": "f4-single-request-001",
+      "ranges": ["range-a"],
+      "expected_state": "committed",
+      "coverage": ["single_range", "atomic_commit"]
+    },
+    {
+      "id": "F4-TXN-MULTI-01",
+      "transaction_id": "f4-multi-001",
+      "request_id": "f4-multi-request-001",
+      "ranges": ["range-a", "range-b"],
+      "expected_state": "committed",
+      "coverage": ["two_or_more_ranges", "atomic_commit"]
+    },
+    {
+      "id": "F4-TXN-ROLLBACK-01",
+      "transaction_id": "f4-rollback-001",
+      "request_id": "f4-rollback-request-001",
+      "ranges": ["range-a", "range-b"],
+      "expected_state": "terminal_failure",
+      "coverage": ["abort", "rollback", "partial_participant_failure"]
+    },
+    {
+      "id": "F4-TXN-TIMEOUT-01",
+      "transaction_id": "f4-timeout-001",
+      "request_id": "f4-timeout-request-001",
+      "ranges": ["range-a", "range-b"],
+      "expected_state": "retryable_failure",
+      "coverage": ["timeout", "retryable"]
+    },
+    {
+      "id": "F4-TXN-CONFLICT-01",
+      "transaction_id": "f4-conflict-001",
+      "request_id": "f4-conflict-request-001",
+      "ranges": ["range-a", "range-b"],
+      "expected_state": "terminal_failure",
+      "coverage": ["conflict", "abort", "no_partial_visibility"]
+    },
+    {
+      "id": "F4-TXN-EPOCH-01",
+      "transaction_id": "f4-epoch-001",
+      "request_id": "f4-epoch-request-001",
+      "ranges": ["range-a"],
+      "expected_state": "rejected",
+      "coverage": ["epoch_mismatch", "no_participant_io"]
+    },
+    {
+      "id": "F4-TXN-PENDING-01",
+      "transaction_id": "f4-pending-001",
+      "request_id": "f4-pending-request-001",
+      "ranges": ["range-a", "range-b"],
+      "expected_state": "recovery_pending",
+      "coverage": ["partial_commit_ack", "no_partial_visibility"]
+    }
+  ]
+}
