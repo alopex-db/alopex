@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use pyo3::prelude::*;
@@ -22,7 +23,7 @@ use crate::vector;
 use crate::vector::SliceOrOwned;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 
 #[cfg(test)]
 static ROLLBACK_FAIL_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -40,6 +41,7 @@ pub struct PyDatabase {
     streams: Arc<StreamLeaseRegistry>,
     dataframe_streams: Arc<DataFrameStreamRegistry>,
     txns: Arc<Mutex<Vec<Weak<PyTransactionInner>>>>,
+    transaction_sequence: Arc<AtomicU64>,
 }
 
 impl PyDatabase {
@@ -55,6 +57,7 @@ impl PyDatabase {
             streams: Arc::new(StreamLeaseRegistry::default()),
             dataframe_streams: Arc::new(DataFrameStreamRegistry::default()),
             txns: Arc::new(Mutex::new(Vec::new())),
+            transaction_sequence: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -280,10 +283,21 @@ impl PyDatabase {
         )
     }
 
-    #[pyo3(signature = (mode = None))]
-    fn begin(&self, mode: Option<PyTxnMode>) -> PyResult<PyTransaction> {
+    #[pyo3(signature = (mode = None, *, request_id = None))]
+    fn begin(
+        &self,
+        mode: Option<PyTxnMode>,
+        request_id: Option<String>,
+    ) -> PyResult<PyTransaction> {
         let db = self.ensure_open()?;
         let txn_mode = mode.unwrap_or_default().into();
+        let sequence = self.transaction_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let transaction_id = format!("local-python-txn-{sequence}");
+        let request_id = match request_id {
+            Some(request_id) if !request_id.trim().is_empty() => request_id,
+            Some(_) => return Err(error::to_py_err("request_id must not be empty")),
+            None => format!("local-python-request-{sequence}"),
+        };
         let mut guard = self
             .txns
             .lock()
@@ -293,6 +307,8 @@ impl PyDatabase {
             txn_mode,
             self.control.clone(),
             self.streams.clone(),
+            transaction_id,
+            request_id,
         )?;
         guard.push(Arc::downgrade(&py_txn.inner));
         Ok(py_txn)
@@ -1511,8 +1527,8 @@ mod tests {
     #[test]
     fn close_rolls_back_tracked_transactions_and_cleans_up() {
         let mut db = PyDatabase::new(None).expect("db");
-        let txn1 = db.begin(None).expect("txn1");
-        let txn2 = db.begin(None).expect("txn2");
+        let txn1 = db.begin(None, None).expect("txn1");
+        let txn2 = db.begin(None, None).expect("txn2");
 
         {
             let mut guard = txn1.inner.txn.lock().expect("transaction lock poisoned");
@@ -1540,7 +1556,7 @@ mod tests {
     #[test]
     fn close_retry_keeps_tracked_transactions_on_failure() {
         let mut db = PyDatabase::new(None).expect("db");
-        let _txn = db.begin(None).expect("txn");
+        let _txn = db.begin(None, None).expect("txn");
 
         inject_rollback_failure_once();
         db.close().expect_err("close should fail once");
@@ -1571,9 +1587,9 @@ mod tests {
             .expect("ddl");
             db.execute_sql(py, "INSERT INTO stream_close (id) VALUES (1)", None)
                 .expect("insert");
-            let txn = db.begin(None).expect("transaction");
+            let txn = db.begin(None, None).expect("transaction");
             let stream = txn
-                .execute_sql_stream("SELECT id FROM stream_close", None, None, None)
+                .execute_sql_stream("SELECT id FROM stream_close", None, None, None, None)
                 .expect("stream");
 
             db.close().expect("close");
