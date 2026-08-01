@@ -1,3 +1,7 @@
+import json
+import subprocess
+import sys
+
 import pytest
 
 from alopex import AlopexError, Catalog, ColumnInfo
@@ -106,55 +110,84 @@ def test_ddl_error_cases(unique_name):
 
 
 @pytest.mark.requires_polars
-def test_scan_table_storage_options_merge(tmp_path, unique_name, monkeypatch):
-    import polars as pl
-
+def test_scan_table_storage_options_merge(tmp_path, unique_name):
     catalog_name = f"{unique_name}_cat"
     namespace_name = f"{unique_name}_ns"
     table_name = f"{unique_name}_tbl"
     storage_location = str(tmp_path / "data.parquet")
 
-    df = pl.DataFrame({"id": [1]})
-    df.write_parquet(storage_location)
+    # Catalog caches the callable it imports from Polars. Exercise the mocked
+    # callable in a fresh interpreter so that this test neither observes nor
+    # changes the cached callable used by the rest of the pytest process.
+    script = """
+import json
+import sys
 
-    Catalog.create_catalog(catalog_name)
-    Catalog.create_namespace(catalog_name, namespace_name)
-    Catalog.create_table(
+import polars as pl
+import pytest
+
+storage_location, catalog_name, namespace_name, table_name = sys.argv[1:]
+pl.DataFrame({"id": [1]}).write_parquet(storage_location)
+captured = {}
+
+def fake_scan(path, **kwargs):
+    captured["path"] = path
+    captured["kwargs"] = kwargs
+
+    class DummyLazyFrame:
+        def collect(self):
+            return pl.DataFrame({"id": [1]})
+
+    return DummyLazyFrame()
+
+monkeypatch = pytest.MonkeyPatch()
+monkeypatch.setattr(pl, "scan_parquet", fake_scan)
+
+from alopex import Catalog, ColumnInfo
+
+Catalog.create_catalog(catalog_name)
+Catalog.create_namespace(catalog_name, namespace_name)
+Catalog.create_table(
+    catalog_name,
+    namespace_name,
+    table_name,
+    [ColumnInfo("id", "INTEGER", 0, False)],
+    storage_location,
+)
+try:
+    Catalog.scan_table(
         catalog_name,
         namespace_name,
         table_name,
-        [ColumnInfo("id", "INTEGER", 0, False)],
-        storage_location,
+        credential_provider={"token": "old", "shared": "old"},
+        storage_options={"shared": "new", "extra": "1"},
     )
-
-    captured = {}
-
-    def fake_scan(path, **kwargs):
-        captured["path"] = path
-        captured["kwargs"] = kwargs
-
-        class DummyLazyFrame:
-            def collect(self):
-                return pl.DataFrame({"id": [1]})
-
-        return DummyLazyFrame()
-
-    monkeypatch.setattr(pl, "scan_parquet", fake_scan)
-
-    try:
-        Catalog.scan_table(
+    print(json.dumps(captured))
+finally:
+    Catalog.delete_table(catalog_name, namespace_name, table_name)
+    Catalog.delete_namespace(catalog_name, namespace_name)
+    Catalog.delete_catalog(catalog_name)
+    monkeypatch.undo()
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            storage_location,
             catalog_name,
             namespace_name,
             table_name,
-            credential_provider={"token": "old", "shared": "old"},
-            storage_options={"shared": "new", "extra": "1"},
-        )
-        assert captured["path"] == storage_location
-        assert captured["kwargs"]["token"] == "old"
-        assert captured["kwargs"]["shared"] == "new"
-        assert captured["kwargs"]["extra"] == "1"
-    finally:
-        _cleanup_catalog(catalog_name, namespace_name, table_name)
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    captured = json.loads(result.stdout)
+    assert captured["path"] == storage_location
+    assert captured["kwargs"]["token"] == "old"
+    assert captured["kwargs"]["shared"] == "new"
+    assert captured["kwargs"]["extra"] == "1"
 
 
 @pytest.mark.requires_polars
