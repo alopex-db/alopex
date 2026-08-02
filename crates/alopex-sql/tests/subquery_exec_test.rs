@@ -412,3 +412,56 @@ fn a_genuinely_ambiguous_name_is_rejected() {
         "expected an ambiguity error, got: {rendered}"
     );
 }
+
+#[test]
+fn resolution_is_identical_either_side_of_the_column_index_threshold() {
+    // Scoped tables switch from scanning their column list to a hash index once
+    // they exceed a width threshold. Both paths must resolve names the same way,
+    // otherwise a schema crossing that width silently changes behaviour.
+    for width in [8usize, 31, 32, 33, 64] {
+        let columns = (0..width)
+            .map(|i| format!("c{i} INT"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = (0..width)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let last = width - 1;
+
+        // A name is found wherever it sits in the schema.
+        let query = last_query(&format!(
+            "CREATE TABLE w ({columns});
+             INSERT INTO w VALUES ({values});
+             SELECT c0, c{last} FROM w;"
+        ));
+        assert_eq!(
+            query.rows,
+            vec![vec![SqlValue::Integer(0), SqlValue::Integer(last as i32),]],
+            "width {width} resolved the wrong columns"
+        );
+
+        // A name that does not exist is still an error, not a stray match.
+        let missing = execute_sql(&format!(
+            "CREATE TABLE w ({columns});
+             SELECT c{width} FROM w;"
+        ))
+        .expect_err("an absent column must be rejected");
+        assert!(
+            missing.to_string().contains(&format!("c{width}")),
+            "width {width} gave an unhelpful error: {missing}"
+        );
+
+        // An ambiguous unqualified name is rejected at every width.
+        let ambiguous = execute_sql(&format!(
+            "CREATE TABLE l ({columns});
+             CREATE TABLE r ({columns});
+             SELECT c0 FROM l JOIN r ON l.c0 = r.c0;"
+        ))
+        .expect_err("an ambiguous column must be rejected");
+        assert!(
+            ambiguous.to_string().contains("c0"),
+            "width {width} gave an unhelpful ambiguity error: {ambiguous}"
+        );
+    }
+}
