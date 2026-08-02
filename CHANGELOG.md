@@ -8,6 +8,27 @@ Follow-up to the v0.8.2 name-resolution work. The remaining findings from the
 reference-implementation review are addressed here.
 
 ### Fixed
+- An equi-join keys rows on the numeric value rather than on its debug
+  rendering, so `Integer(1)` and `Double(1.0)` meet in the same bucket. Joining
+  columns of different numeric types through `USING` or `NATURAL` returned an
+  empty result with no error, while the identical predicate in a `WHERE` clause
+  matched; a `FULL` join additionally reported the shared key twice.
+- A duplicate range-variable name, as in `FROM t AS x JOIN t AS x`, is rejected
+  as ambiguous. It previously resolved to the first table, silently reading the
+  wrong column.
+- A column merged by one `USING` or `NATURAL` join stays a single key when it
+  feeds the next one. Chaining three or more tables reported the merged name as
+  an ambiguous pair of input keys.
+- Unquoted identifiers fold to lower case and quoted identifiers keep theirs,
+  which is the PostgreSQL-compatible reading v0.8.2 adopted for double-quoted
+  names but did not fully implement.
+- Diagnostics point at the position the caller wrote. Quoted identifiers are
+  normalised before parsing, and removing the quote characters shifted every
+  later span two columns per identifier.
+- A mismatch between the `NATURAL` markers the parser supplies over FFI and the
+  joins found in the AST is now a parse error. The surplus joins previously kept
+  their default, turning a `NATURAL JOIN` into a cross product with no
+  diagnostic.
 - A derived table no longer resolves names from the query that encloses it.
   Standard SQL evaluates `FROM (SELECT ...) AS d` independently of the rest of
   the statement, and only `LATERAL` makes the surrounding scope visible; Alopex
