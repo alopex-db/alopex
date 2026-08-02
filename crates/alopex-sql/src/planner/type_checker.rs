@@ -18,11 +18,16 @@ use crate::planner::name_resolver::NameResolver;
 use crate::planner::typed_expr::{Quantifier, TypedExpr, TypedExprKind};
 use crate::planner::types::ResolvedType;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 /// A table visible to expression name resolution.
+///
+/// The metadata is shared rather than owned: every enclosing scope is copied
+/// into each nested scope, and copying whole schemas there made resolution cost
+/// grow with the square of the nesting depth.
 #[derive(Debug, Clone)]
 pub struct ScopedTable {
-    pub table: TableMetadata,
+    pub table: Arc<TableMetadata>,
     pub start_index: usize,
     /// Lexical nesting level; zero is the current SELECT and larger values
     /// are successively enclosing SELECT scopes.
@@ -40,9 +45,9 @@ pub struct ScopedTable {
 }
 
 impl ScopedTable {
-    pub fn new(table: TableMetadata, start_index: usize) -> Self {
+    pub fn new(table: impl Into<Arc<TableMetadata>>, start_index: usize) -> Self {
         Self {
-            table,
+            table: table.into(),
             start_index,
             scope_level: 0,
             hidden_unqualified_columns: HashSet::new(),
@@ -404,7 +409,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
 
             let tables = candidates
                 .iter()
-                .map(|table| &table.table)
+                .map(|table| table.table.as_ref())
                 .collect::<Vec<_>>();
             match resolver.resolve_column_with_scope(&tables, table_qualifier, column_name, span) {
                 Ok(resolved) => {
