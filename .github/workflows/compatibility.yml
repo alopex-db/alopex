@@ -32,8 +32,9 @@ jobs:
             target: x86_64-unknown-linux-gnu
             compression: lz4
           # v0.6.0 hold: GitHub hosted ubuntu-24.04-arm64 jobs are staying
-          # queued and block release PRs. Keep x86_64/WASM compatibility
-          # required, and re-enable native ARM after the runner lane is stable.
+          # queued and block release PRs. Keep x86_64 compatibility required,
+          # and re-enable native ARM after the runner lane is stable. WASM is
+          # advisory until v1.0.0; see the wasm job below.
     steps:
       - uses: actions/checkout@v4
       - name: Checkout Chirps dependency
@@ -83,8 +84,12 @@ jobs:
         run: cargo test -p alopex-core --tests format_compatibility_test $FEATURE_FLAGS
 
   wasm:
-    name: WASM Compatibility (${{ matrix.compression }})
+    # Advisory until v1.0.0, which is when WASM becomes a supported target.
+    # A failure here reports what does not build for wasm32 today; it does not
+    # hold a release, because nothing is promised on that target yet.
+    name: WASM Compatibility (advisory, ${{ matrix.compression }})
     runs-on: ubuntu-latest
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
