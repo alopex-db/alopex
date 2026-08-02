@@ -226,6 +226,43 @@ fn correlated_and_non_overlapping_subquery_names_remain_valid() {
 }
 
 #[test]
+fn a_derived_table_does_not_see_the_enclosing_query_without_lateral() {
+    // Standard SQL evaluates a derived table independently of the query it sits
+    // in, so `o` is not in scope inside it; only LATERAL would make it visible.
+    // Resolving `o.v` here builds a correlated reference the user never wrote.
+    let error = execute_sql(
+        r#"
+        CREATE TABLE t (v INT);
+        CREATE TABLE u (w INT);
+        INSERT INTO t VALUES (1);
+        INSERT INTO u VALUES (1);
+        SELECT o.v FROM t AS o
+        WHERE o.v = (SELECT d.w FROM (SELECT u.w FROM u WHERE u.w = o.v) AS d);
+        "#,
+    )
+    .expect_err("a derived table must not resolve a name from the enclosing query");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("'o'"),
+        "the error should name the unresolvable qualifier, got: {message}"
+    );
+
+    // The same shape stays legal one level up: a scalar subquery *is* allowed to
+    // correlate, so only the derived-table boundary changed.
+    let correlated = last_query(
+        r#"
+        CREATE TABLE t (v INT);
+        CREATE TABLE u (w INT);
+        INSERT INTO t VALUES (1), (2);
+        INSERT INTO u VALUES (1);
+        SELECT o.v FROM t AS o WHERE o.v = (SELECT u.w FROM u WHERE u.w = o.v);
+        "#,
+    );
+    assert_eq!(correlated.rows, vec![vec![SqlValue::Integer(1)]]);
+}
+
+#[test]
 fn double_quoted_identifier_resolves_to_the_column_value() {
     let query = last_query(
         r#"

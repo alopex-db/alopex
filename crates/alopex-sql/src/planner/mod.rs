@@ -1276,7 +1276,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         *span,
                     ));
                 };
-                let mut relation = self.plan_select_relation(select, outer_scope)?;
+                // A derived table is evaluated independently of the query it
+                // sits in, so nothing from the enclosing scopes is visible
+                // inside it. Only LATERAL lifts that restriction, and Alopex
+                // does not accept LATERAL yet. Passing `outer_scope` through
+                // here would resolve an outer name into a correlated reference
+                // the user never wrote, so the scope stops at this boundary.
+                let mut relation = self.plan_select_relation(select, &[])?;
                 let alias = alias.clone().ok_or_else(|| {
                     PlannerError::invalid_expression("derived table requires an alias".to_string())
                 })?;
