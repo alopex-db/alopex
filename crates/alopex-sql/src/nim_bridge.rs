@@ -81,11 +81,19 @@ fn normalize_quoted_identifiers(sql: &str) -> String {
                 }
             }
             '"' => {
+                // Replace each quote with a space rather than removing it, so
+                // every later token keeps its original offset and diagnostics
+                // point into the SQL the caller actually wrote.
+                normalized.push(' ');
                 while let Some(identifier_ch) = chars.next() {
                     if identifier_ch == '"' {
                         if chars.peek() == Some(&'"') {
+                            // An escaped quote is two characters in the input
+                            // and one in the identifier; pad to keep the width.
                             normalized.push(chars.next().expect("peeked quote"));
+                            normalized.push(' ');
                         } else {
+                            normalized.push(' ');
                             break;
                         }
                     } else {

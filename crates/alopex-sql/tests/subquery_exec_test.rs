@@ -271,3 +271,39 @@ fn quoted_identifiers_preserve_case_while_unquoted_identifiers_fold() {
         "expected C003 for an unquoted case mismatch, got: {err}"
     );
 }
+
+/// Error positions must point into the SQL the caller wrote. Quoted identifiers
+/// are normalised before parsing, and dropping the quote characters shifted
+/// every later column by two per identifier, so diagnostics pointed at the
+/// wrong place in exactly the queries that use quoting.
+#[test]
+fn error_spans_survive_quoted_identifier_normalisation() {
+    let sql = "SELECT \"Quoted\", missing FROM t";
+    let column = sql.find("missing").expect("locate the offending column") + 1;
+
+    let statements =
+        Parser::parse_sql(&AlopexDialect, "CREATE TABLE t (\"Quoted\" INT)").expect("parse create");
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let store = Arc::new(MemoryKV::new());
+    let mut executor = Executor::new(store, catalog.clone());
+    for statement in statements {
+        let guard = catalog.read().expect("catalog lock");
+        let plan = Planner::new(&*guard).plan(&statement).expect("plan create");
+        drop(guard);
+        executor.execute(plan).expect("execute create");
+    }
+
+    let statement = Parser::parse_sql(&AlopexDialect, sql)
+        .expect("parse select")
+        .remove(0);
+    let guard = catalog.read().expect("catalog lock");
+    let error = Planner::new(&*guard)
+        .plan(&statement)
+        .expect_err("unknown column must fail");
+
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(&format!("column {column}")),
+        "error should point at column {column} of the original SQL: {rendered}"
+    );
+}
