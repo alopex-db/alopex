@@ -307,3 +307,71 @@ fn error_spans_survive_quoted_identifier_normalisation() {
         "error should point at column {column} of the original SQL: {rendered}"
     );
 }
+
+/// Scope resolution has to hold at more than one level. A three-level query
+/// exercises the inner-first rule twice, and the middle level must not become a
+/// candidate for a name the innermost one already defines.
+#[test]
+fn three_level_nesting_resolves_each_name_in_its_own_scope() {
+    let rows = last_query(
+        "
+        CREATE TABLE outer_t (id INT PRIMARY KEY, v INT);
+        CREATE TABLE mid_t (id INT PRIMARY KEY, v INT);
+        CREATE TABLE inner_t (id INT PRIMARY KEY, v INT);
+        INSERT INTO outer_t (id, v) VALUES (1, 10), (2, 20);
+        INSERT INTO mid_t (id, v) VALUES (1, 5);
+        INSERT INTO inner_t (id, v) VALUES (1, 1);
+        SELECT id FROM outer_t
+         WHERE v > (SELECT MAX(v) FROM mid_t
+                     WHERE v > (SELECT MAX(v) FROM inner_t))
+         ORDER BY id;
+        ",
+    )
+    .rows;
+    // MAX(inner_t.v) = 1, so the middle level yields MAX(mid_t.v) = 5 and both
+    // outer rows exceed it. Binding v to an enclosing scope would change this.
+    assert_eq!(
+        rows,
+        vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]
+    );
+}
+
+/// EXISTS introduces a scope like any other subquery: a name defined inside it
+/// shadows the outer one, and only a qualified reference reaches outward.
+#[test]
+fn exists_subquery_shadows_the_outer_name_it_redefines() {
+    let rows = last_query(
+        "
+        CREATE TABLE lhs (id INT PRIMARY KEY, tag TEXT);
+        CREATE TABLE rhs (id INT PRIMARY KEY, tag TEXT);
+        INSERT INTO lhs (id, tag) VALUES (1, 'keep'), (2, 'drop');
+        INSERT INTO rhs (id, tag) VALUES (9, 'keep');
+        SELECT id FROM lhs
+         WHERE EXISTS (SELECT 1 FROM rhs WHERE tag = lhs.tag)
+         ORDER BY id;
+        ",
+    )
+    .rows;
+    // Unqualified tag inside EXISTS is rhs.tag, so only the row whose tag the
+    // right side also carries survives. Resolving it to lhs.tag would keep both.
+    assert_eq!(rows, vec![vec![SqlValue::Integer(1)]]);
+}
+
+/// A name that genuinely appears in more than one visible relation must be
+/// rejected rather than bound to whichever one comes first.
+#[test]
+fn a_genuinely_ambiguous_name_is_rejected() {
+    let error = execute_sql(
+        "
+        CREATE TABLE left_t (shared INT PRIMARY KEY, l TEXT);
+        CREATE TABLE right_t (shared INT PRIMARY KEY, r TEXT);
+        SELECT shared FROM left_t JOIN right_t ON left_t.shared = right_t.shared;
+        ",
+    )
+    .expect_err("shared is ambiguous across both inputs");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("ambiguous"),
+        "expected an ambiguity error, got: {rendered}"
+    );
+}
