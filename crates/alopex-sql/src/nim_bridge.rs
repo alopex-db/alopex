@@ -50,7 +50,7 @@ pub fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
                     expected: "MessagePack AST matching docs/ffi-ast-contract.md".to_string(),
                     found: err.to_string(),
                 })?;
-            annotate_natural_joins(&mut statements, natural_join_markers);
+            annotate_natural_joins(&mut statements, natural_join_markers)?;
             Ok(statements)
         }
         ParseResultKind::Error => {
@@ -203,52 +203,72 @@ fn skip_quoted(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, quote: char
     }
 }
 
-fn annotate_natural_joins(statements: &mut [Statement], natural_markers: Vec<bool>) {
+/// Apply the parser's NATURAL markers to the joins they belong to.
+///
+/// The markers arrive as a flat list alongside the AST, so they only line up
+/// while both sides walk the joins in the same order. A mismatch used to leave
+/// the remaining joins as plain joins, turning `NATURAL JOIN` into a cross
+/// product without any diagnostic. Treat it as the contract violation it is.
+fn annotate_natural_joins(statements: &mut [Statement], natural_markers: Vec<bool>) -> Result<()> {
+    let supplied = natural_markers.len();
     let mut natural_markers = natural_markers.into_iter();
+    let mut consumed = 0usize;
     for statement in statements {
         if let StatementKind::Select(select) = &mut statement.kind {
-            annotate_select_natural_joins(select, &mut natural_markers);
+            annotate_select_natural_joins(select, &mut natural_markers, &mut consumed);
         }
     }
+
+    if consumed != supplied {
+        return Err(ParserError::UnexpectedToken {
+            line: 0,
+            column: 0,
+            expected: format!("{supplied} NATURAL join markers, one per join"),
+            found: format!("{consumed} joins in the AST"),
+        });
+    }
+    Ok(())
 }
 
 fn annotate_select_natural_joins(
     select: &mut Select,
     natural_markers: &mut impl Iterator<Item = bool>,
+    consumed: &mut usize,
 ) {
     for item in &mut select.projection {
         if let SelectItem::Expr { expr, .. } = item {
-            annotate_expr_natural_joins(expr, natural_markers);
+            annotate_expr_natural_joins(expr, natural_markers, consumed);
         }
     }
     for from in &mut select.from {
-        annotate_from_natural_joins(from, natural_markers);
+        annotate_from_natural_joins(from, natural_markers, consumed);
     }
     if let Some(selection) = &mut select.selection {
-        annotate_expr_natural_joins(selection, natural_markers);
+        annotate_expr_natural_joins(selection, natural_markers, consumed);
     }
     if let Some(group_by) = &mut select.group_by {
         for expression in group_by {
-            annotate_expr_natural_joins(expression, natural_markers);
+            annotate_expr_natural_joins(expression, natural_markers, consumed);
         }
     }
     if let Some(having) = &mut select.having {
-        annotate_expr_natural_joins(having, natural_markers);
+        annotate_expr_natural_joins(having, natural_markers, consumed);
     }
     for order_by in &mut select.order_by {
-        annotate_expr_natural_joins(&mut order_by.expr, natural_markers);
+        annotate_expr_natural_joins(&mut order_by.expr, natural_markers, consumed);
     }
     if let Some(limit) = &mut select.limit {
-        annotate_expr_natural_joins(limit, natural_markers);
+        annotate_expr_natural_joins(limit, natural_markers, consumed);
     }
     if let Some(offset) = &mut select.offset {
-        annotate_expr_natural_joins(offset, natural_markers);
+        annotate_expr_natural_joins(offset, natural_markers, consumed);
     }
 }
 
 fn annotate_from_natural_joins(
     from: &mut FromItem,
     natural_markers: &mut impl Iterator<Item = bool>,
+    consumed: &mut usize,
 ) {
     match from {
         FromItem::Join {
@@ -257,53 +277,58 @@ fn annotate_from_natural_joins(
             natural,
             ..
         } => {
-            annotate_from_natural_joins(left, natural_markers);
+            annotate_from_natural_joins(left, natural_markers, consumed);
             if let Some(marker) = natural_markers.next() {
                 *natural |= marker;
+                *consumed += 1;
             }
-            annotate_from_natural_joins(right, natural_markers);
+            annotate_from_natural_joins(right, natural_markers, consumed);
         }
         FromItem::Derived { subquery, .. } => {
             if let StatementKind::Select(select) = &mut subquery.kind {
-                annotate_select_natural_joins(select, natural_markers);
+                annotate_select_natural_joins(select, natural_markers, consumed);
             }
         }
         FromItem::Table { .. } => {}
     }
 }
 
-fn annotate_expr_natural_joins(expr: &mut Expr, natural_markers: &mut impl Iterator<Item = bool>) {
+fn annotate_expr_natural_joins(
+    expr: &mut Expr,
+    natural_markers: &mut impl Iterator<Item = bool>,
+    consumed: &mut usize,
+) {
     match &mut expr.kind {
         ExprKind::ScalarSubquery { subquery } | ExprKind::Exists { subquery, .. } => {
             if let StatementKind::Select(select) = &mut subquery.kind {
-                annotate_select_natural_joins(select, natural_markers);
+                annotate_select_natural_joins(select, natural_markers, consumed);
             }
         }
         ExprKind::InSubquery { expr, subquery, .. }
         | ExprKind::Quantified { expr, subquery, .. } => {
-            annotate_expr_natural_joins(expr, natural_markers);
+            annotate_expr_natural_joins(expr, natural_markers, consumed);
             if let StatementKind::Select(select) = &mut subquery.kind {
-                annotate_select_natural_joins(select, natural_markers);
+                annotate_select_natural_joins(select, natural_markers, consumed);
             }
         }
         ExprKind::BinaryOp { left, right, .. } => {
-            annotate_expr_natural_joins(left, natural_markers);
-            annotate_expr_natural_joins(right, natural_markers);
+            annotate_expr_natural_joins(left, natural_markers, consumed);
+            annotate_expr_natural_joins(right, natural_markers, consumed);
         }
         ExprKind::UnaryOp { operand, .. } | ExprKind::IsNull { expr: operand, .. } => {
-            annotate_expr_natural_joins(operand, natural_markers);
+            annotate_expr_natural_joins(operand, natural_markers, consumed);
         }
         ExprKind::FunctionCall { args, .. } => {
             for argument in args {
-                annotate_expr_natural_joins(argument, natural_markers);
+                annotate_expr_natural_joins(argument, natural_markers, consumed);
             }
         }
         ExprKind::Between {
             expr, low, high, ..
         } => {
-            annotate_expr_natural_joins(expr, natural_markers);
-            annotate_expr_natural_joins(low, natural_markers);
-            annotate_expr_natural_joins(high, natural_markers);
+            annotate_expr_natural_joins(expr, natural_markers, consumed);
+            annotate_expr_natural_joins(low, natural_markers, consumed);
+            annotate_expr_natural_joins(high, natural_markers, consumed);
         }
         ExprKind::Like {
             expr,
@@ -311,20 +336,20 @@ fn annotate_expr_natural_joins(expr: &mut Expr, natural_markers: &mut impl Itera
             escape,
             ..
         } => {
-            annotate_expr_natural_joins(expr, natural_markers);
-            annotate_expr_natural_joins(pattern, natural_markers);
+            annotate_expr_natural_joins(expr, natural_markers, consumed);
+            annotate_expr_natural_joins(pattern, natural_markers, consumed);
             if let Some(escape) = escape {
-                annotate_expr_natural_joins(escape, natural_markers);
+                annotate_expr_natural_joins(escape, natural_markers, consumed);
             }
         }
         ExprKind::InList { expr, list, .. } => {
-            annotate_expr_natural_joins(expr, natural_markers);
+            annotate_expr_natural_joins(expr, natural_markers, consumed);
             for item in list {
-                annotate_expr_natural_joins(item, natural_markers);
+                annotate_expr_natural_joins(item, natural_markers, consumed);
             }
         }
         ExprKind::Cast { expr, .. } => {
-            annotate_expr_natural_joins(expr, natural_markers);
+            annotate_expr_natural_joins(expr, natural_markers, consumed);
         }
         ExprKind::Literal { .. } | ExprKind::ColumnRef { .. } | ExprKind::VectorLiteral { .. } => {}
     }
