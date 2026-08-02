@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.3]
+
+Follow-up to the v0.8.2 name-resolution work. The remaining findings from the
+reference-implementation review are addressed here.
+
+### Fixed
+- A derived table no longer resolves names from the query that encloses it.
+  Standard SQL evaluates `FROM (SELECT ...) AS d` independently of the rest of
+  the statement, and only `LATERAL` makes the surrounding scope visible; Alopex
+  does not accept `LATERAL`. The outer scope was being passed into the derived
+  subquery, so a name from an enclosing `SELECT` resolved into a correlated
+  reference that was never written. Scalar subqueries still correlate.
+- The Python test suite no longer leaves a stand-in `polars` module in
+  `sys.modules`, which made a later test in a full-suite run fail against the
+  wrong `scan_parquet` signature.
+
+### Changed
+- Python benchmark tests record binding overhead through `record_property`
+  instead of asserting on it. A timing threshold makes a test's outcome depend
+  on the machine it runs on; measurement on a controlled environment is tracked
+  separately in #76. These tests still assert correctness: that a scan is
+  usable, that a read returns every row, and that a write persists every row.
+
+### Performance
+Name resolution was superlinear in both schema width and subquery nesting. The
+earlier reading that called it linear timed parsing and planning together, and
+the parser's own linear cost hid the growth curve.
+
+- Scoped tables share their `TableMetadata` through `Arc` rather than copying it
+  into every nested scope. Twelve levels of correlated nesting: 76.1 µs → 36.5 µs.
+- Tables wider than 32 columns carry a column-name index, so resolving a name no
+  longer scans the column list. Narrow tables keep the scan, because indexing
+  every table unconditionally cost more than it saved. An 800-column projection:
+  2.41 ms → 633 µs, and its growth from 400 columns falls from 3.5× to 2.1×.
+- `NATURAL JOIN` hashes the right schema when finding common columns instead of
+  pairing every column against every other. A 200-column join: 573 µs → 482 µs.
+
+`crates/alopex-sql/benches/name_resolution_bench.rs` holds these measurements.
+
 ## [0.8.2]
 
 SQL correctness release. Every fix below addresses a documented feature that did
