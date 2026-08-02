@@ -94,3 +94,7 @@ harness = false
 [[bench]]
 name = "scalar_registry_bench"
 harness = false
+
+[[bench]]
+name = "name_resolution_bench"
+harness = false
