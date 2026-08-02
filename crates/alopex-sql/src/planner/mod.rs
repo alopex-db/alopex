@@ -2629,15 +2629,17 @@ fn projection_schema(
                                 TypedExprKind::ColumnRef { column, .. } => Some(column),
                                 _ => None,
                             };
-                            first_column.filter(|column| {
-                                args.iter().all(|arg| {
-                                    matches!(
-                                        &arg.kind,
-                                        TypedExprKind::ColumnRef { column: other, .. }
-                                            if other == *column
-                                    )
+                            first_column
+                                .filter(|column| {
+                                    args.iter().all(|arg| {
+                                        matches!(
+                                            &arg.kind,
+                                            TypedExprKind::ColumnRef { column: other, .. }
+                                                if other == *column
+                                        )
+                                    })
                                 })
-                            }).cloned()
+                                .cloned()
                         }
                         _ => None,
                     })

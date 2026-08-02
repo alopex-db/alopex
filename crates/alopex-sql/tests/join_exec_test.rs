@@ -356,3 +356,44 @@ fn using_and_natural_common_columns_merge_under_outer_joins() {
     ];
     assert_eq!(queries, vec![right.clone(), full.clone(), right, full]);
 }
+
+/// USING and NATURAL compare a common column across both inputs, so the two
+/// sides must be brought to a common type first. Without it an INTEGER key
+/// never equals a DOUBLE key holding the same value, and the join silently
+/// returns nothing instead of the matching rows.
+#[test]
+fn using_join_unifies_common_column_types() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "
+        CREATE TABLE a (k INT PRIMARY KEY, x TEXT);
+        CREATE TABLE b (k DOUBLE, y TEXT);
+        INSERT INTO a (k, x) VALUES (1, 'p'), (2, 'q');
+        INSERT INTO b (k, y) VALUES (1.0, 'P'), (3.0, 'R');
+        SELECT k FROM a JOIN b USING (k) ORDER BY k;
+        SELECT k FROM a FULL JOIN b USING (k) ORDER BY k;
+        ",
+    )
+    .expect("parse mixed-type using join");
+
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let store = Arc::new(MemoryKV::new());
+    let mut executor = Executor::new(store, catalog.clone());
+    let mut queries = Vec::new();
+
+    for statement in statements {
+        let guard = catalog.read().expect("catalog lock");
+        let plan = Planner::new(&*guard)
+            .plan(&statement)
+            .expect("plan mixed-type using join");
+        drop(guard);
+        if let ExecutionResult::Query(query) = executor.execute(plan).expect("execute join") {
+            queries.push(query.rows);
+        }
+    }
+
+    // 1 and 1.0 are the same key, so the inner join matches that row and the
+    // full join reports three distinct keys rather than duplicating it.
+    assert_eq!(queries[0].len(), 1, "inner join lost the matching key");
+    assert_eq!(queries[1].len(), 3, "full join duplicated the shared key");
+}
