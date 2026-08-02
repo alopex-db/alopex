@@ -42,7 +42,7 @@ use crate::ast::expr::Literal;
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::{AlopexDialect, DataSourceFormat, Parser, SqlError, TableType};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 struct PlannedRelation {
     plan: LogicalPlan,
@@ -2687,9 +2687,16 @@ fn natural_join_columns(
     left_schema: &[ColumnMetadata],
     right_schema: &[ColumnMetadata],
 ) -> Vec<String> {
+    // Pairing every left column against every right column is quadratic in the
+    // join width, so the right side is hashed once. Iteration stays over the
+    // left schema because the common columns keep the left table's order.
+    let right_names = right_schema
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<HashSet<_>>();
     left_schema
         .iter()
-        .filter(|left| right_schema.iter().any(|right| right.name == left.name))
+        .filter(|left| right_names.contains(left.name.as_str()))
         .map(|column| column.name.clone())
         .collect()
 }
