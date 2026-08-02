@@ -236,6 +236,31 @@ fn equi_join_keys(condition: &TypedExpr, left_width: usize) -> Option<(usize, us
     }
 }
 
+/// Build the equality key for a hash join.
+///
+/// `=` promotes across the numeric types, so the key has to as well: keying on
+/// the debug form put `Integer(1)` and `Double(1.0)` in different buckets and
+/// the join silently dropped rows that the same predicate matches in a `WHERE`
+/// clause. Numeric values therefore share one representation, and integral
+/// floating point values render as integers so they land in the same bucket as
+/// the equal integer.
 fn hash_key(value: &SqlValue) -> String {
-    format!("{value:?}")
+    match value {
+        SqlValue::Integer(v) => format!("num:{v}"),
+        SqlValue::BigInt(v) | SqlValue::Timestamp(v) => format!("num:{v}"),
+        SqlValue::Float(v) => numeric_hash_key(f64::from(*v)),
+        SqlValue::Double(v) => numeric_hash_key(*v),
+        other => format!("{other:?}"),
+    }
+}
+
+fn numeric_hash_key(value: f64) -> String {
+    // An integral float must key as the integer it equals. Values outside the
+    // i64 range, and non-integral ones, keep their own representation; no
+    // integer compares equal to them.
+    if value.is_finite() && value.fract() == 0.0 && value.abs() < 9.223_372_036_854_776e18 {
+        format!("num:{}", value as i64)
+    } else {
+        format!("num:{value}")
+    }
 }

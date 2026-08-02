@@ -14,15 +14,19 @@ use crate::catalog::{Catalog, ColumnMetadata, TableMetadata};
 use crate::planner::aggregate_expr::{AggregateExpr, AggregateFunction};
 use crate::planner::error::PlannerError;
 use crate::planner::logical_plan::LogicalPlan;
-use crate::planner::name_resolver::NameResolver;
 use crate::planner::typed_expr::{Quantifier, TypedExpr, TypedExprKind};
 use crate::planner::types::ResolvedType;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 /// A table visible to expression name resolution.
+///
+/// The metadata is shared rather than owned: every enclosing scope is copied
+/// into each nested scope, and copying whole schemas there made resolution cost
+/// grow with the square of the nesting depth.
 #[derive(Debug, Clone)]
 pub struct ScopedTable {
-    pub table: TableMetadata,
+    pub table: Arc<TableMetadata>,
     pub start_index: usize,
     /// Lexical nesting level; zero is the current SELECT and larger values
     /// are successively enclosing SELECT scopes.
@@ -32,21 +36,55 @@ pub struct ScopedTable {
     /// for an unqualified reference because the merged output column owns
     /// the name.
     pub hidden_unqualified_columns: HashSet<String>,
-    /// For a column merged by USING or NATURAL, the output index of the other
-    /// side. An unqualified reference to a merged name resolves to
-    /// `COALESCE(left, right)` so that RIGHT and FULL joins report the key from
-    /// whichever side is present instead of the left side's NULL.
-    pub merged_column_partners: HashMap<String, usize>,
+    /// For a column merged by USING or NATURAL, the output indexes of every
+    /// other side. An unqualified reference to a merged name resolves to
+    /// `COALESCE(left, right, ...)` so that RIGHT and FULL joins report the key
+    /// from whichever joined input is present.
+    pub merged_column_partners: HashMap<String, Vec<usize>>,
+    /// Column name to position in `table.columns`, built once when the table
+    /// enters scope. Resolution looks a name up once per reference, so scanning
+    /// the column list made a wide projection cost the square of its width.
+    /// Shared alongside the metadata it indexes so the two cannot drift apart.
+    ///
+    /// `None` for narrow tables, where building the map costs more than the
+    /// scans it saves; see [`COLUMN_INDEX_THRESHOLD`].
+    column_index: Option<Arc<HashMap<String, usize>>>,
 }
 
+/// Column count above which a scoped table gets a hash index.
+///
+/// Below this a linear scan of the column list wins: the map allocation is paid
+/// once per table per scope, and measurement showed narrow tables getting 10-15%
+/// slower when every table was indexed unconditionally.
+const COLUMN_INDEX_THRESHOLD: usize = 32;
+
 impl ScopedTable {
-    pub fn new(table: TableMetadata, start_index: usize) -> Self {
+    pub fn new(table: impl Into<Arc<TableMetadata>>, start_index: usize) -> Self {
+        let table = table.into();
+        let column_index = (table.columns.len() > COLUMN_INDEX_THRESHOLD).then(|| {
+            // On a duplicate name the first position wins, matching the linear
+            // scan this replaces.
+            let mut index = HashMap::with_capacity(table.columns.len());
+            for (position, column) in table.columns.iter().enumerate() {
+                index.entry(column.name.clone()).or_insert(position);
+            }
+            Arc::new(index)
+        });
         Self {
             table,
             start_index,
             scope_level: 0,
             hidden_unqualified_columns: HashSet::new(),
             merged_column_partners: HashMap::new(),
+            column_index,
+        }
+    }
+
+    /// Position of `column` in this table, or `None` if it has no such column.
+    pub fn column_position(&self, column: &str) -> Option<usize> {
+        match &self.column_index {
+            Some(index) => index.get(column).copied(),
+            None => self.table.get_column_index(column),
         }
     }
 
@@ -57,8 +95,13 @@ impl ScopedTable {
 
     /// Record that `column` is merged with the output column at `partner_index`.
     pub fn merge_column_with(&mut self, column: &str, partner_index: usize) {
-        self.merged_column_partners
-            .insert(column.to_string(), partner_index);
+        let partners = self
+            .merged_column_partners
+            .entry(column.to_string())
+            .or_default();
+        if !partners.contains(&partner_index) {
+            partners.push(partner_index);
+        }
     }
 }
 
@@ -357,7 +400,6 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         column_name: &str,
         span: Span,
     ) -> Result<TypedExpr, PlannerError> {
-        let resolver = NameResolver::new(self.catalog);
         let levels = scope
             .iter()
             .map(|table| table.scope_level)
@@ -377,26 +419,69 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 continue;
             }
             if let Some(qualifier) = table_qualifier {
-                if !candidates.iter().any(|table| table.table.name == qualifier) {
-                    continue;
+                let qualified = candidates
+                    .iter()
+                    .filter(|table| table.table.name == qualifier)
+                    .collect::<Vec<_>>();
+                match qualified.len() {
+                    0 => continue,
+                    1 => qualifier_found = true,
+                    _ => {
+                        return Err(PlannerError::ambiguous_column(
+                            column_name,
+                            qualified
+                                .iter()
+                                .map(|table| table.table.name.clone())
+                                .collect(),
+                            span,
+                        ));
+                    }
                 }
-                qualifier_found = true;
             }
 
-            let tables = candidates
-                .iter()
-                .map(|table| &table.table)
-                .collect::<Vec<_>>();
-            match resolver.resolve_column_with_scope(&tables, table_qualifier, column_name, span) {
-                Ok(resolved) => {
-                    let scoped = candidates
-                        .into_iter()
-                        .find(|table| table.table.name == resolved.table_name)
-                        .ok_or_else(|| PlannerError::table_not_found(&resolved.table_name, span))?;
-                    let column_index =
-                        scoped.table.get_column_index(column_name).ok_or_else(|| {
-                            PlannerError::column_not_found(column_name, &scoped.table.name, span)
-                        })?;
+            // Resolution happens through each table's own column index rather
+            // than by scanning its column list, because this runs once per
+            // column reference and the scan made a wide projection quadratic.
+            let mut matches = candidates.iter().filter(|table| {
+                table_qualifier.is_none_or(|qualifier| table.table.name == qualifier)
+                    && table.column_position(column_name).is_some()
+            });
+            let found = matches.next();
+            let second = matches.next();
+
+            match (found, second) {
+                (Some(_), Some(_)) => {
+                    return Err(PlannerError::ambiguous_column(
+                        column_name,
+                        candidates
+                            .iter()
+                            .filter(|table| table.column_position(column_name).is_some())
+                            .map(|table| table.table.name.clone())
+                            .collect(),
+                        span,
+                    ));
+                }
+                (None, _) => {
+                    if table_qualifier.is_some() {
+                        // A qualified name that the named table does not have is
+                        // an error here; it cannot be a correlated reference.
+                        return Err(PlannerError::column_not_found(
+                            column_name,
+                            candidates
+                                .first()
+                                .map(|table| table.table.name.as_str())
+                                .unwrap_or("unknown"),
+                            span,
+                        ));
+                    }
+                    // A missing local name may be a correlated reference. Only
+                    // this case falls back to the next enclosing scope.
+                    continue;
+                }
+                (Some(scoped), None) => {
+                    let column_index = scoped
+                        .column_position(column_name)
+                        .expect("filtered on the column being present");
                     let column = &scoped.table.columns[column_index];
                     let own_ref = TypedExpr {
                         kind: TypedExprKind::ColumnRef {
@@ -413,9 +498,12 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     // merged value, otherwise a RIGHT or FULL join reports the
                     // left side's NULL for rows that only exist on the right.
                     if table_qualifier.is_none()
-                        && let Some(&partner_index) = scoped.merged_column_partners.get(column_name)
+                        && let Some(partner_indices) =
+                            scoped.merged_column_partners.get(column_name)
                     {
-                        let partner = TypedExpr {
+                        let mut args = Vec::with_capacity(partner_indices.len() + 1);
+                        args.push(own_ref);
+                        args.extend(partner_indices.iter().map(|&partner_index| TypedExpr {
                             kind: TypedExprKind::ColumnRef {
                                 table: scoped.table.name.clone(),
                                 column: column_name.to_string(),
@@ -423,11 +511,11 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                             },
                             resolved_type: column.data_type.clone(),
                             span,
-                        };
+                        }));
                         return Ok(TypedExpr {
                             kind: TypedExprKind::FunctionCall {
                                 name: "coalesce".to_string(),
-                                args: vec![own_ref, partner],
+                                args,
                                 distinct: false,
                                 star: false,
                             },
@@ -438,11 +526,6 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
 
                     return Ok(own_ref);
                 }
-                Err(PlannerError::ColumnNotFound { .. }) if table_qualifier.is_none() => {
-                    // A missing local name may be a correlated reference. Only
-                    // this case falls back to the next enclosing scope.
-                }
-                Err(error) => return Err(error),
             }
         }
 

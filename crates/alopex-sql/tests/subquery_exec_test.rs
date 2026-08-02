@@ -226,6 +226,43 @@ fn correlated_and_non_overlapping_subquery_names_remain_valid() {
 }
 
 #[test]
+fn a_derived_table_does_not_see_the_enclosing_query_without_lateral() {
+    // Standard SQL evaluates a derived table independently of the query it sits
+    // in, so `o` is not in scope inside it; only LATERAL would make it visible.
+    // Resolving `o.v` here builds a correlated reference the user never wrote.
+    let error = execute_sql(
+        r#"
+        CREATE TABLE t (v INT);
+        CREATE TABLE u (w INT);
+        INSERT INTO t VALUES (1);
+        INSERT INTO u VALUES (1);
+        SELECT o.v FROM t AS o
+        WHERE o.v = (SELECT d.w FROM (SELECT u.w FROM u WHERE u.w = o.v) AS d);
+        "#,
+    )
+    .expect_err("a derived table must not resolve a name from the enclosing query");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("'o'"),
+        "the error should name the unresolvable qualifier, got: {message}"
+    );
+
+    // The same shape stays legal one level up: a scalar subquery *is* allowed to
+    // correlate, so only the derived-table boundary changed.
+    let correlated = last_query(
+        r#"
+        CREATE TABLE t (v INT);
+        CREATE TABLE u (w INT);
+        INSERT INTO t VALUES (1), (2);
+        INSERT INTO u VALUES (1);
+        SELECT o.v FROM t AS o WHERE o.v = (SELECT u.w FROM u WHERE u.w = o.v);
+        "#,
+    );
+    assert_eq!(correlated.rows, vec![vec![SqlValue::Integer(1)]]);
+}
+
+#[test]
 fn double_quoted_identifier_resolves_to_the_column_value() {
     let query = last_query(
         r#"
@@ -236,4 +273,195 @@ fn double_quoted_identifier_resolves_to_the_column_value() {
     );
 
     assert_eq!(query.rows, vec![vec![SqlValue::Text("hello world".into())]]);
+}
+
+/// PostgreSQL-style identifiers fold only when they are unquoted: a delimited
+/// identifier keeps its case while bare spellings resolve as lowercase.
+#[test]
+fn quoted_identifiers_preserve_case_while_unquoted_identifiers_fold() {
+    let query = last_query(
+        r#"
+        CREATE TABLE t ("Col" INT, PLAIN INT);
+        INSERT INTO t ("Col", PLAIN) VALUES (10, 20);
+        SELECT "Col", plain, PLAIN FROM t;
+        "#,
+    );
+    assert_eq!(
+        query.rows,
+        vec![vec![
+            SqlValue::Integer(10),
+            SqlValue::Integer(20),
+            SqlValue::Integer(20),
+        ]]
+    );
+
+    let err = execute_sql(
+        r#"
+        CREATE TABLE t ("Col" INT);
+        INSERT INTO t ("Col") VALUES (10);
+        SELECT col FROM t;
+        "#,
+    )
+    .expect_err("unquoted col must not resolve the case-sensitive quoted column");
+    assert!(
+        err.to_string().contains("ALOPEX-C003"),
+        "expected C003 for an unquoted case mismatch, got: {err}"
+    );
+}
+
+/// Error positions must point into the SQL the caller wrote. Quoted identifiers
+/// are normalised before parsing, and dropping the quote characters shifted
+/// every later column by two per identifier, so diagnostics pointed at the
+/// wrong place in exactly the queries that use quoting.
+#[test]
+fn error_spans_survive_quoted_identifier_normalisation() {
+    let sql = "SELECT \"Quoted\", missing FROM t";
+    let column = sql.find("missing").expect("locate the offending column") + 1;
+
+    let statements =
+        Parser::parse_sql(&AlopexDialect, "CREATE TABLE t (\"Quoted\" INT)").expect("parse create");
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let store = Arc::new(MemoryKV::new());
+    let mut executor = Executor::new(store, catalog.clone());
+    for statement in statements {
+        let guard = catalog.read().expect("catalog lock");
+        let plan = Planner::new(&*guard).plan(&statement).expect("plan create");
+        drop(guard);
+        executor.execute(plan).expect("execute create");
+    }
+
+    let statement = Parser::parse_sql(&AlopexDialect, sql)
+        .expect("parse select")
+        .remove(0);
+    let guard = catalog.read().expect("catalog lock");
+    let error = Planner::new(&*guard)
+        .plan(&statement)
+        .expect_err("unknown column must fail");
+
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(&format!("column {column}")),
+        "error should point at column {column} of the original SQL: {rendered}"
+    );
+}
+
+/// Scope resolution has to hold at more than one level. A three-level query
+/// exercises the inner-first rule twice, and the middle level must not become a
+/// candidate for a name the innermost one already defines.
+#[test]
+fn three_level_nesting_resolves_each_name_in_its_own_scope() {
+    let rows = last_query(
+        "
+        CREATE TABLE outer_t (id INT PRIMARY KEY, v INT);
+        CREATE TABLE mid_t (id INT PRIMARY KEY, v INT);
+        CREATE TABLE inner_t (id INT PRIMARY KEY, v INT);
+        INSERT INTO outer_t (id, v) VALUES (1, 10), (2, 20);
+        INSERT INTO mid_t (id, v) VALUES (1, 5);
+        INSERT INTO inner_t (id, v) VALUES (1, 1);
+        SELECT id FROM outer_t
+         WHERE v > (SELECT MAX(v) FROM mid_t
+                     WHERE v > (SELECT MAX(v) FROM inner_t))
+         ORDER BY id;
+        ",
+    )
+    .rows;
+    // MAX(inner_t.v) = 1, so the middle level yields MAX(mid_t.v) = 5 and both
+    // outer rows exceed it. Binding v to an enclosing scope would change this.
+    assert_eq!(
+        rows,
+        vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]
+    );
+}
+
+/// EXISTS introduces a scope like any other subquery: a name defined inside it
+/// shadows the outer one, and only a qualified reference reaches outward.
+#[test]
+fn exists_subquery_shadows_the_outer_name_it_redefines() {
+    let rows = last_query(
+        "
+        CREATE TABLE lhs (id INT PRIMARY KEY, tag TEXT);
+        CREATE TABLE rhs (id INT PRIMARY KEY, tag TEXT);
+        INSERT INTO lhs (id, tag) VALUES (1, 'keep'), (2, 'drop');
+        INSERT INTO rhs (id, tag) VALUES (9, 'keep');
+        SELECT id FROM lhs
+         WHERE EXISTS (SELECT 1 FROM rhs WHERE tag = lhs.tag)
+         ORDER BY id;
+        ",
+    )
+    .rows;
+    // Unqualified tag inside EXISTS is rhs.tag, so only the row whose tag the
+    // right side also carries survives. Resolving it to lhs.tag would keep both.
+    assert_eq!(rows, vec![vec![SqlValue::Integer(1)]]);
+}
+
+/// A name that genuinely appears in more than one visible relation must be
+/// rejected rather than bound to whichever one comes first.
+#[test]
+fn a_genuinely_ambiguous_name_is_rejected() {
+    let error = execute_sql(
+        "
+        CREATE TABLE left_t (shared INT PRIMARY KEY, l TEXT);
+        CREATE TABLE right_t (shared INT PRIMARY KEY, r TEXT);
+        SELECT shared FROM left_t JOIN right_t ON left_t.shared = right_t.shared;
+        ",
+    )
+    .expect_err("shared is ambiguous across both inputs");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("ambiguous"),
+        "expected an ambiguity error, got: {rendered}"
+    );
+}
+
+#[test]
+fn resolution_is_identical_either_side_of_the_column_index_threshold() {
+    // Scoped tables switch from scanning their column list to a hash index once
+    // they exceed a width threshold. Both paths must resolve names the same way,
+    // otherwise a schema crossing that width silently changes behaviour.
+    for width in [8usize, 31, 32, 33, 64] {
+        let columns = (0..width)
+            .map(|i| format!("c{i} INT"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = (0..width)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let last = width - 1;
+
+        // A name is found wherever it sits in the schema.
+        let query = last_query(&format!(
+            "CREATE TABLE w ({columns});
+             INSERT INTO w VALUES ({values});
+             SELECT c0, c{last} FROM w;"
+        ));
+        assert_eq!(
+            query.rows,
+            vec![vec![SqlValue::Integer(0), SqlValue::Integer(last as i32),]],
+            "width {width} resolved the wrong columns"
+        );
+
+        // A name that does not exist is still an error, not a stray match.
+        let missing = execute_sql(&format!(
+            "CREATE TABLE w ({columns});
+             SELECT c{width} FROM w;"
+        ))
+        .expect_err("an absent column must be rejected");
+        assert!(
+            missing.to_string().contains(&format!("c{width}")),
+            "width {width} gave an unhelpful error: {missing}"
+        );
+
+        // An ambiguous unqualified name is rejected at every width.
+        let ambiguous = execute_sql(&format!(
+            "CREATE TABLE l ({columns});
+             CREATE TABLE r ({columns});
+             SELECT c0 FROM l JOIN r ON l.c0 = r.c0;"
+        ))
+        .expect_err("an ambiguous column must be rejected");
+        assert!(
+            ambiguous.to_string().contains("c0"),
+            "width {width} gave an unhelpful ambiguity error: {ambiguous}"
+        );
+    }
 }

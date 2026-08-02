@@ -137,8 +137,7 @@ class LazyFrame:
 
 
 @pytest.fixture()
-def polars_compatible_module():
-    previous = sys.modules.get("polars")
+def polars_compatible_module(monkeypatch):
     polars = types.ModuleType("polars")
     polars.DataFrame = DataFrame
     polars.LazyFrame = LazyFrame
@@ -152,14 +151,17 @@ def polars_compatible_module():
 
     polars.scan_parquet = scan_parquet
     polars.read_parquet = read_parquet
-    sys.modules["polars"] = polars
+
+    # With the optional dependency installed, keep the real module visible to
+    # the binding and use this fake only as the test's duck-typed DataFrame.
+    # Without it, scoped monkeypatch restoration makes the compatibility test
+    # self-contained without leaking the fake module to another test.
     try:
-        yield polars
-    finally:
-        if previous is None:
-            sys.modules.pop("polars", None)
-        else:
-            sys.modules["polars"] = previous
+        import polars as _polars  # noqa: F401
+    except ModuleNotFoundError:
+        monkeypatch.setitem(sys.modules, "polars", polars)
+
+    return polars
 
 
 def test_catalog_namespace_table_lifecycle_consistency(tmp_path, catalog_resources):

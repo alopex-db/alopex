@@ -4,14 +4,14 @@ use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::MemoryCatalog;
 use alopex_sql::dialect::AlopexDialect;
 use alopex_sql::executor::query::join::{hash_join, nested_loop_join};
-use alopex_sql::executor::{ExecutionResult, Executor, Row};
+use alopex_sql::executor::{ExecutionResult, Executor, ExecutorError, Row};
 use alopex_sql::parser::Parser;
 use alopex_sql::planner::logical_plan::JoinType;
 use alopex_sql::planner::typed_expr::TypedExpr;
 use alopex_sql::planner::{Planner, ResolvedType};
 use alopex_sql::storage::SqlValue;
 
-fn run_sql(sql: &str) -> Vec<ExecutionResult> {
+fn try_run_sql(sql: &str) -> Result<Vec<ExecutionResult>, ExecutorError> {
     let dialect = AlopexDialect;
     let statements = Parser::parse_sql(&dialect, sql).expect("parse sql");
     let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
@@ -20,11 +20,15 @@ fn run_sql(sql: &str) -> Vec<ExecutionResult> {
     let mut results = Vec::new();
     for stmt in statements {
         let guard = catalog.read().unwrap();
-        let plan = Planner::new(&*guard).plan(&stmt).expect("plan");
+        let plan = Planner::new(&*guard).plan(&stmt)?;
         drop(guard);
-        results.push(executor.execute(plan).expect("execute"));
+        results.push(executor.execute(plan)?);
     }
-    results
+    Ok(results)
+}
+
+fn run_sql(sql: &str) -> Vec<ExecutionResult> {
+    try_run_sql(sql).expect("execute sql")
 }
 
 fn last_query(sql: &str) -> alopex_sql::executor::QueryResult {
@@ -61,6 +65,69 @@ fn inner_join_uses_equi_condition() {
             vec![SqlValue::Text("alice".into()), SqlValue::Integer(50)],
             vec![SqlValue::Text("alice".into()), SqlValue::Integer(75)],
             vec![SqlValue::Text("bob".into()), SqlValue::Integer(20)],
+        ]
+    );
+}
+
+/// A duplicate range-variable name cannot identify one input of a self join.
+/// Resolving it to the first table would silently read the wrong column.
+#[test]
+fn duplicate_join_qualifiers_are_rejected_as_ambiguous() {
+    for (from, reference) in [
+        ("t AS x JOIN t AS x ON 1 = 1", "x.id"),
+        ("t JOIN t ON 1 = 1", "t.id"),
+    ] {
+        let err = try_run_sql(&format!(
+            "CREATE TABLE t (id INT PRIMARY KEY); SELECT {reference} FROM {from};"
+        ))
+        .expect_err("duplicate relation names must not bind a qualified column to the first input");
+
+        assert!(
+            err.to_string().contains("ALOPEX-C004"),
+            "expected C004 for {from}, got: {err}"
+        );
+    }
+}
+
+/// A merged key from one JOIN remains the single left-side key of the next
+/// USING/NATURAL JOIN, rather than becoming an ambiguous pair of input keys.
+#[test]
+fn chained_using_and_natural_joins_keep_the_merged_key_visible() {
+    let results = try_run_sql(
+        r#"
+        CREATE TABLE a (k INT PRIMARY KEY, a_value TEXT);
+        CREATE TABLE b (k INT PRIMARY KEY, b_value TEXT);
+        CREATE TABLE c (k INT PRIMARY KEY, c_value TEXT);
+        INSERT INTO a VALUES (1, 'a');
+        INSERT INTO b VALUES (1, 'b'), (2, 'b-only');
+        INSERT INTO c VALUES (1, 'c'), (2, 'bc-only'), (3, 'c-only');
+        SELECT k FROM a JOIN b USING (k) JOIN c USING (k);
+        SELECT k FROM a NATURAL JOIN b NATURAL JOIN c;
+        SELECT k FROM a FULL JOIN b USING (k) FULL JOIN c USING (k) ORDER BY k;
+        "#,
+    )
+    .expect("plan and execute chained merged joins");
+
+    let queries = results
+        .into_iter()
+        .filter_map(|result| match result {
+            ExecutionResult::Query(query) => Some(query),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(queries.len(), 3);
+    for query in &queries[..2] {
+        assert_eq!(query.columns[0].name, "k");
+        assert_eq!(query.rows, vec![vec![SqlValue::Integer(1)]]);
+    }
+    assert_eq!(queries[2].columns[0].name, "k");
+    assert_eq!(
+        queries[2].rows,
+        vec![
+            vec![SqlValue::Integer(1)],
+            vec![SqlValue::Integer(2)],
+            vec![SqlValue::Integer(3)],
         ]
     );
 }
@@ -288,4 +355,45 @@ fn using_and_natural_common_columns_merge_under_outer_joins() {
         vec![SqlValue::Integer(3)],
     ];
     assert_eq!(queries, vec![right.clone(), full.clone(), right, full]);
+}
+
+/// USING and NATURAL compare a common column across both inputs, so the two
+/// sides must be brought to a common type first. Without it an INTEGER key
+/// never equals a DOUBLE key holding the same value, and the join silently
+/// returns nothing instead of the matching rows.
+#[test]
+fn using_join_unifies_common_column_types() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "
+        CREATE TABLE a (k INT PRIMARY KEY, x TEXT);
+        CREATE TABLE b (k DOUBLE, y TEXT);
+        INSERT INTO a (k, x) VALUES (1, 'p'), (2, 'q');
+        INSERT INTO b (k, y) VALUES (1.0, 'P'), (3.0, 'R');
+        SELECT k FROM a JOIN b USING (k) ORDER BY k;
+        SELECT k FROM a FULL JOIN b USING (k) ORDER BY k;
+        ",
+    )
+    .expect("parse mixed-type using join");
+
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let store = Arc::new(MemoryKV::new());
+    let mut executor = Executor::new(store, catalog.clone());
+    let mut queries = Vec::new();
+
+    for statement in statements {
+        let guard = catalog.read().expect("catalog lock");
+        let plan = Planner::new(&*guard)
+            .plan(&statement)
+            .expect("plan mixed-type using join");
+        drop(guard);
+        if let ExecutionResult::Query(query) = executor.execute(plan).expect("execute join") {
+            queries.push(query.rows);
+        }
+    }
+
+    // 1 and 1.0 are the same key, so the inner join matches that row and the
+    // full join reports three distinct keys rather than duplicating it.
+    assert_eq!(queries[0].len(), 1, "inner join lost the matching key");
+    assert_eq!(queries[1].len(), 3, "full join duplicated the shared key");
 }

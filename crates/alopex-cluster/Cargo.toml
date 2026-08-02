@@ -32,8 +32,13 @@ sha2 = "0.10"
 
 # All Chirps dependencies are optional so the default embedded/single-node
 # build neither requires nor advertises cluster control.
-alopex-chirps = { version = "0.5.1", path = "../../../../chirps/crates/alopex-chirps", optional = true }
-alopex-chirps-core = { version = "0.5.1", path = "../../../../chirps/crates/chirps-core", optional = true }
-alopex-chirps-gossip-swim = { version = "0.5.1", path = "../../../../chirps/crates/chirps-gossip-swim", optional = true }
-alopex-chirps-raft-storage = { version = "0.5.1", path = "../../../../chirps/crates/chirps-raft-storage", optional = true }
-alopex-chirps-transport-quic = { version = "0.5.1", path = "../../../../chirps/crates/chirps-transport-quic", optional = true }
+#
+# Taken from crates.io rather than a sibling checkout. A path dependency made
+# the build depend on whichever branch the neighbouring working tree happened
+# to be on, so an unrelated in-progress change there could add a dependency
+# this workspace's lock file did not know about.
+alopex-chirps = { version = "0.5.1", optional = true }
+alopex-chirps-core = { version = "0.5.1", optional = true }
+alopex-chirps-gossip-swim = { version = "0.5.1", optional = true }
+alopex-chirps-raft-storage = { version = "0.5.1", optional = true }
+alopex-chirps-transport-quic = { version = "0.5.1", optional = true }

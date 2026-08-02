@@ -42,7 +42,7 @@ use crate::ast::expr::Literal;
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::{AlopexDialect, DataSourceFormat, Parser, SqlError, TableType};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 struct PlannedRelation {
     plan: LogicalPlan,
@@ -1276,7 +1276,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         *span,
                     ));
                 };
-                let mut relation = self.plan_select_relation(select, outer_scope)?;
+                // A derived table is evaluated independently of the query it
+                // sits in, so nothing from the enclosing scopes is visible
+                // inside it. Only LATERAL lifts that restriction, and Alopex
+                // does not accept LATERAL yet. Passing `outer_scope` through
+                // here would resolve an outer name into a correlated reference
+                // the user never wrote, so the scope stops at this boundary.
+                let mut relation = self.plan_select_relation(select, &[])?;
                 let alias = alias.clone().ok_or_else(|| {
                     PlannerError::invalid_expression("derived table requires an alias".to_string())
                 })?;
@@ -1360,20 +1366,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         for column in columns {
             let left_col = find_scoped_column(&left.scope, column, span)?;
             let right_col = find_scoped_column(&right.scope, column, span)?;
-            let left_expr = TypedExpr::column_ref(
-                left_col.table,
-                column.clone(),
-                left_col.index,
-                left_col.ty.clone(),
-                span,
-            );
-            let right_expr = TypedExpr::column_ref(
-                right_col.table,
-                column.clone(),
-                right_col.index,
-                right_col.ty.clone(),
-                span,
-            );
+            let left_expr = merged_scoped_column_expr(&left_col, column, span);
+            let right_expr = merged_scoped_column_expr(&right_col, column, span);
             self.type_checker
                 .check_comparison_op(&left_col.ty, &right_col.ty, span)?;
             let eq = TypedExpr::binary_op(
@@ -2527,6 +2521,7 @@ struct FoundScopedColumn {
     table: String,
     index: usize,
     ty: ResolvedType,
+    partner_indices: Vec<usize>,
 }
 
 fn find_scoped_column(
@@ -2536,12 +2531,20 @@ fn find_scoped_column(
 ) -> Result<FoundScopedColumn, PlannerError> {
     let mut matches = Vec::new();
     for table in scope {
+        if table.hidden_unqualified_columns.contains(column) {
+            continue;
+        }
         if let Some(local_idx) = table.table.get_column_index(column) {
             let meta = &table.table.columns[local_idx];
             matches.push(FoundScopedColumn {
                 table: table.table.name.clone(),
                 index: table.start_index + local_idx,
                 ty: meta.data_type.clone(),
+                partner_indices: table
+                    .merged_column_partners
+                    .get(column)
+                    .cloned()
+                    .unwrap_or_default(),
             });
         }
     }
@@ -2553,6 +2556,45 @@ fn find_scoped_column(
             scope.iter().map(|s| s.table.name.clone()).collect(),
             span,
         )),
+    }
+}
+
+fn merged_scoped_column_expr(
+    found: &FoundScopedColumn,
+    column: &str,
+    span: crate::ast::Span,
+) -> TypedExpr {
+    let own = TypedExpr::column_ref(
+        found.table.clone(),
+        column.to_string(),
+        found.index,
+        found.ty.clone(),
+        span,
+    );
+    if found.partner_indices.is_empty() {
+        return own;
+    }
+
+    let mut args = Vec::with_capacity(found.partner_indices.len() + 1);
+    args.push(own);
+    args.extend(found.partner_indices.iter().map(|&index| {
+        TypedExpr::column_ref(
+            found.table.clone(),
+            column.to_string(),
+            index,
+            found.ty.clone(),
+            span,
+        )
+    }));
+    TypedExpr {
+        kind: TypedExprKind::FunctionCall {
+            name: "coalesce".to_string(),
+            args,
+            distinct: false,
+            star: false,
+        },
+        resolved_type: found.ty.clone(),
+        span,
     }
 }
 
@@ -2587,15 +2629,23 @@ fn projection_schema(
                         // COALESCE(left, right); it still names the merged
                         // column, not an anonymous expression.
                         TypedExprKind::FunctionCall { name, args, .. }
-                            if name == "coalesce" && args.len() == 2 =>
+                            if name == "coalesce" && !args.is_empty() =>
                         {
-                            match (&args[0].kind, &args[1].kind) {
-                                (
-                                    TypedExprKind::ColumnRef { column: left, .. },
-                                    TypedExprKind::ColumnRef { column: right, .. },
-                                ) if left == right => Some(left.clone()),
+                            let first_column = match &args[0].kind {
+                                TypedExprKind::ColumnRef { column, .. } => Some(column),
                                 _ => None,
-                            }
+                            };
+                            first_column
+                                .filter(|column| {
+                                    args.iter().all(|arg| {
+                                        matches!(
+                                            &arg.kind,
+                                            TypedExprKind::ColumnRef { column: other, .. }
+                                                if other == *column
+                                        )
+                                    })
+                                })
+                                .cloned()
                         }
                         _ => None,
                     })
@@ -2637,9 +2687,16 @@ fn natural_join_columns(
     left_schema: &[ColumnMetadata],
     right_schema: &[ColumnMetadata],
 ) -> Vec<String> {
+    // Pairing every left column against every right column is quadratic in the
+    // join width, so the right side is hashed once. Iteration stays over the
+    // left schema because the common columns keep the left table's order.
+    let right_names = right_schema
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<HashSet<_>>();
     left_schema
         .iter()
-        .filter(|left| right_schema.iter().any(|right| right.name == left.name))
+        .filter(|left| right_names.contains(left.name.as_str()))
         .map(|column| column.name.clone())
         .collect()
 }
