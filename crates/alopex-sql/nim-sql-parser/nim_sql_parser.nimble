@@ -7,8 +7,8 @@ srcDir        = "src"
 
 # Dependencies
 requires "nim >= 2.2"
-requires "npeg"
-requires "msgpack4nim"
+requires "npeg == 1.3.0"
+requires "msgpack4nim == 0.4.4"
 
 # Tasks
 task test, "Run tests":

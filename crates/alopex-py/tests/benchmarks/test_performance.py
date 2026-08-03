@@ -94,17 +94,18 @@ def _cleanup_catalog(catalog_name, namespace_name, table_name):
         pass
 
 
-def _record_overhead(record_property, name, value):
-    """Record a measurement as test metadata instead of asserting on it.
+def _record_metric(benchmark, record_property, name, value):
+    """Record one numeric measurement without turning it into a test gate.
 
     Timing on a shared CI runner is contended and order-dependent, so a
     threshold here fails builds for unrelated scheduling noise rather than for
-    a real regression. Performance is tracked by recording these numbers and
-    reviewing them; a genuine regression is raised as an issue, not by turning
-    an unstable measurement into a gate.
+    a real regression. pytest-benchmark JSON is the canonical run artifact;
+    xUnit properties are a diagnostic projection of the same numeric values.
     """
-    record_property(name, value)
-    print(f"[perf] {name}: {value}")
+    numeric_value = float(value)
+    benchmark.extra_info[name] = numeric_value
+    record_property(name, f"{numeric_value:.6f}")
+    print(f"[perf] {name}: {numeric_value:.6f}")
 
 
 def _make_large_df(rows):
@@ -140,11 +141,14 @@ def test_scan_overhead_vs_polars(tmp_path, unique_name, benchmark, record_proper
         direct, wrapped, overhead_ms = benchmark.pedantic(
             measure, iterations=1, rounds=1, warmup_rounds=1
         )
-        _record_overhead(
+        _record_metric(
+            benchmark,
             record_property,
             "scan_overhead_ms",
-            f"{overhead_ms:.3f} (direct {direct * 1000:.3f}ms, wrapped {wrapped * 1000:.3f}ms)",
+            overhead_ms,
         )
+        _record_metric(benchmark, record_property, "scan_direct_ms", direct * 1000.0)
+        _record_metric(benchmark, record_property, "scan_wrapped_ms", wrapped * 1000.0)
         # Correctness: the wrapper must return a usable scan.
         assert (
             Catalog.scan_table(catalog_name, namespace_name, table_name) is not None
@@ -176,8 +180,11 @@ def test_large_read_overhead(tmp_path, unique_name, benchmark, record_property):
 
     try:
         benchmark.pedantic(measure, iterations=1, rounds=5, warmup_rounds=1)
-        _record_overhead(
-            record_property, "read_overhead_pct", f"{min(overheads) * 100:.2f}"
+        _record_metric(
+            benchmark,
+            record_property,
+            "read_overhead_pct",
+            statistics.median(overheads) * 100.0,
         )
         # Correctness: the wrapper must read back every row.
         assert (
@@ -229,8 +236,11 @@ def test_large_write_overhead(tmp_path, unique_name, benchmark, record_property)
             return overhead
 
         benchmark.pedantic(measure, iterations=1, rounds=5, warmup_rounds=1)
-        _record_overhead(
-            record_property, "write_overhead_pct", f"{min(overheads) * 100:.2f}"
+        _record_metric(
+            benchmark,
+            record_property,
+            "write_overhead_pct",
+            statistics.median(overheads) * 100.0,
         )
         # Correctness: the wrapper must persist every row.
         assert (

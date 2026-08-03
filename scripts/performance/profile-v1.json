@@ -1,0 +1,28 @@
+{
+  "cpu_affinity": [
+    0
+  ],
+  "environment": {
+    "MKL_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "POLARS_MAX_THREADS": "1",
+    "RAYON_NUM_THREADS": "1"
+  },
+  "name": "gha-ubuntu-24.04-x64-single-core-v1",
+  "runner": "ubuntu-24.04",
+  "schema_version": 1,
+  "toolchain": {
+    "maturin": "1.14.1",
+    "msgpack4nim": "0.4.4",
+    "nim_image": "nimlang/nim:2.2@sha256:62428daa4a39baeb6f5e429a9c2ca3cee27a80ef880fe6e1bf3e29cc2296ac1b",
+    "npeg": "1.3.0",
+    "numpy": "2.4.6",
+    "pip": "26.2",
+    "polars": "1.43.2",
+    "python": "3.11.11",
+    "pytest": "9.1.1",
+    "pytest-benchmark": "5.2.3",
+    "rust": "1.96.0"
+  }
+}

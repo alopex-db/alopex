@@ -265,6 +265,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install maturin pytest
+          # The performance module's numeric values remain advisory, but its
+          # scan/read/write correctness assertions stay in this required lane.
+          python -m pip install pytest-benchmark
           if [[ "${{ matrix.polars }}" == "latest" ]]; then
             python -m pip install polars
           else
@@ -336,8 +339,11 @@ jobs:
           mypy crates/alopex-py/python/alopex
 
   benchmarks:
-    name: benchmarks (small/medium)
+    name: benchmarks (advisory; small/medium)
     runs-on: ubuntu-latest
+    # Performance measurements are advisory. Functional behavior remains
+    # covered by the regular test jobs; benchmark noise must not gate CI.
+    continue-on-error: true
     steps:
       - name: Free disk space
         run: |
@@ -400,15 +406,17 @@ jobs:
         run: |
           pytest crates/alopex-py/tests/benchmarks/ -v --benchmark-only --benchmark-json=benchmark.json -m "not large"
       - name: Upload benchmark artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: alopex-py-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
           path: benchmark.json
+          if-no-files-found: ignore
 
   ci-success:
     name: ci-success
     if: ${{ always() }}
-    needs: [rust-check, test, polars-test, typecheck, benchmarks]
+    needs: [rust-check, test, polars-test, typecheck]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -423,8 +431,5 @@ jobs:
             exit 1
           fi
           if [[ "${{ needs.typecheck.result }}" != "success" ]]; then
-            exit 1
-          fi
-          if [[ "${{ needs.benchmarks.result }}" != "success" ]]; then
             exit 1
           fi
