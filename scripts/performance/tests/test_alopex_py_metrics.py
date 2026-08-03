@@ -531,6 +531,11 @@ def test_dedicated_workflow_is_serial_advisory_and_uses_pinned_inputs():
     assert "permissions:\n      contents: write\n      issues: write" in workflow
     assert "startsWith(github.ref, 'refs/tags/alopex-py-v')" in workflow
 
+    evidence_step = workflow.split("      - name: Inspect measurement evidence\n", 1)[
+        1
+    ].split("      - name: Prepare canonical history worktree\n", 1)[0]
+    assert "          import re\n" in evidence_step
+
 
 def test_regular_python_ci_does_not_gate_on_benchmark_job():
     repository_root = Path(__file__).resolve().parents[3]
