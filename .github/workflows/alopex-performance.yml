@@ -1,0 +1,427 @@
+name: Alopex Python Performance Advisory
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*", "alopex-py-v*"]
+  schedule:
+    - cron: "17 3 * * 2,5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alopex-performance-history
+  queue: max
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
+  OPENBLAS_NUM_THREADS: "1"
+  OMP_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  POLARS_MAX_THREADS: "1"
+  RAYON_NUM_THREADS: "1"
+
+jobs:
+  measure:
+    name: measure in read-only job
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python
+        id: setup_python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.11"
+
+      - name: Setup Rust
+        id: setup_rust
+        uses: dtolnay/rust-toolchain@1.96.0
+
+      - name: Prepare isolated Python environment
+        id: prepare_python
+        run: |
+          python -m venv .venv-performance
+          echo "VIRTUAL_ENV=$PWD/.venv-performance" >> "$GITHUB_ENV"
+          echo "$PWD/.venv-performance/bin" >> "$GITHUB_PATH"
+
+      - name: Install pinned measurement dependencies
+        id: install_dependencies
+        run: |
+          .venv-performance/bin/python -m pip install --upgrade pip==26.2
+          .venv-performance/bin/python -m pip install \
+            maturin==1.14.1 \
+            pytest==9.1.1 \
+            pytest-benchmark==5.2.3 \
+            numpy==2.4.6 \
+            polars==1.43.2
+          sudo apt-get update
+          sudo apt-get install -y patchelf
+
+      - name: Build pinned Nim SQL parser
+        id: build_nim
+        run: bash scripts/build-nim-parser.sh --backend docker
+
+      - name: Build release-mode Python extension
+        id: build_extension
+        run: maturin develop --release -m crates/alopex-py/Cargo.toml --features numpy
+
+      - name: Read canonical comparison history
+        id: history
+        env:
+          HISTORY_DIR: ${{ runner.temp }}/alopex-performance-history-read
+        run: |
+          mkdir -p "$HISTORY_DIR"
+          set +e
+          git ls-remote --exit-code --heads origin performance-history > /dev/null
+          branch_status=$?
+          set -e
+          case "$branch_status" in
+            0)
+              git fetch origin "+refs/heads/performance-history:refs/remotes/origin/performance-history"
+              if git cat-file -e refs/remotes/origin/performance-history:history.json; then
+                git show refs/remotes/origin/performance-history:history.json > "$HISTORY_DIR/history.json"
+              else
+                echo '{"schema_version": 1, "records": []}' > "$HISTORY_DIR/history.json"
+              fi
+              ;;
+            2)
+              echo '{"schema_version": 1, "records": []}' > "$HISTORY_DIR/history.json"
+              ;;
+            *)
+              echo "Could not determine whether performance-history exists." >&2
+              exit "$branch_status"
+              ;;
+          esac
+          echo "dir=$HISTORY_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Run issue 76 measurement workload
+        id: benchmark
+        continue-on-error: true
+        run: |
+          mkdir -p performance-artifacts
+          taskset -c 0 python -m pytest \
+            crates/alopex-py/tests/benchmarks/test_performance.py \
+            -v -s \
+            --benchmark-only \
+            --benchmark-json=performance-artifacts/benchmark.json \
+            --junitxml=performance-artifacts/performance-junit.xml \
+            -o junit_family=xunit1
+
+      - name: Normalize and cross-check machine-readable metrics
+        id: normalize
+        if: steps.benchmark.outcome == 'success'
+        run: |
+          python scripts/performance/alopex_py_metrics.py collect \
+            --benchmark-json performance-artifacts/benchmark.json \
+            --junit-xml performance-artifacts/performance-junit.xml \
+            --output performance-artifacts/current.json \
+            --commit "$GITHUB_SHA" \
+            --ref "$GITHUB_REF" \
+            --profile gha-ubuntu-24.04-x64-single-core-v1 \
+            --lock-file Cargo.lock \
+            --workload-file crates/alopex-py/tests/benchmarks/test_performance.py \
+            --workload-file scripts/performance/profile-v1.json \
+            --workload-file scripts/build-nim-parser.sh \
+            --workload-file crates/alopex-sql/nim-sql-parser/nim_sql_parser.nimble
+
+      - name: Compare with matching historical distribution
+        id: compare
+        if: steps.normalize.outcome == 'success'
+        env:
+          HISTORY_DIR: ${{ steps.history.outputs.dir }}
+        run: |
+          python scripts/performance/alopex_py_metrics.py evaluate \
+            --current performance-artifacts/current.json \
+            --history "$HISTORY_DIR/history.json" \
+            --output-json performance-artifacts/comparison.json \
+            --output-markdown performance-artifacts/report.md
+          cat performance-artifacts/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record measurement pipeline status
+        if: always()
+        env:
+          SETUP_PYTHON_OUTCOME: ${{ steps.setup_python.outcome }}
+          SETUP_RUST_OUTCOME: ${{ steps.setup_rust.outcome }}
+          PREPARE_PYTHON_OUTCOME: ${{ steps.prepare_python.outcome }}
+          INSTALL_DEPENDENCIES_OUTCOME: ${{ steps.install_dependencies.outcome }}
+          BUILD_NIM_OUTCOME: ${{ steps.build_nim.outcome }}
+          BUILD_EXTENSION_OUTCOME: ${{ steps.build_extension.outcome }}
+          HISTORY_OUTCOME: ${{ steps.history.outcome }}
+          BENCHMARK_OUTCOME: ${{ steps.benchmark.outcome }}
+          NORMALIZE_OUTCOME: ${{ steps.normalize.outcome }}
+          COMPARE_OUTCOME: ${{ steps.compare.outcome }}
+        run: |
+          mkdir -p performance-artifacts
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          stages = {
+              "setup_python": os.environ.get("SETUP_PYTHON_OUTCOME", "skipped"),
+              "setup_rust": os.environ.get("SETUP_RUST_OUTCOME", "skipped"),
+              "prepare_python": os.environ.get("PREPARE_PYTHON_OUTCOME", "skipped"),
+              "install_dependencies": os.environ.get("INSTALL_DEPENDENCIES_OUTCOME", "skipped"),
+              "build_nim": os.environ.get("BUILD_NIM_OUTCOME", "skipped"),
+              "build_extension": os.environ.get("BUILD_EXTENSION_OUTCOME", "skipped"),
+              "history": os.environ.get("HISTORY_OUTCOME", "skipped"),
+              "benchmark": os.environ.get("BENCHMARK_OUTCOME", "skipped"),
+              "normalize": os.environ.get("NORMALIZE_OUTCOME", "skipped"),
+              "compare": os.environ.get("COMPARE_OUTCOME", "skipped"),
+          }
+          failed = next((name for name, value in stages.items() if value != "success"), None)
+          payload = {
+              "status": "measured" if failed is None else "not_measured",
+              "reason": "ok" if failed is None else f"{failed}_{stages[failed]}",
+              "stages": stages,
+          }
+          Path("performance-artifacts/measurement-status.json").write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Explain missing measurement
+        if: always() && steps.compare.outcome != 'success'
+        run: |
+          echo "## Alopex Python Performance Advisory" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The measurement pipeline did not produce a comparable record." >> "$GITHUB_STEP_SUMMARY"
+          echo "This workflow is advisory and does not gate normal CI or a release." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload read-only measurement evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alopex-py-performance-measurement-${{ github.run_id }}-${{ github.run_attempt }}
+          path: performance-artifacts
+          if-no-files-found: warn
+          retention-days: 30
+
+  persist:
+    name: persist trusted history and notify
+    needs: measure
+    if: >-
+      always() &&
+      (github.ref == 'refs/heads/main' ||
+       startsWith(github.ref, 'refs/tags/v') ||
+       startsWith(github.ref, 'refs/tags/alopex-py-v'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      issues: write
+      actions: read
+    steps:
+      - name: Checkout trusted source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download read-only measurement evidence
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: alopex-py-performance-measurement-${{ github.run_id }}-${{ github.run_attempt }}
+          path: performance-artifacts
+
+      - name: Inspect measurement evidence
+        id: evidence
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("performance-artifacts")
+          status_path = root / "measurement-status.json"
+          measured = False
+          reason = "artifact_unavailable"
+          notification_ready = False
+          if status_path.is_file():
+              try:
+                  status = json.loads(status_path.read_text(encoding="utf-8"))
+                  reason = str(status.get("reason") or "measurement_pipeline_failed")
+                  measured = (
+                      status.get("status") == "measured"
+                      and (root / "current.json").is_file()
+                      and (root / "comparison.json").is_file()
+                  )
+              except (OSError, json.JSONDecodeError):
+                  reason = "measurement_status_invalid"
+          comparison_path = root / "comparison.json"
+          if measured and comparison_path.is_file():
+              try:
+                  comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
+                  notification_ready = bool(comparison.get("notification_ready"))
+              except (OSError, json.JSONDecodeError):
+                  measured = False
+                  reason = "comparison_invalid"
+          reason = re.sub(r"[^0-9A-Za-z_.-]+", "_", reason)[:80]
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as handle:
+              handle.write(f"measured={str(measured).lower()}\n")
+              handle.write(f"reason={reason}\n")
+              handle.write(f"notification_ready={str(notification_ready).lower()}\n")
+          PY
+
+      - name: Prepare canonical history worktree
+        id: history
+        if: always()
+        env:
+          HISTORY_DIR: ${{ runner.temp }}/alopex-performance-history
+        run: |
+          git fetch origin "+refs/heads/performance-history:refs/remotes/origin/performance-history" || true
+          if git show-ref --verify --quiet refs/remotes/origin/performance-history; then
+            git worktree add --detach "$HISTORY_DIR" refs/remotes/origin/performance-history
+          else
+            git worktree add --detach "$HISTORY_DIR" HEAD
+            git -C "$HISTORY_DIR" switch --orphan performance-history-local
+            git -C "$HISTORY_DIR" clean -fdx
+          fi
+          echo "dir=$HISTORY_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Record trusted measurement
+        id: record
+        if: steps.evidence.outputs.measured == 'true'
+        env:
+          HISTORY_DIR: ${{ steps.history.outputs.dir }}
+        run: |
+          args=(
+            record
+            --current performance-artifacts/current.json
+            --history "$HISTORY_DIR/history.json"
+            --index "$HISTORY_DIR/index.md"
+            --comparison performance-artifacts/comparison.json
+          )
+          if [[ "$GITHUB_REF" == refs/tags/v* || "$GITHUB_REF" == refs/tags/alopex-py-v* ]]; then
+            args+=(
+              --release-tag "$GITHUB_REF_NAME"
+              --release-dir "$HISTORY_DIR/releases"
+            )
+          fi
+          python3 scripts/performance/alopex_py_metrics.py "${args[@]}"
+          cp "$HISTORY_DIR/index.md" performance-artifacts/history.md
+          if [[ "$GITHUB_REF" == refs/tags/v* || "$GITHUB_REF" == refs/tags/alopex-py-v* ]]; then
+            cp "$HISTORY_DIR/releases/$GITHUB_REF_NAME.md" performance-artifacts/release-report.md
+            cp "$HISTORY_DIR/releases/$GITHUB_REF_NAME.json" performance-artifacts/release-report.json
+          fi
+
+      - name: Create non-blocking missing release artifact
+        id: missing_release_artifact
+        if: >-
+          always() &&
+          steps.record.outcome != 'success' &&
+          (startsWith(github.ref, 'refs/tags/v') ||
+           startsWith(github.ref, 'refs/tags/alopex-py-v'))
+        env:
+          FAILURE_REASON: ${{ steps.evidence.outputs.reason }}
+          MEASURED: ${{ steps.evidence.outputs.measured }}
+        run: |
+          reason="$FAILURE_REASON"
+          if [[ "$MEASURED" == "true" ]]; then
+            reason="record_failed"
+          fi
+          python3 scripts/performance/alopex_py_metrics.py missing-release \
+            --release-tag "$GITHUB_REF_NAME" \
+            --commit "$GITHUB_SHA" \
+            --reason "$reason" \
+            --output-markdown performance-artifacts/release-report.md \
+            --output-json performance-artifacts/release-report.json
+
+      - name: Add missing release report to canonical history
+        id: missing_release
+        if: >-
+          always() &&
+          steps.missing_release_artifact.outcome == 'success' &&
+          steps.history.outcome == 'success'
+        env:
+          HISTORY_DIR: ${{ steps.history.outputs.dir }}
+        run: |
+          mkdir -p "$HISTORY_DIR/releases"
+          cp performance-artifacts/release-report.md "$HISTORY_DIR/releases/$GITHUB_REF_NAME.md"
+          cp performance-artifacts/release-report.json "$HISTORY_DIR/releases/$GITHUB_REF_NAME.json"
+
+      - name: Persist canonical history
+        id: persist_history
+        if: >-
+          always() &&
+          (steps.record.outcome == 'success' ||
+           steps.missing_release.outcome == 'success')
+        env:
+          HISTORY_DIR: ${{ steps.history.outputs.dir }}
+        run: |
+          git -C "$HISTORY_DIR" config user.name "github-actions[bot]"
+          git -C "$HISTORY_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$HISTORY_DIR" add --all
+          if git -C "$HISTORY_DIR" diff --cached --quiet; then
+            echo "History already contains this commit and environment."
+            exit 0
+          fi
+          git -C "$HISTORY_DIR" commit -m "perf: record ${GITHUB_SHA::12}"
+          git -C "$HISTORY_DIR" push origin HEAD:performance-history
+
+      - name: Create or update advisory regression issue
+        if: >-
+          steps.persist_history.outcome == 'success' &&
+          steps.evidence.outputs.notification_ready == 'true'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          REPORT_PATH: performance-artifacts/report.md
+          COMPARISON_PATH: performance-artifacts/comparison.json
+        with:
+          script: |
+            const fs = require('fs');
+            const comparison = JSON.parse(fs.readFileSync(process.env.COMPARISON_PATH, 'utf8'));
+            const report = fs.readFileSync(process.env.REPORT_PATH, 'utf8');
+            const key = `${comparison.environment_fingerprint}:${comparison.workload_signature}`;
+            const marker = `<!-- alopex-performance-regression:${key} -->`;
+            const body = `${marker}\n${report}\nMeasured commit: ${context.sha}`;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find(issue => !issue.pull_request && issue.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `perf: alopex-py advisory regression (${comparison.notification_metrics.join(', ')})`,
+                body,
+              });
+            }
+
+      - name: Upload persisted report evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alopex-py-performance-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: performance-artifacts
+          if-no-files-found: warn
+          retention-days: 30

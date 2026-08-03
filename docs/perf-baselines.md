@@ -1,6 +1,15 @@
-# Performance Baselines
+# Rust Stress Performance Baselines
 
-This document describes how perf baselines are generated, stored, and enforced.
+This document describes how Rust stress-test baselines are generated, stored,
+and enforced. It is intentionally separate from the non-gating Alopex Python
+overhead monitor documented in
+[alopex-py-performance-monitoring.md](alopex-py-performance-monitoring.md).
+
+## Current status
+
+- This lane runs only on scheduled or manually dispatched stress workflows.
+- Its fixed-margin checks can fail the stress lane.
+- Its artifacts are not a source for Alopex Python Issue #76 comparisons.
 
 ## Baseline storage
 

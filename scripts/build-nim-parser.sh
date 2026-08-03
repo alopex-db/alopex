@@ -50,7 +50,7 @@ build_host() {
     echo "Nim >= 2.2 is required, found ${version}" >&2
     return 1
   fi
-  (cd "${PARSER_DIR}" && nimble install -y npeg msgpack4nim && nimble lib)
+  (cd "${PARSER_DIR}" && nimble install -y "npeg@1.3.0" "msgpack4nim@0.4.4" && nimble lib)
 }
 
 build_docker() {
@@ -65,7 +65,7 @@ build_docker() {
     -e HOME=/tmp \
     --user "$(id -u):$(id -g)" \
     "${NIM_IMAGE}" \
-    -c 'export PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin; nimble install -y npeg msgpack4nim && nimble lib'
+    -c 'export PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin; nimble install -y "npeg@1.3.0" "msgpack4nim@0.4.4" && nimble lib'
 }
 
 if [[ "${BACKEND}" == "auto" ]]; then
