@@ -1,0 +1,63 @@
+{
+  "records": [
+    {
+      "commit": "37fa53c23f9640e4ec70aa6f2b86d18c4663f75c",
+      "dependencies": {
+        "alopex": "0.8.3",
+        "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
+        "iniconfig": "2.3.0",
+        "maturin": "1.14.1",
+        "nim": "unavailable",
+        "numpy": "2.4.6",
+        "packaging": "26.2",
+        "patchelf": "patchelf 0.18.0",
+        "pip": "26.2",
+        "pluggy": "1.6.0",
+        "polars": "1.43.2",
+        "polars-runtime-32": "1.43.2",
+        "py-cpuinfo": "9.0.0",
+        "pygments": "2.20.0",
+        "pytest": "9.1.1",
+        "pytest-benchmark": "5.2.3",
+        "python": "3.11.11",
+        "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+        "setuptools": "65.5.0"
+      },
+      "environment": {
+        "cpu": "AMD EPYC 9V74 80-Core Processor",
+        "cpu_governor": "unavailable",
+        "fingerprint": "83b62ca6a26c0eb4",
+        "kernel": "6.17.0-1020-azure",
+        "machine": "x86_64",
+        "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+        "python": "3.11.11",
+        "system": "Linux",
+        "turbo_policy": "unavailable"
+      },
+      "lock_hash": "17c4b5ab831807c4c7bd929c6c8fa2c7ee85c4a29175b59d15adbb975888067c",
+      "measured_at": "2026-08-03T11:03:22.980736+00:00",
+      "metrics": {
+        "read_overhead_pct": {
+          "direction": "lower_is_better",
+          "unit": "%",
+          "value": 0.4780833969327687
+        },
+        "scan_overhead_ms": {
+          "direction": "lower_is_better",
+          "unit": "ms",
+          "value": 0.002003900010549841
+        },
+        "write_overhead_pct": {
+          "direction": "lower_is_better",
+          "unit": "%",
+          "value": 0.9241167209971717
+        }
+      },
+      "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+      "ref": "refs/heads/main",
+      "schema_version": 1,
+      "workload_signature": "d3f8b665f7c5365000265889ce11de54b96bd46ca6ad3ead8b2db977d7d91009"
+    }
+  ],
+  "schema_version": 1
+}
