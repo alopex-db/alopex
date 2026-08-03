@@ -247,6 +247,7 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+          import re
           from pathlib import Path
 
           root = Path("performance-artifacts")
