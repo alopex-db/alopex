@@ -755,8 +755,21 @@ suite "Roadmap — DDL and Vector":
     check cols.children[0].kind == nkVectorLiteral
     check cols.children[0].children.len == 3
     check cols.children[0].children[1].floatVal == -2.0
-    check cols.children[1].kind == nkFunctionCall
-    check cols.children[1].children[0].strVal == "CAST"
+    let castExpr = cols.children[1]
+    check castExpr.kind == nkCast
+    check castExpr.children.len == 2
+    check castExpr.children[0].kind == nkIdentifier
+    check castExpr.children[0].strVal == "id"
+    check castExpr.children[1].kind == nkTypeName
+    check castExpr.children[1].children.len == 1
+    check castExpr.children[1].children[0].kind == nkIdentifier
+    check castExpr.children[1].children[0].strVal == "TEXT"
+    check not castExpr.span.isEmpty
+    check not castExpr.children[0].span.isEmpty
+    check not castExpr.children[1].span.isEmpty
+    check castExpr.span.start == Location(line: 1, column: 26)
+    check castExpr.children[0].span.start == Location(line: 1, column: 31)
+    check castExpr.children[1].span.start == Location(line: 1, column: 37)
     check cols.children[2].children[0].strVal == "NOW"
 
 suite "Roadmap — aggregation":
