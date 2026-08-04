@@ -91,7 +91,8 @@ task test, "Run tests":
         "tests/test_parser.nim",
         "tests/test_promql_parser.nim",
         "tests/test_msgpack_output.nim",
-        "tests/test_ffi_boundary.nim"
+        "tests/test_ffi_boundary.nim",
+        "tests/test_security_limits.nim"
       ]
 
   for testFile in testFiles:

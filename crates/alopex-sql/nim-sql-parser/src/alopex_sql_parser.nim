@@ -1174,6 +1174,30 @@ proc errorResult(message: string): CParseResult =
 
 const internalDefectPrefix = "internal parser defect (this is a parser bug, not invalid SQL): "
 
+const
+  maxSqlInputBytes = 1_048_576
+  negativeSqlLengthError = "SQL input length must not be negative"
+  oversizeSqlInputError = "SQL input exceeds 1048576-byte limit"
+  nullSqlInputError = "SQL input pointer must not be null"
+  interiorNulSqlInputError = "SQL input contains an interior NUL byte"
+
+proc copySqlInput(input: cstring; length: cint): string =
+  ## Validate the C transport metadata before touching `input`, then take one
+  ## exact, length-bounded copy. In particular, an oversized hostile pointer
+  ## must be rejected without scanning or dereferencing it.
+  if length < 0:
+    raise newException(ValueError, negativeSqlLengthError)
+  if length > cint(maxSqlInputBytes):
+    raise newException(ValueError, oversizeSqlInputError)
+  if input == nil:
+    raise newException(ValueError, nullSqlInputError)
+
+  result = newString(int(length))
+  if length > 0:
+    copyMem(addr result[0], input, int(length))
+  if '\0' in result:
+    raise newException(ValueError, interiorNulSqlInputError)
+
 proc alopex_parse_sql*(input: cstring, length: cint): CParseResult {.exportc, dynlib, cdecl.} =
   ## Parse SQL and return MessagePack-serialized AST bytes.
   ## Caller must free buffer_ptr with alopex_free_buffer.
@@ -1193,7 +1217,7 @@ proc alopex_parse_sql*(input: cstring, length: cint): CParseResult {.exportc, dy
   ## ワイヤ契約 (docs/ffi-ast-contract.md) はエラー経路には及ばないため
   ## 不変。
   try:
-    let sql = if length > 0: ($input)[0 ..< length] else: $input
+    let sql = copySqlInput(input, length)
     let payload = encodeSqlToMsgPack(sql)
     result = CParseResult(
       kind: prkOk,
