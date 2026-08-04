@@ -21,8 +21,8 @@ echo "Testing Nim SQL parser (${BACKEND} backend)"
 if [[ "${BACKEND}" == "host" ]]; then
   version="$(nim --version | sed -n 's/.*Version \([0-9][0-9.]*\).*/\1/p' | head -n 1)"
   [[ -n "${version}" ]] || { echo "could not determine Nim version" >&2; exit 1; }
-  if [[ "$(printf '%s\n' "2.2.0" "${version}" | sort -V | head -n 1)" != "2.2.0" ]]; then
-    echo "Nim >= 2.2 is required, found ${version}" >&2
+  if [[ "${version}" != "2.2.10" ]]; then
+    echo "Nim 2.2.10 is required, found ${version}" >&2
     exit 1
   fi
   (cd "${PARSER_DIR}" && nimble install -y npeg msgpack4nim && nimble test)

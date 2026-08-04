@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the Nim FFI library used by alopex-sql. The Docker image is pinned to
-# the digest used by the parity and release workflows so local and CI builds
-# use the same Nim toolchain.
+# Build the Nim FFI library used by alopex-sql. CI and release workflows use
+# exact host Nim 2.2.10. Docker is an explicit local backend, or an auto-mode
+# fallback only when nim or nimble is absent. A present wrong Nim version is
+# selected as host and rejected rather than falling back to Docker.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PARSER_DIR="${ROOT_DIR}/crates/alopex-sql/nim-sql-parser"
@@ -21,8 +22,10 @@ usage() {
 Usage: scripts/build-nim-parser.sh [--backend auto|host|docker]
 
 Builds crates/alopex-sql/nim-sql-parser/libalopex_sql_parser.so (or the
-platform equivalent). The default backend uses a local Nim >= 2.2 toolchain
-when available and falls back to the pinned Docker image.
+platform equivalent). CI and release use exact host Nim 2.2.10. Locally,
+Docker is used when explicitly requested, or by auto only when nim or nimble
+is absent. If both commands exist but Nim has the wrong version, host is
+selected and the build is rejected without a Docker fallback.
 EOF
 }
 
@@ -46,8 +49,8 @@ build_host() {
   local version
   version="$(nim --version | sed -n 's/.*Version \([0-9][0-9.]*\).*/\1/p' | head -n 1)"
   [[ -n "${version}" ]] || { echo "could not determine Nim version" >&2; return 1; }
-  if [[ "$(printf '%s\n' "2.2.0" "${version}" | sort -V | head -n 1)" != "2.2.0" ]]; then
-    echo "Nim >= 2.2 is required, found ${version}" >&2
+  if [[ "${version}" != "2.2.10" ]]; then
+    echo "Nim 2.2.10 is required, found ${version}" >&2
     return 1
   fi
   (cd "${PARSER_DIR}" && nimble install -y "npeg@1.3.0" "msgpack4nim@0.4.4" && nimble lib)
