@@ -1,3 +1,5 @@
+import std/[os, strutils]
+
 # Package
 version       = "0.2.0"
 author        = "Alopex Team"
@@ -12,10 +14,95 @@ requires "msgpack4nim == 0.4.4"
 
 # Tasks
 task test, "Run tests":
-  exec "nim c -r tests/test_parser.nim"
-  exec "nim c -r tests/test_promql_parser.nim"
-  exec "nim c -r tests/test_msgpack_output.nim"
-  exec "nim c -r tests/test_ffi_boundary.nim"
+  const requiredNimVersion = "2.2.10"
+  const requiredNimbleVersion = "0.22.3"
+  const requiredNimbleSha = "42ef70c2102a942c46f13eb76872326edd525cec"
+  const failureInjectionEnv = "ALOPEX_NIM_PARSER_INJECT_FAILURE"
+  const buildRootEnv = "ALOPEX_NIM_TEST_BUILD_ROOT"
+  const nimBinEnv = "ALOPEX_NIM_BIN"
+
+  let nimBin = getEnv(nimBinEnv)
+  if nimBin.len == 0 or not fileExists(nimBin):
+    echo nimBinEnv & " must name the resolved Nim executable"
+    quit(2)
+
+  let nimIdentity = gorgeEx(quoteShell(nimBin) & " --version")
+  if nimIdentity.exitCode != 0:
+    echo nimIdentity.output
+    echo "failed to inspect the resolved Nim executable"
+    quit(2)
+  var actualNimVersion = ""
+  const nimVersionPrefix = "Nim Compiler Version "
+  for line in nimIdentity.output.splitLines:
+    if line.startsWith(nimVersionPrefix):
+      let fields = line[nimVersionPrefix.len .. ^1].splitWhitespace
+      if fields.len > 0:
+        actualNimVersion = fields[0]
+      break
+  if actualNimVersion != requiredNimVersion:
+    echo "Nim " & requiredNimVersion & " is required, found " &
+      (if actualNimVersion.len == 0: "unknown" else: actualNimVersion)
+    quit(2)
+
+  let nimbleIdentity = gorgeEx(quoteShell(nimbleExe) & " --version")
+  if nimbleIdentity.exitCode != 0:
+    echo nimbleIdentity.output
+    echo "failed to inspect the invoking Nimble executable"
+    quit(2)
+  let nimbleShaLine = "git hash: " & requiredNimbleSha
+  var hasRequiredNimbleVersion = false
+  var hasRequiredNimbleSha = false
+  for line in nimbleIdentity.output.splitLines:
+    if line.startsWith("nimble v"):
+      let fields = line["nimble v".len .. ^1].splitWhitespace
+      if fields.len > 0 and fields[0] == requiredNimbleVersion:
+        hasRequiredNimbleVersion = true
+    if line == nimbleShaLine:
+      hasRequiredNimbleSha = true
+  if not hasRequiredNimbleVersion:
+    echo "Nimble " & requiredNimbleVersion &
+      " is required from the invoking executable"
+    quit(2)
+  if not hasRequiredNimbleSha:
+    echo "Nimble must be built from " & requiredNimbleSha
+    quit(2)
+
+  let injectFailure = getEnv(failureInjectionEnv, "0")
+  if injectFailure notin ["0", "1"]:
+    echo failureInjectionEnv & " must be 0 or 1"
+    quit(2)
+
+  let suppliedBuildRoot = getEnv(buildRootEnv)
+  if suppliedBuildRoot.len == 0:
+    echo buildRootEnv & " must name an invocation-owned temporary directory"
+    quit(2)
+  let buildRoot = suppliedBuildRoot
+  let binDir = buildRoot / "bin"
+  let nimcacheDir = buildRoot / "nimcache"
+  if not dirExists(binDir) or not dirExists(nimcacheDir):
+    echo buildRootEnv & " must contain pre-created bin and nimcache directories"
+    quit(2)
+
+  let testFiles =
+    if injectFailure == "1":
+      @["tests/test_harness_failure.nim"]
+    else:
+      @[
+        "tests/test_parser.nim",
+        "tests/test_promql_parser.nim",
+        "tests/test_msgpack_output.nim",
+        "tests/test_ffi_boundary.nim"
+      ]
+
+  for testFile in testFiles:
+    let executable = binDir / splitFile(testFile).name
+    let command = quoteShell(nimBin) & " c -r --nimcache:" &
+      quoteShell(nimcacheDir) & " -o:" & quoteShell(executable) & " " &
+      quoteShell(testFile)
+    let result = gorgeEx(command)
+    echo result.output
+    if result.exitCode != 0:
+      quit(result.exitCode)
 
 task lib, "Build shared library":
   # 前提 (issue #40 対応時に Nim 2.2.10 / alopex-parity コンテナで実測検証済み):
