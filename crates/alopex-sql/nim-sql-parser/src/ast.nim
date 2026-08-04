@@ -21,6 +21,7 @@ type
     nkCreateTable
     nkDropTable
     nkCreateIndex
+    nkCreateContinuousAggregate
     nkDropIndex
     nkPragma
     nkStatementList
