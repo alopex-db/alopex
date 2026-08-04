@@ -2,8 +2,92 @@
 
 use alopex_sql::{
     AlopexDialect, DataType, ExprKind, FromItem, InsertSource, JoinType, Literal, Parser,
-    SelectItem, StatementKind, VectorMetric, parser_contract_version,
+    ParserError, SelectItem, StatementKind, VectorMetric, parser_contract_version,
 };
+
+const MAX_SQL_INPUT_BYTES: usize = 1_048_576;
+
+fn padded_sql(total_bytes: usize) -> String {
+    const STATEMENT: &str = "SELECT 1";
+    assert!(total_bytes >= STATEMENT.len());
+    format!("{}{STATEMENT}", " ".repeat(total_bytes - STATEMENT.len()))
+}
+
+fn padded_expression(total_bytes: usize) -> String {
+    const EXPRESSION: &str = "1";
+    assert!(total_bytes >= EXPRESSION.len());
+    format!("{}{EXPRESSION}", " ".repeat(total_bytes - EXPRESSION.len()))
+}
+
+fn assert_input_too_large(error: ParserError) {
+    let ParserError::UnexpectedToken {
+        line,
+        column,
+        expected,
+        found,
+    } = error
+    else {
+        panic!("expected bounded input error, got {error:?}");
+    };
+    assert_eq!((line, column), (0, 0));
+    assert_eq!(expected, "SQL input at most 1048576 UTF-8 bytes");
+    assert_eq!(found, "SQL input exceeds byte limit");
+}
+
+#[test]
+fn public_sql_boundary_accepts_minus_and_exact_then_rejects_plus() {
+    for total_bytes in [MAX_SQL_INPUT_BYTES - 1, MAX_SQL_INPUT_BYTES] {
+        let sql = padded_sql(total_bytes);
+        assert_eq!(sql.len(), total_bytes);
+        let statements = Parser::parse_sql(&AlopexDialect, &sql)
+            .unwrap_or_else(|error| panic!("{total_bytes}-byte SQL should pass guard: {error}"));
+        assert_eq!(statements.len(), 1);
+    }
+
+    let plus = padded_sql(MAX_SQL_INPUT_BYTES + 1);
+    assert_input_too_large(
+        Parser::parse_sql(&AlopexDialect, &plus).expect_err("limit plus one must be rejected"),
+    );
+}
+
+#[test]
+fn public_expression_boundary_accounts_for_select_wrapper_before_allocation() {
+    const WRAPPER_BYTES: usize = "SELECT ".len();
+    let exact = padded_expression(MAX_SQL_INPUT_BYTES - WRAPPER_BYTES);
+    assert_eq!(exact.len() + WRAPPER_BYTES, MAX_SQL_INPUT_BYTES);
+    let expression = Parser::parse_expression_sql(&AlopexDialect, &exact)
+        .expect("wrapped exact-limit expression should pass guard and parse");
+    assert!(matches!(
+        expression.kind,
+        ExprKind::Literal {
+            literal: Literal::Number(ref value)
+        } if value == "1"
+    ));
+
+    let plus = padded_expression(MAX_SQL_INPUT_BYTES - WRAPPER_BYTES + 1);
+    assert_input_too_large(
+        Parser::parse_expression_sql(&AlopexDialect, &plus)
+            .expect_err("wrapper-adjusted limit plus one must be rejected"),
+    );
+}
+
+#[test]
+fn public_nul_guard_and_normal_sql_behavior_are_stable() {
+    let nul = Parser::parse_sql(&AlopexDialect, "SELECT \0 1")
+        .expect_err("interior NUL must be rejected without calling FFI");
+    let ParserError::UnexpectedToken {
+        expected, found, ..
+    } = nul
+    else {
+        panic!("expected bounded NUL error, got {nul:?}");
+    };
+    assert_eq!(expected, "valid SQL without interior NUL bytes");
+    assert_eq!(found, "interior NUL byte");
+
+    let statements =
+        Parser::parse_sql(&AlopexDialect, "SELECT 1").expect("ordinary SQL must remain unchanged");
+    assert_eq!(statements.len(), 1);
+}
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {

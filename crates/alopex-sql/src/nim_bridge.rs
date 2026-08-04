@@ -4,28 +4,34 @@ use crate::ast::{Statement, StatementKind};
 use crate::error::{ParserError, Result};
 use crate::nim_ffi::{self, OwnedBuffer, ParseResultKind};
 
+const MAX_SQL_INPUT_BYTES: usize = 1_048_576;
+const SELECT_WRAPPER_PREFIX: &str = "SELECT ";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputPreflightError {
+    TooLarge,
+    LengthOverflow,
+    InteriorNul,
+}
+
 /// Return the SQL/PromQL MessagePack wire contract version exported by Nim.
 pub fn parser_contract_version() -> String {
     nim_ffi::parser_contract_version()
 }
 
 pub fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
-    if sql.as_bytes().contains(&0) {
-        return Err(ParserError::UnexpectedToken {
-            line: 0,
-            column: 0,
-            expected: "valid SQL without interior NUL bytes".to_string(),
-            found: "interior NUL byte".to_string(),
-        });
-    }
+    preflight_input(sql, 0).map_err(parser_error_from_preflight)?;
+    parse_sql_preflighted(sql)
+}
 
+fn parse_sql_preflighted(sql: &str) -> Result<Vec<Statement>> {
     let natural_join_markers = natural_join_markers(sql);
     // Option (a): double-quoted tokens are identifiers under SQL standard and
     // PostgreSQL rules. The currently deployed Nim lexer predates that contract
     // and emits them as string literals, so normalize the FFI input until every
     // parser binary has the corrected token kind.
     let normalized_sql = normalize_quoted_identifiers(sql);
-    let result = nim_ffi::parse_sql(&normalized_sql);
+    let result = nim_ffi::parse_sql(&normalized_sql).map_err(parser_error_from_ffi_input)?;
     match result.kind {
         ParseResultKind::Ok => {
             let buffer = OwnedBuffer::new(result.buffer_ptr, result.buffer_len);
@@ -356,8 +362,12 @@ fn annotate_expr_natural_joins(
 }
 
 pub fn parse_expression_sql(sql: &str) -> Result<crate::ast::Expr> {
-    let wrapped = format!("SELECT {sql}");
-    let statements = parse_sql(&wrapped)?;
+    let wrapped_len =
+        preflight_input(sql, SELECT_WRAPPER_PREFIX.len()).map_err(parser_error_from_preflight)?;
+    let mut wrapped = String::with_capacity(wrapped_len);
+    wrapped.push_str(SELECT_WRAPPER_PREFIX);
+    wrapped.push_str(sql);
+    let statements = parse_sql_preflighted(&wrapped)?;
     let Some(statement) = statements.into_iter().next() else {
         return Err(empty_expression_error());
     };
@@ -377,6 +387,64 @@ fn empty_expression_error() -> ParserError {
         column: 0,
         expected: "expression".to_string(),
         found: "empty parser result".to_string(),
+    }
+}
+
+fn checked_total_input_len(
+    input_len: usize,
+    wrapper_len: usize,
+) -> std::result::Result<usize, InputPreflightError> {
+    let total_len = input_len
+        .checked_add(wrapper_len)
+        .ok_or(InputPreflightError::LengthOverflow)?;
+    if total_len > MAX_SQL_INPUT_BYTES {
+        return Err(InputPreflightError::TooLarge);
+    }
+    Ok(total_len)
+}
+
+fn preflight_input(
+    sql: &str,
+    wrapper_len: usize,
+) -> std::result::Result<usize, InputPreflightError> {
+    let total_len = checked_total_input_len(sql.len(), wrapper_len)?;
+    if sql.as_bytes().contains(&0) {
+        return Err(InputPreflightError::InteriorNul);
+    }
+    Ok(total_len)
+}
+
+fn parser_error_from_preflight(error: InputPreflightError) -> ParserError {
+    match error {
+        InputPreflightError::TooLarge | InputPreflightError::LengthOverflow => {
+            input_too_large_error()
+        }
+        InputPreflightError::InteriorNul => interior_nul_error(),
+    }
+}
+
+fn parser_error_from_ffi_input(error: nim_ffi::ParseInputError) -> ParserError {
+    match error {
+        nim_ffi::ParseInputError::LengthOutOfRange => input_too_large_error(),
+        nim_ffi::ParseInputError::InteriorNul => interior_nul_error(),
+    }
+}
+
+fn input_too_large_error() -> ParserError {
+    ParserError::UnexpectedToken {
+        line: 0,
+        column: 0,
+        expected: "SQL input at most 1048576 UTF-8 bytes".to_string(),
+        found: "SQL input exceeds byte limit".to_string(),
+    }
+}
+
+fn interior_nul_error() -> ParserError {
+    ParserError::UnexpectedToken {
+        line: 0,
+        column: 0,
+        expected: "valid SQL without interior NUL bytes".to_string(),
+        found: "interior NUL byte".to_string(),
     }
 }
 
@@ -408,4 +476,73 @@ fn parse_nim_line_col(message: &str) -> Option<(u64, u64)> {
     let (line, rest) = after_line.split_once(", col ")?;
     let (col, _) = rest.split_once(':')?;
     Some((line.parse().ok()?, col.parse().ok()?))
+}
+
+#[cfg(test)]
+mod input_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn raw_sql_guard_accepts_boundary_minus_and_exact_but_rejects_plus() {
+        assert_eq!(
+            checked_total_input_len(MAX_SQL_INPUT_BYTES - 1, 0),
+            Ok(MAX_SQL_INPUT_BYTES - 1)
+        );
+        assert_eq!(
+            checked_total_input_len(MAX_SQL_INPUT_BYTES, 0),
+            Ok(MAX_SQL_INPUT_BYTES)
+        );
+        assert_eq!(
+            checked_total_input_len(MAX_SQL_INPUT_BYTES + 1, 0),
+            Err(InputPreflightError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn guard_counts_utf8_bytes_instead_of_characters() {
+        let exact = "é".repeat(MAX_SQL_INPUT_BYTES / "é".len());
+        assert_eq!(exact.chars().count(), MAX_SQL_INPUT_BYTES / 2);
+        assert_eq!(exact.len(), MAX_SQL_INPUT_BYTES);
+        assert_eq!(preflight_input(&exact, 0), Ok(MAX_SQL_INPUT_BYTES));
+
+        let plus = format!("{exact}é");
+        assert_eq!(
+            preflight_input(&plus, 0),
+            Err(InputPreflightError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn expression_guard_includes_wrapper_and_detects_length_overflow() {
+        assert_eq!(
+            checked_total_input_len(
+                MAX_SQL_INPUT_BYTES - SELECT_WRAPPER_PREFIX.len(),
+                SELECT_WRAPPER_PREFIX.len(),
+            ),
+            Ok(MAX_SQL_INPUT_BYTES)
+        );
+        assert_eq!(
+            checked_total_input_len(
+                MAX_SQL_INPUT_BYTES - SELECT_WRAPPER_PREFIX.len() + 1,
+                SELECT_WRAPPER_PREFIX.len(),
+            ),
+            Err(InputPreflightError::TooLarge)
+        );
+        assert_eq!(
+            checked_total_input_len(usize::MAX, SELECT_WRAPPER_PREFIX.len()),
+            Err(InputPreflightError::LengthOverflow)
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_nul_before_any_ffi_work() {
+        assert_eq!(
+            preflight_input("SELECT \0 1", 0),
+            Err(InputPreflightError::InteriorNul)
+        );
+        assert_eq!(
+            preflight_input("1 \0 2", SELECT_WRAPPER_PREFIX.len()),
+            Err(InputPreflightError::InteriorNul)
+        );
+    }
 }

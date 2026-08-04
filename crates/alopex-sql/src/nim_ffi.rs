@@ -38,14 +38,32 @@ unsafe extern "C" {
 
 static INIT: Once = Once::new();
 
-pub fn parse_sql(sql: &str) -> CParseResult {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParseInputError {
+    InteriorNul,
+    LengthOutOfRange,
+}
+
+fn checked_c_int_len(len: usize) -> Result<c_int, ParseInputError> {
+    c_int::try_from(len).map_err(|_| ParseInputError::LengthOutOfRange)
+}
+
+fn prepare_sql_input(sql: &str) -> Result<(CString, c_int), ParseInputError> {
+    let len = checked_c_int_len(sql.len())?;
+    if sql.as_bytes().contains(&0) {
+        return Err(ParseInputError::InteriorNul);
+    }
+    let input = CString::new(sql).map_err(|_| ParseInputError::InteriorNul)?;
+    Ok((input, len))
+}
+
+pub fn parse_sql(sql: &str) -> Result<CParseResult, ParseInputError> {
+    let (input, len) = prepare_sql_input(sql)?;
     INIT.call_once(|| unsafe {
         alopex_parser_init();
     });
 
-    let input = CString::new(sql).expect("SQL input contains an interior NUL byte");
-    let len = c_int::try_from(sql.len()).expect("SQL input is too large for Nim parser FFI");
-    unsafe { alopex_parse_sql(input.as_ptr(), len) }
+    Ok(unsafe { alopex_parse_sql(input.as_ptr(), len) })
 }
 
 pub fn parser_contract_version() -> String {
@@ -88,5 +106,32 @@ impl Drop for OwnedBuffer {
         if !self.ptr.is_null() {
             unsafe { alopex_free_buffer(self.ptr) };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hostile_length_is_fallible_without_allocating_a_huge_string() {
+        let max = usize::try_from(c_int::MAX).expect("c_int::MAX fits usize");
+        assert_eq!(checked_c_int_len(max), Ok(c_int::MAX));
+        assert_eq!(
+            checked_c_int_len(max + 1),
+            Err(ParseInputError::LengthOutOfRange)
+        );
+        assert_eq!(
+            checked_c_int_len(usize::MAX),
+            Err(ParseInputError::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn low_level_adapter_rejects_nul_without_panicking() {
+        assert_eq!(
+            prepare_sql_input("SELECT \0 1").map(|_| ()),
+            Err(ParseInputError::InteriorNul)
+        );
     }
 }
