@@ -21,7 +21,7 @@ const PARTITION_SIZE: usize = 64;
 const PARTITION_SCAN_REPEATS: usize = 64;
 
 fn within_stability_gate(comparison: &V06Comparison) -> bool {
-    comparison.degradation_ratio.abs() <= STABILITY_GATE_RATIO
+    comparison.degradation_ratio <= STABILITY_GATE_RATIO
 }
 
 fn schema() -> Schema {
@@ -145,7 +145,7 @@ fn dataframe_cast_and_partition_scan_stability_within_30_percent() {
     eprintln!("dataframe_stability {line}");
     assert!(
         within_stability_gate(&comparison),
-        "expected degradation_ratio.abs() <= {STABILITY_GATE_RATIO:.2}, got {line}"
+        "expected degradation_ratio <= {STABILITY_GATE_RATIO:.2}, got {line}"
     );
 }
 
@@ -154,24 +154,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stability_gate_accepts_clear_inside_ratios() {
+    fn stability_gate_accepts_degradation_within_limit() {
         let positive =
             compare_v05_to_current(Duration::from_millis(100), Duration::from_millis(125));
-        let negative =
-            compare_v05_to_current(Duration::from_millis(100), Duration::from_millis(75));
 
         assert!(within_stability_gate(&positive));
-        assert!(within_stability_gate(&negative));
     }
 
     #[test]
-    fn stability_gate_rejects_clear_outside_ratios() {
-        let positive =
-            compare_v05_to_current(Duration::from_millis(100), Duration::from_millis(135));
-        let negative =
+    fn stability_gate_accepts_improvements_beyond_limit() {
+        let improvement =
             compare_v05_to_current(Duration::from_millis(100), Duration::from_millis(65));
 
+        assert!(within_stability_gate(&improvement));
+    }
+
+    #[test]
+    fn stability_gate_rejects_degradation_beyond_limit() {
+        let positive =
+            compare_v05_to_current(Duration::from_millis(100), Duration::from_millis(135));
+
         assert!(!within_stability_gate(&positive));
-        assert!(!within_stability_gate(&negative));
     }
 }

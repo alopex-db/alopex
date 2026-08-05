@@ -556,7 +556,7 @@ async fn http_streaming_timeout_returns_error() {
         let server = Server::new(config).expect("server");
         let router = http::router(server.state.clone());
 
-        let (status, _, _) = send_json(
+        let (status, _, body) = send_json(
             router.clone(),
             Method::POST,
             "/sql",
@@ -564,25 +564,40 @@ async fn http_streaming_timeout_returns_error() {
             &[],
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "CREATE TABLE failed: {}",
+            String::from_utf8_lossy(&body)
+        );
 
-        let mut values = String::new();
-        for id in 0..2000 {
-            if !values.is_empty() {
-                values.push_str(", ");
+        const TOTAL_ROWS: usize = 2_000;
+        const INSERT_BATCH_ROWS: usize = 100;
+        for batch_start in (0..TOTAL_ROWS).step_by(INSERT_BATCH_ROWS) {
+            let batch_end = (batch_start + INSERT_BATCH_ROWS).min(TOTAL_ROWS);
+            let mut values = String::new();
+            for id in batch_start..batch_end {
+                if !values.is_empty() {
+                    values.push_str(", ");
+                }
+                values.push_str(&format!("({id}, 'v{id}')"));
             }
-            values.push_str(&format!("({id}, 'v{id}')"));
+            let insert_sql = format!("INSERT INTO items (id, value) VALUES {values};");
+            let (status, _, body) = send_json(
+                router.clone(),
+                Method::POST,
+                "/sql",
+                json!({ "sql": insert_sql }),
+                &[],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "bounded INSERT batch {batch_start}..{batch_end} failed: {}",
+                String::from_utf8_lossy(&body)
+            );
         }
-        let insert_sql = format!("INSERT INTO items (id, value) VALUES {values};");
-        let (status, _, _) = send_json(
-            router,
-            Method::POST,
-            "/sql",
-            json!({ "sql": insert_sql }),
-            &[],
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
     }
 
     let config = ServerConfig {

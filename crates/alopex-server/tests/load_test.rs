@@ -14,6 +14,9 @@ use tempfile::tempdir;
 use tokio::time::sleep;
 use tower::ServiceExt;
 
+const LOAD_TEST_ROWS: usize = 2_000;
+const INSERT_BATCH_ROWS: usize = 100;
+
 async fn build_state(query_timeout: Duration) -> (Arc<ServerState>, tempfile::TempDir) {
     let temp = tempdir().expect("tempdir");
     let config = ServerConfig {
@@ -50,6 +53,42 @@ async fn send_get(router: axum::Router, path: &str) -> StatusCode {
         .expect("request");
     let response = router.oneshot(request).await.expect("response");
     response.status()
+}
+
+async fn seed_items(router: &axum::Router, total_rows: usize) {
+    let (status, body) = send_json(
+        router.clone(),
+        "/sql",
+        json!({
+            "sql": "CREATE TABLE items (id INT PRIMARY KEY, value TEXT);"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "CREATE TABLE failed: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    for batch_start in (0..total_rows).step_by(INSERT_BATCH_ROWS) {
+        let batch_end = (batch_start + INSERT_BATCH_ROWS).min(total_rows);
+        let mut values = String::new();
+        for id in batch_start..batch_end {
+            if !values.is_empty() {
+                values.push_str(", ");
+            }
+            values.push_str(&format!("({id}, 'v{id}')"));
+        }
+        let insert_sql = format!("INSERT INTO items (id, value) VALUES {values};");
+        let (status, body) = send_json(router.clone(), "/sql", json!({ "sql": insert_sql })).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "bounded INSERT batch {batch_start}..{batch_end} failed: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
 }
 
 fn parse_metric(metrics: &str, name: &str) -> Option<f64> {
@@ -112,26 +151,7 @@ async fn load_test_backpressure_with_slow_client() {
     let (state, _temp) = build_state(Duration::from_secs(5)).await;
     let router = http::router(state.clone());
 
-    let (status, _) = send_json(
-        router.clone(),
-        "/sql",
-        json!({
-            "sql": "CREATE TABLE items (id INT PRIMARY KEY, value TEXT);"
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    let mut values = String::new();
-    for id in 0..2000 {
-        if !values.is_empty() {
-            values.push_str(", ");
-        }
-        values.push_str(&format!("({}, 'v{}')", id, id));
-    }
-    let insert_sql = format!("INSERT INTO items (id, value) VALUES {values};");
-    let (status, _) = send_json(router.clone(), "/sql", json!({ "sql": insert_sql })).await;
-    assert_eq!(status, StatusCode::OK);
+    seed_items(&router, LOAD_TEST_ROWS).await;
 
     let metrics_before = state.metrics.expose_prometheus().expect("metrics");
     let before = parse_metric(&metrics_before, "stream_backpressure").unwrap_or(0.0);
@@ -176,24 +196,7 @@ async fn load_test_timeout_cancels_stream() {
         let server = Server::new(config).expect("server");
         let router = http::router(server.state.clone());
 
-        let (status, _) = send_json(
-            router.clone(),
-            "/sql",
-            json!({ "sql": "CREATE TABLE items (id INT PRIMARY KEY, value TEXT);" }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-
-        let mut values = String::new();
-        for id in 0..2000 {
-            if !values.is_empty() {
-                values.push_str(", ");
-            }
-            values.push_str(&format!("({id}, 'v{id}')"));
-        }
-        let insert_sql = format!("INSERT INTO items (id, value) VALUES {values};");
-        let (status, _) = send_json(router, "/sql", json!({ "sql": insert_sql })).await;
-        assert_eq!(status, StatusCode::OK);
+        seed_items(&router, LOAD_TEST_ROWS).await;
     }
 
     let config = ServerConfig {
