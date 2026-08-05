@@ -1,8 +1,56 @@
 ## MessagePack contract tests for the Nim SQL parser FFI payload.
 
+{.define: alopexSqlParserContractTests.}
+
 import std/[json, strutils, unittest]
 import msgpack4nim/msgpack2json
-import ../src/alopex_sql_parser
+import ../src/[alopex_sql_parser, ast, parser]
+
+const ContractDescriptor = staticRead("../PARSER_CONTRACT_VERSION").strip()
+const ContinuousAggregateProducerEnabled = ContractDescriptor == "0.4.0"
+
+const
+  MinimalContinuousAggregateSql =
+    "CREATE CONTINUOUS AGGREGATE c AS SELECT 1 FROM m " &
+    "WITH (retention = '7d', refresh_interval = '1h')"
+  CanonicalContinuousAggregateSql = """CREATE CONTINUOUS AGGREGATE cpu_hourly
+AS
+SELECT
+  TIME_BUCKET(INTERVAL '1 hour', time) AS time,
+  host,
+  AVG(usage_user) AS usage_user_avg
+FROM cpu_metrics
+GROUP BY TIME_BUCKET(INTERVAL '1 hour', time), host
+WITH (
+  retention = '30d',
+  refresh_interval = '1h'
+);"""
+  CanonicalContinuousAggregateJson = """{"kind":{"variant":"CreateContinuousAggregate","name":"cpu_hourly","name_span":{"start":{"line":1,"column":29},"end":{"line":1,"column":38}},"query":{"variant":"Select","distinct":false,"projection":[{"variant":"Expr","expr":{"kind":{"variant":"FunctionCall","name":"TIME_BUCKET","args":[{"kind":{"variant":"Literal","literal":{"variant":"Interval","value":"1 hour"}},"span":{"start":{"line":4,"column":15},"end":{"line":4,"column":31}}},{"kind":{"variant":"ColumnRef","table":null,"column":"time"},"span":{"start":{"line":4,"column":34},"end":{"line":4,"column":37}}}],"distinct":false,"star":false},"span":{"start":{"line":4,"column":3},"end":{"line":4,"column":13}}},"alias":"time","span":{"start":{"line":4,"column":43},"end":{"line":4,"column":46}}},{"variant":"Expr","expr":{"kind":{"variant":"ColumnRef","table":null,"column":"host"},"span":{"start":{"line":5,"column":3},"end":{"line":5,"column":6}}},"alias":null,"span":{"start":{"line":5,"column":3},"end":{"line":5,"column":6}}},{"variant":"Expr","expr":{"kind":{"variant":"FunctionCall","name":"AVG","args":[{"kind":{"variant":"ColumnRef","table":null,"column":"usage_user"},"span":{"start":{"line":6,"column":7},"end":{"line":6,"column":16}}}],"distinct":false,"star":false},"span":{"start":{"line":6,"column":3},"end":{"line":6,"column":5}}},"alias":"usage_user_avg","span":{"start":{"line":6,"column":22},"end":{"line":6,"column":35}}}],"from":[{"variant":"Table","name":"cpu_metrics","alias":null,"span":{"start":{"line":7,"column":6},"end":{"line":7,"column":16}}}],"selection":null,"group_by":[{"kind":{"variant":"FunctionCall","name":"TIME_BUCKET","args":[{"kind":{"variant":"Literal","literal":{"variant":"Interval","value":"1 hour"}},"span":{"start":{"line":8,"column":22},"end":{"line":8,"column":38}}},{"kind":{"variant":"ColumnRef","table":null,"column":"time"},"span":{"start":{"line":8,"column":41},"end":{"line":8,"column":44}}}],"distinct":false,"star":false},"span":{"start":{"line":8,"column":10},"end":{"line":8,"column":20}}},{"kind":{"variant":"ColumnRef","table":null,"column":"host"},"span":{"start":{"line":8,"column":48},"end":{"line":8,"column":51}}}],"having":null,"order_by":[],"limit":null,"offset":null,"span":{"start":{"line":3,"column":1},"end":{"line":8,"column":51}}},"options":[{"key":"retention","key_span":{"start":{"line":10,"column":3},"end":{"line":10,"column":11}},"value":"30d","value_span":{"start":{"line":10,"column":15},"end":{"line":10,"column":19}},"span":{"start":{"line":10,"column":3},"end":{"line":10,"column":19}}},{"key":"refresh_interval","key_span":{"start":{"line":11,"column":3},"end":{"line":11,"column":18}},"value":"1h","value_span":{"start":{"line":11,"column":22},"end":{"line":11,"column":25}},"span":{"start":{"line":11,"column":3},"end":{"line":11,"column":25}}}],"span":{"start":{"line":1,"column":1},"end":{"line":12,"column":1}}},"span":{"start":{"line":1,"column":1},"end":{"line":12,"column":1}}}"""
+  CanonicalContinuousAggregateGolden = "82A46B696E6486A776617269616E74B9437265617465436F6E74696E756F7573416767726567617465A46E616D65AA6370755F686F75726C79A96E616D655F7370616E82A5737461727482A46C696E6501A6636F6C756D6E1DA3656E6482A46C696E6501A6636F6C756D6E26A571756572798BA776617269616E74A653656C656374A864697374696E6374C2AA70726F6A656374696F6E9384A776617269616E74A445787072A46578707282A46B696E6485A776617269616E74AC46756E6374696F6E43616C6CA46E616D65AB54494D455F4255434B4554A4617267739282A46B696E6482A776617269616E74A74C69746572616CA76C69746572616C82A776617269616E74A8496E74657276616CA576616C7565A63120686F7572A47370616E82A5737461727482A46C696E6504A6636F6C756D6E0FA3656E6482A46C696E6504A6636F6C756D6E1F82A46B696E6483A776617269616E74A9436F6C756D6E526566A57461626C65C0A6636F6C756D6EA474696D65A47370616E82A5737461727482A46C696E6504A6636F6C756D6E22A3656E6482A46C696E6504A6636F6C756D6E25A864697374696E6374C2A473746172C2A47370616E82A5737461727482A46C696E6504A6636F6C756D6E03A3656E6482A46C696E6504A6636F6C756D6E0DA5616C696173A474696D65A47370616E82A5737461727482A46C696E6504A6636F6C756D6E2BA3656E6482A46C696E6504A6636F6C756D6E2E84A776617269616E74A445787072A46578707282A46B696E6483A776617269616E74A9436F6C756D6E526566A57461626C65C0A6636F6C756D6EA4686F7374A47370616E82A5737461727482A46C696E6505A6636F6C756D6E03A3656E6482A46C696E6505A6636F6C756D6E06A5616C696173C0A47370616E82A5737461727482A46C696E6505A6636F6C756D6E03A3656E6482A46C696E6505A6636F6C756D6E0684A776617269616E74A445787072A46578707282A46B696E6485A776617269616E74AC46756E6374696F6E43616C6CA46E616D65A3415647A4617267739182A46B696E6483A776617269616E74A9436F6C756D6E526566A57461626C65C0A6636F6C756D6EAA75736167655F75736572A47370616E82A5737461727482A46C696E6506A6636F6C756D6E07A3656E6482A46C696E6506A6636F6C756D6E10A864697374696E6374C2A473746172C2A47370616E82A5737461727482A46C696E6506A6636F6C756D6E03A3656E6482A46C696E6506A6636F6C756D6E05A5616C696173AE75736167655F757365725F617667A47370616E82A5737461727482A46C696E6506A6636F6C756D6E16A3656E6482A46C696E6506A6636F6C756D6E23A466726F6D9184A776617269616E74A55461626C65A46E616D65AB6370755F6D657472696373A5616C696173C0A47370616E82A5737461727482A46C696E6507A6636F6C756D6E06A3656E6482A46C696E6507A6636F6C756D6E10A973656C656374696F6EC0A867726F75705F62799282A46B696E6485A776617269616E74AC46756E6374696F6E43616C6CA46E616D65AB54494D455F4255434B4554A4617267739282A46B696E6482A776617269616E74A74C69746572616CA76C69746572616C82A776617269616E74A8496E74657276616CA576616C7565A63120686F7572A47370616E82A5737461727482A46C696E6508A6636F6C756D6E16A3656E6482A46C696E6508A6636F6C756D6E2682A46B696E6483A776617269616E74A9436F6C756D6E526566A57461626C65C0A6636F6C756D6EA474696D65A47370616E82A5737461727482A46C696E6508A6636F6C756D6E29A3656E6482A46C696E6508A6636F6C756D6E2CA864697374696E6374C2A473746172C2A47370616E82A5737461727482A46C696E6508A6636F6C756D6E0AA3656E6482A46C696E6508A6636F6C756D6E1482A46B696E6483A776617269616E74A9436F6C756D6E526566A57461626C65C0A6636F6C756D6EA4686F7374A47370616E82A5737461727482A46C696E6508A6636F6C756D6E30A3656E6482A46C696E6508A6636F6C756D6E33A6686176696E67C0A86F726465725F627990A56C696D6974C0A66F6666736574C0A47370616E82A5737461727482A46C696E6503A6636F6C756D6E01A3656E6482A46C696E6508A6636F6C756D6E33A76F7074696F6E739285A36B6579A9726574656E74696F6EA86B65795F7370616E82A5737461727482A46C696E650AA6636F6C756D6E03A3656E6482A46C696E650AA6636F6C756D6E0BA576616C7565A3333064AA76616C75655F7370616E82A5737461727482A46C696E650AA6636F6C756D6E0FA3656E6482A46C696E650AA6636F6C756D6E13A47370616E82A5737461727482A46C696E650AA6636F6C756D6E03A3656E6482A46C696E650AA6636F6C756D6E1385A36B6579B0726566726573685F696E74657276616CA86B65795F7370616E82A5737461727482A46C696E650BA6636F6C756D6E03A3656E6482A46C696E650BA6636F6C756D6E12A576616C7565A23168AA76616C75655F7370616E82A5737461727482A46C696E650BA6636F6C756D6E16A3656E6482A46C696E650BA6636F6C756D6E19A47370616E82A5737461727482A46C696E650BA6636F6C756D6E03A3656E6482A46C696E650BA6636F6C756D6E19A47370616E82A5737461727482A46C696E6501A6636F6C756D6E01A3656E6482A46C696E650CA6636F6C756D6E01A47370616E82A5737461727482A46C696E6501A6636F6C756D6E01A3656E6482A46C696E650CA6636F6C756D6E01"
+
+proc canonicalContinuousAggregate(): SqlNode =
+  parseSql(MinimalContinuousAggregateSql)
+
+proc stagedError(statement: SqlNode): string =
+  try:
+    discard encodeContinuousAggregateV040ToMsgPack(statement)
+  except CatchableError as exc:
+    return exc.msg
+
+proc checkStagedError(statement: SqlNode; fragment: string) =
+  let message = stagedError(statement)
+  check message.contains(fragment)
+  check message.len <= 160
+
+proc messagePackDepthError(payload: string): string =
+  try:
+    discard validateStagedMessagePackDepthForTest(payload)
+  except CatchableError as exc:
+    return exc.msg
+
+proc oneByteChunks(payload: string): seq[string] =
+  for i in 0 ..< payload.len:
+    result.add(payload[i .. i])
 
 proc payloadJson(sql: string): JsonNode =
   toJsonNode(encodeSqlToMsgPack(sql))
@@ -14,6 +62,10 @@ proc assertMsgpackRoundtrip(sql: string) =
 
 proc hexPayload(sql: string): string =
   let payload = encodeSqlToMsgPack(sql)
+  for ch in payload:
+    result.add(toHex(ord(ch), 2))
+
+proc hexBytes(payload: string): string =
   for ch in payload:
     result.add(toHex(ord(ch), 2))
 
@@ -162,3 +214,255 @@ suite "MessagePack output - stability":
   test "SELECT literal payload is stable":
     check hexPayload("SELECT 1") ==
       "9182A46B696E648AA776617269616E74A653656C656374A864697374696E6374C2AA70726F6A656374696F6E9184A776617269616E74A445787072A46578707282A46B696E6482A776617269616E74A74C69746572616CA76C69746572616C82A776617269616E74A64E756D626572A576616C7565A131A47370616E82A5737461727482A46C696E6501A6636F6C756D6E08A3656E6482A46C696E6501A6636F6C756D6E08A5616C696173C0A47370616E82A5737461727482A46C696E6501A6636F6C756D6E08A3656E6482A46C696E6501A6636F6C756D6E08A466726F6D90A973656C656374696F6EC0A867726F75705F6279C0A6686176696E67C0A86F726465725F627990A56C696D6974C0A66F6666736574C0A47370616E82A5737461727482A46C696E6501A6636F6C756D6E01A3656E6482A46C696E6501A6636F6C756D6E06"
+
+suite "MessagePack output - staged continuous aggregate contract":
+
+  test "exported version is sourced from the descriptor":
+    check $alopex_parser_version() == ContractDescriptor
+
+  test "requirements canonical SQL owns exact JSON, spans, and MessagePack bytes":
+    let payload = encodeContinuousAggregateV040ToMsgPack(
+      parseSql(CanonicalContinuousAggregateSql)
+    )
+    check $toJsonNode(payload) == CanonicalContinuousAggregateJson
+    check hexBytes(payload) == CanonicalContinuousAggregateGolden
+
+  test "minimal fixture encodes a whole statement without activating public 0.3":
+    let statement = canonicalContinuousAggregate()
+    var previous = ""
+    for _ in 0 ..< 8:
+      let encoded = encodeContinuousAggregateV040ToMsgPack(statement)
+      if previous.len > 0:
+        check encoded == previous
+      previous = encoded
+
+    when ContinuousAggregateProducerEnabled:
+      check toJsonNode(astToMsgPack(@[statement]))[0]["kind"]["variant"].getStr() ==
+        "CreateContinuousAggregate"
+    else:
+      expect ParseError:
+        discard astToMsgPack(@[statement])
+
+  test "malformed staged trees fail as bounded CatchableError before encoding":
+    checkStagedError(nil, "must not be nil")
+    checkStagedError(newNode(nkSelect), "expected nkCreateContinuousAggregate")
+
+    var missing = canonicalContinuousAggregate()
+    missing.children.setLen(2)
+    checkStagedError(missing, "exactly 3 children")
+
+    var extra = canonicalContinuousAggregate()
+    extra.children.add(newIdent("extra"))
+    checkStagedError(extra, "exactly 3 children")
+
+    var wrongName = canonicalContinuousAggregate()
+    wrongName.children[0] = newStringLit("c", wrongName.children[0].span)
+    checkStagedError(wrongName, "name must be nkIdentifier")
+
+    var wrongQuery = canonicalContinuousAggregate()
+    wrongQuery.children[1] = newNode(nkPragma, wrongQuery.children[1].span)
+    checkStagedError(wrongQuery, "query must be nkSelect")
+
+    var malformedWhere = canonicalContinuousAggregate()
+    malformedWhere.children[1].children.add(
+      newNode(nkWhereClause, malformedWhere.children[1].span)
+    )
+    checkStagedError(malformedWhere, "WHERE clause must have exactly 1 child")
+
+    var nilBinaryOperand = canonicalContinuousAggregate()
+    nilBinaryOperand.children[1].children[0].children[0] = newBinaryOp(
+      opAdd, newIntLit(1, nilBinaryOperand.span), nil, nilBinaryOperand.span
+    )
+    checkStagedError(nilBinaryOperand, "binary expression operands must not be nil")
+
+    var malformedVector = canonicalContinuousAggregate()
+    let vector = newNode(nkVectorLiteral, malformedVector.span)
+    vector.children.add(newIntLit(1, malformedVector.span))
+    malformedVector.children[1].children[0].children[0] = vector
+    checkStagedError(malformedVector, "vector literal children must be nkFloatLit")
+
+    var wrongOptions = canonicalContinuousAggregate()
+    wrongOptions.children[2] = newNode(nkExprList, wrongOptions.children[2].span)
+    checkStagedError(wrongOptions, "options must be nkWithOptions")
+
+    var nestedNilOption = canonicalContinuousAggregate()
+    nestedNilOption.children[2].children[0] = nil
+    checkStagedError(nestedNilOption, "nil node")
+
+    var cyclic = canonicalContinuousAggregate()
+    let expressionSpan = cyclic.children[1].children[0].children[0].span
+    var cycleExpr = newUnaryOp(opNeg, newIntLit(1, expressionSpan), expressionSpan)
+    cycleExpr.unOperand = cycleExpr
+    cyclic.children[1].children[0].children[0] = cycleExpr
+    checkStagedError(cyclic, "cycle")
+
+    var missingOption = canonicalContinuousAggregate()
+    missingOption.children[2].children.setLen(1)
+    checkStagedError(missingOption, "exactly 2 options")
+
+    var extraOption = canonicalContinuousAggregate()
+    extraOption.children[2].children.add(
+      newNode(nkIndexOption, extraOption.children[2].span)
+    )
+    checkStagedError(extraOption, "exactly 2 options")
+
+    var wrongOptionNode = canonicalContinuousAggregate()
+    wrongOptionNode.children[2].children[0] = newNode(
+      nkExprList, wrongOptionNode.children[2].children[0].span
+    )
+    checkStagedError(wrongOptionNode, "option must be nkIndexOption")
+
+    var wrongOptionShape = canonicalContinuousAggregate()
+    wrongOptionShape.children[2].children[0].children.setLen(1)
+    checkStagedError(wrongOptionShape, "option must have exactly 2 children")
+
+    var wrongOptionKey = canonicalContinuousAggregate()
+    wrongOptionKey.children[2].children[0].children[0] = newStringLit(
+      "retention", wrongOptionKey.children[2].children[0].children[0].span
+    )
+    checkStagedError(wrongOptionKey, "option key must be nkIdentifier")
+
+    var wrongOptionValue = canonicalContinuousAggregate()
+    wrongOptionValue.children[2].children[0].children[1] = newIntLit(
+      7, wrongOptionValue.children[2].children[0].children[1].span
+    )
+    checkStagedError(wrongOptionValue, "option value must be nkStringLit")
+
+    var unknownOption = canonicalContinuousAggregate()
+    unknownOption.children[2].children[1].children[0].strVal = "bogus"
+    checkStagedError(unknownOption, "expected option refresh_interval")
+
+    var reordered = canonicalContinuousAggregate()
+    swap(reordered.children[2].children[0], reordered.children[2].children[1])
+    checkStagedError(reordered, "expected option retention")
+
+    var invalidMultilineSpan = canonicalContinuousAggregate()
+    invalidMultilineSpan.children[2].children[0].children[1].span = Span(
+      start: Location(line: 1, column: 1),
+      `end`: Location(line: 2, column: 0),
+    )
+    checkStagedError(invalidMultilineSpan, "invalid span")
+
+    var wide = canonicalContinuousAggregate()
+    let wideItem = wide.children[1].children[0].children[0]
+    wide.children[1].children[0].children.setLen(12_000)
+    for i in 0 ..< wide.children[1].children[0].children.len:
+      wide.children[1].children[0].children[i] = wideItem
+    checkStagedError(wide, "exceeds 1048576-byte limit")
+
+    var atLimit = canonicalContinuousAggregate()
+    let deepSpan = atLimit.children[1].children[0].children[0].span
+    var expression = newIntLit(1, deepSpan)
+    for _ in 0 ..< 124:
+      expression = newUnaryOp(opNeg, expression, deepSpan)
+    atLimit.children[1].children[0].children[0] = expression
+    validateContinuousAggregateV040ForTest(atLimit)
+
+    var tooDeep = canonicalContinuousAggregate()
+    tooDeep.children[1].children[0].children[0] =
+      newUnaryOp(opNeg, expression, deepSpan)
+    checkStagedError(tooDeep, "maximum staged AST nesting depth of 128 exceeded")
+
+  test "unexpected staged writer Defect keeps its internal classification":
+    expect Defect:
+      triggerStagedWriterDefectForTest()
+
+  test "actual MessagePack depth accepts 128 containers and rejects 129":
+    let exact = repeat("\x91", 128) & "\xc0"
+    check validateStagedMessagePackDepthForTest(exact) == 128
+    let message = messagePackDepthError("\x91" & exact)
+    check message.contains("nesting depth of 128 exceeded")
+    check message.len <= 160
+
+  test "incremental observer handles split lengths and bin/ext marker families":
+    for payload in [
+      "\xd9\x00", "\xda\x00\x00", "\xdb\x00\x00\x00\x00",
+      "\xdc\x00\x01\xc0", "\xdd\x00\x00\x00\x01\xc0",
+      "\xde\x00\x01\xc0\xc0", "\xdf\x00\x00\x00\x01\xc0\xc0",
+      "\xc4\x00", "\xc5\x00\x00", "\xc6\x00\x00\x00\x00",
+      "\xc7\x00\x00", "\xc8\x00\x00\x00", "\xc9\x00\x00\x00\x00\x00",
+      "\xd4\x00\x00", "\xd5\x00\x00\x00", "\xd6\x00" & repeat("\x00", 4),
+      "\xd7\x00" & repeat("\x00", 8), "\xd8\x00" & repeat("\x00", 16),
+    ]:
+      discard validateStagedMessagePackChunksForTest(oneByteChunks(payload))
+
+  test "actual MessagePack byte limit accepts exact-minus and exact, rejects plus":
+    const wireLimit = 1_048_576
+    var statement = canonicalContinuousAggregate()
+    statement.children[0].strVal = repeat("x", 1_000_000)
+    let trial = encodeContinuousAggregateV040ToMsgPack(statement)
+    let exactNameBytes = statement.children[0].strVal.len + wireLimit - trial.len
+    check exactNameBytes > 1_000_000
+
+    statement.children[0].strVal = repeat("x", exactNameBytes - 1)
+    check encodeContinuousAggregateV040ToMsgPack(statement).len == wireLimit - 1
+    statement.children[0].strVal = repeat("x", exactNameBytes)
+    check encodeContinuousAggregateV040ToMsgPack(statement).len == wireLimit
+    statement.children[0].strVal = repeat("x", exactNameBytes + 1)
+    checkStagedError(statement, "exceeds 1048576-byte limit")
+
+  test "future helper reuses the existing Select writer for full clauses":
+    let statement = parseSql(
+      "CREATE CONTINUOUS AGGREGATE hourly AS " &
+      "SELECT host, AVG(value) FROM samples WHERE value > 0 GROUP BY host " &
+      "HAVING AVG(value) > 0 ORDER BY host DESC NULLS LAST LIMIT 1 " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    let query = toJsonNode(
+      encodeContinuousAggregateV040ToMsgPack(statement)
+    )["kind"]["query"]
+    check query["projection"].len == 2
+    check query["from"].len == 1
+    check query["selection"].kind != JNull
+    check query["group_by"].len == 1
+    check query["having"].kind != JNull
+    check query["order_by"].len == 1
+    check query["limit"].kind != JNull
+
+  test "future helper accepts the existing CAST DECIMAL grammar":
+    let statement = parseSql(
+      "CREATE CONTINUOUS AGGREGATE hourly AS " &
+      "SELECT CAST(value AS DECIMAL(10,2)) FROM samples " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    let query = toJsonNode(
+      encodeContinuousAggregateV040ToMsgPack(statement)
+    )["kind"]["query"]
+    let castKind = query["projection"][0]["expr"]["kind"]
+    check castKind["variant"].getStr() == "Cast"
+    check castKind["target_type"]["variant"].getStr() == "Double"
+
+  test "descriptor compile-time selects the public encoder route and C entry recovers":
+    let statement = canonicalContinuousAggregate()
+
+    let boundary = alopex_parse_sql(
+      cstring(CanonicalContinuousAggregateSql),
+      cint(CanonicalContinuousAggregateSql.len),
+    )
+    when ContinuousAggregateProducerEnabled:
+      check toJsonNode(astToMsgPack(@[statement]))[0]["kind"]["variant"].getStr() ==
+        "CreateContinuousAggregate"
+      check boundary.kind == prkOk
+      check boundary.buffer_ptr != nil
+      check boundary.buffer_len > 0
+      alopex_free_buffer(boundary.buffer_ptr)
+    else:
+      expect ParseError:
+        discard astToMsgPack(@[statement])
+      check boundary.kind == prkError
+      check boundary.buffer_ptr == nil
+      check boundary.error_ptr != nil
+      check boundary.error_len > 0
+      check boundary.error_len <= 128
+      var message = newString(int(boundary.error_len))
+      copyMem(addr message[0], boundary.error_ptr, int(boundary.error_len))
+      check message.contains("unsupported statement node for MessagePack")
+      check message.contains("nkCreateContinuousAggregate")
+      alopex_free_buffer(cast[pointer](boundary.error_ptr))
+
+    let normalSql = "SELECT 1"
+    let recovered = alopex_parse_sql(cstring(normalSql), cint(normalSql.len))
+    check recovered.kind == prkOk
+    check recovered.buffer_ptr != nil
+    check recovered.buffer_len > 0
+    alopex_free_buffer(recovered.buffer_ptr)

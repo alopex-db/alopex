@@ -4,9 +4,22 @@
 ## Success payloads are MessagePack bytes containing seq[Statement].
 ## Build: nim c -d:release --app:lib --mm:orc -o:libalopex_sql_parser.so src/alopex_sql_parser.nim
 
-import std/[strutils]
+import std/[streams, strutils]
 import msgpack4nim
 import ast, parser, promql_ast, promql_parser
+
+func isExactContractDescriptor(raw, version: string): bool {.compileTime.} =
+  raw == version or raw == version & "\n" or raw == version & "\r\n"
+
+const parserContractDescriptor = staticRead("../PARSER_CONTRACT_VERSION")
+
+static:
+  doAssert isExactContractDescriptor(parserContractDescriptor, "0.3.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.4.0"),
+    "PARSER_CONTRACT_VERSION must select an exact supported contract"
+
+const parserContractVersion = parserContractDescriptor.strip()
+const continuousAggregateProducerEnabled = parserContractVersion != "0.3.0"
 
 # --- C ABI types ---
 
@@ -24,19 +37,19 @@ type
 
 # --- MessagePack contract helpers ---
 
-proc writeKey(s: MsgStream; key: string) =
+proc writeKey(s: Stream; key: string) =
   s.pack_type(key)
 
-proc writeNil(s: MsgStream) =
+proc writeNil(s: Stream) =
   s.pack_imp_nil()
 
-proc writeStringOpt(s: MsgStream; value: string) =
+proc writeStringOpt(s: Stream; value: string) =
   if value.len == 0:
     s.writeNil()
   else:
     s.pack_type(value)
 
-proc writeBoolOpt(s: MsgStream; value: int) =
+proc writeBoolOpt(s: Stream; value: int) =
   case value
   of -1:
     s.writeNil()
@@ -45,14 +58,14 @@ proc writeBoolOpt(s: MsgStream; value: int) =
   else:
     s.pack_type(true)
 
-proc writeLocation(s: MsgStream; loc: Location) =
+proc writeLocation(s: Stream; loc: Location) =
   s.pack_map(2)
   s.writeKey("line")
   s.pack_type(loc.line)
   s.writeKey("column")
   s.pack_type(loc.column)
 
-proc writeSpan(s: MsgStream; span: Span) =
+proc writeSpan(s: Stream; span: Span) =
   s.pack_map(2)
   s.writeKey("start")
   s.writeLocation(span.start)
@@ -163,12 +176,12 @@ proc normalizedIndexMethod(name: string): string =
   of "HNSW": "Hnsw"
   else: name
 
-proc writeStatement(s: MsgStream; node: SqlNode)
-proc writeExpr(s: MsgStream; node: SqlNode)
-proc writeFromItem(s: MsgStream; node: SqlNode)
-proc writeDataType(s: MsgStream; node: SqlNode)
+proc writeStatement(s: Stream; node: SqlNode)
+proc writeExpr(s: Stream; node: SqlNode)
+proc writeFromItem(s: Stream; node: SqlNode)
+proc writeDataType(s: Stream; node: SqlNode)
 
-proc writeLiteralKind(s: MsgStream; node: SqlNode) =
+proc writeLiteralKind(s: Stream; node: SqlNode) =
   case node.kind
   of nkIntLit:
     s.pack_map(2)
@@ -209,18 +222,18 @@ proc writeLiteralKind(s: MsgStream; node: SqlNode) =
     s.writeKey("variant")
     s.pack_type("Null")
 
-proc writeExprOpt(s: MsgStream; node: SqlNode) =
+proc writeExprOpt(s: Stream; node: SqlNode) =
   if node == nil:
     s.writeNil()
   else:
     s.writeExpr(node)
 
-proc writeExprSeq(s: MsgStream; nodes: seq[SqlNode]) =
+proc writeExprSeq(s: Stream; nodes: seq[SqlNode]) =
   s.pack_array(nodes.len)
   for child in nodes:
     s.writeExpr(child)
 
-proc writeStringSeqOpt(s: MsgStream; values: seq[string]) =
+proc writeStringSeqOpt(s: Stream; values: seq[string]) =
   if values.len == 0:
     s.writeNil()
   else:
@@ -228,7 +241,7 @@ proc writeStringSeqOpt(s: MsgStream; values: seq[string]) =
     for value in values:
       s.pack_type(value)
 
-proc writeSelectItem(s: MsgStream; node: SqlNode) =
+proc writeSelectItem(s: Stream; node: SqlNode) =
   if node.kind == nkStar:
     s.pack_map(2)
     s.writeKey("variant")
@@ -261,7 +274,7 @@ proc writeSelectItem(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeOrderByExpr(s: MsgStream; node: SqlNode) =
+proc writeOrderByExpr(s: Stream; node: SqlNode) =
   let exprNode = if node.kind == nkAlias: node.aliasExpr else: node
   s.pack_map(4)
   s.writeKey("expr")
@@ -273,7 +286,7 @@ proc writeOrderByExpr(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeIndexOption(s: MsgStream; node: SqlNode) =
+proc writeIndexOption(s: Stream; node: SqlNode) =
   s.pack_map(3)
   s.writeKey("key")
   s.pack_type(node.children[0].firstIdent())
@@ -282,7 +295,7 @@ proc writeIndexOption(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeIndexOptions(s: MsgStream; node: SqlNode) =
+proc writeIndexOptions(s: Stream; node: SqlNode) =
   if node == nil:
     s.pack_array(0)
     return
@@ -290,7 +303,7 @@ proc writeIndexOptions(s: MsgStream; node: SqlNode) =
   for opt in node.children:
     s.writeIndexOption(opt)
 
-proc writeColumnConstraint(s: MsgStream; node: SqlNode) =
+proc writeColumnConstraint(s: Stream; node: SqlNode) =
   let name = node.firstIdent().toUpperAscii()
   case name
   of "NOT NULL":
@@ -329,7 +342,7 @@ proc writeColumnConstraint(s: MsgStream; node: SqlNode) =
     s.writeKey("span")
     s.writeSpan(node.span)
 
-proc writeColumnDef(s: MsgStream; node: SqlNode) =
+proc writeColumnDef(s: Stream; node: SqlNode) =
   s.pack_map(4)
   s.writeKey("name")
   s.pack_type(node.colName)
@@ -342,7 +355,7 @@ proc writeColumnDef(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeTableConstraint(s: MsgStream; node: SqlNode) =
+proc writeTableConstraint(s: Stream; node: SqlNode) =
   s.pack_map(3)
   s.writeKey("variant")
   s.pack_type("PrimaryKey")
@@ -357,7 +370,7 @@ proc writeTableConstraint(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeDataType(s: MsgStream; node: SqlNode) =
+proc writeDataType(s: Stream; node: SqlNode) =
   let rawName = node.firstIdent()
   let variant = normalizedDataTypeName(rawName)
   if variant == "Vector":
@@ -379,7 +392,7 @@ proc writeDataType(s: MsgStream; node: SqlNode) =
     s.writeKey("variant")
     s.pack_type(variant)
 
-proc writeFromItem(s: MsgStream; node: SqlNode) =
+proc writeFromItem(s: Stream; node: SqlNode) =
   if node == nil:
     s.writeNil()
     return
@@ -453,7 +466,7 @@ proc writeFromItem(s: MsgStream; node: SqlNode) =
     s.writeKey("span")
     s.writeSpan(node.span)
 
-proc writeExpr(s: MsgStream; node: SqlNode) =
+proc writeExpr(s: Stream; node: SqlNode) =
   if node == nil:
     s.writeNil()
     return
@@ -648,7 +661,7 @@ proc writeExpr(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeSelectKind(s: MsgStream; node: SqlNode) =
+proc writeSelectFields(s: Stream; node: SqlNode) =
   var distinctFlag = false
   var projectionNode: SqlNode = nil
   var fromNode: SqlNode = nil
@@ -681,7 +694,6 @@ proc writeSelectKind(s: MsgStream; node: SqlNode) =
     else:
       discard
 
-  s.pack_map(10)
   s.writeKey("variant")
   s.pack_type("Select")
   s.writeKey("distinct")
@@ -727,7 +739,17 @@ proc writeSelectKind(s: MsgStream; node: SqlNode) =
   else:
     s.writeNil()
 
-proc writeInsertKind(s: MsgStream; node: SqlNode) =
+proc writeSelectKind(s: Stream; node: SqlNode) =
+  s.pack_map(10)
+  s.writeSelectFields(node)
+
+proc writeContinuousAggregateQuery(s: Stream; node: SqlNode) =
+  s.pack_map(11)
+  s.writeSelectFields(node)
+  s.writeKey("span")
+  s.writeSpan(node.span)
+
+proc writeInsertKind(s: Stream; node: SqlNode) =
   let tableName = node.children[0].firstIdent()
   # カラムリストは nkColumnList、VALUES 行は nkExprList。children 数からの
   # 推測は「カラムリスト省略 × 多行 VALUES」で先頭行を列リストと誤判別する
@@ -766,7 +788,7 @@ proc writeInsertKind(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeUpdateKind(s: MsgStream; node: SqlNode) =
+proc writeUpdateKind(s: Stream; node: SqlNode) =
   s.pack_map(5)
   s.writeKey("variant")
   s.pack_type("Update")
@@ -790,7 +812,7 @@ proc writeUpdateKind(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeDeleteKind(s: MsgStream; node: SqlNode) =
+proc writeDeleteKind(s: Stream; node: SqlNode) =
   s.pack_map(4)
   s.writeKey("variant")
   s.pack_type("Delete")
@@ -804,7 +826,7 @@ proc writeDeleteKind(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeCreateTableKind(s: MsgStream; node: SqlNode) =
+proc writeCreateTableKind(s: Stream; node: SqlNode) =
   var ifNotExistsFlag = false
   var tableName = ""
   var columns: seq[SqlNode] = @[]
@@ -847,7 +869,7 @@ proc writeCreateTableKind(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeDropTableKind(s: MsgStream; node: SqlNode) =
+proc writeDropTableKind(s: Stream; node: SqlNode) =
   let ifExistsFlag = node.children.len > 0 and node.children[0].kind == nkIdentifier and
     node.children[0].strVal == "IF EXISTS"
   let tableIdx = if ifExistsFlag: 1 else: 0
@@ -861,7 +883,7 @@ proc writeDropTableKind(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeCreateIndexKind(s: MsgStream; node: SqlNode) =
+proc writeCreateIndexKind(s: Stream; node: SqlNode) =
   var idx = 0
   let ifNotExistsFlag = node.children.len > 0 and node.children[0].kind == nkIdentifier and
     node.children[0].strVal == "IF NOT EXISTS"
@@ -893,7 +915,7 @@ proc writeCreateIndexKind(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeDropIndexKind(s: MsgStream; node: SqlNode) =
+proc writeDropIndexKind(s: Stream; node: SqlNode) =
   let ifExistsFlag = node.children.len > 0 and node.children[0].kind == nkIdentifier and
     node.children[0].strVal == "IF EXISTS"
   let nameIdx = if ifExistsFlag: 1 else: 0
@@ -907,7 +929,7 @@ proc writeDropIndexKind(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writePragmaKind(s: MsgStream; node: SqlNode) =
+proc writePragmaKind(s: Stream; node: SqlNode) =
   s.pack_map(4)
   s.writeKey("variant")
   s.pack_type("Pragma")
@@ -927,7 +949,322 @@ proc writePragmaKind(s: MsgStream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeStatementKind(s: MsgStream; node: SqlNode) =
+const
+  maxStagedPayloadBytes = 1_048_576
+  maxStagedPayloadDepth = 128
+  stagedSizeError = "staged MessagePack exceeds 1048576-byte limit"
+  stagedDepthError = "maximum staged MessagePack nesting depth of 128 exceeded"
+
+type
+  StagedLengthKind = enum
+    slString, slBinary, slArray, slMap, slExtension
+
+  BoundedMsgPackStream = ref object of StreamObj
+    total: int
+    data: string
+    retainBytes: bool
+    expectedBytes: int
+    rootValues: int
+    frameCount: int
+    frames: array[maxStagedPayloadDepth, uint64]
+    maximumDepth: int
+    pendingPayloadBytes: uint64
+    pendingLengthBytes: int
+    pendingLength: uint64
+    pendingLengthKind: StagedLengthKind
+
+proc stagedValidationError(message: string) {.noreturn.} =
+  raise newException(ValueError, message)
+
+proc stagedStreamError(message: string) {.noreturn.} =
+  raise newException(IOError, message)
+
+proc finishCompletedFrames(s: BoundedMsgPackStream) =
+  while s.frameCount > 0 and s.frames[s.frameCount - 1] == 0:
+    dec s.frameCount
+
+proc beginStagedValue(s: BoundedMsgPackStream) =
+  if s.frameCount == 0:
+    inc s.rootValues
+  else:
+    if s.frames[s.frameCount - 1] == 0:
+      stagedStreamError("malformed staged MessagePack container")
+    dec s.frames[s.frameCount - 1]
+
+proc beginStagedScalar(s: BoundedMsgPackStream; payloadBytes: uint64 = 0) =
+  s.beginStagedValue()
+  s.pendingPayloadBytes = payloadBytes
+  s.finishCompletedFrames()
+
+proc beginStagedContainer(s: BoundedMsgPackStream; itemCount: uint64) =
+  s.beginStagedValue()
+  let depth = s.frameCount + 1
+  if depth > maxStagedPayloadDepth:
+    stagedStreamError(stagedDepthError)
+  if depth > s.maximumDepth:
+    s.maximumDepth = depth
+  if itemCount == 0:
+    s.finishCompletedFrames()
+  else:
+    s.frames[s.frameCount] = itemCount
+    inc s.frameCount
+
+proc startStagedLength(s: BoundedMsgPackStream; kind: StagedLengthKind;
+                       byteCount: int) =
+  s.pendingLengthKind = kind
+  s.pendingLengthBytes = byteCount
+  s.pendingLength = 0
+
+proc finishStagedLength(s: BoundedMsgPackStream) =
+  case s.pendingLengthKind
+  of slString, slBinary:
+    s.beginStagedScalar(s.pendingLength)
+  of slArray:
+    s.beginStagedContainer(s.pendingLength)
+  of slMap:
+    s.beginStagedContainer(s.pendingLength * 2'u64)
+  of slExtension:
+    s.beginStagedScalar(s.pendingLength + 1'u64)
+
+proc observeStagedByte(s: BoundedMsgPackStream; value: uint8) =
+  if s.pendingPayloadBytes > 0:
+    dec s.pendingPayloadBytes
+    return
+  if s.pendingLengthBytes > 0:
+    s.pendingLength = (s.pendingLength shl 8) or uint64(value)
+    dec s.pendingLengthBytes
+    if s.pendingLengthBytes == 0:
+      s.finishStagedLength()
+    return
+
+  case value
+  of 0x00'u8 .. 0x7f'u8, 0xc0'u8, 0xc2'u8, 0xc3'u8,
+      0xe0'u8 .. 0xff'u8:
+    s.beginStagedScalar()
+  of 0x80'u8 .. 0x8f'u8:
+    s.beginStagedContainer(uint64(value and 0x0f'u8) * 2'u64)
+  of 0x90'u8 .. 0x9f'u8:
+    s.beginStagedContainer(uint64(value and 0x0f'u8))
+  of 0xa0'u8 .. 0xbf'u8:
+    s.beginStagedScalar(uint64(value and 0x1f'u8))
+  of 0xc4'u8: s.startStagedLength(slBinary, 1)
+  of 0xc5'u8: s.startStagedLength(slBinary, 2)
+  of 0xc6'u8: s.startStagedLength(slBinary, 4)
+  of 0xc7'u8: s.startStagedLength(slExtension, 1)
+  of 0xc8'u8: s.startStagedLength(slExtension, 2)
+  of 0xc9'u8: s.startStagedLength(slExtension, 4)
+  of 0xca'u8: s.beginStagedScalar(4)
+  of 0xcb'u8: s.beginStagedScalar(8)
+  of 0xcc'u8, 0xd0'u8: s.beginStagedScalar(1)
+  of 0xcd'u8, 0xd1'u8: s.beginStagedScalar(2)
+  of 0xce'u8, 0xd2'u8: s.beginStagedScalar(4)
+  of 0xcf'u8, 0xd3'u8: s.beginStagedScalar(8)
+  of 0xd4'u8: s.beginStagedScalar(2)
+  of 0xd5'u8: s.beginStagedScalar(3)
+  of 0xd6'u8: s.beginStagedScalar(5)
+  of 0xd7'u8: s.beginStagedScalar(9)
+  of 0xd8'u8: s.beginStagedScalar(17)
+  of 0xd9'u8: s.startStagedLength(slString, 1)
+  of 0xda'u8: s.startStagedLength(slString, 2)
+  of 0xdb'u8: s.startStagedLength(slString, 4)
+  of 0xdc'u8: s.startStagedLength(slArray, 2)
+  of 0xdd'u8: s.startStagedLength(slArray, 4)
+  of 0xde'u8: s.startStagedLength(slMap, 2)
+  of 0xdf'u8: s.startStagedLength(slMap, 4)
+  else:
+    stagedStreamError("invalid staged MessagePack marker")
+
+proc writeBoundedMsgPack(s: Stream; buffer: pointer; bufLen: int) =
+  let bounded = BoundedMsgPackStream(s)
+  if bufLen < 0 or bufLen > maxStagedPayloadBytes - bounded.total:
+    stagedStreamError(stagedSizeError)
+  if bufLen == 0:
+    return
+
+  let bytes = cast[ptr UncheckedArray[uint8]](buffer)
+  for i in 0 ..< bufLen:
+    bounded.observeStagedByte(bytes[i])
+
+  if bounded.retainBytes:
+    let oldLen = bounded.data.len
+    bounded.data.setLen(oldLen + bufLen)
+    copyMem(addr bounded.data[oldLen], buffer, bufLen)
+  bounded.total += bufLen
+
+proc newBoundedMsgPackStream(expectedBytes = -1): BoundedMsgPackStream =
+  new(result)
+  result.writeDataImpl = writeBoundedMsgPack
+  result.expectedBytes = expectedBytes
+  result.retainBytes = expectedBytes >= 0
+  if result.retainBytes:
+    result.data = newStringOfCap(expectedBytes)
+
+proc finishBoundedMsgPack(s: BoundedMsgPackStream) =
+  if s.pendingPayloadBytes != 0 or s.pendingLengthBytes != 0 or
+      s.frameCount != 0 or s.rootValues != 1:
+    stagedValidationError("staged writer produced malformed MessagePack")
+  if s.expectedBytes >= 0 and s.total != s.expectedBytes:
+    stagedValidationError("staged MessagePack counting pass mismatch")
+
+proc validateStagedSpan(node: SqlNode) =
+  let start = node.span.start
+  let finish = node.span.`end`
+  if start.line < 1 or start.column < 1 or finish.line < 1 or
+      finish.column < 1 or finish.line < start.line or
+      (finish.line == start.line and finish.column < start.column):
+    stagedValidationError("staged MessagePack tree contains an invalid span")
+
+proc validateStagedWriterShape(node: SqlNode) =
+  ## Validate only cardinalities dereferenced by the existing MessagePack
+  ## writers. SQL grammar and semantic validity remain parser-owned.
+  template requireChildren(count: int; label: string) =
+    if node.children.len != count:
+      stagedValidationError(label & " must have exactly " & $count & " child" &
+        (if count == 1: "" else: "ren"))
+
+  case node.kind
+  of nkQualifiedStar:
+    requireChildren(1, "qualified wildcard")
+  of nkColumnRef:
+    requireChildren(2, "column reference")
+  of nkFunctionCall:
+    if node.children.len < 1:
+      stagedValidationError("function call must have at least 1 child")
+  of nkCast:
+    requireChildren(2, "CAST expression")
+  of nkScalarSubquery, nkExists, nkFromDerived:
+    requireChildren(1, "subquery")
+  of nkInSubquery:
+    requireChildren(2, "IN subquery")
+  of nkQuantified:
+    requireChildren(3, "quantified expression")
+  of nkWhereClause:
+    requireChildren(1, "WHERE clause")
+  of nkHavingClause:
+    requireChildren(1, "HAVING clause")
+  of nkBinaryOp:
+    if node.binLeft == nil or node.binRight == nil:
+      stagedValidationError("binary expression operands must not be nil")
+    elif node.binOp in {opBetween, opNotBetween}:
+      if node.binRight.kind != nkExprList or node.binRight.children.len != 2:
+        stagedValidationError("BETWEEN bounds must have exactly 2 children")
+    elif node.binOp in {opLike, opNotLike, opILike, opNotILike, opGlob,
+        opNotGlob, opSimilarTo, opNotSimilarTo} and
+        node.binRight.kind == nkExprList and node.binRight.children.len < 1:
+      stagedValidationError("pattern expression list must not be empty")
+  of nkVectorLiteral:
+    for child in node.children:
+      if child == nil or child.kind != nkFloatLit:
+        stagedValidationError("vector literal children must be nkFloatLit")
+  else:
+    discard
+
+proc validateStagedAst(node: SqlNode; depth: int;
+                       ancestors: var array[maxStagedPayloadDepth, SqlNode]) =
+  if node == nil:
+    stagedValidationError("staged MessagePack tree contains a nil node")
+  for i in 0 ..< min(depth - 1, maxStagedPayloadDepth):
+    if ancestors[i] == node:
+      stagedValidationError("staged MessagePack tree contains a cycle")
+  if depth > maxStagedPayloadDepth:
+    stagedValidationError("maximum staged AST nesting depth of 128 exceeded")
+  node.validateStagedSpan()
+  node.validateStagedWriterShape()
+  ancestors[depth - 1] = node
+
+  case node.kind
+  of nkIdentifier, nkStringLit, nkIntervalLit, nkIntLit, nkFloatLit,
+      nkBoolLit, nkNull, nkStar:
+    discard
+  of nkBinaryOp:
+    node.binLeft.validateStagedAst(depth + 1, ancestors)
+    node.binRight.validateStagedAst(depth + 1, ancestors)
+  of nkUnaryOp:
+    node.unOperand.validateStagedAst(depth + 1, ancestors)
+  of nkJoin, nkFromJoin:
+    node.joinLeft.validateStagedAst(depth + 1, ancestors)
+    node.joinRight.validateStagedAst(depth + 1, ancestors)
+    if node.joinCond != nil:
+      node.joinCond.validateStagedAst(depth + 1, ancestors)
+  of nkAlias:
+    node.aliasExpr.validateStagedAst(depth + 1, ancestors)
+  of nkColumnDef:
+    node.colType.validateStagedAst(depth + 1, ancestors)
+    for child in node.colConstraints:
+      child.validateStagedAst(depth + 1, ancestors)
+  else:
+    for child in node.children:
+      child.validateStagedAst(depth + 1, ancestors)
+
+proc validateContinuousAggregateV040(statement: SqlNode) =
+  if statement == nil:
+    stagedValidationError("continuous aggregate statement must not be nil")
+  if statement.kind != nkCreateContinuousAggregate:
+    stagedValidationError("expected nkCreateContinuousAggregate statement")
+  if statement.children.len != 3:
+    stagedValidationError("continuous aggregate statement must have exactly 3 children")
+
+  var ancestors: array[maxStagedPayloadDepth, SqlNode]
+  statement.validateStagedAst(1, ancestors)
+
+  let nameNode = statement.children[0]
+  let queryNode = statement.children[1]
+  let optionsNode = statement.children[2]
+  if nameNode.kind != nkIdentifier or nameNode.strVal.len == 0:
+    stagedValidationError("continuous aggregate name must be nkIdentifier")
+  if queryNode.kind != nkSelect:
+    stagedValidationError("continuous aggregate query must be nkSelect")
+  if optionsNode.kind != nkWithOptions:
+    stagedValidationError("continuous aggregate options must be nkWithOptions")
+  if optionsNode.children.len != 2:
+    stagedValidationError("continuous aggregate must have exactly 2 options")
+
+  const expectedOptions = ["retention", "refresh_interval"]
+  for i, option in optionsNode.children:
+    if option.kind != nkIndexOption:
+      stagedValidationError("continuous aggregate option must be nkIndexOption")
+    if option.children.len != 2:
+      stagedValidationError("continuous aggregate option must have exactly 2 children")
+    if option.children[0].kind != nkIdentifier:
+      stagedValidationError("continuous aggregate option key must be nkIdentifier")
+    if option.children[1].kind != nkStringLit:
+      stagedValidationError("continuous aggregate option value must be nkStringLit")
+    if option.children[0].strVal != expectedOptions[i]:
+      stagedValidationError("expected option " & expectedOptions[i])
+    if option.children[1].strVal.len == 0:
+      stagedValidationError("continuous aggregate option value must not be empty")
+
+proc writeContinuousAggregateOption(s: Stream; option: SqlNode) =
+  s.pack_map(5)
+  s.writeKey("key")
+  s.pack_type(option.children[0].strVal)
+  s.writeKey("key_span")
+  s.writeSpan(option.children[0].span)
+  s.writeKey("value")
+  s.pack_type(option.children[1].strVal)
+  s.writeKey("value_span")
+  s.writeSpan(option.children[1].span)
+  s.writeKey("span")
+  s.writeSpan(option.span)
+
+proc writeContinuousAggregateV040Kind(s: Stream; statement: SqlNode) =
+  s.pack_map(6)
+  s.writeKey("variant")
+  s.pack_type("CreateContinuousAggregate")
+  s.writeKey("name")
+  s.pack_type(statement.children[0].strVal)
+  s.writeKey("name_span")
+  s.writeSpan(statement.children[0].span)
+  s.writeKey("query")
+  s.writeContinuousAggregateQuery(statement.children[1])
+  s.writeKey("options")
+  s.pack_array(statement.children[2].children.len)
+  for option in statement.children[2].children:
+    s.writeContinuousAggregateOption(option)
+  s.writeKey("span")
+  s.writeSpan(statement.span)
+
+proc writeStatementKind(s: Stream; node: SqlNode) =
   case node.kind
   of nkSelect:
     s.writeSelectKind(node)
@@ -947,15 +1284,84 @@ proc writeStatementKind(s: MsgStream; node: SqlNode) =
     s.writeDropIndexKind(node)
   of nkPragma:
     s.writePragmaKind(node)
+  of nkCreateContinuousAggregate:
+    when continuousAggregateProducerEnabled:
+      s.writeContinuousAggregateV040Kind(node)
+    else:
+      raise newException(ParseError,
+        "unsupported statement node for MessagePack: " & $node.kind)
   else:
     raise newException(ParseError, "unsupported statement node for MessagePack: " & $node.kind)
 
-proc writeStatement(s: MsgStream; node: SqlNode) =
+proc writeStatement(s: Stream; node: SqlNode) =
   s.pack_map(2)
   s.writeKey("kind")
   s.writeStatementKind(node)
   s.writeKey("span")
   s.writeSpan(node.span)
+
+when defined(alopexSqlParserContractTests):
+  proc writeContinuousAggregateStatement(s: Stream; statement: SqlNode) =
+    s.pack_map(2)
+    s.writeKey("kind")
+    s.writeContinuousAggregateV040Kind(statement)
+    s.writeKey("span")
+    s.writeSpan(statement.span)
+
+type StagedPayloadWriter = proc(s: Stream) {.closure.}
+
+proc encodeBoundedStagedPayload(writePayload: StagedPayloadWriter): string =
+  let counting = newBoundedMsgPackStream()
+  writePayload(counting)
+  counting.finishBoundedMsgPack()
+
+  let output = newBoundedMsgPackStream(counting.total)
+  writePayload(output)
+  output.finishBoundedMsgPack()
+  result = output.data
+
+when continuousAggregateProducerEnabled:
+  proc encodeStagedStatements(statements: seq[SqlNode]): string =
+    for statement in statements:
+      if statement != nil and statement.kind == nkCreateContinuousAggregate:
+        statement.validateContinuousAggregateV040()
+    result = encodeBoundedStagedPayload(proc(s: Stream) =
+      s.pack_array(statements.len)
+      for statement in statements:
+        s.writeStatement(statement)
+    )
+
+when defined(alopexSqlParserContractTests):
+  proc validateContinuousAggregateV040ForTest*(statement: SqlNode) =
+    statement.validateContinuousAggregateV040()
+
+  proc encodeContinuousAggregateV040ToMsgPack*(statement: SqlNode): string =
+    ## Test-only seam for the descriptor-0.3 dormant producer. Production
+    ## importers and the C ABI expose no future-contract helper.
+    statement.validateContinuousAggregateV040()
+    result = encodeBoundedStagedPayload(proc(s: Stream) =
+      s.writeContinuousAggregateStatement(statement)
+    )
+
+  proc validateStagedMessagePackChunksForTest*(chunks: openArray[string]): int =
+    ## Exercise the same incremental depth/size observer with a synthetic
+    ## payload, including markers and length prefixes split across writes.
+    let counting = newBoundedMsgPackStream()
+    for chunk in chunks:
+      if chunk.len > 0:
+        counting.writeData(unsafeAddr chunk[0], chunk.len)
+    counting.finishBoundedMsgPack()
+    result = counting.maximumDepth
+
+  proc validateStagedMessagePackDepthForTest*(payload: string): int =
+    validateStagedMessagePackChunksForTest([payload])
+
+  proc triggerStagedWriterDefectForTest*() =
+    ## Prove that an unexpected implementation Defect is not reclassified as
+    ## malformed caller data by the staged encoder.
+    discard encodeBoundedStagedPayload(proc(s: Stream) =
+      raise newException(IndexDefect, "intentional staged writer defect")
+    )
 
 proc astToMsgPack*(statements: seq[SqlNode]): string =
   ## Encode parsed statements into the FFI MessagePack contract.
@@ -971,6 +1377,11 @@ proc astToMsgPack*(statements: seq[SqlNode]): string =
   ## misinterpret the first child as either a values row or a column list.
   ## Callers outside `parseSqlStatements` must ensure this invariant
   ## themselves.
+  when continuousAggregateProducerEnabled:
+    for statement in statements:
+      if statement != nil and statement.kind == nkCreateContinuousAggregate:
+        return encodeStagedStatements(statements)
+
   var s = MsgStream.init()
   s.pack_array(statements.len)
   for statement in statements:
@@ -983,7 +1394,7 @@ proc encodeSqlToMsgPack*(sql: string): string =
 
 # --- PromQL MessagePack contract ---
 
-proc writePromPosition(s: MsgStream; position: PromPosition) =
+proc writePromPosition(s: Stream; position: PromPosition) =
   s.pack_map(3)
   s.writeKey("line")
   s.pack_type(position.line)
@@ -992,14 +1403,14 @@ proc writePromPosition(s: MsgStream; position: PromPosition) =
   s.writeKey("offset")
   s.pack_type(position.offset)
 
-proc writePromSpan(s: MsgStream; span: PromSpan) =
+proc writePromSpan(s: Stream; span: PromSpan) =
   s.pack_map(2)
   s.writeKey("start")
   s.writePromPosition(span.start)
   s.writeKey("end")
   s.writePromPosition(span.`end`)
 
-proc writePromDuration(s: MsgStream; duration: PromDuration) =
+proc writePromDuration(s: Stream; duration: PromDuration) =
   s.pack_map(2)
   s.writeKey("raw")
   s.pack_type(duration.raw)
@@ -1027,9 +1438,9 @@ proc normalizedPromUnaryOp(op: PromUnaryOp): string =
   of puPlus: "Plus"
   of puMinus: "Minus"
 
-proc writePromExpr(s: MsgStream; expr: PromExpr)
+proc writePromExpr(s: Stream; expr: PromExpr)
 
-proc writePromMatcher(s: MsgStream; matcher: PromLabelMatcher) =
+proc writePromMatcher(s: Stream; matcher: PromLabelMatcher) =
   s.pack_map(4)
   s.writeKey("name")
   s.pack_type(matcher.name)
@@ -1040,7 +1451,7 @@ proc writePromMatcher(s: MsgStream; matcher: PromLabelMatcher) =
   s.writeKey("span")
   s.writePromSpan(matcher.span)
 
-proc writePromExprKind(s: MsgStream; expr: PromExpr) =
+proc writePromExprKind(s: Stream; expr: PromExpr) =
   case expr.kind
   of peVectorSelector:
     s.pack_map(4)
@@ -1134,7 +1545,7 @@ proc writePromExprKind(s: MsgStream; expr: PromExpr) =
     s.writeKey("expr")
     s.writePromExpr(expr.inner)
 
-proc writePromExpr(s: MsgStream; expr: PromExpr) =
+proc writePromExpr(s: Stream; expr: PromExpr) =
   s.pack_map(2)
   s.writeKey("kind")
   s.writePromExprKind(expr)
@@ -1256,4 +1667,4 @@ proc alopex_free_buffer*(p: pointer) {.exportc, dynlib, cdecl.} =
 
 proc alopex_parser_version*(): cstring {.exportc, dynlib, cdecl.} =
   ## Return SQL/PromQL wire contract version. Do NOT free this - it is static.
-  "0.3.0"
+  cstring(parserContractVersion)
