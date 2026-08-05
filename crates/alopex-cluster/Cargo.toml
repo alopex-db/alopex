@@ -33,8 +33,8 @@ unicode-normalization = "0.1"
 
 # All Chirps dependencies are optional so the default embedded/single-node
 # build neither requires nor advertises cluster control.
-alopex-chirps = { version = "0.5.1", path = "../../../../chirps/crates/alopex-chirps", optional = true }
-alopex-chirps-core = { version = "0.5.1", path = "../../../../chirps/crates/chirps-core", optional = true }
-alopex-chirps-gossip-swim = { version = "0.5.1", path = "../../../../chirps/crates/chirps-gossip-swim", optional = true }
-alopex-chirps-raft-storage = { version = "0.5.1", path = "../../../../chirps/crates/chirps-raft-storage", optional = true }
-alopex-chirps-transport-quic = { version = "0.5.1", path = "../../../../chirps/crates/chirps-transport-quic", optional = true }
+alopex-chirps = { version = "0.5.2", path = "../../../../chirps/crates/alopex-chirps", optional = true }
+alopex-chirps-core = { version = "0.5.2", path = "../../../../chirps/crates/chirps-core", optional = true }
+alopex-chirps-gossip-swim = { version = "0.5.2", path = "../../../../chirps/crates/chirps-gossip-swim", optional = true }
+alopex-chirps-raft-storage = { version = "0.5.2", path = "../../../../chirps/crates/chirps-raft-storage", optional = true }
+alopex-chirps-transport-quic = { version = "0.5.2", path = "../../../../chirps/crates/chirps-transport-quic", optional = true }

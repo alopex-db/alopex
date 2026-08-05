@@ -13,3 +13,5 @@ charset-normalizer==3.4.0
 idna==3.10
 urllib3==2.2.3
 setuptools==75.8.0    # grpc_tools.protoc の proto include 解決に使用
+maturin==1.10.2       # v0.9 candidate gate の read-only Rust/Python extension build
+pytest==8.4.0         # v0.9 candidate gate の Python sync/async fixture

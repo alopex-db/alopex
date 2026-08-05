@@ -8,12 +8,13 @@ fi
 
 workspace_parent="$(dirname "$(dirname "${GITHUB_WORKSPACE}")")"
 chirps_dir="${workspace_parent}/chirps"
+chirps_ref="${CHIRPS_REF:-release/v0.5.2}"
 
 if [[ -d "${chirps_dir}/.git" ]]; then
-    git -C "${chirps_dir}" fetch --depth 1 origin main
+    git -C "${chirps_dir}" fetch --depth 1 origin "${chirps_ref}"
     git -C "${chirps_dir}" checkout FETCH_HEAD
     exit 0
 fi
 
 rm -rf "${chirps_dir}"
-git clone --depth 1 https://github.com/alopex-db/alopex-chirps.git "${chirps_dir}"
+git clone --depth 1 --branch "${chirps_ref}" https://github.com/alopex-db/alopex-chirps.git "${chirps_dir}"

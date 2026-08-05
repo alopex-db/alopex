@@ -76,6 +76,8 @@ struct TaskEvidence {
 #[derive(Debug)]
 struct Config {
     repo_root: PathBuf,
+    specs_root: Option<PathBuf>,
+    candidate_sha: Option<String>,
     manifest: PathBuf,
     generate: bool,
 }
@@ -261,6 +263,13 @@ fn prerequisite_evidence(status: &str) -> Vec<String> {
     }
 }
 
+fn validate_candidate_sha(sha: String) -> Result<String, String> {
+    if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("candidate SHA が不正: {sha}"));
+    }
+    Ok(sha)
+}
+
 fn candidate_sha(root: &Path) -> Result<String, String> {
     let output = Command::new("git")
         .arg("-C")
@@ -275,14 +284,10 @@ fn candidate_sha(root: &Path) -> Result<String, String> {
         .map_err(|_| "candidate SHA が UTF-8 ではない".to_owned())?
         .trim()
         .to_owned();
-    if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(format!("candidate SHA が不正: {sha}"));
-    }
-    Ok(sha)
+    validate_candidate_sha(sha)
 }
 
-fn build_manifest(root: &Path) -> Result<Manifest, String> {
-    let source_sha = candidate_sha(root)?;
+fn build_manifest(_root: &Path, source_sha: String) -> Result<Manifest, String> {
     let entries = expected_matrix_ids()
         .into_iter()
         .map(|id| {
@@ -476,7 +481,18 @@ fn require_file_with(root: &Path, relative: &str, needle: &str) -> Result<String
     }
 }
 
-fn spec_tasks_file(root: &Path) -> Result<PathBuf, String> {
+fn spec_tasks_file(root: &Path, specs_root: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(specs_root) = specs_root {
+        let candidate = specs_root
+            .join("specs/alopex-v0.9.0-phase-4-distributed-transactions/tasks.md");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        return Err(format!(
+            "--specs-root に approved Phase 4 tasks.md が見つからない: {}",
+            candidate.display()
+        ));
+    }
     root.ancestors()
         .map(|ancestor| {
             ancestor
@@ -501,7 +517,7 @@ fn verify_literal_register(source: &str, prefix: &str, end: u8, label: &str) -> 
     Ok(())
 }
 
-fn verify_source_contract(root: &Path) -> Result<(), String> {
+fn verify_source_contract(root: &Path, specs_root: Option<&Path>) -> Result<(), String> {
     let transaction = require_file_with(
         root,
         "crates/alopex-sql/src/transaction_classifier.rs",
@@ -611,7 +627,7 @@ fn verify_source_contract(root: &Path) -> Result<(), String> {
     ] {
         require_file_with(root, relative, needle)?;
     }
-    let tasks_path = spec_tasks_file(root)?;
+    let tasks_path = spec_tasks_file(root, specs_root)?;
     let tasks = fs::read_to_string(&tasks_path)
         .map_err(|error| format!("approved Phase 4 tasks.md を読めない: {error}"))?;
     if !tasks.contains("4.22") {
@@ -631,6 +647,8 @@ fn verify_source_contract(root: &Path) -> Result<(), String> {
 fn parse_args() -> Result<Config, String> {
     let mut repo_root =
         env::current_dir().map_err(|error| format!("cwd を取得できない: {error}"))?;
+    let mut specs_root = None;
+    let mut candidate_sha = None;
     let mut manifest = None;
     let mut generate = false;
     let mut args = env::args().skip(1);
@@ -638,6 +656,16 @@ fn parse_args() -> Result<Config, String> {
         match arg.as_str() {
             "--repo-root" => {
                 repo_root = PathBuf::from(args.next().ok_or("--repo-root の値がない")?);
+            }
+            "--specs-root" => {
+                specs_root = Some(PathBuf::from(
+                    args.next().ok_or("--specs-root の値がない")?,
+                ));
+            }
+            "--candidate-sha" => {
+                candidate_sha = Some(validate_candidate_sha(
+                    args.next().ok_or("--candidate-sha の値がない")?,
+                )?);
             }
             "--manifest" => {
                 manifest = Some(PathBuf::from(args.next().ok_or("--manifest の値がない")?));
@@ -661,7 +689,7 @@ fn parse_args() -> Result<Config, String> {
             }
             "--help" | "-h" => {
                 return Err(
-                    "usage: verify-v09-f4 --target-version 0.9.0 --phase 4 --manifest <path> [--repo-root <candidate-root>] [--generate]"
+                    "usage: verify-v09-f4 --target-version 0.9.0 --phase 4 --manifest <path> [--repo-root <candidate-root>] [--specs-root <approved-spec-workflow-root>] [--candidate-sha <40-hex-sha>] [--generate]"
                         .to_owned(),
                 );
             }
@@ -671,6 +699,8 @@ fn parse_args() -> Result<Config, String> {
     let manifest = manifest.ok_or("--manifest が必須")?;
     Ok(Config {
         repo_root,
+        specs_root,
+        candidate_sha,
         manifest,
         generate,
     })
@@ -683,9 +713,13 @@ fn run(config: Config) -> Result<(), String> {
             config.repo_root.display()
         )
     })?;
-    verify_source_contract(&repo_root)?;
+    verify_source_contract(&repo_root, config.specs_root.as_deref())?;
+    let source_sha = match config.candidate_sha {
+        Some(candidate_sha) => candidate_sha,
+        None => candidate_sha(&repo_root)?,
+    };
     if config.generate {
-        let manifest = build_manifest(&repo_root)?;
+        let manifest = build_manifest(&repo_root, source_sha)?;
         validate_manifest(&manifest)?;
         if let Some(parent) = config.manifest.parent() {
             fs::create_dir_all(parent)
@@ -711,7 +745,6 @@ fn run(config: Config) -> Result<(), String> {
     let manifest = serde_json::from_slice::<Manifest>(&bytes)
         .map_err(|error| format!("manifest schema が不正: {error}"))?;
     validate_manifest(&manifest)?;
-    let source_sha = candidate_sha(&repo_root)?;
     if manifest.source_sha != source_sha
         || manifest
             .entries

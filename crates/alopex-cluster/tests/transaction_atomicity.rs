@@ -315,7 +315,15 @@ fn epoch_mismatch_is_rejected_before_participant_io() {
     let coordinator = coordinator(&request);
     request.data_epoch = 12;
     request.read_point.data_epoch = 12;
-    request.participants[0].range.data_epoch = 12;
+    // Keep the intent self-consistent so `intent.validate()` succeeds and the
+    // test reaches the admission fence. The stale epoch is intentionally only
+    // between the immutable intent and the verifier's committed epoch (11).
+    for participant in &mut request.participants {
+        participant.range.data_epoch = 12;
+    }
+    if let Some(range_identity) = &mut request.routing.range_identity {
+        range_identity.data_epoch = 12;
+    }
     let mut driver = Driver::default();
     assert!(matches!(
         coordinator.execute(&request, &mut driver),

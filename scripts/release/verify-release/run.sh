@@ -21,6 +21,8 @@
 #
 # Usage:
 #   ./scripts/release/verify-release/run.sh [ALOPEX_VERSION] [--no-report]
+#   V09_SPECS_DIR=/path/to/alopex-spec-workflow \
+#     ./scripts/release/verify-release/run.sh 0.9.0 --v09-candidate-gate --no-report
 #   例: ./scripts/release/verify-release/run.sh 0.7.6
 #
 # chirps は既定では隣接 checkout (${REPO_ROOT}/../chirps) を使う。存在しない
@@ -39,9 +41,11 @@ DOCS_PUBLIC_DIR="${DOCS_PUBLIC_DIR:-${DEFAULT_DOCS_PUBLIC_DIR}}"
 
 ALOPEX_VERSION="0.7.6"
 DO_REPORT=1
+V09_CANDIDATE_GATE=0
 for arg in "$@"; do
     case "${arg}" in
         --no-report) DO_REPORT=0 ;;
+        --v09-candidate-gate) V09_CANDIDATE_GATE=1 ;;
         *) ALOPEX_VERSION="${arg}" ;;
     esac
 done
@@ -52,7 +56,7 @@ if [ ! -d "${DEFAULT_CHIRPS_DIR}" ] && [ -d "${REPO_ROOT}/../../chirps" ]; then
     DEFAULT_CHIRPS_DIR="${REPO_ROOT}/../../chirps"
 fi
 CHIRPS_REPO_URL="${CHIRPS_REPO_URL:-https://github.com/alopex-db/alopex-chirps.git}"
-CHIRPS_REF="${CHIRPS_REF:-main}"
+CHIRPS_REF="${CHIRPS_REF:-release/v0.5.2}"
 CHIRPS_DIR_WAS_EXPLICIT=0
 if [ -n "${CHIRPS_DIR:-}" ]; then
     CHIRPS_DIR_WAS_EXPLICIT=1
@@ -72,6 +76,72 @@ NC='\033[0m'
 log_info() { echo -e "${YELLOW}[INFO]${NC} $1"; }
 log_ok() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_fail() { echo -e "${RED}[FAIL]${NC} $1"; }
+
+ensure_clean_v09_candidate() {
+    local changes
+    changes="$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=all)" || {
+        log_fail "v0.9 candidate source の Git 状態を確認できません: ${REPO_ROOT}"
+        return 64
+    }
+    if [[ -n "${changes}" ]]; then
+        log_fail "v0.9 candidate source must be clean and committed; evidence cannot be bound to HEAD while staged, unstaged, or untracked changes exist"
+        return 64
+    fi
+}
+
+run_v09_candidate_gate() {
+    if [[ "${ALOPEX_VERSION}" != "0.9.0" ]]; then
+        log_fail "--v09-candidate-gate は v0.9.0 専用です: ${ALOPEX_VERSION}"
+        return 64
+    fi
+    if [[ "${DO_REPORT}" -ne 0 ]]; then
+        log_fail "v0.9 candidate gate は --no-report が必須です。docs PR や外部書き込みは行いません。"
+        return 64
+    fi
+    if [[ -z "${V09_SPECS_DIR:-}" || ! -d "${V09_SPECS_DIR}" ]]; then
+        log_fail "V09_SPECS_DIR に approved alopex-spec-workflow checkout を指定してください"
+        return 64
+    fi
+    if [[ ! -d "${CHIRPS_DIR}" ]]; then
+        log_fail "v0.9 candidate gate は既存の CHIRPS_DIR を必要とし、clone は行いません: ${CHIRPS_DIR}"
+        return 64
+    fi
+    ensure_clean_v09_candidate || return $?
+
+    local cargo_home_host="${CARGO_HOME:-${HOME}/.cargo}"
+    if [[ ! -d "${cargo_home_host}/registry" ]]; then
+        log_fail "offline candidate verification 用の Cargo registry cache がない: ${cargo_home_host}/registry"
+        return 64
+    fi
+
+    local candidate_image="alopex-v09-candidate:${ALOPEX_VERSION}"
+    local manifest_path="/tmp/alopex-v09-f4-manifest.json"
+    local candidate_sha
+    candidate_sha="$(git -C "${REPO_ROOT}" rev-parse HEAD)" || {
+        log_fail "candidate Git SHA を取得できません"
+        return 64
+    }
+    log_info "v0.9 candidate Docker image をビルドします（Docker push/tag/publish は行いません）"
+    docker build -t "${candidate_image}" -f "${REPO_ROOT}/scripts/parity/Dockerfile" \
+        "${REPO_ROOT}/scripts/parity"
+
+    log_info "v0.9 candidate gate をネットワークなし・read-only source/spec/chirps mount で実行します"
+    docker run --rm --network none \
+        --user "$(id -u):$(id -g)" \
+        -e HOME=/tmp/alopex-v09-home \
+        -e CARGO_HOME=/usr/local/cargo \
+        -e CARGO_TARGET_DIR=/tmp/alopex-v09-target \
+        -e "V09_CANDIDATE_SHA=${candidate_sha}" \
+        -e V09_SPECS_DIR=/spec-workflow \
+        -v "${REPO_ROOT}:/workspace:ro" \
+        -v "${V09_SPECS_DIR}:/spec-workflow:ro" \
+        -v "${CHIRPS_DIR}:/chirps:ro" \
+        -v "${cargo_home_host}/registry:/usr/local/cargo/registry:ro" \
+        -v "${cargo_home_host}/git:/usr/local/cargo/git:ro" \
+        -w /workspace \
+        "${candidate_image}" \
+        bash scripts/release/v09_gate.sh --phase 4 --manifest "${manifest_path}"
+}
 
 ensure_chirps_dir() {
     if [ -d "${CHIRPS_DIR}" ]; then
@@ -277,6 +347,11 @@ EOF
     )
     log_ok "docs-public へレポートを push しました(branch: ${branch})"
 }
+
+if [[ "${V09_CANDIDATE_GATE}" -eq 1 ]]; then
+    run_v09_candidate_gate
+    exit $?
+fi
 
 ensure_chirps_dir
 

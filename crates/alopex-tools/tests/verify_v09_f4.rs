@@ -114,3 +114,72 @@ fn relative_repo_root_finds_the_approved_external_spec_workflow() {
     );
     fs::remove_dir_all(directory).expect("remove temporary directory");
 }
+
+#[test]
+fn explicit_specs_root_supports_a_read_only_docker_mount() {
+    let directory = temp_dir();
+    let manifest = directory.join("f4.json");
+    let specs_root = repo_root()
+        .ancestors()
+        .map(|ancestor| ancestor.join(".spec-workflow"))
+        .find(|path| path.is_dir())
+        .expect("approved spec workflow");
+    let output = Command::new(env!("CARGO_BIN_EXE_verify-v09-f4"))
+        .current_dir(repo_root())
+        .args([
+            "--repo-root",
+            ".",
+            "--specs-root",
+            specs_root.to_str().expect("UTF-8 specs root"),
+            "--target-version",
+            "0.9.0",
+            "--phase",
+            "4",
+            "--manifest",
+            manifest.to_str().expect("UTF-8 manifest"),
+            "--generate",
+        ])
+        .output()
+        .expect("verifier process");
+    assert!(
+        output.status.success(),
+        "explicit specs root generation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(directory).expect("remove temporary directory");
+}
+
+#[test]
+fn explicit_candidate_sha_does_not_require_git_metadata_inside_the_candidate_mount() {
+    let directory = temp_dir();
+    let manifest = directory.join("f4.json");
+    let source_sha = std::process::Command::new("git")
+        .args(["-C", repo_root().to_str().expect("UTF-8 root"), "rev-parse", "HEAD"])
+        .output()
+        .expect("candidate SHA")
+        .stdout;
+    let source_sha = String::from_utf8(source_sha).expect("UTF-8 SHA");
+    let output = Command::new(env!("CARGO_BIN_EXE_verify-v09-f4"))
+        .current_dir(repo_root())
+        .args([
+            "--repo-root",
+            ".",
+            "--candidate-sha",
+            source_sha.trim(),
+            "--target-version",
+            "0.9.0",
+            "--phase",
+            "4",
+            "--manifest",
+            manifest.to_str().expect("UTF-8 manifest"),
+            "--generate",
+        ])
+        .output()
+        .expect("verifier process");
+    assert!(
+        output.status.success(),
+        "explicit candidate SHA generation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(directory).expect("remove temporary directory");
+}

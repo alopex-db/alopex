@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - 'v0.9.0'
   workflow_dispatch:
 
 env:
@@ -14,7 +14,7 @@ env:
 jobs:
   # Run CI checks before release
   ci-gate:
-    name: v0.8 CI Gate (${{ matrix.os }})
+    name: v0.9 CI Gate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -43,7 +43,7 @@ jobs:
       - name: Setup Python venv
         shell: bash
         run: |
-          VENV_DIR="${RUNNER_TEMP:-/tmp}/alopex-v08-gate-venv"
+          VENV_DIR="${RUNNER_TEMP:-/tmp}/alopex-v09-gate-venv"
           rm -rf "$VENV_DIR"
           python -m venv "$VENV_DIR"
           VENV_ROOT=$(VENV_DIR="$VENV_DIR" python -c "import os; from pathlib import Path; print(Path(os.environ['VENV_DIR']).resolve().as_posix())")
@@ -60,7 +60,7 @@ jobs:
           echo "PYO3_PYTHON=$VENV_PY" >> "$GITHUB_ENV"
           echo "PYTHON_SYS_EXECUTABLE=$VENV_PY" >> "$GITHUB_ENV"
           echo "ALOPEX_PYTHON=$VENV_PY" >> "$GITHUB_ENV"
-          echo "V07_GATE_VENV_DIR=$VENV_ROOT" >> "$GITHUB_ENV"
+          echo "V09_GATE_VENV_DIR=$VENV_ROOT" >> "$GITHUB_ENV"
       - name: Install Python deps
         run: python -m pip install --upgrade pip maturin pytest numpy
       - name: Build Nim SQL parser library (Linux)
@@ -91,20 +91,25 @@ jobs:
           nim_lib_dir="$(cygpath -w "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}")"
           echo "ALOPEX_DLL_DIR=${nim_lib_dir}" >> "$GITHUB_ENV"
           echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
-      - name: Run v0.7 baseline gate (Linux)
+      - name: Checkout approved v0.9 specification evidence (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/checkout@v4
+        with:
+          repository: alopex-db/alopex-spec-workflow
+          path: alopex-spec-workflow
+      - name: Run v0.9 target-version candidate gate (Linux, Docker)
         if: runner.os == 'Linux'
         env:
-          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: bash scripts/release/v07_gate.sh
-      - name: Build Python extension for v0.8 gate (Windows)
+          CHIRPS_DIR: ${{ github.workspace }}/../chirps
+          V09_SPECS_DIR: ${{ github.workspace }}/alopex-spec-workflow
+        run: bash scripts/release/verify-release/run.sh 0.9.0 --v09-candidate-gate --no-report
+      - name: Build all v0.9 product crates (Windows)
         if: runner.os == 'Windows'
-        run: maturin develop -m crates/alopex-py/Cargo.toml
-      - name: Run v0.8 release gate
         shell: bash
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: bash crates/alopex-tools/v08/verify-v08-surfaces.sh
+        run: cargo test --workspace --all-features --locked --no-run
 
   build-release:
     name: Build Release (${{ matrix.target }})
