@@ -110,6 +110,46 @@ fn col_ref(table: Option<&str>, column: &str) -> Expr {
     }
 }
 
+#[test]
+fn generic_planner_route_rejects_unsupported_statements_explicitly() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+    let statement = stmt(StatementKind::Pragma {
+        name: "io_stats".to_string(),
+        value: None,
+    });
+    let expected = PlannerError::unsupported_feature(
+        "statement kind for the generic SQL planner",
+        "a statement-specific planner",
+        statement.span,
+    );
+
+    let error =
+        match planner.plan_classified_statement(&statement, GenericHostStatement::Unsupported) {
+            Ok(_) => panic!("unsupported generic statement unexpectedly planned"),
+            Err(error) => error,
+        };
+    assert_eq!(error, expected);
+}
+
+#[test]
+fn generic_routing_access_rejects_unsupported_statements_explicitly() {
+    let statement = stmt(StatementKind::Pragma {
+        name: "io_stats".to_string(),
+        value: None,
+    });
+    let expected = PlannerError::unsupported_feature(
+        "statement kind for the generic SQL planner",
+        "a statement-specific planner",
+        statement.span,
+    );
+
+    assert_eq!(
+        table_reference_access_for_classified(&statement, GenericHostStatement::Unsupported),
+        Err(expected)
+    );
+}
+
 /// Create a binary operation expression.
 fn binary_op(left: Expr, op: BinaryOp, right: Expr) -> Expr {
     Expr {

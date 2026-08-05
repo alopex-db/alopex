@@ -205,27 +205,30 @@ pub fn plan_statement_for_routing<C: Catalog + ?Sized>(
 ) -> Result<PlannedStatement, PlannerError> {
     let planner = Planner::new(catalog);
     let plan = planner.plan(statement)?;
-    let routing_input = routing_input_for_plan(&statement.kind, &plan);
+    let routing_input = routing_input_for_plan(statement, &plan)?;
     Ok(PlannedStatement {
         plan,
         routing_input,
     })
 }
 
-fn routing_input_for_plan(statement_kind: &StatementKind, plan: &LogicalPlan) -> RoutingInput {
+fn routing_input_for_plan(
+    statement: &Statement,
+    plan: &LogicalPlan,
+) -> Result<RoutingInput, PlannerError> {
     let mut diagnostics = Vec::new();
     let extractor = TableReferenceExtractor::new();
     let table_references = extractor.extract_from_logical_plan(
         plan,
-        table_reference_access(statement_kind),
+        table_reference_access(statement)?,
         &mut diagnostics,
     );
 
-    RoutingInput {
-        statement_kind: statement_kind.clone(),
+    Ok(RoutingInput {
+        statement_kind: statement.kind.clone(),
         table_references,
         diagnostics,
-    }
+    })
 }
 
 /// Extracts physical table references from SQL-owned planner structures.
@@ -561,18 +564,71 @@ fn push_table_reference(
     }
 }
 
-fn table_reference_access(statement_kind: &StatementKind) -> TableReferenceAccess {
+#[derive(Debug)]
+enum GenericHostStatement<'a> {
+    CreateTable(&'a CreateTable),
+    DropTable(&'a DropTable),
+    CreateIndex(&'a CreateIndex),
+    DropIndex(&'a DropIndex),
+    Pragma {
+        name: &'a str,
+        value: &'a Option<PragmaValue>,
+    },
+    Select(&'a Select),
+    Insert(&'a Insert),
+    Update(&'a Update),
+    Delete(&'a Delete),
+    Unsupported,
+}
+
+fn classify_generic_host_statement(statement_kind: &StatementKind) -> GenericHostStatement<'_> {
+    // The fallback is intentionally unreachable for the current enum. It
+    // becomes the safe route before a future statement-specific host is added.
+    #[allow(unreachable_patterns)]
     match statement_kind {
-        StatementKind::Select(_) => TableReferenceAccess::Read,
-        StatementKind::Insert(_) | StatementKind::Update(_) | StatementKind::Delete(_) => {
-            TableReferenceAccess::Write
-        }
-        StatementKind::CreateTable(_) => TableReferenceAccess::Create,
-        StatementKind::DropTable(_) => TableReferenceAccess::Drop,
-        StatementKind::CreateIndex(_) | StatementKind::DropIndex(_) => {
-            TableReferenceAccess::Metadata
-        }
-        StatementKind::Pragma { .. } => TableReferenceAccess::Metadata,
+        StatementKind::CreateTable(statement) => GenericHostStatement::CreateTable(statement),
+        StatementKind::DropTable(statement) => GenericHostStatement::DropTable(statement),
+        StatementKind::CreateIndex(statement) => GenericHostStatement::CreateIndex(statement),
+        StatementKind::DropIndex(statement) => GenericHostStatement::DropIndex(statement),
+        StatementKind::Pragma { name, value } => GenericHostStatement::Pragma { name, value },
+        StatementKind::Select(statement) => GenericHostStatement::Select(statement),
+        StatementKind::Insert(statement) => GenericHostStatement::Insert(statement),
+        StatementKind::Update(statement) => GenericHostStatement::Update(statement),
+        StatementKind::Delete(statement) => GenericHostStatement::Delete(statement),
+        _ => GenericHostStatement::Unsupported,
+    }
+}
+
+fn unsupported_generic_statement(statement: &Statement) -> PlannerError {
+    PlannerError::unsupported_feature(
+        "statement kind for the generic SQL planner",
+        "a statement-specific planner",
+        statement.span,
+    )
+}
+
+fn table_reference_access(statement: &Statement) -> Result<TableReferenceAccess, PlannerError> {
+    table_reference_access_for_classified(
+        statement,
+        classify_generic_host_statement(&statement.kind),
+    )
+}
+
+fn table_reference_access_for_classified(
+    statement: &Statement,
+    classified: GenericHostStatement<'_>,
+) -> Result<TableReferenceAccess, PlannerError> {
+    match classified {
+        GenericHostStatement::Select(_) => Ok(TableReferenceAccess::Read),
+        GenericHostStatement::Insert(_)
+        | GenericHostStatement::Update(_)
+        | GenericHostStatement::Delete(_) => Ok(TableReferenceAccess::Write),
+        GenericHostStatement::CreateTable(_) => Ok(TableReferenceAccess::Create),
+        GenericHostStatement::DropTable(_) => Ok(TableReferenceAccess::Drop),
+        GenericHostStatement::CreateIndex(_)
+        | GenericHostStatement::DropIndex(_)
+        | GenericHostStatement::Pragma { .. } => Ok(TableReferenceAccess::Metadata),
+        GenericHostStatement::Unsupported => Err(unsupported_generic_statement(statement)),
     }
 }
 
@@ -629,19 +685,28 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     /// - Type checking fails
     /// - DDL validation fails (e.g., table already exists for CREATE TABLE)
     pub fn plan(&self, stmt: &Statement) -> Result<LogicalPlan, PlannerError> {
-        match &stmt.kind {
+        self.plan_classified_statement(stmt, classify_generic_host_statement(&stmt.kind))
+    }
+
+    fn plan_classified_statement(
+        &self,
+        stmt: &Statement,
+        classified: GenericHostStatement<'_>,
+    ) -> Result<LogicalPlan, PlannerError> {
+        match classified {
             // DDL statements
-            StatementKind::CreateTable(ct) => self.plan_create_table(ct),
-            StatementKind::DropTable(dt) => self.plan_drop_table(dt),
-            StatementKind::CreateIndex(ci) => self.plan_create_index(ci),
-            StatementKind::DropIndex(di) => self.plan_drop_index(di),
-            StatementKind::Pragma { name, value } => self.plan_pragma(name, value),
+            GenericHostStatement::CreateTable(statement) => self.plan_create_table(statement),
+            GenericHostStatement::DropTable(statement) => self.plan_drop_table(statement),
+            GenericHostStatement::CreateIndex(statement) => self.plan_create_index(statement),
+            GenericHostStatement::DropIndex(statement) => self.plan_drop_index(statement),
+            GenericHostStatement::Pragma { name, value } => self.plan_pragma(name, value),
 
             // DML statements
-            StatementKind::Select(sel) => self.plan_select(sel),
-            StatementKind::Insert(ins) => self.plan_insert(ins),
-            StatementKind::Update(upd) => self.plan_update(upd),
-            StatementKind::Delete(del) => self.plan_delete(del),
+            GenericHostStatement::Select(statement) => self.plan_select(statement),
+            GenericHostStatement::Insert(statement) => self.plan_insert(statement),
+            GenericHostStatement::Update(statement) => self.plan_update(statement),
+            GenericHostStatement::Delete(statement) => self.plan_delete(statement),
+            GenericHostStatement::Unsupported => Err(unsupported_generic_statement(stmt)),
         }
     }
 
