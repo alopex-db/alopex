@@ -507,6 +507,33 @@ print(matches[0])
         self.assertFalse(fourth_record.exists())
         self.assertFalse(fourth_archive.exists())
 
+    def test_development_identity_sidecars_are_not_source_inputs(self) -> None:
+        first_record, _ = self.pack()
+        first = json.loads(first_record.read_text(encoding="utf-8"))
+
+        (self.source / "CONTRACT_VERSION").write_text(
+            "0.4.0\n", encoding="utf-8"
+        )
+        (self.source / "SHA256SUMS").write_text(
+            f"{'0' * 64}  libalopex_sql_parser.so\n", encoding="utf-8"
+        )
+        second_record, _ = self.pack(output=self.root / "development-sidecars")
+        second = json.loads(second_record.read_text(encoding="utf-8"))
+
+        self.assertEqual(first["parser_source"], second["parser_source"])
+
+    def test_nested_identity_named_file_remains_a_source_input(self) -> None:
+        first_record, _ = self.pack()
+        first = json.loads(first_record.read_text(encoding="utf-8"))
+
+        nested = self.source / "docs"
+        nested.mkdir()
+        (nested / "CONTRACT_VERSION").write_text("source material\n", encoding="utf-8")
+        second_record, _ = self.pack(output=self.root / "nested-identity-name")
+        second = json.loads(second_record.read_text(encoding="utf-8"))
+
+        self.assertNotEqual(first["parser_source"], second["parser_source"])
+
     def test_generated_package_metadata_file_order_is_not_an_identity_input(
         self,
     ) -> None:

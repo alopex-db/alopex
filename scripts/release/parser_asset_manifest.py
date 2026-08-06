@@ -253,6 +253,11 @@ def source_path_ignored(relative: PurePosixPath, is_dir: bool) -> bool:
         return True
     if is_dir:
         return False
+    if len(relative.parts) == 1 and relative.name in {
+        "CONTRACT_VERSION",
+        "SHA256SUMS",
+    }:
+        return True
     ignored_names = {
         "alopex_sql_parser.dll",
         "libalopex_sql_parser.dylib",

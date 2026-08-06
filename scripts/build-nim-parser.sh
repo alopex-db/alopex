@@ -525,8 +525,46 @@ build_docker() {
     -c 'export PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin; nimble install -y "npeg@1.3.0" "msgpack4nim@0.4.4" && nimble lib'
 }
 
+write_identity_sidecars() (
+  local output_dir
+  local output_name
+  local output_sha
+  local contract_tmp
+  local checksum_tmp
+  output_dir="$(dirname "${OUTPUT}")"
+  output_name="$(basename "${OUTPUT}")"
+  contract_tmp="${output_dir}/.CONTRACT_VERSION.$$"
+  checksum_tmp="${output_dir}/.SHA256SUMS.$$"
+  trap 'rm -f -- "${contract_tmp}" "${checksum_tmp}"' EXIT
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    output_sha="$(sha256sum "${OUTPUT}")"
+    output_sha="${output_sha%% *}"
+  elif command -v shasum >/dev/null 2>&1; then
+    output_sha="$(shasum -a 256 "${OUTPUT}")"
+    output_sha="${output_sha%% *}"
+  elif command -v openssl >/dev/null 2>&1; then
+    output_sha="$(openssl dgst -sha256 "${OUTPUT}")"
+    output_sha="${output_sha##*= }"
+  else
+    echo "sha256sum, shasum, or openssl is required to identify the parser output" >&2
+    exit 1
+  fi
+  [[ "${output_sha}" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "could not identify Nim parser output: ${OUTPUT}" >&2
+    exit 1
+  }
+
+  printf '%s\n' "${REQUIRED_CONTRACT_VERSION}" >"${contract_tmp}"
+  printf '%s  %s\n' "${output_sha}" "${output_name}" >"${checksum_tmp}"
+  chmod 0644 "${contract_tmp}" "${checksum_tmp}"
+  mv -f -- "${contract_tmp}" "${output_dir}/CONTRACT_VERSION"
+  mv -f -- "${checksum_tmp}" "${output_dir}/SHA256SUMS"
+)
+
 echo "Building Nim SQL parser (${BACKEND} backend)"
-rm -f -- "${OUTPUT}"
+rm -f -- "${OUTPUT}" "$(dirname "${OUTPUT}")/CONTRACT_VERSION" \
+  "$(dirname "${OUTPUT}")/SHA256SUMS"
 if [[ "${BACKEND}" == "host" ]]; then
   build_host
 else
@@ -534,4 +572,5 @@ else
 fi
 
 [[ -f "${OUTPUT}" ]] || { echo "Nim parser output not found: ${OUTPUT}" >&2; exit 1; }
+write_identity_sidecars
 echo "Built ${OUTPUT}"

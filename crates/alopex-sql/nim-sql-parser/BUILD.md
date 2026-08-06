@@ -14,8 +14,10 @@ bash scripts/test-nim-parser.sh
 ```
 
 `auto` uses a host Nim/Nimble installation when both are available and falls
-back to Docker. The host toolchain must be Nim 2.2 or newer. To select a
-backend explicitly:
+back to Docker. Exact host builds require Nim 2.2.10, Nimble 0.22.3 at commit
+`42ef70c2102a942c46f13eb76872326edd525cec`, and an offline dependency seed in
+`ALOPEX_NIMBLE_SEED_DIR` (or `ALOPEX_NIMBLE_DIR`). To select a backend
+explicitly:
 
 ```sh
 bash scripts/build-nim-parser.sh --backend host
@@ -37,7 +39,7 @@ The build output is one of:
 
 The library exports `alopex_parse_sql`, `alopex_parse_promql`,
 `alopex_parser_version`, `alopex_parser_init`, and `alopex_free_buffer`.
-The current SQL/PromQL MessagePack contract version is `0.3.0`.
+The current SQL/PromQL MessagePack contract version is `0.4.0`.
 
 For Skulk development, copy the host artifact into
 `crates/skulk/nim-parser/vendor/<target-triple>/` in the Skulk repository.
@@ -46,8 +48,12 @@ artifact directory.
 
 ## Rust checks
 
-Cargo automatically discovers the generated library in the parser directory.
-For a worktree or an explicit output directory, use:
+Cargo uses the target-qualified release library under `vendor/` by default.
+The build script also writes `CONTRACT_VERSION` and `SHA256SUMS` beside a local
+development output. Cargo validates the pinned vendor manifest, target,
+contract, byte size, and SHA-256 before emitting link directives. For a
+worktree or an explicit output directory, keep both generated identity
+sidecars with the library and use:
 
 ```sh
 NIM_SQL_PARSER_LIB_DIR="$PWD/crates/alopex-sql/nim-sql-parser" \

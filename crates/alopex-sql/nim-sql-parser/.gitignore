@@ -1,5 +1,9 @@
 # Nim build artifacts
 *.so
+*.dylib
+*.dll
+/CONTRACT_VERSION
+/SHA256SUMS
 nimcache/
 tests/poc_msgpack
 tests/fixtures/

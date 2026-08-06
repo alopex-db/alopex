@@ -25,6 +25,8 @@ exclude = [
     "nim-sql-parser/Dockerfile",
     "nim-sql-parser/nim_sql_parser.nimble",
     "nim-sql-parser/.gitignore",
+    "nim-sql-parser/CONTRACT_VERSION",
+    "nim-sql-parser/SHA256SUMS",
 ]
 
 [features]
@@ -71,6 +73,10 @@ serde_json.workspace = true
 [[bench]]
 name = "key_encoding"
 harness = false
+
+[[test]]
+name = "build_support"
+path = "build_support.rs"
 
 [[bench]]
 name = "storage_bench"
