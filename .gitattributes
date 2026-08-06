@@ -1,0 +1,6 @@
+/crates/alopex-sql/nim-sql-parser/** text eol=lf
+/crates/alopex-sql/nim-sql-parser/**/*.dll binary !eol
+/crates/alopex-sql/nim-sql-parser/**/*.dylib binary !eol
+/crates/alopex-sql/nim-sql-parser/**/*.exe binary !eol
+/crates/alopex-sql/nim-sql-parser/**/*.pdb binary !eol
+/crates/alopex-sql/nim-sql-parser/**/*.so binary !eol
