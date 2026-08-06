@@ -41,19 +41,19 @@ TARGET_LIBRARIES = {
 }
 REQUIRED_PACKAGES = {
     "msgpack4nim": {
-        "file_count": 6,
+        "file_count": 5,
         "manifest": "msgpack4nim.nimble",
         "tree_sha256": (
-            "c401e23d97bae585829820e83f2cd6cd01d0cfe57b4ca141f0d818652a92c8e0"
+            "462002b97d57683173c49a0110182f0edb4bfb74d523cb15f569f79bcf88f4fc"
         ),
         "vcs_revision": "f4cc097ca9694f17feced9f82994f583ef7911fe",
         "version": "0.4.4",
     },
     "npeg": {
-        "file_count": 17,
+        "file_count": 16,
         "manifest": "npeg.nimble",
         "tree_sha256": (
-            "63e8fe2f54321445b470b23cff6a1fe3d962be4906b89d23047a0b027eb336af"
+            "83cd5c1fd9ee21e81306b5e15a5080c7aac132984ef87d5c804a870b55959b0b"
         ),
         "vcs_revision": "409f6796d0e880b3f0222c964d1da7de6e450811",
         "version": "1.3.0",
@@ -276,7 +276,87 @@ def source_path_ignored(relative: PurePosixPath, is_dir: bool) -> bool:
 
 def package_path_ignored(relative: PurePosixPath, is_dir: bool) -> bool:
     del is_dir
-    return any(part in {".git", "__pycache__", "nimcache"} for part in relative.parts)
+    return relative == PurePosixPath("nimblemeta.json") or any(
+        part in {".git", "__pycache__", "nimcache"} for part in relative.parts
+    )
+
+
+def normalize_nimble_metadata_path(value: str, description: str) -> str:
+    normalized = value.replace("\\", "/")
+    if not normalized.startswith("/"):
+        raise ParserAssetError(f"{description} must be package-root-relative")
+    relative = safe_archive_path(normalized[1:], description)
+    return f"/{relative}"
+
+
+def validate_nimble_metadata(
+    metadata: Any,
+    *,
+    name: str,
+    version: str,
+    vcs_revision: str,
+    source_root: Path,
+) -> None:
+    if not isinstance(metadata, dict):
+        raise ParserAssetError(f"{name} Nimble metadata must be an object")
+    require_exact_keys(
+        metadata, {"metaData", "version"}, f"{name} Nimble metadata"
+    )
+    if isinstance(metadata["version"], bool) or metadata["version"] != 1:
+        raise ParserAssetError(f"{name} Nimble metadata version must be 1")
+    details = metadata["metaData"]
+    if not isinstance(details, dict):
+        raise ParserAssetError(f"{name} Nimble metaData must be an object")
+    require_exact_keys(
+        details,
+        {
+            "binaries",
+            "downloadMethod",
+            "files",
+            "specialVersions",
+            "url",
+            "vcsRevision",
+        },
+        f"{name} Nimble metaData",
+    )
+    if details["downloadMethod"] != "git":
+        raise ParserAssetError(f"{name} Nimble download method must be git")
+    if details["url"] != "":
+        raise ParserAssetError(f"{name} Nimble metadata URL must be empty")
+    if details["binaries"] != []:
+        raise ParserAssetError(f"{name} Nimble package must declare no binaries")
+    if details["specialVersions"] != [version]:
+        raise ParserAssetError(
+            f"{name} Nimble metadata must declare only version {version}"
+        )
+    if details["vcsRevision"] != vcs_revision:
+        raise ParserAssetError(
+            f"{name} VCS revision must be {vcs_revision}, "
+            f"found {details['vcsRevision']}"
+        )
+    files = details["files"]
+    if not isinstance(files, list) or not all(
+        isinstance(item, str) for item in files
+    ):
+        raise ParserAssetError(f"{name} Nimble file list must contain strings")
+    normalized_files = [
+        normalize_nimble_metadata_path(item, f"{name} Nimble file path")
+        for item in files
+    ]
+    if len(normalized_files) != len(set(normalized_files)):
+        raise ParserAssetError(f"{name} Nimble file list contains duplicates")
+    expected_files: list[str] = []
+    for path in sorted(source_root.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = PurePosixPath(path.relative_to(source_root).as_posix())
+        if package_path_ignored(relative, False):
+            continue
+        expected_files.append(f"/{relative.as_posix()}")
+    if sorted(normalized_files) != sorted(expected_files):
+        raise ParserAssetError(
+            f"{name} Nimble file list does not match package content"
+        )
 
 
 def tree_identity(
@@ -434,26 +514,25 @@ def package_identities(values: Iterable[str]) -> list[dict[str, Any]]:
             package.root / "nimblemeta.json", f"{name} Nimble metadata"
         )
         metadata = parse_json_bytes(metadata_content, f"{name} Nimble metadata")
-        try:
-            vcs_revision = metadata["metaData"]["vcsRevision"]
-        except (KeyError, TypeError) as error:
-            raise ParserAssetError(
-                f"{name} Nimble metadata has no VCS revision"
-            ) from error
-        if vcs_revision != requirement["vcs_revision"]:
-            raise ParserAssetError(
-                f"{name} VCS revision must be {requirement['vcs_revision']}, "
-                f"found {vcs_revision}"
-            )
+        vcs_revision = requirement["vcs_revision"]
+        validate_nimble_metadata(
+            metadata,
+            name=name,
+            version=required_version,
+            vcs_revision=vcs_revision,
+            source_root=package.root,
+        )
         identity = tree_identity(
             package.root, f"{name} package", package_path_ignored
         )
-        if identity != {
+        expected_identity = {
             "file_count": requirement["file_count"],
             "tree_sha256": requirement["tree_sha256"],
-        }:
+        }
+        if identity != expected_identity:
             raise ParserAssetError(
-                f"{name} package content does not match the locked identity"
+                f"{name} package content does not match the locked identity; "
+                f"expected={expected_identity}, actual={identity}"
             )
         identities.append(
             {
