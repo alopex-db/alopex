@@ -399,6 +399,29 @@ jobs:
           export ALOPEX_NIM_CONTROLLED_FAILURE_PROOF="$proof_path"
           echo "ALOPEX_NIM_CONTROLLED_FAILURE_PROOF=$proof_path" >> "$GITHUB_ENV"
           bash scripts/test-nim-parser.sh --backend host --controlled-failure
+      - name: Stage reviewed parser candidate for v0.8 surfaces
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)
+              parser_target="x86_64-unknown-linux-gnu"
+              parser_library="libalopex_sql_parser.so"
+              ;;
+            Windows)
+              parser_target="x86_64-pc-windows-msvc"
+              parser_library="alopex_sql_parser.dll"
+              ;;
+            *)
+              echo "unsupported v0.8 parser gate runner: $RUNNER_OS" >&2
+              exit 2
+              ;;
+          esac
+          reviewed_dir="${NIM_SQL_PARSER_DIR}/vendor/${parser_target}"
+          for candidate in "$parser_library" CONTRACT_VERSION SHA256SUMS; do
+            test -f "${reviewed_dir}/${candidate}"
+            cp -f -- "${reviewed_dir}/${candidate}" "${NIM_SQL_PARSER_DIR}/${candidate}"
+            cmp -s "${reviewed_dir}/${candidate}" "${NIM_SQL_PARSER_DIR}/${candidate}"
+          done
       - name: Register Nim library directory (Windows)
         if: runner.os == 'Windows'
         shell: bash
