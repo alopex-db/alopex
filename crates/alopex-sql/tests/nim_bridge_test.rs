@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 
 const MAX_SQL_INPUT_BYTES: usize = 1_048_576;
 const MAX_MESSAGEPACK_PAYLOAD_BYTES: usize = 1_048_576;
+const MINIMAL_CONTINUOUS_AGGREGATE_SQL: &str = "CREATE CONTINUOUS AGGREGATE cpu_hourly AS SELECT 1 FROM cpu_metrics \
+     WITH (retention = '30d', refresh_interval = '1h')";
 
 fn wire_span(start_line: u64, start_column: u64, end_line: u64, end_column: u64) -> Value {
     json!({
@@ -157,7 +159,28 @@ fn public_nul_guard_and_normal_sql_behavior_are_stable() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.3.0");
+    assert_eq!(parser_contract_version(), "0.4.0");
+}
+
+#[test]
+fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
+    let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
+        .expect("contract 0.4.0 must publicly emit the prepared continuous aggregate payload");
+    let [statement] = statements.as_slice() else {
+        panic!("expected one continuous aggregate statement, got {statements:?}");
+    };
+    let StatementKind::CreateContinuousAggregate(definition) = &statement.kind else {
+        panic!("expected typed continuous aggregate statement, got {statement:?}");
+    };
+
+    assert_eq!(parser_contract_version(), "0.4.0");
+    assert_eq!(definition.name, "cpu_hourly");
+    assert_eq!(definition.query.from.len(), 1);
+    assert_eq!(definition.options.len(), 2);
+    assert_eq!(definition.options[0].key, "retention");
+    assert_eq!(definition.options[0].value, "30d");
+    assert_eq!(definition.options[1].key, "refresh_interval");
+    assert_eq!(definition.options[1].value, "1h");
 }
 
 #[test]
