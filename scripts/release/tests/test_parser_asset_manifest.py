@@ -111,9 +111,14 @@ class ParserAssetManifestTests(unittest.TestCase):
             self.npeg / "nimblemeta.json",
             {
                 "metaData": {
+                    "binaries": [],
+                    "downloadMethod": "git",
+                    "files": ["/npeg.nimble", "/npeg.nim"],
+                    "specialVersions": ["1.3.0"],
+                    "url": "",
                     "vcsRevision": MANIFEST.REQUIRED_PACKAGES["npeg"][
                         "vcs_revision"
-                    ]
+                    ],
                 },
                 "version": 1,
             },
@@ -126,9 +131,14 @@ class ParserAssetManifestTests(unittest.TestCase):
             self.msgpack / "nimblemeta.json",
             {
                 "metaData": {
+                    "binaries": [],
+                    "downloadMethod": "git",
+                    "files": ["/msgpack4nim.nimble", "/msgpack4nim.nim"],
+                    "specialVersions": ["0.4.4"],
+                    "url": "",
                     "vcsRevision": MANIFEST.REQUIRED_PACKAGES["msgpack4nim"][
                         "vcs_revision"
-                    ]
+                    ],
                 },
                 "version": 1,
             },
@@ -496,6 +506,69 @@ print(matches[0])
         )
         self.assertFalse(fourth_record.exists())
         self.assertFalse(fourth_archive.exists())
+
+    def test_generated_package_metadata_file_order_is_not_an_identity_input(
+        self,
+    ) -> None:
+        first_record, _ = self.pack()
+        first = json.loads(first_record.read_text(encoding="utf-8"))
+
+        metadata_path = self.npeg / "nimblemeta.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["metaData"]["files"].reverse()
+        canonical_json(metadata_path, metadata)
+
+        second_record, _ = self.pack(output=self.root / "metadata-order")
+        second = json.loads(second_record.read_text(encoding="utf-8"))
+        self.assertEqual(first["packages"], second["packages"])
+
+    def test_generated_package_metadata_path_separator_is_not_an_identity_input(
+        self,
+    ) -> None:
+        first_record, _ = self.pack()
+        first = json.loads(first_record.read_text(encoding="utf-8"))
+
+        metadata_path = self.npeg / "nimblemeta.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["metaData"]["files"] = [
+            path.replace("/", "\\") for path in metadata["metaData"]["files"]
+        ]
+        canonical_json(metadata_path, metadata)
+
+        second_record, _ = self.pack(output=self.root / "metadata-separator")
+        second = json.loads(second_record.read_text(encoding="utf-8"))
+        self.assertEqual(first["packages"], second["packages"])
+
+    def test_generated_package_metadata_semantics_are_validated(self) -> None:
+        metadata_path = self.npeg / "nimblemeta.json"
+        original = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        missing_file = json.loads(json.dumps(original))
+        missing_file["metaData"]["files"].pop()
+        canonical_json(metadata_path, missing_file)
+        record, archive = self.pack(
+            output=self.root / "missing-metadata-file", expected=2
+        )
+        self.assertFalse(record.exists())
+        self.assertFalse(archive.exists())
+
+        wrong_revision = json.loads(json.dumps(original))
+        wrong_revision["metaData"]["vcsRevision"] = "0" * 40
+        canonical_json(metadata_path, wrong_revision)
+        record, archive = self.pack(
+            output=self.root / "wrong-metadata-revision", expected=2
+        )
+        self.assertFalse(record.exists())
+        self.assertFalse(archive.exists())
+
+        unsafe_path = json.loads(json.dumps(original))
+        unsafe_path["metaData"]["files"][0] = "/../outside.nim"
+        canonical_json(metadata_path, unsafe_path)
+        record, archive = self.pack(
+            output=self.root / "unsafe-metadata-path", expected=2
+        )
+        self.assertFalse(record.exists())
+        self.assertFalse(archive.exists())
 
     def test_pack_rejects_contract_drift_and_symlinked_source(self) -> None:
         (self.source / "PARSER_CONTRACT_VERSION").write_text(
