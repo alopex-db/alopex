@@ -1,0 +1,138 @@
+name: Acquire v0.8.4 parser assets
+
+on:
+  push:
+    branches:
+      - codex/parser-assets-v0.8.4
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parser-assets-v0.8.4
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-native-asset:
+    name: Parser asset (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup exact Nim parser toolchain
+        uses: ./.github/actions/setup-nim-parser-toolchain
+
+      - name: Pin Task 1.6 registry metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly revision='b79eaaa3fc65fc473bc9e803445f8f7aef7112a2'
+          readonly expected_size='977981'
+          readonly expected_sha='e42c394337184b2fe52f65538ea3dc93fb8840efb77ec775261ebd1f7169d329'
+          metadata="${RUNNER_TEMP}/alopex-parser-packages.json"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://raw.githubusercontent.com/nim-lang/packages/${revision}/packages.json" \
+            --output "${metadata}"
+          test "$(wc -c <"${metadata}" | tr -d ' ')" = "${expected_size}"
+          printf '%s  %s\n' "${expected_sha}" "${metadata}" | sha256sum -c -
+          nimble_dir="${ALOPEX_NIMBLE_DIR}"
+          if [[ "${RUNNER_OS}" == 'Windows' ]]; then
+            nimble_dir="$(cygpath -u "${nimble_dir}")"
+          fi
+          cp "${metadata}" "${nimble_dir}/packages_official.json"
+          cp "${metadata}" "${nimble_dir}/packages_temp.json"
+          rm -f -- "${metadata}"
+
+      - name: Build deterministic native archive
+        shell: bash
+        run: >-
+          bash scripts/build-nim-parser.sh
+          --backend host
+          --target "${{ matrix.target }}"
+          --archive-dir parser-assets
+
+      - name: Verify and extract exact archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          record="$(find parser-assets -maxdepth 1 -type f -name '*.json' -print)"
+          archive="$(find parser-assets -maxdepth 1 -type f -name '*.tar.gz' -print)"
+          test -n "${record}"
+          test -n "${archive}"
+          test "$(printf '%s\n' "${record}" | wc -l | tr -d ' ')" = 1
+          test "$(printf '%s\n' "${archive}" | wc -l | tr -d ' ')" = 1
+          python scripts/release/parser_asset_manifest.py verify-target \
+            --record "${record}" --asset-dir parser-assets
+
+          extract_root="${RUNNER_TEMP}/alopex-parser-asset-extracted"
+          rm -rf -- "${extract_root}"
+          mkdir -p -- "${extract_root}"
+          tar -xzf "${archive}" -C "${extract_root}"
+          lib_dir="${extract_root}/alopex-sql-parser/${{ matrix.target }}"
+          case "${{ matrix.target }}" in
+            x86_64-apple-darwin|aarch64-apple-darwin)
+              library='libalopex_sql_parser.dylib'
+              ;;
+            x86_64-pc-windows-msvc)
+              library='alopex_sql_parser.dll'
+              ;;
+            *)
+              echo 'unsupported target' >&2
+              exit 2
+              ;;
+          esac
+          cmp "crates/alopex-sql/nim-sql-parser/${library}" \
+            "${lib_dir}/${library}"
+          if [[ "${RUNNER_OS}" == 'Windows' ]]; then
+            native_lib_dir="$(cygpath -w "${lib_dir}")"
+            echo "NIM_SQL_PARSER_LIB_DIR=${native_lib_dir}" \
+              >>"${GITHUB_ENV}"
+            echo "${native_lib_dir}" >>"${GITHUB_PATH}"
+          else
+            echo "NIM_SQL_PARSER_LIB_DIR=${lib_dir}" >>"${GITHUB_ENV}"
+            echo "${lib_dir}" >>"${GITHUB_PATH}"
+          fi
+
+      - name: Run authoritative Nim suites
+        shell: bash
+        run: bash scripts/test-nim-parser.sh --backend host
+
+      - name: Run extracted-byte Rust boundary smoke
+        env:
+          CARGO_BUILD_JOBS: 1
+        run: >-
+          cargo test -p alopex-sql --test nim_bridge_test
+          --features lane_ci
+
+      - name: Upload verified target record and archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: parser-asset-${{ matrix.target }}
+          path: parser-assets/*
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Clean task staging
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- parser-assets
+          rm -rf -- "${RUNNER_TEMP}/alopex-parser-asset-extracted"
