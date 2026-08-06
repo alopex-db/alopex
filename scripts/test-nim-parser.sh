@@ -8,29 +8,45 @@ REQUIRED_NIM_VERSION="2.2.10"
 REQUIRED_NIMBLE_VERSION="0.22.3"
 REQUIRED_NIMBLE_SHA="42ef70c2102a942c46f13eb76872326edd525cec"
 FAILURE_INJECTION="${ALOPEX_NIM_PARSER_INJECT_FAILURE:-0}"
+CONTROLLED_FAILURE=0
+CONTROLLED_FAILURE_PROOF="${ALOPEX_NIM_CONTROLLED_FAILURE_PROOF:-}"
 SEED_DIR="${ALOPEX_NIMBLE_SEED_DIR:-${ALOPEX_NIMBLE_DIR:-}}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/test-nim-parser.sh [--backend host]
+Usage: scripts/test-nim-parser.sh [--backend host] [--controlled-failure]
 
 Runs the Nim SQL parser tests with the exact host Nim 2.2.10 and Nimble
 0.22.3 toolchain. ALOPEX_NIMBLE_SEED_DIR or ALOPEX_NIMBLE_DIR must point to a
 job-owned dependency seed containing npeg 1.3.0 and msgpack4nim 0.4.4.
+
+--controlled-failure selects the Task 1.1 harness fixture and intentionally
+returns non-zero. CI must inspect the step outcome; this script never converts
+that controlled failure into success.
 EOF
 }
 
-if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  usage
-  exit 0
-fi
-if [[ "${1:-}" == "--backend" ]]; then
-  [[ "$#" == "2" ]] || { echo "--backend requires exactly one value" >&2; exit 2; }
-  BACKEND="${2}"
-elif [[ "$#" != "0" ]]; then
-  echo "unexpected argument: ${1}" >&2
-  exit 2
-fi
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --backend)
+      [[ "$#" -ge 2 ]] || { echo "--backend requires one value" >&2; exit 2; }
+      BACKEND="$2"
+      shift 2
+      ;;
+    --controlled-failure)
+      CONTROLLED_FAILURE=1
+      shift
+      ;;
+    *)
+      echo "unexpected argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
 if [[ "${BACKEND}" != "host" ]]; then
   echo "only the host Nim parser test backend is supported" >&2
   exit 2
@@ -39,6 +55,9 @@ case "${FAILURE_INJECTION}" in
   0|1) ;;
   *) echo "ALOPEX_NIM_PARSER_INJECT_FAILURE must be 0 or 1" >&2; exit 2 ;;
 esac
+if [[ "${CONTROLLED_FAILURE}" == "1" ]]; then
+  FAILURE_INJECTION=1
+fi
 if [[ -z "${SEED_DIR}" ]]; then
   echo "ALOPEX_NIMBLE_SEED_DIR or ALOPEX_NIMBLE_DIR is required; NIMBLE_DIR is not accepted as a dependency seed" >&2
   exit 2
@@ -56,6 +75,10 @@ to_posix_path() {
   fi
   printf '%s\n' "${candidate}"
 }
+
+if [[ -n "${CONTROLLED_FAILURE_PROOF}" ]]; then
+  CONTROLLED_FAILURE_PROOF="$(to_posix_path "${CONTROLLED_FAILURE_PROOF}")"
+fi
 
 resolve_executable() {
   local candidate
@@ -228,9 +251,49 @@ if ! grep -Fqx "git hash: ${REQUIRED_NIMBLE_SHA}" <<<"${NIMBLE_IDENTITY}"; then
   exit 2
 fi
 
-echo "Testing Nim SQL parser (host backend)"
-(
+run_nimble_tests() {
   cd "${PARSER_DIR}"
   "${NIMBLE_BIN}" --nimbleDir:"${NIMBLE_DIR_ARG}" \
     --nim:"${NIM_BIN_ARG}" --useSystemNim --offline test
-)
+}
+
+echo "Testing Nim SQL parser (host backend)"
+if [[ "${CONTROLLED_FAILURE}" == "1" ]]; then
+  if [[ -z "${CONTROLLED_FAILURE_PROOF}" ]]; then
+    echo "ALOPEX_NIM_CONTROLLED_FAILURE_PROOF is required with --controlled-failure" >&2
+    exit 2
+  fi
+  if [[ -e "${CONTROLLED_FAILURE_PROOF}" || -L "${CONTROLLED_FAILURE_PROOF}" ]]; then
+    echo "controlled-failure proof path must not already exist: ${CONTROLLED_FAILURE_PROOF}" >&2
+    exit 2
+  fi
+  controlled_output=""
+  controlled_status=0
+  set +e
+  controlled_output="$(run_nimble_tests 2>&1)"
+  controlled_status=$?
+  set -e
+  printf '%s\n' "${controlled_output}"
+  if [[ "${controlled_status}" == "0" ]]; then
+    echo "controlled Nim parser fixture unexpectedly succeeded" >&2
+    exit 3
+  fi
+  if ! grep -Fq "controlled failure reaches the process exit status" \
+      <<<"${controlled_output}"; then
+    echo "controlled Nim parser fixture marker was not observed" >&2
+    exit 2
+  fi
+  umask 077
+  (
+    set -o noclobber
+    printf '%s\n' \
+      "schema=alopex-nim-controlled-failure-v1" \
+      "nim=${REQUIRED_NIM_VERSION}" \
+      "nimble=${REQUIRED_NIMBLE_VERSION}" \
+      "nimble_sha=${REQUIRED_NIMBLE_SHA}" \
+      >"${CONTROLLED_FAILURE_PROOF}"
+  )
+  exit "${controlled_status}"
+fi
+
+run_nimble_tests

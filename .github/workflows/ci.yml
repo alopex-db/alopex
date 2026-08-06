@@ -385,6 +385,20 @@ jobs:
       - name: Run Nim SQL parser tests
         shell: bash
         run: bash scripts/test-nim-parser.sh --backend host
+      - name: Run controlled Nim parser failure
+        id: nim_parser_controlled_failure
+        continue-on-error: true
+        shell: bash
+        run: |
+          proof_root="${RUNNER_TEMP:-/tmp}"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            proof_root="$(cygpath -u "$proof_root")"
+          fi
+          proof_path="${proof_root}/alopex-nim-controlled-failure-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+          test ! -e "$proof_path"
+          export ALOPEX_NIM_CONTROLLED_FAILURE_PROOF="$proof_path"
+          echo "ALOPEX_NIM_CONTROLLED_FAILURE_PROOF=$proof_path" >> "$GITHUB_ENV"
+          bash scripts/test-nim-parser.sh --backend host --controlled-failure
       - name: Register Nim library directory (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -405,6 +419,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+          ALOPEX_NIM_CONTROLLED_FAILURE_OUTCOME: ${{ steps.nim_parser_controlled_failure.outcome }}
         run: bash crates/alopex-tools/v08/verify-v08-surfaces.sh
 
   ci-success:
