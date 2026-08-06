@@ -1267,9 +1267,42 @@ fn is_write_sql(sql: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn continuous_aggregate_statement_kind() -> alopex_sql::ast::StatementKind {
+        alopex_sql::ast::StatementKind::CreateContinuousAggregate(
+            alopex_sql::ast::CreateContinuousAggregate {
+                name: "hourly_metrics".to_string(),
+                name_span: alopex_sql::ast::Span::default(),
+                query: alopex_sql::ast::Select {
+                    distinct: false,
+                    projection: vec![alopex_sql::ast::SelectItem::Wildcard {
+                        span: alopex_sql::ast::Span::default(),
+                    }],
+                    from: vec![],
+                    selection: None,
+                    group_by: None,
+                    having: None,
+                    order_by: vec![],
+                    limit: None,
+                    offset: None,
+                    span: alopex_sql::ast::Span::default(),
+                },
+                options: vec![],
+                span: alopex_sql::ast::Span::default(),
+            },
+        )
+    }
+
     #[test]
     fn unsupported_generic_statement_is_not_schema_ddl() {
         assert!(!StatementSchemaClass::Unsupported.is_schema_mutation());
+    }
+
+    #[test]
+    fn continuous_aggregate_is_unsupported_and_not_schema_ddl() {
+        let class = classify_statement_schema(&continuous_aggregate_statement_kind());
+
+        assert_eq!(class, StatementSchemaClass::Unsupported);
+        assert!(!class.is_schema_mutation());
     }
 
     #[test]
