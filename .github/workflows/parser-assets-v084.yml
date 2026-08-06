@@ -87,6 +87,9 @@ jobs:
             --record "${record}" --asset-dir parser-assets
 
           extract_root="${RUNNER_TEMP}/alopex-parser-asset-extracted"
+          if [[ "${RUNNER_OS}" == 'Windows' ]]; then
+            extract_root="$(cygpath -u "${extract_root}")"
+          fi
           rm -rf -- "${extract_root}"
           mkdir -p -- "${extract_root}"
           tar -xzf "${archive}" -C "${extract_root}"
@@ -139,4 +142,8 @@ jobs:
         shell: bash
         run: |
           rm -rf -- parser-assets
-          rm -rf -- "${RUNNER_TEMP}/alopex-parser-asset-extracted"
+          extract_root="${RUNNER_TEMP}/alopex-parser-asset-extracted"
+          if [[ "${RUNNER_OS}" == 'Windows' ]]; then
+            extract_root="$(cygpath -u "${extract_root}")"
+          fi
+          rm -rf -- "${extract_root}"
