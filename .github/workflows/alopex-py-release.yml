@@ -24,11 +24,56 @@ jobs:
         # aarch64 linker rejects it as incompatible. Keep x86_64 releasable
         # while the ARM-native/shared-library build path is resolved.
         target: [x86_64]
+        target_triple: [x86_64-unknown-linux-gnu]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
+      - name: Stage exact Alopex v0.8.4 parser assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CORE_TAG: v0.8.4
+          TARGET_TRIPLE: x86_64-unknown-linux-gnu
+        run: |
+          set -euo pipefail
+          rm -rf .core-parser-assets
+          mkdir -p .core-parser-assets
+          for attempt in $(seq 1 30); do
+            if gh release download "$CORE_TAG" --repo alopex-db/alopex \
+              --pattern 'parser-assets-v0.8.4.json' \
+              --pattern 'parser-vendor-manifest-v0.8.4.json' \
+              --pattern 'alopex-parser-v0.8.4-contract-0.4.0-*.tar.gz' \
+              --dir .core-parser-assets --clobber; then
+              break
+            fi
+            rm -rf .core-parser-assets && mkdir -p .core-parser-assets
+            test "$attempt" -lt 30
+            sleep 20
+          done
+          python scripts/release/parser_asset_manifest.py verify-manifest \
+            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.4.json \
+            --asset-dir .core-parser-assets
+          python - <<'PY'
+          import hashlib, json, tarfile
+          from pathlib import Path
+          root = Path('.core-parser-assets')
+          envelope = json.loads((root / 'parser-assets-v0.8.4.json').read_text())
+          assert envelope['source']['tag'] == 'v0.8.4'
+          manifest = json.loads((root / 'parser-vendor-manifest-v0.8.4.json').read_text())
+          asset = next(item for item in manifest['assets'] if item['target'] == 'x86_64-unknown-linux-gnu')
+          archive = root / asset['archive']['filename']
+          with tarfile.open(archive, 'r:gz') as handle:
+              members = {member.name: handle.extractfile(member).read() for member in handle.getmembers()}
+          library = members[asset['library']['path']]
+          assert hashlib.sha256(library).hexdigest() == asset['library']['sha256']
+          destination = Path('crates/alopex-sql/nim-sql-parser/vendor/x86_64-unknown-linux-gnu')
+          destination.mkdir(parents=True, exist_ok=True)
+          name = Path(asset['library']['path']).name
+          (destination / name).write_bytes(library)
+          (destination / 'CONTRACT_VERSION').write_text('0.4.0\n')
+          (destination / 'SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
+          PY
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -40,44 +85,12 @@ jobs:
           #   "Script to run before maturin command on Linux."
           # manylinux: auto では maturin-action が manylinux コンテナ内でビルドするため、
           # このスクリプトも同コンテナ内 (AlmaLinux ベース) で cargo build 前に実行される。
-          # ここで Nim 2.2 をセットアップし、alopex-sql の build.rs が要求する
-          # libalopex_sql_parser.so を crates/alopex-sql/nim-sql-parser/ に生成する。
-          #
-          # Nim 公式は aarch64 向けプリビルドバイナリ tar.xz を配布していない
-          # (x64 のみ。https://nim-lang.org/download/ で確認)。そのため両ターゲットで
-          # 確実に動くソースからのブートストラップ (csources 同梱) を採用する。
-          # manylinux には gcc/make があるためソースビルドが可能。
-          #
-          # 要 CI 検証:
-          #   - aarch64 ターゲットは maturin-action が QEMU エミュレーションの
-          #     aarch64 コンテナで実行する可能性が高く、ソースビルドは動作するが
-          #     低速。実際の所要時間・成否は CI 上でのみ確認可能。
-          #   - manylinux コンテナ内の curl/xz/gcc 可用性は CI 上で要確認。
           before-script-linux: |
             set -euxo pipefail
             REPO_ROOT="$PWD"
             CHIRPS_DIR="$(dirname "$(dirname "${REPO_ROOT}")")/chirps"
             rm -rf "${CHIRPS_DIR}"
             git clone --depth 1 https://github.com/alopex-db/alopex-chirps.git "${CHIRPS_DIR}"
-            NIM_VERSION=2.2.4
-            curl -fsSL "https://nim-lang.org/download/nim-${NIM_VERSION}.tar.xz" -o /tmp/nim.tar.xz
-            mkdir -p /opt/nim-src
-            tar -xJf /tmp/nim.tar.xz -C /opt/nim-src --strip-components=1
-            cd /opt/nim-src
-            sh build.sh
-            bin/nim c --skipUserCfg --skipParentCfg koch
-            ./koch boot -d:release
-            ./koch tools
-            export PATH="/opt/nim-src/bin:${HOME}/.nimble/bin:${PATH}"
-            # env (NIM_SQL_PARSER_DIR) のコンテナ内伝播は不確実なためパスを直書き。
-            # maturin-action のコンテナ開始時 CWD を REPO_ROOT として保持し、
-            # Nim source build で /opt/nim-src に移動した後も repo 側へ戻れるようにする。
-            # manylinux コンテナ内では root がマウントされた repo を読むため、
-            # nimble lib が内部で実行する git ls-files 用に safe.directory を登録する。
-            git config --global --add safe.directory "${REPO_ROOT}"
-            cd "${REPO_ROOT}/crates/alopex-sql/nim-sql-parser"
-            nimble install -y npeg msgpack4nim
-            nimble lib
             cd "${REPO_ROOT}"
       - name: Inspect Linux wheel contents
         shell: bash
@@ -103,23 +116,57 @@ jobs:
           # parser shared library is built natively before linking.
           - os: macos-15-intel
             target: x86_64
+            target_triple: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64
+            target_triple: aarch64-apple-darwin
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
-      # ネイティブ Nim ツールチェーン (2.2 固定) をホスト上でセットアップ。
-      # 他ワークフロー (alopex-py.yml 等) の macOS/Windows パターンと整合。
-      # 要 CI 検証: x86_64 は Intel runner、aarch64 は macos-latest 上で検証する。
-      - name: Setup Nim
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: '2.2.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build Nim SQL parser library
-        run: bash scripts/build-nim-parser.sh --backend host
+      - name: Stage exact Alopex v0.8.4 parser assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_TRIPLE: ${{ matrix.target_triple }}
+        run: |
+          set -euo pipefail
+          rm -rf .core-parser-assets && mkdir -p .core-parser-assets
+          for attempt in $(seq 1 30); do
+            if gh release download v0.8.4 --repo alopex-db/alopex \
+              --pattern 'parser-assets-v0.8.4.json' \
+              --pattern 'parser-vendor-manifest-v0.8.4.json' \
+              --pattern 'alopex-parser-v0.8.4-contract-0.4.0-*.tar.gz' \
+              --dir .core-parser-assets --clobber; then
+              break
+            fi
+            rm -rf .core-parser-assets && mkdir -p .core-parser-assets
+            test "$attempt" -lt 30
+            sleep 20
+          done
+          python scripts/release/parser_asset_manifest.py verify-manifest \
+            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.4.json \
+            --asset-dir .core-parser-assets
+          TARGET_TRIPLE="$TARGET_TRIPLE" python - <<'PY'
+          import hashlib, json, os, tarfile
+          from pathlib import Path
+          root = Path('.core-parser-assets')
+          envelope = json.loads((root / 'parser-assets-v0.8.4.json').read_text())
+          assert envelope['source']['tag'] == 'v0.8.4'
+          manifest = json.loads((root / 'parser-vendor-manifest-v0.8.4.json').read_text())
+          target = os.environ['TARGET_TRIPLE']
+          asset = next(item for item in manifest['assets'] if item['target'] == target)
+          with tarfile.open(root / asset['archive']['filename'], 'r:gz') as handle:
+              members = {m.name: handle.extractfile(m).read() for m in handle.getmembers()}
+          library = members[asset['library']['path']]
+          assert hashlib.sha256(library).hexdigest() == asset['library']['sha256']
+          destination = Path('crates/alopex-sql/nim-sql-parser/vendor') / target
+          destination.mkdir(parents=True, exist_ok=True)
+          name = Path(asset['library']['path']).name
+          (destination / name).write_bytes(library)
+          (destination / 'CONTRACT_VERSION').write_text('0.4.0\n')
+          (destination / 'SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
+          PY
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -147,23 +194,49 @@ jobs:
         uses: actions/checkout@v4
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
-      # ネイティブ Nim ツールチェーン (2.2 固定) をホスト上でセットアップ。
-      # 他ワークフロー (alopex-py.yml 等) の macOS/Windows パターンと整合。
-      - name: Setup Nim
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: '2.2.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build Nim SQL parser library
-        run: bash scripts/build-nim-parser.sh --backend host
-      - name: Stage Nim parser DLL in Python package
-        shell: bash
+      - name: Stage exact Alopex v0.8.4 parser assets
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          dll="${NIM_SQL_PARSER_DIR}/alopex_sql_parser.dll"
-          test -f "$dll"
-          mkdir -p crates/alopex-py/python/alopex/native
-          cp "$dll" crates/alopex-py/python/alopex/native/
+          rm -rf .core-parser-assets && mkdir -p .core-parser-assets
+          for attempt in $(seq 1 30); do
+            if gh release download v0.8.4 --repo alopex-db/alopex \
+              --pattern 'parser-assets-v0.8.4.json' \
+              --pattern 'parser-vendor-manifest-v0.8.4.json' \
+              --pattern 'alopex-parser-v0.8.4-contract-0.4.0-*.tar.gz' \
+              --dir .core-parser-assets --clobber; then
+              break
+            fi
+            rm -rf .core-parser-assets && mkdir -p .core-parser-assets
+            test "$attempt" -lt 30
+            sleep 20
+          done
+          python scripts/release/parser_asset_manifest.py verify-manifest \
+            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.4.json \
+            --asset-dir .core-parser-assets
+          python - <<'PY'
+          import hashlib, json, tarfile
+          from pathlib import Path
+          root = Path('.core-parser-assets')
+          envelope = json.loads((root / 'parser-assets-v0.8.4.json').read_text())
+          assert envelope['source']['tag'] == 'v0.8.4'
+          manifest = json.loads((root / 'parser-vendor-manifest-v0.8.4.json').read_text())
+          target = 'x86_64-pc-windows-msvc'
+          asset = next(item for item in manifest['assets'] if item['target'] == target)
+          with tarfile.open(root / asset['archive']['filename'], 'r:gz') as handle:
+              members = {m.name: handle.extractfile(m).read() for m in handle.getmembers()}
+          library = members[asset['library']['path']]
+          assert hashlib.sha256(library).hexdigest() == asset['library']['sha256']
+          destination = Path('crates/alopex-sql/nim-sql-parser/vendor') / target
+          destination.mkdir(parents=True, exist_ok=True)
+          name = Path(asset['library']['path']).name
+          (destination / name).write_bytes(library)
+          (destination / 'CONTRACT_VERSION').write_text('0.4.0\n')
+          (destination / 'SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
+          Path('crates/alopex-py/python/alopex/native').mkdir(parents=True, exist_ok=True)
+          Path('crates/alopex-py/python/alopex/native', name).write_bytes(library)
+          PY
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:

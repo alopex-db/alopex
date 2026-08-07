@@ -25,6 +25,7 @@ MANIFEST_TOOL = REPOSITORY_ROOT / "scripts/release/parser_asset_manifest.py"
 BUILD_SCRIPT = REPOSITORY_ROOT / "scripts/build-nim-parser.sh"
 PARSER_DIR = REPOSITORY_ROOT / "crates/alopex-sql/nim-sql-parser"
 RELEASE_WORKFLOW = REPOSITORY_ROOT / ".github/workflows/release.yml"
+PY_RELEASE_WORKFLOW = REPOSITORY_ROOT / ".github/workflows/alopex-py-release.yml"
 NIMBLE_SHA = "42ef70c2102a942c46f13eb76872326edd525cec"
 BUILD_PROFILE = "nim-release-library-v1"
 TARGET_LIBRARIES = {
@@ -891,6 +892,16 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("git rev-parse", self.workflow)
         self.assertIn("git describe --tags --exact-match", self.workflow)
         self.assertIn("release-envelope", self.workflow)
+
+    def test_python_release_consumes_public_core_assets_without_nim_rebuild(self) -> None:
+        workflow = PY_RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("gh release download v0.8.4", workflow)
+        self.assertIn("seq 1 30", workflow)
+        self.assertIn("parser-assets-v0.8.4.json", workflow)
+        self.assertIn("parser_asset_manifest.py verify-manifest", workflow)
+        self.assertNotIn("setup-nim-action", workflow)
+        self.assertNotIn("nimble lib", workflow)
+        self.assertNotIn("nim-${NIM_VERSION}", workflow)
 
 
 if __name__ == "__main__":
