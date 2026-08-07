@@ -73,6 +73,11 @@ jobs:
           (destination / name).write_bytes(library)
           (destination / 'CONTRACT_VERSION').write_text('0.4.0\n')
           (destination / 'SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
+          package_native = Path('crates/alopex-py/python/alopex/native')
+          package_native.mkdir(parents=True, exist_ok=True)
+          (package_native / name).write_bytes(library)
+          (package_native / 'CONTRACT_VERSION').write_text('0.4.0\n')
+          (package_native / 'SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
           PY
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -96,8 +101,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          library_sha="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path('.core-parser-assets/parser-vendor-manifest-v0.8.4.json').read_text())
+          print(next(a['library']['sha256'] for a in manifest['assets'] if a['target'] == 'x86_64-unknown-linux-gnu'))
+          PY
+          )"
           for wheel in dist/*.whl; do
-            python scripts/release/verify_wheel_contents.py "$wheel"
+            python scripts/release/verify_wheel_contents.py "$wheel" \
+              --expected-library-path alopex/native/libalopex_sql_parser.so \
+              --expected-library-sha256 "$library_sha" --expected-contract-version 0.4.0
           done
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -166,6 +180,11 @@ jobs:
           (destination / name).write_bytes(library)
           (destination / 'CONTRACT_VERSION').write_text('0.4.0\n')
           (destination / 'SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
+          package_native = Path('crates/alopex-py/python/alopex/native')
+          package_native.mkdir(parents=True, exist_ok=True)
+          (package_native / name).write_bytes(library)
+          (package_native / 'CONTRACT_VERSION').write_text('0.4.0\n')
+          (package_native / 'SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
           PY
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -177,8 +196,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          library_sha="$(TARGET_TRIPLE="${{ matrix.target_triple }}" python - <<'PY'
+          import json, os
+          from pathlib import Path
+          manifest = json.loads(Path('.core-parser-assets/parser-vendor-manifest-v0.8.4.json').read_text())
+          print(next(a['library']['sha256'] for a in manifest['assets'] if a['target'] == os.environ['TARGET_TRIPLE']))
+          PY
+          )"
           for wheel in dist/*.whl; do
-            python scripts/release/verify_wheel_contents.py "$wheel"
+            python scripts/release/verify_wheel_contents.py "$wheel" \
+              --expected-library-path alopex/native/libalopex_sql_parser.dylib \
+              --expected-library-sha256 "$library_sha" --expected-contract-version 0.4.0
           done
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -236,6 +264,8 @@ jobs:
           (destination / 'SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
           Path('crates/alopex-py/python/alopex/native').mkdir(parents=True, exist_ok=True)
           Path('crates/alopex-py/python/alopex/native', name).write_bytes(library)
+          Path('crates/alopex-py/python/alopex/native/CONTRACT_VERSION').write_text('0.4.0\n')
+          Path('crates/alopex-py/python/alopex/native/SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
           PY
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -248,7 +278,16 @@ jobs:
           set -euo pipefail
           wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
           test -n "$wheel"
-          python scripts/release/verify_wheel_contents.py "$wheel" --require-nim-dll
+          library_sha="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path('.core-parser-assets/parser-vendor-manifest-v0.8.4.json').read_text())
+          print(next(a['library']['sha256'] for a in manifest['assets'] if a['target'] == 'x86_64-pc-windows-msvc'))
+          PY
+          )"
+          python scripts/release/verify_wheel_contents.py "$wheel" --require-nim-dll \
+            --expected-library-sha256 "$library_sha" --expected-contract-version 0.4.0 \
+            --expected-loader-path alopex/native/alopex_sql_parser.dll
       - name: Import Windows wheel without ALOPEX_DLL_DIR
         shell: pwsh
         run: |

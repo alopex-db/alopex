@@ -53,6 +53,7 @@ print(sys.version_info.minor);",
 
 fn main() {
     pyo3_build_config::add_extension_module_link_args();
+    let profile = env::var("PROFILE").unwrap_or_default();
 
     // alopex-sql の build.rs は Nim 共有ライブラリの link-search/link-lib しか
     // 出せず（依存クレートの rustc-link-arg は最終バイナリ/cdylib に伝播しない
@@ -62,9 +63,16 @@ fn main() {
     // として受け取る。alopex-py は crate-type = ["cdylib"] であり
     // rustc-link-arg-bins ではなく rustc-link-arg（cdylib にも適用される）を
     // 使う。(edition 2021 の build.rs のため let chains は使わない)
-    if let Ok(libdir) = env::var("DEP_ALOPEX_SQL_PARSER_LIBDIR") {
-        if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{libdir}");
+    if cfg!(target_os = "linux") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/native");
+    } else if cfg!(target_os = "macos") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/native");
+    }
+    if profile != "release" {
+        if let Ok(libdir) = env::var("DEP_ALOPEX_SQL_PARSER_LIBDIR") {
+            if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
+                println!("cargo:rustc-link-arg=-Wl,-rpath,{libdir}");
+            }
         }
     }
 
@@ -73,7 +81,6 @@ fn main() {
         return;
     }
 
-    let profile = env::var("PROFILE").unwrap_or_default();
     if profile == "release" {
         return;
     }

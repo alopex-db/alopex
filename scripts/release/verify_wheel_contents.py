@@ -59,6 +59,7 @@ def verify(
     require_dll: bool,
     expected_archive_sha256: str | None = None,
     expected_library_sha256: str | None = None,
+    expected_library_path: str | None = None,
     expected_contract_version: str | None = None,
     expected_target: str | None = None,
     expected_loader_path: str | None = None,
@@ -85,6 +86,9 @@ def verify(
         raise AssertionError(f"DLLs must not be present in {archive}: {dlls}")
     if expected_target is not None and expected_target not in archive.name:
         raise AssertionError(f"archive filename does not identify target {expected_target}")
+    library_path = _normal_name(expected_library_path or EXPECTED_DLL)
+    if expected_library_path is not None and library_path not in files:
+        raise AssertionError(f"{library_path} is missing from {archive}")
     if require_dll:
         library_path = EXPECTED_DLL
         library = files[library_path]
@@ -114,6 +118,20 @@ def verify(
                 raise AssertionError(
                     f"loader path must resolve to {library_path}, found {expected_loader_path}"
                 )
+    elif expected_library_path is not None:
+        library = files[library_path]
+        if expected_library_sha256 is not None:
+            actual = hashlib.sha256(library).hexdigest()
+            if actual != expected_library_sha256:
+                raise AssertionError(
+                    f"native library digest mismatch: expected {expected_library_sha256}, found {actual}"
+                )
+        if expected_contract_version is not None:
+            contract_path = str(Path(library_path).with_name("CONTRACT_VERSION"))
+            if contract_path not in files:
+                raise AssertionError(f"{contract_path} is missing from {archive}")
+            if files[contract_path].decode("utf-8").strip() != expected_contract_version:
+                raise AssertionError("contract version mismatch")
 
 
 def main() -> int:
@@ -126,6 +144,7 @@ def main() -> int:
     )
     parser.add_argument("--expected-archive-sha256")
     parser.add_argument("--expected-library-sha256")
+    parser.add_argument("--expected-library-path")
     parser.add_argument("--expected-contract-version")
     parser.add_argument("--expected-target")
     parser.add_argument("--expected-loader-path")
@@ -135,6 +154,7 @@ def main() -> int:
         require_dll=args.require_nim_dll,
         expected_archive_sha256=args.expected_archive_sha256,
         expected_library_sha256=args.expected_library_sha256,
+        expected_library_path=args.expected_library_path,
         expected_contract_version=args.expected_contract_version,
         expected_target=args.expected_target,
         expected_loader_path=args.expected_loader_path,
