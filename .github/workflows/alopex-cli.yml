@@ -8,6 +8,8 @@ on:
       - 'crates/alopex-embedded/**'
       - 'crates/alopex-core/**'
       - 'crates/alopex-sql/**'
+      - 'scripts/build-nim-parser.sh'
+      - '.github/actions/setup-nim-parser-toolchain/**'
       - '.github/workflows/alopex-cli.yml'
   pull_request:
     branches: [main]
@@ -16,6 +18,8 @@ on:
       - 'crates/alopex-embedded/**'
       - 'crates/alopex-core/**'
       - 'crates/alopex-sql/**'
+      - 'scripts/build-nim-parser.sh'
+      - '.github/actions/setup-nim-parser-toolchain/**'
 
 env:
   RUST_BACKTRACE: 1
@@ -81,15 +85,11 @@ jobs:
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
         run: bash scripts/build-nim-parser.sh --backend docker
-      # macOS/Windows ランナーは docker で Linux コンテナを動かせないため、
-      # ネイティブ Nim ツールチェーン (2.2 固定) をセットアップして共有ライブラリを生成する。
-      # 要 CI 検証: macOS/Windows ランナー上でのみ動作確認可能（ローカル検証不可）。
-      - name: Setup Nim (macOS/Windows)
+      # macOS/Windows はホストビルドを行うため、Linux/Windows の正規
+      # リリースゲートと同じ exact toolchain と隔離 package store を使う。
+      - name: Setup exact Nim parser toolchain (macOS/Windows)
         if: runner.os != 'Linux'
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: '2.2.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        uses: ./.github/actions/setup-nim-parser-toolchain
       - name: Build Nim SQL parser library (macOS/Windows)
         if: runner.os != 'Linux'
         shell: bash
@@ -315,6 +315,15 @@ jobs:
 
           # Create a long-running query
           SQL_FILE=$(mktemp)
+          PID=''
+          cleanup_signal_test() {
+            if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
+              kill -TERM "$PID" 2>/dev/null || true
+              wait "$PID" 2>/dev/null || true
+            fi
+            rm -f -- "$SQL_FILE"
+          }
+          trap cleanup_signal_test EXIT
           echo "CREATE TABLE signal_test (id INTEGER PRIMARY KEY);" > "$SQL_FILE"
           for i in $(seq 1 50000); do
             echo "INSERT INTO signal_test (id) VALUES ($i);"
@@ -329,18 +338,21 @@ jobs:
           sleep 2
           kill -INT $PID 2>/dev/null || true
 
-          # Wait for process to exit
-          wait $PID 2>/dev/null
+          # `bash -e` must not preempt validation of the expected SIGINT status.
+          set +e
+          wait "$PID" 2>/dev/null
           EXIT_CODE=$?
+          set -e
+          PID=''
 
           # Exit code 130 indicates SIGINT was handled (128 + 2)
-          if [[ "$EXIT_CODE" -eq 130 ]] || [[ "$EXIT_CODE" -eq 0 ]] || [[ "$EXIT_CODE" -eq 1 ]]; then
+          # and 0 is valid when the finite fixture completes before delivery.
+          if [[ "$EXIT_CODE" -eq 130 ]] || [[ "$EXIT_CODE" -eq 0 ]]; then
             echo "PASS: Ctrl-C handled gracefully (exit code: $EXIT_CODE)"
           else
-            echo "INFO: Process exited with code $EXIT_CODE"
+            echo "FAIL: Unexpected exit code: $EXIT_CODE" >&2
+            exit 1
           fi
-
-          rm -f "$SQL_FILE"
 
   # ============================================================================
   # S3 compatibility test with MinIO

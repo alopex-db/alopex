@@ -5,15 +5,21 @@ on:
     branches: [main, develop]
     paths:
       - ".github/workflows/alopex-py.yml"
+      - ".github/actions/setup-nim-parser-toolchain/**"
+      - "scripts/build-nim-parser.sh"
       - "crates/alopex-py/**"
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
+      - "crates/alopex-sql/**"
   pull_request:
     paths:
       - ".github/workflows/alopex-py.yml"
+      - ".github/actions/setup-nim-parser-toolchain/**"
+      - "scripts/build-nim-parser.sh"
       - "crates/alopex-py/**"
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
+      - "crates/alopex-sql/**"
 
 defaults:
   run:
@@ -125,15 +131,11 @@ jobs:
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
         run: bash scripts/build-nim-parser.sh --backend docker
-      # macOS/Windows ランナーは docker で Linux コンテナを動かせないため、
-      # ネイティブ Nim ツールチェーン (2.2 固定) をセットアップして共有ライブラリを生成する。
-      # 要 CI 検証: macOS/Windows ランナー上でのみ動作確認可能（ローカル検証不可）。
-      - name: Setup Nim (macOS/Windows)
+      # macOS/Windows はホストビルドを行うため、Linux/Windows の正規
+      # リリースゲートと同じ exact toolchain と隔離 package store を使う。
+      - name: Setup exact Nim parser toolchain (macOS/Windows)
         if: runner.os != 'Linux'
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: '2.2.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        uses: ./.github/actions/setup-nim-parser-toolchain
       - name: Build Nim SQL parser library (macOS/Windows)
         if: runner.os != 'Linux'
         shell: bash
