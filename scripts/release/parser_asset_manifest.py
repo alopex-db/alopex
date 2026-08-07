@@ -25,6 +25,7 @@ import zlib
 TARGET_RECORD_SCHEMA = "alopex-parser-target-record-v1"
 BUILD_IDENTITY_SCHEMA = "alopex-parser-build-identity-v1"
 VENDOR_MANIFEST_SCHEMA = "alopex-parser-vendor-manifest-v1"
+RELEASE_ENVELOPE_SCHEMA = "alopex-parser-release-envelope-v1"
 
 REQUIRED_ALOPEX_VERSION = "0.8.4"
 REQUIRED_CONTRACT_VERSION = "0.4.0"
@@ -1319,6 +1320,49 @@ def verify_manifest(args: argparse.Namespace) -> None:
     print(manifest_path)
 
 
+def release_envelope(args: argparse.Namespace) -> None:
+    """Emit the post-tag publication envelope without changing source state."""
+    manifest_path = Path(args.manifest)
+    manifest = load_canonical_json(manifest_path, "vendor manifest")
+    validate_manifest_shape(manifest)
+    tag = require_string(args.tag, "tag")
+    tag_sha = require_string(args.tag_sha, "tag SHA")
+    if not re.fullmatch(r"[0-9a-f]{40}", tag_sha):
+        raise ParserAssetError("tag SHA must be a 40-character lowercase hex value")
+    if tag != f"v{REQUIRED_ALOPEX_VERSION}":
+        raise ParserAssetError("release envelope tag does not match Alopex version")
+    asset_dir = Path(args.asset_dir)
+    assets: list[dict[str, Any]] = []
+    for asset in manifest["assets"]:
+        archive_name = asset["archive"]["filename"]
+        archive_path = asset_dir / archive_name
+        content = read_regular_file(
+            archive_path, "release archive", max_bytes=MAX_ARCHIVE_BYTES
+        )
+        assets.append(
+            {
+                "filename": archive_name,
+                "sha256": sha256_bytes(content),
+                "size": len(content),
+                "target": asset["target"],
+            }
+        )
+    envelope = {
+        "alopex_version": REQUIRED_ALOPEX_VERSION,
+        "assets": assets,
+        "contract_version": REQUIRED_CONTRACT_VERSION,
+        "manifest": {
+            "filename": manifest_path.name,
+            "sha256": sha256_bytes(manifest_path.read_bytes()),
+            "size": manifest_path.stat().st_size,
+        },
+        "schema": RELEASE_ENVELOPE_SCHEMA,
+        "source": {"tag": tag, "tag_sha": tag_sha},
+    }
+    atomic_write(Path(args.output), canonical_json_bytes(envelope))
+    print(args.output)
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         description="Build and verify deterministic Alopex parser assets"
@@ -1362,6 +1406,14 @@ def parser() -> argparse.ArgumentParser:
     manifest.add_argument("--manifest", required=True)
     manifest.add_argument("--asset-dir", required=True)
     manifest.set_defaults(handler=verify_manifest)
+
+    envelope = commands.add_parser("release-envelope")
+    envelope.add_argument("--manifest", required=True)
+    envelope.add_argument("--asset-dir", required=True)
+    envelope.add_argument("--tag", required=True)
+    envelope.add_argument("--tag-sha", required=True)
+    envelope.add_argument("--output", required=True)
+    envelope.set_defaults(handler=release_envelope)
     return root
 
 

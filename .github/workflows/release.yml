@@ -132,11 +132,53 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Setup Python for archive verification
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Setup exact Nim parser toolchain
         uses: ./.github/actions/setup-nim-parser-toolchain
       - name: Build Nim SQL parser library
         shell: bash
-        run: bash scripts/build-nim-parser.sh --backend host
+        run: |
+          bash scripts/build-nim-parser.sh --backend host \
+            --target "${{ matrix.target }}" --archive-dir artifacts/parser
+      - name: Verify parser target record
+        shell: bash
+        run: |
+          set -euo pipefail
+          record="$(find artifacts/parser -maxdepth 1 -name '*${{ matrix.target }}.json' -type f -print -quit)"
+          test -n "$record"
+          python scripts/release/parser_asset_manifest.py verify-target \
+            --record "$record" --asset-dir artifacts/parser
+      - name: Extract and run native smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          RECORD="$(find artifacts/parser -maxdepth 1 -name '*${{ matrix.target }}.json' -type f -print -quit)" \
+          ARCHIVE_DIR="artifacts/parser/native-smoke" \
+          python - <<'PY'
+          import ctypes
+          import json
+          import os
+          from pathlib import Path
+          import tarfile
+
+          record = json.loads(Path(os.environ["RECORD"]).read_text(encoding="utf-8"))
+          archive_path = Path("artifacts/parser") / record["archive"]["filename"]
+          extract_dir = Path(os.environ["ARCHIVE_DIR"])
+          extract_dir.mkdir(parents=True, exist_ok=True)
+          with tarfile.open(archive_path, "r:gz") as archive:
+              archive.extractall(extract_dir)
+          library = extract_dir / record["library"]["path"]
+          loaded = ctypes.CDLL(str(library))
+          loaded.alopex_parser_version.restype = ctypes.c_char_p
+          version = loaded.alopex_parser_version().decode("ascii")
+          if version != "0.4.0":
+              raise SystemExit(f"native smoke version mismatch: {version}")
+          print(f"native smoke passed: {record['target']} parser {version}")
+          PY
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p alopex-cli
 
@@ -154,7 +196,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: artifacts/${{ matrix.asset_name }}
+          path: |
+            artifacts/${{ matrix.asset_name }}
+            artifacts/parser/*.json
+            artifacts/parser/*.tar.gz
 
       # crates.io に公開する alopex-sql は Nim ツールチェーンを持たない環境
       # でも `cargo install`/`cargo build` できる必要がある(D2 是正)。この
@@ -184,11 +229,36 @@ jobs:
       - name: Checkout Chirps dependency
         run: bash .github/scripts/checkout-chirps.sh
 
+      - name: Verify peeled release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          test "$(git describe --tags --exact-match HEAD)" = "${GITHUB_REF_NAME}"
+          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "${GITHUB_SHA}"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Assemble and verify parser manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t records < <(find artifacts -maxdepth 1 -name 'alopex-parser-*.json' -type f | sort)
+          test "${#records[@]}" -eq 4
+          args=()
+          for record in "${records[@]}"; do args+=(--record "$record"); done
+          python scripts/release/parser_asset_manifest.py assemble-manifest \
+            "${args[@]}" --asset-dir artifacts --output artifacts/parser-vendor-manifest-v0.8.4.json
+          python scripts/release/parser_asset_manifest.py verify-manifest \
+            --manifest artifacts/parser-vendor-manifest-v0.8.4.json --asset-dir artifacts
+          python scripts/release/parser_asset_manifest.py release-envelope \
+            --manifest artifacts/parser-vendor-manifest-v0.8.4.json \
+            --asset-dir artifacts --tag "$GITHUB_REF_NAME" --tag-sha "$GITHUB_SHA" \
+            --output artifacts/parser-assets-v0.8.4.json
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -212,50 +282,36 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Setup exact Nim parser toolchain
-        uses: ./.github/actions/setup-nim-parser-toolchain
-      - name: Build Nim SQL parser library
+      - name: Verify peeled release tag and create clean source staging
         shell: bash
-        run: bash scripts/build-nim-parser.sh --backend host
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          test "$(git describe --tags --exact-match HEAD)" = "${GITHUB_REF_NAME}"
+          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain)"
+          stage="${RUNNER_TEMP}/alopex-release-source"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          git archive --format=tar "${GITHUB_REF_NAME}^{commit}" | tar -xf - -C "$stage"
+          test -z "$(git -C "$stage" status --porcelain 2>/dev/null || true)"
+          echo "RELEASE_STAGE=$stage" >> "$GITHUB_ENV"
 
-      # alopex-sql の公開 crate は Nim ツールチェーンを持たない環境でも
-      # `cargo install`/`cargo build` できる必要がある(D2 是正)。build-release
-      # ジョブが4プラットフォーム分ビルド済みの Nim 共有ライブラリを
-      # nim-sql-parser/vendor/<target-triple>/ へ配置してから publish する
-      # (alopex-sql/build.rs の解決順序に vendor/ を追加済み)。
       - name: Download vendored Nim shared libraries
         uses: actions/download-artifact@v4
         with:
           pattern: nim-vendor-*
           path: /tmp/nim-vendor
 
-      - name: Place vendored libraries under nim-sql-parser/vendor/<target-triple>
+      - name: Place vendored libraries in clean source staging
         run: |
           set -euo pipefail
           for dir in /tmp/nim-vendor/nim-vendor-*; do
-            target="$(basename "${dir}" | sed 's/^nim-vendor-//')"
-            dest="${NIM_SQL_PARSER_DIR}/vendor/${target}"
-            mkdir -p "${dest}"
-            cp "${dir}"/* "${dest}/"
-            echo "vendored for ${target}:"
-            ls -la "${dest}"
+            target="$(basename "$dir" | sed 's/^nim-vendor-//')"
+            dest="${RELEASE_STAGE}/${NIM_SQL_PARSER_DIR}/vendor/${target}"
+            mkdir -p "$dest"
+            cp "$dir"/* "$dest/"
           done
-
-      # `cargo publish` は working directory が git 的にクリーンであることを
-      # 要求する(dirty チェック)。vendor/ 配下のファイルは nim-sql-parser/
-      # .gitignore の `!vendor/**` で cargo package の除外対象からは外れて
-      # いるが、git 自体には add/commit していないため untracked のまま
-      # であり、cargo publish の dirty チェックには依然として引っかかる
-      # (cargo package の除外ロジックと cargo publish の dirty チェックは
-      # 別物)。このランナー上だけの一時コミットを作り(push しない)、
-      # `--allow-dirty` でチェック自体を無効化せずに解決する。
-      - name: Commit vendored libraries locally (not pushed)
-        run: |
-          set -euo pipefail
-          git add "${NIM_SQL_PARSER_DIR}/vendor"
-          git -c user.name="github-actions[bot]" \
-              -c user.email="github-actions[bot]@users.noreply.github.com" \
-              commit -m "chore: vendor Nim shared libraries for release (CI-local, not pushed)"
 
       - name: Create publish helper
         run: |
@@ -263,12 +319,17 @@ jobs:
           #!/usr/bin/env bash
           set -euo pipefail
           crate="$1"
-          version="$(cargo metadata --no-deps --format-version 1 | python - "$crate" <<'PY'
+          version="$(python - "$crate" "$RELEASE_STAGE" <<'PY'
           import json
+          from pathlib import Path
           import subprocess
           import sys
           name = sys.argv[1]
-          data = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"]))
+          stage = Path(sys.argv[2])
+          data = json.loads(subprocess.check_output([
+              "cargo", "metadata", "--manifest-path", str(stage / "Cargo.toml"),
+              "--no-deps", "--format-version", "1"
+          ]))
           for pkg in data["packages"]:
               if pkg["name"] == name:
                   print(pkg["version"])
@@ -289,7 +350,7 @@ jobs:
             echo "unexpected crates.io status ${status} for ${crate}@${version}" >&2
             exit 1
           fi
-          cargo publish -p "${crate}"
+          cargo publish --manifest-path "${RELEASE_STAGE}/Cargo.toml" -p "${crate}"
           EOF
           chmod +x publish-crate.sh
 

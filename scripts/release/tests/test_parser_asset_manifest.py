@@ -24,6 +24,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 MANIFEST_TOOL = REPOSITORY_ROOT / "scripts/release/parser_asset_manifest.py"
 BUILD_SCRIPT = REPOSITORY_ROOT / "scripts/build-nim-parser.sh"
 PARSER_DIR = REPOSITORY_ROOT / "crates/alopex-sql/nim-sql-parser"
+RELEASE_WORKFLOW = REPOSITORY_ROOT / ".github/workflows/release.yml"
 NIMBLE_SHA = "42ef70c2102a942c46f13eb76872326edd525cec"
 BUILD_PROFILE = "nim-release-library-v1"
 TARGET_LIBRARIES = {
@@ -184,6 +185,7 @@ class ParserAssetManifestTests(unittest.TestCase):
         MANIFEST.REQUIRED_PACKAGES = self.original_required_packages
         MANIFEST.REQUIRED_REGISTRY_METADATA = self.original_required_metadata
         self.temp.cleanup()
+
 
     def run_cli(
         self, *arguments: str, expected: int = 0
@@ -773,6 +775,37 @@ print(matches[0])
         self.assertIn("target matrix", result.stderr.lower())
         self.assertFalse(manifest.exists())
 
+    def test_release_envelope_is_canonical_and_binds_tag(self) -> None:
+        records = [
+            self.pack(target=target, output=self.output)[0]
+            for target in TARGET_LIBRARIES
+        ]
+        manifest = self.root / "vendor.json"
+        arguments = ["assemble-manifest"]
+        for record in records:
+            arguments.extend(("--record", str(record)))
+        arguments.extend(("--asset-dir", str(self.output), "--output", str(manifest)))
+        self.run_cli(*arguments)
+        envelope = self.root / "parser-assets.json"
+        self.run_cli(
+            "release-envelope",
+            "--manifest",
+            str(manifest),
+            "--asset-dir",
+            str(self.output),
+            "--tag",
+            "v0.8.4",
+            "--tag-sha",
+            "0123456789abcdef0123456789abcdef01234567",
+            "--output",
+            str(envelope),
+        )
+        parsed = json.loads(envelope.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["schema"], MANIFEST.RELEASE_ENVELOPE_SCHEMA)
+        self.assertEqual(parsed["source"]["tag"], "v0.8.4")
+        self.assertEqual(len(parsed["assets"]), 4)
+        self.assertEqual(envelope.read_bytes(), MANIFEST.canonical_json_bytes(parsed))
+
     def test_build_script_names_exact_builder_and_archive_contract(self) -> None:
         text = BUILD_SCRIPT.read_text(encoding="utf-8")
         self.assertIn('REQUIRED_NIM_VERSION="2.2.10"', text)
@@ -832,6 +865,32 @@ print(matches[0])
         )
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("host", result.stderr.lower())
+
+
+class ReleaseWorkflowContractTests(unittest.TestCase):
+    """Keep publication evidence tied to the peeled tag and staged sources."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    def test_publish_does_not_create_a_synthetic_git_commit(self) -> None:
+        self.assertNotIn("git add \"${NIM_SQL_PARSER_DIR}/vendor\"", self.workflow)
+        self.assertNotIn("Commit vendored libraries locally", self.workflow)
+        self.assertNotIn("--allow-dirty", self.workflow)
+        self.assertIn("git archive", self.workflow)
+
+    def test_release_build_verifies_archive_and_native_smoke_before_upload(self) -> None:
+        verify = self.workflow.index("verify-target")
+        upload = self.workflow.index("uses: actions/upload-artifact@v4")
+        self.assertLess(verify, upload)
+        self.assertIn("native smoke", self.workflow.lower())
+        self.assertIn("parser-assets-v0.8.4.json", self.workflow)
+
+    def test_release_envelope_binds_peeled_tag_sha_and_manifest(self) -> None:
+        self.assertIn("git rev-parse", self.workflow)
+        self.assertIn("git describe --tags --exact-match", self.workflow)
+        self.assertIn("release-envelope", self.workflow)
 
 
 if __name__ == "__main__":
