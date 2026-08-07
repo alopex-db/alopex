@@ -7,6 +7,19 @@ import alopex
 from alopex import AlopexError, Catalog, ColumnInfo, DataFrame, Database, TxnMode
 
 
+def test_release_wheel_verifier_contract_is_digest_based():
+    verifier = (
+        Path(__file__).resolve().parents[3]
+        / "scripts"
+        / "release"
+        / "verify_wheel_contents.py"
+    ).read_text(encoding="utf-8")
+    assert "expected_archive_sha256" in verifier
+    assert "expected_library_sha256" in verifier
+    assert "internal native library digest record mismatch" in verifier
+    assert "expected_loader_path" in verifier
+
+
 EXPECTED_ERROR_CODES = {
     "ALOPEX-PY001",
     "ALOPEX-PY002",
