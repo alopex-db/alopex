@@ -5,18 +5,15 @@ from pathlib import Path
 # NOTE: mypy の platform 分岐解析はエイリアスなしの `sys.platform` のみ認識する。
 if sys.platform == "win32":
     # Windows: Python 3.8+ (bpo-36085) は拡張モジュールの依存 DLL 解決に PATH を
-    # 使わない。まず開発時の ALOPEX_DLL_DIR を登録し、配布wheelでは package-local
-    # native/ を登録する。add_dll_directory() の戻り値はハンドルを保持しないと登録が
-    # 解除されるため、モジュール寿命まで保持する。
+    # 使わない。配布 wheel に同梱した package-local native/ だけを登録する。
+    # 任意の環境変数や外部ディレクトリを受け入れないことで、ロード対象を
+    # wheel の reviewed asset に限定する。add_dll_directory() の戻り値はハンドルを
+    # 保持しないと登録が解除されるため、モジュール寿命まで保持する。
     _DLL_DIRECTORY_HANDLES = []
-
-    for _dll_dir in filter(None, os.environ.get("ALOPEX_DLL_DIR", "").split(os.pathsep)):
-        # 環境変数の既存挙動を維持し、存在しない明示指定は設定ミスとして失敗させる。
-        _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(_dll_dir))
-
     _package_dll_dir = Path(__file__).resolve().parent / "native"
-    if _package_dll_dir.is_dir():
-        _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(str(_package_dll_dir)))
+    if not _package_dll_dir.is_dir():
+        raise ImportError("alopex wheel is missing its package-local native assets")
+    _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(str(_package_dll_dir)))
 
 from . import _alopex as _alopex
 from ._alopex import catalog as _catalog  # type: ignore[attr-defined]
