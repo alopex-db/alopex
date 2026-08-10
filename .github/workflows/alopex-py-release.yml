@@ -342,6 +342,11 @@ jobs:
           ref: ${{ inputs.source_ref || github.ref }}
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
+      - name: Remove native parser vendor files from sdist staging
+        run: |
+          set -euo pipefail
+          find crates/alopex-sql/nim-sql-parser/vendor \
+            -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:

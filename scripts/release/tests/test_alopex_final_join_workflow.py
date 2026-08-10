@@ -46,6 +46,13 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertNotIn("SHA256SUMS').write_text", text)
         self.assertGreaterEqual(text.count("CONTRACT_VERSION').write_bytes(b'0.4.0\\n')"), 3)
 
+    def test_sdist_stages_source_without_native_vendor_directories(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        block = text.split("  sdist:", maxsplit=1)[1].split("  publish-testpypi:", maxsplit=1)[0]
+        self.assertIn("Remove native parser vendor files from sdist staging", block)
+        self.assertIn("find crates/alopex-sql/nim-sql-parser/vendor", block)
+        self.assertIn("-type d -exec rm -rf {} +", block)
+
 
 if __name__ == "__main__":
     unittest.main()
