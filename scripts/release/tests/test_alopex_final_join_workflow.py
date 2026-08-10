@@ -53,6 +53,11 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertIn("find crates/alopex-sql/nim-sql-parser/vendor", block)
         self.assertIn("-type d -exec rm -rf {} +", block)
 
+    def test_manual_release_uses_the_existing_immutable_tag(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        block = text.split("  github-release:", maxsplit=1)[1].split("  final-release-join:", maxsplit=1)[0]
+        self.assertIn("tag_name: ${{ inputs.release_tag || github.ref_name }}", block)
+
 
 if __name__ == "__main__":
     unittest.main()
