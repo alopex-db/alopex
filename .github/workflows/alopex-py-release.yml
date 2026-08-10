@@ -46,7 +46,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.ref }}
+          ref: ${{ inputs.source_ref || (github.ref_name == 'alopex-py-v0.8.4-repair' && 'alopex-py-v0.8.4') || github.ref }}
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
       - name: Stage exact Alopex v0.8.4 parser assets
@@ -157,7 +157,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.ref }}
+          ref: ${{ inputs.source_ref || (github.ref_name == 'alopex-py-v0.8.4-repair' && 'alopex-py-v0.8.4') || github.ref }}
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
       - name: Stage exact Alopex v0.8.4 parser assets
@@ -242,7 +242,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.ref }}
+          ref: ${{ inputs.source_ref || (github.ref_name == 'alopex-py-v0.8.4-repair' && 'alopex-py-v0.8.4') || github.ref }}
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
       - name: Stage exact Alopex v0.8.4 parser assets
@@ -339,7 +339,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.ref }}
+          ref: ${{ inputs.source_ref || (github.ref_name == 'alopex-py-v0.8.4-repair' && 'alopex-py-v0.8.4') || github.ref }}
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
       - name: Remove native parser vendor files from sdist staging
@@ -449,7 +449,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          tag_name: ${{ inputs.release_tag || (github.ref_name == 'alopex-py-v0.8.4-repair' && 'alopex-py-v0.8.4') || github.ref_name }}
           files: dist/**/*
 
   final-release-join:
@@ -463,7 +463,7 @@ jobs:
       - name: Checkout tagged source
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.ref }}
+          ref: ${{ inputs.source_ref || (github.ref_name == 'alopex-py-v0.8.4-repair' && 'alopex-py-v0.8.4') || github.ref }}
 
       - name: Resolve exact core and Python workflow identities
         env:
@@ -471,7 +471,7 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           PYTHON_RUN_ID: ${{ github.run_id }}
           PYTHON_HEAD_SHA: ${{ inputs.target_sha || github.sha }}
-          PYTHON_TAG_NAME: ${{ inputs.release_tag || github.ref_name }}
+          PYTHON_TAG_NAME: ${{ inputs.release_tag || (github.ref_name == 'alopex-py-v0.8.4-repair' && 'alopex-py-v0.8.4') || github.ref_name }}
         run: |
           set -euo pipefail
           core_tag_sha="$(gh api "repos/${REPOSITORY}/git/ref/tags/v0.8.4" | jq -r '.object.sha')"
@@ -483,6 +483,10 @@ jobs:
           python_tag_type="$(gh api "repos/${REPOSITORY}/git/ref/tags/${PYTHON_TAG_NAME}" | jq -r '.object.type')"
           if [[ "${python_tag_type}" == "tag" ]]; then
             python_tag_sha="$(gh api "repos/${REPOSITORY}/git/tags/${python_tag_sha}" | jq -r '.object.sha')"
+          fi
+          if [[ "${GITHUB_REF_NAME}" == "alopex-py-v0.8.4-repair" ]]; then
+            PYTHON_HEAD_SHA="${python_tag_sha}"
+            printf 'PYTHON_HEAD_SHA=%s\n' "${PYTHON_HEAD_SHA}" >> "${GITHUB_ENV}"
           fi
           [[ "${core_tag_sha}" == "${python_tag_sha}" ]] || {
             echo "core and Python tags do not share a peeled SHA" >&2
