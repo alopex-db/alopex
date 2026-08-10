@@ -66,7 +66,8 @@ class CiWorkflowContractTests(unittest.TestCase):
             signal_step,
         )
         self.assertNotIn('[[ "$EXIT_CODE" -eq 1 ]]', signal_step)
-        self.assertIn("seq 1 1000", signal_step)
+        self.assertIn("seq 1 100", signal_step)
+        self.assertNotIn("seq 1 1000", signal_step)
         self.assertNotIn("seq 1 5000", signal_step)
         self.assertNotIn("seq 1 10000", signal_step)
         self.assertNotIn("seq 1 20000", signal_step)
