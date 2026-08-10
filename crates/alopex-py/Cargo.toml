@@ -1,6 +1,6 @@
 [package]
 name = "alopex-py"
-version = "0.8.3"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
