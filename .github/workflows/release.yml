@@ -68,16 +68,24 @@ jobs:
       - name: Build Nim SQL parser library
         shell: bash
         run: bash scripts/build-nim-parser.sh --backend host
+      - name: Stage parser library in package-local native directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p crates/alopex-py/python/alopex/native
+          case "$RUNNER_OS" in
+            Linux) library="${NIM_SQL_PARSER_DIR}/libalopex_sql_parser.so" ;;
+            Windows) library="${NIM_SQL_PARSER_DIR}/alopex_sql_parser.dll" ;;
+            macOS) library="${NIM_SQL_PARSER_DIR}/libalopex_sql_parser.dylib" ;;
+            *) echo "unsupported runner" >&2; exit 2 ;;
+          esac
+          test -f "$library"
+          cp "$library" crates/alopex-py/python/alopex/native/
+          cp "${NIM_SQL_PARSER_DIR}/CONTRACT_VERSION" crates/alopex-py/python/alopex/native/
+          cp "${NIM_SQL_PARSER_DIR}/SHA256SUMS" crates/alopex-py/python/alopex/native/
       - name: Run Nim SQL parser tests
         shell: bash
         run: bash scripts/test-nim-parser.sh --backend host
-      - name: Register Nim library directory (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          nim_lib_dir="$(cygpath -w "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}")"
-          echo "ALOPEX_DLL_DIR=${nim_lib_dir}" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
       - name: Run v0.7 baseline gate (Linux)
         if: runner.os == 'Linux'
         env:

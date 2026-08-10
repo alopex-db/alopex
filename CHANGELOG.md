@@ -180,7 +180,7 @@ Bugfix and packaging release. No breaking changes intended.
 - Unsupported compaction is reported consistently as `501 Not Implemented`
   across the server and CLI surfaces (#39).
 - Windows Python wheels now bundle the Nim SQL parser DLL and load it from the
-  package without requiring `ALOPEX_DLL_DIR` (#33).
+  package without requiring an external DLL-directory override (#33).
 - Backup/restore completion tests now observe Coordinator state directly and
   verify the final HTTP status without relying on a fixed polling interval
   (#34).
@@ -307,7 +307,7 @@ suite, which is included in this release.
   boundary for subsequent statements on the same thread (#40).
 - Windows: the Nim SQL parser DLL no longer fails to load for `alopex-py`
   (`ImportError: DLL load failed`) — the MinGW runtime is now statically
-  linked into the DLL, and `ALOPEX_DLL_DIR` resolves the dependency
+  linked into the DLL, and the package-local native directory resolves the dependency
   explicitly instead of relying on PATH search (Python 3.8+ does not use
   PATH for extension-module dependency resolution).
 

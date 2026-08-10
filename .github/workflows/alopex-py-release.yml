@@ -288,7 +288,7 @@ jobs:
           python scripts/release/verify_wheel_contents.py "$wheel" --require-nim-dll \
             --expected-library-sha256 "$library_sha" --expected-contract-version 0.4.0 \
             --expected-loader-path alopex/native/alopex_sql_parser.dll
-      - name: Import Windows wheel without ALOPEX_DLL_DIR
+      - name: Import Windows wheel without external DLL overrides
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -297,7 +297,6 @@ jobs:
           python -m venv $venv
           $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
           & "$venv\Scripts\python.exe" -m pip install --no-index --no-deps $wheel
-          Remove-Item Env:ALOPEX_DLL_DIR -ErrorAction SilentlyContinue
           Push-Location $env:RUNNER_TEMP
           try {
             & "$venv\Scripts\python.exe" -c "from alopex import Database; print('clean wheel import OK')"

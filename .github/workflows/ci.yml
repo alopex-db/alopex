@@ -422,13 +422,10 @@ jobs:
             cp -f -- "${reviewed_dir}/${candidate}" "${NIM_SQL_PARSER_DIR}/${candidate}"
             cmp -s "${reviewed_dir}/${candidate}" "${NIM_SQL_PARSER_DIR}/${candidate}"
           done
-      - name: Register Nim library directory (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          nim_lib_dir="$(cygpath -w "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}")"
-          echo "ALOPEX_DLL_DIR=${nim_lib_dir}" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
+          mkdir -p crates/alopex-py/python/alopex/native
+          cp -f -- "${reviewed_dir}/${parser_library}" crates/alopex-py/python/alopex/native/
+          cp -f -- "${reviewed_dir}/CONTRACT_VERSION" crates/alopex-py/python/alopex/native/
+          cp -f -- "${reviewed_dir}/SHA256SUMS" crates/alopex-py/python/alopex/native/
       - name: Run v0.7 baseline gate (Linux)
         if: runner.os == 'Linux'
         env:
