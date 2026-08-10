@@ -496,19 +496,37 @@ jobs:
             echo "Python workflow HEAD is not the peeled Python tag SHA" >&2
             exit 1
           }
-          runs="$(gh run list --workflow release.yml --commit "${core_tag_sha}" \
-            --json databaseId,headSha,status,conclusion --limit 20)"
-          core_run_id="$(printf '%s' "${runs}" | python3 -c '
+          runs="$(gh run list --workflow release.yml \
+            --json databaseId,headSha,headBranch,status,conclusion --limit 50)"
+          core_run="$(printf '%s' "${runs}" | python3 -c '
           import json, sys
           runs = json.load(sys.stdin)
-          matches = [r for r in runs if r.get("headSha") == sys.argv[1]
-                     and r.get("status") == "completed" and r.get("conclusion") == "success"]
-          if len(matches) != 1:
-              raise SystemExit(f"expected exactly one successful core run, found {len(matches)}")
-          print(matches[0]["databaseId"])
-          ' "${core_tag_sha}")"
-          printf 'CORE_TAG_SHA=%s\nCORE_RUN_ID=%s\nPYTHON_RUN_ID=%s\n' \
-            "${core_tag_sha}" "${core_run_id}" "${PYTHON_RUN_ID}" >> "${GITHUB_ENV}"
+          core_sha, ref_name = sys.argv[1:]
+          successful = [r for r in runs
+                        if r.get("status") == "completed"
+                        and r.get("conclusion") == "success"]
+          same_sha = [r for r in successful if r.get("headSha") == core_sha]
+          if len(same_sha) == 1:
+              match = same_sha[0]
+          elif ref_name == "alopex-py-v0.8.4-repair":
+              repaired = [r for r in successful
+                          if r.get("headBranch") == "repair/v0.8.4-release"]
+              if len(repaired) != 1:
+                  raise SystemExit(
+                      "expected exactly one successful v0.8.4 repair core run, "
+                      f"found {len(repaired)}"
+                  )
+              match = repaired[0]
+          else:
+              raise SystemExit(
+                  "expected exactly one successful core run on the core tag SHA, "
+                  f"found {len(same_sha)}"
+              )
+          print(f"{match[\"databaseId\"]}\t{match[\"headSha\"]}")
+          ' "${core_tag_sha}" "${GITHUB_REF_NAME}")"
+          IFS=$'\t' read -r core_run_id core_run_head_sha <<< "${core_run}"
+          printf 'CORE_TAG_SHA=%s\nCORE_RUN_ID=%s\nCORE_RUN_HEAD_SHA=%s\nPYTHON_RUN_ID=%s\n' \
+            "${core_tag_sha}" "${core_run_id}" "${core_run_head_sha}" "${PYTHON_RUN_ID}" >> "${GITHUB_ENV}"
 
       - name: Download the immutable parser envelope
         env:
@@ -528,14 +546,14 @@ jobs:
           VERSION: "0.8.4"
         run: |
           set -euo pipefail
-          python3 - "${CORE_TAG_SHA}" "${CORE_RUN_ID}" "${PYTHON_RUN_ID}" \
-            "${PYTHON_HEAD_SHA}" "join-assets" "${REPOSITORY}" "${VERSION}" <<'PY'
+          python3 - "${CORE_TAG_SHA}" "${CORE_RUN_ID}" "${CORE_RUN_HEAD_SHA}" \
+            "${PYTHON_RUN_ID}" "${PYTHON_HEAD_SHA}" "join-assets" "${REPOSITORY}" "${VERSION}" <<'PY'
           import json
           import pathlib
           import sys
           import urllib.request
 
-          core_sha, core_run, python_run, python_head, asset_dir, repository, version = sys.argv[1:]
+          core_sha, core_run, core_run_head, python_run, python_head, asset_dir, repository, version = sys.argv[1:]
           root = pathlib.Path(asset_dir)
           envelope = json.loads((root / "parser-assets-v0.8.4.json").read_text())
           manifest = json.loads((root / "parser-vendor-manifest-v0.8.4.json").read_text())
@@ -577,7 +595,7 @@ jobs:
               "version": version,
               "reviewed_main_sha": core_sha,
               "tag": {"name": f"v{version}", "peeled_sha": core_sha},
-              "core": {"status": "success", "published": True, "run_id": core_run, "head_sha": core_sha, "peeled_sha": core_sha, "registry": "crates.io", "crates": crates},
+              "core": {"status": "success", "published": True, "run_id": core_run, "head_sha": core_run_head, "source_sha": core_sha, "peeled_sha": core_sha, "registry": "crates.io", "crates": crates},
               "python": {"status": "success", "published": True, "run_id": python_run, "head_sha": python_head, "peeled_sha": core_sha, "registry": "pypi", "distributions": distributions},
               "parser": {"contract": manifest["contract_version"], "manifest_sha256": digest(__import__("hashlib").sha256((root / "parser-vendor-manifest-v0.8.4.json").read_bytes()).hexdigest()), "envelope_sha256": digest(__import__("hashlib").sha256((root / "parser-assets-v0.8.4.json").read_bytes()).hexdigest()), "assets": assets},
               "publication_order": {"core_before_python": True},
