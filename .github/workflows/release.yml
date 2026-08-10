@@ -5,11 +5,22 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing immutable release tag to publish
+        required: true
+        type: string
+      release_sha:
+        description: Peeled commit SHA targeted by that tag
+        required: true
+        type: string
 
 env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+  RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
 
 jobs:
   # Run CI checks before release
@@ -68,6 +79,19 @@ jobs:
       - name: Build Nim SQL parser library
         shell: bash
         run: bash scripts/build-nim-parser.sh --backend host
+      - name: Stage reviewed parser candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Linux) target="x86_64-unknown-linux-gnu"; library="libalopex_sql_parser.so" ;;
+            Windows) target="x86_64-pc-windows-msvc"; library="alopex_sql_parser.dll" ;;
+            *) echo "unsupported runner: $RUNNER_OS" >&2; exit 2 ;;
+          esac
+          source_dir="${NIM_SQL_PARSER_DIR}/vendor/${target}"
+          for name in "$library" CONTRACT_VERSION SHA256SUMS; do
+            cp -f -- "${source_dir}/${name}" "${NIM_SQL_PARSER_DIR}/${name}"
+          done
       - name: Stage parser library in package-local native directory
         shell: bash
         run: |
@@ -86,6 +110,19 @@ jobs:
       - name: Run Nim SQL parser tests
         shell: bash
         run: bash scripts/test-nim-parser.sh --backend host
+      - name: Run controlled Nim parser failure
+        id: nim_parser_controlled_failure
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_root="${RUNNER_TEMP:-/tmp}"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then proof_root="$(cygpath -u "$proof_root")"; fi
+          proof_path="${proof_root}/alopex-nim-controlled-failure-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+          test ! -e "$proof_path"
+          export ALOPEX_NIM_CONTROLLED_FAILURE_PROOF="$proof_path"
+          echo "ALOPEX_NIM_CONTROLLED_FAILURE_PROOF=$proof_path" >> "$GITHUB_ENV"
+          bash scripts/test-nim-parser.sh --backend host --controlled-failure
       - name: Run v0.7 baseline gate (Linux)
         if: runner.os == 'Linux'
         env:
@@ -99,6 +136,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+          ALOPEX_NIM_CONTROLLED_FAILURE_OUTCOME: ${{ steps.nim_parser_controlled_failure.outcome }}
         run: bash crates/alopex-tools/v08/verify-v08-surfaces.sh
 
   build-release:
@@ -152,6 +190,26 @@ jobs:
         run: |
           bash scripts/build-nim-parser.sh --backend host \
             --target "${{ matrix.target }}" --archive-dir artifacts/parser
+      - name: Replace parser archive with reviewed vendor bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu) library="libalopex_sql_parser.so" ;;
+            x86_64-apple-darwin|aarch64-apple-darwin) library="libalopex_sql_parser.dylib" ;;
+            x86_64-pc-windows-msvc) library="alopex_sql_parser.dll" ;;
+            *) echo "unsupported parser target" >&2; exit 2 ;;
+          esac
+          vendor="${NIM_SQL_PARSER_DIR}/vendor/${{ matrix.target }}"
+          for name in "$library" CONTRACT_VERSION SHA256SUMS; do
+            cp -f -- "${vendor}/${name}" "${NIM_SQL_PARSER_DIR}/${name}"
+          done
+          record="$(find artifacts/parser -maxdepth 1 -name '*${{ matrix.target }}.json' -type f -print -quit)"
+          test -n "$record"
+          python scripts/release/repack-parser-record.py \
+            --record "$record" \
+            --library "${vendor}/${library}" \
+            --output-dir artifacts/parser
       - name: Verify parser target record
         shell: bash
         run: |
@@ -242,8 +300,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --force --tags origin
-          test "$(git describe --tags --exact-match HEAD)" = "${GITHUB_REF_NAME}"
-          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "${GITHUB_SHA}"
+          test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "${RELEASE_SHA}"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -265,13 +322,15 @@ jobs:
             --manifest artifacts/parser-vendor-manifest-v0.8.4.json --asset-dir artifacts
           python scripts/release/parser_asset_manifest.py release-envelope \
             --manifest artifacts/parser-vendor-manifest-v0.8.4.json \
-            --asset-dir artifacts --tag "$GITHUB_REF_NAME" --tag-sha "$GITHUB_SHA" \
+            --asset-dir artifacts --tag "$RELEASE_TAG" --tag-sha "$RELEASE_SHA" \
             --output artifacts/parser-assets-v0.8.4.json
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ env.RELEASE_SHA }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -295,13 +354,12 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --force --tags origin
-          test "$(git describe --tags --exact-match HEAD)" = "${GITHUB_REF_NAME}"
-          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "${GITHUB_SHA}"
+          test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "${RELEASE_SHA}"
           test -z "$(git status --porcelain)"
           stage="${RUNNER_TEMP}/alopex-release-source"
           rm -rf "$stage"
           mkdir -p "$stage"
-          git archive --format=tar "${GITHUB_REF_NAME}^{commit}" | tar -xf - -C "$stage"
+          git archive --format=tar "${RELEASE_SHA}" | tar -xf - -C "$stage"
           test -z "$(git -C "$stage" status --porcelain 2>/dev/null || true)"
           echo "RELEASE_STAGE=$stage" >> "$GITHUB_ENV"
 
