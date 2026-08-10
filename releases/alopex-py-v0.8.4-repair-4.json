@@ -1,0 +1,100 @@
+{
+  "comparison": {
+    "advisory_only": true,
+    "current_commit": "5ade7d73724d01c6b73044995bee1b1f69f751f4",
+    "environment_fingerprint": "aad91bff6b2e74ff",
+    "has_regressions": false,
+    "metrics": {
+      "read_overhead_pct": {
+        "current": 0.29447861799376374,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 2,
+        "status": "insufficient_history",
+        "unit": "%"
+      },
+      "scan_overhead_ms": {
+        "current": 0.0015802999996594731,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 2,
+        "status": "insufficient_history",
+        "unit": "ms"
+      },
+      "write_overhead_pct": {
+        "current": 0.4008744586118164,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 2,
+        "status": "insufficient_history",
+        "unit": "%"
+      }
+    },
+    "notification_metrics": [],
+    "notification_ready": false,
+    "schema_version": 1,
+    "status": "insufficient_history",
+    "workload_signature": "1ec4da38777426b8d73dfab354b76795fd8c08cdcf37e2a113e8d2fb4d8b0a9b"
+  },
+  "record": {
+    "commit": "5ade7d73724d01c6b73044995bee1b1f69f751f4",
+    "dependencies": {
+      "alopex": "0.8.4",
+      "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
+      "iniconfig": "2.3.0",
+      "maturin": "1.14.1",
+      "nim": "unavailable",
+      "numpy": "2.4.6",
+      "packaging": "26.3",
+      "patchelf": "patchelf 0.18.0",
+      "pip": "26.2",
+      "pluggy": "1.6.0",
+      "polars": "1.43.2",
+      "polars-runtime-32": "1.43.2",
+      "py-cpuinfo": "9.0.0",
+      "pygments": "2.20.0",
+      "pytest": "9.1.1",
+      "pytest-benchmark": "5.2.3",
+      "python": "3.11.11",
+      "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+      "setuptools": "65.5.0"
+    },
+    "environment": {
+      "cpu": "AMD EPYC 9V74 80-Core Processor",
+      "cpu_governor": "unavailable",
+      "fingerprint": "aad91bff6b2e74ff",
+      "kernel": "6.17.0-1020-azure",
+      "machine": "x86_64",
+      "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+      "python": "3.11.11",
+      "system": "Linux",
+      "turbo_policy": "unavailable"
+    },
+    "lock_hash": "c162375899bb8028a4ec101608ab5fdbb11ae081a732859ef36d2287ececfb45",
+    "measured_at": "2026-08-10T20:23:53.990293+00:00",
+    "metrics": {
+      "read_overhead_pct": {
+        "direction": "lower_is_better",
+        "unit": "%",
+        "value": 0.29447861799376374
+      },
+      "scan_overhead_ms": {
+        "direction": "lower_is_better",
+        "unit": "ms",
+        "value": 0.0015802999996594731
+      },
+      "write_overhead_pct": {
+        "direction": "lower_is_better",
+        "unit": "%",
+        "value": 0.4008744586118164
+      }
+    },
+    "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+    "ref": "refs/tags/alopex-py-v0.8.4-repair-4",
+    "schema_version": 1,
+    "workload_signature": "1ec4da38777426b8d73dfab354b76795fd8c08cdcf37e2a113e8d2fb4d8b0a9b"
+  }
+}
