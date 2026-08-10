@@ -107,6 +107,12 @@ jobs:
           cp "$library" crates/alopex-py/python/alopex/native/
           cp "${NIM_SQL_PARSER_DIR}/CONTRACT_VERSION" crates/alopex-py/python/alopex/native/
           cp "${NIM_SQL_PARSER_DIR}/SHA256SUMS" crates/alopex-py/python/alopex/native/
+      # Windows test executables do not carry an rpath; make the reviewed
+      # parser DLL discoverable through the runner PATH before any Rust gate.
+      - name: Add Nim library to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
       - name: Run Nim SQL parser tests
         shell: bash
         run: bash scripts/test-nim-parser.sh --backend host
