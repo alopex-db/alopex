@@ -615,26 +615,26 @@
         "turbo_policy": "unavailable"
       },
       "lock_hash": "c162375899bb8028a4ec101608ab5fdbb11ae081a732859ef36d2287ececfb45",
-      "measured_at": "2026-08-10T19:15:08.662058+00:00",
+      "measured_at": "2026-08-10T19:20:57.436757+00:00",
       "metrics": {
         "read_overhead_pct": {
           "direction": "lower_is_better",
           "unit": "%",
-          "value": 0.3855459362659912
+          "value": 0.19703667543323208
         },
         "scan_overhead_ms": {
           "direction": "lower_is_better",
           "unit": "ms",
-          "value": 0.0019317999885970483
+          "value": 0.0016999000195028206
         },
         "write_overhead_pct": {
           "direction": "lower_is_better",
           "unit": "%",
-          "value": 0.29239670838891313
+          "value": 1.0900405697770448
         }
       },
       "profile": "gha-ubuntu-24.04-x64-single-core-v1",
-      "ref": "refs/heads/main",
+      "ref": "refs/tags/alopex-py-v0.8.4-repair-2",
       "schema_version": 1,
       "workload_signature": "1ec4da38777426b8d73dfab354b76795fd8c08cdcf37e2a113e8d2fb4d8b0a9b"
     }
