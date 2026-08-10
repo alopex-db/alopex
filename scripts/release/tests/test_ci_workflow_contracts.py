@@ -69,6 +69,18 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertIn('echo "FAIL: Unexpected exit code: $EXIT_CODE" >&2', signal_step)
         self.assertIn("exit 1", signal_step)
 
+    def test_exact_toolchain_pins_the_immutable_nimble_registry_snapshot(self) -> None:
+        action = (WORKFLOW_DIR.parent / "actions/setup-nim-parser-toolchain/action.yml").read_text(
+            encoding="utf-8"
+        )
+        revision = "b79eaaa3fc65fc473bc9e803445f8f7aef7112a2"
+        self.assertIn(f"package_list_revision='{revision}'", action)
+        self.assertIn(
+            "raw.githubusercontent.com/nim-lang/packages/${package_list_revision}/packages.json",
+            action,
+        )
+        self.assertIn("cp \"${pinned_metadata}\" \"${nimble_dir}/packages_temp.json\"", action)
+
 
 if __name__ == "__main__":
     unittest.main()

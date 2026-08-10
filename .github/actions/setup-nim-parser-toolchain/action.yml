@@ -348,6 +348,21 @@ runs:
           run_setup_nimble --nimbleDir:"${nimble_dir_native}" \
             --nim:"${nim_path_native}" --useSystemNim install -y \
             'npeg@1.3.0' 'msgpack4nim@0.4.4'
+          # Nimble refreshes its registry during install. Pin the registry
+          # snapshot used by the parser release after that step so a later
+          # package-list update cannot invalidate the reproducible archive
+          # identity or make one host diverge from another.
+          package_list_revision='b79eaaa3fc65fc473bc9e803445f8f7aef7112a2'
+          package_list_url="https://raw.githubusercontent.com/nim-lang/packages/${package_list_revision}/packages.json"
+          pinned_metadata="${nimble_dir}/packages_official.json"
+          if [[ "${RUNNER_OS:-}" == 'Windows' ]]; then
+            pinned_metadata_native="$(cygpath -w "${pinned_metadata}")"
+          else
+            pinned_metadata_native="${pinned_metadata}"
+          fi
+          curl --fail --location --retry 3 --silent --show-error \
+            "${package_list_url}" --output "${pinned_metadata_native}"
+          cp "${pinned_metadata}" "${nimble_dir}/packages_temp.json"
         fi
 
         npeg_path="$(run_setup_nimble --nimbleDir:"${nimble_dir_native}" \
