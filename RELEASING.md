@@ -12,7 +12,7 @@
 
 ```toml
 [workspace.package]
-version = "0.3.0"  # ← ここを変更すると全クレートに反映
+version = "0.8.4"  # ← ここを変更すると全クレートに反映
 ```
 
 ### クレート一覧
@@ -36,13 +36,46 @@ version = "0.3.0"  # ← ここを変更すると全クレートに反映
 alopex-core → alopex-sql → alopex-dataframe → alopex-embedded → alopex-cluster → alopex-server → alopex-cli
 ```
 
+## v0.8.4 現行リリース契約
+
+v0.8.4 は、main にレビュー済みの同一コミットを取り込み、そのコミットを
+明示的にタグ付けして公開するリリースである。RC は `rc/v0.8.4` を使用し、
+未公開のローカル生成物や合成コミットを公開入力にしてはならない。
+
+### パーサー資産の不変条件
+
+- Alopex SQL parser の FFI 契約は `0.4.0` とする。
+- Linux x86_64、macOS x86_64、macOS arm64、Windows x86_64 の4ターゲットを
+  Nim 2.2.10 / Nimble 0.22.3 で個別にビルドし、各ターゲットの native smoke
+  と SHA-256 検証を通過させてからアップロードする。
+- `parser-vendor-manifest-v0.8.4.json` は追跡済みの入力を記録し、公開後に
+  `parser-assets-v0.8.4.json` がタグの peeled SHA、マニフェスト、アーカイブ、
+  ライブラリ digest を同一性付きで束ねる。手作業コピーや別ビルドで補っては
+  ならない。
+- Python 配布物は公開済み Alopex parser 資産を取得して package-local
+  `alopex/native/` に配置する。Python ジョブで Nim を再ビルドせず、任意の
+  外部ライブラリディレクトリをローダー入力にしない。
+
+### 公開順序と失敗時の扱い
+
+1. clean な peeled tag から core crate と parser 資産を一度だけ生成する。
+2. core crate を依存順に公開し、公開済みの同じ parser envelope を検証する。
+3. core の公開成功を確認してから Python wheel/sdist を公開する。
+4. 途中失敗時は既存のタグ・版・バイト列を削除・再作成せず、同じ識別子を
+   使った修復を行う。
+
+ゲートが不合格なら公開を開始しない。生成物、Cargo target、Nimble cache、
+hook 用 target は invocation 所有範囲を記録し、完了後にその範囲だけを削除する。
+Umbrella 全体と各 target/cache の合計は常に 50 GiB 以下であることを `du -sb`
+で確認する。
+
 ## リリースワークフロー
 
 ### タグ形式
 
 | プロジェクト | タグ形式 | 例 |
 |-------------|---------|-----|
-| alopex | `v{major}.{minor}.{patch}` | `v0.3.0` |
+| alopex | `v{major}.{minor}.{patch}` | `v0.8.4` |
 
 ### v0.7.0 リリース契約
 
@@ -142,8 +175,8 @@ Branch cleanup record の最小記録項目:
 
 ### 0. RCブランチの作成（必須）
 
-リリース作業は **必ずRCブランチから開始**する。RCブランチは `main` から作成し、
-命名は `rc/<version>` を基本とする（例: `rc/v0.5.0`）。
+リリース作業は **必ずRCブランチから開始**する。v0.8.4 のRCブランチは
+`main` から作成し、`rc/v0.8.4` を使用する。
 
 RCブランチの命名規則:
 
@@ -154,8 +187,8 @@ RCブランチの命名規則:
 ```bash
 git checkout main
 git pull origin main
-git checkout -b rc/v0.5.0
-git push -u origin rc/v0.5.0
+git checkout -b rc/v0.8.4
+git push -u origin rc/v0.8.4
 ```
 
 以後のリリース準備はこの RC ブランチで実施する。
