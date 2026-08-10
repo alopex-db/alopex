@@ -30,6 +30,22 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertNotIn("cargo publish", block)
         self.assertNotIn("maturin build", block)
 
+    def test_repair_forward_run_binds_source_and_target_explicitly(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("workflow_dispatch:", text)
+        self.assertIn("source_ref:", text)
+        self.assertIn("target_sha:", text)
+        self.assertIn("release_tag:", text)
+        self.assertIn("ref: ${{ inputs.source_ref || github.ref }}", text)
+        self.assertIn("PYTHON_HEAD_SHA: ${{ inputs.target_sha || github.sha }}", text)
+        self.assertIn("PYTHON_TAG_NAME: ${{ inputs.release_tag || github.ref_name }}", text)
+
+    def test_sidecars_are_written_with_platform_stable_bytes(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn("CONTRACT_VERSION').write_text", text)
+        self.assertNotIn("SHA256SUMS').write_text", text)
+        self.assertGreaterEqual(text.count("CONTRACT_VERSION').write_bytes(b'0.4.0\\n')"), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

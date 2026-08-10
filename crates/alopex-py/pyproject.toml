@@ -34,3 +34,7 @@ features = ["pyo3/extension-module"]
 # wheels only; sdists remain source-only and cannot silently carry reviewed
 # native bytes.
 include = [{ path = "python/alopex/native/*", format = "wheel" }]
+# Native parser files used to build wheels are not part of the source
+# distribution.  The sdist is source-only; wheels receive the reviewed,
+# target-specific bytes staged by the release workflow.
+exclude = [{ path = "../alopex-sql/nim-sql-parser/vendor/**/*", format = "sdist" }]

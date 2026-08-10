@@ -4,6 +4,23 @@ on:
   push:
     tags:
       - "alopex-py-v*"
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Immutable source ref to build (for repair-forward runs)"
+        required: false
+        default: ""
+        type: string
+      target_sha:
+        description: "Explicit reviewed SHA bound to the Python tag"
+        required: false
+        default: ""
+        type: string
+      release_tag:
+        description: "Existing immutable Python tag to publish"
+        required: false
+        default: ""
+        type: string
 
 defaults:
   run:
@@ -28,6 +45,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
       - name: Stage exact Alopex v0.8.4 parser assets
@@ -71,13 +90,13 @@ jobs:
           destination.mkdir(parents=True, exist_ok=True)
           name = Path(asset['library']['path']).name
           (destination / name).write_bytes(library)
-          (destination / 'CONTRACT_VERSION').write_text('0.4.0\n')
-          (destination / 'SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
+          (destination / 'CONTRACT_VERSION').write_bytes(b'0.4.0\n')
+          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           package_native = Path('crates/alopex-py/python/alopex/native')
           package_native.mkdir(parents=True, exist_ok=True)
           (package_native / name).write_bytes(library)
-          (package_native / 'CONTRACT_VERSION').write_text('0.4.0\n')
-          (package_native / 'SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
+          (package_native / 'CONTRACT_VERSION').write_bytes(b'0.4.0\n')
+          (package_native / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           PY
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -137,6 +156,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
       - name: Stage exact Alopex v0.8.4 parser assets
@@ -178,13 +199,13 @@ jobs:
           destination.mkdir(parents=True, exist_ok=True)
           name = Path(asset['library']['path']).name
           (destination / name).write_bytes(library)
-          (destination / 'CONTRACT_VERSION').write_text('0.4.0\n')
-          (destination / 'SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
+          (destination / 'CONTRACT_VERSION').write_bytes(b'0.4.0\n')
+          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           package_native = Path('crates/alopex-py/python/alopex/native')
           package_native.mkdir(parents=True, exist_ok=True)
           (package_native / name).write_bytes(library)
-          (package_native / 'CONTRACT_VERSION').write_text('0.4.0\n')
-          (package_native / 'SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
+          (package_native / 'CONTRACT_VERSION').write_bytes(b'0.4.0\n')
+          (package_native / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           PY
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -220,6 +241,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
       - name: Stage exact Alopex v0.8.4 parser assets
@@ -260,12 +283,12 @@ jobs:
           destination.mkdir(parents=True, exist_ok=True)
           name = Path(asset['library']['path']).name
           (destination / name).write_bytes(library)
-          (destination / 'CONTRACT_VERSION').write_text('0.4.0\n')
-          (destination / 'SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
+          (destination / 'CONTRACT_VERSION').write_bytes(b'0.4.0\n')
+          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           Path('crates/alopex-py/python/alopex/native').mkdir(parents=True, exist_ok=True)
           Path('crates/alopex-py/python/alopex/native', name).write_bytes(library)
-          Path('crates/alopex-py/python/alopex/native/CONTRACT_VERSION').write_text('0.4.0\n')
-          Path('crates/alopex-py/python/alopex/native/SHA256SUMS').write_text(f"{asset['library']['sha256']}  {name}\n")
+          Path('crates/alopex-py/python/alopex/native/CONTRACT_VERSION').write_bytes(b'0.4.0\n')
+          Path('crates/alopex-py/python/alopex/native/SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           PY
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -315,6 +338,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
       - name: Build sdist
@@ -432,14 +457,15 @@ jobs:
       - name: Checkout tagged source
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ inputs.source_ref || github.ref }}
 
       - name: Resolve exact core and Python workflow identities
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           PYTHON_RUN_ID: ${{ github.run_id }}
-          PYTHON_HEAD_SHA: ${{ github.sha }}
+          PYTHON_HEAD_SHA: ${{ inputs.target_sha || github.sha }}
+          PYTHON_TAG_NAME: ${{ inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
           core_tag_sha="$(gh api "repos/${REPOSITORY}/git/ref/tags/v0.8.4" | jq -r '.object.sha')"
@@ -447,8 +473,8 @@ jobs:
           if [[ "${core_tag_type}" == "tag" ]]; then
             core_tag_sha="$(gh api "repos/${REPOSITORY}/git/tags/${core_tag_sha}" | jq -r '.object.sha')"
           fi
-          python_tag_sha="$(gh api "repos/${REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}" | jq -r '.object.sha')"
-          python_tag_type="$(gh api "repos/${REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}" | jq -r '.object.type')"
+          python_tag_sha="$(gh api "repos/${REPOSITORY}/git/ref/tags/${PYTHON_TAG_NAME}" | jq -r '.object.sha')"
+          python_tag_type="$(gh api "repos/${REPOSITORY}/git/ref/tags/${PYTHON_TAG_NAME}" | jq -r '.object.type')"
           if [[ "${python_tag_type}" == "tag" ]]; then
             python_tag_sha="$(gh api "repos/${REPOSITORY}/git/tags/${python_tag_sha}" | jq -r '.object.sha')"
           fi
@@ -493,7 +519,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - "${CORE_TAG_SHA}" "${CORE_RUN_ID}" "${PYTHON_RUN_ID}" \
-            "${GITHUB_SHA}" "join-assets" "${REPOSITORY}" "${VERSION}" <<'PY'
+            "${PYTHON_HEAD_SHA}" "join-assets" "${REPOSITORY}" "${VERSION}" <<'PY'
           import json
           import pathlib
           import sys
