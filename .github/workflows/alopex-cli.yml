@@ -327,8 +327,8 @@ jobs:
           trap cleanup_signal_test EXIT
           echo "CREATE TABLE signal_test (id INTEGER PRIMARY KEY);" > "$SQL_FILE"
           # Keep both the parser input and MessagePack output below their 1 MiB
-          # limits; 20,000 rows exceeded the output limit before SIGINT.
-          for i in $(seq 1 10000); do
+          # limits; 10,000 rows still exceeded the output limit before SIGINT.
+          for i in $(seq 1 5000); do
             echo "INSERT INTO signal_test (id) VALUES ($i);"
           done >> "$SQL_FILE"
           echo "SELECT * FROM signal_test;" >> "$SQL_FILE"
