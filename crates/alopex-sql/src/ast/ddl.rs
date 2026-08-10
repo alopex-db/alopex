@@ -1,6 +1,34 @@
+use super::dml::Select;
 use super::expr::Expr;
 use super::span::{Span, Spanned};
 use serde::{Deserialize, Serialize};
+
+/// A Skulk-owned continuous aggregate definition carried by the SQL parser.
+///
+/// Alopex owns the wire representation but does not execute this statement.
+/// The generic-host behavior is added separately after every host boundary is
+/// extension-safe.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateContinuousAggregate {
+    pub name: String,
+    pub name_span: Span,
+    #[serde(with = "crate::nim_bridge::continuous_aggregate_select_wire")]
+    pub query: Select,
+    pub options: Vec<ContinuousAggregateOption>,
+    pub span: Span,
+}
+
+/// One ordered option in a continuous aggregate definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuousAggregateOption {
+    pub key: String,
+    pub key_span: Span,
+    pub value: String,
+    pub value_span: Span,
+    pub span: Span,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTable {
@@ -100,6 +128,18 @@ pub struct DropIndex {
 }
 
 impl Spanned for CreateTable {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for CreateContinuousAggregate {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for ContinuousAggregateOption {
     fn span(&self) -> Span {
         self.span
     }

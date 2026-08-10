@@ -8,8 +8,8 @@
 
 use super::*;
 use crate::ast::ddl::{
-    ColumnConstraint, ColumnDef, CreateIndex, CreateTable, DataType, DropIndex, DropTable,
-    IndexMethod,
+    ColumnConstraint, ColumnDef, CreateContinuousAggregate, CreateIndex, CreateTable, DataType,
+    DropIndex, DropTable, IndexMethod,
 };
 use crate::ast::dml::{
     Assignment, Delete, FromItem, Insert, InsertSource, OrderByExpr, Select, SelectItem, Update,
@@ -69,6 +69,29 @@ fn stmt(kind: StatementKind) -> Statement {
     Statement { kind, span: span() }
 }
 
+fn continuous_aggregate_statement() -> Statement {
+    stmt(StatementKind::CreateContinuousAggregate(
+        CreateContinuousAggregate {
+            name: "hourly_metrics".to_string(),
+            name_span: span(),
+            query: Select {
+                distinct: false,
+                projection: vec![SelectItem::Wildcard { span: span() }],
+                from: vec![],
+                selection: None,
+                group_by: None,
+                having: None,
+                order_by: vec![],
+                limit: None,
+                offset: None,
+                span: span(),
+            },
+            options: vec![],
+            span: span(),
+        },
+    ))
+}
+
 /// Create an integer literal expression.
 fn int_lit(value: i64) -> Expr {
     Expr {
@@ -108,6 +131,69 @@ fn col_ref(table: Option<&str>, column: &str) -> Expr {
         },
         span: span(),
     }
+}
+
+#[test]
+fn generic_planner_route_rejects_unsupported_statements_explicitly() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+    let statement = stmt(StatementKind::Pragma {
+        name: "io_stats".to_string(),
+        value: None,
+    });
+    let expected = PlannerError::unsupported_feature(
+        "statement kind for the generic SQL planner",
+        "a statement-specific planner",
+        statement.span,
+    );
+
+    let error =
+        match planner.plan_classified_statement(&statement, GenericHostStatement::Unsupported) {
+            Ok(_) => panic!("unsupported generic statement unexpectedly planned"),
+            Err(error) => error,
+        };
+    assert_eq!(error, expected);
+}
+
+#[test]
+fn generic_routing_access_rejects_unsupported_statements_explicitly() {
+    let statement = stmt(StatementKind::Pragma {
+        name: "io_stats".to_string(),
+        value: None,
+    });
+    let expected = PlannerError::unsupported_feature(
+        "statement kind for the generic SQL planner",
+        "a statement-specific planner",
+        statement.span,
+    );
+
+    assert_eq!(
+        table_reference_access_for_classified(&statement, GenericHostStatement::Unsupported),
+        Err(expected)
+    );
+}
+
+#[test]
+fn continuous_aggregate_is_rejected_by_both_generic_planner_paths() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+    let statement = continuous_aggregate_statement();
+    let expected = PlannerError::unsupported_feature(
+        "statement kind for the generic SQL planner",
+        "a statement-specific planner",
+        statement.span,
+    );
+
+    let planning_error = match planner.plan(&statement) {
+        Ok(_) => panic!("continuous aggregate unexpectedly reached the generic planner"),
+        Err(error) => error,
+    };
+    assert_eq!(planning_error, expected);
+    let routing_error = match plan_statement_for_routing(&catalog, &statement) {
+        Ok(_) => panic!("continuous aggregate unexpectedly reached generic routing"),
+        Err(error) => error,
+    };
+    assert_eq!(routing_error, expected);
 }
 
 /// Create a binary operation expression.

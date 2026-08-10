@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.4] — release candidate
+
+This entry records the reviewed release intent and compatibility contract. It
+does not claim that public crates, wheels, or GitHub assets have been
+published; publication evidence is recorded only after the core and Python
+release gates complete.
+
+### Compatibility
+
+- SQL parser contract `0.4.0` remains Nim-owned and is staged as reviewed,
+  deterministic native assets for Linux x86_64, macOS x86_64, macOS arm64,
+  and Windows x86_64.
+- Python wheels consume the Alopex core parser envelope and use package-local
+  native libraries with relative loader paths; arbitrary external DLL
+  directories are not part of the release interface.
+- WebAssembly remains outside this release and is deferred to v1.0+.
+
+### Release verification
+
+- Core release candidates are checked from the peeled `v0.8.4` tag, including
+  archive extraction and native loader smoke tests before upload.
+- Python packaging consumes the public core assets only after the core
+  manifest and envelope pass identity verification. Any later publication
+  remains repair-forward and must not rewrite the immutable v0.8.2/v0.8.3
+  history.
+
 ## [0.8.3]
 
 Follow-up to the v0.8.2 name-resolution work. The remaining findings from the
@@ -180,7 +206,7 @@ Bugfix and packaging release. No breaking changes intended.
 - Unsupported compaction is reported consistently as `501 Not Implemented`
   across the server and CLI surfaces (#39).
 - Windows Python wheels now bundle the Nim SQL parser DLL and load it from the
-  package without requiring `ALOPEX_DLL_DIR` (#33).
+  package without requiring an external DLL-directory override (#33).
 - Backup/restore completion tests now observe Coordinator state directly and
   verify the final HTTP status without relying on a fixed polling interval
   (#34).
@@ -307,7 +333,7 @@ suite, which is included in this release.
   boundary for subsequent statements on the same thread (#40).
 - Windows: the Nim SQL parser DLL no longer fails to load for `alopex-py`
   (`ImportError: DLL load failed`) — the MinGW runtime is now statically
-  linked into the DLL, and `ALOPEX_DLL_DIR` resolves the dependency
+  linked into the DLL, and the package-local native directory resolves the dependency
   explicitly instead of relying on PATH search (Python 3.8+ does not use
   PATH for extension-module dependency resolution).
 

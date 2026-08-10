@@ -266,7 +266,7 @@ pub fn encode_key_event(event: &KeyEvent) -> Vec<u8> {
     // Handle unmodified keys
     match event.code {
         KeyCode::Char(c) => c.to_string().into_bytes(),
-        KeyCode::Enter => b"\n".to_vec(),
+        KeyCode::Enter => b"\r".to_vec(),
         KeyCode::Tab => b"\t".to_vec(),
         KeyCode::Esc => vec![0x1b],
         KeyCode::Backspace => vec![0x7f], // DEL character
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn test_encode_special_chars() {
         let event = KeyEvent::new(KeyCode::Enter);
-        assert_eq!(event.to_bytes(), b"\n");
+        assert_eq!(event.to_bytes(), b"\r");
 
         let event = KeyEvent::new(KeyCode::Tab);
         assert_eq!(event.to_bytes(), b"\t");

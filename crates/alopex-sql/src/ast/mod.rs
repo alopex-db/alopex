@@ -41,6 +41,8 @@ pub enum StatementKind {
     DropTable(DropTable),
     CreateIndex(CreateIndex),
     DropIndex(DropIndex),
+    /// A Skulk-owned continuous aggregate definition carried but not executed by Alopex.
+    CreateContinuousAggregate(CreateContinuousAggregate),
 
     /// Runtime configuration or statistics statement.
     Pragma {

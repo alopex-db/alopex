@@ -1,8 +1,163 @@
+use crate::ast::ddl::CreateContinuousAggregate;
 use crate::ast::dml::{FromItem, Select, SelectItem};
 use crate::ast::expr::{Expr, ExprKind};
-use crate::ast::{Statement, StatementKind};
+use crate::ast::{Span, Statement, StatementKind};
 use crate::error::{ParserError, Result};
 use crate::nim_ffi::{self, OwnedBuffer, ParseResultKind};
+use serde::Deserialize;
+
+const MAX_SQL_INPUT_BYTES: usize = 1_048_576;
+const MAX_MESSAGEPACK_PAYLOAD_BYTES: usize = 1_048_576;
+const MAX_MESSAGEPACK_DEPTH: usize = 128;
+const MAX_MESSAGEPACK_VALUES: usize = 65_536;
+const SELECT_WRAPPER_PREFIX: &str = "SELECT ";
+const PARSER_CONTRACT_DESCRIPTOR: &str = include_str!("../nim-sql-parser/PARSER_CONTRACT_VERSION");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputPreflightError {
+    TooLarge,
+    LengthOverflow,
+    InteriorNul,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessagePackPreflightError {
+    TooLarge,
+    TooDeep,
+    TooManyValues,
+    Truncated,
+    ReservedMarker,
+    TrailingBytes,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StagedContinuousAggregateStatement {
+    kind: StagedContinuousAggregateKind,
+    span: Span,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "variant")]
+enum StagedContinuousAggregateKind {
+    CreateContinuousAggregate(CreateContinuousAggregate),
+}
+
+/// Exact Select wire adapter for the continuous-aggregate payload.
+///
+/// Existing top-level Select statements encode their variant through
+/// `StatementKind`. The nested continuous-aggregate query is a named Select
+/// payload in its own right, so it carries and validates an explicit
+/// `variant: Select` field.
+pub(crate) mod continuous_aggregate_select_wire {
+    use crate::ast::{Expr, FromItem, OrderByExpr, Select, SelectItem, Span};
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize)]
+    struct SelectWireRef<'a> {
+        variant: &'static str,
+        distinct: bool,
+        projection: &'a [SelectItem],
+        from: &'a [FromItem],
+        selection: &'a Option<Expr>,
+        group_by: &'a Option<Vec<Expr>>,
+        having: &'a Option<Expr>,
+        order_by: &'a [OrderByExpr],
+        limit: &'a Option<Expr>,
+        offset: &'a Option<Expr>,
+        span: Span,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SelectWire {
+        variant: String,
+        distinct: bool,
+        projection: Vec<SelectItem>,
+        from: Vec<FromItem>,
+        selection: Option<Expr>,
+        group_by: Option<Vec<Expr>>,
+        having: Option<Expr>,
+        order_by: Vec<OrderByExpr>,
+        limit: Option<Expr>,
+        offset: Option<Expr>,
+        span: Span,
+    }
+
+    pub(crate) fn serialize<S>(
+        select: &Select,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        SelectWireRef {
+            variant: "Select",
+            distinct: select.distinct,
+            projection: &select.projection,
+            from: &select.from,
+            selection: &select.selection,
+            group_by: &select.group_by,
+            having: &select.having,
+            order_by: &select.order_by,
+            limit: &select.limit,
+            offset: &select.offset,
+            span: select.span,
+        }
+        .serialize(serializer)
+    }
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> std::result::Result<Select, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = SelectWire::deserialize(deserializer)?;
+        if wire.variant != "Select" {
+            return Err(D::Error::custom(format!(
+                "expected nested query variant `Select`, found `{}`",
+                wire.variant
+            )));
+        }
+        Ok(Select {
+            distinct: wire.distinct,
+            projection: wire.projection,
+            from: wire.from,
+            selection: wire.selection,
+            group_by: wire.group_by,
+            having: wire.having,
+            order_by: wire.order_by,
+            limit: wire.limit,
+            offset: wire.offset,
+            span: wire.span,
+        })
+    }
+}
+
+impl CreateContinuousAggregate {
+    /// Decode the staged 0.4 wire shape without adding it to `StatementKind`.
+    ///
+    /// This narrow seam lets the contract shape be proven while the checked-in
+    /// producer remains on 0.3. The linked-version check is the same one used
+    /// by the production parser path and always runs before payload preflight.
+    #[doc(hidden)]
+    pub fn decode_staged_messagepack(linked_parser_contract: &str, payload: &[u8]) -> Result<Self> {
+        ensure_linked_parser_contract(linked_parser_contract)?;
+        validate_bounded_messagepack(payload).map_err(messagepack_preflight_error)?;
+        let decoded = rmp_serde::from_slice::<StagedContinuousAggregateStatement>(payload)
+            .map_err(messagepack_decode_error)?;
+        let StagedContinuousAggregateKind::CreateContinuousAggregate(statement) = decoded.kind;
+        if decoded.span != statement.span {
+            return Err(ParserError::UnexpectedToken {
+                line: 0,
+                column: 0,
+                expected: "matching outer and kind spans in MessagePack AST".to_string(),
+                found: "continuous aggregate outer span differs from kind span".to_string(),
+            });
+        }
+        Ok(statement)
+    }
+}
 
 /// Return the SQL/PromQL MessagePack wire contract version exported by Nim.
 pub fn parser_contract_version() -> String {
@@ -10,22 +165,19 @@ pub fn parser_contract_version() -> String {
 }
 
 pub fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
-    if sql.as_bytes().contains(&0) {
-        return Err(ParserError::UnexpectedToken {
-            line: 0,
-            column: 0,
-            expected: "valid SQL without interior NUL bytes".to_string(),
-            found: "interior NUL byte".to_string(),
-        });
-    }
+    preflight_input(sql, 0).map_err(parser_error_from_preflight)?;
+    parse_sql_preflighted(sql)
+}
 
+fn parse_sql_preflighted(sql: &str) -> Result<Vec<Statement>> {
+    ensure_linked_parser_contract(&nim_ffi::parser_contract_version())?;
     let natural_join_markers = natural_join_markers(sql);
     // Option (a): double-quoted tokens are identifiers under SQL standard and
     // PostgreSQL rules. The currently deployed Nim lexer predates that contract
     // and emits them as string literals, so normalize the FFI input until every
     // parser binary has the corrected token kind.
     let normalized_sql = normalize_quoted_identifiers(sql);
-    let result = nim_ffi::parse_sql(&normalized_sql);
+    let result = nim_ffi::parse_sql(&normalized_sql).map_err(parser_error_from_ffi_input)?;
     match result.kind {
         ParseResultKind::Ok => {
             let buffer = OwnedBuffer::new(result.buffer_ptr, result.buffer_len);
@@ -43,13 +195,9 @@ pub fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
                         .to_string(),
                 });
             }
+            validate_bounded_messagepack(buffer.as_slice()).map_err(messagepack_preflight_error)?;
             let mut statements = rmp_serde::from_slice::<Vec<Statement>>(buffer.as_slice())
-                .map_err(|err| ParserError::UnexpectedToken {
-                    line: 0,
-                    column: 0,
-                    expected: "MessagePack AST matching docs/ffi-ast-contract.md".to_string(),
-                    found: err.to_string(),
-                })?;
+                .map_err(messagepack_decode_error)?;
             annotate_natural_joins(&mut statements, natural_join_markers)?;
             Ok(statements)
         }
@@ -59,6 +207,231 @@ pub fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
                 String::from_utf8_lossy(buffer.as_slice()).as_ref(),
             ))
         }
+    }
+}
+
+fn expected_parser_contract() -> &'static str {
+    PARSER_CONTRACT_DESCRIPTOR.trim()
+}
+
+fn ensure_linked_parser_contract(linked_parser_contract: &str) -> Result<()> {
+    let expected = expected_parser_contract();
+    if linked_parser_contract == expected {
+        return Ok(());
+    }
+    Err(ParserError::UnexpectedToken {
+        line: 0,
+        column: 0,
+        expected: format!("linked Nim parser contract {expected}"),
+        found: format!("linked Nim parser contract {linked_parser_contract}"),
+    })
+}
+
+fn messagepack_decode_error(error: rmp_serde::decode::Error) -> ParserError {
+    ParserError::UnexpectedToken {
+        line: 0,
+        column: 0,
+        expected: "bounded MessagePack AST matching docs/ffi-ast-contract.md".to_string(),
+        found: error.to_string(),
+    }
+}
+
+fn messagepack_preflight_error(error: MessagePackPreflightError) -> ParserError {
+    let found = match error {
+        MessagePackPreflightError::TooLarge => {
+            format!("MessagePack payload exceeds {MAX_MESSAGEPACK_PAYLOAD_BYTES} bytes")
+        }
+        MessagePackPreflightError::TooDeep => {
+            format!("MessagePack nesting exceeds {MAX_MESSAGEPACK_DEPTH} levels")
+        }
+        MessagePackPreflightError::TooManyValues => {
+            format!("MessagePack collection limit of {MAX_MESSAGEPACK_VALUES} values exceeded")
+        }
+        MessagePackPreflightError::Truncated => "truncated MessagePack payload".to_string(),
+        MessagePackPreflightError::ReservedMarker => "reserved MessagePack marker 0xc1".to_string(),
+        MessagePackPreflightError::TrailingBytes => {
+            "trailing bytes after MessagePack payload".to_string()
+        }
+    };
+    ParserError::UnexpectedToken {
+        line: 0,
+        column: 0,
+        expected: "bounded MessagePack AST matching docs/ffi-ast-contract.md".to_string(),
+        found,
+    }
+}
+
+fn validate_bounded_messagepack(
+    payload: &[u8],
+) -> std::result::Result<(), MessagePackPreflightError> {
+    if payload.len() > MAX_MESSAGEPACK_PAYLOAD_BYTES {
+        return Err(MessagePackPreflightError::TooLarge);
+    }
+    let mut scanner = MessagePackScanner {
+        payload,
+        position: 0,
+        values: 0,
+    };
+    scanner.scan_value(1)?;
+    if scanner.position != payload.len() {
+        return Err(MessagePackPreflightError::TrailingBytes);
+    }
+    Ok(())
+}
+
+struct MessagePackScanner<'a> {
+    payload: &'a [u8],
+    position: usize,
+    values: usize,
+}
+
+impl MessagePackScanner<'_> {
+    fn scan_value(&mut self, depth: usize) -> std::result::Result<(), MessagePackPreflightError> {
+        if depth > MAX_MESSAGEPACK_DEPTH {
+            return Err(MessagePackPreflightError::TooDeep);
+        }
+        self.values = self
+            .values
+            .checked_add(1)
+            .ok_or(MessagePackPreflightError::TooManyValues)?;
+        if self.values > MAX_MESSAGEPACK_VALUES {
+            return Err(MessagePackPreflightError::TooManyValues);
+        }
+
+        let marker = self.read_byte()?;
+        match marker {
+            0x00..=0x7f | 0xc0 | 0xc2 | 0xc3 | 0xe0..=0xff => Ok(()),
+            0x80..=0x8f => self.scan_map(usize::from(marker & 0x0f), depth),
+            0x90..=0x9f => self.scan_children(usize::from(marker & 0x0f), depth),
+            0xa0..=0xbf => self.skip(usize::from(marker & 0x1f)),
+            0xc1 => Err(MessagePackPreflightError::ReservedMarker),
+            0xc4 | 0xd9 => {
+                let length = usize::from(self.read_byte()?);
+                self.skip(length)
+            }
+            0xc5 | 0xda => {
+                let length = usize::from(self.read_u16()?);
+                self.skip(length)
+            }
+            0xc6 | 0xdb => {
+                let length = usize::try_from(self.read_u32()?)
+                    .map_err(|_| MessagePackPreflightError::TooLarge)?;
+                self.skip(length)
+            }
+            0xc7 => {
+                let length = usize::from(self.read_byte()?);
+                self.skip_ext(length)
+            }
+            0xc8 => {
+                let length = usize::from(self.read_u16()?);
+                self.skip_ext(length)
+            }
+            0xc9 => {
+                let length = usize::try_from(self.read_u32()?)
+                    .map_err(|_| MessagePackPreflightError::TooLarge)?;
+                self.skip_ext(length)
+            }
+            0xca => self.skip(4),
+            0xcb => self.skip(8),
+            0xcc | 0xd0 => self.skip(1),
+            0xcd | 0xd1 => self.skip(2),
+            0xce | 0xd2 => self.skip(4),
+            0xcf | 0xd3 => self.skip(8),
+            0xd4 => self.skip_ext(1),
+            0xd5 => self.skip_ext(2),
+            0xd6 => self.skip_ext(4),
+            0xd7 => self.skip_ext(8),
+            0xd8 => self.skip_ext(16),
+            0xdc => {
+                let count = usize::from(self.read_u16()?);
+                self.scan_children(count, depth)
+            }
+            0xdd => {
+                let count = usize::try_from(self.read_u32()?)
+                    .map_err(|_| MessagePackPreflightError::TooManyValues)?;
+                self.scan_children(count, depth)
+            }
+            0xde => {
+                let count = usize::from(self.read_u16()?);
+                self.scan_map(count, depth)
+            }
+            0xdf => {
+                let count = usize::try_from(self.read_u32()?)
+                    .map_err(|_| MessagePackPreflightError::TooManyValues)?;
+                self.scan_map(count, depth)
+            }
+        }
+    }
+
+    fn scan_map(
+        &mut self,
+        entries: usize,
+        depth: usize,
+    ) -> std::result::Result<(), MessagePackPreflightError> {
+        let children = entries
+            .checked_mul(2)
+            .ok_or(MessagePackPreflightError::TooManyValues)?;
+        self.scan_children(children, depth)
+    }
+
+    fn scan_children(
+        &mut self,
+        children: usize,
+        depth: usize,
+    ) -> std::result::Result<(), MessagePackPreflightError> {
+        if children > MAX_MESSAGEPACK_VALUES {
+            return Err(MessagePackPreflightError::TooManyValues);
+        }
+        for _ in 0..children {
+            self.scan_value(depth + 1)?;
+        }
+        Ok(())
+    }
+
+    fn skip_ext(
+        &mut self,
+        payload_length: usize,
+    ) -> std::result::Result<(), MessagePackPreflightError> {
+        let total = payload_length
+            .checked_add(1)
+            .ok_or(MessagePackPreflightError::TooLarge)?;
+        self.skip(total)
+    }
+
+    fn read_byte(&mut self) -> std::result::Result<u8, MessagePackPreflightError> {
+        let byte = *self
+            .payload
+            .get(self.position)
+            .ok_or(MessagePackPreflightError::Truncated)?;
+        self.position += 1;
+        Ok(byte)
+    }
+
+    fn read_u16(&mut self) -> std::result::Result<u16, MessagePackPreflightError> {
+        let bytes = self.take(2)?;
+        Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn read_u32(&mut self) -> std::result::Result<u32, MessagePackPreflightError> {
+        let bytes = self.take(4)?;
+        Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn skip(&mut self, length: usize) -> std::result::Result<(), MessagePackPreflightError> {
+        self.take(length).map(|_| ())
+    }
+
+    fn take(&mut self, length: usize) -> std::result::Result<&[u8], MessagePackPreflightError> {
+        let end = self
+            .position
+            .checked_add(length)
+            .ok_or(MessagePackPreflightError::Truncated)?;
+        let bytes = self
+            .payload
+            .get(self.position..end)
+            .ok_or(MessagePackPreflightError::Truncated)?;
+        self.position = end;
+        Ok(bytes)
     }
 }
 
@@ -356,8 +729,12 @@ fn annotate_expr_natural_joins(
 }
 
 pub fn parse_expression_sql(sql: &str) -> Result<crate::ast::Expr> {
-    let wrapped = format!("SELECT {sql}");
-    let statements = parse_sql(&wrapped)?;
+    let wrapped_len =
+        preflight_input(sql, SELECT_WRAPPER_PREFIX.len()).map_err(parser_error_from_preflight)?;
+    let mut wrapped = String::with_capacity(wrapped_len);
+    wrapped.push_str(SELECT_WRAPPER_PREFIX);
+    wrapped.push_str(sql);
+    let statements = parse_sql_preflighted(&wrapped)?;
     let Some(statement) = statements.into_iter().next() else {
         return Err(empty_expression_error());
     };
@@ -377,6 +754,64 @@ fn empty_expression_error() -> ParserError {
         column: 0,
         expected: "expression".to_string(),
         found: "empty parser result".to_string(),
+    }
+}
+
+fn checked_total_input_len(
+    input_len: usize,
+    wrapper_len: usize,
+) -> std::result::Result<usize, InputPreflightError> {
+    let total_len = input_len
+        .checked_add(wrapper_len)
+        .ok_or(InputPreflightError::LengthOverflow)?;
+    if total_len > MAX_SQL_INPUT_BYTES {
+        return Err(InputPreflightError::TooLarge);
+    }
+    Ok(total_len)
+}
+
+fn preflight_input(
+    sql: &str,
+    wrapper_len: usize,
+) -> std::result::Result<usize, InputPreflightError> {
+    let total_len = checked_total_input_len(sql.len(), wrapper_len)?;
+    if sql.as_bytes().contains(&0) {
+        return Err(InputPreflightError::InteriorNul);
+    }
+    Ok(total_len)
+}
+
+fn parser_error_from_preflight(error: InputPreflightError) -> ParserError {
+    match error {
+        InputPreflightError::TooLarge | InputPreflightError::LengthOverflow => {
+            input_too_large_error()
+        }
+        InputPreflightError::InteriorNul => interior_nul_error(),
+    }
+}
+
+fn parser_error_from_ffi_input(error: nim_ffi::ParseInputError) -> ParserError {
+    match error {
+        nim_ffi::ParseInputError::LengthOutOfRange => input_too_large_error(),
+        nim_ffi::ParseInputError::InteriorNul => interior_nul_error(),
+    }
+}
+
+fn input_too_large_error() -> ParserError {
+    ParserError::UnexpectedToken {
+        line: 0,
+        column: 0,
+        expected: "SQL input at most 1048576 UTF-8 bytes".to_string(),
+        found: "SQL input exceeds byte limit".to_string(),
+    }
+}
+
+fn interior_nul_error() -> ParserError {
+    ParserError::UnexpectedToken {
+        line: 0,
+        column: 0,
+        expected: "valid SQL without interior NUL bytes".to_string(),
+        found: "interior NUL byte".to_string(),
     }
 }
 
@@ -408,4 +843,73 @@ fn parse_nim_line_col(message: &str) -> Option<(u64, u64)> {
     let (line, rest) = after_line.split_once(", col ")?;
     let (col, _) = rest.split_once(':')?;
     Some((line.parse().ok()?, col.parse().ok()?))
+}
+
+#[cfg(test)]
+mod input_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn raw_sql_guard_accepts_boundary_minus_and_exact_but_rejects_plus() {
+        assert_eq!(
+            checked_total_input_len(MAX_SQL_INPUT_BYTES - 1, 0),
+            Ok(MAX_SQL_INPUT_BYTES - 1)
+        );
+        assert_eq!(
+            checked_total_input_len(MAX_SQL_INPUT_BYTES, 0),
+            Ok(MAX_SQL_INPUT_BYTES)
+        );
+        assert_eq!(
+            checked_total_input_len(MAX_SQL_INPUT_BYTES + 1, 0),
+            Err(InputPreflightError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn guard_counts_utf8_bytes_instead_of_characters() {
+        let exact = "é".repeat(MAX_SQL_INPUT_BYTES / "é".len());
+        assert_eq!(exact.chars().count(), MAX_SQL_INPUT_BYTES / 2);
+        assert_eq!(exact.len(), MAX_SQL_INPUT_BYTES);
+        assert_eq!(preflight_input(&exact, 0), Ok(MAX_SQL_INPUT_BYTES));
+
+        let plus = format!("{exact}é");
+        assert_eq!(
+            preflight_input(&plus, 0),
+            Err(InputPreflightError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn expression_guard_includes_wrapper_and_detects_length_overflow() {
+        assert_eq!(
+            checked_total_input_len(
+                MAX_SQL_INPUT_BYTES - SELECT_WRAPPER_PREFIX.len(),
+                SELECT_WRAPPER_PREFIX.len(),
+            ),
+            Ok(MAX_SQL_INPUT_BYTES)
+        );
+        assert_eq!(
+            checked_total_input_len(
+                MAX_SQL_INPUT_BYTES - SELECT_WRAPPER_PREFIX.len() + 1,
+                SELECT_WRAPPER_PREFIX.len(),
+            ),
+            Err(InputPreflightError::TooLarge)
+        );
+        assert_eq!(
+            checked_total_input_len(usize::MAX, SELECT_WRAPPER_PREFIX.len()),
+            Err(InputPreflightError::LengthOverflow)
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_nul_before_any_ffi_work() {
+        assert_eq!(
+            preflight_input("SELECT \0 1", 0),
+            Err(InputPreflightError::InteriorNul)
+        );
+        assert_eq!(
+            preflight_input("1 \0 2", SELECT_WRAPPER_PREFIX.len()),
+            Err(InputPreflightError::InteriorNul)
+        );
+    }
 }

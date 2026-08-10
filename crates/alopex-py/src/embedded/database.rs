@@ -21,14 +21,6 @@ use crate::vector::SliceOrOwned;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(test)]
-static ROLLBACK_FAIL_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-#[cfg(test)]
-fn inject_rollback_failure_once() {
-    ROLLBACK_FAIL_COUNT.store(1, Ordering::SeqCst);
-}
-
 #[pyclass(name = "Database")]
 pub struct PyDatabase {
     inner: Option<Arc<alopex_embedded::Database>>,
@@ -37,9 +29,16 @@ pub struct PyDatabase {
     streams: Arc<StreamLeaseRegistry>,
     dataframe_streams: Arc<DataFrameStreamRegistry>,
     txns: Arc<Mutex<Vec<Weak<PyTransactionInner>>>>,
+    #[cfg(test)]
+    rollback_fail_count: AtomicUsize,
 }
 
 impl PyDatabase {
+    #[cfg(test)]
+    fn inject_rollback_failure_once(&self) {
+        self.rollback_fail_count.store(1, Ordering::SeqCst);
+    }
+
     fn from_db(
         db: alopex_embedded::Database,
         mode: alopex_embedded::StorageMode,
@@ -52,6 +51,8 @@ impl PyDatabase {
             streams: Arc::new(StreamLeaseRegistry::default()),
             dataframe_streams: Arc::new(DataFrameStreamRegistry::default()),
             txns: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            rollback_fail_count: AtomicUsize::new(0),
         }
     }
 
@@ -365,7 +366,8 @@ impl PyDatabase {
                     }
                 };
                 #[cfg(test)]
-                if ROLLBACK_FAIL_COUNT
+                if self
+                    .rollback_fail_count
                     .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
                         if count > 0 {
                             Some(count - 1)
@@ -478,7 +480,6 @@ mod tests {
     use pyo3::types::{PyDict, PyList};
     use pyo3::IntoPyObjectExt;
 
-    use super::inject_rollback_failure_once;
     use super::PyDatabase;
 
     fn with_py<F: FnOnce(Python<'_>)>(f: F) {
@@ -729,10 +730,11 @@ mod tests {
 
     #[test]
     fn close_retry_keeps_tracked_transactions_on_failure() {
+        pyo3::Python::initialize();
         let mut db = PyDatabase::new(None).expect("db");
         let _txn = db.begin(None).expect("txn");
 
-        inject_rollback_failure_once();
+        db.inject_rollback_failure_once();
         db.close().expect_err("close should fail once");
 
         assert!(!db
@@ -747,6 +749,27 @@ mod tests {
             .lock()
             .expect("transaction list lock poisoned")
             .is_empty());
+    }
+
+    #[test]
+    fn rollback_failure_injection_is_database_scoped() {
+        pyo3::Python::initialize();
+        let mut injected = PyDatabase::new(None).expect("injected db");
+        let _injected_txn = injected.begin(None).expect("injected txn");
+        let mut unaffected = PyDatabase::new(None).expect("unaffected db");
+        let _unaffected_txn = unaffected.begin(None).expect("unaffected txn");
+
+        injected.inject_rollback_failure_once();
+
+        unaffected
+            .close()
+            .expect("another database must not consume the injected failure");
+        injected
+            .close()
+            .expect_err("the owning database must receive the injected failure");
+        injected
+            .close()
+            .expect("the owning database can retry close");
     }
 
     #[test]

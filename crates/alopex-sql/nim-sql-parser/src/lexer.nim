@@ -40,12 +40,16 @@ type
     value*: string
     line*: int
     col*: int
+    endLine*: int
+    endCol*: int
 
   Lexer* = object
     input: string
     pos: int
     line: int
     col: int
+    lastLine: int
+    lastCol: int
 
 const Keywords = {
   "select": tkSelect, "from": tkFrom, "where": tkWhere,
@@ -93,12 +97,19 @@ proc peek(lex: Lexer): char =
 
 proc advance(lex: var Lexer): char =
   result = lex.peek()
+  lex.lastLine = lex.line
+  lex.lastCol = lex.col
   if result == '\n':
     inc lex.line
     lex.col = 1
   else:
     inc lex.col
   inc lex.pos
+
+proc makeToken(lex: Lexer; kind: TokenKind; value: string;
+               startLine, startCol: int): Token =
+  Token(kind: kind, value: value, line: startLine, col: startCol,
+        endLine: lex.lastLine, endCol: lex.lastCol)
 
 proc skipWhitespace(lex: var Lexer) =
   while lex.pos < lex.input.len:
@@ -138,7 +149,7 @@ proc readString(lex: var Lexer): Token =
         break
     else:
       value &= $c
-  Token(kind: tkString, value: value, line: startLine, col: startCol)
+  lex.makeToken(tkString, value, startLine, startCol)
 
 proc readNumber(lex: var Lexer): Token =
   let startLine = lex.line
@@ -153,9 +164,9 @@ proc readNumber(lex: var Lexer): Token =
     while lex.pos < lex.input.len and lex.peek() in {'0'..'9'}:
       value &= $lex.advance()
   if isFloat:
-    Token(kind: tkFloat, value: value, line: startLine, col: startCol)
+    lex.makeToken(tkFloat, value, startLine, startCol)
   else:
-    Token(kind: tkInteger, value: value, line: startLine, col: startCol)
+    lex.makeToken(tkInteger, value, startLine, startCol)
 
 proc readIdentOrKeyword(lex: var Lexer): Token =
   let startLine = lex.line
@@ -165,14 +176,15 @@ proc readIdentOrKeyword(lex: var Lexer): Token =
     value &= $lex.advance()
   let lower = value.toLowerAscii()
   if lower in Keywords:
-    Token(kind: Keywords[lower], value: value, line: startLine, col: startCol)
+    lex.makeToken(Keywords[lower], value, startLine, startCol)
   else:
-    Token(kind: tkIdent, value: value, line: startLine, col: startCol)
+    lex.makeToken(tkIdent, value, startLine, startCol)
 
 proc nextToken*(lex: var Lexer): Token =
   lex.skipWhitespace()
   if lex.pos >= lex.input.len:
-    return Token(kind: tkEof, value: "", line: lex.line, col: lex.col)
+    return Token(kind: tkEof, value: "", line: lex.line, col: lex.col,
+                 endLine: lex.line, endCol: lex.col)
 
   let startLine = lex.line
   let startCol = lex.col
@@ -187,70 +199,70 @@ proc nextToken*(lex: var Lexer): Token =
     return lex.readIdentOrKeyword()
   of '*':
     discard lex.advance()
-    return Token(kind: tkStar, value: "*", line: startLine, col: startCol)
+    return lex.makeToken(tkStar, "*", startLine, startCol)
   of ',':
     discard lex.advance()
-    return Token(kind: tkComma, value: ",", line: startLine, col: startCol)
+    return lex.makeToken(tkComma, ",", startLine, startCol)
   of '.':
     discard lex.advance()
-    return Token(kind: tkDot, value: ".", line: startLine, col: startCol)
+    return lex.makeToken(tkDot, ".", startLine, startCol)
   of ';':
     discard lex.advance()
-    return Token(kind: tkSemicolon, value: ";", line: startLine, col: startCol)
+    return lex.makeToken(tkSemicolon, ";", startLine, startCol)
   of '(':
     discard lex.advance()
-    return Token(kind: tkLParen, value: "(", line: startLine, col: startCol)
+    return lex.makeToken(tkLParen, "(", startLine, startCol)
   of ')':
     discard lex.advance()
-    return Token(kind: tkRParen, value: ")", line: startLine, col: startCol)
+    return lex.makeToken(tkRParen, ")", startLine, startCol)
   of '[':
     discard lex.advance()
-    return Token(kind: tkLBracket, value: "[", line: startLine, col: startCol)
+    return lex.makeToken(tkLBracket, "[", startLine, startCol)
   of ']':
     discard lex.advance()
-    return Token(kind: tkRBracket, value: "]", line: startLine, col: startCol)
+    return lex.makeToken(tkRBracket, "]", startLine, startCol)
   of '+':
     discard lex.advance()
-    return Token(kind: tkPlus, value: "+", line: startLine, col: startCol)
+    return lex.makeToken(tkPlus, "+", startLine, startCol)
   of '-':
     discard lex.advance()
-    return Token(kind: tkMinus, value: "-", line: startLine, col: startCol)
+    return lex.makeToken(tkMinus, "-", startLine, startCol)
   of '/':
     discard lex.advance()
-    return Token(kind: tkSlash, value: "/", line: startLine, col: startCol)
+    return lex.makeToken(tkSlash, "/", startLine, startCol)
   of '%':
     discard lex.advance()
-    return Token(kind: tkPercent, value: "%", line: startLine, col: startCol)
+    return lex.makeToken(tkPercent, "%", startLine, startCol)
   of '|':
     discard lex.advance()
     if lex.peek() == '|':
       discard lex.advance()
-      return Token(kind: tkPipePipe, value: "||", line: startLine, col: startCol)
-    return Token(kind: tkIdent, value: "|", line: startLine, col: startCol)
+      return lex.makeToken(tkPipePipe, "||", startLine, startCol)
+    return lex.makeToken(tkIdent, "|", startLine, startCol)
   of '=':
     discard lex.advance()
-    return Token(kind: tkEq, value: "=", line: startLine, col: startCol)
+    return lex.makeToken(tkEq, "=", startLine, startCol)
   of '<':
     discard lex.advance()
     if lex.peek() == '=':
       discard lex.advance()
-      return Token(kind: tkLe, value: "<=", line: startLine, col: startCol)
+      return lex.makeToken(tkLe, "<=", startLine, startCol)
     elif lex.peek() == '>':
       discard lex.advance()
-      return Token(kind: tkNeq, value: "<>", line: startLine, col: startCol)
-    return Token(kind: tkLt, value: "<", line: startLine, col: startCol)
+      return lex.makeToken(tkNeq, "<>", startLine, startCol)
+    return lex.makeToken(tkLt, "<", startLine, startCol)
   of '>':
     discard lex.advance()
     if lex.peek() == '=':
       discard lex.advance()
-      return Token(kind: tkGe, value: ">=", line: startLine, col: startCol)
-    return Token(kind: tkGt, value: ">", line: startLine, col: startCol)
+      return lex.makeToken(tkGe, ">=", startLine, startCol)
+    return lex.makeToken(tkGt, ">", startLine, startCol)
   of '!':
     discard lex.advance()
     if lex.peek() == '=':
       discard lex.advance()
-      return Token(kind: tkNeq, value: "!=", line: startLine, col: startCol)
-    return Token(kind: tkIdent, value: "!", line: startLine, col: startCol)
+      return lex.makeToken(tkNeq, "!=", startLine, startCol)
+    return lex.makeToken(tkIdent, "!", startLine, startCol)
   else:
     discard lex.advance()
-    return Token(kind: tkIdent, value: $c, line: startLine, col: startCol)
+    return lex.makeToken(tkIdent, $c, startLine, startCol)

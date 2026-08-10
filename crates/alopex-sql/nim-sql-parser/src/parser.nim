@@ -9,11 +9,16 @@ type
   Parser* = object
     lex: Lexer
     current: Token
+    previous: Token
     errors*: seq[string]
+    nestingDepth: int
 
   ParseError* = object of CatchableError
 
 const
+  MaxSyntacticNesting = 128
+  NestingLimitError =
+    "maximum SQL syntactic nesting depth of 128 exceeded"
   ClauseTerminators = {tkWhere, tkOrder, tkGroup, tkHaving, tkLimit, tkOffset,
                        tkJoin, tkInner, tkLeft, tkRight, tkFull, tkCross,
                        tkNatural, tkUsing, tkOn}
@@ -28,8 +33,8 @@ proc initParser*(input: string): Parser =
   result.current = result.lex.nextToken()
 
 proc tokenSpan(tok: Token): Span =
-  let width = max(tok.value.len, 1)
-  newSpan(tok.line, tok.col, tok.col + width - 1)
+  Span(start: Location(line: tok.line, column: tok.col),
+       `end`: Location(line: tok.endLine, column: tok.endCol))
 
 proc currentSpan(p: Parser): Span =
   tokenSpan(p.current)
@@ -40,8 +45,17 @@ proc error(p: var Parser, msg: string) =
   p.errors.add(errMsg)
   raise newException(ParseError, errMsg)
 
+proc enterNesting(p: var Parser) =
+  if p.nestingDepth >= MaxSyntacticNesting:
+    raise newException(ParseError, NestingLimitError)
+  inc p.nestingDepth
+
+proc leaveNesting(p: var Parser) =
+  dec p.nestingDepth
+
 proc advance(p: var Parser): Token =
   result = p.current
+  p.previous = result
   p.current = p.lex.nextToken()
 
 proc expect(p: var Parser, kind: TokenKind): Token =
@@ -51,6 +65,17 @@ proc expect(p: var Parser, kind: TokenKind): Token =
 
 proc check(p: Parser, kind: TokenKind): bool =
   p.current.kind == kind
+
+proc checkContextual(p: Parser; value: string): bool =
+  p.current.kind == tkIdent and p.current.value.cmpIgnoreCase(value) == 0
+
+proc expectContextual(p: var Parser; value: string): Token =
+  if not p.checkContextual(value):
+    p.error("expected " & value)
+  result = p.advance()
+
+proc spanThrough(first, last: Span): Span =
+  Span(start: first.start, `end`: last.`end`)
 
 proc expectIdent(p: var Parser; context = "identifier"): Token =
   if p.current.kind != tkIdent:
@@ -88,6 +113,8 @@ proc parseTypeName(p: var Parser): SqlNode
 # --- Expression parsing (precedence climbing) ---
 
 proc parseVectorLiteral(p: var Parser): SqlNode =
+  p.enterNesting()
+  defer: p.leaveNesting()
   let start = p.expect(tkLBracket)
   result = newNode(nkVectorLiteral, tokenSpan(start))
   var sawValue = false
@@ -111,6 +138,8 @@ proc parseVectorLiteral(p: var Parser): SqlNode =
   discard p.expect(tkRBracket)
 
 proc parseSubqueryInParens(p: var Parser): SqlNode =
+  p.enterNesting()
+  defer: p.leaveNesting()
   discard p.expect(tkLParen)
   if not p.check(tkSelect):
     p.error("expected SELECT subquery")
@@ -124,6 +153,8 @@ proc parseExistsExpr(p: var Parser; negated: bool): SqlNode =
   result.children.add(p.parseSubqueryInParens())
 
 proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
+  p.enterNesting()
+  defer: p.leaveNesting()
   result = newNode(nkFunctionCall, tokenSpan(nameTok))
   discard p.expect(tkLParen)
   let normalizedName = case nameTok.value.toLowerAscii()
@@ -188,6 +219,8 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
   discard p.expect(tkRParen)
 
 proc parseCastExpr(p: var Parser): SqlNode =
+  p.enterNesting()
+  defer: p.leaveNesting()
   let tok = p.expect(tkCast)
   result = newNode(nkCast, tokenSpan(tok))
   discard p.expect(tkLParen)
@@ -227,6 +260,8 @@ proc parsePrimary(p: var Parser): SqlNode =
   of tkLBracket:
     result = p.parseVectorLiteral()
   of tkLParen:
+    p.enterNesting()
+    defer: p.leaveNesting()
     let start = p.advance()
     if p.check(tkSelect):
       let subquery = p.parseSelectStmt()
@@ -245,8 +280,12 @@ proc parsePrimary(p: var Parser): SqlNode =
     if p.check(tkExists):
       result = p.parseExistsExpr(true)
     else:
+      p.enterNesting()
+      defer: p.leaveNesting()
       result = newUnaryOp(opNot, p.parsePrimary())
   of tkMinus:
+    p.enterNesting()
+    defer: p.leaveNesting()
     let tok = p.advance()
     result = newUnaryOp(opNeg, p.parsePrimary(), tokenSpan(tok))
   of tkIdent, tkFirst, tkLast, tkTime:
@@ -318,6 +357,8 @@ proc parseQuantified(p: var Parser; left: SqlNode; op: BinaryOpKind): SqlNode =
   result.children.add(p.parseSubqueryInParens())
 
 proc parseInExpr(p: var Parser; left: SqlNode; negated: bool): SqlNode =
+  p.enterNesting()
+  defer: p.leaveNesting()
   discard p.expect(tkIn)
   discard p.expect(tkLParen)
   if p.check(tkSelect):
@@ -435,7 +476,7 @@ proc parseSelectItem(p: var Parser): SqlNode =
   result = p.parseExpr()
   if p.check(tkAs):
     discard p.advance()
-    let alias = p.expectIdent("alias")
+    let alias = p.expectExprIdent("alias")
     result = makeAlias(result, alias.value, tokenSpan(alias))
   elif p.check(tkIdent):
     let alias = p.advance()
@@ -459,6 +500,8 @@ proc parseOptionalAlias(p: var Parser; item: SqlNode): SqlNode =
 
 proc parseFromItem(p: var Parser): SqlNode =
   if p.check(tkLParen):
+    p.enterNesting()
+    defer: p.leaveNesting()
     let start = p.advance()
     if p.check(tkSelect):
       let subquery = p.parseSelectStmt()
@@ -656,6 +699,8 @@ proc parseInsertStmt(p: var Parser): SqlNode =
       else:
         break
   elif p.check(tkSelect):
+    p.enterNesting()
+    defer: p.leaveNesting()
     result.children.add(p.parseSelectStmt())
   else:
     discard p.expect(tkValues)
@@ -703,6 +748,8 @@ proc parseTypeName(p: var Parser): SqlNode =
   result = newNode(nkTypeName, tokenSpan(typeTok))
   result.children.add(newIdent(typeTok.value, tokenSpan(typeTok)))
   if p.check(tkLParen):
+    p.enterNesting()
+    defer: p.leaveNesting()
     discard p.advance()
     result.children.add(p.parseExpr())
     if p.check(tkComma):
@@ -765,6 +812,94 @@ proc parseWithOptions(p: var Parser): SqlNode =
     else:
       break
   discard p.expect(tkRParen)
+
+proc isSingleMeasurementSelect(query: SqlNode): bool =
+  for child in query.children:
+    if child.kind == nkFromClause:
+      if child.children.len != 1:
+        return false
+      let source = child.children[0]
+      return source.kind == nkIdentifier or
+        (source.kind == nkAlias and source.aliasExpr.kind == nkIdentifier)
+  false
+
+proc parseContinuousAggregateOptions(p: var Parser): SqlNode =
+  const optionNames = ["retention", "refresh_interval"]
+  let start = p.expect(tkWith)
+  result = newNode(nkWithOptions, tokenSpan(start))
+  discard p.expect(tkLParen)
+
+  for index, expectedName in optionNames:
+    if p.check(tkRParen):
+      p.error("missing continuous aggregate option " & expectedName)
+    if p.current.kind != tkIdent:
+      p.error("expected continuous aggregate option " & expectedName)
+    let key = p.current
+    let normalizedKey = key.value.toLowerAscii()
+    if normalizedKey notin optionNames:
+      p.error("unknown continuous aggregate option " & key.value)
+    if normalizedKey != expectedName:
+      if index > 0 and normalizedKey == optionNames[index - 1]:
+        p.error("duplicate continuous aggregate option " & key.value)
+      p.error("expected continuous aggregate option " & expectedName)
+    discard p.advance()
+    discard p.expect(tkEq)
+    if not p.check(tkString):
+      p.error("continuous aggregate option " & expectedName &
+        " requires a string duration")
+    if p.current.value.len == 0:
+      p.error("continuous aggregate option " & expectedName &
+        " requires a non-empty duration string")
+    let value = p.advance()
+    let option = newNode(nkIndexOption,
+      spanThrough(tokenSpan(key), tokenSpan(value)))
+    option.children.add(newIdent(key.value, tokenSpan(key)))
+    option.children.add(newStringLit(value.value, tokenSpan(value)))
+    result.children.add(option)
+
+    if index < optionNames.high:
+      if not p.check(tkComma):
+        p.error("missing continuous aggregate option " & optionNames[index + 1])
+      discard p.advance()
+    elif p.check(tkComma):
+      discard p.advance()
+      if p.check(tkRParen):
+        p.error("unexpected trailing comma in continuous aggregate options")
+      if p.current.kind == tkIdent:
+        let extra = p.current.value.toLowerAscii()
+        if extra in optionNames:
+          p.error("duplicate continuous aggregate option " & p.current.value)
+        p.error("unknown continuous aggregate option " & p.current.value)
+      p.error("expected continuous aggregate option")
+
+  let closing = p.expect(tkRParen)
+  result.span = spanThrough(tokenSpan(start), tokenSpan(closing))
+
+proc parseCreateContinuousAggregateAfterCreate(
+    p: var Parser; start: Token): SqlNode =
+  discard p.expectContextual("CONTINUOUS")
+  discard p.expectContextual("AGGREGATE")
+  let name = p.expectIdent("continuous aggregate name")
+  discard p.expect(tkAs)
+  if not p.check(tkSelect):
+    p.error("expected SELECT query after AS")
+  p.enterNesting()
+  defer: p.leaveNesting()
+  let query = p.parseSelectStmt()
+  query.span = spanThrough(query.span, tokenSpan(p.previous))
+  if not query.isSingleMeasurementSelect():
+    p.error("continuous aggregate query requires one source measurement")
+  if not p.check(tkWith):
+    p.error("expected WITH options after continuous aggregate SELECT")
+  let options = p.parseContinuousAggregateOptions()
+  if p.current.kind notin {tkSemicolon, tkEof}:
+    p.error("unexpected token after continuous aggregate options")
+
+  result = newNode(nkCreateContinuousAggregate,
+    spanThrough(tokenSpan(start), options.span))
+  result.children.add(newIdent(name.value, tokenSpan(name)))
+  result.children.add(query)
+  result.children.add(options)
 
 proc parseCreateTableAfterCreate(p: var Parser; start: Token): SqlNode =
   discard p.expect(tkTable)
@@ -830,8 +965,10 @@ proc parseCreateStmt(p: var Parser): SqlNode =
     result = p.parseCreateTableAfterCreate(start)
   elif p.check(tkIndex):
     result = p.parseCreateIndexAfterCreate(start)
+  elif p.checkContextual("CONTINUOUS"):
+    result = p.parseCreateContinuousAggregateAfterCreate(start)
   else:
-    p.error("expected TABLE or INDEX after CREATE")
+    p.error("expected TABLE, INDEX, or CONTINUOUS AGGREGATE after CREATE")
 
 proc parseDropTableAfterDrop(p: var Parser; start: Token): SqlNode =
   discard p.expect(tkTable)

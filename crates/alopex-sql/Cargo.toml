@@ -1,6 +1,6 @@
 [package]
 name = "alopex-sql"
-version = "0.8.3"
+version.workspace = true
 edition = "2024"  # Uses let chains feature
 license.workspace = true
 repository.workspace = true
@@ -25,6 +25,8 @@ exclude = [
     "nim-sql-parser/Dockerfile",
     "nim-sql-parser/nim_sql_parser.nimble",
     "nim-sql-parser/.gitignore",
+    "nim-sql-parser/CONTRACT_VERSION",
+    "nim-sql-parser/SHA256SUMS",
 ]
 
 [features]
@@ -56,6 +58,11 @@ futures-core = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "sync"] }
 futures = { workspace = true, optional = true }
 
+[build-dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+
 [dev-dependencies]
 proptest = "1.4"
 criterion = "0.5"
@@ -66,6 +73,10 @@ serde_json.workspace = true
 [[bench]]
 name = "key_encoding"
 harness = false
+
+[[test]]
+name = "build_support"
+path = "build_support.rs"
 
 [[bench]]
 name = "storage_bench"

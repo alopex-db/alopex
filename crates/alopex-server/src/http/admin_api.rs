@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::auth::AuthMode;
 use crate::http::{error_response, RequestContext};
 use crate::metrics::ClusterMetricsSurface;
-use crate::ops::backup::{export_snapshot, BackupHandle};
+use crate::ops::backup::{copy_dir_filtered, export_snapshot, BackupHandle};
 use crate::ops::restore::{RestoreHandle, RestoreSource};
 use crate::ops::state::{OperationState, RestoreMetadata};
 use crate::ops::status::StatusReporter;
@@ -674,25 +674,7 @@ fn timestamp_dir() -> String {
 
 fn copy_data_dir(src: &Path, dest: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dest).map_err(|err| err.to_string())?;
-    copy_dir_filtered(src, dest)
-}
-
-fn copy_dir_filtered(src: &Path, dest: &Path) -> Result<(), String> {
-    for entry in std::fs::read_dir(src).map_err(|err| err.to_string())? {
-        let entry = entry.map_err(|err| err.to_string())?;
-        let file_type = entry.file_type().map_err(|err| err.to_string())?;
-        let name = entry.file_name();
-        if name == ".lifecycle" {
-            continue;
-        }
-        let dest_path = dest.join(name);
-        if file_type.is_dir() {
-            copy_data_dir(&entry.path(), &dest_path)?;
-        } else {
-            std::fs::copy(entry.path(), &dest_path).map_err(|err| err.to_string())?;
-        }
-    }
-    Ok(())
+    copy_dir_filtered(src, dest).map_err(|err| err.to_string())
 }
 
 fn write_latest_marker(root: &Path, dest: &Path) -> Result<(), String> {

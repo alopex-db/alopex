@@ -29,6 +29,8 @@ bindings = "pyo3"
 module-name = "alopex._alopex"
 python-source = "python"
 features = ["pyo3/extension-module"]
-# The Nim parser is generated only by the Windows wheel job. Keep this
-# artifact out of sdists and non-Windows wheels.
-include = [{ path = "python/alopex/native/*.dll", format = "wheel" }]
+# Core-release parser libraries and their contract sidecars are staged under
+# the package-local directory for every wheel target. Maturin includes them in
+# wheels only; sdists remain source-only and cannot silently carry reviewed
+# native bytes.
+include = [{ path = "python/alopex/native/*", format = "wheel" }]

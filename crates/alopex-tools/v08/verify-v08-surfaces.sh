@@ -10,6 +10,39 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT}/target/alopex-tools-v08-surfaces}"
 export CARGO_TARGET_DIR
 
+NIM_CONTROLLED_FAILURE_OUTCOME="${ALOPEX_NIM_CONTROLLED_FAILURE_OUTCOME:-}"
+if [[ "${NIM_CONTROLLED_FAILURE_OUTCOME}" != "failure" ]]; then
+    echo "[alopex-tools:v0.8] controlled Nim parser step outcome must be failure, found ${NIM_CONTROLLED_FAILURE_OUTCOME:-unset}" >&2
+    exit 2
+fi
+
+NIM_CONTROLLED_FAILURE_PROOF="${ALOPEX_NIM_CONTROLLED_FAILURE_PROOF:-}"
+if [[ -z "${NIM_CONTROLLED_FAILURE_PROOF}" \
+    || ! -f "${NIM_CONTROLLED_FAILURE_PROOF}" \
+    || -L "${NIM_CONTROLLED_FAILURE_PROOF}" ]]; then
+    echo "[alopex-tools:v0.8] controlled Nim parser proof is missing or not a regular file" >&2
+    exit 2
+fi
+if [[ "$(wc -l <"${NIM_CONTROLLED_FAILURE_PROOF}")" != "4" ]]; then
+    echo "[alopex-tools:v0.8] controlled Nim parser proof has an unexpected shape" >&2
+    exit 2
+fi
+for expected_line in \
+    "schema=alopex-nim-controlled-failure-v1" \
+    "nim=2.2.10" \
+    "nimble=0.22.3" \
+    "nimble_sha=42ef70c2102a942c46f13eb76872326edd525cec"; do
+    if ! grep -Fqx "${expected_line}" "${NIM_CONTROLLED_FAILURE_PROOF}"; then
+        echo "[alopex-tools:v0.8] controlled Nim parser proof is missing: ${expected_line}" >&2
+        exit 2
+    fi
+done
+rm -f -- "${NIM_CONTROLLED_FAILURE_PROOF}"
+if [[ -e "${NIM_CONTROLLED_FAILURE_PROOF}" ]]; then
+    echo "[alopex-tools:v0.8] failed to remove controlled Nim parser proof" >&2
+    exit 2
+fi
+
 PYTHON_BIN="${ALOPEX_PYTHON:-}"
 if [[ -z "${PYTHON_BIN}" && -x /tmp/alopex-v08-python/bin/python ]] \
     && /tmp/alopex-v08-python/bin/python -m pytest --version >/dev/null 2>&1; then

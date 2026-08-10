@@ -39,12 +39,14 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Setup exact Nim parser toolchain
+        uses: ./.github/actions/setup-nim-parser-toolchain
       - name: Build Nim SQL parser library
-        if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
+        shell: bash
+        run: bash scripts/build-nim-parser.sh --backend host
       - name: Run Nim SQL parser tests
-        if: runner.os == 'Linux'
-        run: bash scripts/test-nim-parser.sh --backend docker
+        shell: bash
+        run: bash scripts/test-nim-parser.sh --backend host
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
@@ -133,27 +135,12 @@ jobs:
       - name: Install Python deps
         run: python -m pip install --upgrade pip numpy
 
+      - name: Setup exact Nim parser toolchain
+        uses: ./.github/actions/setup-nim-parser-toolchain
       - name: Build Nim SQL parser library
-        if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
-      - name: Run Nim SQL parser tests
-        if: runner.os == 'Linux'
-        run: bash scripts/test-nim-parser.sh --backend docker
-      # macOS/Windows ランナーは docker で Linux コンテナを動かせないため、
-      # ネイティブ Nim ツールチェーン (2.2 固定) をセットアップして共有ライブラリを生成する。
-      # 要 CI 検証: macOS/Windows ランナー上でのみ動作確認可能（ローカル検証不可）。
-      - name: Setup Nim (macOS/Windows)
-        if: runner.os != 'Linux'
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: '2.2.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build Nim SQL parser library (macOS/Windows)
-        if: runner.os != 'Linux'
         shell: bash
         run: bash scripts/build-nim-parser.sh --backend host
-      - name: Run Nim SQL parser tests (macOS/Windows)
-        if: runner.os != 'Linux'
+      - name: Run Nim SQL parser tests
         shell: bash
         run: bash scripts/test-nim-parser.sh --backend host
 
@@ -247,14 +234,19 @@ jobs:
       - name: Install Python deps
         run: python -m pip install --upgrade pip numpy
 
-      - name: Build Nim SQL parser library
-        run: bash scripts/build-nim-parser.sh --backend docker
-
-      - name: Run Nim SQL parser tests
-        run: bash scripts/test-nim-parser.sh --backend docker
-
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Setup exact Nim parser toolchain
+        uses: ./.github/actions/setup-nim-parser-toolchain
+
+      - name: Build Nim SQL parser library
+        shell: bash
+        run: bash scripts/build-nim-parser.sh --backend host
+
+      - name: Run Nim SQL parser tests
+        shell: bash
+        run: bash scripts/test-nim-parser.sh --backend host
 
       - name: Generate coverage
         env:
@@ -317,20 +309,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Setup exact Nim parser toolchain
+        uses: ./.github/actions/setup-nim-parser-toolchain
       - name: Build Nim SQL parser library
-        if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
-      # macOS/Windows ランナーは docker で Linux コンテナを動かせないため、
-      # ネイティブ Nim ツールチェーン (2.2 固定) をセットアップして共有ライブラリを生成する。
-      # 要 CI 検証: macOS/Windows ランナー上でのみ動作確認可能（ローカル検証不可）。
-      - name: Setup Nim (macOS/Windows)
-        if: runner.os != 'Linux'
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: '2.2.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build Nim SQL parser library (macOS/Windows)
-        if: runner.os != 'Linux'
         shell: bash
         run: bash scripts/build-nim-parser.sh --backend host
 
@@ -396,34 +377,61 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install Python deps
         run: python -m pip install --upgrade pip maturin pytest numpy
-      - name: Build Nim SQL parser library (Linux)
-        if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
-      - name: Setup Nim (Windows)
-        if: runner.os == 'Windows'
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: '2.2.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build Nim SQL parser library (Windows)
-        if: runner.os == 'Windows'
+      - name: Setup exact Nim parser toolchain
+        uses: ./.github/actions/setup-nim-parser-toolchain
+      - name: Build Nim SQL parser library
         shell: bash
         run: bash scripts/build-nim-parser.sh --backend host
       - name: Run Nim SQL parser tests
         shell: bash
-        run: |
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            bash scripts/test-nim-parser.sh --backend host
-          else
-            bash scripts/test-nim-parser.sh --backend docker
-          fi
-      - name: Register Nim library directory (Windows)
-        if: runner.os == 'Windows'
+        run: bash scripts/test-nim-parser.sh --backend host
+      - name: Run controlled Nim parser failure
+        id: nim_parser_controlled_failure
+        continue-on-error: true
         shell: bash
         run: |
-          nim_lib_dir="$(cygpath -w "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}")"
-          echo "ALOPEX_DLL_DIR=${nim_lib_dir}" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
+          proof_root="${RUNNER_TEMP:-/tmp}"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            proof_root="$(cygpath -u "$proof_root")"
+          fi
+          proof_path="${proof_root}/alopex-nim-controlled-failure-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+          test ! -e "$proof_path"
+          export ALOPEX_NIM_CONTROLLED_FAILURE_PROOF="$proof_path"
+          echo "ALOPEX_NIM_CONTROLLED_FAILURE_PROOF=$proof_path" >> "$GITHUB_ENV"
+          bash scripts/test-nim-parser.sh --backend host --controlled-failure
+      - name: Stage reviewed parser candidate for v0.8 surfaces
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)
+              parser_target="x86_64-unknown-linux-gnu"
+              parser_library="libalopex_sql_parser.so"
+              ;;
+            Windows)
+              parser_target="x86_64-pc-windows-msvc"
+              parser_library="alopex_sql_parser.dll"
+              ;;
+            *)
+              echo "unsupported v0.8 parser gate runner: $RUNNER_OS" >&2
+              exit 2
+              ;;
+          esac
+          reviewed_dir="${NIM_SQL_PARSER_DIR}/vendor/${parser_target}"
+          for candidate in "$parser_library" CONTRACT_VERSION SHA256SUMS; do
+            test -f "${reviewed_dir}/${candidate}"
+            cp -f -- "${reviewed_dir}/${candidate}" "${NIM_SQL_PARSER_DIR}/${candidate}"
+            cmp -s "${reviewed_dir}/${candidate}" "${NIM_SQL_PARSER_DIR}/${candidate}"
+          done
+          mkdir -p crates/alopex-py/python/alopex/native
+          cp -f -- "${reviewed_dir}/${parser_library}" crates/alopex-py/python/alopex/native/
+          cp -f -- "${reviewed_dir}/CONTRACT_VERSION" crates/alopex-py/python/alopex/native/
+          cp -f -- "${reviewed_dir}/SHA256SUMS" crates/alopex-py/python/alopex/native/
+      # Windows has no rpath; make the staged parser DLL discoverable by every
+      # subsequent v0.8 gate executable, including distributed-read tests.
+      - name: Add Nim library to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
       - name: Run v0.7 baseline gate (Linux)
         if: runner.os == 'Linux'
         env:
@@ -437,6 +445,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+          ALOPEX_NIM_CONTROLLED_FAILURE_OUTCOME: ${{ steps.nim_parser_controlled_failure.outcome }}
         run: bash crates/alopex-tools/v08/verify-v08-surfaces.sh
 
   ci-success:

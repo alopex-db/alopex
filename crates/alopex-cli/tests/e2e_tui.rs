@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
@@ -141,6 +141,23 @@ fn ensure_focus_table(harness: &mut TuiTestHarness) -> Result<()> {
     .into())
 }
 
+fn ensure_focus_status(harness: &mut TuiTestHarness) -> Result<()> {
+    if wait_for_contains(harness, "Focus: Status", Duration::from_secs(1)).is_ok() {
+        return Ok(());
+    }
+    for _ in 0..3 {
+        harness.send_key(KeyCode::Char('l'))?;
+        if wait_for_contains(harness, "Focus: Status", Duration::from_secs(2)).is_ok() {
+            return Ok(());
+        }
+    }
+    let snapshot = harness.screen_contents();
+    Err(std::io::Error::other(format!(
+        "Failed to find Focus: Status. Screen snapshot:\n{snapshot}"
+    ))
+    .into())
+}
+
 fn open_selection_overlay_for(
     harness: &mut TuiTestHarness,
     label: &str,
@@ -182,30 +199,138 @@ fn alopex_bin() -> PathBuf {
     })
 }
 
+#[test]
+fn server_binary_path_honors_absolute_cargo_target_dir() {
+    let manifest_dir = Path::new("/workspace/crates/alopex-cli");
+    let target_dir = Path::new("/tmp/alopex-test-target");
+
+    assert_eq!(
+        default_server_binary_path(manifest_dir, Some(target_dir)),
+        target_dir
+            .join("debug")
+            .join(format!("alopex-server{}", std::env::consts::EXE_SUFFIX))
+    );
+}
+
+#[test]
+fn server_binary_path_resolves_relative_target_from_workspace_root() {
+    let manifest_dir = Path::new("/workspace/crates/alopex-cli");
+    let workspace_root = manifest_dir.join("../..");
+
+    assert_eq!(
+        default_server_binary_path(manifest_dir, Some(Path::new("target-e2e"))),
+        workspace_root
+            .join("target-e2e")
+            .join("debug")
+            .join(format!("alopex-server{}", std::env::consts::EXE_SUFFIX))
+    );
+}
+
+#[test]
+fn server_binary_path_defaults_to_workspace_target_dir() {
+    let manifest_dir = Path::new("/workspace/crates/alopex-cli");
+
+    assert_eq!(
+        default_server_binary_path(manifest_dir, None),
+        manifest_dir
+            .join("../..")
+            .join("target")
+            .join("debug")
+            .join(format!("alopex-server{}", std::env::consts::EXE_SUFFIX))
+    );
+}
+
+#[test]
+fn derived_server_binary_is_rebuilt_to_avoid_stale_e2e_execution() {
+    assert!(server_binary_requires_build(
+        ServerBinaryOrigin::Derived,
+        false
+    ));
+    assert!(!server_binary_requires_build(
+        ServerBinaryOrigin::Derived,
+        true
+    ));
+    assert!(!server_binary_requires_build(
+        ServerBinaryOrigin::Explicit,
+        false
+    ));
+    assert!(!server_binary_requires_build(
+        ServerBinaryOrigin::CargoManaged,
+        false
+    ));
+}
+
+#[test]
+fn operation_completion_requires_the_completed_state() {
+    assert!(is_completion_state_label("completed"));
+    assert!(is_completion_state_label(" Completed "));
+    assert!(!is_completion_state_label("accepted"));
+    assert!(!is_completion_state_label("queued"));
+    assert!(!is_completion_state_label("running"));
+}
+
+#[test]
+fn typed_enter_uses_terminal_carriage_return() {
+    let event = ratatui_testlib::events::KeyEvent::new(KeyCode::Enter);
+
+    assert_eq!(event.to_bytes(), b"\r");
+}
+
+fn default_server_binary_path(manifest_dir: &Path, cargo_target_dir: Option<&Path>) -> PathBuf {
+    let workspace_root = manifest_dir.join("../..");
+    let target_dir = match cargo_target_dir {
+        Some(path) if path.is_absolute() => path.to_path_buf(),
+        Some(path) => workspace_root.join(path),
+        None => workspace_root.join("target"),
+    };
+    target_dir
+        .join("debug")
+        .join(format!("alopex-server{}", std::env::consts::EXE_SUFFIX))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServerBinaryOrigin {
+    Explicit,
+    CargoManaged,
+    Derived,
+}
+
+fn server_binary_requires_build(origin: ServerBinaryOrigin, skip_build: bool) -> bool {
+    origin == ServerBinaryOrigin::Derived && !skip_build
+}
+
 fn alopex_server_bin() -> PathBuf {
     static SERVER_BIN: OnceLock<PathBuf> = OnceLock::new();
     let path = SERVER_BIN.get_or_init(|| {
-        if let Ok(explicit) = std::env::var("ALOPEX_TEST_SERVER_BIN") {
+        if let Some(explicit) = std::env::var_os("ALOPEX_TEST_SERVER_BIN") {
             let path = PathBuf::from(explicit);
             if path.exists() {
                 return path;
             }
         }
-        let exe = std::env::var("CARGO_BIN_EXE_alopex-server")
-            .ok()
-            .map(PathBuf::from);
-        let exe = exe.or_else(|| {
-            let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
-            let path = PathBuf::from(manifest_dir).join("../../target/debug/alopex-server");
-            Some(path)
-        });
-        let path = exe.unwrap_or_else(|| {
-            panic!(
-                "Failed to locate alopex-server binary; set CARGO_BIN_EXE_alopex-server, ALOPEX_TEST_SERVER_BIN, or build target/debug/alopex-server"
-            );
-        });
-        if !path.exists() {
+        if let Some(cargo_managed) = std::env::var_os("CARGO_BIN_EXE_alopex-server") {
+            let path = PathBuf::from(cargo_managed);
+            if path.exists() {
+                return path;
+            }
+        }
+        let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Failed to locate alopex-server binary; set CARGO_BIN_EXE_alopex-server, ALOPEX_TEST_SERVER_BIN, or CARGO_MANIFEST_DIR"
+                )
+            });
+        let target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
+        let path = default_server_binary_path(&manifest_dir, target_dir.as_deref());
+        let skip_build = std::env::var_os("ALOPEX_TEST_SKIP_BUILD").is_some();
+        if server_binary_requires_build(ServerBinaryOrigin::Derived, skip_build) {
             build_server_binary(&path);
+        } else if !path.exists() {
+            panic!(
+                "alopex-server binary not found at {}; build it or unset ALOPEX_TEST_SKIP_BUILD",
+                path.display()
+            );
         }
         path
     });
@@ -213,12 +338,6 @@ fn alopex_server_bin() -> PathBuf {
 }
 
 fn build_server_binary(expected: &Path) {
-    if std::env::var("ALOPEX_TEST_SKIP_BUILD").is_ok() {
-        panic!(
-            "alopex-server binary not found at {}; build it or unset ALOPEX_TEST_SKIP_BUILD",
-            expected.display()
-        );
-    }
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().expect("current dir"));
@@ -226,7 +345,7 @@ fn build_server_binary(expected: &Path) {
     let mut cmd = Command::new("cargo");
     cmd.arg("build").arg("-p").arg("alopex-server");
     cmd.current_dir(workspace_root);
-    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
         cmd.env("CARGO_TARGET_DIR", target_dir);
     }
     let status = cmd.status().expect("failed to spawn cargo build");
@@ -389,7 +508,7 @@ impl Drop for TestServer {
 }
 
 static TEST_SERVER: OnceLock<std::result::Result<TestServer, String>> = OnceLock::new();
-static SERVER_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+static SERVER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn ensure_test_server() -> Result<&'static TestServer> {
     let entry = TEST_SERVER.get_or_init(|| start_test_server().map_err(|err| err.to_string()));
@@ -399,11 +518,11 @@ fn ensure_test_server() -> Result<&'static TestServer> {
     }
 }
 
-fn server_lock() -> std::sync::MutexGuard<'static, ()> {
+fn server_lock() -> MutexGuard<'static, ()> {
     SERVER_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
+        .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("server lock")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn start_test_server() -> Result<TestServer> {
@@ -742,7 +861,7 @@ fn confirm_selection_overlay(
 
 fn execute_admin_action(harness: &mut TuiTestHarness) -> Result<()> {
     stabilize_action_selection(harness, 5)?;
-    harness.send_text("\r")?;
+    harness.send_key(KeyCode::Enter)?;
     Ok(())
 }
 
@@ -999,6 +1118,10 @@ fn is_failure_state_label(state: &str) -> bool {
     )
 }
 
+fn is_completion_state_label(state: &str) -> bool {
+    state.trim().eq_ignore_ascii_case("completed")
+}
+
 fn wait_for_backup_completion(
     harness: &mut TuiTestHarness,
     handle: &str,
@@ -1009,15 +1132,15 @@ fn wait_for_backup_completion(
         harness.update_state()?;
         if let Some(state) = find_state_in_status(&harness.screen_contents()) {
             let normalized = state.trim().to_ascii_lowercase();
-            if normalized != "running" && normalized != "queued" {
-                if is_failure_state_label(&normalized) {
-                    let snapshot = harness.screen_contents();
-                    return Err(std::io::Error::other(format!(
-                        "Backup failed with state '{state}'. Screen snapshot:\n{snapshot}"
-                    ))
-                    .into());
-                }
+            if is_completion_state_label(&normalized) {
                 return Ok(());
+            }
+            if is_failure_state_label(&normalized) {
+                let snapshot = harness.screen_contents();
+                return Err(std::io::Error::other(format!(
+                    "Backup failed with state '{state}'. Screen snapshot:\n{snapshot}"
+                ))
+                .into());
             }
         }
 
@@ -1047,15 +1170,15 @@ fn wait_for_restore_completion(
         harness.update_state()?;
         if let Some(state) = find_state_in_status(&harness.screen_contents()) {
             let normalized = state.to_ascii_lowercase();
-            if normalized != "running" && normalized != "queued" {
-                if is_failure_state_label(&normalized) {
-                    let snapshot = harness.screen_contents();
-                    return Err(std::io::Error::other(format!(
-                        "Restore failed with state '{state}'. Screen snapshot:\n{snapshot}"
-                    ))
-                    .into());
-                }
+            if is_completion_state_label(&normalized) {
                 return Ok(());
+            }
+            if is_failure_state_label(&normalized) {
+                let snapshot = harness.screen_contents();
+                return Err(std::io::Error::other(format!(
+                    "Restore failed with state '{state}'. Screen snapshot:\n{snapshot}"
+                ))
+                .into());
             }
         }
 
@@ -1231,8 +1354,7 @@ fn e2e_results_to_admin_flow() -> Result<()> {
 
     harness.send_text("l")?;
     wait_for_contains(&mut harness, "Focus: Detail", Duration::from_secs(5))?;
-    harness.send_text("l")?;
-    wait_for_contains(&mut harness, "Focus: Status", Duration::from_secs(5))?;
+    ensure_focus_status(&mut harness)?;
     harness.send_text("h")?;
     wait_for_contains(&mut harness, "Focus: Detail", Duration::from_secs(5))?;
 
@@ -1776,8 +1898,7 @@ fn e2e_admin_focus_edit_raw_and_exit() -> Result<()> {
     edit_guided_field(&mut harness, "e2e-value")?;
     execute_admin_action(&mut harness)?;
 
-    harness.send_text("l")?;
-    wait_for_contains(&mut harness, "Focus: Status", Duration::from_secs(5))?;
+    ensure_focus_status(&mut harness)?;
     harness.send_text("j")?;
     harness.send_text("k")?;
     harness.send_key_with_modifiers(KeyCode::Char('d'), Modifiers::CTRL)?;

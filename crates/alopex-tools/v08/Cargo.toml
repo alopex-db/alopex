@@ -22,4 +22,8 @@ path = "src/main.rs"
 [dependencies]
 alopex-embedded = { path = "../../alopex-embedded" }
 alopex-sql = { path = "../../alopex-sql" }
+flate2 = "1.1"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3.24"

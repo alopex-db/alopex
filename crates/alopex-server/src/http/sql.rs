@@ -1212,21 +1212,46 @@ fn type_to_string(data_type: &alopex_sql::planner::ResolvedType) -> String {
     }
 }
 
-fn is_ddl(sql: &str) -> bool {
-    let Ok(statements) = alopex_sql::parser::Parser::parse_sql(&AlopexDialect, sql) else {
-        return false;
-    };
-    statements.iter().any(|stmt| match &stmt.kind {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatementSchemaClass {
+    SchemaMutation,
+    NonSchema,
+    Unsupported,
+}
+
+impl StatementSchemaClass {
+    fn is_schema_mutation(self) -> bool {
+        matches!(self, Self::SchemaMutation)
+    }
+}
+
+fn classify_statement_schema(
+    statement_kind: &alopex_sql::ast::StatementKind,
+) -> StatementSchemaClass {
+    // A statement owned by a future specialized host must not inherit schema
+    // authorization merely because the generic classifier predates it.
+    #[allow(unreachable_patterns)]
+    match statement_kind {
         alopex_sql::ast::StatementKind::CreateTable(_)
         | alopex_sql::ast::StatementKind::DropTable(_)
         | alopex_sql::ast::StatementKind::CreateIndex(_)
-        | alopex_sql::ast::StatementKind::DropIndex(_) => true,
+        | alopex_sql::ast::StatementKind::DropIndex(_) => StatementSchemaClass::SchemaMutation,
         alopex_sql::ast::StatementKind::Select(_)
         | alopex_sql::ast::StatementKind::Insert(_)
         | alopex_sql::ast::StatementKind::Update(_)
         | alopex_sql::ast::StatementKind::Delete(_)
-        | alopex_sql::ast::StatementKind::Pragma { .. } => false,
-    })
+        | alopex_sql::ast::StatementKind::Pragma { .. } => StatementSchemaClass::NonSchema,
+        _ => StatementSchemaClass::Unsupported,
+    }
+}
+
+fn is_ddl(sql: &str) -> bool {
+    let Ok(statements) = alopex_sql::parser::Parser::parse_sql(&AlopexDialect, sql) else {
+        return false;
+    };
+    statements
+        .iter()
+        .any(|statement| classify_statement_schema(&statement.kind).is_schema_mutation())
 }
 
 fn is_write_sql(sql: &str) -> bool {
@@ -1236,4 +1261,55 @@ fn is_write_sql(sql: &str) -> bool {
     statements
         .iter()
         .any(|stmt| !matches!(stmt.kind, alopex_sql::ast::StatementKind::Select(_)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn continuous_aggregate_statement_kind() -> alopex_sql::ast::StatementKind {
+        alopex_sql::ast::StatementKind::CreateContinuousAggregate(
+            alopex_sql::ast::CreateContinuousAggregate {
+                name: "hourly_metrics".to_string(),
+                name_span: alopex_sql::ast::Span::default(),
+                query: alopex_sql::ast::Select {
+                    distinct: false,
+                    projection: vec![alopex_sql::ast::SelectItem::Wildcard {
+                        span: alopex_sql::ast::Span::default(),
+                    }],
+                    from: vec![],
+                    selection: None,
+                    group_by: None,
+                    having: None,
+                    order_by: vec![],
+                    limit: None,
+                    offset: None,
+                    span: alopex_sql::ast::Span::default(),
+                },
+                options: vec![],
+                span: alopex_sql::ast::Span::default(),
+            },
+        )
+    }
+
+    #[test]
+    fn unsupported_generic_statement_is_not_schema_ddl() {
+        assert!(!StatementSchemaClass::Unsupported.is_schema_mutation());
+    }
+
+    #[test]
+    fn continuous_aggregate_is_unsupported_and_not_schema_ddl() {
+        let class = classify_statement_schema(&continuous_aggregate_statement_kind());
+
+        assert_eq!(class, StatementSchemaClass::Unsupported);
+        assert!(!class.is_schema_mutation());
+    }
+
+    #[test]
+    fn current_schema_and_non_schema_statements_keep_their_classification() {
+        assert!(is_ddl("CREATE TABLE items (id INT PRIMARY KEY);"));
+        assert!(is_ddl("DROP TABLE items;"));
+        assert!(!is_ddl("SELECT 1;"));
+        assert!(!is_ddl("INSERT INTO items (id) VALUES (1);"));
+    }
 }

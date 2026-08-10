@@ -5,15 +5,21 @@ on:
     branches: [main, develop]
     paths:
       - ".github/workflows/alopex-py.yml"
+      - ".github/actions/setup-nim-parser-toolchain/**"
+      - "scripts/build-nim-parser.sh"
       - "crates/alopex-py/**"
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
+      - "crates/alopex-sql/**"
   pull_request:
     paths:
       - ".github/workflows/alopex-py.yml"
+      - ".github/actions/setup-nim-parser-toolchain/**"
+      - "scripts/build-nim-parser.sh"
       - "crates/alopex-py/**"
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
+      - "crates/alopex-sql/**"
 
 defaults:
   run:
@@ -125,19 +131,35 @@ jobs:
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
         run: bash scripts/build-nim-parser.sh --backend docker
-      # macOS/Windows ランナーは docker で Linux コンテナを動かせないため、
-      # ネイティブ Nim ツールチェーン (2.2 固定) をセットアップして共有ライブラリを生成する。
-      # 要 CI 検証: macOS/Windows ランナー上でのみ動作確認可能（ローカル検証不可）。
-      - name: Setup Nim (macOS/Windows)
+      # macOS/Windows はホストビルドを行うため、Linux/Windows の正規
+      # リリースゲートと同じ exact toolchain と隔離 package store を使う。
+      - name: Setup exact Nim parser toolchain (macOS/Windows)
         if: runner.os != 'Linux'
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: '2.2.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        uses: ./.github/actions/setup-nim-parser-toolchain
       - name: Build Nim SQL parser library (macOS/Windows)
         if: runner.os != 'Linux'
         shell: bash
         run: bash scripts/build-nim-parser.sh --backend host
+      - name: Stage parser library in package-local native directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p crates/alopex-py/python/alopex/native
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            library="${NIM_SQL_PARSER_DIR}/alopex_sql_parser.dll"
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            library="${NIM_SQL_PARSER_DIR}/libalopex_sql_parser.dylib"
+          else
+            library="${NIM_SQL_PARSER_DIR}/libalopex_sql_parser.so"
+          fi
+          test -f "$library"
+          cp "$library" crates/alopex-py/python/alopex/native/
+          printf '0.4.0\n' > crates/alopex-py/python/alopex/native/CONTRACT_VERSION
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$library" | sed "s#${NIM_SQL_PARSER_DIR}/##" > crates/alopex-py/python/alopex/native/SHA256SUMS
+          else
+            shasum -a 256 "$library" | sed "s#${NIM_SQL_PARSER_DIR}/##" > crates/alopex-py/python/alopex/native/SHA256SUMS
+          fi
       # 診断専用ステップ (fail させない): DLL の推移的依存と単体ロード可否を
       # CI ログへ出力する。静的リンク (nim_sql_parser.nimble) が不十分な場合、
       # 次の CI 実行でどの依存 DLL が残っているかをここで特定できる。
@@ -173,20 +195,6 @@ jobs:
               traceback.print_exc()
           PY
           exit 0
-      # Windows は rpath を持たないため、alopex_sql_parser.dll の解決を明示的に
-      # 設定する。Python 3.8+ (bpo-36085) は拡張モジュールの依存 DLL 解決に
-      # PATH を「使わない」ため、PATH 追加だけでは `import alopex` が
-      # ImportError (DLL load failed) になる。alopex/__init__.py が参照する
-      # ALOPEX_DLL_DIR に Nim ライブラリのディレクトリを設定し、
-      # os.add_dll_directory() で登録させる。PATH への追加は Python 以外の
-      # ネイティブプロセス（DLL をプロセス起動時に解決する実行形式）向けに残す。
-      - name: Register Nim library dir for DLL resolution (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          nim_lib_dir="$(cygpath -w "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}")"
-          echo "ALOPEX_DLL_DIR=${nim_lib_dir}" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
       - name: Maturin develop
         if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         run: |

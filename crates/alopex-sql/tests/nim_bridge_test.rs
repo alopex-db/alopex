@@ -1,13 +1,331 @@
 #![cfg(target_os = "linux")]
 
 use alopex_sql::{
-    AlopexDialect, DataType, ExprKind, FromItem, InsertSource, JoinType, Literal, Parser,
-    SelectItem, StatementKind, VectorMetric, parser_contract_version,
+    AlopexDialect, CreateContinuousAggregate, DataType, ExprKind, FromItem, InsertSource, JoinType,
+    Literal, Parser, ParserError, SelectItem, StatementKind, VectorMetric, parser_contract_version,
 };
+use serde_json::{Value, json};
+
+const MAX_SQL_INPUT_BYTES: usize = 1_048_576;
+const MAX_MESSAGEPACK_PAYLOAD_BYTES: usize = 1_048_576;
+const MINIMAL_CONTINUOUS_AGGREGATE_SQL: &str = "CREATE CONTINUOUS AGGREGATE cpu_hourly AS SELECT 1 FROM cpu_metrics \
+     WITH (retention = '30d', refresh_interval = '1h')";
+
+fn wire_span(start_line: u64, start_column: u64, end_line: u64, end_column: u64) -> Value {
+    json!({
+        "start": {"line": start_line, "column": start_column},
+        "end": {"line": end_line, "column": end_column},
+    })
+}
+
+fn staged_continuous_aggregate_value() -> Value {
+    let statement_span = wire_span(1, 1, 4, 1);
+    json!({
+        "kind": {
+            "variant": "CreateContinuousAggregate",
+            "name": "cpu_hourly",
+            "name_span": wire_span(1, 29, 1, 38),
+            "query": {
+                "variant": "Select",
+                "distinct": false,
+                "projection": [{
+                    "variant": "Expr",
+                    "expr": {
+                        "kind": {
+                            "variant": "Literal",
+                            "literal": {"variant": "Number", "value": "1"},
+                        },
+                        "span": wire_span(2, 8, 2, 8),
+                    },
+                    "alias": null,
+                    "span": wire_span(2, 8, 2, 8),
+                }],
+                "from": [],
+                "selection": null,
+                "group_by": null,
+                "having": null,
+                "order_by": [],
+                "limit": null,
+                "offset": null,
+                "span": wire_span(2, 1, 2, 8),
+            },
+            "options": [
+                {
+                    "key": "retention",
+                    "key_span": wire_span(3, 7, 3, 15),
+                    "value": "30d",
+                    "value_span": wire_span(3, 19, 3, 23),
+                    "span": wire_span(3, 7, 3, 23),
+                },
+                {
+                    "key": "refresh_interval",
+                    "key_span": wire_span(3, 26, 3, 41),
+                    "value": "1h",
+                    "value_span": wire_span(3, 45, 3, 48),
+                    "span": wire_span(3, 26, 3, 48),
+                },
+            ],
+            "span": statement_span.clone(),
+        },
+        "span": statement_span,
+    })
+}
+
+fn encode_staged_continuous_aggregate(value: &Value) -> Vec<u8> {
+    rmp_serde::to_vec_named(value).expect("synthetic staged payload should encode")
+}
+
+fn padded_sql(total_bytes: usize) -> String {
+    const STATEMENT: &str = "SELECT 1";
+    assert!(total_bytes >= STATEMENT.len());
+    format!("{}{STATEMENT}", " ".repeat(total_bytes - STATEMENT.len()))
+}
+
+fn padded_expression(total_bytes: usize) -> String {
+    const EXPRESSION: &str = "1";
+    assert!(total_bytes >= EXPRESSION.len());
+    format!("{}{EXPRESSION}", " ".repeat(total_bytes - EXPRESSION.len()))
+}
+
+fn assert_input_too_large(error: ParserError) {
+    let ParserError::UnexpectedToken {
+        line,
+        column,
+        expected,
+        found,
+    } = error
+    else {
+        panic!("expected bounded input error, got {error:?}");
+    };
+    assert_eq!((line, column), (0, 0));
+    assert_eq!(expected, "SQL input at most 1048576 UTF-8 bytes");
+    assert_eq!(found, "SQL input exceeds byte limit");
+}
+
+#[test]
+fn public_sql_boundary_accepts_minus_and_exact_then_rejects_plus() {
+    for total_bytes in [MAX_SQL_INPUT_BYTES - 1, MAX_SQL_INPUT_BYTES] {
+        let sql = padded_sql(total_bytes);
+        assert_eq!(sql.len(), total_bytes);
+        let statements = Parser::parse_sql(&AlopexDialect, &sql)
+            .unwrap_or_else(|error| panic!("{total_bytes}-byte SQL should pass guard: {error}"));
+        assert_eq!(statements.len(), 1);
+    }
+
+    let plus = padded_sql(MAX_SQL_INPUT_BYTES + 1);
+    assert_input_too_large(
+        Parser::parse_sql(&AlopexDialect, &plus).expect_err("limit plus one must be rejected"),
+    );
+}
+
+#[test]
+fn public_expression_boundary_accounts_for_select_wrapper_before_allocation() {
+    const WRAPPER_BYTES: usize = "SELECT ".len();
+    let exact = padded_expression(MAX_SQL_INPUT_BYTES - WRAPPER_BYTES);
+    assert_eq!(exact.len() + WRAPPER_BYTES, MAX_SQL_INPUT_BYTES);
+    let expression = Parser::parse_expression_sql(&AlopexDialect, &exact)
+        .expect("wrapped exact-limit expression should pass guard and parse");
+    assert!(matches!(
+        expression.kind,
+        ExprKind::Literal {
+            literal: Literal::Number(ref value)
+        } if value == "1"
+    ));
+
+    let plus = padded_expression(MAX_SQL_INPUT_BYTES - WRAPPER_BYTES + 1);
+    assert_input_too_large(
+        Parser::parse_expression_sql(&AlopexDialect, &plus)
+            .expect_err("wrapper-adjusted limit plus one must be rejected"),
+    );
+}
+
+#[test]
+fn public_nul_guard_and_normal_sql_behavior_are_stable() {
+    let nul = Parser::parse_sql(&AlopexDialect, "SELECT \0 1")
+        .expect_err("interior NUL must be rejected without calling FFI");
+    let ParserError::UnexpectedToken {
+        expected, found, ..
+    } = nul
+    else {
+        panic!("expected bounded NUL error, got {nul:?}");
+    };
+    assert_eq!(expected, "valid SQL without interior NUL bytes");
+    assert_eq!(found, "interior NUL byte");
+
+    let statements =
+        Parser::parse_sql(&AlopexDialect, "SELECT 1").expect("ordinary SQL must remain unchanged");
+    assert_eq!(statements.len(), 1);
+}
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.3.0");
+    assert_eq!(parser_contract_version(), "0.4.0");
+}
+
+#[test]
+fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
+    let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
+        .expect("contract 0.4.0 must publicly emit the prepared continuous aggregate payload");
+    let [statement] = statements.as_slice() else {
+        panic!("expected one continuous aggregate statement, got {statements:?}");
+    };
+    let StatementKind::CreateContinuousAggregate(definition) = &statement.kind else {
+        panic!("expected typed continuous aggregate statement, got {statement:?}");
+    };
+
+    assert_eq!(parser_contract_version(), "0.4.0");
+    assert_eq!(definition.name, "cpu_hourly");
+    assert_eq!(definition.query.from.len(), 1);
+    assert_eq!(definition.options.len(), 2);
+    assert_eq!(definition.options[0].key, "retention");
+    assert_eq!(definition.options[0].value, "30d");
+    assert_eq!(definition.options[1].key, "refresh_interval");
+    assert_eq!(definition.options[1].value, "1h");
+}
+
+#[test]
+fn staged_continuous_aggregate_decoder_preserves_every_owned_span() {
+    let payload = encode_staged_continuous_aggregate(&staged_continuous_aggregate_value());
+    let decoded =
+        CreateContinuousAggregate::decode_staged_messagepack(&parser_contract_version(), &payload)
+            .expect("bounded staged decoder should accept the canonical future shape");
+
+    assert_eq!(decoded.name, "cpu_hourly");
+    assert_eq!(
+        (decoded.name_span.start.line, decoded.name_span.start.column),
+        (1, 29)
+    );
+    assert_eq!(
+        (decoded.name_span.end.line, decoded.name_span.end.column),
+        (1, 38)
+    );
+    assert_eq!(
+        (
+            decoded.query.span.start.line,
+            decoded.query.span.start.column
+        ),
+        (2, 1)
+    );
+    assert_eq!(
+        (decoded.query.span.end.line, decoded.query.span.end.column),
+        (2, 8)
+    );
+    let SelectItem::Expr {
+        expr,
+        alias: None,
+        span,
+    } = &decoded.query.projection[0]
+    else {
+        panic!("expected the synthetic query's literal projection");
+    };
+    assert_eq!((expr.span.start.line, expr.span.start.column), (2, 8));
+    assert_eq!((expr.span.end.line, expr.span.end.column), (2, 8));
+    assert_eq!((span.start.line, span.start.column), (2, 8));
+    assert_eq!((span.end.line, span.end.column), (2, 8));
+    assert_eq!(decoded.options.len(), 2);
+    assert_eq!(decoded.options[0].key, "retention");
+    assert_eq!(decoded.options[0].value, "30d");
+    assert_eq!(decoded.options[0].key_span.start.column, 7);
+    assert_eq!(decoded.options[0].key_span.end.column, 15);
+    assert_eq!(decoded.options[0].value_span.start.column, 19);
+    assert_eq!(decoded.options[0].value_span.end.column, 23);
+    assert_eq!(decoded.options[0].span.start.column, 7);
+    assert_eq!(decoded.options[0].span.end.column, 23);
+    assert_eq!(decoded.options[1].key, "refresh_interval");
+    assert_eq!(decoded.options[1].value, "1h");
+    assert_eq!(decoded.options[1].key_span.start.column, 26);
+    assert_eq!(decoded.options[1].key_span.end.column, 41);
+    assert_eq!(decoded.options[1].value_span.start.column, 45);
+    assert_eq!(decoded.options[1].value_span.end.column, 48);
+    assert_eq!(decoded.options[1].span.start.column, 26);
+    assert_eq!(decoded.options[1].span.end.column, 48);
+    assert_eq!((decoded.span.start.line, decoded.span.start.column), (1, 1));
+    assert_eq!((decoded.span.end.line, decoded.span.end.column), (4, 1));
+
+    let reencoded = serde_json::to_value(&decoded)
+        .expect("the typed payload should preserve its named nested Select wire shape");
+    assert_eq!(reencoded["query"]["variant"], "Select");
+    assert_eq!(
+        reencoded["query"]["projection"][0]["expr"]["span"],
+        wire_span(2, 8, 2, 8)
+    );
+}
+
+#[test]
+fn staged_decoder_rejects_linked_contract_mismatch_before_payload_preflight() {
+    let oversized_invalid_payload = vec![0; MAX_MESSAGEPACK_PAYLOAD_BYTES + 1];
+    let error = CreateContinuousAggregate::decode_staged_messagepack(
+        "test-mismatched-contract",
+        &oversized_invalid_payload,
+    )
+    .expect_err("linked contract mismatch must win before payload handling");
+    let rendered = error.to_string();
+    assert!(rendered.contains("linked Nim parser contract test-mismatched-contract"));
+    assert!(!rendered.contains("MessagePack payload exceeds"));
+}
+
+#[test]
+fn staged_decoder_rejects_resource_and_unknown_field_bombs() {
+    let linked_contract = parser_contract_version();
+
+    let oversized = vec![0; MAX_MESSAGEPACK_PAYLOAD_BYTES + 1];
+    let size_error =
+        CreateContinuousAggregate::decode_staged_messagepack(&linked_contract, &oversized)
+            .expect_err("payload over the byte ceiling must fail before deserialization");
+    assert!(
+        size_error
+            .to_string()
+            .contains("MessagePack payload exceeds 1048576 bytes")
+    );
+
+    let declared_huge_array = [0xdd, 0xff, 0xff, 0xff, 0xff];
+    let collection_error = CreateContinuousAggregate::decode_staged_messagepack(
+        &linked_contract,
+        &declared_huge_array,
+    )
+    .expect_err("huge declared collection must fail before allocation");
+    assert!(
+        collection_error
+            .to_string()
+            .contains("MessagePack collection limit")
+    );
+
+    let mut depth_bomb = Value::Null;
+    for _ in 0..140 {
+        depth_bomb = json!([depth_bomb]);
+    }
+    let depth_payload = encode_staged_continuous_aggregate(&depth_bomb);
+    let depth_error =
+        CreateContinuousAggregate::decode_staged_messagepack(&linked_contract, &depth_payload)
+            .expect_err("deep input must fail during bounded preflight");
+    assert!(
+        depth_error
+            .to_string()
+            .contains("MessagePack nesting exceeds 128")
+    );
+
+    let mut unknown = staged_continuous_aggregate_value();
+    unknown["kind"]["unexpected"] = Value::Array(vec![json!(0); 256]);
+    let unknown_payload = encode_staged_continuous_aggregate(&unknown);
+    let unknown_error =
+        CreateContinuousAggregate::decode_staged_messagepack(&linked_contract, &unknown_payload)
+            .expect_err("unknown fields must be rejected, not recursively retained");
+    assert!(
+        unknown_error
+            .to_string()
+            .contains("unknown field `unexpected`")
+    );
+}
+
+#[test]
+fn staged_decoder_rejects_inconsistent_outer_and_kind_spans() {
+    let mut inconsistent = staged_continuous_aggregate_value();
+    inconsistent["span"] = wire_span(9, 9, 9, 9);
+    let payload = encode_staged_continuous_aggregate(&inconsistent);
+    let error =
+        CreateContinuousAggregate::decode_staged_messagepack(&parser_contract_version(), &payload)
+            .expect_err("the outer statement span must not be silently discarded");
+    assert!(error.to_string().contains("matching outer and kind spans"));
 }
 
 #[test]

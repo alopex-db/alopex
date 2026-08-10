@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,6 +19,7 @@ use crate::ops::state::{LifecycleStateManager, OperationState, Progress};
 
 const SNAPSHOT_MANIFEST_NAME: &str = "snapshot.manifest";
 const SNAPSHOT_MANIFEST_VERSION: u32 = 1;
+const SPARSE_COPY_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BackupHandle {
@@ -228,9 +230,32 @@ pub(crate) fn copy_dir_filtered(src: &Path, dest: &Path) -> Result<()> {
             fs::create_dir_all(&dest_path)?;
             copy_dir_filtered(&entry.path(), &dest_path)?;
         } else {
-            fs::copy(entry.path(), &dest_path)?;
+            copy_file_preserving_sparse_zeros(&entry.path(), &dest_path)?;
         }
     }
+    Ok(())
+}
+
+fn copy_file_preserving_sparse_zeros(src: &Path, dest: &Path) -> Result<()> {
+    let metadata = fs::metadata(src)?;
+    let mut input = fs::File::open(src)?;
+    let mut output = fs::File::create(dest)?;
+    let mut buffer = vec![0u8; SPARSE_COPY_BUFFER_SIZE];
+
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        if buffer[..read].iter().all(|byte| *byte == 0) {
+            output.seek(SeekFrom::Current(read as i64))?;
+        } else {
+            output.write_all(&buffer[..read])?;
+        }
+    }
+
+    output.set_len(metadata.len())?;
+    fs::set_permissions(dest, metadata.permissions())?;
     Ok(())
 }
 
@@ -388,4 +413,54 @@ fn crc32_file(path: &Path) -> Result<u32> {
         hasher.update(&buf[..read]);
     }
     Ok(hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_copy_preserves_sparse_file_without_materializing_holes() {
+        // APFS may reserve an 8 MiB allocation extent for the first write.
+        // Use a larger logical hole so the assertion measures materialization
+        // rather than filesystem extent granularity.
+        const FILE_LEN: u64 = 64 * 1024 * 1024;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        let source_path = source.path().join("sparse.bin");
+        let destination_path = destination.path().join("sparse.bin");
+
+        let mut file = fs::File::create(&source_path).expect("create sparse source");
+        file.write_all(b"head").expect("write sparse head");
+        file.seek(SeekFrom::Start(FILE_LEN - 4))
+            .expect("seek sparse tail");
+        file.write_all(b"tail").expect("write sparse tail");
+        drop(file);
+
+        copy_dir_filtered(source.path(), destination.path()).expect("copy sparse source");
+
+        let mut copied = fs::File::open(&destination_path).expect("open copied file");
+        let mut head = [0u8; 4];
+        copied.read_exact(&mut head).expect("read copied head");
+        assert_eq!(&head, b"head");
+        copied
+            .seek(SeekFrom::Start(FILE_LEN - 4))
+            .expect("seek copied tail");
+        let mut tail = [0u8; 4];
+        copied.read_exact(&mut tail).expect("read copied tail");
+        assert_eq!(&tail, b"tail");
+        assert_eq!(copied.metadata().expect("copied metadata").len(), FILE_LEN);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let allocated = copied.metadata().expect("copied metadata").blocks() * 512;
+            assert!(
+                allocated < FILE_LEN / 4,
+                "sparse copy allocated {allocated} bytes for a {FILE_LEN}-byte file"
+            );
+        }
+    }
 }

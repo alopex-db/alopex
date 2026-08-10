@@ -1,8 +1,14 @@
 ## Comprehensive tests for Alopex SQL Parser
 ## Covers tokenizer, expression, DML, and DDL tests ported from the Rust test suite.
 
-import unittest
+import std/[strutils, unittest]
 import ../src/[ast, lexer, parser]
+
+proc parseErrorMessage(sql: string): string =
+  try:
+    discard parseSql(sql)
+  except ParseError as error:
+    result = error.msg
 
 # ---------------------------------------------------------------------------
 # Tokenizer tests
@@ -52,6 +58,48 @@ suite "Tokenizer":
     let tok = lex.nextToken()
     check tok.kind == tkString
     check tok.value == "it's"
+
+  test "tokens preserve inclusive raw lexical end locations":
+    var lex = initLexer("foo * '7d' 'it''s' 'a\nb'")
+
+    let ident = lex.nextToken()
+    check ident.line == 1
+    check ident.col == 1
+    check ident.endLine == 1
+    check ident.endCol == 3
+
+    let star = lex.nextToken()
+    check star.line == 1
+    check star.col == 5
+    check star.endLine == 1
+    check star.endCol == 5
+
+    let quoted = lex.nextToken()
+    check quoted.value == "7d"
+    check quoted.line == 1
+    check quoted.col == 7
+    check quoted.endLine == 1
+    check quoted.endCol == 10
+
+    let escaped = lex.nextToken()
+    check escaped.value == "it's"
+    check escaped.line == 1
+    check escaped.col == 12
+    check escaped.endLine == 1
+    check escaped.endCol == 18
+
+    let multiline = lex.nextToken()
+    check multiline.value == "a\nb"
+    check multiline.line == 1
+    check multiline.col == 20
+    check multiline.endLine == 2
+    check multiline.endCol == 2
+
+    let eof = lex.nextToken()
+    check eof.line == 2
+    check eof.col == 3
+    check eof.endLine == 2
+    check eof.endCol == 3
 
   test "operators and punctuation":
     var lex = initLexer("= <> != < <= > >= + - * / % , . ; ( )")
@@ -409,6 +457,12 @@ suite "DML — SELECT":
     check col.kind == nkAlias
     check col.aliasName == "user_name"
 
+  test "SELECT accepts reserved expression name as an explicit alias":
+    let ast = parseSql("SELECT value AS time FROM metrics")
+    let col = ast.children[0].children[0]
+    check col.kind == nkAlias
+    check col.aliasName == "time"
+
   test "SELECT with implicit column alias":
     let ast = parseSql("SELECT name user_name FROM users")
     check ast.kind == nkSelect
@@ -681,6 +735,242 @@ suite "DDL — CREATE TABLE":
     check defFound
 
 # ---------------------------------------------------------------------------
+# DDL tests — CREATE CONTINUOUS AGGREGATE
+# ---------------------------------------------------------------------------
+
+suite "DDL — CREATE CONTINUOUS AGGREGATE":
+
+  test "canonical statement reuses Select AST and preserves named options":
+    let ast = parseSql("""
+CREATE CONTINUOUS AGGREGATE cpu_hourly
+AS
+SELECT
+  TIME_BUCKET(INTERVAL '1 hour', time) AS time,
+  host,
+  AVG(usage_user) AS usage_user_avg
+FROM cpu_metrics
+GROUP BY TIME_BUCKET(INTERVAL '1 hour', time), host
+WITH (
+  retention = '30d',
+  refresh_interval = '1h'
+);
+""")
+    check ast.kind == nkCreateContinuousAggregate
+    check ast.children.len == 3
+    check ast.children[0].kind == nkIdentifier
+    check ast.children[0].strVal == "cpu_hourly"
+    check ast.children[1].kind == nkSelect
+    check ast.children[1].children[0].kind == nkExprList
+    check ast.children[1].children[0].children[0].kind == nkAlias
+    check ast.children[1].children[0].children[0].aliasName == "time"
+    check ast.children[1].children[0].children[0].aliasExpr.kind ==
+      nkFunctionCall
+    check ast.children[2].kind == nkWithOptions
+    check ast.children[2].children.len == 2
+    check ast.children[2].children[0].children[0].strVal == "retention"
+    check ast.children[2].children[0].children[1].kind == nkStringLit
+    check ast.children[2].children[0].children[1].strVal == "30d"
+    check ast.children[2].children[1].children[0].strVal ==
+      "refresh_interval"
+    check ast.children[2].children[1].children[1].strVal == "1h"
+
+  test "contextual words and option names are case-insensitive":
+    let ast = parseSql(
+      "cReAtE cOnTiNuOuS aGgReGaTe CpuHourly AS " &
+      "SeLeCt time, continuous, aggregate FrOm Metrics " &
+      "WiTh (ReTeNtIoN = '30d', ReFrEsH_InTeRvAl = '1h')"
+    )
+    check ast.kind == nkCreateContinuousAggregate
+    check ast.children[0].strVal == "CpuHourly"
+    check ast.children[1].kind == nkSelect
+    check ast.children[2].children[0].children[0].strVal == "ReTeNtIoN"
+    check ast.children[2].children[1].children[0].strVal ==
+      "ReFrEsH_InTeRvAl"
+
+  test "CONTINUOUS and AGGREGATE remain ordinary identifiers elsewhere":
+    var lex = initLexer("CONTINUOUS aggregate")
+    check lex.nextToken().kind == tkIdent
+    check lex.nextToken().kind == tkIdent
+
+    let selected = parseSql(
+      "SELECT continuous, aggregate FROM measurements"
+    )
+    check selected.kind == nkSelect
+    check selected.children[0].children[0].strVal == "continuous"
+    check selected.children[0].children[1].strVal == "aggregate"
+
+    let table = parseSql(
+      "CREATE TABLE continuous (aggregate TEXT)"
+    )
+    check table.kind == nkCreateTable
+    check table.children[0].strVal == "continuous"
+    check table.children[1].colName == "aggregate"
+
+  test "statement, name, query, options, keys, and values retain nearest spans":
+    let ast = parseSql("""CREATE CONTINUOUS AGGREGATE hourly
+AS SELECT time, AVG(value) AS avg_value
+FROM samples
+WITH (
+  retention = '7d',
+  refresh_interval = '1h'
+)""")
+    check ast.span.start == Location(line: 1, column: 1)
+    check ast.span.`end` == Location(line: 7, column: 1)
+    check ast.children[0].span.start == Location(line: 1, column: 29)
+    check ast.children[1].span.start == Location(line: 2, column: 4)
+    check ast.children[1].span.`end` == Location(line: 3, column: 12)
+    check ast.children[2].span.start == Location(line: 4, column: 1)
+    check ast.children[2].span.`end` == Location(line: 7, column: 1)
+    check ast.children[2].children[0].span.start ==
+      Location(line: 5, column: 3)
+    check ast.children[2].children[0].span.`end` ==
+      Location(line: 5, column: 18)
+    check ast.children[2].children[0].children[1].span.`end` ==
+      Location(line: 5, column: 18)
+    check ast.children[2].children[1].children[1].span.start ==
+      Location(line: 6, column: 22)
+
+  test "escaped and multiline option strings use exact raw lexical ends":
+    let escaped = parseSql("""CREATE CONTINUOUS AGGREGATE hourly
+AS SELECT time FROM samples
+WITH (
+  retention = '7''d',
+  refresh_interval = '1h'
+)""")
+    let escapedValue = escaped.children[2].children[0].children[1]
+    check escapedValue.strVal == "7'd"
+    check escapedValue.span.start == Location(line: 4, column: 15)
+    check escapedValue.span.`end` == Location(line: 4, column: 20)
+    check escaped.children[2].children[0].span.`end` ==
+      Location(line: 4, column: 20)
+
+    let multiline = parseSql("""CREATE CONTINUOUS AGGREGATE hourly
+AS SELECT time FROM samples
+WITH (
+  retention = '7
+d',
+  refresh_interval = '1h'
+)""")
+    let multilineValue = multiline.children[2].children[0].children[1]
+    check multilineValue.strVal == "7\nd"
+    check multilineValue.span.start == Location(line: 4, column: 15)
+    check multilineValue.span.`end` == Location(line: 5, column: 2)
+    check multiline.children[2].children[0].span.`end` ==
+      Location(line: 5, column: 2)
+
+  test "required clauses occur exactly in canonical order":
+    let malformed = [
+      "CREATE AGGREGATE CONTINUOUS hourly AS SELECT * FROM samples " &
+        "WITH (retention = '7d', refresh_interval = '1h')",
+      "CREATE CONTINUOUS hourly AS SELECT * FROM samples " &
+        "WITH (retention = '7d', refresh_interval = '1h')",
+      "CREATE CONTINUOUS AGGREGATE hourly SELECT * FROM samples " &
+        "WITH (retention = '7d', refresh_interval = '1h')",
+      "CREATE CONTINUOUS AGGREGATE hourly AS INSERT INTO samples VALUES (1) " &
+        "WITH (retention = '7d', refresh_interval = '1h')",
+      "CREATE CONTINUOUS AGGREGATE hourly AS SELECT * FROM samples",
+      "CREATE CONTINUOUS AGGREGATE hourly WITH " &
+        "(retention = '7d', refresh_interval = '1h') AS SELECT * FROM samples"
+    ]
+    for sql in malformed:
+      check parseErrorMessage(sql).contains("Parse error at line")
+
+  test "options must end the statement unless separated by a semicolon":
+    let statement =
+      "CREATE CONTINUOUS AGGREGATE hourly AS SELECT * FROM samples " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+
+    let adjacent = parseErrorMessage(statement & " SELECT 1")
+    check adjacent.contains("unexpected token after continuous aggregate options")
+    check adjacent.contains("got tkSelect 'SELECT'")
+
+    let trailing = parseErrorMessage(statement & " ORDER BY time")
+    check trailing.contains("unexpected token after continuous aggregate options")
+    check trailing.contains("got tkOrder 'ORDER'")
+
+    let separated = parseSql(statement & "; SELECT 1")
+    check separated.kind == nkStatementList
+    check separated.children.len == 2
+    check separated.children[0].kind == nkCreateContinuousAggregate
+    check separated.children[1].kind == nkSelect
+
+  test "missing, duplicate, unknown, and out-of-order options are rejected":
+    let prefix =
+      "CREATE CONTINUOUS AGGREGATE hourly AS SELECT * FROM samples WITH "
+    let malformed = [
+      prefix & "(retention = '7d')",
+      prefix & "(refresh_interval = '1h')",
+      prefix & "(retention = '7d', retention = '8d', " &
+        "refresh_interval = '1h')",
+      prefix & "(retention = '7d', refresh_interval = '1h', bogus = 'x')",
+      prefix & "(refresh_interval = '1h', retention = '7d')"
+    ]
+    for sql in malformed:
+      check parseErrorMessage(sql).contains("Parse error at line")
+
+  test "option values are non-empty strings and preserve mapper input":
+    let prefix =
+      "CREATE CONTINUOUS AGGREGATE hourly AS SELECT * FROM samples WITH "
+    let malformed = [
+      prefix & "(retention = 7, refresh_interval = '1h')",
+      prefix & "(retention = '7d', refresh_interval = 1)",
+      prefix & "(retention = '', refresh_interval = '1h')",
+      prefix & "(retention = '7d', refresh_interval = '')"
+    ]
+    for sql in malformed:
+      check parseErrorMessage(sql).contains("Parse error at line")
+
+  test "option errors report the nearest offending token":
+    let unknown = parseErrorMessage(
+      "CREATE CONTINUOUS AGGREGATE hourly AS SELECT * FROM samples " &
+      "WITH (retention = '7d', bogus = '1h')"
+    )
+    check unknown.contains("col 85")
+    check unknown.contains("unknown continuous aggregate option")
+
+    let malformed = parseErrorMessage(
+      "CREATE CONTINUOUS AGGREGATE hourly AS SELECT * FROM samples " &
+      "WITH (retention = '', refresh_interval = '1h')"
+    )
+    check malformed.contains("col 79")
+    check malformed.contains("non-empty duration string")
+
+  test "single measurement sources are structural and may be aliased":
+    let aliased = parseSql(
+      "CREATE CONTINUOUS AGGREGATE hourly AS SELECT s.time FROM samples AS s " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    check aliased.children[1].children[1].children[0].kind == nkAlias
+    check aliased.children[1].children[1].children[0].aliasExpr.kind ==
+      nkIdentifier
+
+    let prefix = "CREATE CONTINUOUS AGGREGATE hourly AS "
+    let suffix = " WITH (retention = '7d', refresh_interval = '1h')"
+    let malformed = [
+      prefix & "SELECT 1" & suffix,
+      prefix & "SELECT * FROM a JOIN b ON a.id = b.id" & suffix,
+      prefix & "SELECT * FROM a, b" & suffix,
+      prefix & "SELECT * FROM (SELECT * FROM samples) nested" & suffix
+    ]
+    for sql in malformed:
+      check parseErrorMessage(sql).contains(
+        "continuous aggregate query requires one source measurement")
+
+  test "query parsing preserves existing Select clauses for semantic mapping":
+    let ast = parseSql(
+      "CREATE CONTINUOUS AGGREGATE hourly AS " &
+      "SELECT host, AVG(value) FROM samples GROUP BY host " &
+      "HAVING AVG(value) > 0 ORDER BY host LIMIT 1 " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    let query = ast.children[1]
+    check query.kind == nkSelect
+    check query.children[2].kind == nkGroupByClause
+    check query.children[3].kind == nkHavingClause
+    check query.children[4].kind == nkOrderByClause
+    check query.children[5].kind == nkLimitClause
+
+# ---------------------------------------------------------------------------
 # DDL tests — DROP TABLE
 # ---------------------------------------------------------------------------
 
@@ -755,8 +1045,21 @@ suite "Roadmap — DDL and Vector":
     check cols.children[0].kind == nkVectorLiteral
     check cols.children[0].children.len == 3
     check cols.children[0].children[1].floatVal == -2.0
-    check cols.children[1].kind == nkFunctionCall
-    check cols.children[1].children[0].strVal == "CAST"
+    let castExpr = cols.children[1]
+    check castExpr.kind == nkCast
+    check castExpr.children.len == 2
+    check castExpr.children[0].kind == nkIdentifier
+    check castExpr.children[0].strVal == "id"
+    check castExpr.children[1].kind == nkTypeName
+    check castExpr.children[1].children.len == 1
+    check castExpr.children[1].children[0].kind == nkIdentifier
+    check castExpr.children[1].children[0].strVal == "TEXT"
+    check not castExpr.span.isEmpty
+    check not castExpr.children[0].span.isEmpty
+    check not castExpr.children[1].span.isEmpty
+    check castExpr.span.start == Location(line: 1, column: 26)
+    check castExpr.children[0].span.start == Location(line: 1, column: 31)
+    check castExpr.children[1].span.start == Location(line: 1, column: 37)
     check cols.children[2].children[0].strVal == "NOW"
 
 suite "Roadmap — aggregation":
