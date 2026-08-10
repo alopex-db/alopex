@@ -315,25 +315,26 @@ jobs:
 
           # Create a long-running query
           SQL_FILE=$(mktemp)
+          ERR_FILE=$(mktemp)
           PID=''
           cleanup_signal_test() {
             if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
               kill -TERM "$PID" 2>/dev/null || true
               wait "$PID" 2>/dev/null || true
             fi
-            rm -f -- "$SQL_FILE"
+            rm -f -- "$SQL_FILE" "$ERR_FILE"
           }
           trap cleanup_signal_test EXIT
           echo "CREATE TABLE signal_test (id INTEGER PRIMARY KEY);" > "$SQL_FILE"
-          # Keep the fixture below the parser's 1 MiB SQL input limit; the
-          # previous 50,000-row file failed before SIGINT could be observed.
-          for i in $(seq 1 20000); do
+          # Keep both the parser input and MessagePack output below their 1 MiB
+          # limits; 20,000 rows exceeded the output limit before SIGINT.
+          for i in $(seq 1 10000); do
             echo "INSERT INTO signal_test (id) VALUES ($i);"
           done >> "$SQL_FILE"
           echo "SELECT * FROM signal_test;" >> "$SQL_FILE"
 
           # Start the CLI in background
-          $CLI --in-memory --output jsonl sql --file "$SQL_FILE" >/dev/null 2>&1 &
+          $CLI --in-memory --output jsonl sql --file "$SQL_FILE" >/dev/null 2>"$ERR_FILE" &
           PID=$!
 
           # Wait a bit then send SIGINT
@@ -353,6 +354,7 @@ jobs:
             echo "PASS: Ctrl-C handled gracefully (exit code: $EXIT_CODE)"
           else
             echo "FAIL: Unexpected exit code: $EXIT_CODE" >&2
+            sed -n '1,40p' "$ERR_FILE" >&2 || true
             exit 1
           fi
 
