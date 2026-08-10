@@ -6,7 +6,10 @@ Nim parser boundary.
 
 ## Contract Overview
 
-- Contract version: `0.3.0`, returned by `alopex_parser_version()`.
+- Current contract version: `0.4.0`, returned by `alopex_parser_version()`.
+- Alopex v0.8.4 is the first release whose public producer emits the
+  `CreateContinuousAggregate` variant. The variant is owned by Skulk; Alopex
+  transports and validates it but does not execute the statement.
 - SQL entrypoint: `alopex_parse_sql`, returning an array of SQL statements.
 - PromQL entrypoint: `alopex_parse_promql`, returning one PromQL expression.
 - Both parse entrypoints return `CParseResult` and allocate success/error
@@ -26,6 +29,37 @@ Nim parser boundary.
 - Rust side expectation: `rmp-serde` with `serde` derives, using
   `#[serde(tag = "variant")]` for enum-like wire variants and default struct
   field names for maps.
+
+### Version and Compatibility Boundary
+
+The linked Nim shared library, the Rust crate, and the staged payload must all
+report exactly `0.4.0`. A mismatch is rejected before MessagePack decoding;
+callers must not attempt to interpret a payload produced by another contract.
+The v0.8.2 and v0.8.3 releases remain immutable historical `0.3.0` releases:
+they do not emit `CreateContinuousAggregate` and must continue to be consumed
+by a `0.3.0` binding. This document describes the current `0.4.0` surface and
+does not retroactively change those releases.
+
+### Input, Payload, and Resource Bounds
+
+These limits are part of the FFI contract and are enforced before unbounded
+allocation or recursive decoding:
+
+| Boundary | Limit | Controlled failure |
+| --- | ---: | --- |
+| SQL UTF-8 input | 1,048,576 bytes | `ALOPEX-P001`, input-too-large diagnostic |
+| SQL syntactic nesting | 128 levels | `ALOPEX-P006`/bounded syntax diagnostic |
+| PromQL expression nesting | 64 levels | bounded PromQL syntax diagnostic |
+| MessagePack payload | 1,048,576 bytes | `ALOPEX-P001`, bounded-payload diagnostic |
+| MessagePack nesting | 128 levels | `ALOPEX-P001`, depth diagnostic |
+| MessagePack values | 65,536 values | `ALOPEX-P001`, collection-limit diagnostic |
+
+The C boundary also rejects a negative length, a null input pointer, and an
+interior NUL byte. The decoder rejects truncated payloads, the reserved marker
+`0xc1`, trailing bytes, unknown fields, mismatched outer/kind spans, and
+malformed continuous-aggregate shapes. A non-zero parse result is returned as
+`prkError`; no Nim exception crosses the C ABI. `ALOPEX-P007` identifies an
+internal Nim invariant defect and is distinct from invalid user SQL.
 
 ## Common Types
 
@@ -59,6 +93,19 @@ Nim parser boundary.
 | `DropTable` | `if_exists: bool`, `name: string`, `span: Span` |
 | `CreateIndex` | `if_not_exists: bool`, `name: string`, `table: string`, `column: string`, `method: IndexMethod?`, `options: [IndexOption]`, `span: Span` |
 | `DropIndex` | `if_exists: bool`, `name: string`, `span: Span` |
+| `CreateContinuousAggregate` | `name: string`, `name_span: Span`, `query: Select`, `options: [ContinuousAggregateOption]`, `span: Span` |
+
+`CreateContinuousAggregate.query` is a nested `Select` object with an explicit
+`"variant": "Select"` field. `ContinuousAggregateOption` preserves ordered
+options and source locations:
+
+`ContinuousAggregateOption = { "key": string, "key_span": Span, "value": string, "value_span": Span, "span": Span }`
+
+The canonical v0.4.0 grammar requires exactly two options, in this order:
+`retention`, then `refresh_interval`. The query must contain exactly one source
+measurement and the `time_bucket(...)` grouping expression uses the contextual
+identifier alias `time`. Quoted identifiers, escaped quotes, multiline text,
+and inclusive source spans are preserved by the Nim lexer.
 
 `SelectItem` variants:
 
@@ -185,6 +232,7 @@ Nim parser boundary.
 | `nkExists` | `ExprKind.variant = "Exists"` | `ExprKind::Exists` |
 | `nkQuantified` | `ExprKind.variant = "Quantified"` | `ExprKind::Quantified` |
 | `nkDataTypeVector` / `VECTOR(...)` type node | `DataType.variant = "Vector"` | `DataType::Vector` |
+| `nkCreateContinuousAggregate` | `StatementKind.kind.variant = "CreateContinuousAggregate"` | `StatementKind::CreateContinuousAggregate` |
 
 The Nim implementation uses msgpack4nim low-level map writers so Rust-facing
 keys can remain `distinct`, `from`, `end`, and other Rust AST names without
