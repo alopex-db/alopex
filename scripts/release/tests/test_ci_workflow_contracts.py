@@ -81,6 +81,18 @@ class CiWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("cp \"${pinned_metadata}\" \"${nimble_dir}/packages_temp.json\"", action)
 
+    def test_v08_gate_exposes_staged_parser_dll_on_windows(self) -> None:
+        workflow = self.workflow("ci.yml")
+        stage_offset = workflow.index("name: Stage reviewed parser candidate for v0.8 surfaces")
+        v07_offset = workflow.index("name: Run v0.7 baseline gate (Linux)", stage_offset)
+        windows_path_step = workflow[stage_offset:v07_offset]
+        self.assertIn("name: Add Nim library to PATH (Windows)", windows_path_step)
+        self.assertIn("if: runner.os == 'Windows'", windows_path_step)
+        self.assertIn(
+            'echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"',
+            windows_path_step,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
