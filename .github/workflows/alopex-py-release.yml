@@ -522,7 +522,7 @@ jobs:
                   "expected exactly one successful core run on the core tag SHA, "
                   f"found {len(same_sha)}"
               )
-          print(f"{match[\"databaseId\"]}\t{match[\"headSha\"]}")
+          print("{}\t{}".format(match["databaseId"], match["headSha"]))
           ' "${core_tag_sha}" "${GITHUB_REF_NAME}")"
           IFS=$'\t' read -r core_run_id core_run_head_sha <<< "${core_run}"
           printf 'CORE_TAG_SHA=%s\nCORE_RUN_ID=%s\nCORE_RUN_HEAD_SHA=%s\nPYTHON_RUN_ID=%s\n' \
