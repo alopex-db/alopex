@@ -463,7 +463,9 @@ jobs:
       - name: Checkout tagged source
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.4-repair') && 'alopex-py-v0.8.4') || github.ref }}
+          # The join verifier evolves with the workflow repair; packaging
+          # jobs above still checkout the immutable Python source tag.
+          ref: ${{ github.sha }}
 
       - name: Resolve exact core and Python workflow identities
         env:
