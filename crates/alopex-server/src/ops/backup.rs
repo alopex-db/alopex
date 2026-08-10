@@ -421,7 +421,10 @@ mod tests {
 
     #[test]
     fn lifecycle_copy_preserves_sparse_file_without_materializing_holes() {
-        const FILE_LEN: u64 = 8 * 1024 * 1024;
+        // APFS may reserve an 8 MiB allocation extent for the first write.
+        // Use a larger logical hole so the assertion measures materialization
+        // rather than filesystem extent granularity.
+        const FILE_LEN: u64 = 64 * 1024 * 1024;
 
         let source = tempfile::tempdir().expect("source tempdir");
         let destination = tempfile::tempdir().expect("destination tempdir");
