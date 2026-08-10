@@ -28,6 +28,7 @@ candidate = {
         "published": True,
         "run_id": "1001",
         "head_sha": sha,
+        "source_sha": sha,
         "peeled_sha": sha,
         "registry": "crates.io",
         "crates": [{"name": "alopex-core", "status": "published"}],
@@ -79,6 +80,30 @@ assert_fail() {
 }
 
 assert_success bash "${RUNNER}" --verify-join "${TEMP_ROOT}/candidate.json"
+
+python3 - "${TEMP_ROOT}/candidate.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    data = json.load(stream)
+data["core"]["head_sha"] = "c" * 40
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(data, stream, sort_keys=True)
+PY
+assert_success bash "${RUNNER}" --verify-join "${TEMP_ROOT}/candidate.json"
+
+python3 - "${TEMP_ROOT}/candidate.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    data = json.load(stream)
+data["core"]["source_sha"] = "d" * 40
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(data, stream, sort_keys=True)
+PY
+assert_fail bash "${RUNNER}" --verify-join "${TEMP_ROOT}/candidate.json"
 
 python3 - "${TEMP_ROOT}/candidate.json" <<'PY'
 import json

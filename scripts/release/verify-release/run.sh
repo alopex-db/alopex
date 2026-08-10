@@ -141,8 +141,18 @@ for surface_name in ("core", "python"):
         fail(f"{surface_name} surface is not successfully published")
     if not isinstance(surface.get("run_id"), str) or not surface["run_id"]:
         fail(f"{surface_name} workflow run identity is missing")
-    if surface.get("head_sha") != reviewed:
-        fail(f"{surface_name} workflow head SHA does not match reviewed main SHA")
+    head_sha = surface.get("head_sha")
+    if not isinstance(head_sha, str) or not sha40.fullmatch(head_sha):
+        fail(f"{surface_name} workflow head SHA is missing or invalid")
+    if surface_name == "core":
+        # A repair-forward core run may execute from a CI-fix branch.  The
+        # published release envelope still has to bind its source to the
+        # reviewed main SHA; keep both identities in the evidence.
+        source_sha = surface.get("source_sha", head_sha)
+        if source_sha != reviewed:
+            fail("core release source SHA does not match reviewed main SHA")
+    elif head_sha != reviewed:
+        fail("python workflow head SHA does not match reviewed main SHA")
     if surface.get("peeled_sha") != reviewed:
         fail(f"{surface_name} surface is bound to a different SHA")
     if not isinstance(surface.get("registry"), str) or not surface["registry"]:
