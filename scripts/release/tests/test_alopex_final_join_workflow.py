@@ -40,11 +40,11 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertIn("target_sha:", text)
         self.assertIn("release_tag:", text)
         self.assertIn(
-            "ref: ${{ inputs.source_ref || (github.ref_name == 'alopex-py-v0.8.4-repair' && 'alopex-py-v0.8.4') || github.ref }}",
+            "ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.4-repair') && 'alopex-py-v0.8.4') || github.ref }}",
             text,
         )
         self.assertIn("PYTHON_HEAD_SHA: ${{ inputs.target_sha || github.sha }}", text)
-        self.assertIn("PYTHON_TAG_NAME: ${{ inputs.release_tag || (github.ref_name == 'alopex-py-v0.8.4-repair' && 'alopex-py-v0.8.4') || github.ref_name }}", text)
+        self.assertIn("PYTHON_TAG_NAME: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.4-repair') && 'alopex-py-v0.8.4') || github.ref_name }}", text)
         self.assertIn("alopex-py-v0.8.4-repair", text)
         self.assertIn("PYTHON_HEAD_SHA=%s", text)
 
@@ -64,7 +64,7 @@ class FinalJoinWorkflowTests(unittest.TestCase):
     def test_manual_release_uses_the_existing_immutable_tag(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split("  github-release:", maxsplit=1)[1].split("  final-release-join:", maxsplit=1)[0]
-        self.assertIn("tag_name: ${{ inputs.release_tag || (github.ref_name == 'alopex-py-v0.8.4-repair' && 'alopex-py-v0.8.4') || github.ref_name }}", block)
+        self.assertIn("tag_name: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.4-repair') && 'alopex-py-v0.8.4') || github.ref_name }}", block)
 
 
 if __name__ == "__main__":
