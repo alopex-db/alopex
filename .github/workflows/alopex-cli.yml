@@ -325,7 +325,9 @@ jobs:
           }
           trap cleanup_signal_test EXIT
           echo "CREATE TABLE signal_test (id INTEGER PRIMARY KEY);" > "$SQL_FILE"
-          for i in $(seq 1 50000); do
+          # Keep the fixture below the parser's 1 MiB SQL input limit; the
+          # previous 50,000-row file failed before SIGINT could be observed.
+          for i in $(seq 1 20000); do
             echo "INSERT INTO signal_test (id) VALUES ($i);"
           done >> "$SQL_FILE"
           echo "SELECT * FROM signal_test;" >> "$SQL_FILE"
