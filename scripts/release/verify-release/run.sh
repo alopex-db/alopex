@@ -21,7 +21,8 @@
 #
 # Usage:
 #   ./scripts/release/verify-release/run.sh [ALOPEX_VERSION] [--no-report]
-#   例: ./scripts/release/verify-release/run.sh 0.7.6
+#   ./scripts/release/verify-release/run.sh --verify-join candidate.json
+#   例: ./scripts/release/verify-release/run.sh 0.8.4
 #
 # chirps は既定では隣接 checkout (${REPO_ROOT}/../chirps) を使う。存在しない
 # 場合は公開 repo を一時 clone するため、worktree 配置に依存しない。
@@ -37,12 +38,25 @@ if [ -z "${DOCS_PUBLIC_DIR:-}" ] && [ ! -d "${DEFAULT_DOCS_PUBLIC_DIR}" ] \
 fi
 DOCS_PUBLIC_DIR="${DOCS_PUBLIC_DIR:-${DEFAULT_DOCS_PUBLIC_DIR}}"
 
-ALOPEX_VERSION="0.7.6"
+ALOPEX_VERSION="0.8.4"
 DO_REPORT=1
-for arg in "$@"; do
-    case "${arg}" in
-        --no-report) DO_REPORT=0 ;;
-        *) ALOPEX_VERSION="${arg}" ;;
+JOIN_FILE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-report) DO_REPORT=0; shift ;;
+        --verify-join)
+            if [[ $# -lt 2 ]]; then
+                echo "--verify-join requires a candidate JSON path" >&2
+                exit 64
+            fi
+            JOIN_FILE="$2"
+            shift 2
+            ;;
+        --*)
+            echo "unknown option: $1" >&2
+            exit 64
+            ;;
+        *) ALOPEX_VERSION="$1"; shift ;;
     esac
 done
 
@@ -72,6 +86,112 @@ NC='\033[0m'
 log_info() { echo -e "${YELLOW}[INFO]${NC} $1"; }
 log_ok() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_fail() { echo -e "${RED}[FAIL]${NC} $1"; }
+
+# Verify the immutable public-surface join without building from repository
+# product bytes. The input is a recorded candidate envelope produced from
+# public registries/GitHub and is intentionally fixture-friendly for CI tests.
+verify_release_join() {
+    local candidate="$1"
+    if [[ ! -f "${candidate}" || -L "${candidate}" ]]; then
+        log_fail "release join candidate is not a regular file: ${candidate}"
+        return 2
+    fi
+    python3 - "${candidate}" "${ALOPEX_VERSION}" <<'PY'
+import json
+import re
+import sys
+
+candidate_path, version = sys.argv[1:]
+expected_tag = f"v{version}"
+sha40 = re.compile(r"^[0-9a-fA-F]{40}$")
+sha64 = re.compile(r"^[0-9a-fA-F]{64}$")
+targets = {
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+}
+
+def fail(message):
+    print(f"release-join: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    with open(candidate_path, encoding="utf-8") as stream:
+        data = json.load(stream)
+except (OSError, json.JSONDecodeError) as exc:
+    fail(f"invalid candidate JSON: {exc}")
+
+if data.get("version") != version:
+    fail(f"candidate version {data.get('version')!r} != {version!r}")
+reviewed = data.get("reviewed_main_sha")
+if not isinstance(reviewed, str) or not sha40.fullmatch(reviewed):
+    fail("reviewed_main_sha must be a full 40-hex SHA")
+tag = data.get("tag")
+if not isinstance(tag, dict) or tag.get("name") != expected_tag:
+    fail(f"tag must be {expected_tag}")
+if tag.get("peeled_sha") != reviewed:
+    fail("peeled tag SHA does not match reviewed main SHA")
+
+for surface_name in ("core", "python"):
+    surface = data.get(surface_name)
+    if not isinstance(surface, dict):
+        fail(f"missing {surface_name} public surface")
+    if surface.get("status") != "success" or not surface.get("published"):
+        fail(f"{surface_name} surface is not successfully published")
+    if surface.get("peeled_sha") != reviewed:
+        fail(f"{surface_name} surface is bound to a different SHA")
+    if not isinstance(surface.get("registry"), str) or not surface["registry"]:
+        fail(f"{surface_name} registry identity is missing")
+
+crates = data["core"].get("crates")
+if not isinstance(crates, list) or not crates or any(
+    not isinstance(item, dict) or item.get("status") != "published"
+    for item in crates
+):
+    fail("core crate publication set is incomplete")
+distributions = data["python"].get("distributions")
+if not isinstance(distributions, list) or not distributions or any(
+    not isinstance(item, dict)
+    or item.get("status") != "published"
+    or not isinstance(item.get("sha256"), str)
+    or not sha64.fullmatch(item["sha256"])
+    for item in distributions
+):
+    fail("Python wheel/sdist publication set is incomplete")
+
+parser = data.get("parser")
+if not isinstance(parser, dict):
+    fail("parser public surface is missing")
+if parser.get("contract") != "0.4.0":
+    fail("parser contract must be 0.4.0")
+for field in ("manifest_sha256", "envelope_sha256"):
+    if not isinstance(parser.get(field), str) or not sha64.fullmatch(parser[field]):
+        fail(f"parser {field} is missing or invalid")
+assets = parser.get("assets")
+if not isinstance(assets, list) or {a.get("target") for a in assets if isinstance(a, dict)} != targets:
+    fail("parser assets do not cover exactly the four release targets")
+for asset in assets:
+    if not isinstance(asset, dict):
+        fail("parser asset record is invalid")
+    if not sha64.fullmatch(str(asset.get("archive_sha256", ""))) or not sha64.fullmatch(str(asset.get("library_sha256", ""))):
+        fail(f"parser asset digest is invalid for {asset.get('target')}")
+    if asset.get("native_smoke") is not True:
+        fail(f"native smoke evidence is missing for {asset.get('target')}")
+
+if data.get("publication_order", {}).get("core_before_python") is not True:
+    fail("publication order does not prove core-before-Python")
+if data.get("repair_forward", {}).get("complete") is not True:
+    fail("repair-forward closeout is incomplete")
+
+print(f"release-join: complete for {expected_tag} at {reviewed}")
+PY
+}
+
+if [[ -n "${JOIN_FILE}" ]]; then
+    verify_release_join "${JOIN_FILE}"
+    exit $?
+fi
 
 ensure_chirps_dir() {
     if [ -d "${CHIRPS_DIR}" ]; then
