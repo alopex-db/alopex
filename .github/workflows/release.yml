@@ -318,6 +318,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # download-artifact preserves the common `parser/` directory from
+          # each build artifact. Normalize records and archives into the
+          # release asset root before the manifest tool resolves basenames.
+          mapfile -t records < <(find artifacts -type f -name 'alopex-parser-*.json' -print | sort)
+          test "${#records[@]}" -eq 4
+          for record in "${records[@]}"; do
+            archive="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["archive"]["filename"])' "$record")"
+            record_root="artifacts/$(basename "$record")"
+            archive_source="$(dirname "$record")/$archive"
+            if [[ "$record" != "$record_root" ]]; then cp -- "$record" "$record_root"; fi
+            if [[ "$archive_source" != "artifacts/$archive" ]]; then cp -- "$archive_source" "artifacts/$archive"; fi
+          done
           mapfile -t records < <(find artifacts -maxdepth 1 -name 'alopex-parser-*.json' -type f | sort)
           test "${#records[@]}" -eq 4
           args=()
