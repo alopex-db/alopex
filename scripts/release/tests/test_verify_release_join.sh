@@ -26,6 +26,8 @@ candidate = {
     "core": {
         "status": "success",
         "published": True,
+        "run_id": "1001",
+        "head_sha": sha,
         "peeled_sha": sha,
         "registry": "crates.io",
         "crates": [{"name": "alopex-core", "status": "published"}],
@@ -33,6 +35,8 @@ candidate = {
     "python": {
         "status": "success",
         "published": True,
+        "run_id": "1002",
+        "head_sha": sha,
         "peeled_sha": sha,
         "registry": "pypi",
         "distributions": [{"name": "alopex", "status": "published", "sha256": digest}],

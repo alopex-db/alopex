@@ -139,6 +139,10 @@ for surface_name in ("core", "python"):
         fail(f"missing {surface_name} public surface")
     if surface.get("status") != "success" or not surface.get("published"):
         fail(f"{surface_name} surface is not successfully published")
+    if not isinstance(surface.get("run_id"), str) or not surface["run_id"]:
+        fail(f"{surface_name} workflow run identity is missing")
+    if surface.get("head_sha") != reviewed:
+        fail(f"{surface_name} workflow head SHA does not match reviewed main SHA")
     if surface.get("peeled_sha") != reviewed:
         fail(f"{surface_name} surface is bound to a different SHA")
     if not isinstance(surface.get("registry"), str) or not surface["registry"]:

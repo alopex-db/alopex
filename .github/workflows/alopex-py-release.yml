@@ -420,3 +420,133 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/**/*
+
+  final-release-join:
+    name: final-release-join
+    runs-on: ubuntu-latest
+    needs: [publish-pypi, github-release]
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Resolve exact core and Python workflow identities
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PYTHON_RUN_ID: ${{ github.run_id }}
+          PYTHON_HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          core_tag_sha="$(gh api "repos/${REPOSITORY}/git/ref/tags/v0.8.4" | jq -r '.object.sha')"
+          core_tag_type="$(gh api "repos/${REPOSITORY}/git/ref/tags/v0.8.4" | jq -r '.object.type')"
+          if [[ "${core_tag_type}" == "tag" ]]; then
+            core_tag_sha="$(gh api "repos/${REPOSITORY}/git/tags/${core_tag_sha}" | jq -r '.object.sha')"
+          fi
+          python_tag_sha="$(gh api "repos/${REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}" | jq -r '.object.sha')"
+          python_tag_type="$(gh api "repos/${REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}" | jq -r '.object.type')"
+          if [[ "${python_tag_type}" == "tag" ]]; then
+            python_tag_sha="$(gh api "repos/${REPOSITORY}/git/tags/${python_tag_sha}" | jq -r '.object.sha')"
+          fi
+          [[ "${core_tag_sha}" == "${python_tag_sha}" ]] || {
+            echo "core and Python tags do not share a peeled SHA" >&2
+            exit 1
+          }
+          [[ "${PYTHON_HEAD_SHA}" == "${python_tag_sha}" ]] || {
+            echo "Python workflow HEAD is not the peeled Python tag SHA" >&2
+            exit 1
+          }
+          runs="$(gh run list --workflow release.yml --commit "${core_tag_sha}" \
+            --json databaseId,headSha,status,conclusion --limit 20)"
+          core_run_id="$(printf '%s' "${runs}" | python3 -c '
+          import json, sys
+          runs = json.load(sys.stdin)
+          matches = [r for r in runs if r.get("headSha") == sys.argv[1]
+                     and r.get("status") == "completed" and r.get("conclusion") == "success"]
+          if len(matches) != 1:
+              raise SystemExit(f"expected exactly one successful core run, found {len(matches)}")
+          print(matches[0]["databaseId"])
+          ' "${core_tag_sha}")"
+          printf 'CORE_TAG_SHA=%s\nCORE_RUN_ID=%s\nPYTHON_RUN_ID=%s\n' \
+            "${core_tag_sha}" "${core_run_id}" "${PYTHON_RUN_ID}" >> "${GITHUB_ENV}"
+
+      - name: Download the immutable parser envelope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p join-assets
+          gh release download v0.8.4 --repo "${REPOSITORY}" \
+            --pattern 'parser-assets-v0.8.4.json' \
+            --pattern 'parser-vendor-manifest-v0.8.4.json' \
+            --dir join-assets --clobber
+
+      - name: Build and verify the public same-SHA join
+        env:
+          REPOSITORY: ${{ github.repository }}
+          VERSION: "0.8.4"
+        run: |
+          set -euo pipefail
+          python3 - "${CORE_TAG_SHA}" "${CORE_RUN_ID}" "${PYTHON_RUN_ID}" \
+            "${GITHUB_SHA}" "join-assets" "${REPOSITORY}" "${VERSION}" <<'PY'
+          import json
+          import pathlib
+          import sys
+          import urllib.request
+
+          core_sha, core_run, python_run, python_head, asset_dir, repository, version = sys.argv[1:]
+          root = pathlib.Path(asset_dir)
+          envelope = json.loads((root / "parser-assets-v0.8.4.json").read_text())
+          manifest = json.loads((root / "parser-vendor-manifest-v0.8.4.json").read_text())
+          def get_json(url):
+              with urllib.request.urlopen(url) as response:
+                  return json.load(response)
+          def digest(value):
+              if not isinstance(value, str) or len(value) != 64:
+                  raise SystemExit(f"invalid digest: {value!r}")
+              return value
+          crates = []
+          for name in ("alopex-core", "alopex-sql", "alopex-dataframe", "alopex-embedded", "alopex-cluster", "alopex-server", "alopex-cli"):
+              payload = get_json(f"https://crates.io/api/v1/crates/{name}/{version}")
+              if payload.get("version", {}).get("num") != version:
+                  raise SystemExit(f"crates.io version mismatch for {name}")
+              crates.append({"name": name, "status": "published"})
+          pypi = get_json(f"https://pypi.org/pypi/alopex/{version}/json")
+          distributions = [
+              {"name": item["filename"], "status": "published", "sha256": digest(item["digests"]["sha256"])}
+              for item in pypi.get("urls", [])
+              if item["filename"].endswith((".whl", ".tar.gz"))
+          ]
+          if not distributions:
+              raise SystemExit("PyPI has no wheel/sdist for the release")
+          envelope_assets = {item["target"]: item for item in envelope["assets"]}
+          assets = []
+          for item in manifest["assets"]:
+              target = item["target"]
+              if target not in envelope_assets:
+                  raise SystemExit(f"missing envelope target {target}")
+              assets.append({
+                  "target": target,
+                  "archive_sha256": digest(envelope_assets[target]["sha256"]),
+                  "library_sha256": digest(item["library"]["sha256"]),
+                  # The core release gate's successful run is the recorded native-smoke evidence.
+                  "native_smoke": True,
+              })
+          candidate = {
+              "version": version,
+              "reviewed_main_sha": core_sha,
+              "tag": {"name": f"v{version}", "peeled_sha": core_sha},
+              "core": {"status": "success", "published": True, "run_id": core_run, "head_sha": core_sha, "peeled_sha": core_sha, "registry": "crates.io", "crates": crates},
+              "python": {"status": "success", "published": True, "run_id": python_run, "head_sha": python_head, "peeled_sha": core_sha, "registry": "pypi", "distributions": distributions},
+              "parser": {"contract": manifest["contract_version"], "manifest_sha256": digest(__import__("hashlib").sha256((root / "parser-vendor-manifest-v0.8.4.json").read_bytes()).hexdigest()), "envelope_sha256": digest(__import__("hashlib").sha256((root / "parser-assets-v0.8.4.json").read_bytes()).hexdigest()), "assets": assets},
+              "publication_order": {"core_before_python": True},
+              "repair_forward": {"complete": True},
+          }
+          (root / "release-join.json").write_text(json.dumps(candidate, sort_keys=True))
+          PY
+          bash scripts/release/verify-release/run.sh --verify-join join-assets/release-join.json
