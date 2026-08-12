@@ -626,6 +626,18 @@ run_step "v${ALOPEX_VERSION} SQL scalar/PRAGMA 動作保証" \
     "crates.io/PyPI から取得した v${ALOPEX_VERSION} の CLI で、ハッシュ・UUID・エンコード・文字列関数と PRAGMA の公開利用経路を確認する。ソースの cargo build は行わず、インストール済みの alopex CLI だけを実行する。" \
     -- run_in_container bash -c 'ALOPEX_CLI=alopex bash scripts/demo/v074/demo_sql_v074.sh'
 
+run_step "v${ALOPEX_VERSION} 組み込み API サーフェス (demo_api_surfaces.py)" \
+    "PyPI 公開版の Python バインディングから SQL を実行する経路を実演する。Database.new()(SF-MEM)/ Database.open(path)(SF-FILE)でのコーパス実行と再オープン、Transaction の commit/rollback、execute_sql_stream() の反復取得、統計関数と PRAGMA を Python から実行する。最後に CLI/HTTP/gRPC/Rust API/Python API の 5 経路が同一コーパスに対して同一の正規化結果を返すことを表示する。従来の mode-parity(4 経路)に Python API を加えた確認である。" \
+    -- run_in_container python3 scripts/demo/v074/demo_api_surfaces.py
+
+run_step "v${ALOPEX_VERSION} ベクトル検索 API (demo_vector_api.py)" \
+    "PyPI 公開版の Python バインディングから、SQL 経由のベクトル検索(vector_distance + ORDER BY + LIMIT)を実行する。ネイティブのベクトル API(upsert_vector / search_similar / create_hnsw_index / search_hnsw)は公開 wheel に含まれないため実行できない(issue #82)。当該部分は SKIP として明示し、成功数には数えない。" \
+    -- run_in_container python3 scripts/demo/v074/demo_vector_api.py
+
+run_step "v${ALOPEX_VERSION} ベクトル検索 API (Rust)" \
+    "crates.io 公開版 alopex-embedded を使い、Rust 組み込み API からベクトル検索を実行する。SQL 経由(execute_sql)とネイティブ API(create_hnsw_index / upsert_vector / upsert_to_hnsw / search_similar / search_hnsw)の双方を実演し、Python 側と同一のコーパス・同一のクエリ点で順位が一致することを示す。Rust の公開クレートにはベクトル API が含まれるため、Python 側で実行できない部分(issue #82)もこちらでは確認できる。" \
+    -- run_in_container bash -c 'ALOPEX_DEMO_MODE=vector /tools-target/release/verify-release-embedded'
+
 echo ""
 log_ok "全デモスクリプトが公開版 v${ALOPEX_VERSION} で完走しました。"
 
