@@ -33,6 +33,9 @@ dhat-heap.json
 **/__pycache__/
 .pytest_cache/
 crates/alopex-py/python/alopex/_alopex*.so
+# wheel ビルド時に staging されるパーサー(.github/workflows/alopex-py.yml
+# 「Stage parser library in package-local native directory」が生成する)。
+crates/alopex-py/python/alopex/native/
 benchmark*.json
 profile*.log
 crates/*/proptest-regressions/
