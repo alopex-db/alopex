@@ -63,7 +63,9 @@ COMPAT_FIXTURES_DIR = PARITY_DIR / "fixtures" / "compat"
 
 
 def proto_path(repo: Path) -> Path:
-    return repo / "crates" / "alopex-server" / "proto" / "alopex.proto"
+    # released モードでは検証対象バージョンの proto を使う
+    # (ExecuteSql の戻り値型が v0.7.5 で変更されたため)。
+    return surfaces.server_proto_path(repo)
 
 
 def install_signal_handlers() -> None:

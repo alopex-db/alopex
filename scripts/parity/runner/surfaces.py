@@ -1,4 +1,4 @@
-"""4 経路(embedded / cli / http / grpc)の実行とサーバー起動管理。
+"""5 経路(embedded / cli / http / grpc / python)の実行とサーバー起動管理。
 
 docs-public/specs/alopex-mode-parity-spec.md「実行系の構成」に従う。
 SF-CLUSTER(cluster-aware サーバー・単一メンバーの HTTP 経路、v0.7.1 で
@@ -11,14 +11,19 @@ SF-CLUSTER(cluster-aware サーバー・単一メンバーの HTTP 経路、v0.7
 - cli: 製品バイナリ ``alopex --batch --output json`` の subprocess。
 - http: requests で SQL 実行エンドポイントへ POST。
 - grpc: grpcio-tools で alopex.proto から実行時にスタブ生成
-  (生成物は tempdir、コミットしない)。
+  (生成物は tempdir、コミットしない)。proto は検証対象バージョンのもの
+  を使う(server_proto_path)。``ExecuteSql`` の戻り値型は v0.7.5 で
+  ``stream Row`` から ``stream SqlResultSet`` へ変更されている。
+- python: Python バインディング(``alopex.Database``)。SF-MEM は
+  ``Database.new()``、SF-FILE は ``Database.open(path)``。
 
 本モジュールが返す「生レコード」(StatementRecord)の形:
 
     {
         "sql": str,
         "kind": "query" | "success" | "rows_affected" | "error",
-        "columns": [str, ...] | None,   # kind == "query"(gRPC は常に None)
+        "columns": [str, ...] | None,   # kind == "query"
+                                        # (gRPC の旧契約 stream Row は None)
         "rows": [[...], ...] | None,    # kind == "query"(位置ベース)
         "affected_count": int | None,   # kind == "rows_affected"
         "error_message": str | None,    # kind == "error"
@@ -111,14 +116,65 @@ def nim_parser_dir(repo: Path) -> Path:
     return repo / "crates" / "alopex-sql" / "nim-sql-parser"
 
 
+def server_proto_path(repo: Path) -> Path:
+    """gRPC スタブ生成に使う proto ファイル。
+
+    リリース確認(``ALOPEX_BINARY_SOURCE=released``)では、検証対象は
+    **公開版のサーバー**であり、作業ツリーの proto とは限らない。
+    ``ExecuteSql`` の戻り値型は v0.7.5 で ``stream Row`` から
+    ``stream SqlResultSet`` へ変更されたため(#31)、作業ツリー(main)の
+    proto で v0.7.4 のサーバーと通信するとデコードが破綻する。
+
+    そこで released モードでは ``ALOPEX_VERSION`` のタグから proto を
+    取り出して一時ファイルへ書き出す。取得できない場合(タグ未取得の
+    浅いクローン等)は作業ツリーの proto へフォールバックする。
+    """
+    working_tree = repo / "crates" / "alopex-server" / "proto" / "alopex.proto"
+    if os.environ.get(BINARY_SOURCE_ENV) != BINARY_SOURCE_RELEASED:
+        return working_tree
+    version = os.environ.get("ALOPEX_VERSION", "").strip()
+    if not version:
+        return working_tree
+    tag = version if version.startswith("v") else f"v{version}"
+    rel = "crates/alopex-server/proto/alopex.proto"
+    result = subprocess.run(
+        ["git", "show", f"{tag}:{rel}"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return working_tree
+    staged = Path(tempfile.mkdtemp(prefix="alopex-proto-")) / "alopex.proto"
+    staged.write_text(result.stdout, encoding="utf-8")
+    return staged
+
+
 def product_env(repo: Path) -> Dict[str, str]:
     """製品バイナリ・cargo 実行用の環境変数。
 
     Nim 共有ライブラリ(``nimble lib`` の生成物)を解決できるよう、
     CI (.github/workflows/ci.yml) と同じく nim-sql-parser ディレクトリを
     LD_LIBRARY_PATH の先頭へ載せる。
+
+    ただし ``ALOPEX_BINARY_SOURCE=released``(リリース確認)では**載せない**。
+    このモードの目的は「リポジトリのソース・成果物を一切使わず、公開物
+    だけで動くこと」の検証であり、公開版バイナリは自身が同梱・依存する
+    パーサーを解決する。ここでリポジトリ内の .so を PATH 先頭に差し込むと、
+    公開物が意図しないローカルのパーサーを掴む。
+
+    実害は理論上のものではない: リポジトリに別バージョン(別 AST 契約)の
+    .so がある状態で v0.7.4 のリリース確認を回すと、公開版 CLI が
+    そのパーサーを読み込み、``INSERT ... VALUES`` が
+    ``error[ALOPEX-P001] ... missing field `values``` で全滅する。
+    検証が「公開物の不具合」と誤って報告されるため、混入を禁じる。
     """
     env = dict(os.environ)
+    if env.get(BINARY_SOURCE_ENV) == BINARY_SOURCE_RELEASED:
+        # 公開物のみを使う。リポジトリ内 .so の混入を防ぐため、
+        # 呼び出し元から継承した LD_LIBRARY_PATH も落とす。
+        env.pop("LD_LIBRARY_PATH", None)
+        return env
     nim_dir = str(nim_parser_dir(repo))
     current = env.get("LD_LIBRARY_PATH", "")
     env["LD_LIBRARY_PATH"] = f"{nim_dir}:{current}" if current else nim_dir
@@ -711,6 +767,109 @@ class CliSurface:
 
 
 # ---------------------------------------------------------------------------
+# 経路 5: Python 組み込み API(alopex パッケージ)
+# ---------------------------------------------------------------------------
+
+
+class PythonSurface:
+    """Python バインディング経路(``alopex.Database``)。
+
+    embedded(Rust)/cli/http/grpc に続く 5 番目のサーフェス。SF-MEM は
+    ``Database.new()``、SF-FILE は ``Database.open(path)`` で実現する。
+
+    生レコードの形は他サーフェスと同一(StatementRecord)なので、
+    ``normalize.normalize_records`` をそのまま通せる。
+
+    ``Database.execute_sql`` の戻り値は文種別で 3 通りに分岐する
+    (crates/alopex-py/src/embedded/database.rs):
+
+    - ``list[dict]`` : 結果集合(列名キー、CLI --output json と同形)
+    - ``int``        : 影響行数(DML)
+    - ``None``       : 結果集合を持たない成功(DDL)
+
+    エラーは ``PyAlopexError`` 送出で通知されるため、メッセージを
+    ``error_message`` に載せて normalize 側の分類へ委ねる。
+    """
+
+    def __init__(self, module: Any) -> None:
+        self.alopex = module
+
+    # -- データベースの開閉 ----------------------------------------------------
+
+    def open_in_memory(self) -> Any:
+        """SF-MEM: インメモリで開く。"""
+        return self.alopex.Database.new()
+
+    def open_path(self, data_dir: Path) -> Any:
+        """SF-FILE: データディレクトリを開く(永続)。"""
+        return self.alopex.Database.open(str(data_dir))
+
+    # -- 実行 -----------------------------------------------------------------
+
+    def execute(self, db: Any, sql: str) -> Dict[str, Any]:
+        base = {
+            "sql": sql,
+            "columns": None,
+            "rows": None,
+            "affected_count": None,
+            "error_message": None,
+        }
+        try:
+            result = db.execute_sql(sql)
+        except Exception as exc:  # noqa: BLE001 - PyAlopexError は Exception 派生
+            return {**base, "kind": "error", "error_message": str(exc)}
+
+        if result is None:
+            return {**base, "kind": "success"}
+        if isinstance(result, int) and not isinstance(result, bool):
+            return {**base, "kind": "rows_affected", "affected_count": result}
+        if isinstance(result, list):
+            if not result:
+                # 空結果集合は列名情報を持たない(CLI --output json と同じ扱い)
+                return {**base, "kind": "query", "rows": []}
+            columns = list(result[0].keys())
+            rows = [[row.get(name) for name in columns] for row in result]
+            return {**base, "kind": "query", "columns": columns, "rows": rows}
+        raise SurfaceError(
+            f"execute_sql が未知の型を返した ({type(result).__name__}): {sql!r}"
+        )
+
+    def run_statements(self, db: Any, statements: Sequence[str]) -> List[Dict[str, Any]]:
+        return [self.execute(db, sql) for sql in statements]
+
+
+def import_alopex_module(repo: Path) -> Any:
+    """alopex Python パッケージを import する。
+
+    - 既定: リポジトリ内 ``crates/alopex-py/python`` を優先する。
+    - ``ALOPEX_BINARY_SOURCE=released``: リポジトリ内パッケージを sys.path へ
+      入れず、PyPI からインストールした公開版(site-packages)を解決する。
+
+    拡張モジュールは Nim パーサー共有ライブラリを必要とする。wheel では
+    package-local な ``alopex/native/`` が rpath($ORIGIN/native)で解決される
+    (.github/workflows/alopex-py.yml「Stage parser library in package-local
+    native directory」)。ソースツリーからの実行でそれが無い場合に備え、
+    LD_LIBRARY_PATH が未設定なら nim-sql-parser ディレクトリを補う
+    (動的リンカのパスはプロセス起動時にのみ反映されるため、import 前に
+    行う必要がある)。
+    """
+    if os.environ.get(BINARY_SOURCE_ENV) != BINARY_SOURCE_RELEASED:
+        package_dir = repo / "crates" / "alopex-py" / "python"
+        if package_dir.is_dir() and str(package_dir) not in sys.path:
+            sys.path.insert(0, str(package_dir))
+    try:
+        import alopex  # noqa: PLC0415
+
+        return alopex
+    except ImportError as exc:
+        raise SurfaceError(
+            f"alopex Python パッケージを import できない: {exc}。"
+            " 既定モードでは crates/alopex-py で `maturin develop` 済みであること、"
+            " released モードでは `pip install alopex==<version>` 済みであること。"
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
 # サーバー起動管理(alopex-server)
 # ---------------------------------------------------------------------------
 
@@ -1011,9 +1170,17 @@ class GrpcSurface:
         - 結果集合を返す文(is_query_statement) -> ``ExecuteSql``(stream Row)
         - DML(is_dml_statement)              -> ``ExecuteDml``(affected_rows)
         - それ以外(DDL)                       -> ``ExecuteDdl``(success)
-    - proto の ``Row`` は列名メタデータを持たないため query の columns は
-      常に None とし、正規化時に他経路または期待値の列名で補完する
-      (runner.normalize 参照)。
+    - ``ExecuteSql`` は ``stream SqlResultSet``(columns / rows /
+      affected_rows を持つ)を返す。1 文につき 1 要素であり、列名は
+      ``SqlColumn.name`` として応答に含まれる。したがって query の
+      columns は他経路や期待値からの補完を要しない。
+
+      注意: 以前の proto は ``stream Row``(列名メタデータなし)であり、
+      本ハーネスもそれに合わせて columns=None を返していた。サーバー側の
+      変更(#31「fix(server): return all SQL statement results」)で
+      ``SqlResultSet`` へ移行したため、本クラスもそれに追随している。
+      ``normalize`` の columns_override / columns_source による補完は
+      gRPC 経路には不要だが、渡されても実害はない(同じ列名になる)。
     """
 
     def __init__(self, target: str, *, proto_path: Path, timeout: float = 60.0) -> None:
@@ -1025,6 +1192,8 @@ class GrpcSurface:
         self._pb2_grpc: Any = None
         self._channel: Any = None
         self._stub: Any = None
+        #: ExecuteSql の契約(True=SqlResultSet / False=Row)。初回に判定して保持。
+        self._result_sets_stream: Optional[bool] = None
 
     # -- スタブ生成 -----------------------------------------------------------
 
@@ -1088,6 +1257,26 @@ class GrpcSurface:
     def _decode_row(self, row: Any) -> List[Any]:
         return [self._decode_value(v) for v in row.values]
 
+    def _streams_result_sets(self) -> bool:
+        """``ExecuteSql`` が ``SqlResultSet`` を流すか(新契約か)を判定する。
+
+        proto ファイルは検証対象のバージョンによって異なる:
+
+        - v0.7.4 以前 : ``rpc ExecuteSql(...) returns (stream Row);``
+        - v0.7.5 以降 : ``rpc ExecuteSql(...) returns (stream SqlResultSet);``
+          (#31「fix(server): return all SQL statement results」)
+
+        ハーネスは両方を検証対象にしうる(リリース確認は過去バージョンの
+        公開物に対しても実行される)ため、生成済みスタブの
+        出力メッセージ型から契約を判定する。proto の文字列を読むのではなく
+        生成物を見るのは、実際に通信する型と乖離させないためである。
+        """
+        if self._result_sets_stream is None:
+            descriptor = self._pb2.DESCRIPTOR.services_by_name["AlopexService"]
+            method = descriptor.methods_by_name["ExecuteSql"]
+            self._result_sets_stream = method.output_type.name == "SqlResultSet"
+        return self._result_sets_stream
+
     # -- 実行 -----------------------------------------------------------------
 
     def execute(self, sql: str) -> Dict[str, Any]:
@@ -1104,11 +1293,22 @@ class GrpcSurface:
         try:
             if is_query_statement(sql):
                 request = self._pb2.SqlRequest(sql=sql, session_id="")
-                rows = [
-                    self._decode_row(row)
-                    for row in self._stub.ExecuteSql(request, timeout=self.timeout)
-                ]
-                # proto の Row は列名メタデータを持たない(columns=None)
+                messages = list(self._stub.ExecuteSql(request, timeout=self.timeout))
+                if self._streams_result_sets():
+                    # 新契約(v0.7.5 以降): stream SqlResultSet。
+                    # 1 文につき 1 要素で、列名も応答に含まれる。
+                    if len(messages) != 1:
+                        raise SurfaceError(
+                            "gRPC ExecuteSql が 1 文に対して結果集合を"
+                            f" {len(messages)} 個返した: {sql!r}"
+                        )
+                    result_set = messages[0]
+                    columns = [column.name for column in result_set.columns] or None
+                    rows = [self._decode_row(row) for row in result_set.rows]
+                    return {**base, "kind": "query", "columns": columns, "rows": rows}
+                # 旧契約(v0.7.4 以前): stream Row。列名メタデータを持たない
+                # ため columns=None とし、正規化時に他経路・期待値から補完する。
+                rows = [self._decode_row(row) for row in messages]
                 return {**base, "kind": "query", "rows": rows}
             if is_dml_statement(sql):
                 request = self._pb2.DmlRequest(sql=sql, session_id="")
