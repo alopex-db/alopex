@@ -4,6 +4,20 @@ on:
   push:
     tags:
       - "alopex-py-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Historical patch version (X.Y.Z)"
+        required: true
+        type: string
+      maintenance_base:
+        description: "Last published Rust tag in the release line (vX.Y.Z)"
+        required: true
+        type: string
+
+concurrency:
+  group: alopex-py-release-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+  cancel-in-progress: false
 
 defaults:
   run:
@@ -13,8 +27,59 @@ env:
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
 
 jobs:
+  prepare-release:
+    name: Validate Python release candidate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release_tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('release/v{0}', inputs.version) || github.ref }}
+          fetch-depth: 0
+      - name: Resolve release identity
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version='${{ inputs.version }}'
+            [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            tag="alopex-py-v${version}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            [[ "${tag}" =~ ^alopex-py-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]
+            version="${BASH_REMATCH[1]}"
+          fi
+          {
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "source_sha=$(git rev-parse HEAD)"
+          } >> "${GITHUB_OUTPUT}"
+      - name: Validate historical patch source
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="release/v${{ inputs.version }}"
+          git checkout -B "${branch}" "origin/${branch}"
+          bash scripts/release/safe-tag.sh "alopex-py-v${{ inputs.version }}" \
+            --maintenance-base '${{ inputs.maintenance_base }}'
+      - name: Verify pushed tag source
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-list -n1 '${{ steps.release.outputs.tag }}')" = "${GITHUB_SHA}"
+          test "$(sed -n 's/^version = "\([^"]*\)"/\1/p' crates/alopex-py/Cargo.toml | head -1)" = '${{ steps.release.outputs.version }}'
+
   linux:
     name: linux (${{ matrix.target }})
+    needs: [prepare-release]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -27,12 +92,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           command: build
+          rust-toolchain: "1.90.0"
           manylinux: auto
           args: -m crates/alopex-py/Cargo.toml --release --out dist
           target: ${{ matrix.target }}
@@ -56,9 +124,6 @@ jobs:
           before-script-linux: |
             set -euxo pipefail
             REPO_ROOT="$PWD"
-            CHIRPS_DIR="$(dirname "$(dirname "${REPO_ROOT}")")/chirps"
-            rm -rf "${CHIRPS_DIR}"
-            git clone --depth 1 https://github.com/alopex-db/alopex-chirps.git "${CHIRPS_DIR}"
             NIM_VERSION=2.2.4
             curl -fsSL "https://nim-lang.org/download/nim-${NIM_VERSION}.tar.xz" -o /tmp/nim.tar.xz
             mkdir -p /opt/nim-src
@@ -69,12 +134,12 @@ jobs:
             ./koch boot -d:release
             ./koch tools
             export PATH="/opt/nim-src/bin:${HOME}/.nimble/bin:${PATH}"
-            # env (NIM_SQL_PARSER_DIR) のコンテナ内伝播は不確実なためパスを直書き。
-            # maturin-action のコンテナ開始時 CWD を REPO_ROOT として保持し、
-            # Nim source build で /opt/nim-src に移動した後も repo 側へ戻れるようにする。
             # manylinux コンテナ内では root がマウントされた repo を読むため、
             # nimble lib が内部で実行する git ls-files 用に safe.directory を登録する。
             git config --global --add safe.directory "${REPO_ROOT}"
+            # env (NIM_SQL_PARSER_DIR) のコンテナ内伝播は不確実なためパスを直書き。
+            # maturin-action のコンテナ開始時 CWD を REPO_ROOT として保持し、
+            # Nim source build で /opt/nim-src に移動した後も repo 側へ戻れるようにする。
             cd "${REPO_ROOT}/crates/alopex-sql/nim-sql-parser"
             nimble install -y npeg msgpack4nim
             nimble lib
@@ -86,6 +151,15 @@ jobs:
           for wheel in dist/*.whl; do
             python scripts/release/verify_wheel_contents.py "$wheel"
           done
+      - name: Exercise Linux wheel vector API
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_venv="${RUNNER_TEMP}/alopex-wheel-vector-smoke"
+          python -m venv "$smoke_venv"
+          "$smoke_venv/bin/python" -m pip install numpy
+          "$smoke_venv/bin/python" -m pip install --no-index --no-deps dist/*.whl
+          "$smoke_venv/bin/python" scripts/release/verify_python_vector_api.py
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -94,6 +168,7 @@ jobs:
 
   macos:
     name: macos (${{ matrix.target }})
+    needs: [prepare-release]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -108,6 +183,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
       # ネイティブ Nim ツールチェーン (2.2 固定) をホスト上でセットアップ。
@@ -124,6 +201,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: build
+          rust-toolchain: "1.90.0"
           args: -m crates/alopex-py/Cargo.toml --release --out dist
           target: ${{ matrix.target }}
       - name: Inspect macOS wheel contents
@@ -133,6 +211,15 @@ jobs:
           for wheel in dist/*.whl; do
             python scripts/release/verify_wheel_contents.py "$wheel"
           done
+      - name: Exercise macOS wheel vector API
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_venv="${RUNNER_TEMP}/alopex-wheel-vector-smoke"
+          python -m venv "$smoke_venv"
+          "$smoke_venv/bin/python" -m pip install numpy
+          "$smoke_venv/bin/python" -m pip install --no-index --no-deps dist/*.whl
+          "$smoke_venv/bin/python" scripts/release/verify_python_vector_api.py
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -141,10 +228,13 @@ jobs:
 
   windows:
     name: windows (x86_64)
+    needs: [prepare-release]
     runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
       # ネイティブ Nim ツールチェーン (2.2 固定) をホスト上でセットアップ。
@@ -168,6 +258,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: build
+          rust-toolchain: "1.90.0"
           args: -m crates/alopex-py/Cargo.toml --release --out dist
       - name: Inspect Windows wheel contents
         shell: bash
@@ -176,7 +267,7 @@ jobs:
           wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
           test -n "$wheel"
           python scripts/release/verify_wheel_contents.py "$wheel" --require-nim-dll
-      - name: Import Windows wheel without ALOPEX_DLL_DIR
+      - name: Exercise Windows wheel vector API without ALOPEX_DLL_DIR
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -184,11 +275,12 @@ jobs:
           if (Test-Path $venv) { Remove-Item -Recurse -Force $venv }
           python -m venv $venv
           $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
+          & "$venv\Scripts\python.exe" -m pip install numpy
           & "$venv\Scripts\python.exe" -m pip install --no-index --no-deps $wheel
           Remove-Item Env:ALOPEX_DLL_DIR -ErrorAction SilentlyContinue
           Push-Location $env:RUNNER_TEMP
           try {
-            & "$venv\Scripts\python.exe" -c "from alopex import Database; print('clean wheel import OK')"
+            & "$venv\Scripts\python.exe" "$env:GITHUB_WORKSPACE\scripts\release\verify_python_vector_api.py"
           } finally {
             Pop-Location
           }
@@ -200,16 +292,20 @@ jobs:
 
   sdist:
     name: sdist
+    needs: [prepare-release]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
       - name: Checkout Chirps dependency
         run: .github/scripts/checkout-chirps.sh
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
+          rust-toolchain: "1.90.0"
           args: -m crates/alopex-py/Cargo.toml --out dist
       - name: Inspect sdist contents
         shell: bash
@@ -224,10 +320,42 @@ jobs:
           name: sdist
           path: dist/*
 
+  create-tag:
+    name: Create annotated Python release tag
+    needs: [prepare-release, linux, macos, windows, sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
+          fetch-depth: 0
+      - name: Revalidate source and create tag
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="release/v${{ needs.prepare-release.outputs.version }}"
+          test "$(git rev-parse HEAD)" = '${{ needs.prepare-release.outputs.source_sha }}'
+          git fetch origin "${branch}" --quiet
+          test "$(git rev-parse "origin/${branch}")" = '${{ needs.prepare-release.outputs.source_sha }}'
+          git checkout -B "${branch}" "origin/${branch}"
+          bash scripts/release/safe-tag.sh '${{ needs.prepare-release.outputs.release_tag }}' \
+            --maintenance-base '${{ inputs.maintenance_base }}'
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              tag -a '${{ needs.prepare-release.outputs.release_tag }}' \
+              -m 'Release ${{ needs.prepare-release.outputs.release_tag }}'
+          git push origin '${{ needs.prepare-release.outputs.release_tag }}'
+      - name: Preserve pre-existing push tag
+        if: github.event_name == 'push'
+        run: test "$(git rev-list -n1 '${{ needs.prepare-release.outputs.release_tag }}')" = '${{ needs.prepare-release.outputs.source_sha }}'
+
   publish-testpypi:
     name: publish-testpypi
     runs-on: ubuntu-latest
-    needs: [linux, macos, windows, sdist]
+    needs: [linux, macos, windows, sdist, create-tag]
     environment: testpypi
     permissions:
       id-token: write
@@ -254,6 +382,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [publish-testpypi]
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('alopex-py-v{0}', inputs.version) || github.ref }}
       - name: Wait for TestPyPI indexing
         run: sleep 60
       - name: Setup Python
@@ -262,13 +394,19 @@ jobs:
           python-version: "3.11"
       - name: Install from TestPyPI
         run: |
+          version='${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}'
+          if [[ -z "${version}" ]]; then
+            version="${GITHUB_REF_NAME#alopex-py-v}"
+          fi
           pip install --index-url https://test.pypi.org/simple/ \
             --extra-index-url https://pypi.org/simple/ \
-            alopex
+            "alopex==${version}"
       - name: Verify import
         run: |
           python -c "from alopex import Database; print('Database import OK')"
           python -c "from alopex import Transaction; print('Transaction import OK')"
+          python -m pip install numpy
+          python scripts/release/verify_python_vector_api.py
 
   publish-pypi:
     name: publish-pypi
@@ -297,7 +435,7 @@ jobs:
   github-release:
     name: github-release
     runs-on: ubuntu-latest
-    needs: [linux, macos, windows, sdist]
+    needs: [linux, macos, windows, sdist, create-tag]
     permissions:
       contents: write
     steps:
@@ -308,4 +446,5 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('alopex-py-v{0}', inputs.version) || github.ref_name }}
           files: dist/**/*

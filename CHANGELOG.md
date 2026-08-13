@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.7]
+
+Python packaging and vector distance correctness release.
+
+### Fixed
+- Python wheels always expose the documented Vector/HNSW API. Rust's `numpy`
+  binding is now an unconditional build dependency, while Python NumPy remains
+  an optional runtime interoperability dependency (#82).
+- `HnswSearchResult.distance` now returns the documented lower-is-closer metric
+  distance instead of leaking the internal higher-is-better score. L2 returns
+  non-negative Euclidean distance (#83).
+
+### Changed
+- `alopex-chirps-gossip-swim` is resolved from the published crates.io 0.5.1
+  package instead of requiring a host-specific sibling checkout.
+- Python release jobs install each generated wheel and execute a Vector/HNSW
+  lifecycle smoke test before publishing.
+- Historical patch releases now use a GitHub Actions CI/CD dispatch that
+  validates an explicit prior tag and maintenance branch, runs the target-line
+  gate and cross-platform builds before creating immutable annotated tags, then
+  chains Rust registry publication into the matching Python release.
+- The v0.7 release branch and its Rust/Python release jobs are pinned to Rust
+  1.90.0 for reproducible maintenance builds.
+
+### Breaking Changes
+- None intended.
+
 ## [0.7.6]
 
 Additive cluster-surface release.

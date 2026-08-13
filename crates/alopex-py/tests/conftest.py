@@ -10,12 +10,6 @@ def _module_available(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
-def _has_vector_api() -> bool:
-    from alopex import Transaction
-
-    return hasattr(Transaction, "upsert_vector")
-
-
 def pytest_configure(config):
     config.addinivalue_line("markers", "requires_numpy: numpy が必要なテスト")
     config.addinivalue_line("markers", "requires_polars: polars が必要なテスト")
@@ -23,8 +17,8 @@ def pytest_configure(config):
 
 def pytest_runtest_setup(item):
     if "requires_numpy" in item.keywords:
-        if not _module_available("numpy") or not _has_vector_api():
-            pytest.skip("numpy feature が有効でないためスキップ")
+        if not _module_available("numpy"):
+            pytest.skip("numpy がインストールされていないためスキップ")
     if "requires_polars" in item.keywords:
         if not _module_available("polars"):
             pytest.skip("polars が未インストールのためスキップ")

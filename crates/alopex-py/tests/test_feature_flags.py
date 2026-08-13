@@ -1,29 +1,22 @@
-import importlib.util
-
-import pytest
-
-from alopex import AlopexError, Database, Metric, Transaction, TxnMode
+from alopex import Database, Transaction
 
 
-def test_numpy_feature_flags():
-    has_numpy = importlib.util.find_spec("numpy") is not None
-    has_vector_api = hasattr(Transaction, "upsert_vector")
+def test_vector_api_is_part_of_every_build():
+    database_methods = (
+        "create_hnsw_index",
+        "search_hnsw",
+        "drop_hnsw_index",
+        "get_hnsw_stats",
+    )
+    transaction_methods = (
+        "upsert_vector",
+        "search_similar",
+        "get_vector",
+        "upsert_to_hnsw",
+        "delete_from_hnsw",
+    )
 
-    if not has_vector_api:
-        assert not hasattr(Transaction, "search_similar")
-        assert not hasattr(Database, "search_hnsw")
-        assert not hasattr(Transaction, "upsert_to_hnsw")
-        assert not hasattr(Transaction, "delete_from_hnsw")
-        assert not hasattr(Database, "create_hnsw_index")
-        assert not hasattr(Database, "drop_hnsw_index")
-        assert not hasattr(Database, "get_hnsw_stats")
-        return
+    missing = [name for name in database_methods if not hasattr(Database, name)]
+    missing.extend(name for name in transaction_methods if not hasattr(Transaction, name))
 
-    if not has_numpy:
-        db = Database.new()
-        txn = db.begin(TxnMode.READ_WRITE)
-        with pytest.raises(AlopexError):
-            txn.upsert_vector(b"k1", None, [1.0], Metric.COSINE)
-        return
-
-    assert has_vector_api is True
+    assert missing == []

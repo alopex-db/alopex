@@ -5,7 +5,6 @@ mod catalog;
 mod embedded;
 mod error;
 mod types;
-#[cfg(feature = "numpy")]
 mod vector;
 
 #[pymodule]

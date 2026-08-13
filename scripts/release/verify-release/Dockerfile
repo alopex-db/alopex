@@ -39,12 +39,12 @@
 #
 # 使い方:
 #   docker build -t alopex-verify-release \
-#     --build-arg ALOPEX_VERSION=0.7.6 \
+#     --build-arg ALOPEX_VERSION=0.7.7 \
 #     -f scripts/release/verify-release/Dockerfile \
 #     scripts/release/verify-release
 #   docker run --rm -it \
 #     --user "$(id -u):$(id -g)" -e HOME=/home/verify \
-#     -v "$PWD":/workspace:ro -v <path-to-chirps>:/chirps:ro \
+#     -v "$PWD":/workspace:ro \
 #     -w /workspace \
 #     -e ALOPEX_BINARY_SOURCE=released \
 #     alopex-verify-release \
@@ -56,7 +56,7 @@
 
 ARG RUST_VERSION=1.96
 ARG NIM_IMAGE=nimlang/nim:2.2@sha256:62428daa4a39baeb6f5e429a9c2ca3cee27a80ef880fe6e1bf3e29cc2296ac1b
-ARG ALOPEX_VERSION=0.7.6
+ARG ALOPEX_VERSION=0.7.7
 
 FROM ${NIM_IMAGE} AS nim-toolchain
 

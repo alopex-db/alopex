@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -z "${GITHUB_WORKSPACE:-}" ]]; then
-    echo "GITHUB_WORKSPACE is not set" >&2
+# Kept at the legacy path for workflow compatibility. Alopex consumes the
+# published package and must not depend on a sibling checkout.
+repo_root="${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+manifest="${repo_root}/crates/alopex-cluster/Cargo.toml"
+
+grep -Eq 'alopex-chirps-gossip-swim = \{ version = "=0\.5\.1", optional = true \}' "${manifest}"
+if grep -Eq 'alopex-chirps-gossip-swim.*path[[:space:]]*=' "${manifest}"; then
+    echo "alopex-chirps-gossip-swim must resolve from crates.io, not a local path" >&2
     exit 1
 fi
 
-workspace_parent="$(dirname "$(dirname "${GITHUB_WORKSPACE}")")"
-chirps_dir="${workspace_parent}/chirps"
-
-if [[ -d "${chirps_dir}/.git" ]]; then
-    git -C "${chirps_dir}" fetch --depth 1 origin main
-    git -C "${chirps_dir}" checkout FETCH_HEAD
-    exit 0
-fi
-
-rm -rf "${chirps_dir}"
-git clone --depth 1 https://github.com/alopex-db/alopex-chirps.git "${chirps_dir}"
+echo "Chirps dependency contract OK: crates.io alopex-chirps-gossip-swim =0.5.1"

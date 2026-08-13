@@ -5,6 +5,24 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Historical patch version (X.Y.Z)"
+        required: true
+        type: string
+      maintenance_base:
+        description: "Last published tag in the release line (vX.Y.Z)"
+        required: true
+        type: string
+      publish_python:
+        description: "Dispatch the matching Python release after Rust publication"
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+  cancel-in-progress: false
 
 env:
   RUST_BACKTRACE: 1
@@ -12,9 +30,60 @@ env:
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
 
 jobs:
+  prepare-release:
+    name: Validate release candidate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release_tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('release/v{0}', inputs.version) || github.ref }}
+          fetch-depth: 0
+      - name: Resolve release identity
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version='${{ inputs.version }}'
+            [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            tag="v${version}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            [[ "${tag}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]
+            version="${BASH_REMATCH[1]}"
+          fi
+          {
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "source_sha=$(git rev-parse HEAD)"
+          } >> "${GITHUB_OUTPUT}"
+      - name: Validate historical patch source
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="release/v${{ inputs.version }}"
+          git checkout -B "${branch}" "origin/${branch}"
+          bash scripts/release/safe-tag.sh "v${{ inputs.version }}" \
+            --maintenance-base '${{ inputs.maintenance_base }}'
+      - name: Verify pushed tag source
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-list -n1 '${{ steps.release.outputs.tag }}')" = "${GITHUB_SHA}"
+          test "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)" = '${{ steps.release.outputs.version }}'
+
   # Run CI checks before release
   ci-gate:
     name: CI Gate
+    needs: [prepare-release]
     runs-on: ubuntu-latest
     steps:
       - name: Free disk space
@@ -25,10 +94,13 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force || true
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
       - name: Checkout Chirps dependency
         run: bash .github/scripts/checkout-chirps.sh
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.90.0"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
@@ -47,7 +119,7 @@ jobs:
 
   build-release:
     name: Build Release (${{ matrix.target }})
-    needs: [ci-gate]
+    needs: [prepare-release, ci-gate]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -74,12 +146,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
       - name: Checkout Chirps dependency
         run: bash .github/scripts/checkout-chirps.sh
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.90.0"
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
@@ -136,14 +211,48 @@ jobs:
             ${{ env.NIM_SQL_PARSER_DIR }}/alopex_sql_parser.dll
           if-no-files-found: ignore
 
-  create-release:
-    name: Create GitHub Release
-    needs: build-release
+  create-tag:
+    name: Create annotated release tag
+    needs: [prepare-release, ci-gate, build-release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.source_sha }}
+          fetch-depth: 0
+      - name: Revalidate source and create tag
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="release/v${{ needs.prepare-release.outputs.version }}"
+          test "$(git rev-parse HEAD)" = '${{ needs.prepare-release.outputs.source_sha }}'
+          git fetch origin "${branch}" --quiet
+          test "$(git rev-parse "origin/${branch}")" = '${{ needs.prepare-release.outputs.source_sha }}'
+          git checkout -B "${branch}" "origin/${branch}"
+          bash scripts/release/safe-tag.sh '${{ needs.prepare-release.outputs.release_tag }}' \
+            --maintenance-base '${{ inputs.maintenance_base }}'
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              tag -a '${{ needs.prepare-release.outputs.release_tag }}' \
+              -m 'Release ${{ needs.prepare-release.outputs.release_tag }}'
+          git push origin '${{ needs.prepare-release.outputs.release_tag }}'
+      - name: Preserve pre-existing push tag
+        if: github.event_name == 'push'
+        run: test "$(git rev-list -n1 '${{ needs.prepare-release.outputs.release_tag }}')" = '${{ needs.prepare-release.outputs.source_sha }}'
+
+  create-release:
+    name: Create GitHub Release
+    needs: [prepare-release, build-release, create-tag]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_tag }}
       - name: Checkout Chirps dependency
         run: bash .github/scripts/checkout-chirps.sh
 
@@ -156,6 +265,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.prepare-release.outputs.release_tag }}
           files: artifacts/*
           generate_release_notes: true
         env:
@@ -163,16 +273,20 @@ jobs:
 
   publish-crate:
     name: Publish to crates.io
-    needs: [build-release, create-release]
+    needs: [prepare-release, build-release, create-tag, create-release]
     runs-on: ubuntu-latest
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
       NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_tag }}
       - name: Checkout Chirps dependency
         run: bash .github/scripts/checkout-chirps.sh
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.90.0"
       - uses: Swatinem/rust-cache@v2
 
       - name: Build Nim SQL parser library
@@ -294,3 +408,22 @@ jobs:
 
       - name: Publish alopex-cli
         run: ./publish-crate.sh alopex-cli
+
+  dispatch-python-release:
+    name: Dispatch matching Python release
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_python
+    needs: [prepare-release, publish-crate]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Start Python CI/CD from the same maintenance branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run alopex-py-release.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref "release/v${{ needs.prepare-release.outputs.version }}" \
+            -f "version=${{ needs.prepare-release.outputs.version }}" \
+            -f "maintenance_base=${{ inputs.maintenance_base }}"

@@ -70,6 +70,8 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "alopex-chirps-gossip-swim"
 version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55e56b2ee2d83c3776e8d1d58f293d27e01b7be307a346fbaeae8f0796eecc6c"
 dependencies = [
  "alopex-chirps-wire",
  "async-trait",
@@ -83,6 +85,8 @@ dependencies = [
 [[package]]
 name = "alopex-chirps-wire"
 version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec21c23f4012a7d229a9a885f2b18becbfbad7e5043b0e977981302bc332d594"
 dependencies = [
  "bincode",
  "serde",
@@ -91,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-cli"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "alopex-core",
  "alopex-embedded",
@@ -143,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-cluster"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "alopex-chirps-gossip-swim",
  "serde",
@@ -152,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-core"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "alopex-dataframe",
  "alopex-sql",
@@ -194,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-dataframe"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "alopex-core",
  "arrow",
@@ -208,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-embedded"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "alopex-cluster",
  "alopex-core",
@@ -229,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-py"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "alopex-cluster",
  "alopex-core",
@@ -246,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-server"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "alopex-cli",
  "alopex-cluster",
@@ -293,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "alopex-sql"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "alopex-core",
  "arrow-array 52.2.0",

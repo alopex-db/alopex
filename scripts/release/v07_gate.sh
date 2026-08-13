@@ -141,6 +141,10 @@ check_release_workflow_contract() {
         "release workflow declares tag trigger block"
     require_file_contains "${release_workflow}" "v\\*" \
         "release workflow accepts repository release tags"
+    require_file_contains "${release_workflow}" "maintenance_base:" \
+        "Rust release workflow exposes the historical patch dispatch contract"
+    require_file_contains "${release_workflow}" "dispatch-python-release:" \
+        "Rust maintenance release dispatches matching Python CI/CD"
     require_file_contains "${release_workflow}" "alopex-linux-x86_64" \
         "release workflow publishes Linux CLI artifact"
     require_file_contains "${release_workflow}" "alopex-macos-x86_64" \
@@ -157,10 +161,30 @@ check_release_workflow_contract() {
         "release workflow creates GitHub release"
     require_file_contains "${py_release_workflow}" "alopex-py-v\\*" \
         "independent alopex-py release tag trigger is preserved"
+    require_file_contains "${py_release_workflow}" "workflow_dispatch:" \
+        "Python release workflow accepts maintenance CI/CD dispatch"
+    require_file_contains "${py_release_workflow}" "verify_python_vector_api\\.py" \
+        "Python release workflow executes the installed-wheel Vector/HNSW smoke test"
+    require_file_contains "${PROJECT_ROOT}/crates/alopex-cluster/Cargo.toml" \
+        'alopex-chirps-gossip-swim = \{ version = "=0\.5\.1", optional = true \}' \
+        "Chirps gossip dependency is pinned to the published crates.io 0.5.1 package"
+    require_file_contains "${PROJECT_ROOT}/rust-toolchain.toml" \
+        'channel = "1\.90\.0"' \
+        "v0.7 release toolchain is pinned to Rust 1.90.0"
+    require_file_contains "${release_workflow}" \
+        'toolchain: "1\.90\.0"' \
+        "Rust release jobs install Rust 1.90.0"
+    require_file_contains "${py_release_workflow}" \
+        'rust-toolchain: "1\.90\.0"' \
+        "Python release jobs install Rust 1.90.0"
 }
 
 verify_release_binary() {
-    local binary="${PROJECT_ROOT}/target/release/alopex"
+    local target_dir="${CARGO_TARGET_DIR:-${PROJECT_ROOT}/target}"
+    if [[ "${target_dir}" != /* ]]; then
+        target_dir="${PROJECT_ROOT}/${target_dir}"
+    fi
+    local binary="${target_dir}/release/alopex"
     if [[ "${OS:-}" == "Windows_NT" ]]; then
         binary="${binary}.exe"
     fi
@@ -192,6 +216,8 @@ main() {
     fi
 
     check_release_workflow_contract
+    run_step "Release process: historical patch tag safety" \
+        bash scripts/release/tests/safe-tag-maintenance.sh
 
     if [[ "${V07_GATE_RUN_V06}" == "1" ]]; then
         run_step "Baseline: v0.6 release gate" \
@@ -204,6 +230,11 @@ main() {
         cargo fmt --all -- --check
     run_step "Lint: workspace clippy" \
         cargo clippy --all-targets --all-features --locked -- -D warnings
+    # Cover every product crate under the target version without pulling the
+    # pseudo-terminal TUI integration suite into a headless release runner.
+    # CLI/server/distributed/DataFrame integration viewpoints run below.
+    run_step "Target release: all Rust crate library and binary tests" \
+        cargo test --workspace --all-features --lib --bins --locked
     run_step "Cluster: metadata, router, and simulated harness tests" \
         cargo test -p alopex-cluster --all-features --locked
     run_step "Embedded: v0.6 compatibility regression tests" \
@@ -232,6 +263,8 @@ main() {
                 crates/alopex-py/tests/test_compatibility_contract.py \
                 crates/alopex-py/tests/test_dataframe_p3.py \
                 crates/alopex-py/tests/test_surface_consistency.py
+        run_step "Python: installed Vector/HNSW API smoke" \
+            python scripts/release/verify_python_vector_api.py
     else
         log_warn "Skipping Python maturin/pytest checks because V07_GATE_RUN_MATURIN=${V07_GATE_RUN_MATURIN}"
     fi

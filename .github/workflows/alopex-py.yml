@@ -4,16 +4,22 @@ on:
   push:
     branches: [main, develop]
     paths:
+      - "Cargo.lock"
       - ".github/workflows/alopex-py.yml"
+      - "crates/alopex-cluster/**"
       - "crates/alopex-py/**"
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
+      - "scripts/release/verify_python_vector_api.py"
   pull_request:
     paths:
+      - "Cargo.lock"
       - ".github/workflows/alopex-py.yml"
+      - "crates/alopex-cluster/**"
       - "crates/alopex-py/**"
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
+      - "scripts/release/verify_python_vector_api.py"
 
 defaults:
   run:
@@ -190,19 +196,7 @@ jobs:
       - name: Maturin develop
         if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         run: |
-          if [[ -n "${ACT:-}" ]]; then
-            if [[ "${{ matrix.feature }}" == "numpy" ]]; then
-              maturin develop -m crates/alopex-py/Cargo.toml --features numpy
-            else
-              maturin develop -m crates/alopex-py/Cargo.toml
-            fi
-            exit 0
-          fi
-          if [[ "${{ matrix.feature }}" == "numpy" ]]; then
-            maturin develop -m crates/alopex-py/Cargo.toml --features numpy
-          else
-            maturin develop -m crates/alopex-py/Cargo.toml
-          fi
+          maturin develop -m crates/alopex-py/Cargo.toml
       - name: Run pytest
         if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         run: |
@@ -211,29 +205,30 @@ jobs:
             exit 0
           fi
           pytest crates/alopex-py/tests
-      - name: Verify vector APIs are absent
+      - name: Verify vector APIs remain present without Python numpy
         if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.feature == 'no-numpy' }}
         run: |
           python - <<'PY'
           from alopex import Database, Transaction
 
-          txn_missing = [
+          txn_methods = [
               "upsert_vector",
               "search_similar",
+              "get_vector",
               "upsert_to_hnsw",
               "delete_from_hnsw",
           ]
-          db_missing = [
+          db_methods = [
               "create_hnsw_index",
               "search_hnsw",
               "drop_hnsw_index",
               "get_hnsw_stats",
           ]
 
-          for name in txn_missing:
-              assert not hasattr(Transaction, name), f"{name} should be absent"
-          for name in db_missing:
-              assert not hasattr(Database, name), f"{name} should be absent"
+          for name in txn_methods:
+              assert hasattr(Transaction, name), f"Transaction.{name} should be present"
+          for name in db_methods:
+              assert hasattr(Database, name), f"Database.{name} should be present"
           PY
 
   polars-test:
@@ -395,7 +390,7 @@ jobs:
         run: bash scripts/build-nim-parser.sh --backend docker
       - name: Maturin develop (numpy)
         run: |
-          maturin develop -m crates/alopex-py/Cargo.toml --features numpy
+          maturin develop -m crates/alopex-py/Cargo.toml
       - name: Run benchmarks
         run: |
           pytest crates/alopex-py/tests/benchmarks/ -v --benchmark-only --benchmark-json=benchmark.json -m "not large"

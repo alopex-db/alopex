@@ -55,11 +55,11 @@ echo -e "${GREEN}Format check passed${NC}"
 
 if [ "${ALOPEX_SKIP_CLIPPY:-0}" != "1" ]; then
     echo ""
-    # CI は dtolnay/rust-toolchain@stable を使うため、stable ツールチェーンが
-    # あれば stable で clippy を実行して CI とバージョンを揃える。stable 固有の
-    # lint（Rust 1.96 の result_large_err / noop_waker 等）を push 前に検知する。
+    # rust-toolchain.toml があるリリース系列では、その固定版を cargo/rustup に
+    # 選ばせてローカルとリリースCIを一致させる。固定がない開発ブランチだけは
+    # stable を明示し、通常CIのツールチェーンと揃える。
     CLIPPY_TOOLCHAIN=""
-    if rustup toolchain list 2>/dev/null | grep -q "^stable-"; then
+    if [ ! -f rust-toolchain.toml ] && rustup toolchain list 2>/dev/null | grep -q "^stable-"; then
         CLIPPY_TOOLCHAIN="+stable"
     fi
     echo -e "${YELLOW}Running cargo ${CLIPPY_TOOLCHAIN:-default} clippy...${NC}"
