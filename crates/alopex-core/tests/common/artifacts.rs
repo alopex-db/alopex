@@ -326,8 +326,9 @@ fn disk_total_bytes(path: &Path) -> Option<u64> {
     if res != 0 {
         return None;
     }
-    let block_size = stat.f_frsize as u64;
-    Some(block_size.saturating_mul(stat.f_blocks as u64))
+    let block_size = stat.f_frsize as u128;
+    let blocks = stat.f_blocks as u128;
+    Some(u64::try_from(block_size.saturating_mul(blocks)).unwrap_or(u64::MAX))
 }
 
 #[cfg(not(target_family = "unix"))]
