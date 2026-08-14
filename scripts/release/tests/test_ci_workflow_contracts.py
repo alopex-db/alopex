@@ -99,6 +99,34 @@ class CiWorkflowContractTests(unittest.TestCase):
             windows_path_step,
         )
 
+    def test_security_audit_is_fail_closed_with_a_guarded_exception(self) -> None:
+        workflow = self.workflow("ci.yml")
+        audit_job = workflow.split("  security-audit:", maxsplit=1)[1].split(
+            "\n  build:", maxsplit=1
+        )[0]
+
+        self.assertNotIn("continue-on-error", audit_job)
+        self.assertNotIn("RUSTSEC-2026-0194", audit_job)
+        self.assertNotIn("RUSTSEC-2026-0195", audit_job)
+        self.assertIn("ignore: RUSTSEC-2026-0235", audit_job)
+        tree_guard = audit_job.index(
+            "cargo tree --locked --workspace --all-features --target all"
+        )
+        audit_step = audit_job.index("uses: rustsec/audit-check@v2")
+        self.assertLess(tree_guard, audit_step)
+        self.assertIn("RUSTSEC-2026-0235 is reachable", audit_job)
+
+    def test_workflows_do_not_clone_an_unpinned_chirps_checkout(self) -> None:
+        for workflow_path in WORKFLOW_DIR.glob("*.yml"):
+            with self.subTest(workflow=workflow_path.name):
+                workflow = workflow_path.read_text(encoding="utf-8")
+                self.assertNotIn("checkout-chirps.sh", workflow)
+                self.assertNotIn("Checkout Chirps dependency", workflow)
+
+        self.assertFalse(
+            (WORKFLOW_DIR.parent / "scripts/checkout-chirps.sh").exists()
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
