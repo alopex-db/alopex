@@ -30,7 +30,7 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force || true
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.90.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -66,28 +66,63 @@ jobs:
       - name: Build Nim SQL parser library
         shell: bash
         run: bash scripts/build-nim-parser.sh --backend host
-      - name: Stage parser library in package-local native directory
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p crates/alopex-py/python/alopex/native
-          case "$RUNNER_OS" in
-            Linux) library="${NIM_SQL_PARSER_DIR}/libalopex_sql_parser.so" ;;
-            Windows) library="${NIM_SQL_PARSER_DIR}/alopex_sql_parser.dll" ;;
-            macOS) library="${NIM_SQL_PARSER_DIR}/libalopex_sql_parser.dylib" ;;
-            *) echo "unsupported runner" >&2; exit 2 ;;
-          esac
-          test -f "$library"
-          cp "$library" crates/alopex-py/python/alopex/native/
-          cp "${NIM_SQL_PARSER_DIR}/CONTRACT_VERSION" crates/alopex-py/python/alopex/native/
-          cp "${NIM_SQL_PARSER_DIR}/SHA256SUMS" crates/alopex-py/python/alopex/native/
       - name: Run Nim SQL parser tests
         shell: bash
         run: bash scripts/test-nim-parser.sh --backend host
+      - name: Run controlled Nim parser failure
+        id: nim_parser_controlled_failure
+        continue-on-error: true
+        shell: bash
+        run: |
+          proof_root="${RUNNER_TEMP:-/tmp}"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            proof_root="$(cygpath -u "$proof_root")"
+          fi
+          proof_path="${proof_root}/alopex-nim-controlled-failure-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+          test ! -e "$proof_path"
+          export ALOPEX_NIM_CONTROLLED_FAILURE_PROOF="$proof_path"
+          echo "ALOPEX_NIM_CONTROLLED_FAILURE_PROOF=$proof_path" >> "$GITHUB_ENV"
+          bash scripts/test-nim-parser.sh --backend host --controlled-failure
+      - name: Stage reviewed parser candidate for v0.8 surfaces
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)
+              parser_target="x86_64-unknown-linux-gnu"
+              parser_library="libalopex_sql_parser.so"
+              ;;
+            Windows)
+              parser_target="x86_64-pc-windows-msvc"
+              parser_library="alopex_sql_parser.dll"
+              ;;
+            *)
+              echo "unsupported v0.8 parser gate runner: $RUNNER_OS" >&2
+              exit 2
+              ;;
+          esac
+          reviewed_dir="${NIM_SQL_PARSER_DIR}/vendor/${parser_target}"
+          for candidate in "$parser_library" CONTRACT_VERSION SHA256SUMS; do
+            test -f "${reviewed_dir}/${candidate}"
+            cp -f -- "${reviewed_dir}/${candidate}" "${NIM_SQL_PARSER_DIR}/${candidate}"
+            cmp -s "${reviewed_dir}/${candidate}" "${NIM_SQL_PARSER_DIR}/${candidate}"
+          done
+          mkdir -p crates/alopex-py/python/alopex/native
+          cp -f -- "${reviewed_dir}/${parser_library}" crates/alopex-py/python/alopex/native/
+          cp -f -- "${reviewed_dir}/CONTRACT_VERSION" crates/alopex-py/python/alopex/native/
+          cp -f -- "${reviewed_dir}/SHA256SUMS" crates/alopex-py/python/alopex/native/
+      - name: Add Nim library to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
       - name: Run v0.7 baseline gate (Linux)
         if: runner.os == 'Linux'
         env:
-          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+          # The baseline crate contract is tied to the checked-in, checksummed
+          # vendor identity. The fresh parser build above is independently
+          # tested and packaged as a v0.8.5 release asset; it must not be fed
+          # into build_support's v0.8.4 vendor verifier.
+          NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser/vendor/x86_64-unknown-linux-gnu
+          LD_LIBRARY_PATH: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser/vendor/x86_64-unknown-linux-gnu:${{ env.LD_LIBRARY_PATH }}
         run: bash scripts/release/v07_gate.sh
       - name: Build Python extension for v0.8 gate (Windows)
         if: runner.os == 'Windows'
@@ -97,6 +132,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
+          ALOPEX_NIM_CONTROLLED_FAILURE_OUTCOME: ${{ steps.nim_parser_controlled_failure.outcome }}
         run: bash crates/alopex-tools/v08/verify-v08-surfaces.sh
 
   build-release:
@@ -130,7 +166,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.90.0
         with:
           targets: ${{ matrix.target }}
 
@@ -205,23 +241,6 @@ jobs:
             artifacts/parser/*.json
             artifacts/parser/*.tar.gz
 
-      # crates.io に公開する alopex-sql は Nim ツールチェーンを持たない環境
-      # でも `cargo install`/`cargo build` できる必要がある(D2 是正)。この
-      # ジョブが alopex-cli リンク用に既にビルド済みの Nim 共有ライブラリを
-      # vendor アーティファクトとしてもアップロードし、publish-crate ジョブが
-      # nim-sql-parser/vendor/<target-triple>/ へ配置してから publish する。
-      - name: Upload vendored Nim shared library
-        uses: actions/upload-artifact@v4
-        with:
-          name: nim-vendor-${{ matrix.target }}
-          # Linux: libalopex_sql_parser.so / macOS: libalopex_sql_parser.dylib
-          # / Windows: alopex_sql_parser.dll (lib 接頭辞なし)。
-          path: |
-            ${{ env.NIM_SQL_PARSER_DIR }}/libalopex_sql_parser.so
-            ${{ env.NIM_SQL_PARSER_DIR }}/libalopex_sql_parser.dylib
-            ${{ env.NIM_SQL_PARSER_DIR }}/alopex_sql_parser.dll
-          if-no-files-found: ignore
-
   create-release:
     name: Create GitHub Release
     needs: build-release
@@ -279,7 +298,7 @@ jobs:
       NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.90.0
       - uses: Swatinem/rust-cache@v2
 
       - name: Verify peeled release tag and create clean source staging
@@ -296,22 +315,6 @@ jobs:
           git archive --format=tar "${GITHUB_REF_NAME}^{commit}" | tar -xf - -C "$stage"
           test -z "$(git -C "$stage" status --porcelain 2>/dev/null || true)"
           echo "RELEASE_STAGE=$stage" >> "$GITHUB_ENV"
-
-      - name: Download vendored Nim shared libraries
-        uses: actions/download-artifact@v4
-        with:
-          pattern: nim-vendor-*
-          path: /tmp/nim-vendor
-
-      - name: Place vendored libraries in clean source staging
-        run: |
-          set -euo pipefail
-          for dir in /tmp/nim-vendor/nim-vendor-*; do
-            target="$(basename "$dir" | sed 's/^nim-vendor-//')"
-            dest="${RELEASE_STAGE}/${NIM_SQL_PARSER_DIR}/vendor/${target}"
-            mkdir -p "$dest"
-            cp "$dir"/* "$dest/"
-          done
 
       - name: Create publish helper
         run: |

@@ -16,12 +16,48 @@ class V085ReleaseContractTests(unittest.TestCase):
         python_release = (ROOT / ".github/workflows/alopex-py-release.yml").read_text(
             encoding="utf-8"
         )
+        parser_build = (ROOT / "scripts/build-nim-parser.sh").read_text(
+            encoding="utf-8"
+        )
+        parser_manifest = (
+            ROOT / "scripts/release/parser_asset_manifest.py"
+        ).read_text(encoding="utf-8")
         version = re.search(r'^version = "([0-9.]+)"$', workspace, re.MULTILINE)
         self.assertIsNotNone(version)
         self.assertEqual(version.group(1), "0.8.5")
         self.assertIn('ALOPEX_VERSION="0.8.5"', run)
         self.assertIn("parser-assets-v0.8.5.json", release)
         self.assertIn("parser-assets-v0.8.5.json", python_release)
+        self.assertIn('REQUIRED_ALOPEX_VERSION="0.8.5"', parser_build)
+        self.assertIn('REQUIRED_ALOPEX_VERSION = "0.8.5"', parser_manifest)
+
+    def test_release_separates_fresh_parser_assets_from_crate_vendor(self) -> None:
+        release = (ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        baseline_vendor = (
+            "crates/alopex-sql/nim-sql-parser/vendor/"
+            "x86_64-unknown-linux-gnu"
+        )
+
+        self.assertIn(f"NIM_SQL_PARSER_DIR: {baseline_vendor}", release)
+        self.assertIn("Run controlled Nim parser failure", release)
+        self.assertIn("Stage reviewed parser candidate for v0.8 surfaces", release)
+        self.assertIn(
+            "ALOPEX_NIM_CONTROLLED_FAILURE_OUTCOME: "
+            "${{ steps.nim_parser_controlled_failure.outcome }}",
+            release,
+        )
+        self.assertNotIn("pattern: nim-vendor-*", release)
+        self.assertNotIn("Place vendored libraries in clean source staging", release)
+        self.assertNotIn("Upload vendored Nim shared library", release)
+
+    def test_release_rust_toolchain_is_pinned(self) -> None:
+        release = (ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("dtolnay/rust-toolchain@stable", release)
+        self.assertGreaterEqual(release.count("dtolnay/rust-toolchain@1.90.0"), 3)
 
     def test_public_tool_dependencies_are_generated_from_exact_version(self) -> None:
         tools = (ROOT / "crates/alopex-tools/Cargo.toml").read_text(encoding="utf-8")

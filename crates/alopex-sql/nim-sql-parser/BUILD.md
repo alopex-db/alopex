@@ -41,8 +41,8 @@ The library exports `alopex_parse_sql`, `alopex_parse_promql`,
 `alopex_parser_version`, `alopex_parser_init`, and `alopex_free_buffer`.
 The current SQL/PromQL MessagePack contract version is `0.4.0`.
 
-For Skulk v0.5 development, consume the public Alopex v0.8.4 parser envelope
-and its `parser-vendor-manifest-v0.8.4.json`. Select the exact target entry,
+For Skulk v0.5 development, consume the public Alopex v0.8.5 parser envelope
+and its `parser-vendor-manifest-v0.8.5.json`. Select the exact target entry,
 verify the archive and library SHA-256 values, verify `CONTRACT_VERSION=0.4.0`,
 then stage the unchanged library and both sidecars under
 `crates/skulk/nim-parser/vendor/<target-triple>/`. A manually copied library or
@@ -68,5 +68,5 @@ cargo test -p alopex-sql --lib
 CI calls the same build and test scripts. The Skulk resolver must not fall back
 to a source build or an arbitrary host path. Keep Nim ownership in this
 repository and treat the public Alopex parser asset as the single
-cross-repository contract. WASM is outside this v0.8.4 contract and remains
+cross-repository contract. WASM is outside this v0.8.5 contract and remains
 deferred to Alopex v1.0 or later.
