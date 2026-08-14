@@ -1,12 +1,12 @@
 {
   "comparison": {
     "advisory_only": true,
-    "current_commit": "b97fa22df20b31629fe910da8cc9cc89e4a828ad",
+    "current_commit": "9bc4f28b6ad16536d95999a761ae797f13fd4f9b",
     "environment_fingerprint": "679e2850f133fb77",
     "has_regressions": false,
     "metrics": {
       "read_overhead_pct": {
-        "current": 0.44291327549780113,
+        "current": 0.44078875096292175,
         "direction": "lower_is_better",
         "minimum_samples": 5,
         "robust_z_threshold": 3.5,
@@ -15,7 +15,7 @@
         "unit": "%"
       },
       "scan_overhead_ms": {
-        "current": 0.0022505000004002787,
+        "current": 0.0004245999889462837,
         "direction": "lower_is_better",
         "minimum_samples": 5,
         "robust_z_threshold": 3.5,
@@ -24,7 +24,7 @@
         "unit": "ms"
       },
       "write_overhead_pct": {
-        "current": 0.014499284430934296,
+        "current": 0.3645176447761052,
         "direction": "lower_is_better",
         "minimum_samples": 5,
         "robust_z_threshold": 3.5,
@@ -37,10 +37,10 @@
     "notification_ready": false,
     "schema_version": 1,
     "status": "insufficient_history",
-    "workload_signature": "1ec4da38777426b8d73dfab354b76795fd8c08cdcf37e2a113e8d2fb4d8b0a9b"
+    "workload_signature": "4f278ef6c10700e4cb878107f99c2eb944f98f31bbe9ea60a9c88a95ffe8fdf1"
   },
   "record": {
-    "commit": "b97fa22df20b31629fe910da8cc9cc89e4a828ad",
+    "commit": "9bc4f28b6ad16536d95999a761ae797f13fd4f9b",
     "dependencies": {
       "alopex": "0.8.5",
       "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
@@ -74,27 +74,27 @@
       "turbo_policy": "unavailable"
     },
     "lock_hash": "1e77c7f90ceab8dedde95a01f2fc339e73a6459d6ba1284d201308f058486bee",
-    "measured_at": "2026-08-14T16:47:38.427100+00:00",
+    "measured_at": "2026-08-14T18:18:52.076740+00:00",
     "metrics": {
       "read_overhead_pct": {
         "direction": "lower_is_better",
         "unit": "%",
-        "value": 0.44291327549780113
+        "value": 0.44078875096292175
       },
       "scan_overhead_ms": {
         "direction": "lower_is_better",
         "unit": "ms",
-        "value": 0.0022505000004002787
+        "value": 0.0004245999889462837
       },
       "write_overhead_pct": {
         "direction": "lower_is_better",
         "unit": "%",
-        "value": 0.014499284430934296
+        "value": 0.3645176447761052
       }
     },
     "profile": "gha-ubuntu-24.04-x64-single-core-v1",
     "ref": "refs/tags/v0.8.5",
     "schema_version": 1,
-    "workload_signature": "1ec4da38777426b8d73dfab354b76795fd8c08cdcf37e2a113e8d2fb4d8b0a9b"
+    "workload_signature": "4f278ef6c10700e4cb878107f99c2eb944f98f31bbe9ea60a9c88a95ffe8fdf1"
   }
 }
