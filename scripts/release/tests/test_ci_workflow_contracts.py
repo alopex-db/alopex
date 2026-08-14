@@ -108,13 +108,19 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", audit_job)
         self.assertNotIn("RUSTSEC-2026-0194", audit_job)
         self.assertNotIn("RUSTSEC-2026-0195", audit_job)
-        self.assertIn("ignore: RUSTSEC-2026-0235", audit_job)
         tree_guard = audit_job.index(
             "cargo tree --locked --workspace --all-features --target all"
         )
-        audit_step = audit_job.index("uses: rustsec/audit-check@v2")
+        audit_step = audit_job.index("name: Run RustSec audit")
         self.assertLess(tree_guard, audit_step)
         self.assertIn("RUSTSEC-2026-0235 is reachable", audit_job)
+        self.assertIn(
+            "cargo install cargo-audit --version 0.22.2 --locked", audit_job
+        )
+        self.assertIn(
+            "cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0235", audit_job
+        )
+        self.assertNotIn("rustsec/audit-check@", audit_job)
 
     def test_workflows_do_not_clone_an_unpinned_chirps_checkout(self) -> None:
         for workflow_path in WORKFLOW_DIR.glob("*.yml"):

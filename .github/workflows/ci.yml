@@ -278,7 +278,6 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-latest
     permissions:
-      checks: write
       contents: read
     steps:
       - uses: actions/checkout@v4
@@ -293,14 +292,14 @@ jobs:
             echo "::error::RUSTSEC-2026-0235 is reachable; remove the exception and upgrade rkyv"
             exit 1
           fi
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # rust_decimal's `std` feature weakly forwards `rkyv?/std`, so Cargo.lock
-          # contains rkyv 0.7.46 even though no resolved target/feature path uses it.
-          # The preceding full dependency-tree check must fail before this exception
-          # can conceal a reachable RUSTSEC-2026-0235 path. Tracking: #94.
-          ignore: RUSTSEC-2026-0235
+      - name: Install pinned cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Run RustSec audit
+        # rust_decimal's `std` feature weakly forwards `rkyv?/std`, so Cargo.lock
+        # contains rkyv 0.7.46 even though no resolved target/feature path uses it.
+        # The preceding full dependency-tree check must fail before this exception
+        # can conceal a reachable RUSTSEC-2026-0235 path. Tracking: #94.
+        run: cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0235
 
   build:
     name: Build (${{ matrix.os }})
