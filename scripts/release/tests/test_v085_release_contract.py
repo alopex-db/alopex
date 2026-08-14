@@ -48,6 +48,16 @@ class V085ReleaseContractTests(unittest.TestCase):
         self.assertIn("scripts/demo/v074/demo_api_surfaces.py", run)
         self.assertIn("scripts/demo/v074/demo_vector_api.py", run)
 
+    def test_apalache_uses_the_runner_identity(self) -> None:
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        compose = (ROOT / "formal/release-report/compose.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('export APALACHE_UID="$(id -u)"', ci)
+        self.assertIn('export APALACHE_GID="$(id -g)"', ci)
+        self.assertIn('USER_ID: "${APALACHE_UID:-1000}"', compose)
+        self.assertIn('GROUP_ID: "${APALACHE_GID:-1000}"', compose)
+
 
 if __name__ == "__main__":
     unittest.main()
