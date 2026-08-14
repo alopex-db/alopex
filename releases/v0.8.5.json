@@ -1,34 +1,34 @@
 {
   "comparison": {
     "advisory_only": true,
-    "current_commit": "9bc4f28b6ad16536d95999a761ae797f13fd4f9b",
-    "environment_fingerprint": "679e2850f133fb77",
+    "current_commit": "adf2648a4303c94540359444c0a8446b338e5b86",
+    "environment_fingerprint": "2123f174d41bd76f",
     "has_regressions": false,
     "metrics": {
       "read_overhead_pct": {
-        "current": 0.44078875096292175,
+        "current": 0.45120722135870917,
         "direction": "lower_is_better",
         "minimum_samples": 5,
         "robust_z_threshold": 3.5,
-        "sample_count": 0,
+        "sample_count": 1,
         "status": "insufficient_history",
         "unit": "%"
       },
       "scan_overhead_ms": {
-        "current": 0.0004245999889462837,
+        "current": 0.0007200000084139898,
         "direction": "lower_is_better",
         "minimum_samples": 5,
         "robust_z_threshold": 3.5,
-        "sample_count": 0,
+        "sample_count": 1,
         "status": "insufficient_history",
         "unit": "ms"
       },
       "write_overhead_pct": {
-        "current": 0.3645176447761052,
+        "current": 0.3654286642593474,
         "direction": "lower_is_better",
         "minimum_samples": 5,
         "robust_z_threshold": 3.5,
-        "sample_count": 0,
+        "sample_count": 1,
         "status": "insufficient_history",
         "unit": "%"
       }
@@ -40,7 +40,7 @@
     "workload_signature": "4f278ef6c10700e4cb878107f99c2eb944f98f31bbe9ea60a9c88a95ffe8fdf1"
   },
   "record": {
-    "commit": "9bc4f28b6ad16536d95999a761ae797f13fd4f9b",
+    "commit": "adf2648a4303c94540359444c0a8446b338e5b86",
     "dependencies": {
       "alopex": "0.8.5",
       "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
@@ -63,9 +63,9 @@
       "setuptools": "65.5.0"
     },
     "environment": {
-      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "cpu": "AMD EPYC 9V74 80-Core Processor",
       "cpu_governor": "unavailable",
-      "fingerprint": "679e2850f133fb77",
+      "fingerprint": "2123f174d41bd76f",
       "kernel": "6.17.0-1022-azure",
       "machine": "x86_64",
       "profile": "gha-ubuntu-24.04-x64-single-core-v1",
@@ -74,22 +74,22 @@
       "turbo_policy": "unavailable"
     },
     "lock_hash": "1e77c7f90ceab8dedde95a01f2fc339e73a6459d6ba1284d201308f058486bee",
-    "measured_at": "2026-08-14T18:18:52.076740+00:00",
+    "measured_at": "2026-08-14T21:21:26.370517+00:00",
     "metrics": {
       "read_overhead_pct": {
         "direction": "lower_is_better",
         "unit": "%",
-        "value": 0.44078875096292175
+        "value": 0.45120722135870917
       },
       "scan_overhead_ms": {
         "direction": "lower_is_better",
         "unit": "ms",
-        "value": 0.0004245999889462837
+        "value": 0.0007200000084139898
       },
       "write_overhead_pct": {
         "direction": "lower_is_better",
         "unit": "%",
-        "value": 0.3645176447761052
+        "value": 0.3654286642593474
       }
     },
     "profile": "gha-ubuntu-24.04-x64-single-core-v1",
