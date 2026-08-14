@@ -38,9 +38,10 @@ expected/*.json と同一のスキーマ(オーケストレーター決定、全
 5. 実行時間などのメタ情報は比較対象外(rows_affected の count は
    expected スキーマの一部であり比較対象)。
 
-gRPC 経路(``ExecuteSql`` の ``stream Row``)は列名メタデータを持たないため、
-query 結果は他経路の結果または期待値から列名を補完してから正規化する
-(``columns_override`` / ``columns_source``)。
+旧 gRPC 経路(``ExecuteSql`` の ``stream Row``)は列名メタデータを持たないため、
+その版の query 結果は他経路の結果または期待値から列名を補完して正規化する
+(``columns_override`` / ``columns_source``)。現行 ``stream SqlResultSet`` は応答の
+列名をそのまま使う。
 """
 
 from __future__ import annotations

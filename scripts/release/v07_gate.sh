@@ -235,6 +235,8 @@ main() {
     check_release_workflow_contract
     run_step "Release process: historical patch tag safety" \
         bash scripts/release/tests/safe-tag-maintenance.sh
+    run_step "Release demos: gRPC response envelope compatibility" \
+        python -m unittest scripts.parity.runner.test_surfaces
 
     if [[ "${V07_GATE_RUN_V06}" == "1" ]]; then
         run_step "Baseline: v0.6 release gate" \

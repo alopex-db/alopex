@@ -18,7 +18,7 @@ SF-CLUSTER(cluster-aware サーバー・単一メンバーの HTTP 経路、v0.7
     {
         "sql": str,
         "kind": "query" | "success" | "rows_affected" | "error",
-        "columns": [str, ...] | None,   # kind == "query"(gRPC は常に None)
+        "columns": [str, ...] | None,   # kind == "query"
         "rows": [[...], ...] | None,    # kind == "query"(位置ベース)
         "affected_count": int | None,   # kind == "rows_affected"
         "error_message": str | None,    # kind == "error"
@@ -1011,9 +1011,9 @@ class GrpcSurface:
         - 結果集合を返す文(is_query_statement) -> ``ExecuteSql``(stream Row)
         - DML(is_dml_statement)              -> ``ExecuteDml``(affected_rows)
         - それ以外(DDL)                       -> ``ExecuteDdl``(success)
-    - proto の ``Row`` は列名メタデータを持たないため query の columns は
-      常に None とし、正規化時に他経路または期待値の列名で補完する
-      (runner.normalize 参照)。
+    - 現行 proto の ``SqlResultSet`` は列名メタデータと複数の ``Row`` を持つ。
+      旧版 server の ``stream Row`` も公開済み版の検証用に受理し、その場合は
+      columns を None として正規化時に補完する(runner.normalize 参照)。
     """
 
     def __init__(self, target: str, *, proto_path: Path, timeout: float = 60.0) -> None:
@@ -1088,6 +1088,30 @@ class GrpcSurface:
     def _decode_row(self, row: Any) -> List[Any]:
         return [self._decode_value(v) for v in row.values]
 
+    def _decode_query_responses(
+        self, responses: Any
+    ) -> tuple[Optional[List[str]], List[List[Any]]]:
+        """Decode both the current ``stream SqlResultSet`` and legacy
+        ``stream Row`` wire contracts.
+
+        Release verification deliberately generates stubs from the checked-in
+        proto while talking to an already-published server.  Supporting both
+        shapes keeps that harness valid across patch releases that changed the
+        response envelope without weakening value decoding.
+        """
+
+        columns: Optional[List[str]] = None
+        rows: List[List[Any]] = []
+        for response in responses:
+            if hasattr(response, "rows") and hasattr(response, "columns"):
+                response_columns = [column.name for column in response.columns]
+                if columns is None and response_columns:
+                    columns = response_columns
+                rows.extend(self._decode_row(row) for row in response.rows)
+            else:
+                rows.append(self._decode_row(response))
+        return columns, rows
+
     # -- 実行 -----------------------------------------------------------------
 
     def execute(self, sql: str) -> Dict[str, Any]:
@@ -1104,12 +1128,10 @@ class GrpcSurface:
         try:
             if is_query_statement(sql):
                 request = self._pb2.SqlRequest(sql=sql, session_id="")
-                rows = [
-                    self._decode_row(row)
-                    for row in self._stub.ExecuteSql(request, timeout=self.timeout)
-                ]
-                # proto の Row は列名メタデータを持たない(columns=None)
-                return {**base, "kind": "query", "rows": rows}
+                columns, rows = self._decode_query_responses(
+                    self._stub.ExecuteSql(request, timeout=self.timeout)
+                )
+                return {**base, "kind": "query", "columns": columns, "rows": rows}
             if is_dml_statement(sql):
                 request = self._pb2.DmlRequest(sql=sql, session_id="")
                 response = self._stub.ExecuteDml(request, timeout=self.timeout)
