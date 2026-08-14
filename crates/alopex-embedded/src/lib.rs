@@ -503,18 +503,9 @@ impl Database {
     pub fn file_format_version(&self) -> alopex_core::storage::format::FileVersion {
         use alopex_core::storage::format::FileVersion;
 
-        match self.store.as_ref() {
-            AnyKV::Memory(_) => FileVersion::CURRENT,
-            AnyKV::Lsm(kv) => read_file_version_from_storage(&kv.data_dir),
-            #[cfg(feature = "s3")]
-            AnyKV::S3(kv) => read_file_version_from_storage(kv.cache_dir()),
-            // Cargo feature unification can enable `alopex-core/s3` through a
-            // sibling dependency without enabling this crate's `s3` feature.
-            // Keep the match exhaustive in that configuration; the remote
-            // cache version is only part of this crate's explicit S3 surface.
-            #[cfg(not(feature = "s3"))]
-            _ => FileVersion::CURRENT,
-        }
+        self.store
+            .file_format_storage_dir()
+            .map_or(FileVersion::CURRENT, read_file_version_from_storage)
     }
 
     /// Returns current memory usage statistics (in-memory KV only).
