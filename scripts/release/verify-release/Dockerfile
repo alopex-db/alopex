@@ -39,7 +39,7 @@
 #
 # 使い方:
 #   docker build -t alopex-verify-release \
-#     --build-arg ALOPEX_VERSION=0.8.4 \
+#     --build-arg ALOPEX_VERSION=0.8.5 \
 #     -f scripts/release/verify-release/Dockerfile \
 #     scripts/release/verify-release
 #   docker run --rm -it \
@@ -56,7 +56,7 @@
 
 ARG RUST_VERSION=1.96
 ARG NIM_IMAGE=nimlang/nim:2.2@sha256:62428daa4a39baeb6f5e429a9c2ca3cee27a80ef880fe6e1bf3e29cc2296ac1b
-ARG ALOPEX_VERSION=0.8.4
+ARG ALOPEX_VERSION=0.8.5
 
 FROM ${NIM_IMAGE} AS nim-toolchain
 

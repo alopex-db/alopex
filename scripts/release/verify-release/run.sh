@@ -23,7 +23,7 @@
 #   ./scripts/release/verify-release/run.sh --report-only RESULTS.json
 #       [--report-dir DIR]
 #   ./scripts/release/verify-release/run.sh --verify-join candidate.json
-#   例: ./scripts/release/verify-release/run.sh 0.8.4
+#   例: ./scripts/release/verify-release/run.sh 0.8.5
 #
 set -uo pipefail
 
