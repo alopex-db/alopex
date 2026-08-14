@@ -179,6 +179,9 @@ check_release_workflow_contract() {
     require_file_contains "${PROJECT_ROOT}/scripts/release/verify-release/run.sh" \
         'verify_python_vector_api\.py' \
         "public-package demo report includes the installed-wheel Vector/HNSW verification"
+    require_file_contains "${PROJECT_ROOT}/scripts/release/verify-release/requirements.txt" \
+        '^numpy==2\.2\.1' \
+        "public-package Vector/HNSW demo pins its optional NumPy dependency"
     require_file_contains "${PROJECT_ROOT}/crates/alopex-cluster/Cargo.toml" \
         'alopex-chirps-gossip-swim = \{ version = "=0\.5\.1", optional = true \}' \
         "Chirps gossip dependency is pinned to the published crates.io 0.5.1 package"
