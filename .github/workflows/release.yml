@@ -5,6 +5,22 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      repair_forward:
+        description: "Resume registry publication for an immutable release tag"
+        required: false
+        default: false
+        type: boolean
+      release_tag:
+        description: "Existing immutable core release tag"
+        required: false
+        default: ""
+        type: string
+      target_sha:
+        description: "Peeled commit SHA of the immutable release tag"
+        required: false
+        default: ""
+        type: string
 
 env:
   RUST_BACKTRACE: 1
@@ -15,6 +31,7 @@ jobs:
   # Run CI checks before release
   ci-gate:
     name: v0.8 CI Gate (${{ matrix.os }})
+    if: ${{ !inputs.repair_forward }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -138,6 +155,7 @@ jobs:
   build-release:
     name: Build Release (${{ matrix.target }})
     needs: [ci-gate]
+    if: ${{ !inputs.repair_forward }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -244,6 +262,7 @@ jobs:
   create-release:
     name: Create GitHub Release
     needs: build-release
+    if: ${{ !inputs.repair_forward }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -310,10 +329,13 @@ jobs:
   publish-crate:
     name: Publish to crates.io
     needs: [build-release, create-release]
+    if: ${{ always() && (inputs.repair_forward == true || (needs.build-release.result == 'success' && needs.create-release.result == 'success')) }}
     runs-on: ubuntu-latest
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
-      NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
+      RELEASE_TAG_NAME: ${{ inputs.release_tag || github.ref_name }}
+      RELEASE_TARGET_SHA: ${{ inputs.target_sha || github.sha }}
+      REPAIR_FORWARD: ${{ inputs.repair_forward || false }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.90.0
@@ -324,13 +346,20 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --force --tags origin
-          test "$(git describe --tags --exact-match HEAD)" = "${GITHUB_REF_NAME}"
-          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "${GITHUB_SHA}"
+          if [[ "${REPAIR_FORWARD}" == "true" ]]; then
+            [[ "${GITHUB_REF_NAME}" == "repair/v0.8.5-release" ]]
+            [[ "${RELEASE_TAG_NAME}" == "v0.8.5" ]]
+            [[ "${RELEASE_TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          else
+            test "$(git describe --tags --exact-match HEAD)" = "${RELEASE_TAG_NAME}"
+            test "${GITHUB_SHA}" = "${RELEASE_TARGET_SHA}"
+          fi
+          test "$(git rev-parse "${RELEASE_TAG_NAME}^{commit}")" = "${RELEASE_TARGET_SHA}"
           test -z "$(git status --porcelain)"
           stage="${RUNNER_TEMP}/alopex-release-source"
           rm -rf "$stage"
           mkdir -p "$stage"
-          git archive --format=tar "${GITHUB_REF_NAME}^{commit}" | tar -xf - -C "$stage"
+          git archive --format=tar "${RELEASE_TAG_NAME}^{commit}" | tar -xf - -C "$stage"
           test -z "$(git -C "$stage" status --porcelain 2>/dev/null || true)"
           echo "RELEASE_STAGE=$stage" >> "$GITHUB_ENV"
 
@@ -371,7 +400,8 @@ jobs:
             echo "unexpected crates.io status ${status} for ${crate}@${version}" >&2
             exit 1
           fi
-          cargo publish --manifest-path "${RELEASE_STAGE}/Cargo.toml" -p "${crate}"
+          env -u NIM_SQL_PARSER_LIB_DIR cargo publish \
+            --manifest-path "${RELEASE_STAGE}/Cargo.toml" -p "${crate}"
           EOF
           chmod +x publish-crate.sh
 
@@ -419,7 +449,7 @@ jobs:
   dispatch-python-release:
     name: Publish Python and require public demos
     needs: [publish-crate]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.repair_forward }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
