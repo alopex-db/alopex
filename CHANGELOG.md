@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.8.5] — release candidate
+## [0.8.5] — 2026-08-14
 
 ### Fixed
 
@@ -15,6 +15,16 @@ All notable changes to this project will be documented in this file.
   mode.
 - Demo output distinguishes a missing API, a skipped scenario, and a typed
   execution error instead of attributing every exception to the SQL input.
+
+### Security
+
+- Updated the released Chirps dependency family and `object_store`/`quick-xml`
+  chain to remove the reachable RustSec vulnerabilities found by the v0.8.5
+  audit, and made the GitHub Actions audit fail closed.
+- The lockfile-only `rkyv 0.7.46` exception is guarded by an all-features,
+  all-target dependency-tree check. Non-vulnerability soundness and
+  unmaintained warnings remain tracked in issue #95 for coordinated major
+  dependency migrations.
 
 ### Release verification
 
