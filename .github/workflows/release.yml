@@ -264,6 +264,24 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Flatten parser artifact payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          parser_dir="artifacts/parser"
+          test -d "$parser_dir"
+          mapfile -t parser_records < <(find "$parser_dir" -maxdepth 1 -name 'alopex-parser-*.json' -type f | sort)
+          mapfile -t parser_archives < <(find "$parser_dir" -maxdepth 1 -name 'alopex-parser-*.tar.gz' -type f | sort)
+          test "${#parser_records[@]}" -eq 4
+          test "${#parser_archives[@]}" -eq 4
+          for asset in "${parser_records[@]}" "${parser_archives[@]}"; do
+            destination="artifacts/$(basename "$asset")"
+            test ! -e "$destination"
+            mv -- "$asset" "$destination"
+          done
+          test -z "$(find "$parser_dir" -mindepth 1 -print -quit)"
+          rmdir "$parser_dir"
+
       - name: Assemble and verify parser manifest
         shell: bash
         run: |

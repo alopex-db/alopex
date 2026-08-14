@@ -59,6 +59,16 @@ class V085ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("dtolnay/rust-toolchain@stable", release)
         self.assertGreaterEqual(release.count("dtolnay/rust-toolchain@1.90.0"), 3)
 
+    def test_release_flattens_downloaded_parser_payloads_before_assembly(self) -> None:
+        release = (ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Flatten parser artifact payloads", release)
+        self.assertIn('test "${#parser_records[@]}" -eq 4', release)
+        self.assertIn('test "${#parser_archives[@]}" -eq 4', release)
+        self.assertIn('destination="artifacts/$(basename "$asset")"', release)
+        self.assertIn('test ! -e "$destination"', release)
+
     def test_public_tool_dependencies_are_generated_from_exact_version(self) -> None:
         tools = (ROOT / "crates/alopex-tools/Cargo.toml").read_text(encoding="utf-8")
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
