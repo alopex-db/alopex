@@ -5,7 +5,6 @@ mod catalog;
 mod embedded;
 mod error;
 mod types;
-#[cfg(feature = "numpy")]
 mod vector;
 
 #[pymodule]
@@ -101,6 +100,8 @@ mod tests {
                 "search_hnsw",
                 "drop_hnsw_index",
                 "get_hnsw_stats",
+                "execute_sql_stream",
+                "query_stream",
             ] {
                 assert!(database_type.hasattr(method).unwrap(), "Database.{method}");
             }
@@ -116,6 +117,8 @@ mod tests {
                 "get_vector",
                 "upsert_to_hnsw",
                 "delete_from_hnsw",
+                "execute_sql_stream",
+                "query_stream",
             ] {
                 assert!(
                     transaction_type.hasattr(method).unwrap(),

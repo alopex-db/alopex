@@ -1167,7 +1167,7 @@ class GrpcSurface:
     - スタブは grpcio-tools で ``crates/alopex-server/proto/alopex.proto`` から
       実行時に生成する。生成物は tempdir に置き、コミットしない。
     - RPC ルーティングは文種別で行う(サーバーの gRPC サーフェスの定義に従う):
-        - 結果集合を返す文(is_query_statement) -> ``ExecuteSql``(stream Row)
+        - 結果集合を返す文(is_query_statement) -> ``ExecuteSql``
         - DML(is_dml_statement)              -> ``ExecuteDml``(affected_rows)
         - それ以外(DDL)                       -> ``ExecuteDdl``(success)
     - ``ExecuteSql`` は ``stream SqlResultSet``(columns / rows /
@@ -1192,8 +1192,6 @@ class GrpcSurface:
         self._pb2_grpc: Any = None
         self._channel: Any = None
         self._stub: Any = None
-        #: ExecuteSql の契約(True=SqlResultSet / False=Row)。初回に判定して保持。
-        self._result_sets_stream: Optional[bool] = None
 
     # -- スタブ生成 -----------------------------------------------------------
 
@@ -1257,25 +1255,32 @@ class GrpcSurface:
     def _decode_row(self, row: Any) -> List[Any]:
         return [self._decode_value(v) for v in row.values]
 
-    def _streams_result_sets(self) -> bool:
-        """``ExecuteSql`` が ``SqlResultSet`` を流すか(新契約か)を判定する。
-
-        proto ファイルは検証対象のバージョンによって異なる:
-
-        - v0.7.4 以前 : ``rpc ExecuteSql(...) returns (stream Row);``
-        - v0.7.5 以降 : ``rpc ExecuteSql(...) returns (stream SqlResultSet);``
-          (#31「fix(server): return all SQL statement results」)
-
-        ハーネスは両方を検証対象にしうる(リリース確認は過去バージョンの
-        公開物に対しても実行される)ため、生成済みスタブの
-        出力メッセージ型から契約を判定する。proto の文字列を読むのではなく
-        生成物を見るのは、実際に通信する型と乖離させないためである。
-        """
-        if self._result_sets_stream is None:
-            descriptor = self._pb2.DESCRIPTOR.services_by_name["AlopexService"]
-            method = descriptor.methods_by_name["ExecuteSql"]
-            self._result_sets_stream = method.output_type.name == "SqlResultSet"
-        return self._result_sets_stream
+    def _decode_query_responses(
+        self, responses: Any
+    ) -> tuple[Optional[List[str]], List[List[Any]]]:
+        """Decode current ``SqlResultSet`` envelopes and legacy ``Row`` streams."""
+        columns: Optional[List[str]] = None
+        rows: List[List[Any]] = []
+        response_mode: Optional[str] = None
+        for response in responses:
+            if hasattr(response, "rows") and hasattr(response, "columns"):
+                if response_mode is not None:
+                    raise SurfaceError(
+                        "gRPC ExecuteSql が 1 文に対して複数の結果集合を返した"
+                    )
+                response_mode = "result_set"
+                response_columns = [column.name for column in response.columns]
+                if columns is None and response_columns:
+                    columns = response_columns
+                rows.extend(self._decode_row(row) for row in response.rows)
+            else:
+                if response_mode == "result_set":
+                    raise SurfaceError(
+                        "gRPC ExecuteSql が SqlResultSet と Row を混在させた"
+                    )
+                response_mode = "rows"
+                rows.append(self._decode_row(response))
+        return columns, rows
 
     # -- 実行 -----------------------------------------------------------------
 
@@ -1293,23 +1298,10 @@ class GrpcSurface:
         try:
             if is_query_statement(sql):
                 request = self._pb2.SqlRequest(sql=sql, session_id="")
-                messages = list(self._stub.ExecuteSql(request, timeout=self.timeout))
-                if self._streams_result_sets():
-                    # 新契約(v0.7.5 以降): stream SqlResultSet。
-                    # 1 文につき 1 要素で、列名も応答に含まれる。
-                    if len(messages) != 1:
-                        raise SurfaceError(
-                            "gRPC ExecuteSql が 1 文に対して結果集合を"
-                            f" {len(messages)} 個返した: {sql!r}"
-                        )
-                    result_set = messages[0]
-                    columns = [column.name for column in result_set.columns] or None
-                    rows = [self._decode_row(row) for row in result_set.rows]
-                    return {**base, "kind": "query", "columns": columns, "rows": rows}
-                # 旧契約(v0.7.4 以前): stream Row。列名メタデータを持たない
-                # ため columns=None とし、正規化時に他経路・期待値から補完する。
-                rows = [self._decode_row(row) for row in messages]
-                return {**base, "kind": "query", "rows": rows}
+                columns, rows = self._decode_query_responses(
+                    self._stub.ExecuteSql(request, timeout=self.timeout)
+                )
+                return {**base, "kind": "query", "columns": columns, "rows": rows}
             if is_dml_statement(sql):
                 request = self._pb2.DmlRequest(sql=sql, session_id="")
                 response = self._stub.ExecuteDml(request, timeout=self.timeout)

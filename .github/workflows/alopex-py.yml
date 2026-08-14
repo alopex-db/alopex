@@ -50,14 +50,14 @@ jobs:
         run: cargo clippy -p alopex-py --all-targets --all-features
 
   test:
-    name: test ${{ matrix.feature }} py${{ matrix.python }} (${{ matrix.os }})
+    name: test ${{ matrix.numpy_runtime }} py${{ matrix.python }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.11"]
-        feature: ["numpy", "no-numpy"]
+        numpy_runtime: ["with-numpy", "without-numpy"]
     steps:
       - name: Skip non-ubuntu on ACT
         if: ${{ env.ACT && matrix.os != 'ubuntu-latest' }}
@@ -98,7 +98,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install maturin pytest
       - name: Install numpy
-        if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.feature == 'numpy' }}
+        if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.numpy_runtime == 'with-numpy' }}
         run: |
           if [[ -n "${ACT:-}" ]]; then
             python -m pip install numpy
@@ -197,20 +197,7 @@ jobs:
           exit 0
       - name: Maturin develop
         if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
-        run: |
-          if [[ -n "${ACT:-}" ]]; then
-            if [[ "${{ matrix.feature }}" == "numpy" ]]; then
-              maturin develop -m crates/alopex-py/Cargo.toml --features numpy
-            else
-              maturin develop -m crates/alopex-py/Cargo.toml
-            fi
-            exit 0
-          fi
-          if [[ "${{ matrix.feature }}" == "numpy" ]]; then
-            maturin develop -m crates/alopex-py/Cargo.toml --features numpy
-          else
-            maturin develop -m crates/alopex-py/Cargo.toml
-          fi
+        run: maturin develop -m crates/alopex-py/Cargo.toml
       - name: Run pytest
         if: ${{ !env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11') }}
         run: |
@@ -219,8 +206,8 @@ jobs:
             exit 0
           fi
           pytest crates/alopex-py/tests
-      - name: Verify vector APIs are absent
-        if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.feature == 'no-numpy' }}
+      - name: Verify vector APIs remain exported without NumPy installed
+        if: ${{ (!env.ACT || (matrix.os == 'ubuntu-latest' && matrix.python == '3.11')) && matrix.numpy_runtime == 'without-numpy' }}
         run: |
           python - <<'PY'
           from alopex import Database, Transaction
@@ -239,9 +226,9 @@ jobs:
           ]
 
           for name in txn_missing:
-              assert not hasattr(Transaction, name), f"{name} should be absent"
+              assert hasattr(Transaction, name), f"{name} should remain exported"
           for name in db_missing:
-              assert not hasattr(Database, name), f"{name} should be absent"
+              assert hasattr(Database, name), f"{name} should remain exported"
           PY
 
   polars-test:
@@ -407,9 +394,9 @@ jobs:
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
         run: bash scripts/build-nim-parser.sh --backend docker
-      - name: Maturin develop (numpy)
+      - name: Maturin develop
         run: |
-          maturin develop -m crates/alopex-py/Cargo.toml --features numpy
+          maturin develop -m crates/alopex-py/Cargo.toml
       - name: Run benchmarks
         run: |
           pytest crates/alopex-py/tests/benchmarks/ -v --benchmark-only --benchmark-json=benchmark.json -m "not large"

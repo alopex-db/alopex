@@ -442,9 +442,7 @@ fn demo_rust_native() -> Result<(), String> {
     }
 
     println!(
-        "  注記: Python の同等 API は issue #82 のため公開 wheel に含まれず\n\
-                 実行できない(#[cfg(feature = \"numpy\")] 配下 + リリースビルドが\n\
-                 --features numpy を渡していない)。Rust の公開クレートには含まれる。"
+        "  注記: v0.8.5 以降は Python の公開 wheel でも同等の Vector/HNSW API を提供する。"
     );
     Ok(())
 }

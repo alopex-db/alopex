@@ -1,0 +1,8 @@
+services:
+  apalache:
+    image: ghcr.io/apalache-mc/apalache@sha256:fde994fd109323934b9abb7ad169de37b29acf2141483367f2913cae30ff3795
+    working_dir: /var/apalache
+    volumes:
+      - type: bind
+        source: .
+        target: /var/apalache

@@ -240,25 +240,32 @@ impl HnswGraph {
 
         let candidates = self.search_layer(query, enter_point, 0, ef, Some(&mut stats));
 
-        let mut results: Vec<HnswSearchResult> = candidates
+        let mut scored_results: Vec<(f32, HnswSearchResult)> = candidates
             .into_iter()
             .filter_map(|c| self.node(c.node_id).map(|n| (c, n)))
             .filter(|(_, n)| !n.deleted)
-            .map(|(c, n)| HnswSearchResult {
-                key: n.key.clone(),
-                distance: c.score,
-                metadata: n.metadata.clone(),
+            .map(|(c, n)| {
+                (
+                    c.score,
+                    HnswSearchResult {
+                        key: n.key.clone(),
+                        distance: self.public_distance(c.score),
+                        metadata: n.metadata.clone(),
+                    },
+                )
             })
             .collect();
 
-        results.sort_by(|a, b| {
-            b.distance
-                .total_cmp(&a.distance)
-                .then_with(|| a.key.cmp(&b.key))
+        scored_results.sort_by(|(a_score, a), (b_score, b)| {
+            b_score.total_cmp(a_score).then_with(|| a.key.cmp(&b.key))
         });
-        if results.len() > k {
-            results.truncate(k);
+        if scored_results.len() > k {
+            scored_results.truncate(k);
         }
+        let results = scored_results
+            .into_iter()
+            .map(|(_, result)| result)
+            .collect();
 
         Ok((results, stats))
     }
@@ -635,6 +642,14 @@ impl HnswGraph {
             Metric::Cosine => self.kernel.cosine(a, b),
             Metric::L2 => self.kernel.l2(a, b),
             Metric::InnerProduct => self.kernel.inner_product(a, b),
+        }
+    }
+
+    /// Convert the internal higher-is-better score into the public distance contract.
+    fn public_distance(&self, score: f32) -> f32 {
+        match self.config.metric {
+            Metric::Cosine => 1.0 - score,
+            Metric::L2 | Metric::InnerProduct => -score,
         }
     }
 }

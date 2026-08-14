@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from .surfaces import GrpcSurface, product_env
+from .surfaces import GrpcSurface, SurfaceError, product_env
 
 
 class _Value:
@@ -54,6 +54,15 @@ class GrpcQueryResponseDecodingTests(unittest.TestCase):
 
         self.assertIsNone(columns)
         self.assertEqual(rows, [[1], [2]])
+
+    def test_rejects_multiple_result_sets_for_one_statement(self) -> None:
+        response = SimpleNamespace(
+            columns=[SimpleNamespace(name="id")],
+            rows=[_row(1)],
+        )
+
+        with self.assertRaisesRegex(SurfaceError, "1 文"):
+            self.surface._decode_query_responses([response, response])
 
 
 if __name__ == "__main__":

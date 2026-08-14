@@ -46,13 +46,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.4-repair') && 'alopex-py-v0.8.4') || github.ref }}
-      - name: Checkout Chirps dependency
-        run: .github/scripts/checkout-chirps.sh
-      - name: Stage exact Alopex v0.8.4 parser assets
+          ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref }}
+      - name: Stage exact Alopex v0.8.5 parser assets
         env:
           GH_TOKEN: ${{ github.token }}
-          CORE_TAG: v0.8.4
+          CORE_TAG: v0.8.5
           TARGET_TRIPLE: x86_64-unknown-linux-gnu
         run: |
           set -euo pipefail
@@ -60,9 +58,9 @@ jobs:
           mkdir -p .core-parser-assets
           for attempt in $(seq 1 30); do
             if gh release download "$CORE_TAG" --repo alopex-db/alopex \
-              --pattern 'parser-assets-v0.8.4.json' \
-              --pattern 'parser-vendor-manifest-v0.8.4.json' \
-              --pattern 'alopex-parser-v0.8.4-contract-0.4.0-*.tar.gz' \
+              --pattern 'parser-assets-v0.8.5.json' \
+              --pattern 'parser-vendor-manifest-v0.8.5.json' \
+              --pattern 'alopex-parser-v0.8.5-contract-0.4.0-*.tar.gz' \
               --dir .core-parser-assets --clobber; then
               break
             fi
@@ -71,15 +69,15 @@ jobs:
             sleep 20
           done
           python scripts/release/parser_asset_manifest.py verify-manifest \
-            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.4.json \
+            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
             --asset-dir .core-parser-assets
           python - <<'PY'
           import hashlib, json, tarfile
           from pathlib import Path
           root = Path('.core-parser-assets')
-          envelope = json.loads((root / 'parser-assets-v0.8.4.json').read_text())
-          assert envelope['source']['tag'] == 'v0.8.4'
-          manifest = json.loads((root / 'parser-vendor-manifest-v0.8.4.json').read_text())
+          envelope = json.loads((root / 'parser-assets-v0.8.5.json').read_text())
+          assert envelope['source']['tag'] == 'v0.8.5'
+          manifest = json.loads((root / 'parser-vendor-manifest-v0.8.5.json').read_text())
           asset = next(item for item in manifest['assets'] if item['target'] == 'x86_64-unknown-linux-gnu')
           archive = root / asset['archive']['filename']
           with tarfile.open(archive, 'r:gz') as handle:
@@ -112,9 +110,6 @@ jobs:
           before-script-linux: |
             set -euxo pipefail
             REPO_ROOT="$PWD"
-            CHIRPS_DIR="$(dirname "$(dirname "${REPO_ROOT}")")/chirps"
-            rm -rf "${CHIRPS_DIR}"
-            git clone --depth 1 https://github.com/alopex-db/alopex-chirps.git "${CHIRPS_DIR}"
             cd "${REPO_ROOT}"
       - name: Inspect Linux wheel contents
         shell: bash
@@ -123,7 +118,7 @@ jobs:
           library_sha="$(python - <<'PY'
           import json
           from pathlib import Path
-          manifest = json.loads(Path('.core-parser-assets/parser-vendor-manifest-v0.8.4.json').read_text())
+          manifest = json.loads(Path('.core-parser-assets/parser-vendor-manifest-v0.8.5.json').read_text())
           print(next(a['library']['sha256'] for a in manifest['assets'] if a['target'] == 'x86_64-unknown-linux-gnu'))
           PY
           )"
@@ -132,6 +127,15 @@ jobs:
               --expected-library-path alopex/native/libalopex_sql_parser.so \
               --expected-library-sha256 "$library_sha" --expected-contract-version 0.4.0
           done
+      - name: Exercise Linux wheel vector and streaming APIs
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_venv="${RUNNER_TEMP}/alopex-wheel-api-smoke"
+          python -m venv "${smoke_venv}"
+          "${smoke_venv}/bin/python" -m pip install numpy==2.2.1
+          "${smoke_venv}/bin/python" -m pip install --no-index --no-deps dist/*.whl
+          "${smoke_venv}/bin/python" scripts/release/verify_python_vector_api.py
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -157,10 +161,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.4-repair') && 'alopex-py-v0.8.4') || github.ref }}
-      - name: Checkout Chirps dependency
-        run: .github/scripts/checkout-chirps.sh
-      - name: Stage exact Alopex v0.8.4 parser assets
+          ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref }}
+      - name: Stage exact Alopex v0.8.5 parser assets
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET_TRIPLE: ${{ matrix.target_triple }}
@@ -168,10 +170,10 @@ jobs:
           set -euo pipefail
           rm -rf .core-parser-assets && mkdir -p .core-parser-assets
           for attempt in $(seq 1 30); do
-            if gh release download v0.8.4 --repo alopex-db/alopex \
-              --pattern 'parser-assets-v0.8.4.json' \
-              --pattern 'parser-vendor-manifest-v0.8.4.json' \
-              --pattern 'alopex-parser-v0.8.4-contract-0.4.0-*.tar.gz' \
+            if gh release download v0.8.5 --repo alopex-db/alopex \
+              --pattern 'parser-assets-v0.8.5.json' \
+              --pattern 'parser-vendor-manifest-v0.8.5.json' \
+              --pattern 'alopex-parser-v0.8.5-contract-0.4.0-*.tar.gz' \
               --dir .core-parser-assets --clobber; then
               break
             fi
@@ -180,15 +182,15 @@ jobs:
             sleep 20
           done
           python scripts/release/parser_asset_manifest.py verify-manifest \
-            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.4.json \
+            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
             --asset-dir .core-parser-assets
           TARGET_TRIPLE="$TARGET_TRIPLE" python - <<'PY'
           import hashlib, json, os, tarfile
           from pathlib import Path
           root = Path('.core-parser-assets')
-          envelope = json.loads((root / 'parser-assets-v0.8.4.json').read_text())
-          assert envelope['source']['tag'] == 'v0.8.4'
-          manifest = json.loads((root / 'parser-vendor-manifest-v0.8.4.json').read_text())
+          envelope = json.loads((root / 'parser-assets-v0.8.5.json').read_text())
+          assert envelope['source']['tag'] == 'v0.8.5'
+          manifest = json.loads((root / 'parser-vendor-manifest-v0.8.5.json').read_text())
           target = os.environ['TARGET_TRIPLE']
           asset = next(item for item in manifest['assets'] if item['target'] == target)
           with tarfile.open(root / asset['archive']['filename'], 'r:gz') as handle:
@@ -220,7 +222,7 @@ jobs:
           library_sha="$(TARGET_TRIPLE="${{ matrix.target_triple }}" python - <<'PY'
           import json, os
           from pathlib import Path
-          manifest = json.loads(Path('.core-parser-assets/parser-vendor-manifest-v0.8.4.json').read_text())
+          manifest = json.loads(Path('.core-parser-assets/parser-vendor-manifest-v0.8.5.json').read_text())
           print(next(a['library']['sha256'] for a in manifest['assets'] if a['target'] == os.environ['TARGET_TRIPLE']))
           PY
           )"
@@ -229,6 +231,15 @@ jobs:
               --expected-library-path alopex/native/libalopex_sql_parser.dylib \
               --expected-library-sha256 "$library_sha" --expected-contract-version 0.4.0
           done
+      - name: Exercise macOS wheel vector and streaming APIs
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_venv="${RUNNER_TEMP}/alopex-wheel-api-smoke"
+          python -m venv "${smoke_venv}"
+          "${smoke_venv}/bin/python" -m pip install numpy==2.2.1
+          "${smoke_venv}/bin/python" -m pip install --no-index --no-deps dist/*.whl
+          "${smoke_venv}/bin/python" scripts/release/verify_python_vector_api.py
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -242,20 +253,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.4-repair') && 'alopex-py-v0.8.4') || github.ref }}
-      - name: Checkout Chirps dependency
-        run: .github/scripts/checkout-chirps.sh
-      - name: Stage exact Alopex v0.8.4 parser assets
+          ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref }}
+      - name: Stage exact Alopex v0.8.5 parser assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           rm -rf .core-parser-assets && mkdir -p .core-parser-assets
           for attempt in $(seq 1 30); do
-            if gh release download v0.8.4 --repo alopex-db/alopex \
-              --pattern 'parser-assets-v0.8.4.json' \
-              --pattern 'parser-vendor-manifest-v0.8.4.json' \
-              --pattern 'alopex-parser-v0.8.4-contract-0.4.0-*.tar.gz' \
+            if gh release download v0.8.5 --repo alopex-db/alopex \
+              --pattern 'parser-assets-v0.8.5.json' \
+              --pattern 'parser-vendor-manifest-v0.8.5.json' \
+              --pattern 'alopex-parser-v0.8.5-contract-0.4.0-*.tar.gz' \
               --dir .core-parser-assets --clobber; then
               break
             fi
@@ -264,15 +273,15 @@ jobs:
             sleep 20
           done
           python scripts/release/parser_asset_manifest.py verify-manifest \
-            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.4.json \
+            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
             --asset-dir .core-parser-assets
           python - <<'PY'
           import hashlib, json, tarfile
           from pathlib import Path
           root = Path('.core-parser-assets')
-          envelope = json.loads((root / 'parser-assets-v0.8.4.json').read_text())
-          assert envelope['source']['tag'] == 'v0.8.4'
-          manifest = json.loads((root / 'parser-vendor-manifest-v0.8.4.json').read_text())
+          envelope = json.loads((root / 'parser-assets-v0.8.5.json').read_text())
+          assert envelope['source']['tag'] == 'v0.8.5'
+          manifest = json.loads((root / 'parser-vendor-manifest-v0.8.5.json').read_text())
           target = 'x86_64-pc-windows-msvc'
           asset = next(item for item in manifest['assets'] if item['target'] == target)
           with tarfile.open(root / asset['archive']['filename'], 'r:gz') as handle:
@@ -304,14 +313,14 @@ jobs:
           library_sha="$(python - <<'PY'
           import json
           from pathlib import Path
-          manifest = json.loads(Path('.core-parser-assets/parser-vendor-manifest-v0.8.4.json').read_text())
+          manifest = json.loads(Path('.core-parser-assets/parser-vendor-manifest-v0.8.5.json').read_text())
           print(next(a['library']['sha256'] for a in manifest['assets'] if a['target'] == 'x86_64-pc-windows-msvc'))
           PY
           )"
           python scripts/release/verify_wheel_contents.py "$wheel" --require-nim-dll \
             --expected-library-sha256 "$library_sha" --expected-contract-version 0.4.0 \
             --expected-loader-path alopex/native/alopex_sql_parser.dll
-      - name: Import Windows wheel without external DLL overrides
+      - name: Exercise Windows wheel APIs without external DLL overrides
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -319,10 +328,11 @@ jobs:
           if (Test-Path $venv) { Remove-Item -Recurse -Force $venv }
           python -m venv $venv
           $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
+          & "$venv\Scripts\python.exe" -m pip install numpy==2.2.1
           & "$venv\Scripts\python.exe" -m pip install --no-index --no-deps $wheel
           Push-Location $env:RUNNER_TEMP
           try {
-            & "$venv\Scripts\python.exe" -c "from alopex import Database; print('clean wheel import OK')"
+            & "$venv\Scripts\python.exe" "$env:GITHUB_WORKSPACE\scripts\release\verify_python_vector_api.py"
           } finally {
             Pop-Location
           }
@@ -339,9 +349,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.4-repair') && 'alopex-py-v0.8.4') || github.ref }}
-      - name: Checkout Chirps dependency
-        run: .github/scripts/checkout-chirps.sh
+          ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref }}
       - name: Remove native parser vendor files from sdist staging
         run: |
           set -euo pipefail
@@ -449,7 +457,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.4-repair') && 'alopex-py-v0.8.4') || github.ref_name }}
+          tag_name: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref_name }}
           files: dist/**/*
 
   final-release-join:
@@ -473,11 +481,11 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           PYTHON_RUN_ID: ${{ github.run_id }}
           PYTHON_HEAD_SHA: ${{ inputs.target_sha || github.sha }}
-          PYTHON_TAG_NAME: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.4-repair') && 'alopex-py-v0.8.4') || github.ref_name }}
+          PYTHON_TAG_NAME: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref_name }}
         run: |
           set -euo pipefail
-          core_tag_sha="$(gh api "repos/${REPOSITORY}/git/ref/tags/v0.8.4" | jq -r '.object.sha')"
-          core_tag_type="$(gh api "repos/${REPOSITORY}/git/ref/tags/v0.8.4" | jq -r '.object.type')"
+          core_tag_sha="$(gh api "repos/${REPOSITORY}/git/ref/tags/v0.8.5" | jq -r '.object.sha')"
+          core_tag_type="$(gh api "repos/${REPOSITORY}/git/ref/tags/v0.8.5" | jq -r '.object.type')"
           if [[ "${core_tag_type}" == "tag" ]]; then
             core_tag_sha="$(gh api "repos/${REPOSITORY}/git/tags/${core_tag_sha}" | jq -r '.object.sha')"
           fi
@@ -486,7 +494,7 @@ jobs:
           if [[ "${python_tag_type}" == "tag" ]]; then
             python_tag_sha="$(gh api "repos/${REPOSITORY}/git/tags/${python_tag_sha}" | jq -r '.object.sha')"
           fi
-          if [[ "${GITHUB_REF_NAME}" == alopex-py-v0.8.4-repair* ]]; then
+          if [[ "${GITHUB_REF_NAME}" == alopex-py-v0.8.5-repair* ]]; then
             PYTHON_HEAD_SHA="${python_tag_sha}"
             printf 'PYTHON_HEAD_SHA=%s\n' "${PYTHON_HEAD_SHA}" >> "${GITHUB_ENV}"
           fi
@@ -510,12 +518,12 @@ jobs:
           same_sha = [r for r in successful if r.get("headSha") == core_sha]
           if len(same_sha) == 1:
               match = same_sha[0]
-          elif ref_name.startswith("alopex-py-v0.8.4-repair"):
+          elif ref_name.startswith("alopex-py-v0.8.5-repair"):
               repaired = [r for r in successful
-                          if r.get("headBranch") == "repair/v0.8.4-release"]
+                          if r.get("headBranch") == "repair/v0.8.5-release"]
               if len(repaired) != 1:
                   raise SystemExit(
-                      "expected exactly one successful v0.8.4 repair core run, "
+                      "expected exactly one successful v0.8.5 repair core run, "
                       f"found {len(repaired)}"
                   )
               match = repaired[0]
@@ -537,15 +545,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p join-assets
-          gh release download v0.8.4 --repo "${REPOSITORY}" \
-            --pattern 'parser-assets-v0.8.4.json' \
-            --pattern 'parser-vendor-manifest-v0.8.4.json' \
+          gh release download v0.8.5 --repo "${REPOSITORY}" \
+            --pattern 'parser-assets-v0.8.5.json' \
+            --pattern 'parser-vendor-manifest-v0.8.5.json' \
             --dir join-assets --clobber
 
       - name: Build and verify the public same-SHA join
         env:
           REPOSITORY: ${{ github.repository }}
-          VERSION: "0.8.4"
+          VERSION: "0.8.5"
         run: |
           set -euo pipefail
           python3 - "${CORE_TAG_SHA}" "${CORE_RUN_ID}" "${CORE_RUN_HEAD_SHA}" \
@@ -557,8 +565,8 @@ jobs:
 
           core_sha, core_run, core_run_head, python_run, python_head, asset_dir, repository, version = sys.argv[1:]
           root = pathlib.Path(asset_dir)
-          envelope = json.loads((root / "parser-assets-v0.8.4.json").read_text())
-          manifest = json.loads((root / "parser-vendor-manifest-v0.8.4.json").read_text())
+          envelope = json.loads((root / "parser-assets-v0.8.5.json").read_text())
+          manifest = json.loads((root / "parser-vendor-manifest-v0.8.5.json").read_text())
           def get_json(url):
               with urllib.request.urlopen(url) as response:
                   return json.load(response)
@@ -599,10 +607,21 @@ jobs:
               "tag": {"name": f"v{version}", "peeled_sha": core_sha},
               "core": {"status": "success", "published": True, "run_id": core_run, "head_sha": core_run_head, "source_sha": core_sha, "peeled_sha": core_sha, "registry": "crates.io", "crates": crates},
               "python": {"status": "success", "published": True, "run_id": python_run, "head_sha": python_head, "peeled_sha": core_sha, "registry": "pypi", "distributions": distributions},
-              "parser": {"contract": manifest["contract_version"], "manifest_sha256": digest(__import__("hashlib").sha256((root / "parser-vendor-manifest-v0.8.4.json").read_bytes()).hexdigest()), "envelope_sha256": digest(__import__("hashlib").sha256((root / "parser-assets-v0.8.4.json").read_bytes()).hexdigest()), "assets": assets},
+              "parser": {"contract": manifest["contract_version"], "manifest_sha256": digest(__import__("hashlib").sha256((root / "parser-vendor-manifest-v0.8.5.json").read_bytes()).hexdigest()), "envelope_sha256": digest(__import__("hashlib").sha256((root / "parser-assets-v0.8.5.json").read_bytes()).hexdigest()), "assets": assets},
               "publication_order": {"core_before_python": True},
               "repair_forward": {"complete": True},
           }
           (root / "release-join.json").write_text(json.dumps(candidate, sort_keys=True))
           PY
           bash scripts/release/verify-release/run.sh --verify-join join-assets/release-join.json
+
+  verify-public-release:
+    name: Verify demos and publish docs report
+    needs: [final-release-join]
+    permissions:
+      contents: write
+      issues: write
+    uses: ./.github/workflows/public-release-verification.yml
+    with:
+      version: ${{ inputs.release_tag || github.ref_name }}
+      publish_report: true

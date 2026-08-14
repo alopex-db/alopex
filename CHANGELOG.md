@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.5] — release candidate
+
+### Fixed
+
+- Python wheels expose and execute the vector, HNSW, synchronous SQL-stream,
+  and local-scan stream APIs without a release-only Cargo feature switch.
+- `HnswSearchResult.distance` now follows one lower-is-closer public contract:
+  Euclidean L2 distance, cosine distance, or negated inner product.
+- Public-package parity accepts both the current `SqlResultSet` envelope and
+  the legacy row stream, and removes inherited parser loader paths in released
+  mode.
+- Demo output distinguishes a missing API, a skipped scenario, and a typed
+  execution error instead of attributing every exception to the SQL input.
+
+### Release verification
+
+- v0.8 SQL, Python streaming, Vector/HNSW, five-surface, and Rust embedded
+  demos are mandatory after publication. The release remains incomplete until
+  the successful report is present byte-for-byte on `alopex-db/docs@main`.
+- Verification writes reusable JSON evidence and a reviewable Markdown report.
+  Failed scheduled runs retain both as Actions artifacts and notify through an
+  issue, but do not automatically publish a public guarantee.
+- A weekly workflow exercises the latest PyPI/crates.io release, and release
+  contract tests prevent target-version, demo-list, or dependency-wiring drift.
+
 ## [0.8.4] — release candidate
 
 This entry records the reviewed release intent and compatibility contract. It

@@ -26,6 +26,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "v07"))
 
 from _v07 import (  # noqa: E402
@@ -160,78 +162,25 @@ def scene1_python_sql(alopex: Any) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# 場 2: Python のネイティブベクトル API
-#
-# ---------------------------------------------------------------------------
-# 本場は issue #82 の対応後に有効化する。
-# https://github.com/alopex-db/alopex/issues/82
-#
-# 公開 wheel (PyPI v0.8.4) には以下のネイティブベクトル API が 1 つも
-# 含まれていないため、現状このデモを実行すると AttributeError で落ちる。
-#
-#   Database.create_hnsw_index / search_hnsw / drop_hnsw_index / get_hnsw_stats
-#   Transaction.upsert_vector / search_similar / get_vector
-#                / upsert_to_hnsw / delete_from_hnsw
-#
-# 原因: これらは crates/alopex-py で #[cfg(feature = "numpy")] 配下にあり、
-# Cargo.toml が default = [] であるうえ、alopex-py-release.yml の wheel
-# ビルドが --features numpy を渡していない。したがって公開物では常に
-# 欠落する。SQL 経由のベクトル演算(場 1)は影響を受けない。
-#
-# #82 の対応後、以下のコメントを解除する(API 名・シグネチャは
-# crates/alopex-py/python/alopex/_alopex.pyi:491,492,538,545 に準拠)。
-#
-# def scene2_python_native(alopex: Any) -> None:
-#     banner(2, "Python 組み込み API — ネイティブベクトル API")
-#
-#     show_call("alopex.Database.new()")
-#     db = alopex.Database.new()
-#
-#     show_call("db.begin(alopex.TxnMode.READ_WRITE)")
-#     tx = db.begin(alopex.TxnMode.READ_WRITE)
-#
-#     show_call(
-#         "tx.upsert_vector(key=b'doc-1', metadata=None,"
-#         " vector=[1.0, 0.0, 0.0], metric=alopex.Metric.L2)"
-#     )
-#     tx.upsert_vector(b"doc-1", None, [1.0, 0.0, 0.0], alopex.Metric.L2)
-#
-#     show_call(
-#         "tx.search_similar(query=[1.0, 0.0, 0.0],"
-#         " metric=alopex.Metric.L2, k=3)"
-#     )
-#     show_rows(tx.search_similar([1.0, 0.0, 0.0], alopex.Metric.L2, 3))
-#
-#     show_call("tx.commit()")
-#     tx.commit()
-#
-#     # HnswConfig の実シグネチャは位置引数 (dim, m, ef_construction) である。
-#     # .pyi スタブは dimension= と記載しており実体と乖離している (issue #82)。
-#     show_call(
-#         "db.create_hnsw_index('idx_docs_embedding',"
-#         " alopex.HnswConfig(3, 8, 32))"
-#     )
-#     db.create_hnsw_index("idx_docs_embedding", alopex.HnswConfig(3, 8, 32))
-#
-#     show_call(
-#         "db.search_hnsw('idx_docs_embedding',"
-#         " query=[1.0, 0.0, 0.0], k=3, ef_search=None)"
-#     )
-#     results, stats = db.search_hnsw("idx_docs_embedding", [1.0, 0.0, 0.0], 3)
-#     show_rows(results)
-#     print(f"       stats: {stats}")
-# ---------------------------------------------------------------------------
-
-
 #: 場 2 が必要とするネイティブベクトル API。
 #: (Database 側 / Transaction 側)
-DATABASE_VECTOR_METHODS = ("create_hnsw_index", "search_hnsw")
-TRANSACTION_VECTOR_METHODS = ("upsert_vector", "search_similar")
+DATABASE_VECTOR_METHODS = (
+    "create_hnsw_index",
+    "search_hnsw",
+    "drop_hnsw_index",
+    "get_hnsw_stats",
+)
+TRANSACTION_VECTOR_METHODS = (
+    "upsert_vector",
+    "search_similar",
+    "get_vector",
+    "upsert_to_hnsw",
+    "delete_from_hnsw",
+)
 
 
-def scene2_blocked(alopex: Any) -> None:
-    """ネイティブベクトル API の実在を確認し、無ければ SKIP を明示する。
+def scene2_python_native(alopex: Any) -> bool:
+    """API 不在は SKIP、存在時はネイティブベクトル API を実行する。
 
     ハードコードで SKIP を出すと、issue #82 が解消された後もデモが
     「実行できない」と表示し続け、事実と乖離する。実際に API の有無を
@@ -239,38 +188,66 @@ def scene2_blocked(alopex: Any) -> None:
     """
     banner(2, "Python 組み込み API — ネイティブベクトル API")
 
-    db = alopex.Database.new()
-    txn = db.begin()
-    missing = [f"Database.{m}" for m in DATABASE_VECTOR_METHODS if not hasattr(db, m)]
+    missing = [
+        f"Database.{m}" for m in DATABASE_VECTOR_METHODS
+        if not hasattr(alopex.Database, m)
+    ]
     missing += [
-        f"Transaction.{m}" for m in TRANSACTION_VECTOR_METHODS if not hasattr(txn, m)
+        f"Transaction.{m}" for m in TRANSACTION_VECTOR_METHODS
+        if not hasattr(alopex.Transaction, m)
     ]
 
-    if not missing:
-        # #82 解消後にここへ到達する。実装はコメントアウトしてあるため、
-        # 誤って「成功」と表示しないよう、明示的に未実装として報告する。
+    if missing:
         note(
-            "ネイティブベクトル API が公開 wheel に存在する"
-            "(issue #82 が解消された)。本場の実装コメントを解除すること。"
+            "公開 wheel にネイティブベクトル API が存在しないため実行できない"
+            " (issue #82)。https://github.com/alopex-db/alopex/issues/82"
         )
-        print("  SKIP (デモ未実装。成功数には数えない)")
-        return
+        print("  公開 wheel に存在しないメソッド:")
+        for name in missing:
+            print(f"    - {name}")
+        print("  SKIP (未実行。成功数には数えない)")
+        return False
 
-    note(
-        "本場は issue #82 の対応後に有効化する"
-        " (https://github.com/alopex-db/alopex/issues/82)。"
-    )
-    print("  公開 wheel に存在しないメソッド:")
-    for name in missing:
-        print(f"    - {name}")
-    print(
-        "  原因: これらは #[cfg(feature = \"numpy\")] 配下にあり、リリース\n"
-        "  ビルドが --features numpy を渡していない。なお HnswConfig /\n"
-        "  Metric / SearchResult などの型は公開されており構築できるため、\n"
-        "  「型はあるが渡す先が無い」状態である。SQL 経由のベクトル検索\n"
-        "  (場 1)は影響を受けず動作する。"
-    )
-    print("  SKIP (未実行。成功数には数えない)")
+    db = alopex.Database.new()
+    try:
+        show_call("db.create_hnsw_index('idx_docs_embedding', alopex.HnswConfig(3))")
+        db.create_hnsw_index("idx_docs_embedding", alopex.HnswConfig(3))
+
+        show_call("db.begin(alopex.TxnMode.READ_WRITE)")
+        tx = db.begin(alopex.TxnMode.READ_WRITE)
+        query = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        quarter = np.array([0.75, 0.0, 0.0], dtype=np.float32)
+
+        show_call("tx.upsert_vector(b'flat-quarter', None, quarter, alopex.Metric.L2)")
+        tx.upsert_vector(b"flat-quarter", None, quarter, alopex.Metric.L2)
+        show_call("tx.search_similar(query, alopex.Metric.L2, 1)")
+        show_rows(tx.search_similar(query, alopex.Metric.L2, 1))
+        show_call("tx.get_vector(b'flat-quarter', alopex.Metric.L2)")
+        print(f"       {tx.get_vector(b'flat-quarter', alopex.Metric.L2).tolist()}")
+
+        show_call("tx.upsert_to_hnsw('idx_docs_embedding', b'point', query)")
+        tx.upsert_to_hnsw("idx_docs_embedding", b"point", query)
+        show_call("tx.upsert_to_hnsw('idx_docs_embedding', b'quarter', quarter)")
+        tx.upsert_to_hnsw("idx_docs_embedding", b"quarter", quarter)
+        show_call("tx.commit()")
+        tx.commit()
+
+        show_call("db.search_hnsw('idx_docs_embedding', query, 2)")
+        results, stats = db.search_hnsw("idx_docs_embedding", query, 2)
+        show_rows(results)
+        print(f"       node_count={stats.node_count}")
+        show_call("db.get_hnsw_stats('idx_docs_embedding')")
+        print(f"       node_count={db.get_hnsw_stats('idx_docs_embedding').node_count}")
+
+        tx = db.begin(alopex.TxnMode.READ_WRITE)
+        show_call("tx.delete_from_hnsw('idx_docs_embedding', b'quarter')")
+        tx.delete_from_hnsw("idx_docs_embedding", b"quarter")
+        tx.commit()
+        show_call("db.drop_hnsw_index('idx_docs_embedding')")
+        db.drop_hnsw_index("idx_docs_embedding")
+        return True
+    finally:
+        db.close()
 
 
 def main() -> int:
@@ -279,14 +256,14 @@ def main() -> int:
     try:
         alopex = ensure_alopex_importable(repo)
         scene1_python_sql(alopex)
-        scene2_blocked(alopex)
+        native_executed = scene2_python_native(alopex)
     except EnvError as exc:
         print(f"\n環境エラー: {exc}", file=sys.stderr)
         return EXIT_ENV
 
     print()
     print("=" * 72)
-    print("デモ完了: 場 1 実行 / 場 2 SKIP (issue #82 待ち)")
+    print(f"デモ完了: 場 1 実行 / 場 2 {'実行' if native_executed else 'SKIP'}")
     print("=" * 72)
     return EXIT_OK
 

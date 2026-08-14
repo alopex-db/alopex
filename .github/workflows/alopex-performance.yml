@@ -77,7 +77,7 @@ jobs:
 
       - name: Build release-mode Python extension
         id: build_extension
-        run: maturin develop --release -m crates/alopex-py/Cargo.toml --features numpy
+        run: maturin develop --release -m crates/alopex-py/Cargo.toml
 
       - name: Read canonical comparison history
         id: history

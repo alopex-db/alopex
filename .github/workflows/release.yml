@@ -30,8 +30,6 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force || true
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -130,8 +128,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -234,8 +230,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
 
       - name: Verify peeled release tag
         shell: bash
@@ -260,13 +254,13 @@ jobs:
           args=()
           for record in "${records[@]}"; do args+=(--record "$record"); done
           python scripts/release/parser_asset_manifest.py assemble-manifest \
-            "${args[@]}" --asset-dir artifacts --output artifacts/parser-vendor-manifest-v0.8.4.json
+            "${args[@]}" --asset-dir artifacts --output artifacts/parser-vendor-manifest-v0.8.5.json
           python scripts/release/parser_asset_manifest.py verify-manifest \
-            --manifest artifacts/parser-vendor-manifest-v0.8.4.json --asset-dir artifacts
+            --manifest artifacts/parser-vendor-manifest-v0.8.5.json --asset-dir artifacts
           python scripts/release/parser_asset_manifest.py release-envelope \
-            --manifest artifacts/parser-vendor-manifest-v0.8.4.json \
+            --manifest artifacts/parser-vendor-manifest-v0.8.5.json \
             --asset-dir artifacts --tag "$GITHUB_REF_NAME" --tag-sha "$GITHUB_SHA" \
-            --output artifacts/parser-assets-v0.8.4.json
+            --output artifacts/parser-assets-v0.8.5.json
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -285,8 +279,6 @@ jobs:
       NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -402,3 +394,60 @@ jobs:
 
       - name: Publish alopex-cli
         run: ./publish-crate.sh alopex-cli
+
+  dispatch-python-release:
+    name: Publish Python and require public demos
+    needs: [publish-crate]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create or verify matching Python tag
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
+          [[ "${GITHUB_REF_NAME}" == "v${version}" ]]
+          python_tag="alopex-py-v${version}"
+          if git rev-parse --verify --quiet "refs/tags/${python_tag}" >/dev/null; then
+            test "$(git rev-parse "${python_tag}^{commit}")" = "${GITHUB_SHA}"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "${python_tag}" "${GITHUB_SHA}" -m "Release ${python_tag}"
+            git push origin "${python_tag}"
+          fi
+          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run alopex-py-release.yml --ref "${GITHUB_REF_NAME}" \
+            -f "source_ref=${python_tag}" -f "target_sha=${GITHUB_SHA}" \
+            -f "release_tag=${python_tag}"
+          echo "python_tag=${python_tag}" >> "${GITHUB_OUTPUT}"
+          echo "started_at=${started_at}" >> "${GITHUB_OUTPUT}"
+
+      - name: Wait for Python publish, demos, and docs report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON_TAG: ${{ steps.release.outputs.python_tag }}
+          STARTED_AT: ${{ steps.release.outputs.started_at }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id=""
+          for attempt in $(seq 1 60); do
+            run_id="$(gh run list --workflow alopex-py-release.yml \
+              --event workflow_dispatch --limit 20 --json databaseId,headSha,createdAt \
+              --jq ".[] | select(.headSha == \"${GITHUB_SHA}\" and .createdAt >= \"${STARTED_AT}\") | .databaseId" | head -1)"
+            [[ -n "${run_id}" ]] && break
+            sleep 10
+          done
+          [[ -n "${run_id}" ]]
+          gh run watch "${run_id}" --exit-status

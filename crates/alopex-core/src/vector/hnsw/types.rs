@@ -115,7 +115,10 @@ pub struct SearchStats {
 pub struct HnswSearchResult {
     /// Key associated with the returned vector.
     pub key: Vec<u8>,
-    /// Distance value for the result.
+    /// Distance value for the result (lower is closer).
+    ///
+    /// L2 is Euclidean distance, cosine is `1 - cosine_similarity`, and inner product is the
+    /// negated dot product.
     pub distance: f32,
     /// Arbitrary metadata blob stored alongside the vector.
     pub metadata: Vec<u8>,

@@ -51,3 +51,5 @@ crates/*/fuzz/corpus/
 # one level up at the alopex-db root, in its own git repo); this nested copy
 # recurs whenever a tool initializes spec-workflow with cwd=alopex/
 /.spec-workflow/
+/release-verification-output/
+formal/**/_apalache-out/

@@ -264,6 +264,22 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
 
+  release-process-contract:
+    name: Release process contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify report and workflow contracts
+        run: |
+          python -m unittest discover -s scripts/release/tests -p 'test_*.py'
+          bash scripts/release/tests/test_verify_release_reporting.sh
+          bash scripts/release/tests/test_verify_release_join.sh
+      - name: Check release-report state model
+        working-directory: formal/release-report
+        run: |
+          docker compose run --rm apalache typecheck ReleaseReport.tla
+          docker compose run --rm apalache check --config=ReleaseReport.cfg --length=12 ReleaseReport.tla
+
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
@@ -450,7 +466,7 @@ jobs:
 
   ci-success:
     name: CI Success
-    needs: [fmt, clippy, test, coverage, security-audit, build, v08-release-gate]
+    needs: [fmt, clippy, test, coverage, release-process-contract, security-audit, build, v08-release-gate]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -460,6 +476,7 @@ jobs:
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
+             [[ "${{ needs['release-process-contract'].result }}" != "success" ]] || \
              [[ "${{ needs['security-audit'].result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
              [[ "${{ needs['v08-release-gate'].result }}" != "success" ]]; then
@@ -468,6 +485,7 @@ jobs:
             echo "clippy: ${{ needs.clippy.result }}"
             echo "test: ${{ needs.test.result }}"
             echo "coverage: ${{ needs.coverage.result }}"
+            echo "release-process-contract: ${{ needs['release-process-contract'].result }}"
             echo "security-audit: ${{ needs['security-audit'].result }}"
             echo "build: ${{ needs.build.result }}"
             echo "v08-release-gate: ${{ needs['v08-release-gate'].result }}"

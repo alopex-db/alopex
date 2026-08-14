@@ -9,41 +9,50 @@
 # ビルドが通ること自体が「公開クレートが実際に取得・ビルドできる」ことの
 # 検証になる)。
 #
-# 実行結果は docs-public リポジトリへの PR として自動レポートされる
-# (--no-report で無効化可能。CI 以外でのアドホック実行時など、レポート
-# 不要な場合に使う)。「実行して終わり」では検証の意味が薄いため、成功時
-# だけでなく失敗時も必ずレポートを生成する。レポートは結果の一覧表だけ
-# ではなく、各ステップが「何を・なぜ検証するか」の説明文と、実行時の
-# 主要な出力(検証コーパスの実行結果サマリー等)を含む。
+# 実行結果は JSON と Markdown に保存するが、このスクリプト自身は push しない。
+# 公開は .github/workflows/public-release-verification.yml の明示的な成功時ジョブが
+# 担当する。失敗結果は Actions artifact として保持し、一般向け保証書へ自動公開
+# しない。--report-only では保存済み JSON から再検証なしで Markdown を再生成する。
 #
 # 新しいステップを追加する場合は run_step 呼び出しに DESCRIPTION も
 # 必ず添える(結果一覧だけのステップを増やさない)。
 #
 # Usage:
 #   ./scripts/release/verify-release/run.sh [ALOPEX_VERSION] [--no-report]
+#       [--results-file PATH] [--report-dir DIR]
+#   ./scripts/release/verify-release/run.sh --report-only RESULTS.json
+#       [--report-dir DIR]
 #   ./scripts/release/verify-release/run.sh --verify-join candidate.json
 #   例: ./scripts/release/verify-release/run.sh 0.8.4
 #
-# chirps は既定では隣接 checkout (${REPO_ROOT}/../chirps) を使う。存在しない
-# 場合は公開 repo を一時 clone するため、worktree 配置に依存しない。
-
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-DEFAULT_DOCS_PUBLIC_DIR="${REPO_ROOT}/../docs-public"
-if [ -z "${DOCS_PUBLIC_DIR:-}" ] && [ ! -d "${DEFAULT_DOCS_PUBLIC_DIR}" ] \
-    && [ -d "${REPO_ROOT}/../../docs-public" ]; then
-    DEFAULT_DOCS_PUBLIC_DIR="${REPO_ROOT}/../../docs-public"
-fi
-DOCS_PUBLIC_DIR="${DOCS_PUBLIC_DIR:-${DEFAULT_DOCS_PUBLIC_DIR}}"
-
-ALOPEX_VERSION="0.8.4"
+ALOPEX_VERSION="0.8.5"
 DO_REPORT=1
 JOIN_FILE=""
+REPORT_ONLY_FILE=""
+RESULTS_FILE=""
+REPORT_OUTPUT_DIR=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-report) DO_REPORT=0; shift ;;
+        --results-file)
+            [[ $# -ge 2 ]] || { echo "--results-file requires a path" >&2; exit 64; }
+            RESULTS_FILE="$2"
+            shift 2
+            ;;
+        --report-dir)
+            [[ $# -ge 2 ]] || { echo "--report-dir requires a directory" >&2; exit 64; }
+            REPORT_OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --report-only)
+            [[ $# -ge 2 ]] || { echo "--report-only requires a result JSON path" >&2; exit 64; }
+            REPORT_ONLY_FILE="$2"
+            shift 2
+            ;;
         --verify-join)
             if [[ $# -lt 2 ]]; then
                 echo "--verify-join requires a candidate JSON path" >&2
@@ -60,19 +69,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+REPORT_OUTPUT_DIR="${REPORT_OUTPUT_DIR:-${REPO_ROOT}/release-verification-output}"
+RESULTS_FILE="${RESULTS_FILE:-${REPORT_OUTPUT_DIR}/v${ALOPEX_VERSION}.json}"
+
+if [[ -n "${REPORT_ONLY_FILE}" ]]; then
+    python3 "${SCRIPT_DIR}/report.py" render \
+        --results "${REPORT_ONLY_FILE}" --output-dir "${REPORT_OUTPUT_DIR}"
+    exit 0
+fi
+
 IMAGE_TAG="alopex-verify-release:${ALOPEX_VERSION}"
-DEFAULT_CHIRPS_DIR="${REPO_ROOT}/../chirps"
-if [ ! -d "${DEFAULT_CHIRPS_DIR}" ] && [ -d "${REPO_ROOT}/../../chirps" ]; then
-    DEFAULT_CHIRPS_DIR="${REPO_ROOT}/../../chirps"
-fi
-CHIRPS_REPO_URL="${CHIRPS_REPO_URL:-https://github.com/alopex-db/alopex-chirps.git}"
-CHIRPS_REF="${CHIRPS_REF:-main}"
-CHIRPS_DIR_WAS_EXPLICIT=0
-if [ -n "${CHIRPS_DIR:-}" ]; then
-    CHIRPS_DIR_WAS_EXPLICIT=1
-else
-    CHIRPS_DIR="${DEFAULT_CHIRPS_DIR}"
-fi
 LOG_DIR="$(mktemp -d)"
 TOOLS_TARGET_DIR=""
 cleanup() { rm -rf "${LOG_DIR}" "${TOOLS_TARGET_DIR}"; }
@@ -207,32 +213,6 @@ if [[ -n "${JOIN_FILE}" ]]; then
     exit $?
 fi
 
-ensure_chirps_dir() {
-    if [ -d "${CHIRPS_DIR}" ]; then
-        return 0
-    fi
-    if [ "${CHIRPS_DIR_WAS_EXPLICIT}" -eq 1 ]; then
-        log_fail "CHIRPS_DIR で指定された chirps リポジトリが見つからない: ${CHIRPS_DIR}"
-        echo "  パスを修正するか、CHIRPS_DIR を未指定にして公開 repo からの一時取得を使ってください。"
-        exit 2
-    fi
-    if ! command -v git >/dev/null 2>&1; then
-        log_fail "git コマンドが見つからないため、公開 chirps repo を取得できません。"
-        echo "  CHIRPS_DIR=<path> を指定してください。"
-        exit 2
-    fi
-    local cloned_dir="${LOG_DIR}/chirps"
-    log_info "chirps checkout が見つからないため、公開 repo から一時取得します: ${CHIRPS_REPO_URL} (${CHIRPS_REF})"
-    git clone --depth 1 --branch "${CHIRPS_REF}" "${CHIRPS_REPO_URL}" "${cloned_dir}"
-    CHIRPS_DIR="${cloned_dir}"
-}
-
-# --- レポート用の結果蓄積 ---
-# 各ステップを "name|status|description|logfile" 形式で配列に積む。
-# status は ok / fail のいずれか。description はレポート読者(一般公開)
-# に「これは何を検証しているか」を伝える1〜2文。logfile はそのステップの
-# 標準出力キャプチャ(存在すれば末尾を抜粋してレポートに埋め込む)。
-declare -a REPORT_STEPS=()
 OVERALL_STATUS="ok"
 STEP_INDEX=0
 
@@ -256,163 +236,32 @@ run_step() {
 
     if [ "${status}" -eq 0 ]; then
         log_ok "${name} 完了(exit 0)"
-        REPORT_STEPS+=("${name}|ok|${description}|${logfile}")
+        python3 "${SCRIPT_DIR}/report.py" record --results "${RESULTS_FILE}" \
+            --name "${name}" --status ok --description "${description}" --log "${logfile}"
     else
         log_fail "${name} 失敗(exit ${status})"
-        REPORT_STEPS+=("${name}|fail|${description}|${logfile}")
         OVERALL_STATUS="fail"
-        write_report_and_maybe_pr
+        python3 "${SCRIPT_DIR}/report.py" record --results "${RESULTS_FILE}" \
+            --name "${name}" --status fail --description "${description}" --log "${logfile}"
+        write_report
         exit "${status}"
     fi
 }
 
 # ログファイルから末尾 N 行を Markdown コードブロックとして整形する。
-render_log_excerpt() {
-    local logfile="$1" lines="${2:-40}"
-    if [ ! -s "${logfile}" ]; then
-        return 0
-    fi
-    echo '```'
-    tail -n "${lines}" "${logfile}"
-    echo '```'
-}
-
-# docs-public 側に前回までの実行が残した「report/verify-release-*」
-# ブランチのうち、対応する PR がマージ済みのものをローカル・リモート
-# 両方から削除する。run.sh 自身が作ったブランチの後始末を毎回自動で
-# 行い、実行のたびに未マージ分だけが残る状態を保つ(マージされていない
-# ブランチは残し、確認なしに壊さない)。
-cleanup_merged_report_branches() {
-    if ! command -v gh >/dev/null 2>&1; then
-        return 0
-    fi
-    (
-        cd "${DOCS_PUBLIC_DIR}" || return 0
-        if [ -n "$(git status --porcelain)" ]; then
-            log_info "docs-public に未コミット変更があるため、古い report ブランチ cleanup をスキップします"
-            return 0
-        fi
-        # 前回実行が report/verify-release-* ブランチにチェックアウトした
-        # まま終わっている場合、そのブランチ自身は `git branch -D` できない
-        # (カレントブランチは削除不可)。先に main へ戻しておく。
-        git checkout main >/dev/null 2>&1
-        local merged_branches
-        merged_branches="$(gh pr list --repo alopex-db/docs --state merged \
-            --search 'head:report/verify-release-' \
-            --json headRefName --jq '.[].headRefName' 2>/dev/null | sort -u)"
-        [ -z "${merged_branches}" ] && return 0
-        local branch
-        while IFS= read -r branch; do
-            [ -z "${branch}" ] && continue
-            if git show-ref --verify --quiet "refs/heads/${branch}"; then
-                git branch -D "${branch}" >/dev/null 2>&1 \
-                    && log_info "docs-public: マージ済みブランチを削除しました(local): ${branch}"
-            fi
-            if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
-                git push origin --delete "${branch}" >/dev/null 2>&1 \
-                    && log_info "docs-public: マージ済みブランチを削除しました(remote): ${branch}"
-            fi
-        done <<<"${merged_branches}"
-    )
-}
-
-write_report_and_maybe_pr() {
+write_report() {
     if [ "${DO_REPORT}" -eq 0 ]; then
-        log_info "--no-report 指定によりレポート生成をスキップします"
+        log_info "--no-report 指定により Markdown 生成をスキップします(JSON は保存済み)"
         return 0
     fi
-    if [ ! -d "${DOCS_PUBLIC_DIR}" ]; then
-        log_fail "docs-public リポジトリが見つからない: ${DOCS_PUBLIC_DIR}"
-        log_fail "DOCS_PUBLIC_DIR=<path> で指定するか、${REPO_ROOT}/../docs-public に配置すること。レポートは生成できません。"
-        return 1
-    fi
-    cleanup_merged_report_branches
-
-    local report_date report_dir report_file rust_version nim_image
-    report_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    report_dir="${DOCS_PUBLIC_DIR}/reports/release-verification"
-    report_file="${report_dir}/v${ALOPEX_VERSION}.md"
-    mkdir -p "${report_dir}"
-    rust_version="$(grep -oP '^ARG RUST_VERSION=\K.*' "${SCRIPT_DIR}/Dockerfile")"
-    nim_image="$(grep -oP '^ARG NIM_IMAGE=\K[^@]*' "${SCRIPT_DIR}/Dockerfile")"
-
-    {
-        echo "# リリース確認レポート: v${ALOPEX_VERSION}"
-        echo ""
-        echo "> 総合結果: **$([ "${OVERALL_STATUS}" = "ok" ] && echo "✅ 全ステップ成功" || echo "❌ 失敗あり")**"
-        echo ""
-        if [ "${OVERALL_STATUS}" = "ok" ]; then
-            echo "v${ALOPEX_VERSION} は、crates.io / PyPI に公開されたパッケージを"
-            echo "そのままインストールした状態で、ライブラリ・組み込み(ファイル)・"
-            echo "サーバー・クラスタのすべてが同一データに対して同一の結果を返すことを"
-            echo "確認済みである。"
-        else
-            echo "v${ALOPEX_VERSION} の確認中に失敗したステップがある。詳細は下記を参照。"
-        fi
-        echo ""
-        echo "## ステップ"
-        echo ""
-        local entry name status description logfile mark i=0
-        for entry in "${REPORT_STEPS[@]}"; do
-            i=$((i + 1))
-            IFS='|' read -r name status description logfile <<<"${entry}"
-            mark="✅"
-            [ "${status}" = "fail" ] && mark="❌"
-            echo "### ${i}. ${name} ${mark}"
-            echo ""
-            echo "${description}"
-            echo ""
-            render_log_excerpt "${logfile}" 60
-            echo ""
-        done
-        echo "---"
-        echo ""
-        echo "## 検証環境"
-        echo ""
-        echo "| 項目 | 値 |"
-        echo "|---|---|"
-        echo "| 対象バージョン | v${ALOPEX_VERSION} |"
-        echo "| 生成日時 (UTC) | ${report_date} |"
-        echo "| パッケージ取得元 | crates.io(alopex-cli/alopex-server) / PyPI(alopex) |"
-        echo "| ソースビルド | なし(公開パッケージのみ使用) |"
-        echo "| Rust | \`${rust_version}\` |"
-        echo "| Nim(ビルド専用イメージ) | \`${nim_image}\` |"
-        echo "| Python | \`3.11\` |"
-    } >"${report_file}"
-
-    log_info "レポートを生成しました: ${report_file}"
-
-    if ! command -v gh >/dev/null 2>&1; then
-        log_fail "gh コマンドが見つからないため PR 作成をスキップします(レポートファイルは生成済み)"
-        return 1
-    fi
-
-    local branch="report/verify-release-v${ALOPEX_VERSION}"
-    (
-        cd "${DOCS_PUBLIC_DIR}"
-        if ! git diff --quiet -- "reports/release-verification/v${ALOPEX_VERSION}.md" 2>/dev/null && \
-           ! git status --porcelain -- "reports/release-verification/v${ALOPEX_VERSION}.md" | grep -q .; then
-            log_info "レポート内容に変更なし。PR 作成をスキップします。"
-            exit 0
-        fi
-        git checkout -B "${branch}"
-        git add "reports/release-verification/v${ALOPEX_VERSION}.md"
-        git commit -m "docs(release): v${ALOPEX_VERSION} リリース確認レポート ($([ "${OVERALL_STATUS}" = "ok" ] && echo "success" || echo "failure"))"
-        git push -u origin "${branch}" --force
-        gh pr create \
-            --title "docs(release): v${ALOPEX_VERSION} リリース確認レポート" \
-            --body "$(cat <<EOF
-verify-release/run.sh の自動実行結果。総合結果: $([ "${OVERALL_STATUS}" = "ok" ] && echo "✅ 成功" || echo "❌ 失敗あり")。
-
-詳細は \`reports/release-verification/v${ALOPEX_VERSION}.md\` を参照。
-EOF
-)" \
-            --base main --head "${branch}" 2>&1 || log_info "PR が既に存在するか作成に失敗しました(レポートファイルは push 済み)"
-    )
-    log_ok "docs-public へレポートを push しました(branch: ${branch})"
+    python3 "${SCRIPT_DIR}/report.py" render \
+        --results "${RESULTS_FILE}" --output-dir "${REPORT_OUTPUT_DIR}"
 }
 
-ensure_chirps_dir
+rust_version="$(grep -oP '^ARG RUST_VERSION=\K.*' "${SCRIPT_DIR}/Dockerfile")"
+nim_image="$(grep -oP '^ARG NIM_IMAGE=\K[^@]*' "${SCRIPT_DIR}/Dockerfile")"
+python3 "${SCRIPT_DIR}/report.py" init --results "${RESULTS_FILE}" \
+    --version "${ALOPEX_VERSION}" --rust "${rust_version}" --nim "${nim_image}"
 
 log_info "alopex v${ALOPEX_VERSION} リリース確認を開始します"
 
@@ -441,7 +290,6 @@ run_in_container() {
     docker run --rm \
         --user "$(id -u):$(id -g)" -e HOME=/tmp/verify-home \
         -v "${REPO_ROOT}":/workspace:ro \
-        -v "${CHIRPS_DIR}":/chirps:ro \
         -v "${TOOLS_TARGET_DIR}":/tools-target \
         -w /workspace \
         -e "ALOPEX_BINARY_SOURCE=released" \
@@ -452,8 +300,33 @@ run_in_container() {
 }
 
 run_step "verify-release-embedded ビルド" \
-    "crates/alopex-tools(開発ツール専用の独立ワークスペース)が crates.io 公開版の alopex-embedded/alopex-sql に依存としてビルドできるかを検証する。これが通ること自体が「公開 crate が実際に取得・ビルド可能」であることの証明になる。" \
-    -- run_in_container bash -c 'cd crates/alopex-tools && CARGO_TARGET_DIR=/tools-target cargo build --release --locked'
+    "verify-release-embedded の bin source を一時 crate へコピーし、ALOPEX_VERSION と完全一致する crates.io 公開版 alopex-embedded/alopex-sql だけを依存としてビルドする。固定 Cargo.toml の追随漏れと repository path 混入の双方を防ぐ。" \
+    -- run_in_container bash -c '
+set -euo pipefail
+tool_source="$(mktemp -d)"
+trap "rm -rf \"${tool_source}\"" EXIT
+mkdir -p "${tool_source}/src/bin"
+cp crates/alopex-tools/src/bin/verify_release_embedded.rs "${tool_source}/src/bin/"
+cat >"${tool_source}/Cargo.toml" <<EOF
+[workspace]
+
+[package]
+name = "alopex-release-verifier"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "verify-release-embedded"
+path = "src/bin/verify_release_embedded.rs"
+
+[dependencies]
+serde_json = "1.0"
+alopex-embedded = { version = "=${ALOPEX_VERSION}" }
+alopex-sql = { version = "=${ALOPEX_VERSION}" }
+EOF
+CARGO_TARGET_DIR=/tools-target cargo build --manifest-path "${tool_source}/Cargo.toml" --release
+'
 
 run_step "mode-parity 検証 (verify.py)" \
     "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)の全組み合わせが一致することを確認する。" \
@@ -626,19 +499,23 @@ run_step "v${ALOPEX_VERSION} SQL scalar/PRAGMA 動作保証" \
     "crates.io/PyPI から取得した v${ALOPEX_VERSION} の CLI で、ハッシュ・UUID・エンコード・文字列関数と PRAGMA の公開利用経路を確認する。ソースの cargo build は行わず、インストール済みの alopex CLI だけを実行する。" \
     -- run_in_container bash -c 'ALOPEX_CLI=alopex bash scripts/demo/v074/demo_sql_v074.sh'
 
+run_step "v${ALOPEX_VERSION} v0.8 SQL correctness (demo_sql_v08.py)" \
+    "PyPI 公開版で、v0.8 系の TIMESTAMP 書込み、数値型昇格、SUM(INTEGER)、CAST、IN/BETWEEN、異種数値 JOIN、重複 range-variable 拒否を実行し、値とエラー型を確認する。" \
+    -- run_in_container python3 scripts/demo/v08/demo_sql_v08.py
+
 run_step "v${ALOPEX_VERSION} 組み込み API サーフェス (demo_api_surfaces.py)" \
     "PyPI 公開版の Python バインディングから SQL を実行する経路を実演する。Database.new()(SF-MEM)/ Database.open(path)(SF-FILE)でのコーパス実行と再オープン、Transaction の commit/rollback、execute_sql_stream() の反復取得、統計関数と PRAGMA を Python から実行する。最後に CLI/HTTP/gRPC/Rust API/Python API の 5 経路が同一コーパスに対して同一の正規化結果を返すことを表示する。従来の mode-parity(4 経路)に Python API を加えた確認である。" \
     -- run_in_container python3 scripts/demo/v074/demo_api_surfaces.py
 
 run_step "v${ALOPEX_VERSION} ベクトル検索 API (demo_vector_api.py)" \
-    "PyPI 公開版の Python バインディングから、SQL 経由のベクトル検索(vector_distance + ORDER BY + LIMIT)を実行する。ネイティブのベクトル API(upsert_vector / search_similar / create_hnsw_index / search_hnsw)は公開 wheel に含まれないため実行できない(issue #82)。当該部分は SKIP として明示し、成功数には数えない。" \
+    "PyPI 公開版の Python バインディングから、SQL 経由とネイティブ API の両方でベクトル検索を実行する。API 不在時だけ issue #82 を明記して SKIP とし、存在時は全メソッドを呼び出して L2 距離と node_count を表示する。" \
     -- run_in_container python3 scripts/demo/v074/demo_vector_api.py
 
 run_step "v${ALOPEX_VERSION} ベクトル検索 API (Rust)" \
-    "crates.io 公開版 alopex-embedded を使い、Rust 組み込み API からベクトル検索を実行する。SQL 経由(execute_sql)とネイティブ API(create_hnsw_index / upsert_vector / upsert_to_hnsw / search_similar / search_hnsw)の双方を実演し、Python 側と同一のコーパス・同一のクエリ点で順位が一致することを示す。Rust の公開クレートにはベクトル API が含まれるため、Python 側で実行できない部分(issue #82)もこちらでは確認できる。" \
+    "crates.io 公開版 alopex-embedded を使い、Rust 組み込み API から SQL 経由とネイティブ API の双方でベクトル検索を実行し、Python 側と同一のコーパス・クエリ点で順位と公開 distance が一致することを示す。" \
     -- run_in_container bash -c 'ALOPEX_DEMO_MODE=vector /tools-target/release/verify-release-embedded'
 
 echo ""
 log_ok "全デモスクリプトが公開版 v${ALOPEX_VERSION} で完走しました。"
 
-write_report_and_maybe_pr
+write_report
