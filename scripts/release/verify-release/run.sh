@@ -300,13 +300,15 @@ run_in_container() {
 }
 
 run_step "verify-release-embedded ビルド" \
-    "verify-release-embedded の bin source を一時 crate へコピーし、ALOPEX_VERSION と完全一致する crates.io 公開版 alopex-embedded/alopex-sql だけを依存としてビルドする。固定 Cargo.toml の追随漏れと repository path 混入の双方を防ぐ。" \
+    "公開検証用の2つの bin source を一時 crate へコピーし、ALOPEX_VERSION と完全一致する crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけを依存としてビルドする。固定 Cargo.toml の追随漏れと repository path 混入の双方を防ぐ。" \
     -- run_in_container bash -c '
 set -euo pipefail
 tool_source="$(mktemp -d)"
 trap "rm -rf \"${tool_source}\"" EXIT
 mkdir -p "${tool_source}/src/bin"
 cp crates/alopex-tools/src/bin/verify_release_embedded.rs "${tool_source}/src/bin/"
+cp crates/alopex-tools/src/bin/demo_v085_embedded.rs "${tool_source}/src/bin/"
+cp crates/alopex-tools/build.rs "${tool_source}/"
 cat >"${tool_source}/Cargo.toml" <<EOF
 [workspace]
 
@@ -320,9 +322,14 @@ publish = false
 name = "verify-release-embedded"
 path = "src/bin/verify_release_embedded.rs"
 
+[[bin]]
+name = "demo-v085-embedded"
+path = "src/bin/demo_v085_embedded.rs"
+
 [dependencies]
 serde_json = "1.0"
 alopex-embedded = { version = "=${ALOPEX_VERSION}" }
+alopex-core = { version = "=${ALOPEX_VERSION}" }
 alopex-sql = { version = "=${ALOPEX_VERSION}" }
 EOF
 CARGO_TARGET_DIR=/tools-target cargo build --manifest-path "${tool_source}/Cargo.toml" --release
@@ -511,9 +518,9 @@ run_step "v${ALOPEX_VERSION} ベクトル検索 API (demo_vector_api.py)" \
     "PyPI 公開版の Python バインディングから、SQL 経由とネイティブ API の両方でベクトル検索を実行する。API 不在時だけ issue #82 を明記して SKIP とし、存在時は全メソッドを呼び出して L2 距離と node_count を表示する。" \
     -- run_in_container python3 scripts/demo/v074/demo_vector_api.py
 
-run_step "v${ALOPEX_VERSION} ベクトル検索 API (Rust)" \
-    "crates.io 公開版 alopex-embedded を使い、Rust 組み込み API から SQL 経由とネイティブ API の双方でベクトル検索を実行し、Python 側と同一のコーパス・クエリ点で順位と公開 distance が一致することを示す。" \
-    -- run_in_container bash -c 'ALOPEX_DEMO_MODE=vector /tools-target/release/verify-release-embedded'
+run_step "v${ALOPEX_VERSION} Embedded API 全シナリオ" \
+    "crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけでビルドした専用バイナリを使い、保存・KV/transaction・local SQL 全カテゴリ・catalog/cluster 診断・owned/SQL stream・DataFrame/columnar・Vector/HNSW・large value・fail-closed 境界の10シナリオを Rust Embedded API から自己検証付きで実演する。外部 cluster、Python 専用 API、未 provision の V08 segment、default feature 外 S3 は成功に偽装せず明示的な境界として確認する。" \
+    -- run_in_container bash scripts/demo/v08/demo_embedded_v085.sh
 
 echo ""
 log_ok "全デモスクリプトが公開版 v${ALOPEX_VERSION} で完走しました。"

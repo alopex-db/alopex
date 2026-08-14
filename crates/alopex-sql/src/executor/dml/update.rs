@@ -2,10 +2,11 @@ use alopex_core::kv::KVStore;
 
 use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
-use crate::executor::evaluator::{EvalContext, evaluate};
+use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::{TypedAssignment, TypedExpr};
+use crate::planner::types::ResolvedType;
 use crate::storage::{SqlTxn, SqlValue, StorageError};
 
 /// Execute UPDATE statements.
@@ -52,7 +53,16 @@ pub fn execute_update<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
             let mut new_row = row.clone();
 
             for assignment in &assignments {
-                let value = evaluate(&assignment.value, &ctx)?;
+                let mut value = evaluate(&assignment.value, &ctx)?;
+                let target_type = &table.columns[assignment.column_index].data_type;
+                let compatible_vector = matches!(
+                    (target_type, &value),
+                    (ResolvedType::Vector { dimension, .. }, SqlValue::Vector(values))
+                        if *dimension == values.len() as u32
+                );
+                if !value.is_null() && value.resolved_type() != *target_type && !compatible_vector {
+                    value = coerce_value(value, target_type)?;
+                }
                 enforce_not_null(&table, assignment.column_index, &value)?;
                 new_row[assignment.column_index] = value;
             }

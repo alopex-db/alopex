@@ -1,6 +1,24 @@
 use alopex_dataframe::DataFrameError;
 use alopex_embedded::{Database, Error, JoinType};
-use arrow::array::{Array, Int32Array, StringArray};
+use arrow::array::{Array, Float32Array, Int32Array, StringArray};
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn dataframe_query_preserves_float_column_as_float32() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE metrics (id INTEGER PRIMARY KEY, value FLOAT); \
+         INSERT INTO metrics VALUES (1, 1.5), (2, 2.5);",
+    )
+    .unwrap();
+
+    let frame = db
+        .query_df("SELECT id, value FROM metrics ORDER BY id")
+        .unwrap();
+    let values = frame.column("value").unwrap().to_arrow();
+    let values = values[0].as_any().downcast_ref::<Float32Array>().unwrap();
+    assert_eq!(values.values(), &[1.5, 2.5]);
+}
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]

@@ -48,6 +48,37 @@ class V085ReleaseContractTests(unittest.TestCase):
         self.assertIn("scripts/demo/v074/demo_api_surfaces.py", run)
         self.assertIn("scripts/demo/v074/demo_vector_api.py", run)
 
+    def test_embedded_demo_covers_every_v08_local_capability_group(self) -> None:
+        run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
+        wrapper = (ROOT / "scripts/demo/v08/demo_embedded_v085.sh").read_text(
+            encoding="utf-8"
+        )
+        source = (
+            ROOT / "crates/alopex-tools/src/bin/demo_v085_embedded.rs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("scripts/demo/v08/demo_embedded_v085.sh", run)
+        self.assertIn('cp crates/alopex-tools/build.rs "${tool_source}/"', run)
+        self.assertIn("demo-v085-embedded", wrapper)
+        build = (ROOT / "crates/alopex-tools/build.rs").read_text(encoding="utf-8")
+        self.assertIn("DEP_ALOPEX_SQL_PARSER_LIBDIR", build)
+        self.assertIn("rustc-link-arg-bins", build)
+        for scenario_id in (
+            "EMB-01-storage-durability",
+            "EMB-02-kv-transactions",
+            "EMB-03-persisted-transaction-manager",
+            "EMB-04-local-sql-matrix",
+            "EMB-05-catalog-cluster-diagnostics",
+            "EMB-06-owned-and-sql-streams",
+            "EMB-07-dataframe-columnar",
+            "EMB-08-vector-hnsw",
+            "EMB-09-large-values",
+            "EMB-10-fail-closed-boundaries",
+        ):
+            self.assertIn(scenario_id, source)
+
+        self.assertNotIn("distance が負値", source)
+
     def test_apalache_uses_the_runner_identity(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         compose = (ROOT / "formal/release-report/compose.yml").read_text(

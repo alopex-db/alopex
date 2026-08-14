@@ -2356,13 +2356,18 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         target_type: &ResolvedType,
         span: crate::ast::Span,
     ) -> TypedExpr {
-        if matches!(target_type, ResolvedType::Timestamp)
-            && !matches!(
-                value.resolved_type,
-                ResolvedType::Timestamp | ResolvedType::Null
+        if value.resolved_type != *target_type
+            && value.resolved_type != ResolvedType::Null
+            && matches!(
+                target_type,
+                ResolvedType::Integer
+                    | ResolvedType::BigInt
+                    | ResolvedType::Float
+                    | ResolvedType::Double
+                    | ResolvedType::Timestamp
             )
         {
-            TypedExpr::cast(value, ResolvedType::Timestamp, span)
+            TypedExpr::cast(value, target_type.clone(), span)
         } else {
             value
         }

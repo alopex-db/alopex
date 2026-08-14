@@ -22,6 +22,10 @@ lane_ci = []
 name = "verify-release-embedded"
 path = "src/bin/verify_release_embedded.rs"
 
+[[bin]]
+name = "demo-v085-embedded"
+path = "src/bin/demo_v085_embedded.rs"
+
 [dependencies]
 serde_json = "1.0"
 
@@ -29,4 +33,5 @@ serde_json = "1.0"
 # この bin source を一時 crate へコピーし、ALOPEX_VERSION の完全一致依存を
 # 生成するため、固定版の手動追随やローカル path 混入は起きない。
 alopex-embedded = { path = "../alopex-embedded" }
+alopex-core = { path = "../alopex-core" }
 alopex-sql = { path = "../alopex-sql" }

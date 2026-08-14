@@ -26,6 +26,7 @@ pub use vector_ops::{VectorError, VectorMetric, vector_distance, vector_similari
 
 pub use context::EvalContext;
 pub(crate) use context::begin_statement;
+pub(crate) use timestamp::coerce_value;
 
 use crate::executor::{EvaluationError, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;

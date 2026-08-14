@@ -166,3 +166,64 @@ fn integer_and_float_arithmetic_promotes_to_double() {
         vec![vec![SqlValue::Double(3_000_000_001.5)]]
     );
 }
+
+#[test]
+fn dml_normalizes_values_to_the_declared_numeric_storage_type() {
+    let mut harness = SqlHarness::new();
+    harness.execute_sql(
+        "CREATE TABLE normalized (f FLOAT, d DOUBLE, b BIGINT); \
+         INSERT INTO normalized VALUES (1.5, 2, 3);",
+    );
+
+    assert_eq!(
+        harness.query_sql("SELECT f, d, b FROM normalized").rows,
+        vec![vec![
+            SqlValue::Float(1.5),
+            SqlValue::Double(2.0),
+            SqlValue::BigInt(3),
+        ]]
+    );
+
+    harness.execute_sql("UPDATE normalized SET f = 2.5, d = 4, b = 5;");
+    assert_eq!(
+        harness.query_sql("SELECT f, d, b FROM normalized").rows,
+        vec![vec![
+            SqlValue::Float(2.5),
+            SqlValue::Double(4.0),
+            SqlValue::BigInt(5),
+        ]]
+    );
+}
+
+#[test]
+fn insert_select_normalizes_values_to_the_target_numeric_storage_type() {
+    let mut harness = SqlHarness::new();
+    harness.execute_sql(
+        "CREATE TABLE source_values (v DOUBLE); \
+         CREATE TABLE target_values (v FLOAT); \
+         INSERT INTO source_values VALUES (1.5), (2.5); \
+         INSERT INTO target_values SELECT v FROM source_values;",
+    );
+
+    assert_eq!(
+        harness
+            .query_sql("SELECT v FROM target_values ORDER BY v")
+            .rows,
+        vec![vec![SqlValue::Float(1.5)], vec![SqlValue::Float(2.5)]]
+    );
+}
+
+#[test]
+fn assignment_normalization_preserves_compatible_vector_values() {
+    let mut harness = SqlHarness::new();
+    harness.execute_sql(
+        "CREATE TABLE vector_values (id INTEGER PRIMARY KEY, v VECTOR(2, L2)); \
+         INSERT INTO vector_values VALUES (1, [1.0, 0.0]); \
+         UPDATE vector_values SET v = [0.0, 1.0] WHERE id = 1;",
+    );
+
+    assert_eq!(
+        harness.query_sql("SELECT v FROM vector_values").rows,
+        vec![vec![SqlValue::Vector(vec![0.0, 1.0])]]
+    );
+}

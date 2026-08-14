@@ -132,6 +132,7 @@ dependencies = [
 name = "alopex-tools"
 version = "0.0.0"
 dependencies = [
+ "alopex-core",
  "alopex-embedded",
  "alopex-sql",
  "serde_json",
