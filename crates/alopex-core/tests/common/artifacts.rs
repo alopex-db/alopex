@@ -316,6 +316,9 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
 }
 
 #[cfg(target_family = "unix")]
+// `statvfs` field widths vary across Unix libc targets. Keep the explicit
+// normalization even when the current target already exposes `u64` fields.
+#[allow(clippy::unnecessary_cast)]
 fn disk_total_bytes(path: &Path) -> Option<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
