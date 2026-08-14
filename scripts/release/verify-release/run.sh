@@ -20,7 +20,7 @@
 # 必ず添える(結果一覧だけのステップを増やさない)。
 #
 # Usage:
-#   ./scripts/release/verify-release/run.sh [ALOPEX_VERSION] [--no-report]
+#   ./scripts/release/verify-release/run.sh [ALOPEX_VERSION] [--no-report|--push-only]
 #   例: ./scripts/release/verify-release/run.sh 0.7.7
 #
 set -uo pipefail
@@ -36,9 +36,11 @@ DOCS_PUBLIC_DIR="${DOCS_PUBLIC_DIR:-${DEFAULT_DOCS_PUBLIC_DIR}}"
 
 ALOPEX_VERSION="0.7.7"
 DO_REPORT=1
+CREATE_PR=1
 for arg in "$@"; do
     case "${arg}" in
-        --no-report) DO_REPORT=0 ;;
+        --no-report) DO_REPORT=0; CREATE_PR=0 ;;
+        --push-only) CREATE_PR=0 ;;
         *) ALOPEX_VERSION="${arg}" ;;
     esac
 done
@@ -157,7 +159,9 @@ write_report_and_maybe_pr() {
         log_fail "DOCS_PUBLIC_DIR=<path> で指定するか、${REPO_ROOT}/../docs-public に配置すること。レポートは生成できません。"
         return 1
     fi
-    cleanup_merged_report_branches
+    if [ "${CREATE_PR}" -eq 1 ]; then
+        cleanup_merged_report_branches
+    fi
 
     local report_date report_dir report_file rust_version nim_image
     report_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -213,7 +217,7 @@ write_report_and_maybe_pr() {
 
     log_info "レポートを生成しました: ${report_file}"
 
-    if ! command -v gh >/dev/null 2>&1; then
+    if [ "${CREATE_PR}" -eq 1 ] && ! command -v gh >/dev/null 2>&1; then
         log_fail "gh コマンドが見つからないため PR 作成をスキップします(レポートファイルは生成済み)"
         return 1
     fi
@@ -230,6 +234,10 @@ write_report_and_maybe_pr() {
         git add "reports/release-verification/v${ALOPEX_VERSION}.md"
         git commit -m "docs(release): v${ALOPEX_VERSION} リリース確認レポート ($([ "${OVERALL_STATUS}" = "ok" ] && echo "success" || echo "failure"))"
         git push -u origin "${branch}" --force
+        if [ "${CREATE_PR}" -eq 0 ]; then
+            log_info "--push-only 指定により PR 作成を省略します。docs 側 workflow が main へ反映します"
+            exit 0
+        fi
         gh pr create \
             --title "docs(release): v${ALOPEX_VERSION} リリース確認レポート" \
             --body "$(cat <<EOF
@@ -303,6 +311,10 @@ run_step "v0.7 機能デモ: demo_routing.py" \
 run_step "v0.7 機能デモ: demo_dataframe_p3.py" \
     "DataFrame の string/datetime/list 名前空間関数と explode/implode の往復変換が Rust と Python の両サーフェスで決定的に(同一入力に対して常にバイト単位で同一の出力を)動作することを確認する(D4)。" \
     -- run_in_container python3 scripts/demo/v07/demo_dataframe_p3.py
+
+run_step "v${ALOPEX_VERSION} Python Vector/HNSW 公開 API" \
+    "PyPI 公開版 alopex==${ALOPEX_VERSION} の Vector/HNSW API で index 作成、upsert、L2 検索、stats、削除を実行し、距離 0.0/0.25 と node_count=2 を確認する。" \
+    -- run_in_container python3 scripts/release/verify_python_vector_api.py
 
 run_step "v${ALOPEX_VERSION} 回帰保証: alopex-sql aggregate state/distinct/parallel" \
     "crates.io 公開版 alopex-sql だけを依存にした一時 Rust crate をコンテナ内で作成し、Accumulator state/merge、COUNT 以外の DISTINCT 集約、単一プロセス partial→final parallel aggregate が v${ALOPEX_VERSION} で実際に動作することを確認する。リポジトリ内の alopex 製品ソースはビルドしないため、公開 artifact の振る舞い保証になる。" \

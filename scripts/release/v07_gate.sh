@@ -77,7 +77,7 @@ require_file_contains() {
     local file="$1"
     local pattern="$2"
     local description="$3"
-    if ! grep -Eq "${pattern}" "${file}"; then
+    if ! grep -Eq -- "${pattern}" "${file}"; then
         log_error "Release workflow contract check failed: ${description}"
         log_error "Missing pattern '${pattern}' in ${file}"
         exit 1
@@ -145,6 +145,8 @@ check_release_workflow_contract() {
         "Rust release workflow exposes the historical patch dispatch contract"
     require_file_contains "${release_workflow}" "dispatch-python-release:" \
         "Rust maintenance release dispatches matching Python CI/CD"
+    require_file_contains "${release_workflow}" "gh run watch" \
+        "Rust maintenance release waits for matching Python CI/CD completion"
     require_file_contains "${release_workflow}" "alopex-linux-x86_64" \
         "release workflow publishes Linux CLI artifact"
     require_file_contains "${release_workflow}" "alopex-macos-x86_64" \
@@ -165,6 +167,18 @@ check_release_workflow_contract() {
         "Python release workflow accepts maintenance CI/CD dispatch"
     require_file_contains "${py_release_workflow}" "verify_python_vector_api\\.py" \
         "Python release workflow executes the installed-wheel Vector/HNSW smoke test"
+    require_file_contains "${py_release_workflow}" "verify-release/run\\.sh" \
+        "Python release workflow runs demos against the published packages"
+    require_file_contains "${py_release_workflow}" "DOCS_PUBLIC_DEPLOY_KEY" \
+        "Python release workflow has a repository-scoped docs publication credential"
+    require_file_contains "${py_release_workflow}" "Wait for docs main publication" \
+        "Python release workflow waits for the public demo report to reach docs main"
+    require_file_contains "${PROJECT_ROOT}/scripts/release/verify-release/run.sh" \
+        '--push-only' \
+        "release verification can push a report branch without creating a cross-repository PR"
+    require_file_contains "${PROJECT_ROOT}/scripts/release/verify-release/run.sh" \
+        'verify_python_vector_api\.py' \
+        "public-package demo report includes the installed-wheel Vector/HNSW verification"
     require_file_contains "${PROJECT_ROOT}/crates/alopex-cluster/Cargo.toml" \
         'alopex-chirps-gossip-swim = \{ version = "=0\.5\.1", optional = true \}' \
         "Chirps gossip dependency is pinned to the published crates.io 0.5.1 package"

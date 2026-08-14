@@ -56,6 +56,10 @@ def main() -> None:
         assert results[1].key == b"quarter"
         assert abs(results[1].score - 0.25) < np.finfo(np.float32).eps
         assert stats.node_count == 2
+        print("installed wheel exposes all Database and Transaction vector APIs")
+        print(f"nearest={results[0].key!r} score={results[0].score}")
+        print(f"second={results[1].key!r} score={results[1].score}")
+        print(f"node_count={stats.node_count}")
         db.drop_hnsw_index("wheel_vector_smoke")
     finally:
         db.close()

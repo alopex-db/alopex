@@ -14,6 +14,11 @@ on:
         description: "Last published Rust tag in the release line (vX.Y.Z)"
         required: true
         type: string
+      verification_only:
+        description: "Run public-package demos and publish the docs report without rebuilding or publishing"
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: alopex-py-release-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
@@ -29,6 +34,7 @@ env:
 jobs:
   prepare-release:
     name: Validate Python release candidate
+    if: github.event_name != 'workflow_dispatch' || !inputs.verification_only
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -448,3 +454,115 @@ jobs:
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && format('alopex-py-v{0}', inputs.version) || github.ref_name }}
           files: dist/**/*
+
+  verify-public-release:
+    name: Verify public packages and publish demo report
+    needs: [publish-pypi]
+    if: >-
+      always() &&
+      ((github.event_name == 'workflow_dispatch' && inputs.verification_only) ||
+       needs.publish-pypi.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+
+      - name: Checkout verification harness
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('release/v{0}', inputs.version) || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve and verify published release identity
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version='${{ inputs.version }}'
+          else
+            [[ "${GITHUB_REF_NAME}" =~ ^alopex-py-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]
+            version="${BASH_REMATCH[1]}"
+          fi
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git fetch --force --quiet origin \
+            "refs/tags/v${version}:refs/tags/v${version}" \
+            "refs/tags/alopex-py-v${version}:refs/tags/alopex-py-v${version}"
+          core_sha="$(git rev-list -n1 "v${version}")"
+          python_sha="$(git rev-list -n1 "alopex-py-v${version}")"
+          test "${core_sha}" = "${python_sha}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "release_sha=${core_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Configure docs deploy key
+        env:
+          DOCS_PUBLIC_DEPLOY_KEY: ${{ secrets.DOCS_PUBLIC_DEPLOY_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${DOCS_PUBLIC_DEPLOY_KEY}"
+          install -d -m 700 "${HOME}/.ssh"
+          printf '%s\n' "${DOCS_PUBLIC_DEPLOY_KEY}" > "${HOME}/.ssh/id_ed25519"
+          chmod 600 "${HOME}/.ssh/id_ed25519"
+          ssh-keyscan -H github.com > "${HOME}/.ssh/known_hosts"
+
+      - name: Checkout docs publication target
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --branch main --single-branch git@github.com:alopex-db/docs.git "${RUNNER_TEMP}/docs-public"
+          git -C "${RUNNER_TEMP}/docs-public" config user.name "github-actions[bot]"
+          git -C "${RUNNER_TEMP}/docs-public" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run demos against public packages and push report
+        env:
+          DOCS_PUBLIC_DIR: ${{ runner.temp }}/docs-public
+        shell: bash
+        run: bash scripts/release/verify-release/run.sh '${{ steps.release.outputs.version }}' --push-only
+
+      - name: Wait for docs main publication
+        env:
+          DOCS_PUBLIC_DIR: ${{ runner.temp }}/docs-public
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="reports/release-verification/v${VERSION}.md"
+          expected="$(sha256sum "${DOCS_PUBLIC_DIR}/${report}" | awk '{print $1}')"
+          for attempt in $(seq 1 60); do
+            git -C "${DOCS_PUBLIC_DIR}" fetch origin main --quiet
+            if git -C "${DOCS_PUBLIC_DIR}" cat-file -e "origin/main:${report}" 2>/dev/null; then
+              actual="$(git -C "${DOCS_PUBLIC_DIR}" show "origin/main:${report}" | sha256sum | awk '{print $1}')"
+              if [[ "${actual}" = "${expected}" ]]; then
+                echo "docs main contains ${report} (${actual})"
+                exit 0
+              fi
+            fi
+            echo "waiting for docs publication (${attempt}/60)"
+            sleep 10
+          done
+          echo "docs main did not publish ${report}" >&2
+          exit 1
+
+      - name: Cleanup published report branch
+        env:
+          DOCS_PUBLIC_DIR: ${{ runner.temp }}/docs-public
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: git -C "${DOCS_PUBLIC_DIR}" push origin --delete "report/verify-release-v${VERSION}"
+
+      - name: Upload release verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-verification-v${{ steps.release.outputs.version }}
+          path: ${{ runner.temp }}/docs-public/reports/release-verification/v${{ steps.release.outputs.version }}.md
+          if-no-files-found: warn

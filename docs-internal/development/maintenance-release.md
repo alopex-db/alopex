@@ -96,6 +96,14 @@ and installs and exercises each wheel. Only then does it create the annotated
 trigger remains available for normal releases, but historical patches use this
 chained CI/CD route.
 
+The Rust workflow must wait for that Python run instead of treating dispatch as
+completion. After PyPI publication, the Python workflow runs every release demo
+against the exact public crates/PyPI version, pushes the generated report to the
+`alopex-db/docs` report branch with the repository-scoped deploy key, and waits
+until the docs-side workflow validates and publishes the same report bytes to
+`main`. A release run is not successful while the Python run, public-package
+demos, report generation, or docs `main` publication is missing or failed.
+
 If an Environment rejects the maintenance branch, the workflow must stop before
 the corresponding registry publish. Add only the exact `release/vX.Y.Z` branch
 policy, then use **Re-run failed jobs** on the same Actions run so the already
@@ -111,6 +119,9 @@ Do not infer completion from a green workflow alone. Confirm:
 - every Rust crate reports exactly `X.Y.Z` on crates.io;
 - PyPI reports exactly `X.Y.Z` and a clean installation passes the installed API
   smoke test;
+- the matching public-package demo workflow succeeded and
+  `alopex-db/docs@main` contains `reports/release-verification/vX.Y.Z.md` with
+  the same content hash as the workflow artifact;
 - milestone issues are closed only after their public artifacts are verified.
 
 After all direct checks pass, remove the temporary exact maintenance-branch

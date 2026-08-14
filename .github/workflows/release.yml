@@ -422,8 +422,32 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          branch="release/v${{ needs.prepare-release.outputs.version }}"
+          source_sha='${{ needs.prepare-release.outputs.source_sha }}'
+          dispatched_at="$(date -u +%s)"
           gh workflow run alopex-py-release.yml \
             --repo "${GITHUB_REPOSITORY}" \
-            --ref "release/v${{ needs.prepare-release.outputs.version }}" \
+            --ref "${branch}" \
             -f "version=${{ needs.prepare-release.outputs.version }}" \
-            -f "maintenance_base=${{ inputs.maintenance_base }}"
+            -f "maintenance_base=${{ inputs.maintenance_base }}" \
+            -f "verification_only=false"
+
+          run_id=""
+          for attempt in $(seq 1 30); do
+            runs="$(gh run list --repo "${GITHUB_REPOSITORY}" \
+              --workflow alopex-py-release.yml --event workflow_dispatch \
+              --branch "${branch}" --limit 20 \
+              --json databaseId,headSha,createdAt)"
+            run_id="$(jq -r --arg sha "${source_sha}" \
+              --argjson threshold "${dispatched_at}" '
+                [.[] | select(.headSha == $sha)
+                  | select((.createdAt | fromdateiso8601) >= ($threshold - 5))]
+                | sort_by(.createdAt) | reverse | .[0].databaseId // empty
+              ' <<<"${runs}")"
+            [[ -n "${run_id}" ]] && break
+            sleep 2
+          done
+          test -n "${run_id}"
+          echo "Waiting for Python CI/CD run ${run_id}"
+          gh run watch "${run_id}" --repo "${GITHUB_REPOSITORY}" --exit-status
