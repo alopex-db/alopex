@@ -116,6 +116,10 @@ class V085ReleaseContractTests(unittest.TestCase):
         self.assertIn("repair_forward:", release)
         self.assertIn("release_tag:", release)
         self.assertIn("target_sha:", release)
+        self.assertIn("branches:\n      - 'repair/v*-release'", release)
+        self.assertIn(
+            "startsWith(github.ref_name, 'repair/v')", publish
+        )
         self.assertIn(
             '[[ "${GITHUB_REF_NAME}" == "repair/v0.8.5-release" ]]', publish
         )
@@ -123,6 +127,7 @@ class V085ReleaseContractTests(unittest.TestCase):
             'git rev-parse "${RELEASE_TAG_NAME}^{commit}"', publish
         )
         self.assertIn('"${RELEASE_TARGET_SHA}"', publish)
+        self.assertIn('gh release view "${release_tag}"', publish)
         self.assertIn(
             "needs.build-release.result == 'success'", publish
         )
