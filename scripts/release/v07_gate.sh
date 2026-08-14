@@ -169,8 +169,8 @@ check_release_workflow_contract() {
         "Python release workflow executes the installed-wheel Vector/HNSW smoke test"
     require_file_contains "${py_release_workflow}" "verify-release/run\\.sh" \
         "Python release workflow runs demos against the published packages"
-    require_file_contains "${py_release_workflow}" "DOCS_PUBLIC_DEPLOY_KEY" \
-        "Python release workflow has a repository-scoped docs publication credential"
+    require_file_contains "${py_release_workflow}" "contents: write" \
+        "Python release workflow can publish its temporary report branch"
     require_file_contains "${py_release_workflow}" "Wait for docs main publication" \
         "Python release workflow waits for the public demo report to reach docs main"
     require_file_contains "${PROJECT_ROOT}/scripts/release/verify-release/run.sh" \

@@ -98,10 +98,12 @@ chained CI/CD route.
 
 The Rust workflow must wait for that Python run instead of treating dispatch as
 completion. After PyPI publication, the Python workflow runs every release demo
-against the exact public crates/PyPI version, pushes the generated report to the
-`alopex-db/docs` report branch with the repository-scoped deploy key, and waits
-until the docs-side workflow validates and publishes the same report bytes to
-`main`. A release run is not successful while the Python run, public-package
+against the exact public crates/PyPI version, pushes the generated report to a
+temporary report branch in `alopex-db/alopex`, and waits until the scheduled
+docs-side workflow fetches that single-file commit, validates it, and publishes
+the same report bytes to `alopex-db/docs@main`. Each workflow writes only to its
+own repository with its standard `GITHUB_TOKEN`; no cross-repository deploy key
+is used. A release run is not successful while the Python run, public-package
 demos, report generation, or docs `main` publication is missing or failed.
 
 If an Environment rejects the maintenance branch, the workflow must stop before

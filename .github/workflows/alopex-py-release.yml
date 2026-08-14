@@ -463,9 +463,9 @@ jobs:
       ((github.event_name == 'workflow_dispatch' && inputs.verification_only) ||
        needs.publish-pypi.result == 'success')
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Free disk space
         run: |
@@ -502,42 +502,34 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "release_sha=${core_sha}" >> "${GITHUB_OUTPUT}"
 
-      - name: Configure docs deploy key
-        env:
-          DOCS_PUBLIC_DEPLOY_KEY: ${{ secrets.DOCS_PUBLIC_DEPLOY_KEY }}
+      - name: Configure report branch identity
         shell: bash
         run: |
           set -euo pipefail
-          test -n "${DOCS_PUBLIC_DEPLOY_KEY}"
-          install -d -m 700 "${HOME}/.ssh"
-          printf '%s\n' "${DOCS_PUBLIC_DEPLOY_KEY}" > "${HOME}/.ssh/id_ed25519"
-          chmod 600 "${HOME}/.ssh/id_ed25519"
-          ssh-keyscan -H github.com > "${HOME}/.ssh/known_hosts"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Checkout docs publication target
+      - name: Checkout docs publication state
         shell: bash
-        run: |
-          set -euo pipefail
-          git clone --branch main --single-branch git@github.com:alopex-db/docs.git "${RUNNER_TEMP}/docs-public"
-          git -C "${RUNNER_TEMP}/docs-public" config user.name "github-actions[bot]"
-          git -C "${RUNNER_TEMP}/docs-public" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        run: git clone --branch main --single-branch https://github.com/alopex-db/docs.git "${RUNNER_TEMP}/docs-public"
 
       - name: Run demos against public packages and push report
         env:
-          DOCS_PUBLIC_DIR: ${{ runner.temp }}/docs-public
+          DOCS_PUBLIC_DIR: ${{ github.workspace }}
         shell: bash
         run: bash scripts/release/verify-release/run.sh '${{ steps.release.outputs.version }}' --push-only
 
       - name: Wait for docs main publication
         env:
+          REPORT_SOURCE_DIR: ${{ github.workspace }}
           DOCS_PUBLIC_DIR: ${{ runner.temp }}/docs-public
           VERSION: ${{ steps.release.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
           report="reports/release-verification/v${VERSION}.md"
-          expected="$(sha256sum "${DOCS_PUBLIC_DIR}/${report}" | awk '{print $1}')"
-          for attempt in $(seq 1 60); do
+          expected="$(sha256sum "${REPORT_SOURCE_DIR}/${report}" | awk '{print $1}')"
+          for attempt in $(seq 1 180); do
             git -C "${DOCS_PUBLIC_DIR}" fetch origin main --quiet
             if git -C "${DOCS_PUBLIC_DIR}" cat-file -e "origin/main:${report}" 2>/dev/null; then
               actual="$(git -C "${DOCS_PUBLIC_DIR}" show "origin/main:${report}" | sha256sum | awk '{print $1}')"
@@ -546,7 +538,7 @@ jobs:
                 exit 0
               fi
             fi
-            echo "waiting for docs publication (${attempt}/60)"
+            echo "waiting for docs publication (${attempt}/180)"
             sleep 10
           done
           echo "docs main did not publish ${report}" >&2
@@ -554,15 +546,14 @@ jobs:
 
       - name: Cleanup published report branch
         env:
-          DOCS_PUBLIC_DIR: ${{ runner.temp }}/docs-public
           VERSION: ${{ steps.release.outputs.version }}
         shell: bash
-        run: git -C "${DOCS_PUBLIC_DIR}" push origin --delete "report/verify-release-v${VERSION}"
+        run: git push origin --delete "report/verify-release-v${VERSION}"
 
       - name: Upload release verification report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: release-verification-v${{ steps.release.outputs.version }}
-          path: ${{ runner.temp }}/docs-public/reports/release-verification/v${{ steps.release.outputs.version }}.md
+          path: reports/release-verification/v${{ steps.release.outputs.version }}.md
           if-no-files-found: warn
