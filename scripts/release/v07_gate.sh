@@ -188,6 +188,12 @@ check_release_workflow_contract() {
     require_file_contains "${PROJECT_ROOT}/scripts/release/verify-release/Dockerfile" \
         '^ARG RUST_VERSION=1\.90\.0$' \
         "public-package demo container is pinned to Rust 1.90.0"
+    require_file_contains "${PROJECT_ROOT}/crates/alopex-tools/Cargo.toml" \
+        'alopex-embedded = "=0\.7\.7"' \
+        "release demo embedded tool uses the target public alopex-embedded 0.7.7"
+    require_file_contains "${PROJECT_ROOT}/crates/alopex-tools/Cargo.toml" \
+        'alopex-sql = "=0\.7\.7"' \
+        "release demo embedded tool uses the target public alopex-sql 0.7.7"
     require_file_contains "${release_workflow}" \
         'toolchain: "1\.90\.0"' \
         "Rust release jobs install Rust 1.90.0"

@@ -47,10 +47,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "alopex-core"
-version = "0.7.4"
+name = "alopex-cluster"
+version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6c9f4cd93fbda33d3dbe4729617f8e33a5837b4cddfde531ff75cf6cd6828db"
+checksum = "d60d15f3950ce0116239e1fc850d1fc7009047e0b13294fa8ee5d24db981a79f"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "alopex-core"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bad1b8be7711528512cade552d46f898188c21d2914c2e1f7630b59d3ed6ef01"
 dependencies = [
  "bincode",
  "crc32fast",
@@ -68,9 +77,9 @@ dependencies = [
 
 [[package]]
 name = "alopex-dataframe"
-version = "0.7.4"
+version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "becda6953eec0d3dd0dbf2f96c85bf20d54ebea3e2ef4831273486413691b951"
+checksum = "35b62b03d171dbe8e6ccf1d7db39cf1dcf85d9666ac04903a01bc5227e91648e"
 dependencies = [
  "alopex-core",
  "arrow",
@@ -83,10 +92,11 @@ dependencies = [
 
 [[package]]
 name = "alopex-embedded"
-version = "0.7.4"
+version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd12190ec153f9cf65af4c57855148691cd8ea72447adfa4f112c43979883443"
+checksum = "ac310e746e0547bd9546dfe32d1102710cc4fe1178b335bb30da87f8a0ebdada"
 dependencies = [
+ "alopex-cluster",
  "alopex-core",
  "alopex-dataframe",
  "alopex-sql",
@@ -96,9 +106,9 @@ dependencies = [
 
 [[package]]
 name = "alopex-sql"
-version = "0.7.4"
+version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc68ad4b267af83161b0e8dc0e6a33212ec0ee0fced82da7336eb8bbc9e3ccb5"
+checksum = "c8cb669c2cc35bd29beb852a9564cf2a1e169fe1a816154ad86812d07f9bd828"
 dependencies = [
  "alopex-core",
  "arrow-array 52.2.0",
