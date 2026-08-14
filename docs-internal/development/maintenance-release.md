@@ -59,7 +59,21 @@ bash scripts/release/safe-tag.sh v0.7.7 --maintenance-base v0.7.6
 - the target tag does not already exist locally or remotely.
 
 The local `safe-tag.sh` invocation is a non-publishing preflight. Do not create
-the tag locally. Dispatch the `Release` workflow on `release/v0.7.7` with:
+the tag locally.
+
+Before dispatching, a repository administrator must allow the exact maintenance
+branch in both the `testpypi` and `pypi` GitHub Environments. Keep the existing
+`alopex-py-v*` tag policy and add `release/v0.7.7` as a branch policy. Do not add
+a broad `release/v*` production-deployment policy: a typo or an unreviewed future
+maintenance branch would then inherit publishing authority. Verify the two
+exact policies before starting the workflow:
+
+```bash
+gh api repos/alopex-db/alopex/environments/testpypi/deployment-branch-policies
+gh api repos/alopex-db/alopex/environments/pypi/deployment-branch-policies
+```
+
+Dispatch the `Release` workflow on `release/v0.7.7` with:
 
 - `version`: `0.7.7`
 - `maintenance_base`: `v0.7.6`
@@ -82,6 +96,12 @@ and installs and exercises each wheel. Only then does it create the annotated
 trigger remains available for normal releases, but historical patches use this
 chained CI/CD route.
 
+If an Environment rejects the maintenance branch, the workflow must stop before
+the corresponding registry publish. Add only the exact `release/vX.Y.Z` branch
+policy, then use **Re-run failed jobs** on the same Actions run so the already
+validated artifacts and source SHA remain the release inputs. Do not publish
+locally as a workaround.
+
 ## 5. Verify published state directly
 
 Do not infer completion from a green workflow alone. Confirm:
@@ -92,6 +112,11 @@ Do not infer completion from a green workflow alone. Confirm:
 - PyPI reports exactly `X.Y.Z` and a clean installation passes the installed API
   smoke test;
 - milestone issues are closed only after their public artifacts are verified.
+
+After all direct checks pass, remove the temporary exact maintenance-branch
+policies from the `testpypi` and `pypi` Environments. The immutable tag policies
+remain in place, and the next historical patch must explicitly authorize its own
+exact branch before CI/CD starts.
 
 Registry versions and tags are immutable. If publication partially succeeds,
 fix the workflow and release the next patch version; never move or overwrite a
