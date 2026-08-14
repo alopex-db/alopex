@@ -122,6 +122,19 @@ class CiWorkflowContractTests(unittest.TestCase):
         )
         self.assertNotIn("rustsec/audit-check@", audit_job)
 
+    def test_clippy_uses_the_release_msrv_toolchain(self) -> None:
+        workflow = self.workflow("ci.yml")
+        clippy_job = workflow.split("  clippy:", maxsplit=1)[1].split(
+            "\n  test:", maxsplit=1
+        )[0]
+
+        self.assertIn("uses: dtolnay/rust-toolchain@1.90.0", clippy_job)
+        self.assertNotIn("uses: dtolnay/rust-toolchain@stable", clippy_job)
+        self.assertIn(
+            "cargo clippy --all-targets --all-features -- -D warnings",
+            clippy_job,
+        )
+
     def test_workflows_do_not_clone_an_unpinned_chirps_checkout(self) -> None:
         for workflow_path in WORKFLOW_DIR.glob("*.yml"):
             with self.subTest(workflow=workflow_path.name):

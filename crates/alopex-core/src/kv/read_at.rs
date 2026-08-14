@@ -68,7 +68,7 @@ impl ReadAtCapability {
         match self {
             Self::Available {
                 readable_from_epoch,
-                readable_through_epoch,
+                ..
             } if point.data_epoch < *readable_from_epoch => Err(ReadAtError::Expired {
                 requested_epoch: point.data_epoch,
                 readable_from_epoch: *readable_from_epoch,
