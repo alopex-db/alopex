@@ -35,6 +35,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _v07 import (  # noqa: E402
     ADMIN_STATUS_PATH,
+    BINARY_SOURCE_ENV,
+    BINARY_SOURCE_RELEASED,
     EXIT_ENV,
     EXIT_MISMATCH,
     EXIT_OK,
@@ -311,13 +313,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="v07-demo-routing-") as tmp:
             scene1_live_routing(repo, Path(tmp))
-        try:
-            passed = scene2_simulated_harness(repo)
-            scene2_result = f"PASS ({passed} passed)"
-        except SceneSkip as skip:
-            print(f"  SKIP: {skip.reason}")
-            print("        スキップを完了と偽らない(成功数に含めない)。")
-            scene2_result = f"SKIP ({skip.reason})"
+        if os.environ.get(BINARY_SOURCE_ENV) == BINARY_SOURCE_RELEASED:
+            note(
+                "場 2 は repository source の simulated_harness unit test であり、"
+                "公開パッケージのみを対象にする release verification には含めない。"
+            )
+            scene2_result = "N/A (source-only unit contract)"
+        else:
+            try:
+                passed = scene2_simulated_harness(repo)
+                scene2_result = f"PASS ({passed} passed)"
+            except SceneSkip as skip:
+                print(f"  SKIP: {skip.reason}")
+                print("        スキップを完了と偽らない(成功数に含めない)。")
+                scene2_result = f"SKIP ({skip.reason})"
     except DemoFailure as exc:
         print(f"\n検証不一致: {exc}", file=sys.stderr)
         return EXIT_MISMATCH

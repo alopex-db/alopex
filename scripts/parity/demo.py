@@ -305,7 +305,7 @@ def act3_server(
         print("\n  -- SF-GRPC: 同一クエリを gRPC でも検証 --")
         with GrpcSurface(
             server.grpc_target,
-            proto_path=repo / "crates" / "alopex-server" / "proto" / "alopex.proto",
+            proto_path=surfaces.server_proto_path(repo),
         ) as grpc_surface:
             grpc_raw = grpc_surface.run_statements(verify_statements)
         grpc_normalized = normalize.normalize_records(

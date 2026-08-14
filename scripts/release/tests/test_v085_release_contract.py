@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+import re
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+class V085ReleaseContractTests(unittest.TestCase):
+    def test_target_version_is_consistent(self) -> None:
+        workspace = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        python_release = (ROOT / ".github/workflows/alopex-py-release.yml").read_text(
+            encoding="utf-8"
+        )
+        version = re.search(r'^version = "([0-9.]+)"$', workspace, re.MULTILINE)
+        self.assertIsNotNone(version)
+        self.assertEqual(version.group(1), "0.8.5")
+        self.assertIn('ALOPEX_VERSION="0.8.5"', run)
+        self.assertIn("parser-assets-v0.8.5.json", release)
+        self.assertIn("parser-assets-v0.8.5.json", python_release)
+
+    def test_public_tool_dependencies_are_generated_from_exact_version(self) -> None:
+        tools = (ROOT / "crates/alopex-tools/Cargo.toml").read_text(encoding="utf-8")
+        run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
+        self.assertIn('path = "../alopex-embedded"', tools)
+        self.assertIn('alopex-embedded = { version = "=${ALOPEX_VERSION}" }', run)
+        self.assertIn('alopex-sql = { version = "=${ALOPEX_VERSION}" }', run)
+        self.assertNotIn('alopex-embedded = "=0.7.4"', tools)
+
+    def test_release_dag_requires_python_demos_and_docs(self) -> None:
+        rust = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        python = (ROOT / ".github/workflows/alopex-py-release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("dispatch-python-release:", rust)
+        self.assertIn('gh run watch "${run_id}" --exit-status', rust)
+        self.assertIn("verify-public-release:", python)
+        self.assertIn("publish_report: true", python)
+        self.assertIn("verify_python_vector_api.py", python)
+
+    def test_v08_demos_are_mandatory(self) -> None:
+        run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
+        self.assertIn("scripts/demo/v08/demo_sql_v08.py", run)
+        self.assertIn("scripts/demo/v074/demo_api_surfaces.py", run)
+        self.assertIn("scripts/demo/v074/demo_vector_api.py", run)
+
+    def test_embedded_demo_covers_every_v08_local_capability_group(self) -> None:
+        run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
+        wrapper = (ROOT / "scripts/demo/v08/demo_embedded_v085.sh").read_text(
+            encoding="utf-8"
+        )
+        source = (
+            ROOT / "crates/alopex-tools/src/bin/demo_v085_embedded.rs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("scripts/demo/v08/demo_embedded_v085.sh", run)
+        self.assertIn('cp crates/alopex-tools/build.rs "${tool_source}/"', run)
+        self.assertIn("demo-v085-embedded", wrapper)
+        build = (ROOT / "crates/alopex-tools/build.rs").read_text(encoding="utf-8")
+        self.assertIn("DEP_ALOPEX_SQL_PARSER_LIBDIR", build)
+        self.assertIn("rustc-link-arg-bins", build)
+        for scenario_id in (
+            "EMB-01-storage-durability",
+            "EMB-02-kv-transactions",
+            "EMB-03-persisted-transaction-manager",
+            "EMB-04-local-sql-matrix",
+            "EMB-05-catalog-cluster-diagnostics",
+            "EMB-06-owned-and-sql-streams",
+            "EMB-07-dataframe-columnar",
+            "EMB-08-vector-hnsw",
+            "EMB-09-large-values",
+            "EMB-10-fail-closed-boundaries",
+        ):
+            self.assertIn(scenario_id, source)
+
+        self.assertNotIn("distance が負値", source)
+
+    def test_apalache_uses_the_runner_identity(self) -> None:
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        compose = (ROOT / "formal/release-report/compose.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('export APALACHE_UID="$(id -u)"', ci)
+        self.assertIn('export APALACHE_GID="$(id -g)"', ci)
+        self.assertIn('USER_ID: "${APALACHE_UID:-1000}"', compose)
+        self.assertIn('GROUP_ID: "${APALACHE_GID:-1000}"', compose)
+
+
+if __name__ == "__main__":
+    unittest.main()

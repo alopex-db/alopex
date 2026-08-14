@@ -35,8 +35,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -77,8 +75,6 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -231,8 +227,6 @@ jobs:
       LD_LIBRARY_PATH: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -298,8 +292,6 @@ jobs:
       LD_LIBRARY_PATH: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -372,8 +364,6 @@ jobs:
       LD_LIBRARY_PATH: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 

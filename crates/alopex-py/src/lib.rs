@@ -5,7 +5,6 @@ mod catalog;
 mod embedded;
 mod error;
 mod types;
-#[cfg(feature = "numpy")]
 mod vector;
 
 #[pymodule]
@@ -82,6 +81,50 @@ mod tests {
                     .unwrap(),
                 1
             );
+        });
+    }
+
+    #[test]
+    fn exported_runtime_types_include_vector_methods_without_feature_flags() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "_alopex_runtime_vector_test").unwrap();
+            super::_alopex(py, &module).unwrap();
+            let database_type = module
+                .getattr("database")
+                .unwrap()
+                .getattr("Database")
+                .unwrap();
+            for method in [
+                "create_hnsw_index",
+                "search_hnsw",
+                "drop_hnsw_index",
+                "get_hnsw_stats",
+                "execute_sql_stream",
+                "query_stream",
+            ] {
+                assert!(database_type.hasattr(method).unwrap(), "Database.{method}");
+            }
+
+            let transaction_type = module
+                .getattr("transaction")
+                .unwrap()
+                .getattr("Transaction")
+                .unwrap();
+            for method in [
+                "upsert_vector",
+                "search_similar",
+                "get_vector",
+                "upsert_to_hnsw",
+                "delete_from_hnsw",
+                "execute_sql_stream",
+                "query_stream",
+            ] {
+                assert!(
+                    transaction_type.hasattr(method).unwrap(),
+                    "Transaction.{method}"
+                );
+            }
         });
     }
 }

@@ -13,7 +13,15 @@ pub(crate) fn evaluate_cast(
     target_type: &ResolvedType,
     ctx: &EvalContext<'_>,
 ) -> Result<SqlValue> {
-    let value = evaluate(expr, ctx)?;
+    coerce_value(evaluate(expr, ctx)?, target_type)
+}
+
+/// Normalize a value to the representation required by a typed assignment.
+///
+/// INSERT ... SELECT does not retain the source expressions after its query
+/// has executed, so the DML boundary uses this function to enforce the same
+/// storage representation as an expression-level CAST.
+pub(crate) fn coerce_value(value: SqlValue, target_type: &ResolvedType) -> Result<SqlValue> {
     match target_type {
         ResolvedType::Timestamp => coerce_timestamp(value),
         ResolvedType::Integer | ResolvedType::BigInt => coerce_integer(value, target_type),

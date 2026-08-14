@@ -8,6 +8,7 @@ grpcio==1.69.0        # SF-GRPC: AlopexService.ExecuteSql クライアント
 grpcio-tools==1.69.0  # crates/alopex-server/proto/alopex.proto から実行時にスタブ生成
 protobuf==5.29.3      # 生成スタブのランタイム
 requests==2.32.3      # SF-HTTP: SQL 実行 + /healthz ポーリング
+numpy==2.2.1          # Python Vector/HNSW 公開 API の実行デモ
 #
 # --- 推移的依存(ビルド決定性のため固定) ---
 certifi==2024.12.14

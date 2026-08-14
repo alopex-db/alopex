@@ -8,15 +8,10 @@ use crate::embedded::local_scan::PyLocalScan;
 use crate::embedded::stream::{PySqlResultStream, StreamLeaseRegistry};
 use crate::embedded::thread_mode::DatabaseControl;
 use crate::error;
-#[cfg(feature = "numpy")]
 use crate::types::{PyMetric, PySearchResult};
-#[cfg(feature = "numpy")]
 use crate::vector;
-#[cfg(feature = "numpy")]
 use crate::vector::SliceOrOwned;
-#[cfg(feature = "numpy")]
 use alopex_core::Key;
-#[cfg(feature = "numpy")]
 use pyo3::types::PyAnyMethods;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,7 +195,6 @@ impl PyTransaction {
         self.with_txn_mut(|txn| txn.delete(key))
     }
 
-    #[cfg(feature = "numpy")]
     fn upsert_vector(
         &self,
         py: Python<'_>,
@@ -237,7 +231,6 @@ impl PyTransaction {
         })
     }
 
-    #[cfg(feature = "numpy")]
     #[pyo3(signature = (query, metric, k, filter_keys = None, return_vectors = false, zero_copy_return = true))]
     #[allow(unused_variables, clippy::too_many_arguments)]
     fn search_similar(
@@ -314,7 +307,6 @@ impl PyTransaction {
         })
     }
 
-    #[cfg(feature = "numpy")]
     #[pyo3(signature = (name, key, vector, metadata = None))]
     fn upsert_to_hnsw(
         &self,
@@ -356,7 +348,6 @@ impl PyTransaction {
         })
     }
 
-    #[cfg(feature = "numpy")]
     fn delete_from_hnsw(&self, name: &str, key: &[u8]) -> PyResult<()> {
         self.with_txn_mut(|txn| txn.delete_from_hnsw(name, key))
             .map(|_| ())
@@ -374,7 +365,6 @@ impl PyTransaction {
     ///
     /// # Raises
     /// KeyError: キーが存在しない場合
-    #[cfg(feature = "numpy")]
     #[pyo3(signature = (key, metric, zero_copy_return = true))]
     fn get_vector(
         &self,

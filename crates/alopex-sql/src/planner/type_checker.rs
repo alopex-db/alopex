@@ -2123,13 +2123,18 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         value: TypedExpr,
         span: Span,
     ) -> TypedExpr {
-        if matches!(expected, ResolvedType::Timestamp)
-            && !matches!(
-                value.resolved_type,
-                ResolvedType::Timestamp | ResolvedType::Null
+        if value.resolved_type != *expected
+            && value.resolved_type != ResolvedType::Null
+            && matches!(
+                expected,
+                ResolvedType::Integer
+                    | ResolvedType::BigInt
+                    | ResolvedType::Float
+                    | ResolvedType::Double
+                    | ResolvedType::Timestamp
             )
         {
-            TypedExpr::cast(value, ResolvedType::Timestamp, span)
+            TypedExpr::cast(value, expected.clone(), span)
         } else {
             value
         }

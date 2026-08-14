@@ -11,11 +11,8 @@ use crate::embedded::thread_mode::{DatabaseControl, PyThreadMode, ThreadMode};
 use crate::embedded::transaction::{PyTransaction, PyTransactionInner};
 use crate::error;
 use crate::types::{DataFrameStreamRegistry, PyEmbeddedConfig, PyMemoryStats, PyTxnMode};
-#[cfg(feature = "numpy")]
 use crate::types::{PyHnswConfig, PyHnswStats, PySearchResult};
-#[cfg(feature = "numpy")]
 use crate::vector;
-#[cfg(feature = "numpy")]
 use crate::vector::SliceOrOwned;
 
 #[cfg(test)]
@@ -407,14 +404,12 @@ impl PyDatabase {
         Ok(())
     }
 
-    #[cfg(feature = "numpy")]
     fn create_hnsw_index(&self, name: &str, config: PyHnswConfig) -> PyResult<()> {
         let db = self.ensure_open()?;
         db.create_hnsw_index(name, config.into())
             .map_err(error::embedded_err)
     }
 
-    #[cfg(feature = "numpy")]
     #[pyo3(signature = (name, query, k, ef_search = None))]
     fn search_hnsw(
         &self,
@@ -451,13 +446,11 @@ impl PyDatabase {
         })
     }
 
-    #[cfg(feature = "numpy")]
     fn drop_hnsw_index(&self, name: &str) -> PyResult<()> {
         let db = self.ensure_open()?;
         db.drop_hnsw_index(name).map_err(error::embedded_err)
     }
 
-    #[cfg(feature = "numpy")]
     fn get_hnsw_stats(&self, name: &str) -> PyResult<PyHnswStats> {
         let db = self.ensure_open()?;
         db.get_hnsw_stats(name)

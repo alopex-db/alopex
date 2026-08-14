@@ -22,10 +22,16 @@ lane_ci = []
 name = "verify-release-embedded"
 path = "src/bin/verify_release_embedded.rs"
 
+[[bin]]
+name = "demo-v085-embedded"
+path = "src/bin/demo_v085_embedded.rs"
+
 [dependencies]
 serde_json = "1.0"
 
-# バージョンは release-please 等の自動化なしに手動で追随させる。
-# リリース確認ツールの目的上、常に「直近リリースの公開版」を指す。
-alopex-embedded = "=0.7.4"
-alopex-sql = "=0.7.4"
+# ローカル開発では同じ worktree の API に追随する。公開物検証では run.sh が
+# この bin source を一時 crate へコピーし、ALOPEX_VERSION の完全一致依存を
+# 生成するため、固定版の手動追随やローカル path 混入は起きない。
+alopex-embedded = { path = "../alopex-embedded" }
+alopex-core = { path = "../alopex-core" }
+alopex-sql = { path = "../alopex-sql" }

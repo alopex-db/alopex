@@ -1,0 +1,201 @@
+name: Public release verification
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Release version or tag"
+        required: true
+        type: string
+      publish_report:
+        description: "Publish a successful, non-SKIP report to docs"
+        required: true
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version or tag; empty resolves the latest PyPI version"
+        required: false
+        default: ""
+        type: string
+      publish_report:
+        description: "Explicitly publish a successful, non-SKIP report"
+        required: true
+        default: false
+        type: boolean
+  schedule:
+    - cron: "23 3 * * 1"
+
+concurrency:
+  group: public-release-verification-${{ inputs.version || 'latest' }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify public packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve exact public version
+        id: release
+        env:
+          REQUESTED_VERSION: ${{ inputs.version || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${REQUESTED_VERSION}"
+          version="${version#alopex-py-v}"
+          version="${version#v}"
+          if [[ -z "${version}" ]]; then
+            version="$(python3 - <<'PY'
+          import json
+          import urllib.request
+          with urllib.request.urlopen('https://pypi.org/pypi/alopex/json') as response:
+              print(json.load(response)['info']['version'])
+          PY
+          )"
+          fi
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git fetch --force origin "refs/tags/v${version}:refs/tags/v${version}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "REPORT_ROOT=${RUNNER_TEMP}/release-verification-v${version}" >> "${GITHUB_ENV}"
+
+      - name: Run public-package demos and generate reviewable report
+        id: demos
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${REPORT_ROOT}"
+          bash scripts/release/verify-release/run.sh "${VERSION}" \
+            --results-file "${REPORT_ROOT}/v${VERSION}.json" \
+            --report-dir "${REPORT_ROOT}"
+
+      - name: Upload structured result and Markdown
+        if: always() && steps.release.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-verification-v${{ steps.release.outputs.version }}
+          path: ${{ env.REPORT_ROOT }}/v${{ steps.release.outputs.version }}.*
+          if-no-files-found: error
+
+  publish:
+    name: Publish successful report
+    needs: verify
+    if: needs.verify.result == 'success' && inputs.publish_report == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      REPORT_ROOT: release-verification-output
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download reviewed verification result
+        uses: actions/download-artifact@v4
+        with:
+          name: release-verification-v${{ needs.verify.outputs.version }}
+          path: ${{ env.REPORT_ROOT }}
+
+      - name: Validate explicit publication candidate
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="${REPORT_ROOT}/v${VERSION}.md"
+          grep -Fxq '> 総合結果: **✅ 全ステップ成功**' "${report}"
+          python3 - "${REPORT_ROOT}/v${VERSION}.json" <<'PY'
+          import json, re, sys
+          payload = json.load(open(sys.argv[1], encoding='utf-8'))
+          if payload.get('overall_status') != 'ok':
+              raise SystemExit('public report candidate is not successful')
+          skipped = [line for step in payload['steps'] for line in step['diagnostics']
+                     if re.search(r'\bSKIP\b', line, re.IGNORECASE)]
+          if skipped:
+              raise SystemExit(f'A public release report must not contain executed SKIP: {skipped}')
+          PY
+
+      - name: Publish candidate branch for docs ingestion
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="report/verify-release-v${VERSION}"
+          public_url="https://raw.githubusercontent.com/alopex-db/docs/main/reports/release-verification/v${VERSION}.md"
+          if curl -fsSL "${public_url}" -o "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
+            cmp -s "${REPORT_ROOT}/v${VERSION}.md" "${RUNNER_TEMP}/docs-v${VERSION}.md"; then
+            echo "The exact report is already present on docs main."
+            echo "branch=" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+            echo "publication branch already exists: ${branch}" >&2
+            exit 1
+          fi
+          mkdir -p reports/release-verification
+          cp "${REPORT_ROOT}/v${VERSION}.md" "reports/release-verification/v${VERSION}.md"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "${branch}"
+          git add "reports/release-verification/v${VERSION}.md"
+          git commit -m "docs(release): v${VERSION} verified public-package report"
+          git push origin "${branch}"
+          echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+
+      - name: Wait for identical bytes on docs main
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_report="${REPORT_ROOT}/v${VERSION}.md"
+          for attempt in $(seq 1 60); do
+            if curl -fsSL \
+              "https://raw.githubusercontent.com/alopex-db/docs/main/reports/release-verification/v${VERSION}.md" \
+              -o "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
+              cmp -s "${source_report}" "${RUNNER_TEMP}/docs-v${VERSION}.md"; then
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "docs main did not publish the exact report bytes" >&2
+          exit 1
+
+      - name: Cleanup publication branch
+        if: always() && steps.publish.outputs.branch != ''
+        env:
+          BRANCH: ${{ steps.publish.outputs.branch }}
+        shell: bash
+        run: git push origin --delete "${BRANCH}"
+
+  notify-scheduled-failure:
+    name: Notify scheduled verification failure
+    needs: verify
+    if: always() && github.event_name == 'schedule' && needs.verify.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="release verification: scheduled public-package demo failed"
+          existing="$(gh issue list --repo "${REPOSITORY}" --state open \
+            --search "${title} in:title" --json number --jq '.[0].number // empty')"
+          body="v${VERSION:-unknown} の週次公開パッケージ検証が失敗しました。結果 JSON と Markdown は Actions artifact に保存されています: ${RUN_URL}"
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" --repo "${REPOSITORY}" --body "${body}"
+          else
+            gh issue create --repo "${REPOSITORY}" --title "${title}" --body "${body}"
+          fi

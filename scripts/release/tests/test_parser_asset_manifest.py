@@ -886,7 +886,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         upload = self.workflow.index("uses: actions/upload-artifact@v4")
         self.assertLess(verify, upload)
         self.assertIn("native smoke", self.workflow.lower())
-        self.assertIn("parser-assets-v0.8.4.json", self.workflow)
+        self.assertIn("parser-assets-v0.8.5.json", self.workflow)
 
     def test_release_envelope_binds_peeled_tag_sha_and_manifest(self) -> None:
         self.assertIn("git rev-parse", self.workflow)
@@ -895,9 +895,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_python_release_consumes_public_core_assets_without_nim_rebuild(self) -> None:
         workflow = PY_RELEASE_WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("gh release download v0.8.4", workflow)
+        self.assertIn('CORE_TAG: v0.8.5', workflow)
         self.assertIn("seq 1 30", workflow)
-        self.assertIn("parser-assets-v0.8.4.json", workflow)
+        self.assertIn("parser-assets-v0.8.5.json", workflow)
         self.assertIn("parser_asset_manifest.py verify-manifest", workflow)
         self.assertNotIn("setup-nim-action", workflow)
         self.assertNotIn("nimble lib", workflow)

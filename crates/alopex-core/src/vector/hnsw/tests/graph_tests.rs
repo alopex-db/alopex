@@ -31,6 +31,46 @@ fn insert_and_search_basic_flow() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn l2_search_exposes_non_negative_euclidean_distance() {
+    let mut graph = make_graph();
+    graph.insert(b"same", &[1.0, 0.0], b"").unwrap();
+    graph.insert(b"quarter", &[0.75, 0.0], b"").unwrap();
+    graph.insert(b"far", &[0.0, 0.0], b"").unwrap();
+
+    let (results, _) = graph.search(&[1.0, 0.0], 3, 8).unwrap();
+
+    assert_eq!(results[0].key, b"same");
+    assert_eq!(results[0].distance, 0.0);
+    assert!((results[1].distance - 0.25).abs() < f32::EPSILON);
+    assert!((results[2].distance - 1.0).abs() < f32::EPSILON);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn cosine_and_inner_product_search_expose_lower_is_closer_distance() {
+    for (metric, expected) in [
+        (Metric::Cosine, [0.0, 1.0, 2.0]),
+        (Metric::InnerProduct, [-1.0, -0.0, 1.0]),
+    ] {
+        let config = base_config().with_metric(metric);
+        let mut graph = HnswGraph::new(config).unwrap();
+        graph.insert(b"same", &[1.0, 0.0], b"").unwrap();
+        graph.insert(b"orthogonal", &[0.0, 1.0], b"").unwrap();
+        graph.insert(b"opposite", &[-1.0, 0.0], b"").unwrap();
+
+        let (results, _) = graph.search(&[1.0, 0.0], 3, 8).unwrap();
+
+        assert_eq!(results[0].key, b"same");
+        assert_eq!(results[1].key, b"orthogonal");
+        assert_eq!(results[2].key, b"opposite");
+        for (result, expected_distance) in results.iter().zip(expected) {
+            assert!((result.distance - expected_distance).abs() < f32::EPSILON);
+        }
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn ef_search_is_auto_corrected() {
     let mut graph = make_graph();
     for i in 0..5u8 {

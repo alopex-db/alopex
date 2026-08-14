@@ -37,8 +37,8 @@ sha2 = "0.10"
 # the build depend on whichever branch the neighbouring working tree happened
 # to be on, so an unrelated in-progress change there could add a dependency
 # this workspace's lock file did not know about.
-alopex-chirps = { version = "0.5.1", optional = true }
-alopex-chirps-core = { version = "0.5.1", optional = true }
-alopex-chirps-gossip-swim = { version = "0.5.1", optional = true }
-alopex-chirps-raft-storage = { version = "0.5.1", optional = true }
-alopex-chirps-transport-quic = { version = "0.5.1", optional = true }
+alopex-chirps = { version = "0.5.2", optional = true }
+alopex-chirps-core = { version = "0.5.2", optional = true }
+alopex-chirps-gossip-swim = { version = "0.5.2", optional = true }
+alopex-chirps-raft-storage = { version = "0.5.2", optional = true }
+alopex-chirps-transport-quic = { version = "0.5.2", optional = true }

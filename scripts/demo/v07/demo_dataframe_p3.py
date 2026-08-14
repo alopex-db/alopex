@@ -140,9 +140,54 @@ def run_scene1(alopex: Any) -> Dict[str, Any]:
     )
 
 
+def show_calls(python_calls: str, rust_calls: str) -> None:
+    """同一処理の呼び出し構文を Python / Rust の両方で出力する。
+
+    結果だけでは「どう呼ぶのか」が判別できない(``str.lower = [...]`` が
+    ``df.str.lower()`` なのか ``df["name"].str.to_lowercase()`` なのか
+    分からない)ため、呼び出し式そのものをレポートへ残す。
+
+    両言語の DataFrame API は設計が非対称であり、呼び出し構文は一致しない:
+
+    - Python: 列名を渡す eager 名前空間。DataFrame を返すので連鎖する
+      (``crates/alopex-py/src/types/dataframe.rs``)。
+    - Rust  : Expr ベース。``df.str("col")`` 形式は存在せず、
+      ``col("name").str()`` を ``with_columns`` へ渡す
+      (``crates/alopex-dataframe/src/expr/expr.rs``)。
+
+    したがって一致するのは**結果のデータ**であり、呼び出し構文ではない。
+    """
+    print("  -- 呼び出し構文 (Python) --")
+    for line in python_calls.strip().splitlines():
+        print(f"     {line}")
+    print("  -- 呼び出し構文 (Rust) --")
+    for line in rust_calls.strip().splitlines():
+        print(f"     {line}")
+
+
+SCENE1_PY_CALLS = """
+df = alopex.DataFrame({"name": [...]})
+df.str("name").to_lowercase("lower")
+  .str("name").contains(r"\\d+", "has_digits")
+  .str("name").split("-", "parts")
+  .str("name").extract(r"([A-Za-z]+)-(\\d+)", 2, "num")
+  .to_dict()
+"""
+
+SCENE1_RS_CALLS = """
+df.with_columns(vec![
+    col("name").str().to_lowercase().alias("lower"),
+    col("name").str().contains(r"\\d+").alias("has_digits"),
+    col("name").str().split("-").alias("parts"),
+    col("name").str().extract(r"([A-Za-z]+)-(\\d+)", 2).alias("num"),
+])?
+"""
+
+
 def scene1_string(alopex: Any) -> None:
     banner(1, "str namespace: to_lowercase / contains / split / extract")
     print(f"  入力: {STR_INPUT}")
+    show_calls(SCENE1_PY_CALLS, SCENE1_RS_CALLS)
     out = run_scene1(alopex)
     for column, expected in STR_EXPECTED.items():
         check(f"str.{column}", expected, out[column])
@@ -200,9 +245,29 @@ def run_scene2(alopex: Any) -> Dict[str, Any]:
     )
 
 
+SCENE2_PY_CALLS = """
+df = alopex.DataFrame({"ts": [...]}, schema={"ts": "timestamp_micros"})
+df.dt("ts").year("year")
+  .dt("ts").month("month")
+  .dt("ts").weekday("weekday")
+  .dt("ts").convert_time_zone("Z", "+09:00", "tokyo")
+  .to_dict()
+"""
+
+SCENE2_RS_CALLS = """
+df.with_columns(vec![
+    col("ts").dt().year().alias("year"),
+    col("ts").dt().month().alias("month"),
+    col("ts").dt().weekday().alias("weekday"),
+    col("ts").dt().convert_time_zone("Z", "+09:00").alias("tokyo"),
+])?
+"""
+
+
 def scene2_datetime(alopex: Any) -> None:
     banner(2, "dt namespace: year / month / weekday / convert_time_zone")
     print(f"  入力: ts = {DT_INPUT_TS} (timestamp_micros, UTC)")
+    show_calls(SCENE2_PY_CALLS, SCENE2_RS_CALLS)
     out = run_scene2(alopex)
     for column, expected in DT_EXPECTED.items():
         check(f"dt.{column}", expected, out[column])
@@ -300,9 +365,33 @@ def run_scene3(alopex: Any) -> Dict[str, Dict[str, Any]]:
     }
 
 
+SCENE3_PY_CALLS = """
+listified = alopex.DataFrame({...}).str("tags").split(",", "parts")
+listified.list("parts").join("|", "NULL", "joined")
+         .list("parts").len("n")
+         .list("parts").contains("red", "has_red")
+with_ops.explode("parts")     # リスト列を行へ展開
+nested.explode("items").implode()   # explode -> implode の往復
+"""
+
+SCENE3_RS_CALLS = """
+let listified = df.with_columns(vec![
+    col("tags").str().split(",").alias("parts"),
+])?;
+listified.with_columns(vec![
+    col("parts").list().join("|", Some("NULL")).alias("joined"),
+    col("parts").list().len().alias("n"),
+    col("parts").list().contains("red").alias("has_red"),
+])?
+df.explode("parts")?          // DataFrame::explode(column)
+df.explode("items")?.implode()?   // explode -> implode の往復
+"""
+
+
 def scene3_list(alopex: Any) -> None:
     banner(3, "list namespace: join / len / contains -> explode -> implode 往復")
     print(f"  入力: {LIST_INPUT}")
+    show_calls(SCENE3_PY_CALLS, SCENE3_RS_CALLS)
     out = run_scene3(alopex)
 
     print("  -- list.join / len / contains --")

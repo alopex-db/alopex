@@ -21,8 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -33,8 +31,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -73,8 +69,6 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force || true
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -177,8 +171,6 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force || true
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -264,29 +256,50 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
 
+  release-process-contract:
+    name: Release process contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify report and workflow contracts
+        run: |
+          python -m unittest discover -s scripts/release/tests -p 'test_*.py'
+          bash scripts/release/tests/test_verify_release_reporting.sh
+          bash scripts/release/tests/test_verify_release_join.sh
+      - name: Check release-report state model
+        working-directory: formal/release-report
+        run: |
+          export APALACHE_UID="$(id -u)"
+          export APALACHE_GID="$(id -g)"
+          docker compose run --rm apalache typecheck ReleaseReport.tla
+          docker compose run --rm apalache check --config=ReleaseReport.cfg --length=12 ReleaseReport.tla
+
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
     permissions:
-      checks: write
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # RUSTSEC-2026-0194/0195 (quick-xml, alopex コードから直接使用なし、
-          # object_store の推移依存)。object_store 0.14.0 (crates.io 最新) は
-          # quick-xml を ^0.40.1 に固定しており修正版 (>=0.41.0) を引けない。
-          # 修正自体は object_store の v0.14.1-rc1 タグで完了済みだが
-          # crates.io へ未リリース (upstream: apache/arrow-rs-object-store#761,
-          # target 2026-08)。追跡: alopex-db/alopex#42。正式リリース後は
-          # この ignore を外し `cargo update -p object_store -p quick-xml`
-          # で解消すること。
-          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
-        continue-on-error: true  # Advisory: don't fail CI on new vulnerabilities
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - name: Verify ignored rkyv advisory remains unreachable
+        shell: bash
+        run: |
+          set -euo pipefail
+          tree_file="${RUNNER_TEMP}/alopex-security-dependency-tree.txt"
+          cargo tree --locked --workspace --all-features --target all > "${tree_file}"
+          if grep -Eq '^rkyv v0\.7\.46([[:space:]]|$)' "${tree_file}"; then
+            echo "::error::RUSTSEC-2026-0235 is reachable; remove the exception and upgrade rkyv"
+            exit 1
+          fi
+      - name: Install pinned cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Run RustSec audit
+        # rust_decimal's `std` feature weakly forwards `rkyv?/std`, so Cargo.lock
+        # contains rkyv 0.7.46 even though no resolved target/feature path uses it.
+        # The preceding full dependency-tree check must fail before this exception
+        # can conceal a reachable RUSTSEC-2026-0235 path. Tracking: #94.
+        run: cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0235
 
   build:
     name: Build (${{ matrix.os }})
@@ -300,8 +313,6 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -346,8 +357,6 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force || true
       - uses: actions/checkout@v4
-      - name: Checkout Chirps dependency
-        run: bash .github/scripts/checkout-chirps.sh
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -450,7 +459,7 @@ jobs:
 
   ci-success:
     name: CI Success
-    needs: [fmt, clippy, test, coverage, security-audit, build, v08-release-gate]
+    needs: [fmt, clippy, test, coverage, release-process-contract, security-audit, build, v08-release-gate]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -460,6 +469,7 @@ jobs:
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
+             [[ "${{ needs['release-process-contract'].result }}" != "success" ]] || \
              [[ "${{ needs['security-audit'].result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
              [[ "${{ needs['v08-release-gate'].result }}" != "success" ]]; then
@@ -468,6 +478,7 @@ jobs:
             echo "clippy: ${{ needs.clippy.result }}"
             echo "test: ${{ needs.test.result }}"
             echo "coverage: ${{ needs.coverage.result }}"
+            echo "release-process-contract: ${{ needs['release-process-contract'].result }}"
             echo "security-audit: ${{ needs['security-audit'].result }}"
             echo "build: ${{ needs.build.result }}"
             echo "v08-release-gate: ${{ needs['v08-release-gate'].result }}"

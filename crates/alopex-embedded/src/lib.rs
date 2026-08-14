@@ -503,21 +503,16 @@ impl Database {
     pub fn file_format_version(&self) -> alopex_core::storage::format::FileVersion {
         use alopex_core::storage::format::FileVersion;
 
-        match self.store.as_ref() {
-            AnyKV::Memory(_) => FileVersion::CURRENT,
-            AnyKV::Lsm(kv) => read_file_version_from_storage(&kv.data_dir),
-            #[cfg(feature = "s3")]
-            AnyKV::S3(kv) => read_file_version_from_storage(kv.cache_dir()),
-        }
+        self.store
+            .file_format_storage_dir()
+            .map_or(FileVersion::CURRENT, read_file_version_from_storage)
     }
 
     /// Returns current memory usage statistics (in-memory KV only).
     pub fn memory_usage(&self) -> Option<MemoryStats> {
         match self.store.as_ref() {
             AnyKV::Memory(kv) => Some(kv.memory_stats()),
-            AnyKV::Lsm(_) => None,
-            #[cfg(feature = "s3")]
-            AnyKV::S3(_) => None,
+            _ => None,
         }
     }
 

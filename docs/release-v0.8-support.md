@@ -45,3 +45,23 @@ with a missing, mismatched, or unclassified artifact is `Blocked`.
 
 Post-release verification is intentionally `not_run` in every candidate report.
 It can only be performed after a separately authorized public release action.
+
+## Mandatory post-release verification
+
+The Python publication workflow calls
+`.github/workflows/public-release-verification.yml` after the immutable core/Python
+join succeeds. That workflow installs the exact crates.io and PyPI version, runs
+every release demo, saves structured JSON plus Markdown as an Actions artifact,
+and rejects a publication candidate containing `SKIP`.
+
+Report generation has no Git or GitHub side effect. A successful report is
+published only by the workflow's explicit `publish_report: true` job, without a
+force push, and the job waits until `alopex-db/docs@main` contains identical
+bytes. A failed run retains the JSON/Markdown artifact but is not imported as a
+public guarantee. Weekly scheduled verification uses the same harness, never
+publishes automatically, and creates or updates a failure issue when the
+harness or latest public packages stop working.
+
+For local review, run the verifier with `--results-file` and `--report-dir`.
+`--report-only RESULTS.json` regenerates Markdown without rerunning Docker or
+the public package tests.

@@ -3,7 +3,7 @@ use alopex_core::kv::KVStore;
 use crate::ast::ddl::IndexMethod;
 use crate::ast::expr::{Expr, ExprKind};
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
-use crate::executor::evaluator::{EvalContext, evaluate};
+use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;
@@ -139,7 +139,7 @@ fn build_row_from_values(
         let col_index = table
             .get_column_index(col_name)
             .ok_or_else(|| ExecutorError::ColumnNotFound(col_name.clone()))?;
-        row[col_index] = value;
+        row[col_index] = normalize_assignment_value(value, &table.columns[col_index].data_type)?;
     }
 
     Ok(row)
@@ -169,7 +169,8 @@ fn build_row(
         let col_index = table
             .get_column_index(col_name)
             .ok_or_else(|| ExecutorError::ColumnNotFound(col_name.clone()))?;
-        let value = evaluate(&expr, ctx)?;
+        let value =
+            normalize_assignment_value(evaluate(&expr, ctx)?, &table.columns[col_index].data_type)?;
         row[col_index] = value;
     }
 
@@ -187,6 +188,24 @@ fn build_row(
     }
 
     Ok(row)
+}
+
+fn normalize_assignment_value(
+    value: SqlValue,
+    target_type: &crate::planner::types::ResolvedType,
+) -> Result<SqlValue> {
+    let compatible_vector = matches!(
+        (target_type, &value),
+        (
+            crate::planner::types::ResolvedType::Vector { dimension, .. },
+            SqlValue::Vector(values)
+        ) if *dimension == values.len() as u32
+    );
+    if value.is_null() || value.resolved_type() == *target_type || compatible_vector {
+        Ok(value)
+    } else {
+        coerce_value(value, target_type)
+    }
 }
 
 fn evaluate_default(

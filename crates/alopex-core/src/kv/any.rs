@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::error::{Error, Result};
@@ -35,6 +36,21 @@ pub enum AnyKV {
 }
 
 impl AnyKV {
+    /// Returns the local directory that contains persisted file-format metadata.
+    ///
+    /// Keeping this match in `alopex-core` makes it exhaustive under this
+    /// crate's own feature set. Downstream crates cannot reliably match on the
+    /// optional `S3` variant because Cargo may enable `alopex-core/s3` through
+    /// feature unification without enabling their corresponding local feature.
+    pub fn file_format_storage_dir(&self) -> Option<&Path> {
+        match self {
+            Self::Memory(_) => None,
+            Self::Lsm(kv) => Some(&kv.data_dir),
+            #[cfg(feature = "s3")]
+            Self::S3(kv) => Some(kv.cache_dir()),
+        }
+    }
+
     /// MemTable をフラッシュする。
     pub fn flush(&self) -> Result<()> {
         match self {
@@ -714,6 +730,16 @@ mod tests {
             })
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn file_format_storage_dir_distinguishes_memory_and_disk() {
+        let memory = AnyKV::Memory(crate::kv::memory::MemoryKV::new());
+        assert_eq!(memory.file_format_storage_dir(), None);
+
+        let directory = tempfile::tempdir().unwrap();
+        let disk = disk_store(directory.path());
+        assert_eq!(disk.file_format_storage_dir(), Some(directory.path()));
     }
 
     #[test]
