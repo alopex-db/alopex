@@ -185,6 +185,9 @@ check_release_workflow_contract() {
     require_file_contains "${PROJECT_ROOT}/rust-toolchain.toml" \
         'channel = "1\.90\.0"' \
         "v0.7 release toolchain is pinned to Rust 1.90.0"
+    require_file_contains "${PROJECT_ROOT}/scripts/release/verify-release/Dockerfile" \
+        '^ARG RUST_VERSION=1\.90\.0$' \
+        "public-package demo container is pinned to Rust 1.90.0"
     require_file_contains "${release_workflow}" \
         'toolchain: "1\.90\.0"' \
         "Rust release jobs install Rust 1.90.0"

@@ -54,7 +54,7 @@
 # 期待値の読み出しにのみ使う。製品コードは一切ビルドしない)。
 # =============================================================================
 
-ARG RUST_VERSION=1.96
+ARG RUST_VERSION=1.90.0
 ARG NIM_IMAGE=nimlang/nim:2.2@sha256:62428daa4a39baeb6f5e429a9c2ca3cee27a80ef880fe6e1bf3e29cc2296ac1b
 ARG ALOPEX_VERSION=0.7.7
 
