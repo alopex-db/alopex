@@ -44,6 +44,8 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertIn("source_ref:", text)
         self.assertIn("target_sha:", text)
         self.assertIn("release_tag:", text)
+        self.assertIn("repair_forward:", text)
+        self.assertIn("type: boolean", text)
         self.assertIn(
             "ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref }}",
             text,
@@ -52,6 +54,26 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertIn("PYTHON_TAG_NAME: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref_name }}", text)
         self.assertIn("alopex-py-v0.8.5-repair", text)
         self.assertIn("PYTHON_HEAD_SHA=%s", text)
+
+    def test_repair_dispatch_creates_or_verifies_tag_before_packaging(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        block = text.split("  prepare-repair-release:", maxsplit=1)[1].split(
+            "  linux:", maxsplit=1
+        )[0]
+        self.assertIn("contents: write", block)
+        self.assertIn("SOURCE_SHA: ${{ inputs.source_ref }}", block)
+        self.assertIn("TARGET_SHA: ${{ inputs.target_sha }}", block)
+        self.assertIn("RELEASE_TAG: ${{ inputs.release_tag }}", block)
+        self.assertIn("run: bash scripts/release/prepare-python-repair.sh", block)
+        for job in ("linux", "macos", "windows", "sdist"):
+            job_block = text.split(f"  {job}:", maxsplit=1)[1]
+            self.assertIn("needs: [prepare-repair-release]", job_block.split("    steps:", maxsplit=1)[0])
+
+    def test_repair_dispatch_selects_core_repair_evidence_explicitly(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        block = text.split("  final-release-join:", maxsplit=1)[1]
+        self.assertIn("REPAIR_FORWARD: ${{ inputs.repair_forward }}", block)
+        self.assertIn('repair_forward == "true"', block)
 
     def test_v085_immutable_tag_does_not_start_historical_workflow(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
