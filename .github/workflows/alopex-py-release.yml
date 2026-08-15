@@ -24,6 +24,11 @@ on:
         required: false
         default: ""
         type: string
+      repair_forward:
+        description: "Create/verify the historical Python tag without a push-triggered workflow"
+        required: false
+        default: false
+        type: boolean
 
 defaults:
   run:
@@ -33,9 +38,28 @@ env:
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
 
 jobs:
+  prepare-repair-release:
+    name: Prepare immutable repair release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create or verify immutable Python tag
+        if: ${{ inputs.repair_forward }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_ref }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bash scripts/release/prepare-python-repair.sh
+
   linux:
     name: linux (${{ matrix.target }})
     runs-on: ubuntu-latest
+    needs: [prepare-repair-release]
     strategy:
       fail-fast: false
       matrix:
@@ -148,6 +172,7 @@ jobs:
   macos:
     name: macos (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    needs: [prepare-repair-release]
     strategy:
       fail-fast: false
       matrix:
@@ -252,6 +277,7 @@ jobs:
   windows:
     name: windows (x86_64)
     runs-on: windows-latest
+    needs: [prepare-repair-release]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -348,6 +374,7 @@ jobs:
   sdist:
     name: sdist
     runs-on: ubuntu-latest
+    needs: [prepare-repair-release]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -485,6 +512,7 @@ jobs:
           PYTHON_RUN_ID: ${{ github.run_id }}
           PYTHON_HEAD_SHA: ${{ inputs.target_sha || github.sha }}
           PYTHON_TAG_NAME: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref_name }}
+          REPAIR_FORWARD: ${{ inputs.repair_forward }}
         run: |
           set -euo pipefail
           core_tag_sha="$(gh api "repos/${REPOSITORY}/git/ref/tags/v0.8.5" | jq -r '.object.sha')"
@@ -497,7 +525,7 @@ jobs:
           if [[ "${python_tag_type}" == "tag" ]]; then
             python_tag_sha="$(gh api "repos/${REPOSITORY}/git/tags/${python_tag_sha}" | jq -r '.object.sha')"
           fi
-          if [[ "${GITHUB_REF_NAME}" == alopex-py-v0.8.5-repair* ]]; then
+          if [[ "${REPAIR_FORWARD}" == "true" || "${GITHUB_REF_NAME}" == alopex-py-v0.8.5-repair* ]]; then
             PYTHON_HEAD_SHA="${python_tag_sha}"
             printf 'PYTHON_HEAD_SHA=%s\n' "${PYTHON_HEAD_SHA}" >> "${GITHUB_ENV}"
           fi
@@ -514,14 +542,14 @@ jobs:
           core_run="$(printf '%s' "${runs}" | python3 -c '
           import json, sys
           runs = json.load(sys.stdin)
-          core_sha, ref_name = sys.argv[1:]
+          core_sha, ref_name, repair_forward = sys.argv[1:]
           successful = [r for r in runs
                         if r.get("status") == "completed"
                         and r.get("conclusion") == "success"]
           same_sha = [r for r in successful if r.get("headSha") == core_sha]
           if len(same_sha) == 1:
               match = same_sha[0]
-          elif ref_name.startswith("alopex-py-v0.8.5-repair"):
+          elif repair_forward == "true" or ref_name.startswith("alopex-py-v0.8.5-repair"):
               repaired = [r for r in successful
                           if r.get("headBranch") == "repair/v0.8.5-release"]
               if not repaired:
@@ -535,7 +563,7 @@ jobs:
                   f"found {len(same_sha)}"
               )
           print("{}\t{}".format(match["databaseId"], match["headSha"]))
-          ' "${core_tag_sha}" "${GITHUB_REF_NAME}")"
+          ' "${core_tag_sha}" "${GITHUB_REF_NAME}" "${REPAIR_FORWARD}")"
           IFS=$'\t' read -r core_run_id core_run_head_sha <<< "${core_run}"
           printf 'CORE_TAG_SHA=%s\nCORE_RUN_ID=%s\nCORE_RUN_HEAD_SHA=%s\nPYTHON_RUN_ID=%s\n' \
             "${core_tag_sha}" "${core_run_id}" "${core_run_head_sha}" "${PYTHON_RUN_ID}" >> "${GITHUB_ENV}"

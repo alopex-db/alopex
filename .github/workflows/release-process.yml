@@ -24,6 +24,7 @@ jobs:
         run: |
           python -m unittest discover -s scripts/release/tests -p 'test_*.py'
           bash scripts/release/tests/test_safe_tag.sh
+          bash scripts/release/tests/test_prepare_python_repair.sh
           bash scripts/release/tests/test_verify_release_reporting.sh
           bash scripts/release/tests/test_verify_release_join.sh
 
