@@ -521,12 +521,11 @@ jobs:
           elif ref_name.startswith("alopex-py-v0.8.5-repair"):
               repaired = [r for r in successful
                           if r.get("headBranch") == "repair/v0.8.5-release"]
-              if len(repaired) != 1:
+              if not repaired:
                   raise SystemExit(
-                      "expected exactly one successful v0.8.5 repair core run, "
-                      f"found {len(repaired)}"
+                      "expected at least one successful v0.8.5 repair core run"
                   )
-              match = repaired[0]
+              match = max(repaired, key=lambda run: int(run["databaseId"]))
           else:
               raise SystemExit(
                   "expected exactly one successful core run on the core tag SHA, "

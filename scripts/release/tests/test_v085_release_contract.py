@@ -35,19 +35,14 @@ class V085ReleaseContractTests(unittest.TestCase):
         release = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
         )
-        baseline_vendor = (
-            "crates/alopex-sql/nim-sql-parser/vendor/"
-            "x86_64-unknown-linux-gnu"
-        )
-
-        self.assertIn(f"NIM_SQL_PARSER_DIR: {baseline_vendor}", release)
-        self.assertIn("Run controlled Nim parser failure", release)
-        self.assertIn("Stage reviewed parser candidate for v0.8 surfaces", release)
-        self.assertIn(
-            "ALOPEX_NIM_CONTROLLED_FAILURE_OUTCOME: "
-            "${{ steps.nim_parser_controlled_failure.outcome }}",
-            release,
-        )
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("Run controlled Nim parser failure", ci)
+        self.assertIn("Stage reviewed parser candidate for v0.8 surfaces", ci)
+        self.assertNotIn("Run controlled Nim parser failure", release)
+        self.assertNotIn("Run v0.7 baseline gate", release)
+        self.assertNotIn("verify-v08-surfaces.sh", release)
+        self.assertIn("Extract and run native smoke", release)
+        self.assertIn("Assemble and verify parser manifest", release)
         self.assertNotIn("pattern: nim-vendor-*", release)
         self.assertNotIn("Place vendored libraries in clean source staging", release)
         self.assertNotIn("Upload vendored Nim shared library", release)
@@ -57,7 +52,7 @@ class V085ReleaseContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertNotIn("dtolnay/rust-toolchain@stable", release)
-        self.assertGreaterEqual(release.count("dtolnay/rust-toolchain@1.90.0"), 3)
+        self.assertGreaterEqual(release.count("dtolnay/rust-toolchain@1.90.0"), 2)
 
     def test_release_flattens_downloaded_parser_payloads_before_assembly(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
@@ -116,12 +111,14 @@ class V085ReleaseContractTests(unittest.TestCase):
         self.assertIn("repair_forward:", release)
         self.assertIn("release_tag:", release)
         self.assertIn("target_sha:", release)
-        self.assertIn("branches:\n      - 'repair/v*-release'", release)
+        self.assertNotIn("branches:\n      - 'repair/v*-release'", release)
+        self.assertNotIn("startsWith(github.ref_name, 'repair/v')", publish)
         self.assertIn(
-            "startsWith(github.ref_name, 'repair/v')", publish
+            '[[ "${release_tag}" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]',
+            publish,
         )
         self.assertIn(
-            '[[ "${GITHUB_REF_NAME}" == "repair/v0.8.5-release" ]]', publish
+            '[[ "${release_target_sha}" =~ ^[0-9a-f]{40}$ ]]', publish
         )
         self.assertIn(
             'git rev-parse "${RELEASE_TAG_NAME}^{commit}"', publish
@@ -171,12 +168,14 @@ class V085ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("distance が負値", source)
 
     def test_apalache_uses_the_runner_identity(self) -> None:
-        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        process = (ROOT / ".github/workflows/release-process.yml").read_text(
+            encoding="utf-8"
+        )
         compose = (ROOT / "formal/release-report/compose.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn('export APALACHE_UID="$(id -u)"', ci)
-        self.assertIn('export APALACHE_GID="$(id -g)"', ci)
+        self.assertIn('export APALACHE_UID="$(id -u)"', process)
+        self.assertIn('export APALACHE_GID="$(id -g)"', process)
         self.assertIn('USER_ID: "${APALACHE_UID:-1000}"', compose)
         self.assertIn('GROUP_ID: "${APALACHE_GID:-1000}"', compose)
 
