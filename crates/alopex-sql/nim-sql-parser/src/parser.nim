@@ -277,6 +277,37 @@ proc parseCastExpr(p: var Parser): SqlNode =
   result.children.add(p.parseTypeName())
   discard p.expect(tkRParen)
 
+proc parseCaseExpr(p: var Parser): SqlNode =
+  p.enterNesting()
+  defer: p.leaveNesting()
+  let start = p.expect(tkCase)
+  result = newNode(nkCase, tokenSpan(start))
+
+  if not p.check(tkWhen):
+    result.caseOperand = p.parseExpr()
+
+  if not p.check(tkWhen):
+    p.error("expected at least one WHEN in CASE expression")
+
+  while p.check(tkWhen):
+    let whenTok = p.advance()
+    let condition = p.parseExpr()
+    discard p.expect(tkThen)
+    let branchResult = p.parseExpr()
+    let branchEnd = tokenSpan(p.previous)
+    let branch = newNode(nkCaseWhen,
+      spanThrough(tokenSpan(whenTok), branchEnd))
+    branch.caseWhen = condition
+    branch.caseThen = branchResult
+    result.caseBranches.add(branch)
+
+  if p.check(tkElse):
+    discard p.advance()
+    result.caseElse = p.parseExpr()
+
+  let endTok = p.expect(tkEnd)
+  result.span = spanThrough(tokenSpan(start), tokenSpan(endTok))
+
 proc parsePrimary(p: var Parser): SqlNode =
   case p.current.kind
   of tkInteger:
@@ -323,6 +354,8 @@ proc parsePrimary(p: var Parser): SqlNode =
     result = p.parseExistsExpr(false)
   of tkCast:
     result = p.parseCastExpr()
+  of tkCase:
+    result = p.parseCaseExpr()
   of tkNot:
     discard p.advance()
     if p.check(tkExists):

@@ -37,6 +37,8 @@ type
     nkColumnRef
     nkBinaryOp
     nkUnaryOp
+    nkCase
+    nkCaseWhen
     nkFunctionCall
     nkWindowSpec
     nkPartitionByClause
@@ -112,6 +114,13 @@ type
     of nkUnaryOp:
       unOp*: UnaryOpKind
       unOperand*: SqlNode
+    of nkCase:
+      caseOperand*: SqlNode
+      caseBranches*: seq[SqlNode]
+      caseElse*: SqlNode
+    of nkCaseWhen:
+      caseWhen*: SqlNode
+      caseThen*: SqlNode
     of nkJoin, nkFromJoin:
       joinKind*: JoinKind
       joinLeft*, joinRight*, joinCond*: SqlNode
@@ -194,6 +203,14 @@ proc fillMissingSpans*(node: SqlNode; fallback: Span) =
     node.binRight.fillMissingSpans(node.span)
   of nkUnaryOp:
     node.unOperand.fillMissingSpans(node.span)
+  of nkCase:
+    node.caseOperand.fillMissingSpans(node.span)
+    for branch in node.caseBranches:
+      branch.fillMissingSpans(node.span)
+    node.caseElse.fillMissingSpans(node.span)
+  of nkCaseWhen:
+    node.caseWhen.fillMissingSpans(node.span)
+    node.caseThen.fillMissingSpans(node.span)
   of nkJoin, nkFromJoin:
     node.joinLeft.fillMissingSpans(node.span)
     node.joinRight.fillMissingSpans(node.span)
@@ -233,6 +250,16 @@ proc `$`*(node: SqlNode): string =
     result = "BinOp(" & $node.binOp & ", " & $node.binLeft & ", " & $node.binRight & ")"
   of nkUnaryOp:
     result = "UnaryOp(" & $node.unOp & ", " & $node.unOperand & ")"
+  of nkCase:
+    result = "Case("
+    if node.caseOperand != nil:
+      result &= $node.caseOperand & ", "
+    result &= $node.caseBranches
+    if node.caseElse != nil:
+      result &= ", ELSE " & $node.caseElse
+    result &= ")"
+  of nkCaseWhen:
+    result = "When(" & $node.caseWhen & ", " & $node.caseThen & ")"
   of nkJoin, nkFromJoin:
     result = "Join(" & $node.joinKind & ", " & $node.joinLeft & ", " & $node.joinRight
     if node.joinCond != nil:

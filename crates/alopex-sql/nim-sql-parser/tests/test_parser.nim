@@ -32,6 +32,14 @@ suite "Tokenizer":
     check lex.nextToken().kind == tkWhere
     check lex.nextToken().kind == tkWhere
 
+  test "CASE expression keywords are recognized":
+    var lex = initLexer("CASE WHEN THEN ELSE END")
+    check lex.nextToken().kind == tkCase
+    check lex.nextToken().kind == tkWhen
+    check lex.nextToken().kind == tkThen
+    check lex.nextToken().kind == tkElse
+    check lex.nextToken().kind == tkEnd
+
   test "identifiers preserve original case":
     var lex = initLexer("foo _Bar1")
     let t1 = lex.nextToken()
@@ -418,6 +426,43 @@ suite "Expressions — function calls":
     check col.kind == nkFunctionCall
     check col.children[0].strVal == "COALESCE"
     check col.children.len == 4  # name + 3 args
+
+suite "Expressions — CASE":
+
+  test "searched CASE with multiple branches and ELSE":
+    let ast = parseSql("SELECT CASE WHEN a = 1 THEN 'one' WHEN a = 2 THEN 'two' ELSE 'other' END FROM t")
+    let caseExpr = ast.children[0].children[0]
+    check caseExpr.kind == nkCase
+    check caseExpr.caseOperand == nil
+    check caseExpr.caseBranches.len == 2
+    check caseExpr.caseBranches[0].caseWhen.kind == nkBinaryOp
+    check caseExpr.caseBranches[0].caseThen.kind == nkStringLit
+    check caseExpr.caseElse.kind == nkStringLit
+
+  test "simple CASE without ELSE":
+    let ast = parseSql("SELECT CASE a WHEN 1 THEN 'one' END FROM t")
+    let caseExpr = ast.children[0].children[0]
+    check caseExpr.kind == nkCase
+    check caseExpr.caseOperand.kind == nkIdentifier
+    check caseExpr.caseBranches.len == 1
+    check caseExpr.caseElse == nil
+
+  test "nested CASE":
+    let ast = parseSql("SELECT CASE WHEN a THEN CASE b WHEN 1 THEN 2 END ELSE 3 END FROM t")
+    let caseExpr = ast.children[0].children[0]
+    check caseExpr.kind == nkCase
+    check caseExpr.caseBranches[0].caseThen.kind == nkCase
+
+  test "CASE branch span reaches the final THEN expression token":
+    let ast = parseSql("SELECT CASE WHEN a = 1 THEN 1 + 2 ELSE 0 END")
+    let branch = ast.children[0].children[0].caseBranches[0]
+    check branch.span.start.column == 13
+    check branch.span.`end`.column == 33
+
+  test "malformed CASE expressions report the missing grammar element":
+    check parseErrorMessage("SELECT CASE 1 END").contains("expected at least one WHEN")
+    check parseErrorMessage("SELECT CASE WHEN TRUE 1 END").contains("expected tkThen")
+    check parseErrorMessage("SELECT CASE WHEN TRUE THEN 1").contains("expected tkEnd")
 
 suite "Expressions — column references":
 

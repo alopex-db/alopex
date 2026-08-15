@@ -891,12 +891,41 @@ fn collect_column_indices(expr: &TypedExpr, acc: &mut BTreeSet<usize>) {
             collect_column_indices(right, acc);
         }
         TypedExprKind::UnaryOp { operand, .. } => collect_column_indices(operand, acc),
+        TypedExprKind::Cast { expr, .. } => collect_column_indices(expr, acc),
+        TypedExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            if let Some(operand) = operand {
+                collect_column_indices(operand, acc);
+            }
+            for branch in branches {
+                collect_column_indices(&branch.when, acc);
+                collect_column_indices(&branch.then, acc);
+            }
+            if let Some(else_expr) = else_expr {
+                collect_column_indices(else_expr, acc);
+            }
+        }
         TypedExprKind::Between {
             expr, low, high, ..
         } => {
             collect_column_indices(expr, acc);
             collect_column_indices(low, acc);
             collect_column_indices(high, acc);
+        }
+        TypedExprKind::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_column_indices(expr, acc);
+            collect_column_indices(pattern, acc);
+            if let Some(escape) = escape {
+                collect_column_indices(escape, acc);
+            }
         }
         TypedExprKind::InList { expr, list, .. } => {
             collect_column_indices(expr, acc);
@@ -1137,8 +1166,10 @@ fn value_from_column(
 mod tests {
     use super::*;
     use crate::ast::expr::Literal;
+    use crate::ast::span::Span;
     use crate::catalog::{ColumnMetadata, RowIdMode, TableMetadata};
     use crate::columnar::statistics::ColumnStatistics;
+    use crate::planner::TypedCaseWhen;
     use crate::planner::typed_expr::TypedExpr;
     use crate::planner::typed_expr::TypedExprKind;
     use crate::planner::types::ResolvedType;
@@ -1146,6 +1177,48 @@ mod tests {
     use alopex_core::kv::memory::MemoryKV;
     use bincode::config::Options;
     use std::sync::Arc;
+
+    #[test]
+    fn case_promotion_cast_keeps_column_in_projection() {
+        let span = Span::default();
+        let column = TypedExpr {
+            kind: TypedExprKind::ColumnRef {
+                table: "items".to_string(),
+                column: "value".to_string(),
+                column_index: 3,
+            },
+            resolved_type: ResolvedType::Integer,
+            span,
+        };
+        let promoted_column = TypedExpr {
+            kind: TypedExprKind::Cast {
+                expr: Box::new(column),
+                target_type: ResolvedType::Double,
+            },
+            resolved_type: ResolvedType::Double,
+            span,
+        };
+        let case = TypedExpr {
+            kind: TypedExprKind::Case {
+                operand: None,
+                branches: vec![TypedCaseWhen {
+                    when: TypedExpr {
+                        kind: TypedExprKind::Literal(Literal::Boolean(true)),
+                        resolved_type: ResolvedType::Boolean,
+                        span,
+                    },
+                    then: promoted_column,
+                }],
+                else_expr: None,
+            },
+            resolved_type: ResolvedType::Double,
+            span,
+        };
+
+        let mut columns = BTreeSet::new();
+        collect_column_indices(&case, &mut columns);
+        assert_eq!(columns, BTreeSet::from([3]));
+    }
 
     #[test]
     fn evaluate_pushdown_eq_prunes_out_of_range() {

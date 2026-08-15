@@ -41,6 +41,11 @@ pub enum ExprKind {
         op: UnaryOp,
         operand: Box<Expr>,
     },
+    Case {
+        operand: Option<Box<Expr>>,
+        branches: Vec<CaseWhen>,
+        else_expr: Option<Box<Expr>>,
+    },
     FunctionCall {
         name: String,
         args: Vec<Expr>,
@@ -106,6 +111,12 @@ pub struct WindowSpec {
     pub partition_by: Vec<Expr>,
     #[serde(default)]
     pub order_by: Vec<OrderByExpr>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseWhen {
+    pub when: Expr,
+    pub then: Expr,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

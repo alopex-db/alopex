@@ -150,6 +150,7 @@ and inclusive source spans are preserved by the Nim lexer.
 | `ColumnRef` | `table: string?`, `column: string` |
 | `BinaryOp` | `left: Expr`, `op: BinaryOp`, `right: Expr` |
 | `UnaryOp` | `op: UnaryOp`, `operand: Expr` |
+| `Case` | `operand: Expr?`, `branches: [CaseWhen]`, `else_expr: Expr?` |
 | `FunctionCall` | `name: string`, `args: [Expr]`, `distinct: bool`, `star: bool` |
 | `Cast` | `expr: Expr`, `target_type: DataType` |
 | `Between` | `expr: Expr`, `low: Expr`, `high: Expr`, `negated: bool` |
@@ -161,6 +162,9 @@ and inclusive source spans are preserved by the Nim lexer.
 | `InSubquery` | `expr: Expr`, `subquery: Statement`, `negated: bool` |
 | `Exists` | `subquery: Statement`, `negated: bool` |
 | `Quantified` | `expr: Expr`, `op: BinaryOp`, `quantifier: Quantifier`, `subquery: Statement` |
+
+`CaseWhen = { "when": Expr, "then": Expr }`. A missing `operand`
+denotes searched CASE; a missing `else_expr` denotes the implicit NULL result.
 
 `Literal` variants:
 
@@ -231,6 +235,7 @@ and inclusive source spans are preserved by the Nim lexer.
 | `nkInSubquery` | `ExprKind.variant = "InSubquery"` | `ExprKind::InSubquery` |
 | `nkExists` | `ExprKind.variant = "Exists"` | `ExprKind::Exists` |
 | `nkQuantified` | `ExprKind.variant = "Quantified"` | `ExprKind::Quantified` |
+| `nkCase` | `ExprKind.variant = "Case"` | `ExprKind::Case` |
 | `nkDataTypeVector` / `VECTOR(...)` type node | `DataType.variant = "Vector"` | `DataType::Vector` |
 | `nkCreateContinuousAggregate` | `StatementKind.kind.variant = "CreateContinuousAggregate"` | `StatementKind::CreateContinuousAggregate` |
 

@@ -5,6 +5,7 @@
 //! via [`EvalContext`] and returns [`SqlValue`] results or [`ExecutorError`].
 
 pub(crate) mod binary_op;
+mod case_expr;
 mod column_ref;
 pub(crate) mod conditional;
 mod context;
@@ -44,6 +45,11 @@ pub fn evaluate(expr: &TypedExpr, ctx: &EvalContext<'_>) -> Result<SqlValue> {
             binary_op::eval_binary_op(op, left, right, ctx)
         }
         TypedExprKind::UnaryOp { op, operand } => unary_op::eval_unary_op(op, operand, ctx),
+        TypedExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => case_expr::evaluate_case(operand.as_deref(), branches, else_expr.as_deref(), ctx),
         TypedExprKind::IsNull { expr, negated } => is_null::eval_is_null(expr, *negated, ctx),
         TypedExprKind::VectorLiteral(values) => {
             Ok(SqlValue::Vector(values.iter().map(|v| *v as f32).collect()))

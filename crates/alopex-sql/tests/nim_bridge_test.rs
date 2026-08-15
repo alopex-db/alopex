@@ -158,6 +158,39 @@ fn public_nul_guard_and_normal_sql_behavior_are_stable() {
 }
 
 #[test]
+fn case_expression_crosses_the_nim_messagepack_boundary() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT CASE status WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'other' END FROM events",
+    )
+    .expect("CASE expression should deserialize from Nim MessagePack");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    let SelectItem::Expr { expr, .. } = &select.projection[0] else {
+        panic!("expected expression projection");
+    };
+    let ExprKind::Case {
+        operand,
+        branches,
+        else_expr,
+    } = &expr.kind
+    else {
+        panic!("expected Case, got {:?}", expr.kind);
+    };
+
+    assert!(operand.is_some());
+    assert_eq!(branches.len(), 2);
+    assert!(else_expr.is_some());
+    assert!(matches!(
+        branches[0].when.kind,
+        ExprKind::Literal {
+            literal: Literal::Number(ref value)
+        } if value == "1"
+    ));
+}
+
+#[test]
 fn exposes_the_nim_wire_contract_version() {
     assert_eq!(parser_contract_version(), "0.4.0");
 }

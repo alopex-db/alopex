@@ -28,7 +28,7 @@ pub use logical_plan::{JoinType, LogicalPlan, WindowExpr, WindowFunction};
 pub use name_resolver::{NameResolver, ResolvedColumn};
 pub use type_checker::{ScopedTable, TypeChecker};
 pub use typed_expr::{
-    ProjectedColumn, Projection, SortExpr, TypedAssignment, TypedExpr, TypedExprKind,
+    ProjectedColumn, Projection, SortExpr, TypedAssignment, TypedCaseWhen, TypedExpr, TypedExprKind,
 };
 pub use types::ResolvedType;
 
@@ -496,6 +496,22 @@ impl TableReferenceExtractor {
             | TypedExprKind::Cast { expr: operand, .. }
             | TypedExprKind::IsNull { expr: operand, .. } => {
                 self.extract_typed_expr(operand, diagnostics, references);
+            }
+            TypedExprKind::Case {
+                operand,
+                branches,
+                else_expr,
+            } => {
+                if let Some(operand) = operand {
+                    self.extract_typed_expr(operand, diagnostics, references);
+                }
+                for branch in branches {
+                    self.extract_typed_expr(&branch.when, diagnostics, references);
+                    self.extract_typed_expr(&branch.then, diagnostics, references);
+                }
+                if let Some(else_expr) = else_expr {
+                    self.extract_typed_expr(else_expr, diagnostics, references);
+                }
             }
             TypedExprKind::FunctionCall { args, .. } => {
                 for arg in args {
@@ -2008,6 +2024,34 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             TypedExprKind::UnaryOp { operand, .. } => {
                 self.collect_aggregates_from_typed_expr(operand, aggregates, aggregate_map)
             }
+            TypedExprKind::Cast { expr, .. } => {
+                self.collect_aggregates_from_typed_expr(expr, aggregates, aggregate_map)
+            }
+            TypedExprKind::Case {
+                operand,
+                branches,
+                else_expr,
+            } => {
+                if let Some(operand) = operand {
+                    self.collect_aggregates_from_typed_expr(operand, aggregates, aggregate_map)?;
+                }
+                for branch in branches {
+                    self.collect_aggregates_from_typed_expr(
+                        &branch.when,
+                        aggregates,
+                        aggregate_map,
+                    )?;
+                    self.collect_aggregates_from_typed_expr(
+                        &branch.then,
+                        aggregates,
+                        aggregate_map,
+                    )?;
+                }
+                if let Some(else_expr) = else_expr {
+                    self.collect_aggregates_from_typed_expr(else_expr, aggregates, aggregate_map)?;
+                }
+                Ok(())
+            }
             TypedExprKind::FunctionCall { args, .. } => {
                 for arg in args {
                     self.collect_aggregates_from_typed_expr(arg, aggregates, aggregate_map)?;
@@ -2827,6 +2871,21 @@ fn substitute_projection_aliases(
                     .collect(),
             }),
         },
+        ExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => ExprKind::Case {
+            operand: operand.as_deref().map(|e| Box::new(recurse(e))),
+            branches: branches
+                .iter()
+                .map(|branch| crate::ast::expr::CaseWhen {
+                    when: recurse(&branch.when),
+                    then: recurse(&branch.then),
+                })
+                .collect(),
+            else_expr: else_expr.as_deref().map(|e| Box::new(recurse(e))),
+        },
         ExprKind::Cast { expr, target_type } => ExprKind::Cast {
             expr: Box::new(recurse(expr)),
             target_type: target_type.clone(),
@@ -2908,6 +2967,17 @@ fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
             expr_contains_aggregate(left) || expr_contains_aggregate(right)
         }
         ExprKind::UnaryOp { operand, .. } => expr_contains_aggregate(operand),
+        ExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            operand.as_deref().is_some_and(expr_contains_aggregate)
+                || branches.iter().any(|branch| {
+                    expr_contains_aggregate(&branch.when) || expr_contains_aggregate(&branch.then)
+                })
+                || else_expr.as_deref().is_some_and(expr_contains_aggregate)
+        }
         ExprKind::Cast { expr, .. } => expr_contains_aggregate(expr),
         ExprKind::Between {
             expr, low, high, ..
@@ -2964,6 +3034,23 @@ fn typed_expr_contains_aggregate(expr: &TypedExpr) -> bool {
             typed_expr_contains_aggregate(left) || typed_expr_contains_aggregate(right)
         }
         TypedExprKind::UnaryOp { operand, .. } => typed_expr_contains_aggregate(operand),
+        TypedExprKind::Cast { expr, .. } => typed_expr_contains_aggregate(expr),
+        TypedExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            operand
+                .as_deref()
+                .is_some_and(typed_expr_contains_aggregate)
+                || branches.iter().any(|branch| {
+                    typed_expr_contains_aggregate(&branch.when)
+                        || typed_expr_contains_aggregate(&branch.then)
+                })
+                || else_expr
+                    .as_deref()
+                    .is_some_and(typed_expr_contains_aggregate)
+        }
         TypedExprKind::Between {
             expr, low, high, ..
         } => {
@@ -3636,6 +3723,52 @@ fn rewrite_expr_with_maps(
                 kind: TypedExprKind::UnaryOp {
                     op: *op,
                     operand: Box::new(operand),
+                },
+                resolved_type: expr.resolved_type.clone(),
+                span: expr.span,
+            })
+        }
+        TypedExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            let operand = operand
+                .as_deref()
+                .map(|operand| {
+                    rewrite_expr_with_maps(operand, group_key_map, aggregate_map, output_names)
+                        .map(Box::new)
+                })
+                .transpose()?;
+            let mut rewritten_branches = Vec::with_capacity(branches.len());
+            for branch in branches {
+                rewritten_branches.push(TypedCaseWhen {
+                    when: rewrite_expr_with_maps(
+                        &branch.when,
+                        group_key_map,
+                        aggregate_map,
+                        output_names,
+                    )?,
+                    then: rewrite_expr_with_maps(
+                        &branch.then,
+                        group_key_map,
+                        aggregate_map,
+                        output_names,
+                    )?,
+                });
+            }
+            let else_expr = else_expr
+                .as_deref()
+                .map(|else_expr| {
+                    rewrite_expr_with_maps(else_expr, group_key_map, aggregate_map, output_names)
+                        .map(Box::new)
+                })
+                .transpose()?;
+            Ok(TypedExpr {
+                kind: TypedExprKind::Case {
+                    operand,
+                    branches: rewritten_branches,
+                    else_expr,
                 },
                 resolved_type: expr.resolved_type.clone(),
                 span: expr.span,
