@@ -109,6 +109,7 @@ proc parseCreateStmt(p: var Parser): SqlNode
 proc parseDropStmt(p: var Parser): SqlNode
 proc parsePragmaStmt(p: var Parser): SqlNode
 proc parseTypeName(p: var Parser): SqlNode
+proc parseOrderByItem(p: var Parser): SqlNode
 
 # --- Expression parsing (precedence climbing) ---
 
@@ -152,6 +153,46 @@ proc parseExistsExpr(p: var Parser; negated: bool): SqlNode =
   result.negated = negated
   result.children.add(p.parseSubqueryInParens())
 
+proc parseWindowSpec(p: var Parser): SqlNode =
+  p.enterNesting()
+  defer: p.leaveNesting()
+  let overTok = p.expect(tkOver)
+  result = newNode(nkWindowSpec, tokenSpan(overTok))
+  discard p.expect(tkLParen)
+
+  if p.check(tkPartition):
+    let partitionTok = p.advance()
+    discard p.expect(tkBy)
+    let partitionBy = newNode(nkPartitionByClause, tokenSpan(partitionTok))
+    partitionBy.children.add(p.parseExpr())
+    while p.check(tkComma):
+      discard p.advance()
+      partitionBy.children.add(p.parseExpr())
+    result.children.add(partitionBy)
+
+  if p.check(tkOrder):
+    let orderTok = p.advance()
+    discard p.expect(tkBy)
+    let orderBy = newNode(nkOrderByClause, tokenSpan(orderTok))
+    orderBy.children.add(p.parseOrderByItem())
+    while p.check(tkComma):
+      discard p.advance()
+      orderBy.children.add(p.parseOrderByItem())
+    result.children.add(orderBy)
+
+  if p.check(tkRows):
+    p.error("ROWS window frames are unsupported")
+  if p.check(tkRange):
+    p.error("RANGE window frames are unsupported")
+
+  let closeTok = p.expect(tkRParen)
+  result.span = Span(start: tokenSpan(overTok).start,
+                     `end`: tokenSpan(closeTok).`end`)
+
+proc parseOptionalOver(p: var Parser; functionCall: SqlNode) =
+  if p.check(tkOver):
+    functionCall.children.add(p.parseWindowSpec())
+
 proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
   p.enterNesting()
   defer: p.leaveNesting()
@@ -171,11 +212,13 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
         discard p.advance()
         result.children.add(p.parseExpr())
       discard p.expect(tkRParen)
+      p.parseOptionalOver(result)
       return
     while p.check(tkComma):
       discard p.advance()
       result.children.add(p.parseExpr())
     discard p.expect(tkRParen)
+    p.parseOptionalOver(result)
     return
   if nameTok.value.toLowerAscii() == "position" and not p.check(tkRParen):
     let searched = p.parseConcat()
@@ -185,12 +228,14 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
       result.children.add(source)
       result.children.add(searched)
       discard p.expect(tkRParen)
+      p.parseOptionalOver(result)
       return
     result.children.add(searched)
     while p.check(tkComma):
       discard p.advance()
       result.children.add(p.parseExpr())
     discard p.expect(tkRParen)
+    p.parseOptionalOver(result)
     return
   if nameTok.value.toLowerAscii() == "trim" and not p.check(tkRParen):
     result.children.add(p.parseExpr())
@@ -198,11 +243,13 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
       discard p.advance()
       result.children.add(p.parseExpr())
       discard p.expect(tkRParen)
+      p.parseOptionalOver(result)
       return
     while p.check(tkComma):
       discard p.advance()
       result.children.add(p.parseExpr())
     discard p.expect(tkRParen)
+    p.parseOptionalOver(result)
     return
   if not p.check(tkRParen):
     if p.check(tkStar):
@@ -217,6 +264,7 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
         discard p.advance()
         result.children.add(p.parseExpr())
   discard p.expect(tkRParen)
+  p.parseOptionalOver(result)
 
 proc parseCastExpr(p: var Parser): SqlNode =
   p.enterNesting()

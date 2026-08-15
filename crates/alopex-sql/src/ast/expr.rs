@@ -1,4 +1,5 @@
 use super::ddl::DataType;
+use super::dml::OrderByExpr;
 use super::span::{Span, Spanned};
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +46,8 @@ pub enum ExprKind {
         args: Vec<Expr>,
         distinct: bool,
         star: bool,
+        #[serde(default)]
+        over: Option<WindowSpec>,
     },
     Cast {
         expr: Box<Expr>,
@@ -94,6 +97,15 @@ pub enum ExprKind {
         quantifier: Quantifier,
         subquery: Box<super::Statement>,
     },
+}
+
+/// A window specification attached to a function call through `OVER (...)`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowSpec {
+    #[serde(default)]
+    pub partition_by: Vec<Expr>,
+    #[serde(default)]
+    pub order_by: Vec<OrderByExpr>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

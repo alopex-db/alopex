@@ -224,6 +224,7 @@ fn evaluate_default(
             args,
             distinct,
             star,
+            over: None,
         } if name.eq_ignore_ascii_case("now") && args.is_empty() && !distinct && !star => {
             TypedExpr {
                 kind: crate::planner::typed_expr::TypedExprKind::FunctionCall {
@@ -231,6 +232,7 @@ fn evaluate_default(
                     args: Vec::new(),
                     distinct: false,
                     star: false,
+                    over: None,
                 },
                 resolved_type: crate::planner::types::ResolvedType::Timestamp,
                 span: default.span,

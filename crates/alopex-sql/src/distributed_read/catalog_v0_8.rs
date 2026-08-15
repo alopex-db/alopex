@@ -485,6 +485,10 @@ fn validate_plan(
             "join_not_supported_remote",
             "JOIN is outside the v0.8 remote-read catalog",
         )),
+        LogicalPlan::Window { .. } => Err(RemoteReadRejection::unsupported(
+            "window_not_supported_remote",
+            "window functions are outside the v0.8 remote-read catalog",
+        )),
         LogicalPlan::Scan { table, projection } => {
             analysis.scan_count += 1;
             analysis.scan_tables.push(table.clone());

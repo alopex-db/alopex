@@ -38,6 +38,8 @@ type
     nkBinaryOp
     nkUnaryOp
     nkFunctionCall
+    nkWindowSpec
+    nkPartitionByClause
     nkCast
     nkAlias
     nkFromClause

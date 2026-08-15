@@ -47,6 +47,24 @@ use crate::catalog::{IndexMetadata, TableMetadata};
 use crate::planner::aggregate_expr::AggregateExpr;
 use crate::planner::typed_expr::{Projection, SortExpr, TypedAssignment, TypedExpr};
 
+/// Function evaluated by a window operator.
+#[derive(Debug, Clone)]
+pub enum WindowFunction {
+    RowNumber,
+    Rank,
+    DenseRank,
+    Aggregate(AggregateExpr),
+}
+
+/// A planned window expression and its partition/order specification.
+#[derive(Debug, Clone)]
+pub struct WindowExpr {
+    pub function: WindowFunction,
+    pub partition_by: Vec<TypedExpr>,
+    pub order_by: Vec<SortExpr>,
+    pub result_type: crate::planner::types::ResolvedType,
+}
+
 /// JOIN type for logical and physical execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinType {
@@ -137,6 +155,13 @@ pub enum LogicalPlan {
         having: Option<TypedExpr>,
         /// Projection to apply after aggregation.
         projection: Projection,
+    },
+
+    /// Window operation preserving every input row and appending one result
+    /// column per window expression.
+    Window {
+        input: Box<LogicalPlan>,
+        windows: Vec<WindowExpr>,
     },
 
     /// Sort operation (ORDER BY clause).
@@ -262,6 +287,7 @@ impl LogicalPlan {
             | LogicalPlan::Project { .. }
             | LogicalPlan::Join { .. }
             | LogicalPlan::Aggregate { .. }
+            | LogicalPlan::Window { .. }
             | LogicalPlan::Sort { .. }
             | LogicalPlan::Limit { .. } => "SELECT",
             LogicalPlan::Insert { .. } => "INSERT",
@@ -414,6 +440,7 @@ impl LogicalPlan {
             LogicalPlan::Project { .. } => "Project",
             LogicalPlan::Join { .. } => "Join",
             LogicalPlan::Aggregate { .. } => "Aggregate",
+            LogicalPlan::Window { .. } => "Window",
             LogicalPlan::Sort { .. } => "Sort",
             LogicalPlan::Limit { .. } => "Limit",
             LogicalPlan::Insert { .. } => "Insert",
@@ -436,6 +463,7 @@ impl LogicalPlan {
                 | LogicalPlan::Project { .. }
                 | LogicalPlan::Join { .. }
                 | LogicalPlan::Aggregate { .. }
+                | LogicalPlan::Window { .. }
                 | LogicalPlan::Sort { .. }
                 | LogicalPlan::Limit { .. }
         )
@@ -470,6 +498,7 @@ impl LogicalPlan {
             LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Window { input, .. }
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. } => Some(input),
             LogicalPlan::Join { .. } => None,
@@ -493,6 +522,7 @@ impl LogicalPlan {
             LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Window { input, .. }
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. } => input.table_name(),
             LogicalPlan::Join { .. } => None,
@@ -511,6 +541,7 @@ impl LogicalPlan {
             LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Window { input, .. }
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. } => input.contains_join(),
             _ => false,

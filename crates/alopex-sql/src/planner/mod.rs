@@ -24,7 +24,7 @@ mod planner_tests;
 pub use aggregate_expr::{AggregateExpr, AggregateFunction};
 pub use error::PlannerError;
 pub use knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
-pub use logical_plan::{JoinType, LogicalPlan};
+pub use logical_plan::{JoinType, LogicalPlan, WindowExpr, WindowFunction};
 pub use name_resolver::{NameResolver, ResolvedColumn};
 pub use type_checker::{ScopedTable, TypeChecker};
 pub use typed_expr::{
@@ -354,6 +354,22 @@ impl TableReferenceExtractor {
                     self.extract_typed_expr(having, diagnostics, references);
                 }
                 self.extract_projection(projection, diagnostics, references);
+            }
+            LogicalPlan::Window { input, windows } => {
+                self.extract_plan(input, root_access, scan_source, diagnostics, references);
+                for window in windows {
+                    for expr in &window.partition_by {
+                        self.extract_typed_expr(expr, diagnostics, references);
+                    }
+                    for sort_expr in &window.order_by {
+                        self.extract_typed_expr(&sort_expr.expr, diagnostics, references);
+                    }
+                    if let WindowFunction::Aggregate(aggregate) = &window.function
+                        && let Some(arg) = &aggregate.arg
+                    {
+                        self.extract_typed_expr(arg, diagnostics, references);
+                    }
+                }
             }
             LogicalPlan::Sort { input, order_by } => {
                 self.extract_plan(input, root_access, scan_source, diagnostics, references);
@@ -1006,8 +1022,17 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             .as_ref()
             .is_some_and(|items| !items.is_empty());
         let has_aggregate = self.select_contains_aggregate(stmt);
+        let has_window = select_contains_window(stmt);
         let distinct_only =
             stmt.distinct && !has_group_by && !has_aggregate && stmt.having.is_none();
+
+        if has_window && (has_group_by || has_aggregate || stmt.having.is_some() || stmt.distinct) {
+            return Err(PlannerError::unsupported_feature(
+                "window functions combined with GROUP BY, ordinary aggregates, HAVING, or DISTINCT",
+                "future",
+                stmt.span,
+            ));
+        }
 
         // SELECT-list aliases are visible to HAVING and ORDER BY only. `expr_scope`
         // above stays alias-free so that WHERE and GROUP BY keep resolving against
@@ -1016,8 +1041,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
         let final_projection =
             self.build_projection_with_scope(&stmt.projection, &relation.schema, &expr_scope)?;
-        install_base_projection(&mut relation.plan, &final_projection);
+        if !has_window {
+            install_base_projection(&mut relation.plan, &final_projection);
+        }
         let needs_project_boundary = !matches!(relation.plan, LogicalPlan::Scan { .. });
+        let base_schema = relation.schema.clone();
         let mut plan = relation.plan;
 
         // 3. Add Filter if WHERE clause is present
@@ -1037,6 +1065,94 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 input: Box::new(plan),
                 predicate,
             };
+        }
+
+        if has_window {
+            let mut windows = Vec::new();
+            let mut window_map = HashMap::new();
+            if let Projection::Columns(columns) = &final_projection {
+                for column in columns {
+                    self.collect_windows_from_typed_expr(
+                        &column.expr,
+                        &mut windows,
+                        &mut window_map,
+                    )?;
+                }
+            }
+
+            let mut outer_order_by = Vec::new();
+            for order_expr in &stmt.order_by {
+                let sort_source =
+                    substitute_projection_aliases(&order_expr.expr, &projection_aliases);
+                let typed = self.infer_expr_with_scope(&sort_source, &expr_scope)?;
+                self.collect_windows_from_typed_expr(&typed, &mut windows, &mut window_map)?;
+                outer_order_by.push(SortExpr::new(
+                    typed,
+                    order_expr.asc.unwrap_or(true),
+                    order_expr.nulls_first.unwrap_or(false),
+                ));
+            }
+
+            let window_names = (0..windows.len())
+                .map(|idx| format!("__window_{idx}"))
+                .collect::<Vec<_>>();
+            let mut window_schema = base_schema;
+            window_schema.extend(windows.iter().enumerate().map(|(idx, window)| {
+                ColumnMetadata::new(window_names[idx].clone(), window.result_type.clone())
+            }));
+
+            let projection = rewrite_projection_for_windows(
+                &final_projection,
+                &window_map,
+                relation.schema.len(),
+                &window_names,
+            )?;
+            let order_by = outer_order_by
+                .into_iter()
+                .map(|sort| {
+                    Ok(SortExpr::new(
+                        rewrite_expr_for_windows(
+                            &sort.expr,
+                            &window_map,
+                            relation.schema.len(),
+                            &window_names,
+                        )?,
+                        sort.asc,
+                        sort.nulls_first,
+                    ))
+                })
+                .collect::<Result<Vec<_>, PlannerError>>()?;
+
+            plan = LogicalPlan::Window {
+                input: Box::new(plan),
+                windows,
+            };
+            if !order_by.is_empty() {
+                plan = LogicalPlan::Sort {
+                    input: Box::new(plan),
+                    order_by,
+                };
+            }
+            if stmt.limit.is_some() || stmt.offset.is_some() {
+                plan = LogicalPlan::Limit {
+                    input: Box::new(plan),
+                    limit: self.extract_limit_value(&stmt.limit, stmt.span)?,
+                    offset: self.extract_limit_value(&stmt.offset, stmt.span)?,
+                };
+            }
+            let output_schema = projection_schema(&projection, &window_schema);
+            plan = LogicalPlan::Project {
+                input: Box::new(plan),
+                projection,
+            };
+            return Ok(PlannedRelation {
+                plan,
+                schema: output_schema.clone(),
+                scope: vec![ScopedTable::new(
+                    TableMetadata::new(LITERAL_TABLE, output_schema),
+                    0,
+                )],
+            });
         }
 
         if has_group_by || has_aggregate || stmt.having.is_some() || stmt.distinct {
@@ -1867,6 +1983,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 args,
                 distinct,
                 star,
+                over: None,
             } if is_aggregate_function(name) => {
                 for arg in args {
                     if typed_expr_contains_aggregate(arg) {
@@ -1927,6 +2044,117 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             }
             TypedExprKind::IsNull { expr, .. } => {
                 self.collect_aggregates_from_typed_expr(expr, aggregates, aggregate_map)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn collect_windows_from_typed_expr(
+        &self,
+        expr: &TypedExpr,
+        windows: &mut Vec<WindowExpr>,
+        window_map: &mut HashMap<String, usize>,
+    ) -> Result<(), PlannerError> {
+        match &expr.kind {
+            TypedExprKind::FunctionCall {
+                name,
+                args,
+                distinct,
+                star,
+                over: Some(over),
+            } => {
+                if args.iter().any(typed_expr_contains_window)
+                    || over.partition_by.iter().any(typed_expr_contains_window)
+                    || over
+                        .order_by
+                        .iter()
+                        .any(|sort| typed_expr_contains_window(&sort.expr))
+                {
+                    return Err(PlannerError::invalid_expression(
+                        "nested window functions are not supported".to_string(),
+                    ));
+                }
+
+                let key = expr_key(expr);
+                if window_map.contains_key(&key) {
+                    return Ok(());
+                }
+                let function = match name.to_ascii_lowercase().as_str() {
+                    "row_number" => WindowFunction::RowNumber,
+                    "rank" => WindowFunction::Rank,
+                    "dense_rank" => WindowFunction::DenseRank,
+                    "sum" | "count" | "avg" | "min" | "max" => {
+                        let (aggregate, _) = self
+                            .build_aggregate_expr_from_typed(expr, name, args, *distinct, *star)?;
+                        WindowFunction::Aggregate(aggregate)
+                    }
+                    "lag" | "lead" => {
+                        return Err(PlannerError::unsupported_feature(
+                            format!("{} window function", name.to_ascii_uppercase()),
+                            "future",
+                            expr.span,
+                        ));
+                    }
+                    _ => {
+                        return Err(PlannerError::unsupported_feature(
+                            format!("function '{}' with OVER", name),
+                            "future",
+                            expr.span,
+                        ));
+                    }
+                };
+                let index = windows.len();
+                windows.push(WindowExpr {
+                    function,
+                    partition_by: over.partition_by.clone(),
+                    order_by: over.order_by.clone(),
+                    result_type: expr.resolved_type.clone(),
+                });
+                window_map.insert(key, index);
+                Ok(())
+            }
+            TypedExprKind::FunctionCall { args, .. } => {
+                for arg in args {
+                    self.collect_windows_from_typed_expr(arg, windows, window_map)?;
+                }
+                Ok(())
+            }
+            TypedExprKind::BinaryOp { left, right, .. } => {
+                self.collect_windows_from_typed_expr(left, windows, window_map)?;
+                self.collect_windows_from_typed_expr(right, windows, window_map)
+            }
+            TypedExprKind::UnaryOp { operand, .. } => {
+                self.collect_windows_from_typed_expr(operand, windows, window_map)
+            }
+            TypedExprKind::Cast { expr, .. } | TypedExprKind::IsNull { expr, .. } => {
+                self.collect_windows_from_typed_expr(expr, windows, window_map)
+            }
+            TypedExprKind::Between {
+                expr, low, high, ..
+            } => {
+                self.collect_windows_from_typed_expr(expr, windows, window_map)?;
+                self.collect_windows_from_typed_expr(low, windows, window_map)?;
+                self.collect_windows_from_typed_expr(high, windows, window_map)
+            }
+            TypedExprKind::Like {
+                expr,
+                pattern,
+                escape,
+                ..
+            } => {
+                self.collect_windows_from_typed_expr(expr, windows, window_map)?;
+                self.collect_windows_from_typed_expr(pattern, windows, window_map)?;
+                if let Some(escape) = escape {
+                    self.collect_windows_from_typed_expr(escape, windows, window_map)?;
+                }
+                Ok(())
+            }
+            TypedExprKind::InList { expr, list, .. } => {
+                self.collect_windows_from_typed_expr(expr, windows, window_map)?;
+                for item in list {
+                    self.collect_windows_from_typed_expr(item, windows, window_map)?;
+                }
+                Ok(())
             }
             _ => Ok(()),
         }
@@ -2579,11 +2807,25 @@ fn substitute_projection_aliases(
             args,
             distinct,
             star,
+            over,
         } => ExprKind::FunctionCall {
             name: name.clone(),
             args: args.iter().map(recurse).collect(),
             distinct: *distinct,
             star: *star,
+            over: over.as_ref().map(|window| crate::ast::expr::WindowSpec {
+                partition_by: window.partition_by.iter().map(recurse).collect(),
+                order_by: window
+                    .order_by
+                    .iter()
+                    .map(|order| OrderByExpr {
+                        expr: recurse(&order.expr),
+                        asc: order.asc,
+                        nulls_first: order.nulls_first,
+                        span: order.span,
+                    })
+                    .collect(),
+            }),
         },
         ExprKind::Cast { expr, target_type } => ExprKind::Cast {
             expr: Box::new(recurse(expr)),
@@ -2647,11 +2889,20 @@ fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
     use crate::ast::expr::ExprKind;
 
     match &expr.kind {
-        ExprKind::FunctionCall { name, args, .. } => {
-            if is_aggregate_function(name) {
+        ExprKind::FunctionCall {
+            name, args, over, ..
+        } => {
+            if over.is_none() && is_aggregate_function(name) {
                 return true;
             }
             args.iter().any(expr_contains_aggregate)
+                || over.as_ref().is_some_and(|window| {
+                    window.partition_by.iter().any(expr_contains_aggregate)
+                        || window
+                            .order_by
+                            .iter()
+                            .any(|sort| expr_contains_aggregate(&sort.expr))
+                })
         }
         ExprKind::BinaryOp { left, right, .. } => {
             expr_contains_aggregate(left) || expr_contains_aggregate(right)
@@ -2691,11 +2942,23 @@ fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
 
 fn typed_expr_contains_aggregate(expr: &TypedExpr) -> bool {
     match &expr.kind {
-        TypedExprKind::FunctionCall { name, args, .. } => {
-            if is_aggregate_function(name) {
+        TypedExprKind::FunctionCall {
+            name, args, over, ..
+        } => {
+            if over.is_none() && is_aggregate_function(name) {
                 return true;
             }
             args.iter().any(typed_expr_contains_aggregate)
+                || over.as_ref().is_some_and(|window| {
+                    window
+                        .partition_by
+                        .iter()
+                        .any(typed_expr_contains_aggregate)
+                        || window
+                            .order_by
+                            .iter()
+                            .any(|sort| typed_expr_contains_aggregate(&sort.expr))
+                })
         }
         TypedExprKind::BinaryOp { left, right, .. } => {
             typed_expr_contains_aggregate(left) || typed_expr_contains_aggregate(right)
@@ -2729,6 +2992,216 @@ fn typed_expr_contains_aggregate(expr: &TypedExpr) -> bool {
         TypedExprKind::ScalarSubquery(_) | TypedExprKind::Exists { .. } => false,
         _ => false,
     }
+}
+
+fn select_contains_window(stmt: &Select) -> bool {
+    stmt.projection.iter().any(|item| match item {
+        SelectItem::Wildcard { .. } | SelectItem::QualifiedWildcard { .. } => false,
+        SelectItem::Expr { expr, .. } => expr_contains_window(expr),
+    }) || stmt
+        .order_by
+        .iter()
+        .any(|order| expr_contains_window(&order.expr))
+}
+
+fn expr_contains_window(expr: &crate::ast::expr::Expr) -> bool {
+    match &expr.kind {
+        crate::ast::expr::ExprKind::FunctionCall { args, over, .. } => {
+            over.is_some() || args.iter().any(expr_contains_window)
+        }
+        crate::ast::expr::ExprKind::BinaryOp { left, right, .. } => {
+            expr_contains_window(left) || expr_contains_window(right)
+        }
+        crate::ast::expr::ExprKind::UnaryOp { operand, .. }
+        | crate::ast::expr::ExprKind::Cast { expr: operand, .. }
+        | crate::ast::expr::ExprKind::IsNull { expr: operand, .. } => expr_contains_window(operand),
+        crate::ast::expr::ExprKind::Between {
+            expr, low, high, ..
+        } => expr_contains_window(expr) || expr_contains_window(low) || expr_contains_window(high),
+        crate::ast::expr::ExprKind::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_window(expr)
+                || expr_contains_window(pattern)
+                || escape.as_deref().is_some_and(expr_contains_window)
+        }
+        crate::ast::expr::ExprKind::InList { expr, list, .. } => {
+            expr_contains_window(expr) || list.iter().any(expr_contains_window)
+        }
+        _ => false,
+    }
+}
+
+fn typed_expr_contains_window(expr: &TypedExpr) -> bool {
+    match &expr.kind {
+        TypedExprKind::FunctionCall { args, over, .. } => {
+            over.is_some() || args.iter().any(typed_expr_contains_window)
+        }
+        TypedExprKind::BinaryOp { left, right, .. } => {
+            typed_expr_contains_window(left) || typed_expr_contains_window(right)
+        }
+        TypedExprKind::UnaryOp { operand, .. }
+        | TypedExprKind::Cast { expr: operand, .. }
+        | TypedExprKind::IsNull { expr: operand, .. } => typed_expr_contains_window(operand),
+        TypedExprKind::Between {
+            expr, low, high, ..
+        } => {
+            typed_expr_contains_window(expr)
+                || typed_expr_contains_window(low)
+                || typed_expr_contains_window(high)
+        }
+        TypedExprKind::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            typed_expr_contains_window(expr)
+                || typed_expr_contains_window(pattern)
+                || escape.as_deref().is_some_and(typed_expr_contains_window)
+        }
+        TypedExprKind::InList { expr, list, .. } => {
+            typed_expr_contains_window(expr) || list.iter().any(typed_expr_contains_window)
+        }
+        _ => false,
+    }
+}
+
+fn rewrite_projection_for_windows(
+    projection: &Projection,
+    window_map: &HashMap<String, usize>,
+    base_width: usize,
+    window_names: &[String],
+) -> Result<Projection, PlannerError> {
+    match projection {
+        Projection::All(names) => Ok(Projection::All(names.clone())),
+        Projection::Columns(columns) => Ok(Projection::Columns(
+            columns
+                .iter()
+                .map(|column| {
+                    Ok(ProjectedColumn {
+                        expr: rewrite_expr_for_windows(
+                            &column.expr,
+                            window_map,
+                            base_width,
+                            window_names,
+                        )?,
+                        alias: column.alias.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, PlannerError>>()?,
+        )),
+    }
+}
+
+fn rewrite_expr_for_windows(
+    expr: &TypedExpr,
+    window_map: &HashMap<String, usize>,
+    base_width: usize,
+    window_names: &[String],
+) -> Result<TypedExpr, PlannerError> {
+    if let Some(index) = window_map.get(&expr_key(expr)) {
+        return Ok(TypedExpr::column_ref(
+            "__window__".to_string(),
+            window_names
+                .get(*index)
+                .cloned()
+                .unwrap_or_else(|| format!("__window_{index}")),
+            base_width + index,
+            expr.resolved_type.clone(),
+            expr.span,
+        ));
+    }
+
+    let rewrite =
+        |inner: &TypedExpr| rewrite_expr_for_windows(inner, window_map, base_width, window_names);
+    let kind = match &expr.kind {
+        TypedExprKind::FunctionCall {
+            name,
+            args,
+            distinct,
+            star,
+            over,
+        } => {
+            if over.is_some() {
+                return Err(PlannerError::invalid_expression(
+                    "window expression is not part of the window plan".to_string(),
+                ));
+            }
+            TypedExprKind::FunctionCall {
+                name: name.clone(),
+                args: args.iter().map(rewrite).collect::<Result<Vec<_>, _>>()?,
+                distinct: *distinct,
+                star: *star,
+                over: None,
+            }
+        }
+        TypedExprKind::BinaryOp { left, op, right } => TypedExprKind::BinaryOp {
+            left: Box::new(rewrite(left)?),
+            op: *op,
+            right: Box::new(rewrite(right)?),
+        },
+        TypedExprKind::UnaryOp { op, operand } => TypedExprKind::UnaryOp {
+            op: *op,
+            operand: Box::new(rewrite(operand)?),
+        },
+        TypedExprKind::Cast {
+            expr: inner,
+            target_type,
+        } => TypedExprKind::Cast {
+            expr: Box::new(rewrite(inner)?),
+            target_type: target_type.clone(),
+        },
+        TypedExprKind::Between {
+            expr: inner,
+            low,
+            high,
+            negated,
+        } => TypedExprKind::Between {
+            expr: Box::new(rewrite(inner)?),
+            low: Box::new(rewrite(low)?),
+            high: Box::new(rewrite(high)?),
+            negated: *negated,
+        },
+        TypedExprKind::Like {
+            expr: inner,
+            pattern,
+            escape,
+            negated,
+            kind,
+        } => TypedExprKind::Like {
+            expr: Box::new(rewrite(inner)?),
+            pattern: Box::new(rewrite(pattern)?),
+            escape: escape.as_deref().map(rewrite).transpose()?.map(Box::new),
+            negated: *negated,
+            kind: *kind,
+        },
+        TypedExprKind::InList {
+            expr: inner,
+            list,
+            negated,
+        } => TypedExprKind::InList {
+            expr: Box::new(rewrite(inner)?),
+            list: list.iter().map(rewrite).collect::<Result<Vec<_>, _>>()?,
+            negated: *negated,
+        },
+        TypedExprKind::IsNull {
+            expr: inner,
+            negated,
+        } => TypedExprKind::IsNull {
+            expr: Box::new(rewrite(inner)?),
+            negated: *negated,
+        },
+        _ => return Ok(expr.clone()),
+    };
+    Ok(TypedExpr {
+        kind,
+        resolved_type: expr.resolved_type.clone(),
+        span: expr.span,
+    })
 }
 
 fn map_join_type(join_type: crate::ast::dml::JoinType) -> JoinType {
@@ -2816,6 +3289,7 @@ fn merged_scoped_column_expr(
             args,
             distinct: false,
             star: false,
+            over: None,
         },
         resolved_type: found.ty.clone(),
         span,
@@ -3063,6 +3537,7 @@ fn rewrite_expr_with_maps(
             args,
             distinct,
             star,
+            over: None,
         } if is_aggregate_function(name) => {
             let separator = if name.eq_ignore_ascii_case("group_concat") && args.len() == 2 {
                 if let TypedExprKind::Literal(Literal::String(value)) = &args[1].kind {
@@ -3108,7 +3583,13 @@ fn rewrite_expr_with_maps(
             args,
             distinct,
             star,
+            over,
         } => {
+            if over.is_some() {
+                return Err(PlannerError::invalid_expression(
+                    "window function reached aggregate expression rewrite".to_string(),
+                ));
+            }
             if *distinct || *star {
                 return Err(PlannerError::invalid_expression(
                     "DISTINCT/STAR modifiers are only supported for aggregates".to_string(),
@@ -3129,6 +3610,7 @@ fn rewrite_expr_with_maps(
                     args: rewritten_args,
                     distinct: false,
                     star: false,
+                    over: None,
                 },
                 resolved_type: expr.resolved_type.clone(),
                 span: expr.span,

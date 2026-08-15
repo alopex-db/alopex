@@ -97,6 +97,8 @@ pub enum TypedExprKind {
         distinct: bool,
         /// STAR modifier for COUNT(*).
         star: bool,
+        /// Optional typed `OVER (...)` specification.
+        over: Option<TypedWindowSpec>,
     },
 
     /// An explicit type cast.
@@ -186,6 +188,15 @@ pub enum TypedExprKind {
         /// Planned subquery.
         subquery: Box<LogicalPlan>,
     },
+}
+
+/// A type-checked window specification.
+#[derive(Debug, Clone)]
+pub struct TypedWindowSpec {
+    /// Expressions identifying independent partitions.
+    pub partition_by: Vec<TypedExpr>,
+    /// Window-local ordering.
+    pub order_by: Vec<SortExpr>,
 }
 
 /// Quantifier for quantified subquery comparisons.
@@ -393,6 +404,7 @@ impl TypedExpr {
                 args,
                 distinct,
                 star,
+                over: None,
             },
             resolved_type,
             span,
