@@ -141,16 +141,8 @@ jobs:
           set -euo pipefail
           report="${REPORT_ROOT}/v${VERSION}.md"
           grep -Fxq '> 総合結果: **✅ 全ステップ成功**' "${report}"
-          python3 - "${REPORT_ROOT}/v${VERSION}.json" <<'PY'
-          import json, re, sys
-          payload = json.load(open(sys.argv[1], encoding='utf-8'))
-          if payload.get('overall_status') != 'ok':
-              raise SystemExit('public report candidate is not successful')
-          skipped = [line for step in payload['steps'] for line in step['diagnostics']
-                     if re.search(r'\bSKIP\b', line, re.IGNORECASE)]
-          if skipped:
-              raise SystemExit(f'A public release report must not contain executed SKIP: {skipped}')
-          PY
+          python3 scripts/release/verify-release/report.py validate-public \
+            --results "${REPORT_ROOT}/v${VERSION}.json"
 
       - name: Publish candidate branch for docs ingestion
         id: publish

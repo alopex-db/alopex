@@ -27,7 +27,11 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_publication_requires_success_without_skip_and_exact_docs_bytes(self) -> None:
         self.assertIn("✅ 全ステップ成功", self.text)
-        self.assertIn("must not contain executed SKIP", self.text)
+        self.assertIn("report.py validate-public", self.text)
+        reporter = (
+            ROOT / "scripts/release/verify-release/report.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("must not contain executed SKIP", reporter)
         self.assertIn("cmp -s", self.text)
         self.assertNotIn("git push --force", self.text)
 

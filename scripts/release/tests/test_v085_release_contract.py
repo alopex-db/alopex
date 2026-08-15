@@ -135,6 +135,7 @@ class V085ReleaseContractTests(unittest.TestCase):
         self.assertIn("scripts/demo/v08/demo_sql_v08.py", run)
         self.assertIn("scripts/demo/v074/demo_api_surfaces.py", run)
         self.assertIn("scripts/demo/v074/demo_vector_api.py", run)
+        self.assertIn("--require-all", run)
 
     def test_embedded_demo_covers_every_v08_local_capability_group(self) -> None:
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")

@@ -13,6 +13,9 @@ from typing import Any
 
 SCHEMA = "alopex-release-verification/v1"
 DIAGNOSTIC = re.compile(r"SKIP|ERROR|FAIL|FAILED|失敗", re.IGNORECASE)
+SKIP_CASE = re.compile(r"^\s*SKIP\s+\S", re.IGNORECASE)
+SKIP_DETAIL = re.compile(r"^\s*###\s+.*\(SKIP\)\s*$", re.IGNORECASE)
+SKIP_COUNT = re.compile(r"\bSKIP=(\d+)\b", re.IGNORECASE)
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -133,6 +136,26 @@ def render(args: argparse.Namespace) -> None:
     print(output)
 
 
+def validate_public(args: argparse.Namespace) -> None:
+    payload = load(args.results)
+    if payload.get("overall_status") != "ok":
+        raise SystemExit("public report candidate is not successful")
+    if any(step.get("status") != "ok" for step in payload.get("steps", [])):
+        raise SystemExit("public report candidate contains a failed step")
+
+    executed_skips: list[str] = []
+    for step in payload.get("steps", []):
+        for line in step.get("diagnostics", []):
+            counts = [int(value) for value in SKIP_COUNT.findall(line)]
+            if SKIP_CASE.search(line) or SKIP_DETAIL.search(line) or any(counts):
+                executed_skips.append(line)
+    if executed_skips:
+        raise SystemExit(
+            f"A public release report must not contain executed SKIP: {executed_skips}"
+        )
+    print("public release report candidate is complete")
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     commands = root.add_subparsers(dest="command", required=True)
@@ -156,6 +179,10 @@ def parser() -> argparse.ArgumentParser:
     markdown.add_argument("--results", type=Path, required=True)
     markdown.add_argument("--output-dir", type=Path, required=True)
     markdown.set_defaults(func=render)
+
+    validate = commands.add_parser("validate-public")
+    validate.add_argument("--results", type=Path, required=True)
+    validate.set_defaults(func=validate_public)
     return root
 
 
