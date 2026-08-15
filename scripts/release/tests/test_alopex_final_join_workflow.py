@@ -95,6 +95,10 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertNotIn("SHA256SUMS').write_text", text)
         self.assertGreaterEqual(text.count("CONTRACT_VERSION').write_bytes(b'0.4.0\\n')"), 3)
 
+    def test_every_wheel_target_retargets_parser_pins_from_release_manifest(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(text.count("retarget_python_parser_source.py"), 3)
+
     def test_sdist_stages_source_without_native_vendor_directories(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split("  sdist:", maxsplit=1)[1].split("  publish-testpypi:", maxsplit=1)[0]
