@@ -88,6 +88,51 @@ class V085ReleaseContractTests(unittest.TestCase):
         self.assertIn("publish_report: true", python)
         self.assertIn("verify_python_vector_api.py", python)
 
+    def test_crate_publish_verifies_the_packaged_vendor_tree(self) -> None:
+        release = (ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish = release.split("  publish-crate:", maxsplit=1)[1].split(
+            "  dispatch-python-release:", maxsplit=1
+        )[0]
+
+        self.assertNotIn(
+            "NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser",
+            publish,
+        )
+        self.assertIn(
+            "env -u NIM_SQL_PARSER_LIB_DIR cargo publish", publish
+        )
+
+    def test_core_repair_forward_is_bound_to_the_immutable_release_tag(self) -> None:
+        release = (ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish = release.split("  publish-crate:", maxsplit=1)[1].split(
+            "  dispatch-python-release:", maxsplit=1
+        )[0]
+        dispatch = release.split("  dispatch-python-release:", maxsplit=1)[1]
+
+        self.assertIn("repair_forward:", release)
+        self.assertIn("release_tag:", release)
+        self.assertIn("target_sha:", release)
+        self.assertIn("branches:\n      - 'repair/v*-release'", release)
+        self.assertIn(
+            "startsWith(github.ref_name, 'repair/v')", publish
+        )
+        self.assertIn(
+            '[[ "${GITHUB_REF_NAME}" == "repair/v0.8.5-release" ]]', publish
+        )
+        self.assertIn(
+            'git rev-parse "${RELEASE_TAG_NAME}^{commit}"', publish
+        )
+        self.assertIn('"${RELEASE_TARGET_SHA}"', publish)
+        self.assertIn('gh release view "${release_tag}"', publish)
+        self.assertIn(
+            "needs.build-release.result == 'success'", publish
+        )
+        self.assertIn("!inputs.repair_forward", dispatch)
+
     def test_v08_demos_are_mandatory(self) -> None:
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
         self.assertIn("scripts/demo/v08/demo_sql_v08.py", run)
