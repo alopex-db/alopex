@@ -75,6 +75,7 @@ fn continuous_aggregate_statement() -> Statement {
             name: "hourly_metrics".to_string(),
             name_span: span(),
             query: Select {
+                with: None,
                 distinct: false,
                 projection: vec![SelectItem::Wildcard { span: span() }],
                 from: vec![],
@@ -524,6 +525,7 @@ fn test_plan_select_wildcard() {
     let planner = Planner::new(&catalog);
 
     let select = Select {
+        with: None,
         distinct: false,
         projection: vec![SelectItem::Wildcard { span: span() }],
         from: vec![FromItem::Table {
@@ -561,6 +563,7 @@ fn test_plan_select_columns() {
     let planner = Planner::new(&catalog);
 
     let select = Select {
+        with: None,
         distinct: false,
         projection: vec![
             SelectItem::Expr {
@@ -610,6 +613,7 @@ fn test_plan_select_with_where() {
     let planner = Planner::new(&catalog);
 
     let select = Select {
+        with: None,
         distinct: false,
         projection: vec![SelectItem::Wildcard { span: span() }],
         from: vec![FromItem::Table {
@@ -643,6 +647,7 @@ fn test_plan_select_with_order_by() {
     let planner = Planner::new(&catalog);
 
     let select = Select {
+        with: None,
         distinct: false,
         projection: vec![SelectItem::Wildcard { span: span() }],
         from: vec![FromItem::Table {
@@ -693,6 +698,7 @@ fn test_plan_select_with_limit() {
     let planner = Planner::new(&catalog);
 
     let select = Select {
+        with: None,
         distinct: false,
         projection: vec![SelectItem::Wildcard { span: span() }],
         from: vec![FromItem::Table {
@@ -733,6 +739,7 @@ fn test_plan_select_combined() {
 
     // SELECT * FROM users WHERE age > 18 ORDER BY name LIMIT 10
     let select = Select {
+        with: None,
         distinct: false,
         projection: vec![SelectItem::Wildcard { span: span() }],
         from: vec![FromItem::Table {
@@ -780,6 +787,7 @@ fn test_plan_select_table_not_found() {
     let planner = Planner::new(&catalog);
 
     let select = Select {
+        with: None,
         distinct: false,
         projection: vec![SelectItem::Wildcard { span: span() }],
         from: vec![FromItem::Table {

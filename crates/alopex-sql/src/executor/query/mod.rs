@@ -840,6 +840,13 @@ fn column_infos_from_all(
     schema: &[crate::catalog::ColumnMetadata],
     names: &[String],
 ) -> Result<Vec<ColumnInfo>> {
+    if names.len() == schema.len() {
+        return Ok(names
+            .iter()
+            .zip(schema)
+            .map(|(name, column)| ColumnInfo::new(name.clone(), column.data_type.clone()))
+            .collect());
+    }
     names
         .iter()
         .map(|name| {

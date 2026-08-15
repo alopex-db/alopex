@@ -233,6 +233,26 @@ proc writeExprSeq(s: Stream; nodes: seq[SqlNode]) =
   for child in nodes:
     s.writeExpr(child)
 
+proc writeCommonTableExpr(s: Stream; node: SqlNode) =
+  s.pack_map(3)
+  s.writeKey("name")
+  s.pack_type(node.children[0].firstIdent())
+  s.writeKey("query")
+  s.writeStatement(node.children[1])
+  s.writeKey("span")
+  s.writeSpan(node.span)
+
+proc writeWithClause(s: Stream; node: SqlNode) =
+  s.pack_map(3)
+  s.writeKey("recursive")
+  s.pack_type(node.recursive)
+  s.writeKey("ctes")
+  s.pack_array(node.children.len)
+  for cte in node.children:
+    s.writeCommonTableExpr(cte)
+  s.writeKey("span")
+  s.writeSpan(node.span)
+
 proc writeStringSeqOpt(s: Stream; values: seq[string]) =
   if values.len == 0:
     s.writeNil()
@@ -661,7 +681,8 @@ proc writeExpr(s: Stream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
-proc writeSelectFields(s: Stream; node: SqlNode) =
+proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
+  var withNode: SqlNode = nil
   var distinctFlag = false
   var projectionNode: SqlNode = nil
   var fromNode: SqlNode = nil
@@ -673,6 +694,8 @@ proc writeSelectFields(s: Stream; node: SqlNode) =
 
   for child in node.children:
     case child.kind
+    of nkWithClause:
+      withNode = child
     of nkIdentifier:
       if child.strVal == "DISTINCT":
         distinctFlag = true
@@ -696,6 +719,9 @@ proc writeSelectFields(s: Stream; node: SqlNode) =
 
   s.writeKey("variant")
   s.pack_type("Select")
+  if includeWith and withNode != nil:
+    s.writeKey("with")
+    s.writeWithClause(withNode)
   s.writeKey("distinct")
   s.pack_type(distinctFlag)
   s.writeKey("projection")
@@ -740,12 +766,17 @@ proc writeSelectFields(s: Stream; node: SqlNode) =
     s.writeNil()
 
 proc writeSelectKind(s: Stream; node: SqlNode) =
-  s.pack_map(10)
+  var fieldCount = 10
+  for child in node.children:
+    if child.kind == nkWithClause:
+      fieldCount = 11
+      break
+  s.pack_map(fieldCount)
   s.writeSelectFields(node)
 
 proc writeContinuousAggregateQuery(s: Stream; node: SqlNode) =
   s.pack_map(11)
-  s.writeSelectFields(node)
+  s.writeSelectFields(node, false)
   s.writeKey("span")
   s.writeSpan(node.span)
 

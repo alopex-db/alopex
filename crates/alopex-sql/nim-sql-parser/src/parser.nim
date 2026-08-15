@@ -102,6 +102,7 @@ proc makeAlias(expr: SqlNode, alias: string; span: Span = emptySpan()): SqlNode 
 proc parseExpr(p: var Parser): SqlNode
 proc parseConcat(p: var Parser): SqlNode
 proc parseSelectStmt(p: var Parser): SqlNode
+proc parseWithSelectStmt(p: var Parser): SqlNode
 proc parseInsertStmt(p: var Parser): SqlNode
 proc parseUpdateStmt(p: var Parser): SqlNode
 proc parseDeleteStmt(p: var Parser): SqlNode
@@ -661,6 +662,35 @@ proc parseSelectStmt(p: var Parser): SqlNode =
       limitNode.children.add(p.parseExpr())
     result.children.add(limitNode)
 
+proc parseWithSelectStmt(p: var Parser): SqlNode =
+  let start = p.expect(tkWith)
+  let withClause = newNode(nkWithClause, tokenSpan(start))
+  if p.check(tkRecursive):
+    withClause.recursive = true
+    discard p.advance()
+
+  while true:
+    let name = p.expectIdent("common table expression name")
+    let cte = newNode(nkCommonTableExpr, tokenSpan(name))
+    cte.children.add(newIdent(name.value, tokenSpan(name)))
+    discard p.expect(tkAs)
+    discard p.expect(tkLParen)
+    if not p.check(tkSelect):
+      p.error("expected SELECT in common table expression")
+    cte.children.add(p.parseSelectStmt())
+    discard p.expect(tkRParen)
+    withClause.children.add(cte)
+    if p.check(tkComma):
+      discard p.advance()
+    else:
+      break
+
+  if not p.check(tkSelect):
+    p.error("expected SELECT after WITH clause")
+  result = p.parseSelectStmt()
+  result.children.insert(withClause, 0)
+  result.span.start = tokenSpan(start).start
+
 # --- DML parsing ---
 
 proc parseInsertStmt(p: var Parser): SqlNode =
@@ -1017,6 +1047,8 @@ proc parsePragmaStmt(p: var Parser): SqlNode =
 
 proc parseStatement*(p: var Parser): SqlNode =
   case p.current.kind
+  of tkWith:
+    result = p.parseWithSelectStmt()
   of tkSelect:
     result = p.parseSelectStmt()
   of tkInsert:
@@ -1032,7 +1064,7 @@ proc parseStatement*(p: var Parser): SqlNode =
   of tkPragma:
     result = p.parsePragmaStmt()
   else:
-    p.error("expected SQL statement (SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA)")
+    p.error("expected SQL statement (WITH, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, PRAGMA)")
 
   if p.check(tkSemicolon):
     discard p.advance()

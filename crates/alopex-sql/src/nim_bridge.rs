@@ -50,7 +50,7 @@ enum StagedContinuousAggregateKind {
 /// payload in its own right, so it carries and validates an explicit
 /// `variant: Select` field.
 pub(crate) mod continuous_aggregate_select_wire {
-    use crate::ast::{Expr, FromItem, OrderByExpr, Select, SelectItem, Span};
+    use crate::ast::{Expr, FromItem, OrderByExpr, Select, SelectItem, Span, WithClause};
     use serde::de::Error as _;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -73,6 +73,8 @@ pub(crate) mod continuous_aggregate_select_wire {
     #[serde(deny_unknown_fields)]
     struct SelectWire {
         variant: String,
+        #[serde(default)]
+        with: Option<WithClause>,
         distinct: bool,
         projection: Vec<SelectItem>,
         from: Vec<FromItem>,
@@ -120,6 +122,7 @@ pub(crate) mod continuous_aggregate_select_wire {
             )));
         }
         Ok(Select {
+            with: wire.with,
             distinct: wire.distinct,
             projection: wire.projection,
             from: wire.from,
