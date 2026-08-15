@@ -1,7 +1,7 @@
 use crate::ast::ddl::CreateContinuousAggregate;
-use crate::ast::dml::{FromItem, Select, SelectItem};
+use crate::ast::dml::{FromItem, Select, SelectItem, SetOperation, SetOperator};
 use crate::ast::expr::{Expr, ExprKind};
-use crate::ast::{Span, Statement, StatementKind};
+use crate::ast::{Location, Span, Statement, StatementKind};
 use crate::error::{ParserError, Result};
 use crate::nim_ffi::{self, OwnedBuffer, ParseResultKind};
 use serde::Deserialize;
@@ -50,7 +50,7 @@ enum StagedContinuousAggregateKind {
 /// payload in its own right, so it carries and validates an explicit
 /// `variant: Select` field.
 pub(crate) mod continuous_aggregate_select_wire {
-    use crate::ast::{Expr, FromItem, OrderByExpr, Select, SelectItem, Span};
+    use crate::ast::{Expr, FromItem, OrderByExpr, Select, SelectItem, SetOperation, Span};
     use serde::de::Error as _;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -63,6 +63,7 @@ pub(crate) mod continuous_aggregate_select_wire {
         selection: &'a Option<Expr>,
         group_by: &'a Option<Vec<Expr>>,
         having: &'a Option<Expr>,
+        set_operations: &'a [SetOperation],
         order_by: &'a [OrderByExpr],
         limit: &'a Option<Expr>,
         offset: &'a Option<Expr>,
@@ -79,6 +80,8 @@ pub(crate) mod continuous_aggregate_select_wire {
         selection: Option<Expr>,
         group_by: Option<Vec<Expr>>,
         having: Option<Expr>,
+        #[serde(default)]
+        set_operations: Vec<SetOperation>,
         order_by: Vec<OrderByExpr>,
         limit: Option<Expr>,
         offset: Option<Expr>,
@@ -100,6 +103,7 @@ pub(crate) mod continuous_aggregate_select_wire {
             selection: &select.selection,
             group_by: &select.group_by,
             having: &select.having,
+            set_operations: &select.set_operations,
             order_by: &select.order_by,
             limit: &select.limit,
             offset: &select.offset,
@@ -126,6 +130,7 @@ pub(crate) mod continuous_aggregate_select_wire {
             selection: wire.selection,
             group_by: wire.group_by,
             having: wire.having,
+            set_operations: wire.set_operations,
             order_by: wire.order_by,
             limit: wire.limit,
             offset: wire.offset,
@@ -170,6 +175,29 @@ pub fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
 }
 
 fn parse_sql_preflighted(sql: &str) -> Result<Vec<Statement>> {
+    let tokens = scan_top_level_tokens(sql);
+    let ranges = top_level_statement_ranges(sql, &tokens);
+    let contains_set_operation = ranges.iter().any(|(start, end)| {
+        tokens.iter().any(|token| {
+            token.start >= *start
+                && token.end <= *end
+                && matches!(token.kind, TopLevelTokenKind::Word)
+                && set_operator(&sql[token.start..token.end]).is_some()
+        })
+    });
+    if contains_set_operation
+        && let Ok(statements) = parse_sql_via_ffi(sql)
+        && statements.len() == ranges.len()
+    {
+        return Ok(statements);
+    }
+    if let Some(statements) = parse_set_operation_batch(sql)? {
+        return Ok(statements);
+    }
+    parse_sql_via_ffi(sql)
+}
+
+fn parse_sql_via_ffi(sql: &str) -> Result<Vec<Statement>> {
     ensure_linked_parser_contract(&nim_ffi::parser_contract_version())?;
     let natural_join_markers = natural_join_markers(sql);
     // Option (a): double-quoted tokens are identifiers under SQL standard and
@@ -208,6 +236,294 @@ fn parse_sql_preflighted(sql: &str) -> Result<Vec<Statement>> {
             ))
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TopLevelTokenKind {
+    Word,
+    Semicolon,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TopLevelToken {
+    kind: TopLevelTokenKind,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SetOperationSpec {
+    operator: SetOperator,
+    all: bool,
+    span: Span,
+}
+
+fn parse_set_operation_batch(sql: &str) -> Result<Option<Vec<Statement>>> {
+    let tokens = scan_top_level_tokens(sql);
+    let ranges = top_level_statement_ranges(sql, &tokens);
+
+    let contains_set_operation = ranges.iter().any(|(start, end)| {
+        tokens.iter().any(|token| {
+            token.start >= *start
+                && token.end <= *end
+                && matches!(token.kind, TopLevelTokenKind::Word)
+                && set_operator(&sql[token.start..token.end]).is_some()
+        })
+    });
+    if !contains_set_operation {
+        return Ok(None);
+    }
+
+    let mut statements = Vec::new();
+    for (start, end) in ranges {
+        let words = tokens
+            .iter()
+            .copied()
+            .filter(|token| {
+                token.start >= start
+                    && token.end <= end
+                    && matches!(token.kind, TopLevelTokenKind::Word)
+            })
+            .collect::<Vec<_>>();
+        if words
+            .iter()
+            .any(|word| set_operator(&sql[word.start..word.end]).is_some())
+        {
+            statements.push(parse_set_operation_statement(sql, start, end, &words)?);
+        } else {
+            statements.extend(parse_sql_via_ffi(&sql[start..end])?);
+        }
+    }
+    Ok(Some(statements))
+}
+
+fn top_level_statement_ranges(sql: &str, tokens: &[TopLevelToken]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for token in tokens {
+        if matches!(token.kind, TopLevelTokenKind::Semicolon) {
+            if !sql[start..token.start].trim().is_empty() {
+                ranges.push((start, token.start));
+            }
+            start = token.end;
+        }
+    }
+    if !sql[start..].trim().is_empty() {
+        ranges.push((start, sql.len()));
+    }
+    ranges
+}
+
+fn parse_set_operation_statement(
+    sql: &str,
+    statement_start: usize,
+    statement_end: usize,
+    words: &[TopLevelToken],
+) -> Result<Statement> {
+    let mut branch_ranges = Vec::new();
+    let mut operations = Vec::new();
+    let mut branch_start = statement_start;
+
+    for (index, word) in words.iter().enumerate() {
+        let Some(operator) = set_operator(&sql[word.start..word.end]) else {
+            continue;
+        };
+        branch_ranges.push((branch_start, word.start));
+        let all_word = words
+            .get(index + 1)
+            .filter(|next| sql[next.start..next.end].eq_ignore_ascii_case("all"));
+        let all = all_word.is_some();
+        branch_start = all_word.map_or(word.end, |token| token.end);
+        operations.push(SetOperationSpec {
+            operator,
+            all,
+            span: span_for_offsets(sql, word.start, word.end),
+        });
+    }
+    branch_ranges.push((branch_start, statement_end));
+
+    if branch_ranges.len() != operations.len() + 1 {
+        return Err(set_operation_parser_error(
+            "a SELECT query on both sides of every set operator",
+            "malformed set-operation chain",
+        ));
+    }
+
+    let mut branches = branch_ranges
+        .into_iter()
+        .map(|(start, end)| parse_select_fragment(&sql[start..end]))
+        .collect::<Result<Vec<_>>>()?;
+    let final_branch = branches.last_mut().ok_or_else(|| {
+        set_operation_parser_error("at least one SELECT query", "empty set-operation chain")
+    })?;
+    let order_by = std::mem::take(&mut final_branch.order_by);
+    let limit = final_branch.limit.take();
+    let offset = final_branch.offset.take();
+
+    let mut terms = Vec::new();
+    let mut outer_operations = Vec::new();
+    let mut current = branches.remove(0);
+    for (operation, right) in operations.into_iter().zip(branches) {
+        if operation.operator == SetOperator::Intersect {
+            current.set_operations.push(SetOperation {
+                operator: operation.operator,
+                all: operation.all,
+                right: Box::new(right),
+                span: operation.span,
+            });
+        } else {
+            terms.push(current);
+            outer_operations.push(operation);
+            current = right;
+        }
+    }
+    terms.push(current);
+
+    let mut root = terms.remove(0);
+    for (operation, right) in outer_operations.into_iter().zip(terms) {
+        root.set_operations.push(SetOperation {
+            operator: operation.operator,
+            all: operation.all,
+            right: Box::new(right),
+            span: operation.span,
+        });
+    }
+    root.order_by = order_by;
+    root.limit = limit;
+    root.offset = offset;
+    let span = root.span;
+    Ok(Statement {
+        kind: StatementKind::Select(root),
+        span,
+    })
+}
+
+fn parse_select_fragment(sql: &str) -> Result<Select> {
+    let mut statements = parse_sql_via_ffi(sql.trim())?;
+    if statements.len() != 1 {
+        return Err(set_operation_parser_error(
+            "exactly one SELECT query per set-operation input",
+            format!("{} statements", statements.len()),
+        ));
+    }
+    match statements.remove(0).kind {
+        StatementKind::Select(select) => Ok(select),
+        _ => Err(set_operation_parser_error(
+            "SELECT query in set operation",
+            "non-SELECT statement",
+        )),
+    }
+}
+
+fn set_operator(operator: &str) -> Option<SetOperator> {
+    if operator.eq_ignore_ascii_case("union") {
+        Some(SetOperator::Union)
+    } else if operator.eq_ignore_ascii_case("intersect") {
+        Some(SetOperator::Intersect)
+    } else if operator.eq_ignore_ascii_case("except") {
+        Some(SetOperator::Except)
+    } else {
+        None
+    }
+}
+
+fn set_operation_parser_error(
+    expected: impl Into<String>,
+    found: impl Into<String>,
+) -> ParserError {
+    ParserError::UnexpectedToken {
+        line: 0,
+        column: 0,
+        expected: expected.into(),
+        found: found.into(),
+    }
+}
+
+fn span_for_offsets(sql: &str, start: usize, end: usize) -> Span {
+    fn location(sql: &str, offset: usize) -> Location {
+        let prefix = &sql[..offset.min(sql.len())];
+        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u64 + 1;
+        let column = prefix
+            .rsplit_once('\n')
+            .map_or(prefix.len(), |(_, tail)| tail.len()) as u64
+            + 1;
+        Location::new(line, column)
+    }
+    Span::new(location(sql, start), location(sql, end.saturating_sub(1)))
+}
+
+fn scan_top_level_tokens(sql: &str) -> Vec<TopLevelToken> {
+    let bytes = sql.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    let mut depth = 0_u32;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' | b'"' => {
+                let quote = bytes[index];
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == quote {
+                        if bytes.get(index + 1) == Some(&quote) {
+                            index += 2;
+                        } else {
+                            index += 1;
+                            break;
+                        }
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+            }
+            b'(' => {
+                depth += 1;
+                index += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            b';' if depth == 0 => {
+                tokens.push(TopLevelToken {
+                    kind: TopLevelTokenKind::Semicolon,
+                    start: index,
+                    end: index + 1,
+                });
+                index += 1;
+            }
+            byte if depth == 0 && (byte.is_ascii_alphabetic() || byte == b'_') => {
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+                {
+                    index += 1;
+                }
+                tokens.push(TopLevelToken {
+                    kind: TopLevelTokenKind::Word,
+                    start,
+                    end: index,
+                });
+            }
+            _ => index += 1,
+        }
+    }
+    tokens
 }
 
 fn expected_parser_contract() -> &'static str {

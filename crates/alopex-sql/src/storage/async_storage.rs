@@ -661,6 +661,7 @@ fn is_query_plan(plan: &LogicalPlan) -> bool {
             | LogicalPlan::Project { .. }
             | LogicalPlan::Join { .. }
             | LogicalPlan::Aggregate { .. }
+            | LogicalPlan::SetOperation { .. }
             | LogicalPlan::Sort { .. }
             | LogicalPlan::Limit { .. }
     )

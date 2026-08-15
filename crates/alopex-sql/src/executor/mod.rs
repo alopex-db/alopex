@@ -189,6 +189,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
             | LogicalPlan::Project { .. }
             | LogicalPlan::Join { .. }
             | LogicalPlan::Aggregate { .. }
+            | LogicalPlan::SetOperation { .. }
             | LogicalPlan::Sort { .. }
             | LogicalPlan::Limit { .. } => self.execute_query(plan),
         }
@@ -320,6 +321,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     | LogicalPlan::Project { .. }
                     | LogicalPlan::Join { .. }
                     | LogicalPlan::Aggregate { .. }
+                    | LogicalPlan::SetOperation { .. }
                     | LogicalPlan::Sort { .. }
                     | LogicalPlan::Limit { .. }
             )
@@ -414,6 +416,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             | LogicalPlan::Project { .. }
             | LogicalPlan::Join { .. }
             | LogicalPlan::Aggregate { .. }
+            | LogicalPlan::SetOperation { .. }
             | LogicalPlan::Sort { .. }
             | LogicalPlan::Limit { .. } => {
                 let view = TxnCatalogView::new(&*catalog, &*overlay);

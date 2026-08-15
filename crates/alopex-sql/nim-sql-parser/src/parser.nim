@@ -604,7 +604,7 @@ proc parseOrderByItem(p: var Parser): SqlNode =
     else:
       p.error("expected FIRST or LAST after NULLS")
 
-proc parseSelectStmt(p: var Parser): SqlNode =
+proc parseSelectCore(p: var Parser): SqlNode =
   let start = p.expect(tkSelect)
   result = newNode(nkSelect, tokenSpan(start))
 
@@ -641,6 +641,36 @@ proc parseSelectStmt(p: var Parser): SqlNode =
     let having = newNode(nkHavingClause)
     having.children.add(p.parseExpr())
     result.children.add(having)
+
+proc parseIntersectTerm(p: var Parser): SqlNode =
+  result = p.parseSelectCore()
+  while p.check(tkIntersect):
+    let operatorToken = p.advance()
+    let all = if p.check(tkAll):
+      discard p.advance()
+      true
+    else:
+      false
+    let right = p.parseSelectCore()
+    result.children.add(SqlNode(kind: nkSetOperation,
+      setOp: soIntersect, setAll: all, setRight: right,
+      span: tokenSpan(operatorToken), orderAsc: -1, nullsFirst: -1))
+
+proc parseSelectStmt(p: var Parser): SqlNode =
+  result = p.parseIntersectTerm()
+
+  while p.current.kind in {tkUnion, tkExcept}:
+    let operatorToken = p.advance()
+    let operator = if operatorToken.kind == tkUnion: soUnion else: soExcept
+    let all = if p.check(tkAll):
+      discard p.advance()
+      true
+    else:
+      false
+    let right = p.parseIntersectTerm()
+    result.children.add(SqlNode(kind: nkSetOperation,
+      setOp: operator, setAll: all, setRight: right,
+      span: tokenSpan(operatorToken), orderAsc: -1, nullsFirst: -1))
 
   if p.check(tkOrder):
     discard p.advance()

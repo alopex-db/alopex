@@ -57,6 +57,14 @@ pub enum JoinType {
     Cross,
 }
 
+/// Set operation applied to two query inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOperator {
+    Union,
+    Intersect,
+    Except,
+}
+
 /// Logical query plan representation.
 ///
 /// This enum represents all possible logical operations that can be performed.
@@ -137,6 +145,14 @@ pub enum LogicalPlan {
         having: Option<TypedExpr>,
         /// Projection to apply after aggregation.
         projection: Projection,
+    },
+
+    /// UNION, INTERSECT, or EXCEPT over two projection-compatible queries.
+    SetOperation {
+        left: Box<LogicalPlan>,
+        right: Box<LogicalPlan>,
+        operator: SetOperator,
+        all: bool,
     },
 
     /// Sort operation (ORDER BY clause).
@@ -262,6 +278,7 @@ impl LogicalPlan {
             | LogicalPlan::Project { .. }
             | LogicalPlan::Join { .. }
             | LogicalPlan::Aggregate { .. }
+            | LogicalPlan::SetOperation { .. }
             | LogicalPlan::Sort { .. }
             | LogicalPlan::Limit { .. } => "SELECT",
             LogicalPlan::Insert { .. } => "INSERT",
@@ -414,6 +431,7 @@ impl LogicalPlan {
             LogicalPlan::Project { .. } => "Project",
             LogicalPlan::Join { .. } => "Join",
             LogicalPlan::Aggregate { .. } => "Aggregate",
+            LogicalPlan::SetOperation { .. } => "SetOperation",
             LogicalPlan::Sort { .. } => "Sort",
             LogicalPlan::Limit { .. } => "Limit",
             LogicalPlan::Insert { .. } => "Insert",
@@ -436,6 +454,7 @@ impl LogicalPlan {
                 | LogicalPlan::Project { .. }
                 | LogicalPlan::Join { .. }
                 | LogicalPlan::Aggregate { .. }
+                | LogicalPlan::SetOperation { .. }
                 | LogicalPlan::Sort { .. }
                 | LogicalPlan::Limit { .. }
         )
@@ -473,6 +492,7 @@ impl LogicalPlan {
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. } => Some(input),
             LogicalPlan::Join { .. } => None,
+            LogicalPlan::SetOperation { .. } => None,
             _ => None,
         }
     }
@@ -496,6 +516,9 @@ impl LogicalPlan {
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. } => input.table_name(),
             LogicalPlan::Join { .. } => None,
+            LogicalPlan::SetOperation { left, right, .. } => left
+                .table_name()
+                .filter(|name| right.table_name() == Some(*name)),
         }
     }
 
@@ -508,11 +531,30 @@ impl LogicalPlan {
     pub fn contains_join(&self) -> bool {
         match self {
             LogicalPlan::Join { .. } => true,
+            LogicalPlan::SetOperation { left, right, .. } => {
+                left.contains_join() || right.contains_join()
+            }
             LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. } => input.contains_join(),
+            _ => false,
+        }
+    }
+
+    /// Returns whether this plan tree contains a set-operation boundary.
+    pub fn contains_set_operation(&self) -> bool {
+        match self {
+            LogicalPlan::SetOperation { .. } => true,
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Limit { input, .. } => input.contains_set_operation(),
+            LogicalPlan::Join { left, right, .. } => {
+                left.contains_set_operation() || right.contains_set_operation()
+            }
             _ => false,
         }
     }

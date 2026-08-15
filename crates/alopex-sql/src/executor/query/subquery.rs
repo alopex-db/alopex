@@ -270,6 +270,9 @@ pub(crate) fn plan_contains_subquery(plan: &LogicalPlan) -> bool {
                 || projection_contains_subquery(projection)
                 || plan_contains_subquery(input)
         }
+        LogicalPlan::SetOperation { left, right, .. } => {
+            plan_contains_subquery(left) || plan_contains_subquery(right)
+        }
         LogicalPlan::Sort { input, order_by } => {
             order_by.iter().any(|sort| contains_subquery(&sort.expr))
                 || plan_contains_subquery(input)
