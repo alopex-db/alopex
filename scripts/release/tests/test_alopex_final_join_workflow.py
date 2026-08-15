@@ -106,6 +106,14 @@ class FinalJoinWorkflowTests(unittest.TestCase):
             3,
         )
 
+    def test_delivery_builds_pin_maturin_and_repair_macos_dylibs(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(text.count('maturin-version: "1.14.1"'), 4)
+        macos = text.split("  macos:", maxsplit=1)[1].split(
+            "  windows:", maxsplit=1
+        )[0]
+        self.assertIn("--auditwheel repair", macos)
+
     def test_sdist_stages_source_without_native_vendor_directories(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split("  sdist:", maxsplit=1)[1].split("  publish-testpypi:", maxsplit=1)[0]

@@ -139,6 +139,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
+          maturin-version: "1.14.1"
           command: build
           manylinux: auto
           args: -m crates/alopex-py/Cargo.toml --release --out dist
@@ -266,8 +267,9 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
+          maturin-version: "1.14.1"
           command: build
-          args: -m crates/alopex-py/Cargo.toml --release --out dist
+          args: -m crates/alopex-py/Cargo.toml --release --auditwheel repair --out dist
           target: ${{ matrix.target }}
       - name: Inspect macOS wheel contents
         shell: bash
@@ -370,6 +372,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
+          maturin-version: "1.14.1"
           command: build
           args: -m crates/alopex-py/Cargo.toml --release --out dist
       - name: Inspect Windows wheel contents
@@ -427,6 +430,7 @@ jobs:
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
+          maturin-version: "1.14.1"
           command: sdist
           args: -m crates/alopex-py/Cargo.toml --out dist
       - name: Inspect sdist contents
