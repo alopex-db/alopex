@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "alopex-py-v*"
+      # v0.8.5 is published through the repair-forward tag so the immutable
+      # source tag cannot start the historical workflow in parallel.
+      - "!alopex-py-v0.8.5"
   workflow_dispatch:
     inputs:
       source_ref:
@@ -622,5 +625,5 @@ jobs:
       issues: write
     uses: ./.github/workflows/public-release-verification.yml
     with:
-      version: ${{ inputs.release_tag || github.ref_name }}
+      version: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref_name }}
       publish_report: true

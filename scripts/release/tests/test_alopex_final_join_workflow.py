@@ -53,6 +53,20 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertIn("alopex-py-v0.8.5-repair", text)
         self.assertIn("PYTHON_HEAD_SHA=%s", text)
 
+    def test_v085_immutable_tag_does_not_start_historical_workflow(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        trigger = text.split("  workflow_dispatch:", maxsplit=1)[0]
+        self.assertIn('- "alopex-py-v*"', trigger)
+        self.assertIn('- "!alopex-py-v0.8.5"', trigger)
+
+    def test_public_verifier_uses_immutable_tag_for_repair_run(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        block = text.split("  verify-public-release:", maxsplit=1)[1]
+        self.assertIn(
+            "version: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref_name }}",
+            block,
+        )
+
     def test_sidecars_are_written_with_platform_stable_bytes(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertNotIn("CONTRACT_VERSION').write_text", text)
