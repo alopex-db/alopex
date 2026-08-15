@@ -43,6 +43,17 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("contents: write", publish)
         self.assertIn("actions/download-artifact@v4", publish)
 
+    def test_public_demos_wait_for_exact_pypi_wheel_with_a_finite_retry(self) -> None:
+        verify = self.text.split("  verify:\n", 1)[1].split("  publish:\n", 1)[0]
+        readiness = verify.split("      - name: Wait for exact PyPI release\n", 1)[1].split(
+            "      - name: Run public-package demos", 1
+        )[0]
+        self.assertIn('pip download', readiness)
+        self.assertIn('"alopex==${VERSION}"', readiness)
+        self.assertIn("--only-binary=:all:", readiness)
+        self.assertIn("seq 1 30", readiness)
+        self.assertIn("sleep 20", readiness)
+
 
 if __name__ == "__main__":
     unittest.main()
