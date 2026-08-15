@@ -21,6 +21,11 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertIn("repair/v0.8.5-release", block)
         self.assertIn("CORE_RUN_HEAD_SHA", block)
         self.assertIn("expected exactly one successful core run", block)
+        self.assertIn("if not repaired:", block)
+        self.assertIn(
+            'max(repaired, key=lambda run: int(run["databaseId"]))', block
+        )
+        self.assertNotIn("if len(repaired) != 1:", block)
         self.assertIn("bash scripts/release/verify-release/run.sh --verify-join", block)
         self.assertIn("parser-assets-v0.8.5.json", block)
         self.assertIn("parser-vendor-manifest-v0.8.5.json", block)
