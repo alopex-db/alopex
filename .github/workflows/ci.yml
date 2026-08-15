@@ -16,8 +16,47 @@ env:
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
 
 jobs:
+  scope:
+    name: Change scope
+    runs-on: ubuntu-latest
+    outputs:
+      production: ${{ steps.classify.outputs.production }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Classify production and release-process changes
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base_sha="${PUSH_BEFORE_SHA}"
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            base_sha="${PR_BASE_SHA}"
+          fi
+          [[ "${base_sha}" =~ ^[0-9a-f]{40}$ ]]
+          production=false
+          changed=0
+          while IFS= read -r -d '' path; do
+            changed=$((changed + 1))
+            case "${path}" in
+              .github/workflows/*|scripts/release/*|formal/release-report/*) ;;
+              *) production=true ;;
+            esac
+          done < <(git diff --name-only -z "${base_sha}" "${GITHUB_SHA}")
+          if [[ "${changed}" -eq 0 ]]; then
+            production=true
+          fi
+          echo "production=${production}" >> "${GITHUB_OUTPUT}"
+
   fmt:
     name: Rustfmt
+    needs: [scope]
+    if: needs.scope.outputs.production == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +67,8 @@ jobs:
 
   clippy:
     name: Clippy
+    needs: [scope]
+    if: needs.scope.outputs.production == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,6 +88,8 @@ jobs:
 
   test:
     name: Test Suite (${{ matrix.os }}, ${{ matrix.rust }})
+    needs: [scope]
+    if: needs.scope.outputs.production == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -161,6 +204,8 @@ jobs:
 
   coverage:
     name: Code Coverage
+    needs: [scope]
+    if: needs.scope.outputs.production == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Free disk space
@@ -256,26 +301,10 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
 
-  release-process-contract:
-    name: Release process contract
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Verify report and workflow contracts
-        run: |
-          python -m unittest discover -s scripts/release/tests -p 'test_*.py'
-          bash scripts/release/tests/test_verify_release_reporting.sh
-          bash scripts/release/tests/test_verify_release_join.sh
-      - name: Check release-report state model
-        working-directory: formal/release-report
-        run: |
-          export APALACHE_UID="$(id -u)"
-          export APALACHE_GID="$(id -g)"
-          docker compose run --rm apalache typecheck ReleaseReport.tla
-          docker compose run --rm apalache check --config=ReleaseReport.cfg --length=12 ReleaseReport.tla
-
   security-audit:
     name: Security Audit
+    needs: [scope]
+    if: needs.scope.outputs.production == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -303,6 +332,8 @@ jobs:
 
   build:
     name: Build (${{ matrix.os }})
+    needs: [scope]
+    if: needs.scope.outputs.production == 'true'
     runs-on: ${{ matrix.os }}
     env:
       PYO3_PYTHON: python
@@ -338,7 +369,9 @@ jobs:
             target/release/alopex-cli.exe
 
   v08-release-gate:
-    name: v0.8 Release Gate (${{ matrix.os }})
+    name: v0.8 Implementation Surface Contract (${{ matrix.os }})
+    needs: [scope]
+    if: needs.scope.outputs.production == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -459,17 +492,34 @@ jobs:
 
   ci-success:
     name: CI Success
-    needs: [fmt, clippy, test, coverage, release-process-contract, security-audit, build, v08-release-gate]
+    needs: [scope, fmt, clippy, test, coverage, security-audit, build, v08-release-gate]
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Check all jobs passed
         run: |
+          if [[ "${{ needs.scope.result }}" != "success" ]]; then
+            echo "change scope classification failed"
+            exit 1
+          fi
+          if [[ "${{ needs.scope.outputs.production }}" == "false" ]]; then
+            if [[ "${{ needs.fmt.result }}" != "skipped" ]] || \
+               [[ "${{ needs.clippy.result }}" != "skipped" ]] || \
+               [[ "${{ needs.test.result }}" != "skipped" ]] || \
+               [[ "${{ needs.coverage.result }}" != "skipped" ]] || \
+               [[ "${{ needs['security-audit'].result }}" != "skipped" ]] || \
+               [[ "${{ needs.build.result }}" != "skipped" ]] || \
+               [[ "${{ needs['v08-release-gate'].result }}" != "skipped" ]]; then
+              echo "release-process-only change unexpectedly ran production verification"
+              exit 1
+            fi
+            echo "Release-process-only change: production verification delegated to its owners"
+            exit 0
+          fi
           if [[ "${{ needs.fmt.result }}" != "success" ]] || \
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
-             [[ "${{ needs['release-process-contract'].result }}" != "success" ]] || \
              [[ "${{ needs['security-audit'].result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
              [[ "${{ needs['v08-release-gate'].result }}" != "success" ]]; then
@@ -478,7 +528,6 @@ jobs:
             echo "clippy: ${{ needs.clippy.result }}"
             echo "test: ${{ needs.test.result }}"
             echo "coverage: ${{ needs.coverage.result }}"
-            echo "release-process-contract: ${{ needs['release-process-contract'].result }}"
             echo "security-audit: ${{ needs['security-audit'].result }}"
             echo "build: ${{ needs.build.result }}"
             echo "v08-release-gate: ${{ needs['v08-release-gate'].result }}"

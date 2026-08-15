@@ -1,0 +1,41 @@
+name: Release Process Contract
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/release/**'
+      - 'formal/release-report/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/release/**'
+      - 'formal/release-report/**'
+
+jobs:
+  contract:
+    name: Delivery workflow contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify workflow and report contracts
+        run: |
+          python -m unittest discover -s scripts/release/tests -p 'test_*.py'
+          bash scripts/release/tests/test_safe_tag.sh
+          bash scripts/release/tests/test_verify_release_reporting.sh
+          bash scripts/release/tests/test_verify_release_join.sh
+
+  state-model:
+    name: Release report state model
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check finite release-report transitions
+        working-directory: formal/release-report
+        run: |
+          export APALACHE_UID="$(id -u)"
+          export APALACHE_GID="$(id -g)"
+          docker compose run --rm apalache typecheck ReleaseReport.tla
+          docker compose run --rm apalache check --config=ReleaseReport.cfg --length=12 ReleaseReport.tla

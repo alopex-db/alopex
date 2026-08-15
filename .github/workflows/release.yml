@@ -4,8 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-    branches:
-      - 'repair/v*-release'
   workflow_dispatch:
     inputs:
       repair_forward:
@@ -30,134 +28,39 @@ env:
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
 
 jobs:
-  # Run CI checks before release
+  # Implementation correctness belongs to local tests and the normal CI lane.
+  # Release only binds this immutable tag to already-approved CI evidence.
   ci-gate:
-    name: v0.8 CI Gate (${{ matrix.os }})
-    if: ${{ !inputs.repair_forward && !startsWith(github.ref_name, 'repair/v') }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    name: Approved source evidence
+    if: ${{ !inputs.repair_forward }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     steps:
-      - name: Free disk space
-        if: runner.os == 'Linux'
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.90.0
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Setup Python venv
-        shell: bash
-        run: |
-          VENV_DIR="${RUNNER_TEMP:-/tmp}/alopex-v08-gate-venv"
-          rm -rf "$VENV_DIR"
-          python -m venv "$VENV_DIR"
-          VENV_ROOT=$(VENV_DIR="$VENV_DIR" python -c "import os; from pathlib import Path; print(Path(os.environ['VENV_DIR']).resolve().as_posix())")
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            VENV_BIN="$VENV_ROOT/Scripts"
-            VENV_PY="$VENV_BIN/python.exe"
-          else
-            VENV_BIN="$VENV_ROOT/bin"
-            VENV_PY="$VENV_BIN/python"
-          fi
-          test -x "$VENV_PY"
-          echo "$VENV_BIN" >> "$GITHUB_PATH"
-          echo "VIRTUAL_ENV=$VENV_ROOT" >> "$GITHUB_ENV"
-          echo "PYO3_PYTHON=$VENV_PY" >> "$GITHUB_ENV"
-          echo "PYTHON_SYS_EXECUTABLE=$VENV_PY" >> "$GITHUB_ENV"
-          echo "ALOPEX_PYTHON=$VENV_PY" >> "$GITHUB_ENV"
-          echo "V07_GATE_VENV_DIR=$VENV_ROOT" >> "$GITHUB_ENV"
-      - name: Install Python deps
-        run: python -m pip install --upgrade pip maturin pytest numpy
-      - name: Setup exact Nim parser toolchain
-        uses: ./.github/actions/setup-nim-parser-toolchain
-      - name: Build Nim SQL parser library
-        shell: bash
-        run: bash scripts/build-nim-parser.sh --backend host
-      - name: Run Nim SQL parser tests
-        shell: bash
-        run: bash scripts/test-nim-parser.sh --backend host
-      - name: Run controlled Nim parser failure
-        id: nim_parser_controlled_failure
-        continue-on-error: true
-        shell: bash
-        run: |
-          proof_root="${RUNNER_TEMP:-/tmp}"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            proof_root="$(cygpath -u "$proof_root")"
-          fi
-          proof_path="${proof_root}/alopex-nim-controlled-failure-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
-          test ! -e "$proof_path"
-          export ALOPEX_NIM_CONTROLLED_FAILURE_PROOF="$proof_path"
-          echo "ALOPEX_NIM_CONTROLLED_FAILURE_PROOF=$proof_path" >> "$GITHUB_ENV"
-          bash scripts/test-nim-parser.sh --backend host --controlled-failure
-      - name: Stage reviewed parser candidate for v0.8 surfaces
-        shell: bash
-        run: |
-          case "$RUNNER_OS" in
-            Linux)
-              parser_target="x86_64-unknown-linux-gnu"
-              parser_library="libalopex_sql_parser.so"
-              ;;
-            Windows)
-              parser_target="x86_64-pc-windows-msvc"
-              parser_library="alopex_sql_parser.dll"
-              ;;
-            *)
-              echo "unsupported v0.8 parser gate runner: $RUNNER_OS" >&2
-              exit 2
-              ;;
-          esac
-          reviewed_dir="${NIM_SQL_PARSER_DIR}/vendor/${parser_target}"
-          for candidate in "$parser_library" CONTRACT_VERSION SHA256SUMS; do
-            test -f "${reviewed_dir}/${candidate}"
-            cp -f -- "${reviewed_dir}/${candidate}" "${NIM_SQL_PARSER_DIR}/${candidate}"
-            cmp -s "${reviewed_dir}/${candidate}" "${NIM_SQL_PARSER_DIR}/${candidate}"
-          done
-          mkdir -p crates/alopex-py/python/alopex/native
-          cp -f -- "${reviewed_dir}/${parser_library}" crates/alopex-py/python/alopex/native/
-          cp -f -- "${reviewed_dir}/CONTRACT_VERSION" crates/alopex-py/python/alopex/native/
-          cp -f -- "${reviewed_dir}/SHA256SUMS" crates/alopex-py/python/alopex/native/
-      - name: Add Nim library to PATH (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
-      - name: Run v0.7 baseline gate (Linux)
-        if: runner.os == 'Linux'
+          fetch-depth: 0
+      - name: Verify immutable tag and approved CI evidence
         env:
-          # The baseline crate contract is tied to the checked-in, checksummed
-          # vendor identity. The fresh parser build above is independently
-          # tested and packaged as a v0.8.5 release asset; it must not be fed
-          # into build_support's v0.8.4 vendor verifier.
-          NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser/vendor/x86_64-unknown-linux-gnu
-          LD_LIBRARY_PATH: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser/vendor/x86_64-unknown-linux-gnu:${{ env.LD_LIBRARY_PATH }}
-        run: bash scripts/release/v07_gate.sh
-      - name: Build Python extension for v0.8 gate (Windows)
-        if: runner.os == 'Windows'
-        run: maturin develop -m crates/alopex-py/Cargo.toml
-      - name: Run v0.8 release gate
+          GH_TOKEN: ${{ github.token }}
         shell: bash
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
-          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-          ALOPEX_NIM_CONTROLLED_FAILURE_OUTCOME: ${{ steps.nim_parser_controlled_failure.outcome }}
-        run: bash crates/alopex-tools/v08/verify-v08-surfaces.sh
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF}" == refs/tags/v* ]]
+          [[ "$(git cat-file -t "${GITHUB_REF_NAME}")" == "tag" ]]
+          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "${GITHUB_SHA}"
+          git fetch origin main
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
+          gh run list --workflow ci.yml --commit "${GITHUB_SHA}" \
+            --json status,conclusion,headSha --limit 20 \
+            --jq 'any(.[]; .headSha == env.GITHUB_SHA and .status == "completed" and .conclusion == "success")' \
+            | grep -qx true
 
   build-release:
     name: Build Release (${{ matrix.target }})
     needs: [ci-gate]
-    if: ${{ !inputs.repair_forward && !startsWith(github.ref_name, 'repair/v') }}
+    if: ${{ !inputs.repair_forward }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -264,7 +167,7 @@ jobs:
   create-release:
     name: Create GitHub Release
     needs: build-release
-    if: ${{ !inputs.repair_forward && !startsWith(github.ref_name, 'repair/v') }}
+    if: ${{ !inputs.repair_forward }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -331,14 +234,14 @@ jobs:
   publish-crate:
     name: Publish to crates.io
     needs: [build-release, create-release]
-    if: ${{ always() && (inputs.repair_forward == true || startsWith(github.ref_name, 'repair/v') || (needs.build-release.result == 'success' && needs.create-release.result == 'success')) }}
+    if: ${{ always() && (inputs.repair_forward == true || (needs.build-release.result == 'success' && needs.create-release.result == 'success')) }}
     runs-on: ubuntu-latest
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG_NAME: ${{ inputs.release_tag }}
       RELEASE_TARGET_SHA: ${{ inputs.target_sha }}
-      REPAIR_FORWARD: ${{ inputs.repair_forward || startsWith(github.ref_name, 'repair/v') }}
+      REPAIR_FORWARD: ${{ inputs.repair_forward || false }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.90.0
@@ -352,15 +255,14 @@ jobs:
           release_tag="${RELEASE_TAG_NAME}"
           release_target_sha="${RELEASE_TARGET_SHA}"
           if [[ "${REPAIR_FORWARD}" == "true" ]]; then
-            [[ "${GITHUB_REF_NAME}" == "repair/v0.8.5-release" ]]
-            release_tag="${release_tag:-v0.8.5}"
-            [[ "${release_tag}" == "v0.8.5" ]]
-            peeled_sha="$(git rev-parse "${release_tag}^{commit}")"
-            release_target_sha="${release_target_sha:-${peeled_sha}}"
+            [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
             [[ "${release_target_sha}" =~ ^[0-9a-f]{40}$ ]]
-            gh release view "${release_tag}" --json isDraft,tagName \
-              --jq 'select(.isDraft == false and .tagName == "v0.8.5") | .tagName' \
-              | grep -qx 'v0.8.5'
+            peeled_sha="$(git rev-parse "${release_tag}^{commit}")"
+            test "${peeled_sha}" = "${release_target_sha}"
+            gh release view "${release_tag}" --json isDraft --jq '.isDraft' \
+              | grep -qx false
+            gh release view "${release_tag}" --json tagName --jq '.tagName' \
+              | grep -qx "${release_tag}"
           else
             release_tag="${release_tag:-${GITHUB_REF_NAME}}"
             release_target_sha="${release_target_sha:-${GITHUB_SHA}}"
@@ -466,7 +368,7 @@ jobs:
   dispatch-python-release:
     name: Publish Python and require public demos
     needs: [publish-crate]
-    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.repair_forward && !startsWith(github.ref_name, 'repair/v') }}
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.repair_forward }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
