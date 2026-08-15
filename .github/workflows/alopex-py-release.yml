@@ -123,9 +123,16 @@ jobs:
           (package_native / 'CONTRACT_VERSION').write_bytes(b'0.4.0\n')
           (package_native / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           PY
+      - name: Checkout exact-SHA release repair tool
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          sparse-checkout: scripts/release/retarget_python_parser_source.py
+          sparse-checkout-cone-mode: false
       - name: Bind source parser pins to v0.8.5 release assets
         run: |
-          python scripts/release/retarget_python_parser_source.py \
+          python .release-tools/scripts/release/retarget_python_parser_source.py \
             --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
             --vendor-manifest crates/alopex-sql/nim-sql-parser/vendor/parser-vendor-manifest-v0.8.4.json \
             --build-support crates/alopex-sql/build_support.rs
@@ -243,9 +250,16 @@ jobs:
           (package_native / 'CONTRACT_VERSION').write_bytes(b'0.4.0\n')
           (package_native / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           PY
+      - name: Checkout exact-SHA release repair tool
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          sparse-checkout: scripts/release/retarget_python_parser_source.py
+          sparse-checkout-cone-mode: false
       - name: Bind source parser pins to v0.8.5 release assets
         run: |
-          python scripts/release/retarget_python_parser_source.py \
+          python .release-tools/scripts/release/retarget_python_parser_source.py \
             --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
             --vendor-manifest crates/alopex-sql/nim-sql-parser/vendor/parser-vendor-manifest-v0.8.4.json \
             --build-support crates/alopex-sql/build_support.rs
@@ -340,9 +354,16 @@ jobs:
           Path('crates/alopex-py/python/alopex/native/CONTRACT_VERSION').write_bytes(b'0.4.0\n')
           Path('crates/alopex-py/python/alopex/native/SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           PY
+      - name: Checkout exact-SHA release repair tool
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          sparse-checkout: scripts/release/retarget_python_parser_source.py
+          sparse-checkout-cone-mode: false
       - name: Bind source parser pins to v0.8.5 release assets
         run: |
-          python scripts/release/retarget_python_parser_source.py \
+          python .release-tools/scripts/release/retarget_python_parser_source.py \
             --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
             --vendor-manifest crates/alopex-sql/nim-sql-parser/vendor/parser-vendor-manifest-v0.8.4.json \
             --build-support crates/alopex-sql/build_support.rs
