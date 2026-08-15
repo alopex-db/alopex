@@ -1,6 +1,8 @@
 use std::sync::{Arc, RwLock};
 
 use alopex_core::kv::memory::MemoryKV;
+use alopex_sql::ast::StatementKind;
+use alopex_sql::ast::ddl::DataType;
 use alopex_sql::catalog::MemoryCatalog;
 use alopex_sql::dialect::AlopexDialect;
 use alopex_sql::executor::{ExecutionResult, Executor, QueryResult};
@@ -47,6 +49,35 @@ impl SqlHarness {
             })
             .expect("query result")
     }
+}
+
+fn parsed_column_type(sql: &str) -> DataType {
+    let statements = Parser::parse_sql(&AlopexDialect, sql).expect("parse CREATE TABLE");
+    let StatementKind::CreateTable(table) = &statements[0].kind else {
+        panic!("expected CREATE TABLE");
+    };
+    table.columns[0].data_type.clone()
+}
+
+#[test]
+fn real_aliases_float_and_pg_typeof_reports_real() {
+    assert!(matches!(
+        parsed_column_type("CREATE TABLE t (x REAL)"),
+        DataType::Float
+    ));
+    assert!(matches!(
+        parsed_column_type("CREATE TABLE t (x FLOAT)"),
+        DataType::Float
+    ));
+
+    let mut harness = SqlHarness::new();
+    harness.execute_sql("CREATE TABLE values_real (x REAL); INSERT INTO values_real VALUES (1.5);");
+    assert_eq!(
+        harness
+            .query_sql("SELECT pg_typeof(x) FROM values_real")
+            .rows,
+        vec![vec![SqlValue::Text("real".into())]]
+    );
 }
 
 #[test]

@@ -159,6 +159,14 @@ suite "MessagePack output - contract shape":
     check vectorExpr["variant"].getStr() == "VectorLiteral"
     check vectorExpr["values"].len == 3
 
+  test "REAL data type emits the Float contract variant":
+    for sql in [
+      "CREATE TABLE measurements (value REAL)",
+      "CREATE TABLE measurements (value real)",
+    ]:
+      let create = payloadJson(sql).stmtKind()
+      check create["columns"][0]["data_type"]["variant"].getStr() == "Float"
+
   test "CREATE INDEX emits method and WITH options":
     let doc = payloadJson("CREATE INDEX idx_doc_embedding ON documents (embedding) USING HNSW WITH (m = 16, ef_construction = 200)")
     let create = doc.stmtKind()

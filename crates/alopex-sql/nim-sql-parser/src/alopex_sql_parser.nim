@@ -154,6 +154,7 @@ proc normalizedDataTypeName(name: string): string =
   of "SMALLINT": "Int"
   of "BIGINT": "BigInt"
   of "FLOAT": "Float"
+  of "REAL": "Float"
   of "DOUBLE", "DECIMAL": "Double"
   of "TEXT", "VARCHAR", "CHAR": "Text"
   of "BLOB": "Blob"
