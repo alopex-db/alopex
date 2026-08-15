@@ -22,7 +22,7 @@ const
   ClauseTerminators = {tkWhere, tkOrder, tkGroup, tkHaving, tkLimit, tkOffset,
                        tkJoin, tkInner, tkLeft, tkRight, tkFull, tkCross,
                        tkNatural, tkUsing, tkOn}
-  TypeTokens = {tkInt, tkBigint, tkSmallint, tkFloatType, tkDouble, tkDecimal,
+  TypeTokens = {tkInt, tkBigint, tkSmallint, tkFloatType, tkReal, tkDouble, tkDecimal,
                 tkVarchar, tkChar, tkText, tkBlob, tkBoolean, tkBool,
                 tkTimestamp, tkDate, tkTime, tkVector}
   OptionValueTokens = {tkIdent, tkString, tkInteger, tkFloat, tkHnsw, tkBtree,

@@ -23,7 +23,7 @@ type
     tkDistinct, tkAll, tkCast, tkCase, tkWhen, tkThen, tkElse, tkEnd, tkNow
     tkPrimary, tkKey, tkForeign, tkReferences
     tkUnique, tkCheck, tkDefault, tkConstraint, tkEscape, tkWith
-    tkInt, tkBigint, tkSmallint, tkFloatType, tkDouble, tkDecimal
+    tkInt, tkBigint, tkSmallint, tkFloatType, tkReal, tkDouble, tkDecimal
     tkVarchar, tkChar, tkText, tkBlob, tkBoolean, tkBool
     tkTimestamp, tkDate, tkTime, tkVector, tkInterval
     tkHnsw, tkBtree, tkCosine, tkL2
@@ -79,7 +79,7 @@ const Keywords = {
   "default": tkDefault, "constraint": tkConstraint, "escape": tkEscape,
   "with": tkWith,
   "int": tkInt, "integer": tkInt, "bigint": tkBigint, "smallint": tkSmallint,
-  "float": tkFloatType, "double": tkDouble, "decimal": tkDecimal,
+  "float": tkFloatType, "real": tkReal, "double": tkDouble, "decimal": tkDecimal,
   "varchar": tkVarchar, "char": tkChar, "text": tkText,
   "blob": tkBlob, "boolean": tkBoolean, "bool": tkBool,
   "timestamp": tkTimestamp, "date": tkDate, "time": tkTime,
