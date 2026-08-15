@@ -1,11 +1,12 @@
 use alopex_core::kv::KVStore;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::LITERAL_TABLE;
 use crate::catalog::{Catalog, StorageType};
 use crate::executor::evaluator::EvalContext;
 use crate::executor::memory::MemoryPolicy;
 use crate::executor::{ExecutionResult, ExecutorError, QueryResult, QueryRowIterator, Result};
-use crate::planner::logical_plan::LogicalPlan;
+use crate::planner::logical_plan::{LogicalPlan, SetOperator};
 use crate::planner::typed_expr::{Projection, SortExpr};
 use crate::storage::{SqlTxn, SqlValue};
 
@@ -434,6 +435,42 @@ fn build_iterator_pipeline_with_outer<
                 Projection::All(schema.iter().map(|column| column.name.clone()).collect());
             Ok((Box::new(iter), projection, schema))
         }
+        LogicalPlan::SetOperation {
+            left,
+            right,
+            operator,
+            all,
+        } => {
+            let left_result =
+                execute_query_result_with_outer_and_policy(txn, catalog, *left, outer, memory)?;
+            let right_result =
+                execute_query_result_with_outer_and_policy(txn, catalog, *right, outer, memory)?;
+            let rows = execute_set_operation(operator, all, left_result.rows, right_result.rows)?;
+            let schema = left_result
+                .columns
+                .iter()
+                .map(|column| {
+                    crate::catalog::ColumnMetadata::new(&column.name, column.data_type.clone())
+                })
+                .collect::<Vec<_>>();
+            let projection = Projection::All(
+                left_result
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect(),
+            );
+            let rows = rows
+                .into_iter()
+                .enumerate()
+                .map(|(index, values)| Row::new(index as u64, values))
+                .collect();
+            Ok((
+                Box::new(iterator::VecIterator::new(rows, schema.clone())),
+                projection,
+                schema,
+            ))
+        }
         LogicalPlan::Sort { input, order_by } => {
             let (input_iter, projection, schema) =
                 build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer)?;
@@ -515,7 +552,147 @@ pub fn build_streaming_pipeline_with_policy<
         return Ok(materialize_query_result(result));
     }
 
-    build_streaming_pipeline_inner(txn, catalog, plan, memory)
+    match plan {
+        LogicalPlan::SetOperation {
+            left,
+            right,
+            operator,
+            all,
+        } => build_streaming_set_operation(txn, catalog, *left, *right, operator, all, memory),
+        other => build_streaming_pipeline_inner(txn, catalog, other, memory),
+    }
+}
+
+fn build_streaming_set_operation<
+    'a,
+    'txn: 'a,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &'a mut T,
+    catalog: &C,
+    left: LogicalPlan,
+    right: LogicalPlan,
+    operator: SetOperator,
+    all: bool,
+    memory: Option<&MemoryPolicy>,
+) -> Result<(
+    Box<dyn RowIterator + 'a>,
+    Projection,
+    Vec<crate::catalog::ColumnMetadata>,
+)> {
+    let (mut left_iter, left_projection, left_schema) =
+        build_streaming_pipeline_with_policy(txn, catalog, left, memory)?;
+    let mut left_rows = Vec::new();
+    while let Some(result) = left_iter.next_row() {
+        left_rows.push(result?);
+    }
+    drop(left_iter);
+    let left_result = project::execute_project(left_rows, &left_projection, &left_schema)?;
+
+    let (mut right_iter, right_projection, right_schema) =
+        build_streaming_pipeline_with_policy(txn, catalog, right, memory)?;
+    let mut right_rows = Vec::new();
+    while let Some(result) = right_iter.next_row() {
+        right_rows.push(result?);
+    }
+    let right_result = project::execute_project(right_rows, &right_projection, &right_schema)?;
+
+    let rows = execute_set_operation(operator, all, left_result.rows, right_result.rows)?;
+    let schema = left_result
+        .columns
+        .iter()
+        .map(|column| crate::catalog::ColumnMetadata::new(&column.name, column.data_type.clone()))
+        .collect::<Vec<_>>();
+    let projection = Projection::All(
+        left_result
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect(),
+    );
+    let rows = rows
+        .into_iter()
+        .enumerate()
+        .map(|(index, values)| Row::new(index as u64, values))
+        .collect();
+    Ok((
+        Box::new(iterator::VecIterator::new(rows, schema.clone())),
+        projection,
+        schema,
+    ))
+}
+
+fn execute_set_operation(
+    operator: SetOperator,
+    all: bool,
+    mut left: Vec<Vec<SqlValue>>,
+    right: Vec<Vec<SqlValue>>,
+) -> Result<Vec<Vec<SqlValue>>> {
+    if all {
+        match operator {
+            SetOperator::Union => {
+                left.extend(right);
+                return Ok(left);
+            }
+            SetOperator::Intersect | SetOperator::Except => {
+                let mut right_counts = HashMap::<Vec<u8>, usize>::new();
+                for row in right {
+                    *right_counts
+                        .entry(aggregate::encode_group_key(&row)?)
+                        .or_default() += 1;
+                }
+                let mut output = Vec::new();
+                for row in left {
+                    let key = aggregate::encode_group_key(&row)?;
+                    let remaining = right_counts.entry(key).or_default();
+                    if *remaining > 0 {
+                        *remaining -= 1;
+                        if operator == SetOperator::Intersect {
+                            output.push(row);
+                        }
+                    } else if operator == SetOperator::Except {
+                        output.push(row);
+                    }
+                }
+                return Ok(output);
+            }
+        }
+    }
+
+    let right_keys = right
+        .iter()
+        .map(|row| aggregate::encode_group_key(row))
+        .collect::<Result<HashSet<_>>>()?;
+    let mut seen = HashSet::new();
+    let mut output = Vec::new();
+    match operator {
+        SetOperator::Union => {
+            for row in left.into_iter().chain(right) {
+                if seen.insert(aggregate::encode_group_key(&row)?) {
+                    output.push(row);
+                }
+            }
+        }
+        SetOperator::Intersect => {
+            for row in left {
+                let key = aggregate::encode_group_key(&row)?;
+                if right_keys.contains(&key) && seen.insert(key) {
+                    output.push(row);
+                }
+            }
+        }
+        SetOperator::Except => {
+            for row in left {
+                let key = aggregate::encode_group_key(&row)?;
+                if !right_keys.contains(&key) && seen.insert(key) {
+                    output.push(row);
+                }
+            }
+        }
+    }
+    Ok(output)
 }
 
 /// Inner implementation of streaming pipeline builder.
@@ -579,13 +756,13 @@ fn build_streaming_pipeline_inner<
                 return Ok((Box::new(iter), projection.clone(), schema));
             }
             let (input_iter, projection, schema) =
-                build_streaming_pipeline_inner(txn, catalog, *input, memory)?;
+                build_streaming_pipeline_with_policy(txn, catalog, *input, memory)?;
             let filter_iter = FilterIterator::new(input_iter, predicate);
             Ok((Box::new(filter_iter), projection, schema))
         }
         LogicalPlan::Project { input, projection } => {
             let (mut input_iter, _input_projection, schema) =
-                build_streaming_pipeline_inner(txn, catalog, *input, memory)?;
+                build_streaming_pipeline_with_policy(txn, catalog, *input, memory)?;
             let mut rows = Vec::new();
             while let Some(result) = input_iter.next_row() {
                 rows.push(result?);
@@ -615,14 +792,14 @@ fn build_streaming_pipeline_inner<
             using: _,
         } => {
             let (mut left_iter, _left_projection, left_schema) =
-                build_streaming_pipeline_inner(txn, catalog, *left, memory)?;
+                build_streaming_pipeline_with_policy(txn, catalog, *left, memory)?;
             let mut left_rows = Vec::new();
             while let Some(result) = left_iter.next_row() {
                 left_rows.push(result?);
             }
             drop(left_iter);
             let (mut right_iter, _right_projection, right_schema) =
-                build_streaming_pipeline_inner(txn, catalog, *right, memory)?;
+                build_streaming_pipeline_with_policy(txn, catalog, *right, memory)?;
             let mut right_rows = Vec::new();
             while let Some(result) = right_iter.next_row() {
                 right_rows.push(result?);
@@ -649,7 +826,7 @@ fn build_streaming_pipeline_inner<
             projection,
         } => {
             let (input_iter, _projection, _schema) =
-                build_streaming_pipeline_inner(txn, catalog, *input, memory)?;
+                build_streaming_pipeline_with_policy(txn, catalog, *input, memory)?;
             let schema = aggregate::build_aggregate_schema(&group_keys, &aggregates);
             if let Some(policy) = memory
                 && policy.spill_directory().is_some()
@@ -726,7 +903,7 @@ fn build_streaming_pipeline_inner<
         }
         LogicalPlan::Sort { input, order_by } => {
             let (input_iter, projection, schema) =
-                build_streaming_pipeline_inner(txn, catalog, *input, memory)?;
+                build_streaming_pipeline_with_policy(txn, catalog, *input, memory)?;
             let sort_iter = if let Some(policy) = memory {
                 SortIterator::new_with_policy(input_iter, &order_by, Some(policy.clone()))?
             } else {
@@ -740,7 +917,7 @@ fn build_streaming_pipeline_inner<
             offset,
         } => {
             let (input_iter, projection, schema) =
-                build_streaming_pipeline_inner(txn, catalog, *input, memory)?;
+                build_streaming_pipeline_with_policy(txn, catalog, *input, memory)?;
             let limit_iter = LimitIterator::new(input_iter, limit, offset);
             Ok((Box::new(limit_iter), projection, schema))
         }

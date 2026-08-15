@@ -332,6 +332,16 @@ impl From<PlannerError> for SqlError {
                 location: ErrorLocation::default(),
                 code: "ALOPEX-T007",
             },
+            PlannerError::SetOperationColumnCountMismatch {
+                left,
+                right,
+                line,
+                column,
+            } => Self::Plan {
+                message: format!("set operation column count mismatch: left {left}, right {right}"),
+                location: ErrorLocation { line, column },
+                code: "ALOPEX-T008",
+            },
             PlannerError::InvalidPragma { name, reason } => Self::Plan {
                 message: format!("invalid PRAGMA '{name}': {reason}"),
                 location: ErrorLocation::default(),

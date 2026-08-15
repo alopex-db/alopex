@@ -30,6 +30,13 @@ suite "Tokenizer":
     check lex.nextToken().kind == tkFrom
     check lex.nextToken().kind == tkFrom
     check lex.nextToken().kind == tkWhere
+
+  test "set-operation keywords are recognized":
+    var lex = initLexer("UNION ALL INTERSECT EXCEPT")
+    check lex.nextToken().kind == tkUnion
+    check lex.nextToken().kind == tkAll
+    check lex.nextToken().kind == tkIntersect
+    check lex.nextToken().kind == tkExcept
     check lex.nextToken().kind == tkWhere
 
   test "CASE expression keywords are recognized":
@@ -268,6 +275,26 @@ suite "Expressions — operator precedence":
     check expr.binLeft.binLeft.intVal == 1
     check expr.binLeft.binRight.intVal == 2
     check expr.binRight.intVal == 3
+
+suite "Set operations":
+
+  test "UNION ALL records the right input and duplicate policy":
+    let ast = parseSql("SELECT 1 UNION ALL SELECT 2 ORDER BY 1")
+    check ast.kind == nkSelect
+    check ast.children[1].kind == nkSetOperation
+    check ast.children[1].setOp == soUnion
+    check ast.children[1].setAll
+    check ast.children[1].setRight.kind == nkSelect
+    check ast.children[^1].kind == nkOrderByClause
+
+  test "INTERSECT binds more tightly than UNION":
+    let ast = parseSql("SELECT 1 UNION SELECT 2 INTERSECT SELECT 2")
+    let unionNode = ast.children[1]
+    check unionNode.kind == nkSetOperation
+    check unionNode.setOp == soUnion
+    let right = unionNode.setRight
+    check right.children[1].kind == nkSetOperation
+    check right.children[1].setOp == soIntersect
 
 suite "Expressions — BETWEEN / NOT BETWEEN":
 

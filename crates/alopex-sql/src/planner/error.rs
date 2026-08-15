@@ -122,6 +122,17 @@ pub enum PlannerError {
     #[error("error[ALOPEX-T007]: invalid expression: {message}")]
     InvalidExpression { message: String },
 
+    /// ALOPEX-T008: Set-operation inputs expose different numbers of columns.
+    #[error(
+        "error[ALOPEX-T008]: set operation column count mismatch: left {left}, right {right} at line {line}, column {column}"
+    )]
+    SetOperationColumnCountMismatch {
+        left: usize,
+        right: usize,
+        line: u64,
+        column: u64,
+    },
+
     // === Feature Errors (ALOPEX-F*) ===
     /// ALOPEX-F001: Unsupported feature.
     #[error(
@@ -202,6 +213,16 @@ impl PlannerError {
     pub fn invalid_expression(message: impl Into<String>) -> Self {
         Self::InvalidExpression {
             message: message.into(),
+        }
+    }
+
+    /// Create a set-operation column-count error from a span.
+    pub fn set_operation_column_count_mismatch(left: usize, right: usize, span: Span) -> Self {
+        Self::SetOperationColumnCountMismatch {
+            left,
+            right,
+            line: span.start.line,
+            column: span.start.column,
         }
     }
 

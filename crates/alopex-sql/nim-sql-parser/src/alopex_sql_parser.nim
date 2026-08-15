@@ -147,6 +147,12 @@ proc normalizedQuantifier(kind: QuantifierKind): string =
   of qkAny: "Any"
   of qkAll: "All"
 
+proc normalizedSetOperator(kind: SetOperatorKind): string =
+  case kind
+  of soUnion: "Union"
+  of soIntersect: "Intersect"
+  of soExcept: "Except"
+
 proc normalizedDataTypeName(name: string): string =
   case name.toUpperAscii()
   of "INTEGER": "Integer"
@@ -181,6 +187,7 @@ proc writeStatement(s: Stream; node: SqlNode)
 proc writeExpr(s: Stream; node: SqlNode)
 proc writeFromItem(s: Stream; node: SqlNode)
 proc writeDataType(s: Stream; node: SqlNode)
+proc writeSelectKind(s: Stream; node: SqlNode)
 
 proc writeLiteralKind(s: Stream; node: SqlNode) =
   case node.kind
@@ -727,6 +734,7 @@ proc writeSelectFields(s: Stream; node: SqlNode) =
   var havingNode: SqlNode = nil
   var orderByNode: SqlNode = nil
   var limitNode: SqlNode = nil
+  var setOperations: seq[SqlNode] = @[]
 
   for child in node.children:
     case child.kind
@@ -748,6 +756,8 @@ proc writeSelectFields(s: Stream; node: SqlNode) =
       orderByNode = child
     of nkLimitClause:
       limitNode = child
+    of nkSetOperation:
+      setOperations.add(child)
     else:
       discard
 
@@ -778,6 +788,18 @@ proc writeSelectFields(s: Stream; node: SqlNode) =
     s.writeExprSeq(groupByNode.children)
   s.writeKey("having")
   s.writeExprOpt(havingNode)
+  s.writeKey("set_operations")
+  s.pack_array(setOperations.len)
+  for setOperation in setOperations:
+    s.pack_map(4)
+    s.writeKey("operator")
+    s.pack_type(normalizedSetOperator(setOperation.setOp))
+    s.writeKey("all")
+    s.pack_type(setOperation.setAll)
+    s.writeKey("right")
+    s.writeSelectKind(setOperation.setRight)
+    s.writeKey("span")
+    s.writeSpan(setOperation.span)
   s.writeKey("order_by")
   if orderByNode == nil:
     s.pack_array(0)
@@ -797,11 +819,11 @@ proc writeSelectFields(s: Stream; node: SqlNode) =
     s.writeNil()
 
 proc writeSelectKind(s: Stream; node: SqlNode) =
-  s.pack_map(10)
+  s.pack_map(11)
   s.writeSelectFields(node)
 
 proc writeContinuousAggregateQuery(s: Stream; node: SqlNode) =
-  s.pack_map(11)
+  s.pack_map(12)
   s.writeSelectFields(node)
   s.writeKey("span")
   s.writeSpan(node.span)
@@ -1242,6 +1264,9 @@ proc validateStagedWriterShape(node: SqlNode) =
     for child in node.children:
       if child == nil or child.kind != nkFloatLit:
         stagedValidationError("vector literal children must be nkFloatLit")
+  of nkSetOperation:
+    if node.setRight == nil or node.setRight.kind != nkSelect:
+      stagedValidationError("set-operation right input must be nkSelect")
   else:
     discard
 
@@ -1284,6 +1309,8 @@ proc validateStagedAst(node: SqlNode; depth: int;
       node.joinCond.validateStagedAst(depth + 1, ancestors)
   of nkAlias:
     node.aliasExpr.validateStagedAst(depth + 1, ancestors)
+  of nkSetOperation:
+    node.setRight.validateStagedAst(depth + 1, ancestors)
   of nkColumnDef:
     node.colType.validateStagedAst(depth + 1, ancestors)
     for child in node.colConstraints:

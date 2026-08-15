@@ -10,9 +10,27 @@ pub struct Select {
     pub selection: Option<Expr>,
     pub group_by: Option<Vec<Expr>>,
     pub having: Option<Expr>,
+    #[serde(default)]
+    pub set_operations: Vec<SetOperation>,
     pub order_by: Vec<OrderByExpr>,
     pub limit: Option<Expr>,
     pub offset: Option<Expr>,
+    #[serde(default)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SetOperator {
+    Union,
+    Intersect,
+    Except,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetOperation {
+    pub operator: SetOperator,
+    pub all: bool,
+    pub right: Box<Select>,
     #[serde(default)]
     pub span: Span,
 }
@@ -118,6 +136,12 @@ pub struct Delete {
 }
 
 impl Spanned for Select {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for SetOperation {
     fn span(&self) -> Span {
         self.span
     }

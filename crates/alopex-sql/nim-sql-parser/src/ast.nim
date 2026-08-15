@@ -54,6 +54,7 @@ type
     nkGroupByClause
     nkHavingClause
     nkLimitClause
+    nkSetOperation
     nkJoin
     nkUsingClause
     nkColumnDef
@@ -86,6 +87,9 @@ type
 
   QuantifierKind* = enum
     qkAny, qkAll
+
+  SetOperatorKind* = enum
+    soUnion, soIntersect, soExcept
 
   SqlNode* = ref object
     span*: Span
@@ -132,6 +136,10 @@ type
       colName*: string
       colType*: SqlNode
       colConstraints*: seq[SqlNode]
+    of nkSetOperation:
+      setOp*: SetOperatorKind
+      setAll*: bool
+      setRight*: SqlNode
     else:
       children*: seq[SqlNode]
 
@@ -221,6 +229,8 @@ proc fillMissingSpans*(node: SqlNode; fallback: Span) =
     node.colType.fillMissingSpans(node.span)
     for child in node.colConstraints:
       child.fillMissingSpans(node.span)
+  of nkSetOperation:
+    node.setRight.fillMissingSpans(node.span)
   else:
     for child in node.children:
       child.fillMissingSpans(node.span)
@@ -273,6 +283,9 @@ proc `$`*(node: SqlNode): string =
     result = "Alias(" & $node.aliasExpr & " AS " & node.aliasName & ")"
   of nkColumnDef:
     result = "ColDef(" & node.colName & " " & $node.colType & ")"
+  of nkSetOperation:
+    result = "SetOperation(" & $node.setOp &
+      (if node.setAll: " ALL, " else: ", ") & $node.setRight & ")"
   else:
     result = $node.kind & "("
     for i, child in node.children:

@@ -24,7 +24,7 @@ mod planner_tests;
 pub use aggregate_expr::{AggregateExpr, AggregateFunction};
 pub use error::PlannerError;
 pub use knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
-pub use logical_plan::{JoinType, LogicalPlan, WindowExpr, WindowFunction};
+pub use logical_plan::{JoinType, LogicalPlan, SetOperator, WindowExpr, WindowFunction};
 pub use name_resolver::{NameResolver, ResolvedColumn};
 pub use type_checker::{ScopedTable, TypeChecker};
 pub use typed_expr::{
@@ -36,7 +36,8 @@ use crate::ast::ddl::{
     ColumnConstraint, ColumnDef, CreateIndex, CreateTable, DropIndex, DropTable,
 };
 use crate::ast::dml::{
-    Delete, FromItem, Insert, InsertSource, LITERAL_TABLE, OrderByExpr, Select, SelectItem, Update,
+    Delete, FromItem, Insert, InsertSource, LITERAL_TABLE, OrderByExpr, Select, SelectItem,
+    SetOperator as AstSetOperator, Update,
 };
 use crate::ast::expr::Literal;
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
@@ -370,6 +371,10 @@ impl TableReferenceExtractor {
                         self.extract_typed_expr(arg, diagnostics, references);
                     }
                 }
+            }
+            LogicalPlan::SetOperation { left, right, .. } => {
+                self.extract_plan(left, root_access, scan_source, diagnostics, references);
+                self.extract_plan(right, root_access, scan_source, diagnostics, references);
             }
             LogicalPlan::Sort { input, order_by } => {
                 self.extract_plan(input, root_access, scan_source, diagnostics, references);
@@ -1025,6 +1030,73 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         stmt: &Select,
         outer_scope: &[ScopedTable],
     ) -> Result<PlannedRelation, PlannerError> {
+        if !stmt.set_operations.is_empty() {
+            let mut left_select = stmt.clone();
+            left_select.set_operations.clear();
+            left_select.order_by.clear();
+            left_select.limit = None;
+            left_select.offset = None;
+            let mut relation = self.plan_select_relation(&left_select, outer_scope)?;
+
+            for operation in &stmt.set_operations {
+                let right = self.plan_select_relation(&operation.right, outer_scope)?;
+                if relation.schema.len() != right.schema.len() {
+                    return Err(PlannerError::set_operation_column_count_mismatch(
+                        relation.schema.len(),
+                        right.schema.len(),
+                        operation.span,
+                    ));
+                }
+                for (left_column, right_column) in relation.schema.iter().zip(&right.schema) {
+                    if left_column.data_type != right_column.data_type {
+                        return Err(PlannerError::type_mismatch(
+                            left_column.data_type.type_name(),
+                            right_column.data_type.type_name(),
+                            operation.span,
+                        ));
+                    }
+                }
+
+                relation.plan = LogicalPlan::SetOperation {
+                    left: Box::new(relation.plan),
+                    right: Box::new(right.plan),
+                    operator: match operation.operator {
+                        AstSetOperator::Union => SetOperator::Union,
+                        AstSetOperator::Intersect => SetOperator::Intersect,
+                        AstSetOperator::Except => SetOperator::Except,
+                    },
+                    all: operation.all,
+                };
+            }
+
+            relation.scope = vec![ScopedTable::new(
+                TableMetadata::new(LITERAL_TABLE, relation.schema.clone()),
+                0,
+            )];
+            if !stmt.order_by.is_empty() {
+                // 集合演算の ORDER BY は結果列(左辺の出力列名)を参照する。
+                // 射影別名は既に relation.schema へ反映済みなので、別名置換の
+                // マップは空でよい。
+                let order_by = self.build_sort_exprs_with_scope(
+                    &stmt.order_by,
+                    &relation.scope,
+                    &HashMap::new(),
+                )?;
+                relation.plan = LogicalPlan::Sort {
+                    input: Box::new(relation.plan),
+                    order_by,
+                };
+            }
+            if stmt.limit.is_some() || stmt.offset.is_some() {
+                relation.plan = LogicalPlan::Limit {
+                    input: Box::new(relation.plan),
+                    limit: self.extract_limit_value(&stmt.limit, stmt.span)?,
+                    offset: self.extract_limit_value(&stmt.offset, stmt.span)?,
+                };
+            }
+            return Ok(relation);
+        }
+
         let mut relation = self.plan_from_items(&stmt.from, stmt.span, outer_scope)?;
         let expr_scope = relation
             .scope
