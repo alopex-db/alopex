@@ -1009,6 +1009,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let distinct_only =
             stmt.distinct && !has_group_by && !has_aggregate && stmt.having.is_none();
 
+        // SELECT-list aliases are visible to HAVING and ORDER BY only. `expr_scope`
+        // above stays alias-free so that WHERE and GROUP BY keep resolving against
+        // the FROM-derived base relations, as the SQL standard requires.
+        let projection_aliases = collect_projection_aliases(&stmt.projection);
+
         let final_projection =
             self.build_projection_with_scope(&stmt.projection, &relation.schema, &expr_scope)?;
         install_base_projection(&mut relation.plan, &final_projection);
@@ -1065,7 +1070,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             }
 
             let having_typed = if let Some(having) = &stmt.having {
-                let typed = self.infer_expr_with_scope(having, &expr_scope)?;
+                let having = substitute_projection_aliases(having, &projection_aliases);
+                let typed = self.infer_expr_with_scope(&having, &expr_scope)?;
                 if typed.resolved_type != ResolvedType::Boolean {
                     return Err(PlannerError::type_mismatch(
                         "Boolean",
@@ -1082,7 +1088,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             let mut order_by = Vec::new();
             if !stmt.order_by.is_empty() {
                 for order_expr in &stmt.order_by {
-                    let typed = self.infer_expr_with_scope(&order_expr.expr, &expr_scope)?;
+                    let sort_source =
+                        substitute_projection_aliases(&order_expr.expr, &projection_aliases);
+                    let typed = self.infer_expr_with_scope(&sort_source, &expr_scope)?;
                     self.collect_aggregates_from_typed_expr(&typed, &mut aggregates, &mut agg_map)?;
                     let asc = order_expr.asc.unwrap_or(true);
                     let nulls_first = order_expr.nulls_first.unwrap_or(false);
@@ -1167,7 +1175,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
         // Non-aggregate path: ORDER BY + LIMIT/OFFSET
         if !stmt.order_by.is_empty() {
-            let order_by = self.build_sort_exprs_with_scope(&stmt.order_by, &expr_scope)?;
+            let order_by =
+                self.build_sort_exprs_with_scope(&stmt.order_by, &expr_scope, &projection_aliases)?;
             plan = LogicalPlan::Sort {
                 input: Box::new(plan),
                 order_by,
@@ -1645,10 +1654,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         &self,
         order_by: &[OrderByExpr],
         scope: &[ScopedTable],
+        projection_aliases: &HashMap<String, crate::ast::expr::Expr>,
     ) -> Result<Vec<SortExpr>, PlannerError> {
         let mut sort_exprs = Vec::new();
         for order_expr in order_by {
-            let typed_expr = self.infer_expr_with_scope(&order_expr.expr, scope)?;
+            let sort_source = substitute_projection_aliases(&order_expr.expr, projection_aliases);
+            let typed_expr = self.infer_expr_with_scope(&sort_source, scope)?;
             let asc = order_expr.asc.unwrap_or(true);
             let nulls_first = order_expr.nulls_first.unwrap_or(false);
             sort_exprs.push(SortExpr::new(typed_expr, asc, nulls_first));
@@ -2487,6 +2498,149 @@ struct AggregateSignature {
     star: bool,
     arg_key: Option<String>,
     separator: Option<String>,
+}
+
+/// Collect the SELECT-list aliases that ORDER BY / HAVING may reference.
+///
+/// Per the SQL standard, aliases introduced by the projection are visible to
+/// HAVING and ORDER BY (which are logically evaluated after the projection),
+/// but not to WHERE / GROUP BY. Only `SelectItem::Expr` carries an alias;
+/// wildcards contribute nothing.
+///
+/// When the same alias is declared twice the first declaration wins, which
+/// keeps the substitution deterministic instead of depending on map ordering.
+fn collect_projection_aliases(items: &[SelectItem]) -> HashMap<String, crate::ast::expr::Expr> {
+    let mut aliases = HashMap::new();
+    for item in items {
+        if let SelectItem::Expr {
+            expr,
+            alias: Some(alias),
+            ..
+        } = item
+        {
+            aliases.entry(alias.clone()).or_insert_with(|| expr.clone());
+        }
+    }
+    aliases
+}
+
+/// Substitute projection aliases inside an ORDER BY / HAVING expression.
+///
+/// An unqualified `ColumnRef` whose name matches a projection alias is replaced
+/// by the aliased source expression, so everything downstream (type inference,
+/// aggregate collection, `validate_having_expr`, and the aggregate output
+/// rewrite) observes the very expression the projection already produced.
+///
+/// Substitution rules:
+/// - Only unqualified references are eligible; `t.total` always means the base
+///   column `total` of table `t`, never an alias.
+/// - An alias takes precedence over a base column of the same name, per the
+///   SQL standard. `order_by_prefers_projection_alias_over_shadowed_base_column`
+///   pins this behaviour.
+/// - The substituted expression keeps the *reference* site's span so that any
+///   resulting diagnostic still points at the ORDER BY / HAVING clause.
+/// - Subqueries are not descended into: an inner SELECT establishes its own
+///   projection scope, so the outer alias must not leak inside it.
+fn substitute_projection_aliases(
+    expr: &crate::ast::expr::Expr,
+    aliases: &HashMap<String, crate::ast::expr::Expr>,
+) -> crate::ast::expr::Expr {
+    use crate::ast::expr::ExprKind;
+
+    if aliases.is_empty() {
+        return expr.clone();
+    }
+
+    let recurse = |e: &crate::ast::expr::Expr| substitute_projection_aliases(e, aliases);
+
+    let kind = match &expr.kind {
+        ExprKind::ColumnRef {
+            table: None,
+            column,
+        } => match aliases.get(column) {
+            Some(source) => {
+                let mut replacement = source.clone();
+                replacement.span = expr.span;
+                return replacement;
+            }
+            None => return expr.clone(),
+        },
+        ExprKind::BinaryOp { left, op, right } => ExprKind::BinaryOp {
+            left: Box::new(recurse(left)),
+            op: *op,
+            right: Box::new(recurse(right)),
+        },
+        ExprKind::UnaryOp { op, operand } => ExprKind::UnaryOp {
+            op: *op,
+            operand: Box::new(recurse(operand)),
+        },
+        ExprKind::FunctionCall {
+            name,
+            args,
+            distinct,
+            star,
+        } => ExprKind::FunctionCall {
+            name: name.clone(),
+            args: args.iter().map(recurse).collect(),
+            distinct: *distinct,
+            star: *star,
+        },
+        ExprKind::Cast { expr, target_type } => ExprKind::Cast {
+            expr: Box::new(recurse(expr)),
+            target_type: target_type.clone(),
+        },
+        ExprKind::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => ExprKind::Between {
+            expr: Box::new(recurse(expr)),
+            low: Box::new(recurse(low)),
+            high: Box::new(recurse(high)),
+            negated: *negated,
+        },
+        ExprKind::Like {
+            expr,
+            pattern,
+            escape,
+            negated,
+            kind,
+        } => ExprKind::Like {
+            expr: Box::new(recurse(expr)),
+            pattern: Box::new(recurse(pattern)),
+            escape: escape.as_deref().map(|e| Box::new(recurse(e))),
+            negated: *negated,
+            kind: *kind,
+        },
+        ExprKind::InList {
+            expr,
+            list,
+            negated,
+        } => ExprKind::InList {
+            expr: Box::new(recurse(expr)),
+            list: list.iter().map(recurse).collect(),
+            negated: *negated,
+        },
+        ExprKind::IsNull { expr, negated } => ExprKind::IsNull {
+            expr: Box::new(recurse(expr)),
+            negated: *negated,
+        },
+        // Qualified column refs, literals, and subquery-bearing expressions are
+        // left untouched (see the subquery note above).
+        ExprKind::ColumnRef { .. }
+        | ExprKind::Literal { .. }
+        | ExprKind::VectorLiteral { .. }
+        | ExprKind::ScalarSubquery { .. }
+        | ExprKind::InSubquery { .. }
+        | ExprKind::Exists { .. }
+        | ExprKind::Quantified { .. } => return expr.clone(),
+    };
+
+    crate::ast::expr::Expr {
+        kind,
+        span: expr.span,
+    }
 }
 
 fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
