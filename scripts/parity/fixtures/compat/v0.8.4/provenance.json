@@ -1,0 +1,51 @@
+{
+  "schema": "alopex-compat-fixture/v1",
+  "source": {
+    "version": "0.8.4",
+    "tag": "v0.8.4",
+    "peeled_sha": "9a0cea1d24e7672f59cae72d9218b9cc698d9162",
+    "binary_sha256": "15ce7abb399e6f637c9bba4763002cae8ae44b5ca03f0f12ba58f3f3e228c035"
+  },
+  "generator": "scripts/parity/generate_compat_fixture.py",
+  "corpus": [
+    {
+      "path": "scripts/parity/corpus/01_ddl.sql",
+      "sha256": "94ea9c95e89f241dd8664e3671637a1f7de2e073d3e713cfae76ada2a52893d5"
+    },
+    {
+      "path": "scripts/parity/corpus/02_dml.sql",
+      "sha256": "c7e5d175ae35e34db896c61335d5c477007d530eaf56d3ee2ff8debbfba2ff94"
+    },
+    {
+      "path": "scripts/parity/corpus/03_query.sql",
+      "sha256": "f9f32472d8d3a7f6372d3f985669502514b1f91c51307981d75c7089bb90d3ee"
+    },
+    {
+      "path": "scripts/parity/corpus/04_join.sql",
+      "sha256": "7e91fb90d7a5a6a78098124da4a0e693d94d68db291222926b1366c53c9952c5"
+    },
+    {
+      "path": "scripts/parity/corpus/05_aggregate.sql",
+      "sha256": "2521562d29a8ae7c007b9a8965888cab2913e2b23801d35d580ddb42e79981b5"
+    },
+    {
+      "path": "scripts/parity/corpus/06_subquery.sql",
+      "sha256": "beaff82e5e61e646fd9c07c78f1d421b16eee56f50bf51923a924576f9d90f50"
+    },
+    {
+      "path": "scripts/parity/corpus/07_vector.sql",
+      "sha256": "57f95ce7da6346db282b5e647f0c00d0a52339db00a53a290913ea647ae56e66"
+    }
+  ],
+  "expected_sha256": "9a4c087e1655c44c064e21dc0e00bbe896c91a11eec8b30920a5f78831ec8381",
+  "archive": {
+    "path": "data.tar.gz",
+    "sha256": "55faa8e512b314c301622e6ba8a31ae17b40f573e89c1b083b4bdfd6d2c56b50"
+  },
+  "data": [
+    {
+      "path": "lsm.wal",
+      "sha256": "3f59c7eb7e6cfd7148ca517e92b15dd018f1d6f135f617303a5a288513d733e7"
+    }
+  ]
+}

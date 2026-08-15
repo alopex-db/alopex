@@ -336,9 +336,10 @@ CARGO_TARGET_DIR=/tools-target cargo build --manifest-path "${tool_source}/Cargo
 '
 
 run_step "mode-parity 検証 (verify.py)" \
-    "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)の全組み合わせが一致することを確認する。" \
+    "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)・S2c(旧版データの全reader互換)を全件実行し、SKIPを許可しない。" \
     -- run_in_container python3 scripts/parity/verify.py \
-        --corpus scripts/parity/corpus --expected scripts/parity/expected
+        --corpus scripts/parity/corpus --expected scripts/parity/expected \
+        --require-all
 
 run_step "mode-parity デモ (demo.py)" \
     "上記の機械検証と同一のコーパスを使い、「One Engine, Four Forms」を人間向けに実演する。第1幕(ライブラリ/インメモリ)で実行した結果が、第2幕(組み込み/ファイル永続化)・第3幕(シングルノードサーバー、HTTP と gRPC の両方)・第4幕(サーバー停止後に CLI で再オープン)・第5幕(cluster-aware 単一メンバー)を通じて一貫することを確認する。" \

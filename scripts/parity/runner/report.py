@@ -159,7 +159,7 @@ class Report:
             counts[result.status] += 1
         return counts
 
-    def render(self) -> str:
+    def render(self, *, require_all: bool = False) -> str:
         """人間可読なサマリ(セクション別集計 + 非 PASS の詳細)。"""
         lines: List[str] = []
         lines.append("=" * 72)
@@ -196,16 +196,16 @@ class Report:
         lines.append(
             "合計: "
             + " / ".join(f"{status}={total[status]}" for status in _STATUSES)
-            + f"  -> exit {self.exit_code()}"
+            + f"  -> exit {self.exit_code(require_all=require_all)}"
         )
         lines.append("=" * 72)
         return "\n".join(lines)
 
-    def exit_code(self) -> int:
-        """ERROR(環境)> FAIL(不一致)> OK の優先で exit code を決める。"""
+    def exit_code(self, *, require_all: bool = False) -> int:
+        """ERROR(環境)> FAIL/SKIP(全件必須)> OK の優先で exit code を決める。"""
         counts = self.counts()
         if counts[STATUS_ERROR] > 0:
             return EXIT_ENV
-        if counts[STATUS_FAIL] > 0:
+        if counts[STATUS_FAIL] > 0 or (require_all and counts[STATUS_SKIP] > 0):
             return EXIT_MISMATCH
         return EXIT_OK
