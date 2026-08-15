@@ -286,6 +286,32 @@ proc writeOrderByExpr(s: Stream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
+proc writeWindowSpec(s: Stream; node: SqlNode) =
+  var partitionByNode: SqlNode = nil
+  var orderByNode: SqlNode = nil
+  for child in node.children:
+    case child.kind
+    of nkPartitionByClause:
+      partitionByNode = child
+    of nkOrderByClause:
+      orderByNode = child
+    else:
+      discard
+
+  s.pack_map(2)
+  s.writeKey("partition_by")
+  if partitionByNode == nil:
+    s.pack_array(0)
+  else:
+    s.writeExprSeq(partitionByNode.children)
+  s.writeKey("order_by")
+  if orderByNode == nil:
+    s.pack_array(0)
+  else:
+    s.pack_array(orderByNode.children.len)
+    for item in orderByNode.children:
+      s.writeOrderByExpr(item)
+
 proc writeIndexOption(s: Stream; node: SqlNode) =
   s.pack_map(3)
   s.writeKey("key")
@@ -582,23 +608,34 @@ proc writeExpr(s: Stream; node: SqlNode) =
       s.writeKey("operand")
       s.writeExpr(node.unOperand)
   of nkFunctionCall:
-    s.pack_map(5)
+    s.pack_map(6)
     s.writeKey("variant")
     s.pack_type("FunctionCall")
     s.writeKey("name")
     s.pack_type(node.children[0].firstIdent())
     s.writeKey("args")
-    var argCount = node.children.len - 1
+    let windowNode =
+      if node.children.len > 1 and node.children[^1].kind == nkWindowSpec:
+        node.children[^1]
+      else:
+        nil
+    let argEnd = node.children.len - (if windowNode == nil: 0 else: 1)
+    var argCount = argEnd - 1
     if node.funcStar:
       argCount = 0
     s.pack_array(max(argCount, 0))
     if not node.funcStar:
-      for i in 1 ..< node.children.len:
+      for i in 1 ..< argEnd:
         s.writeExpr(node.children[i])
     s.writeKey("distinct")
     s.pack_type(node.funcDistinct)
     s.writeKey("star")
     s.pack_type(node.funcStar)
+    s.writeKey("over")
+    if windowNode == nil:
+      s.writeNil()
+    else:
+      s.writeWindowSpec(windowNode)
   of nkCast:
     s.pack_map(3)
     s.writeKey("variant")
@@ -1130,6 +1167,25 @@ proc validateStagedWriterShape(node: SqlNode) =
   of nkFunctionCall:
     if node.children.len < 1:
       stagedValidationError("function call must have at least 1 child")
+    elif node.children.len > 1:
+      for i in 1 ..< (node.children.len - 1):
+        if node.children[i].kind == nkWindowSpec:
+          stagedValidationError("window specification must be the last function-call child")
+  of nkWindowSpec:
+    var sawPartitionBy = false
+    var sawOrderBy = false
+    for child in node.children:
+      case child.kind
+      of nkPartitionByClause:
+        if sawPartitionBy or sawOrderBy or child.children.len == 0:
+          stagedValidationError("invalid PARTITION BY in window specification")
+        sawPartitionBy = true
+      of nkOrderByClause:
+        if sawOrderBy or child.children.len == 0:
+          stagedValidationError("invalid ORDER BY in window specification")
+        sawOrderBy = true
+      else:
+        stagedValidationError("invalid child in window specification")
   of nkCast:
     requireChildren(2, "CAST expression")
   of nkScalarSubquery, nkExists, nkFromDerived:

@@ -608,6 +608,7 @@ fn test_resolve_expr_function_call() {
             }],
             distinct: false,
             star: false,
+            over: None,
         },
         span: test_span(),
     };

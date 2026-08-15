@@ -9,12 +9,13 @@ use crate::ast::Statement;
 use crate::ast::ddl::VectorMetric;
 use crate::ast::expr::{
     BinaryOp, Expr, ExprKind, Literal, PatternMatchKind, Quantifier as AstQuantifier, UnaryOp,
+    WindowSpec,
 };
 use crate::catalog::{Catalog, ColumnMetadata, TableMetadata};
 use crate::planner::aggregate_expr::{AggregateExpr, AggregateFunction};
 use crate::planner::error::PlannerError;
 use crate::planner::logical_plan::LogicalPlan;
-use crate::planner::typed_expr::{Quantifier, TypedExpr, TypedExprKind};
+use crate::planner::typed_expr::{Quantifier, SortExpr, TypedExpr, TypedExprKind, TypedWindowSpec};
 use crate::planner::types::ResolvedType;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -194,11 +195,13 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 args,
                 distinct,
                 star,
+                over,
             } => self.infer_function_call_type_with_scope(
                 name,
                 args,
                 *distinct,
                 *star,
+                over.as_ref(),
                 scope,
                 plan_subquery,
                 span,
@@ -518,6 +521,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                                 args,
                                 distinct: false,
                                 star: false,
+                                over: None,
                             },
                             resolved_type: column.data_type.clone(),
                             span,
@@ -974,6 +978,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 args: typed_args,
                 distinct,
                 star,
+                over: None,
             },
             resolved_type: result_type,
             span,
@@ -987,6 +992,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         args: &[Expr],
         distinct: bool,
         star: bool,
+        over: Option<&WindowSpec>,
         scope: &[ScopedTable],
         plan_subquery: &SubqueryPlanner<'_>,
         span: Span,
@@ -995,7 +1001,65 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             .iter()
             .map(|arg| self.infer_type_with_scope(arg, scope, plan_subquery))
             .collect::<Result<Vec<_>, _>>()?;
-        let result_type = self.check_function_call(name, &typed_args, distinct, star, span)?;
+        let lower_name = name.to_ascii_lowercase();
+        let result_type = if over.is_some() {
+            match lower_name.as_str() {
+                "lag" | "lead" => {
+                    return Err(PlannerError::unsupported_feature(
+                        format!("{} window function", name.to_ascii_uppercase()),
+                        "future",
+                        span,
+                    ));
+                }
+                "row_number" | "rank" | "dense_rank" => {
+                    if !typed_args.is_empty() || distinct || star {
+                        return Err(PlannerError::invalid_expression(format!(
+                            "{}() window function takes no arguments",
+                            name.to_ascii_uppercase()
+                        )));
+                    }
+                    ResolvedType::BigInt
+                }
+                "sum" | "count" | "avg" | "min" | "max" => {
+                    self.check_function_call(name, &typed_args, distinct, star, span)?
+                }
+                _ => {
+                    return Err(PlannerError::unsupported_feature(
+                        format!("function '{}' with OVER", name),
+                        "future",
+                        span,
+                    ));
+                }
+            }
+        } else {
+            self.check_function_call(name, &typed_args, distinct, star, span)?
+        };
+
+        let typed_over = over
+            .map(|window| {
+                let partition_by = window
+                    .partition_by
+                    .iter()
+                    .map(|expr| self.infer_type_with_scope(expr, scope, plan_subquery))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let order_by = window
+                    .order_by
+                    .iter()
+                    .map(|order| {
+                        let expr = self.infer_type_with_scope(&order.expr, scope, plan_subquery)?;
+                        Ok(SortExpr::new(
+                            expr,
+                            order.asc.unwrap_or(true),
+                            order.nulls_first.unwrap_or(false),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, PlannerError>>()?;
+                Ok(TypedWindowSpec {
+                    partition_by,
+                    order_by,
+                })
+            })
+            .transpose()?;
 
         Ok(TypedExpr {
             kind: TypedExprKind::FunctionCall {
@@ -1003,6 +1067,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 args: typed_args,
                 distinct,
                 star,
+                over: typed_over,
             },
             resolved_type: result_type,
             span,
@@ -1448,6 +1513,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     args,
                     distinct,
                     star,
+                    over: _,
                 } if is_aggregate_name(name) => {
                     let signature = aggregate_signature_from_call(name, args, *distinct, *star)?;
                     if aggregate_signatures.contains(&signature) {

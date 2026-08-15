@@ -1597,6 +1597,7 @@ fn test_unknown_function_error() {
             }],
             distinct: false,
             star: false,
+            over: None,
         },
         span: span_at(3, 5),
     };

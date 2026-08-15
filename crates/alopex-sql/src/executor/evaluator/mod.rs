@@ -53,7 +53,16 @@ pub fn evaluate(expr: &TypedExpr, ctx: &EvalContext<'_>) -> Result<SqlValue> {
             args,
             distinct,
             star,
-        } => function_call::evaluate_function_call(name, args, *distinct, *star, ctx),
+            over,
+        } => {
+            if over.is_some() {
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "evaluate window function as scalar expression".into(),
+                    reason: "window expressions must be evaluated by the Window operator".into(),
+                });
+            }
+            function_call::evaluate_function_call(name, args, *distinct, *star, ctx)
+        }
         TypedExprKind::Cast { expr, target_type } => {
             timestamp::evaluate_cast(expr, target_type, ctx)
         }

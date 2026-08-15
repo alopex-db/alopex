@@ -1,0 +1,474 @@
+//! Window functions / `OVER` clause (issue #128, v0.8.6).
+//!
+//! Scope implemented by v0.8.6:
+//!   * `ROW_NUMBER()` / `RANK()` / `DENSE_RANK()`
+//!   * aggregate `OVER`: `SUM` / `COUNT` / `AVG` / `MIN` / `MAX`
+//!   * `PARTITION BY`
+//!   * window-local `ORDER BY`
+//!   * implicit frames: bare `OVER ()` spans the whole partition, while an
+//!     `ORDER BY` inside `OVER` makes the frame cumulative.
+//!
+//! Explicitly out of scope for v0.8.6 (must be rejected, not silently
+//! mis-evaluated):
+//!   * `LAG()` / `LEAD()` — the `Accumulator` trait
+//!     (`executor/query/aggregate.rs:91-103`) is a sequential
+//!     `update`/`merge`/`finalize` model and cannot express positional access
+//!     to the "N-th preceding row"; that needs whole-partition materialization.
+//!   * explicit frame clauses `ROWS BETWEEN` / `RANGE BETWEEN` — the concept of
+//!     a frame specification does not exist anywhere in the crate.
+//!
+//! At the base commit every query below fails during parsing: the Nim parser
+//! stops at the `(` that follows `OVER`. That makes the whole file RED for a
+//! single shared reason, which is exactly the starting point we want.
+
+use alopex_core::kv::memory::MemoryKV;
+use alopex_sql::catalog::MemoryCatalog;
+use alopex_sql::dialect::AlopexDialect;
+use alopex_sql::executor::{ExecutionResult, Executor, QueryResult};
+use alopex_sql::parser::Parser;
+use alopex_sql::planner::Planner;
+use alopex_sql::storage::SqlValue;
+use std::sync::{Arc, RwLock};
+
+/// Fixture table `sales`:
+///
+/// | id | region | amount | qty | bonus |
+/// |----|--------|--------|-----|-------|
+/// |  1 | east   |  100.0 |   3 |  10.0 |
+/// |  2 | east   |  200.0 |   1 |  NULL |
+/// |  3 | west   |  150.0 |   5 |  20.0 |
+/// |  4 | west   |  150.0 |   2 |  NULL |
+/// |  5 | north  |   50.0 |   0 |   5.0 |
+///
+/// The shape of this data is load-bearing:
+///   * ids 3 and 4 share `amount = 150.0`. Without that tie, `RANK` and
+///     `DENSE_RANK` produce identical output and an implementation that
+///     aliases one to the other would go undetected.
+///   * ids 2 and 4 have a NULL `bonus`, so window aggregates must be shown to
+///     skip NULLs rather than treat them as 0 or propagate them.
+///   * `qty = 0` on id 5 is a boundary value.
+///
+/// `REAL` is not accepted by the parser's type vocabulary at this commit (the
+/// FFI AST contract lists `Float`/`Double` but no `Real`), so the float columns
+/// are declared `FLOAT`.
+const FIXTURE: &str = r#"
+    CREATE TABLE sales (
+      id INTEGER PRIMARY KEY,
+      region TEXT,
+      amount FLOAT,
+      qty INTEGER,
+      bonus FLOAT
+    );
+    INSERT INTO sales VALUES (1, 'east',  100.0, 3, 10.0);
+    INSERT INTO sales VALUES (2, 'east',  200.0, 1, NULL);
+    INSERT INTO sales VALUES (3, 'west',  150.0, 5, 20.0);
+    INSERT INTO sales VALUES (4, 'west',  150.0, 2, NULL);
+    INSERT INTO sales VALUES (5, 'north',  50.0, 0, 5.0);
+"#;
+
+struct Harness {
+    executor: Executor<MemoryKV, MemoryCatalog>,
+    catalog: Arc<RwLock<MemoryCatalog>>,
+}
+
+impl Harness {
+    fn new() -> Self {
+        let store = Arc::new(MemoryKV::new());
+        let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+        let executor = Executor::new(store, Arc::clone(&catalog));
+        let mut harness = Self { executor, catalog };
+        harness.run_ok(FIXTURE);
+        harness
+    }
+
+    /// Run one or more statements, panicking on any parse/plan/exec failure.
+    fn run_ok(&mut self, sql: &str) -> Option<QueryResult> {
+        match self.run(sql) {
+            Ok(result) => result,
+            Err(err) => panic!("expected `{}` to succeed, got: {err}", sql.trim()),
+        }
+    }
+
+    fn run(&mut self, sql: &str) -> Result<Option<QueryResult>, String> {
+        let statements =
+            Parser::parse_sql(&AlopexDialect, sql).map_err(|e| format!("parse: {e}"))?;
+        let mut last = None;
+        for stmt in statements {
+            let plan = {
+                let guard = self.catalog.read().unwrap();
+                Planner::new(&*guard)
+                    .plan(&stmt)
+                    .map_err(|e| format!("{e}"))?
+            };
+            if let ExecutionResult::Query(q) =
+                self.executor.execute(plan).map_err(|e| format!("{e}"))?
+            {
+                last = Some(q);
+            }
+        }
+        Ok(last)
+    }
+
+    /// Run a query expected to fail, returning the rendered error string.
+    fn run_err(&mut self, sql: &str) -> String {
+        match self.run(sql) {
+            Err(err) => err,
+            Ok(_) => panic!("expected `{}` to fail, but it succeeded", sql.trim()),
+        }
+    }
+}
+
+fn query(harness: &mut Harness, sql: &str) -> QueryResult {
+    harness
+        .run_ok(sql)
+        .unwrap_or_else(|| panic!("`{}` produced no query result", sql.trim()))
+}
+
+fn column_names(result: &QueryResult) -> Vec<String> {
+    result.columns.iter().map(|c| c.name.clone()).collect()
+}
+
+/// Extract an integer column as `i64`.
+///
+/// `INTEGER` columns arrive as `SqlValue::Integer(i32)` while `COUNT` /
+/// `ROW_NUMBER` / `RANK` widen to `SqlValue::BigInt(i64)`; both are accepted so
+/// the assertions compare values rather than storage widths.
+fn int_column(result: &QueryResult, index: usize) -> Vec<i64> {
+    result
+        .rows
+        .iter()
+        .map(|row| match &row[index] {
+            SqlValue::Integer(v) => i64::from(*v),
+            SqlValue::BigInt(v) => *v,
+            other => panic!("expected an integer at column {index}, got {other:?}"),
+        })
+        .collect()
+}
+
+/// Extract a floating-point column as `f64`.
+///
+/// `FLOAT` columns arrive as `SqlValue::Float(f32)`; `SUM`/`AVG` may widen to
+/// `SqlValue::Double(f64)`. Integers are accepted too so that an implementation
+/// returning an exact integral value is not failed on its storage width alone.
+fn float_column(result: &QueryResult, index: usize) -> Vec<f64> {
+    result
+        .rows
+        .iter()
+        .map(|row| match &row[index] {
+            SqlValue::Float(v) => f64::from(*v),
+            SqlValue::Double(v) => *v,
+            SqlValue::Integer(v) => f64::from(*v),
+            SqlValue::BigInt(v) => *v as f64,
+            other => panic!("expected a float at column {index}, got {other:?}"),
+        })
+        .collect()
+}
+
+fn text_column(result: &QueryResult, index: usize) -> Vec<String> {
+    result
+        .rows
+        .iter()
+        .map(|row| match &row[index] {
+            SqlValue::Text(v) => v.clone(),
+            other => panic!("expected text at column {index}, got {other:?}"),
+        })
+        .collect()
+}
+
+/// Compare float vectors with a tolerance, reporting the whole vector on
+/// mismatch so a RED run shows what the implementation actually produced.
+#[track_caller]
+fn assert_floats_eq(actual: &[f64], expected: &[f64]) {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "row count mismatch: got {actual:?}, expected {expected:?}"
+    );
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (a - e).abs() < 1e-6,
+            "value at row {i} differs: got {a}, expected {e} (full: {actual:?} vs {expected:?})"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate OVER: row preservation and partitioning
+// ---------------------------------------------------------------------------
+
+/// A bare `OVER ()` aggregates the entire input yet must preserve every input
+/// row. If the implementation collapses the query into a GROUP BY-style
+/// aggregation, the result would be a single row and the row-count assertion
+/// below catches it.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn empty_over_aggregates_all_rows_without_collapsing_them() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, SUM(amount) OVER () AS grand FROM sales ORDER BY id",
+    );
+
+    assert_eq!(
+        column_names(&result),
+        vec!["id".to_string(), "grand".to_string()]
+    );
+    // The row count is the whole point of this test.
+    assert_eq!(
+        result.rows.len(),
+        5,
+        "OVER () must not collapse rows; got {} row(s)",
+        result.rows.len()
+    );
+    assert_eq!(int_column(&result, 0), vec![1, 2, 3, 4, 5]);
+    // 100 + 200 + 150 + 150 + 50 = 650, repeated on every row.
+    assert_floats_eq(&float_column(&result, 1), &[650.0; 5]);
+}
+
+/// `PARTITION BY` must split the input into independent windows while still
+/// emitting one output row per input row.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn partition_by_scopes_the_aggregate_to_each_partition() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, region, SUM(amount) OVER (PARTITION BY region) AS rt \
+         FROM sales ORDER BY id",
+    );
+
+    assert_eq!(result.rows.len(), 5);
+    assert_eq!(int_column(&result, 0), vec![1, 2, 3, 4, 5]);
+    assert_eq!(
+        text_column(&result, 1),
+        vec!["east", "east", "west", "west", "north"]
+    );
+    // east: 100 + 200 = 300; west: 150 + 150 = 300; north: 50.
+    assert_floats_eq(
+        &float_column(&result, 2),
+        &[300.0, 300.0, 300.0, 300.0, 50.0],
+    );
+}
+
+/// An `ORDER BY` inside `OVER` changes the implicit frame from "whole
+/// partition" to "cumulative up to the current row". An implementation that
+/// ignores the frame distinction and always aggregates the full partition would
+/// return 650.0 on every row instead of the running total.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn order_by_inside_over_produces_a_running_total() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, SUM(amount) OVER (ORDER BY id) AS running FROM sales ORDER BY id",
+    );
+
+    assert_eq!(result.rows.len(), 5);
+    assert_eq!(int_column(&result, 0), vec![1, 2, 3, 4, 5]);
+    assert_floats_eq(
+        &float_column(&result, 1),
+        &[100.0, 300.0, 450.0, 600.0, 650.0],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ranking functions
+// ---------------------------------------------------------------------------
+
+/// `ROW_NUMBER()` numbers rows within its own partition using the window's own
+/// `ORDER BY`, independently of the outer `ORDER BY`. The tie on
+/// `amount = 150.0` (ids 3 and 4) is broken deterministically by adding `id` as
+/// a secondary window sort key, so the expected values are unambiguous.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn row_number_uses_window_local_ordering_independent_of_outer_order_by() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, ROW_NUMBER() OVER (PARTITION BY region ORDER BY amount DESC, id) AS rn \
+         FROM sales ORDER BY id",
+    );
+
+    assert_eq!(result.rows.len(), 5);
+    assert_eq!(int_column(&result, 0), vec![1, 2, 3, 4, 5]);
+    // east ordered by amount DESC: id2 (200) => 1, id1 (100) => 2.
+    // west ordered by amount DESC then id: id3 => 1, id4 => 2.
+    // north has a single row: id5 => 1.
+    assert_eq!(int_column(&result, 1), vec![2, 1, 1, 2, 1]);
+}
+
+/// `RANK` leaves a gap after a tie while `DENSE_RANK` does not. Evaluating both
+/// in one query over the tied `amount = 150.0` pair pins down the difference:
+/// an implementation that maps one function onto the other cannot satisfy both
+/// assertions at once.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn rank_leaves_gaps_after_ties_while_dense_rank_does_not() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, RANK() OVER (ORDER BY amount) AS r, \
+                DENSE_RANK() OVER (ORDER BY amount) AS dr \
+         FROM sales ORDER BY id",
+    );
+
+    assert_eq!(result.rows.len(), 5);
+    assert_eq!(int_column(&result, 0), vec![1, 2, 3, 4, 5]);
+    // amounts ascending: 50 (id5), 100 (id1), 150 (id3), 150 (id4), 200 (id2).
+    // RANK:       id5=1, id1=2, id3=3, id4=3, id2=5  <- 4 is skipped
+    // DENSE_RANK: id5=1, id1=2, id3=3, id4=3, id2=4  <- no gap
+    assert_eq!(int_column(&result, 1), vec![2, 5, 3, 3, 1]);
+    assert_eq!(int_column(&result, 2), vec![2, 4, 3, 3, 1]);
+}
+
+// ---------------------------------------------------------------------------
+// Multiple windows and NULL handling
+// ---------------------------------------------------------------------------
+
+/// Two window aggregates over the same window specification must coexist in one
+/// SELECT list and be evaluated independently of each other.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn multiple_window_functions_coexist_in_one_select() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, COUNT(*) OVER (PARTITION BY region) AS c, \
+                AVG(amount) OVER (PARTITION BY region) AS a \
+         FROM sales ORDER BY id",
+    );
+
+    assert_eq!(result.rows.len(), 5);
+    assert_eq!(int_column(&result, 0), vec![1, 2, 3, 4, 5]);
+    // east 2 rows, west 2 rows, north 1 row.
+    assert_eq!(int_column(&result, 1), vec![2, 2, 2, 2, 1]);
+    // east avg = (100+200)/2 = 150; west avg = (150+150)/2 = 150; north = 50.
+    assert_floats_eq(
+        &float_column(&result, 2),
+        &[150.0, 150.0, 150.0, 150.0, 50.0],
+    );
+}
+
+/// Window aggregates must skip NULL inputs, matching plain aggregate semantics.
+/// `bonus` is NULL for ids 2 and 4, so each partition sums only its non-NULL
+/// bonus. Treating NULL as 0 would coincidentally give the same sums here, but
+/// propagating NULL (yielding NULL for east and west) would not — the float
+/// extraction below panics on `SqlValue::Null`, which is the failure we want.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn window_aggregate_skips_null_inputs() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, SUM(bonus) OVER (PARTITION BY region) AS b FROM sales ORDER BY id",
+    );
+
+    assert_eq!(result.rows.len(), 5);
+    assert_eq!(int_column(&result, 0), vec![1, 2, 3, 4, 5]);
+    // east: only id1 contributes 10.0; west: only id3 contributes 20.0;
+    // north: id5 contributes 5.0.
+    assert_floats_eq(&float_column(&result, 1), &[10.0, 10.0, 20.0, 20.0, 5.0]);
+}
+
+// ---------------------------------------------------------------------------
+// Interaction with projection alias scope (issue #122)
+// ---------------------------------------------------------------------------
+
+/// The alias bound to a window function must be resolvable from the outer
+/// `ORDER BY`, exactly as #122 established for ordinary and aggregate
+/// projections. This is the crossing point between the two features: window
+/// output is produced after projection, so the alias scope built by #122 must
+/// also cover window expressions.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn outer_order_by_resolves_window_function_alias() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT region, ROW_NUMBER() OVER (PARTITION BY region ORDER BY id) AS rn \
+         FROM sales ORDER BY region, rn",
+    );
+
+    assert_eq!(
+        column_names(&result),
+        vec!["region".to_string(), "rn".to_string()]
+    );
+    assert_eq!(result.rows.len(), 5);
+    // Regions ascending: east, east, north, west, west; `rn` ascending inside
+    // each region.
+    assert_eq!(
+        text_column(&result, 0),
+        vec!["east", "east", "north", "west", "west"]
+    );
+    assert_eq!(int_column(&result, 1), vec![1, 2, 1, 1, 2]);
+}
+
+// ---------------------------------------------------------------------------
+// Unsupported constructs must be rejected explicitly
+// ---------------------------------------------------------------------------
+
+/// Assert an error rejects an out-of-scope construct by naming it.
+///
+/// Requiring the construct's own name in the message is deliberate: once `OVER`
+/// parsing lands, a generic "unexpected token" would no longer prove that the
+/// construct was recognised and refused rather than mangled into something
+/// else. The message must identify what was rejected.
+#[track_caller]
+fn assert_rejects_named(err: &str, construct: &str) {
+    let haystack = err.to_ascii_lowercase();
+    assert!(
+        haystack.contains(&construct.to_ascii_lowercase()),
+        "error must name the unsupported construct `{construct}`, got: {err}"
+    );
+    assert!(
+        haystack.contains("not supported")
+            || haystack.contains("unsupported")
+            || haystack.contains("not implemented"),
+        "error must state that `{construct}` is unsupported, got: {err}"
+    );
+}
+
+/// `LAG()` is out of scope for v0.8.6 and must be refused with a message that
+/// names it, never accepted and silently evaluated to some other value.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn lag_is_rejected_as_unsupported() {
+    let mut h = Harness::new();
+    let err = h.run_err("SELECT LAG(amount) OVER (ORDER BY id) FROM sales");
+    assert_rejects_named(&err, "LAG");
+}
+
+/// `LEAD()` is out of scope for v0.8.6 and must be refused by name.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn lead_is_rejected_as_unsupported() {
+    let mut h = Harness::new();
+    let err = h.run_err("SELECT LEAD(amount) OVER (ORDER BY id) FROM sales");
+    assert_rejects_named(&err, "LEAD");
+}
+
+/// Explicit frame specifications are out of scope. Accepting the clause and
+/// falling back to the implicit frame would return the cumulative total instead
+/// of the requested sliding window — a silently wrong answer, which is exactly
+/// what this test forbids.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn rows_between_frame_is_rejected_as_unsupported() {
+    let mut h = Harness::new();
+    let err = h.run_err(
+        "SELECT SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM sales",
+    );
+    assert_rejects_named(&err, "ROWS");
+}
+
+/// `RANGE BETWEEN` is likewise out of scope and must be refused by name.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn range_between_frame_is_rejected_as_unsupported() {
+    let mut h = Harness::new();
+    let err = h.run_err(
+        "SELECT SUM(qty) OVER (ORDER BY id RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) \
+         FROM sales",
+    );
+    assert_rejects_named(&err, "RANGE");
+}

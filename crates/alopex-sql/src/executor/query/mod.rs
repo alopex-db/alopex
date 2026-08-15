@@ -19,6 +19,7 @@ mod knn;
 mod project;
 mod scan;
 pub mod subquery;
+pub mod window;
 
 pub use columnar_scan::{ColumnarScanIterator, create_columnar_scan_iterator};
 pub use iterator::{FilterIterator, LimitIterator, RowIterator, ScanIterator, SortIterator};
@@ -424,6 +425,15 @@ fn build_iterator_pipeline_with_outer<
             }
             Ok((Box::new(iter), projection, schema))
         }
+        LogicalPlan::Window { input, windows } => {
+            let (input_iter, _projection, _schema) =
+                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer)?;
+            let iter = window::WindowIterator::new(input_iter, windows, memory)?;
+            let schema = iter.schema().to_vec();
+            let projection =
+                Projection::All(schema.iter().map(|column| column.name.clone()).collect());
+            Ok((Box::new(iter), projection, schema))
+        }
         LogicalPlan::Sort { input, order_by } => {
             let (input_iter, projection, schema) =
                 build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer)?;
@@ -703,6 +713,15 @@ fn build_streaming_pipeline_inner<
             if let Some(policy) = memory {
                 iter = iter.with_memory_policy(Some(policy.clone()));
             }
+            Ok((Box::new(iter), projection, schema))
+        }
+        LogicalPlan::Window { input, windows } => {
+            let (input_iter, _projection, _schema) =
+                build_streaming_pipeline_inner(txn, catalog, *input, memory)?;
+            let iter = window::WindowIterator::new(input_iter, windows, memory)?;
+            let schema = iter.schema().to_vec();
+            let projection =
+                Projection::All(schema.iter().map(|column| column.name.clone()).collect());
             Ok((Box::new(iter), projection, schema))
         }
         LogicalPlan::Sort { input, order_by } => {

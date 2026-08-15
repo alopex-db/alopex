@@ -17,6 +17,7 @@ type
     tkNatural, tkUsing
     tkAs, tkNull, tkTrue, tkFalse
     tkOrder, tkBy, tkAsc, tkDesc, tkNulls, tkFirst, tkLast
+    tkOver, tkPartition, tkWindow, tkRows, tkRange
     tkGroup, tkHaving, tkLimit, tkOffset
     tkLike, tkILike, tkGlob, tkSimilar, tkTo, tkFor, tkIn, tkBetween, tkIs, tkExists, tkAny, tkSome
     tkDistinct, tkAll, tkCast, tkCase, tkWhen, tkThen, tkElse, tkEnd, tkNow
@@ -65,6 +66,8 @@ const Keywords = {
   "as": tkAs, "null": tkNull, "true": tkTrue, "false": tkFalse,
   "order": tkOrder, "by": tkBy, "asc": tkAsc, "desc": tkDesc,
   "nulls": tkNulls, "first": tkFirst, "last": tkLast,
+  "over": tkOver, "partition": tkPartition, "window": tkWindow,
+  "rows": tkRows, "range": tkRange,
   "group": tkGroup, "having": tkHaving, "limit": tkLimit, "offset": tkOffset,
   "like": tkLike, "ilike": tkILike, "glob": tkGlob, "similar": tkSimilar, "to": tkTo, "for": tkFor,
   "in": tkIn, "between": tkBetween, "is": tkIs,
