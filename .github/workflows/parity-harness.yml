@@ -1,0 +1,26 @@
+name: Parity Harness Contract
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/parity/**'
+      - '.github/workflows/parity-harness.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/parity/**'
+      - '.github/workflows/parity-harness.yml'
+
+jobs:
+  contract:
+    name: Parity harness contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify report, surface, and fixture contracts
+        run: |
+          python -m unittest \
+            scripts.parity.runner.test_report \
+            scripts.parity.runner.test_surfaces \
+            scripts.parity.test_compat_fixture_contract

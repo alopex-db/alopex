@@ -6,12 +6,14 @@ on:
     paths-ignore:
       - '.github/workflows/**'
       - 'scripts/release/**'
+      - 'scripts/parity/**'
       - 'formal/release-report/**'
   pull_request:
     branches: [main]
     paths-ignore:
       - '.github/workflows/**'
       - 'scripts/release/**'
+      - 'scripts/parity/**'
       - 'formal/release-report/**'
 
 env:

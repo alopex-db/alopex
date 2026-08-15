@@ -156,6 +156,7 @@ class CiWorkflowContractTests(unittest.TestCase):
 
     def test_release_process_changes_have_a_short_dedicated_lane(self) -> None:
         process = self.workflow("release-process.yml")
+        parity = self.workflow("parity-harness.yml")
         ci = self.workflow("ci.yml")
         compatibility = self.workflow("compatibility.yml")
         stress = self.workflow("stress-tests.yml")
@@ -182,6 +183,11 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("cargo test", process)
         self.assertNotIn("pull_request:", stress)
         self.assertNotIn("release-process-contract:", ci)
+        self.assertIn("scripts/parity/*", ci)
+        self.assertGreaterEqual(compatibility.count("scripts/parity/**"), 2)
+        self.assertGreaterEqual(parity.count("scripts/parity/**"), 2)
+        self.assertIn("scripts.parity.test_compat_fixture_contract", parity)
+        self.assertNotIn("cargo test", parity)
 
     def test_workflows_do_not_clone_an_unpinned_chirps_checkout(self) -> None:
         for workflow_path in WORKFLOW_DIR.glob("*.yml"):
