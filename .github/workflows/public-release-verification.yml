@@ -65,6 +65,36 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "REPORT_ROOT=${RUNNER_TEMP}/release-verification-v${version}" >> "${GITHUB_ENV}"
 
+      - name: Wait for exact PyPI release
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          readiness_dir="${RUNNER_TEMP}/pypi-readiness-v${VERSION}"
+          mkdir -p "${readiness_dir}"
+          ready=false
+          for attempt in $(seq 1 30); do
+            echo "PyPI readiness attempt ${attempt}/30 for alopex==${VERSION}"
+            if python3 -m pip download \
+              --no-cache-dir \
+              --disable-pip-version-check \
+              --only-binary=:all: \
+              --no-deps \
+              --dest "${readiness_dir}" \
+              "alopex==${VERSION}"; then
+              ready=true
+              break
+            fi
+            if [[ "${attempt}" -lt 30 ]]; then
+              sleep 20
+            fi
+          done
+          if [[ "${ready}" != true ]]; then
+            echo "PyPI did not make alopex==${VERSION} installable within 10 minutes" >&2
+            exit 1
+          fi
+
       - name: Run public-package demos and generate reviewable report
         id: demos
         env:
