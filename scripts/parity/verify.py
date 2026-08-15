@@ -83,7 +83,14 @@ def extract_compat_data(
             path = PurePosixPath(member.name)
             if path.is_absolute() or ".." in path.parts or path.parts[:1] != ("data",):
                 raise SurfaceError(f"unsafe compatibility archive member: {member.name}")
-        bundle.extractall(destination, members=members, filter="data")
+            if not (member.isdir() or member.isfile()):
+                raise SurfaceError(
+                    f"unsupported archive member type: {member.name}"
+                )
+        # Python 3.11 distro builds differ on support for extractall(filter=...).
+        # Paths and member types are fully allow-listed above, so extraction
+        # remains fail-closed without depending on that newer keyword.
+        bundle.extractall(destination, members=members)
 
     data_dir = destination / "data"
     actual_data = {

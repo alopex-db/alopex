@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 
-from .verify import extract_compat_data
+from .verify import SurfaceError, extract_compat_data
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +23,23 @@ def sha256(path: Path) -> str:
 
 
 class CompatibilityFixtureContractTests(unittest.TestCase):
+    def test_archive_rejects_links_before_extraction(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            fixture = root / "fixture"
+            fixture.mkdir()
+            with tarfile.open(fixture / "data.tar.gz", mode="w:gz") as bundle:
+                directory = tarfile.TarInfo("data")
+                directory.type = tarfile.DIRTYPE
+                bundle.addfile(directory)
+                link = tarfile.TarInfo("data/escape")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "../../escape"
+                bundle.addfile(link)
+
+            with self.assertRaisesRegex(SurfaceError, "unsupported archive member"):
+                extract_compat_data(fixture, root / "output", {})
+
     def test_v084_fixture_is_complete_and_content_addressed(self) -> None:
         provenance = json.loads(
             (FIXTURE / "provenance.json").read_text(encoding="utf-8")
