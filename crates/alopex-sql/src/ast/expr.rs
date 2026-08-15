@@ -40,6 +40,11 @@ pub enum ExprKind {
         op: UnaryOp,
         operand: Box<Expr>,
     },
+    Case {
+        operand: Option<Box<Expr>>,
+        branches: Vec<CaseWhen>,
+        else_expr: Option<Box<Expr>>,
+    },
     FunctionCall {
         name: String,
         args: Vec<Expr>,
@@ -94,6 +99,12 @@ pub enum ExprKind {
         quantifier: Quantifier,
         subquery: Box<super::Statement>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseWhen {
+    pub when: Expr,
+    pub then: Expr,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

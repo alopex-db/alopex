@@ -233,6 +233,13 @@ proc writeExprSeq(s: Stream; nodes: seq[SqlNode]) =
   for child in nodes:
     s.writeExpr(child)
 
+proc writeCaseBranch(s: Stream; node: SqlNode) =
+  s.pack_map(2)
+  s.writeKey("when")
+  s.writeExpr(node.caseWhen)
+  s.writeKey("then")
+  s.writeExpr(node.caseThen)
+
 proc writeStringSeqOpt(s: Stream; values: seq[string]) =
   if values.len == 0:
     s.writeNil()
@@ -581,6 +588,18 @@ proc writeExpr(s: Stream; node: SqlNode) =
       s.pack_type(normalizedUnaryOp(node.unOp))
       s.writeKey("operand")
       s.writeExpr(node.unOperand)
+  of nkCase:
+    s.pack_map(4)
+    s.writeKey("variant")
+    s.pack_type("Case")
+    s.writeKey("operand")
+    s.writeExprOpt(node.caseOperand)
+    s.writeKey("branches")
+    s.pack_array(node.caseBranches.len)
+    for branch in node.caseBranches:
+      s.writeCaseBranch(branch)
+    s.writeKey("else_expr")
+    s.writeExprOpt(node.caseElse)
   of nkFunctionCall:
     s.pack_map(5)
     s.writeKey("variant")
@@ -1132,6 +1151,16 @@ proc validateStagedWriterShape(node: SqlNode) =
       stagedValidationError("function call must have at least 1 child")
   of nkCast:
     requireChildren(2, "CAST expression")
+  of nkCase:
+    if node.caseBranches.len == 0:
+      stagedValidationError("CASE expression must have at least 1 branch")
+    for branch in node.caseBranches:
+      if branch == nil or branch.kind != nkCaseWhen or branch.caseWhen == nil or
+          branch.caseThen == nil:
+        stagedValidationError("CASE branch must contain WHEN and THEN expressions")
+  of nkCaseWhen:
+    if node.caseWhen == nil or node.caseThen == nil:
+      stagedValidationError("CASE branch must contain WHEN and THEN expressions")
   of nkScalarSubquery, nkExists, nkFromDerived:
     requireChildren(1, "subquery")
   of nkInSubquery:
@@ -1181,6 +1210,16 @@ proc validateStagedAst(node: SqlNode; depth: int;
     node.binRight.validateStagedAst(depth + 1, ancestors)
   of nkUnaryOp:
     node.unOperand.validateStagedAst(depth + 1, ancestors)
+  of nkCase:
+    if node.caseOperand != nil:
+      node.caseOperand.validateStagedAst(depth + 1, ancestors)
+    for branch in node.caseBranches:
+      branch.validateStagedAst(depth + 1, ancestors)
+    if node.caseElse != nil:
+      node.caseElse.validateStagedAst(depth + 1, ancestors)
+  of nkCaseWhen:
+    node.caseWhen.validateStagedAst(depth + 1, ancestors)
+    node.caseThen.validateStagedAst(depth + 1, ancestors)
   of nkJoin, nkFromJoin:
     node.joinLeft.validateStagedAst(depth + 1, ancestors)
     node.joinRight.validateStagedAst(depth + 1, ancestors)

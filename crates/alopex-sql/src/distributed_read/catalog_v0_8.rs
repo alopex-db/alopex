@@ -580,6 +580,23 @@ fn validate_expr(
         | TypedExprKind::IsNull { expr: operand, .. } => {
             validate_expr(operand, allow_aggregate, analysis)
         }
+        TypedExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            if let Some(operand) = operand {
+                validate_expr(operand, allow_aggregate, analysis)?;
+            }
+            for branch in branches {
+                validate_expr(&branch.when, allow_aggregate, analysis)?;
+                validate_expr(&branch.then, allow_aggregate, analysis)?;
+            }
+            if let Some(else_expr) = else_expr {
+                validate_expr(else_expr, allow_aggregate, analysis)?;
+            }
+            Ok(())
+        }
         TypedExprKind::Between {
             expr, low, high, ..
         } => {

@@ -14,7 +14,7 @@ use crate::catalog::{Catalog, ColumnMetadata, TableMetadata};
 use crate::planner::aggregate_expr::{AggregateExpr, AggregateFunction};
 use crate::planner::error::PlannerError;
 use crate::planner::logical_plan::LogicalPlan;
-use crate::planner::typed_expr::{Quantifier, TypedExpr, TypedExprKind};
+use crate::planner::typed_expr::{Quantifier, TypedCaseWhen, TypedExpr, TypedExprKind};
 use crate::planner::types::ResolvedType;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -188,6 +188,19 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             ExprKind::UnaryOp { op, operand } => {
                 self.infer_unary_op_type_with_scope(*op, operand, scope, plan_subquery, span)
             }
+
+            ExprKind::Case {
+                operand,
+                branches,
+                else_expr,
+            } => self.infer_case_type_with_scope(
+                operand.as_deref(),
+                branches,
+                else_expr.as_deref(),
+                scope,
+                plan_subquery,
+                span,
+            ),
 
             ExprKind::FunctionCall {
                 name,
@@ -601,6 +614,105 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             resolved_type: result_type,
             span,
         })
+    }
+
+    fn infer_case_type_with_scope(
+        &self,
+        operand: Option<&Expr>,
+        branches: &[crate::ast::expr::CaseWhen],
+        else_expr: Option<&Expr>,
+        scope: &[ScopedTable],
+        plan_subquery: &SubqueryPlanner<'_>,
+        span: Span,
+    ) -> Result<TypedExpr, PlannerError> {
+        if branches.is_empty() {
+            return Err(PlannerError::invalid_expression(
+                "CASE expression requires at least one WHEN branch",
+            ));
+        }
+        let typed_operand = operand
+            .map(|expr| self.infer_type_with_scope(expr, scope, plan_subquery))
+            .transpose()?;
+        let mut typed_branches = Vec::with_capacity(branches.len());
+        let mut result_type = ResolvedType::Null;
+
+        for branch in branches {
+            let condition = self.infer_type_with_scope(&branch.when, scope, plan_subquery)?;
+            if let Some(operand) = &typed_operand {
+                self.check_comparison_op(
+                    &operand.resolved_type,
+                    &condition.resolved_type,
+                    condition.span,
+                )?;
+            } else if !matches!(
+                condition.resolved_type,
+                ResolvedType::Boolean | ResolvedType::Null
+            ) {
+                return Err(PlannerError::type_mismatch(
+                    "Boolean",
+                    condition.resolved_type.type_name(),
+                    condition.span,
+                ));
+            }
+
+            let result = self.infer_type_with_scope(&branch.then, scope, plan_subquery)?;
+            result_type =
+                self.common_case_result_type(&result_type, &result.resolved_type, result.span)?;
+            typed_branches.push(TypedCaseWhen {
+                when: condition,
+                then: result,
+            });
+        }
+
+        let mut typed_else = else_expr
+            .map(|expr| self.infer_type_with_scope(expr, scope, plan_subquery))
+            .transpose()?;
+        if let Some(else_expr) = &typed_else {
+            result_type = self.common_case_result_type(
+                &result_type,
+                &else_expr.resolved_type,
+                else_expr.span,
+            )?;
+        }
+
+        for branch in &mut typed_branches {
+            coerce_case_result(&mut branch.then, &result_type);
+        }
+        if let Some(else_expr) = &mut typed_else {
+            coerce_case_result(else_expr, &result_type);
+        }
+
+        Ok(TypedExpr {
+            kind: TypedExprKind::Case {
+                operand: typed_operand.map(Box::new),
+                branches: typed_branches,
+                else_expr: typed_else.map(Box::new),
+            },
+            resolved_type: result_type,
+            span,
+        })
+    }
+
+    fn common_case_result_type(
+        &self,
+        current: &ResolvedType,
+        next: &ResolvedType,
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        if matches!(current, ResolvedType::Null) {
+            return Ok(next.clone());
+        }
+        if matches!(next, ResolvedType::Null) || current == next {
+            return Ok(current.clone());
+        }
+        if is_numeric_type(current) && is_numeric_type(next) {
+            return self.check_arithmetic_op(current, next, span);
+        }
+        Err(PlannerError::type_mismatch(
+            current.type_name(),
+            next.type_name(),
+            span,
+        ))
     }
 
     /// Check binary operation and return the result type.
@@ -1465,6 +1577,23 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 TypedExprKind::UnaryOp { operand, .. } => {
                     walk(operand, group_key_indices, aggregate_signatures)
                 }
+                TypedExprKind::Case {
+                    operand,
+                    branches,
+                    else_expr,
+                } => {
+                    if let Some(operand) = operand {
+                        walk(operand, group_key_indices, aggregate_signatures)?;
+                    }
+                    for branch in branches {
+                        walk(&branch.when, group_key_indices, aggregate_signatures)?;
+                        walk(&branch.then, group_key_indices, aggregate_signatures)?;
+                    }
+                    if let Some(else_expr) = else_expr {
+                        walk(else_expr, group_key_indices, aggregate_signatures)?;
+                    }
+                    Ok(())
+                }
                 TypedExprKind::FunctionCall { args, .. } => {
                     for arg in args {
                         walk(arg, group_key_indices, aggregate_signatures)?;
@@ -2146,6 +2275,14 @@ fn is_numeric_type(ty: &ResolvedType) -> bool {
         ty,
         ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Float | ResolvedType::Double
     )
+}
+
+fn coerce_case_result(expr: &mut TypedExpr, target: &ResolvedType) {
+    if expr.resolved_type == *target || matches!(expr.resolved_type, ResolvedType::Null) {
+        return;
+    }
+    let span = expr.span;
+    *expr = TypedExpr::cast(expr.clone(), target.clone(), span);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

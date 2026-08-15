@@ -178,6 +178,36 @@ pub(crate) fn evaluate_expr_with_subqueries<
             let right = evaluate_expr_with_subqueries(txn, catalog, right, row)?;
             crate::executor::evaluator::binary_op::eval_binary_values(op, left, right)
         }
+        TypedExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } if contains_subquery(expr) => {
+            let operand = operand
+                .as_deref()
+                .map(|operand| evaluate_expr_with_subqueries(txn, catalog, operand, row))
+                .transpose()?;
+            for branch in branches {
+                let matched = if let Some(operand) = &operand {
+                    let condition = evaluate_expr_with_subqueries(txn, catalog, &branch.when, row)?;
+                    crate::executor::evaluator::binary_op::eval_binary_values(
+                        &crate::ast::expr::BinaryOp::Eq,
+                        operand.clone(),
+                        condition,
+                    )?
+                } else {
+                    evaluate_expr_with_subqueries(txn, catalog, &branch.when, row)?
+                };
+                if matches!(matched, SqlValue::Boolean(true)) {
+                    return evaluate_expr_with_subqueries(txn, catalog, &branch.then, row);
+                }
+            }
+            if let Some(else_expr) = else_expr {
+                evaluate_expr_with_subqueries(txn, catalog, else_expr, row)
+            } else {
+                Ok(SqlValue::Null)
+            }
+        }
         _ => {
             let ctx = EvalContext::new(&row.values);
             crate::executor::evaluator::evaluate(expr, &ctx)
@@ -195,6 +225,17 @@ pub(crate) fn contains_subquery(expr: &TypedExpr) -> bool {
             contains_subquery(left) || contains_subquery(right)
         }
         TypedExprKind::UnaryOp { operand, .. } => contains_subquery(operand),
+        TypedExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            operand.as_deref().is_some_and(contains_subquery)
+                || branches.iter().any(|branch| {
+                    contains_subquery(&branch.when) || contains_subquery(&branch.then)
+                })
+                || else_expr.as_deref().is_some_and(contains_subquery)
+        }
         TypedExprKind::FunctionCall { args, .. } => args.iter().any(contains_subquery),
         TypedExprKind::Cast { expr, .. } | TypedExprKind::IsNull { expr, .. } => {
             contains_subquery(expr)

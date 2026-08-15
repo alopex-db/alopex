@@ -101,6 +101,13 @@ suite "MessagePack output - roundtrip":
     ]:
       assertMsgpackRoundtrip(sql)
 
+  test "CASE variants round-trip":
+    for sql in [
+      "SELECT CASE WHEN active THEN 'yes' ELSE 'no' END FROM users",
+      "SELECT CASE status WHEN 1 THEN 'one' WHEN 2 THEN 'two' END FROM users",
+    ]:
+      assertMsgpackRoundtrip(sql)
+
   test "Vector and index DDL round-trip":
     for sql in [
       "CREATE TABLE items (id INT, embedding VECTOR(3, COSINE))",
@@ -111,6 +118,22 @@ suite "MessagePack output - roundtrip":
       assertMsgpackRoundtrip(sql)
 
 suite "MessagePack output - contract shape":
+
+  test "CASE emits operand branches and optional ELSE":
+    let searched = selectKind(
+      "SELECT CASE WHEN active THEN 'yes' ELSE 'no' END FROM users")
+    let searchedCase = searched["projection"][0]["expr"]["kind"]
+    check searchedCase["variant"].getStr() == "Case"
+    check searchedCase["operand"].kind == JNull
+    check searchedCase["branches"].len == 1
+    check searchedCase["branches"][0].hasKey("when")
+    check searchedCase["branches"][0].hasKey("then")
+    check searchedCase["else_expr"].kind != JNull
+
+    let simple = selectKind("SELECT CASE status WHEN 1 THEN 'one' END FROM users")
+    let simpleCase = simple["projection"][0]["expr"]["kind"]
+    check simpleCase["operand"].kind != JNull
+    check simpleCase["else_expr"].kind == JNull
 
   test "JOIN emits FromItem Join with tag and join_type":
     let kind = selectKind("SELECT * FROM users LEFT JOIN orders USING (user_id)")
@@ -274,6 +297,46 @@ suite "MessagePack output - staged continuous aggregate contract":
       opAdd, newIntLit(1, nilBinaryOperand.span), nil, nilBinaryOperand.span
     )
     checkStagedError(nilBinaryOperand, "binary expression operands must not be nil")
+
+    var emptyCase = canonicalContinuousAggregate()
+    let emptyCaseSpan = emptyCase.children[1].children[0].children[0].span
+    emptyCase.children[1].children[0].children[0] = newNode(nkCase, emptyCaseSpan)
+    checkStagedError(emptyCase, "CASE expression must have at least 1 branch")
+
+    var wrongCaseBranch = canonicalContinuousAggregate()
+    let wrongCaseSpan = wrongCaseBranch.children[1].children[0].children[0].span
+    let wrongCase = newNode(nkCase, wrongCaseSpan)
+    wrongCase.caseBranches.add(newIntLit(1, wrongCaseSpan))
+    wrongCaseBranch.children[1].children[0].children[0] = wrongCase
+    checkStagedError(wrongCaseBranch, "CASE branch must contain WHEN and THEN")
+
+    var nilCaseWhen = canonicalContinuousAggregate()
+    let nilWhenSpan = nilCaseWhen.children[1].children[0].children[0].span
+    let nilWhenCase = newNode(nkCase, nilWhenSpan)
+    let nilWhenBranch = newNode(nkCaseWhen, nilWhenSpan)
+    nilWhenBranch.caseThen = newIntLit(1, nilWhenSpan)
+    nilWhenCase.caseBranches.add(nilWhenBranch)
+    nilCaseWhen.children[1].children[0].children[0] = nilWhenCase
+    checkStagedError(nilCaseWhen, "CASE branch must contain WHEN and THEN")
+
+    var nilCaseThen = canonicalContinuousAggregate()
+    let nilThenSpan = nilCaseThen.children[1].children[0].children[0].span
+    let nilThenCase = newNode(nkCase, nilThenSpan)
+    let nilThenBranch = newNode(nkCaseWhen, nilThenSpan)
+    nilThenBranch.caseWhen = newBoolLit(true, nilThenSpan)
+    nilThenCase.caseBranches.add(nilThenBranch)
+    nilCaseThen.children[1].children[0].children[0] = nilThenCase
+    checkStagedError(nilCaseThen, "CASE branch must contain WHEN and THEN")
+
+    var cyclicCaseTree = canonicalContinuousAggregate()
+    let cyclicCaseSpan = cyclicCaseTree.children[1].children[0].children[0].span
+    let cyclicCase = newNode(nkCase, cyclicCaseSpan)
+    let cyclicBranch = newNode(nkCaseWhen, cyclicCaseSpan)
+    cyclicBranch.caseWhen = newBoolLit(true, cyclicCaseSpan)
+    cyclicBranch.caseThen = cyclicCase
+    cyclicCase.caseBranches.add(cyclicBranch)
+    cyclicCaseTree.children[1].children[0].children[0] = cyclicCase
+    checkStagedError(cyclicCaseTree, "cycle")
 
     var malformedVector = canonicalContinuousAggregate()
     let vector = newNode(nkVectorLiteral, malformedVector.span)

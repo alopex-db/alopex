@@ -68,6 +68,102 @@ fn create_vector_catalog() -> MemoryCatalog {
     catalog
 }
 
+fn number_expr(value: &str) -> Expr {
+    Expr {
+        kind: ExprKind::Literal {
+            literal: Literal::Number(value.to_string()),
+        },
+        span: test_span(),
+    }
+}
+
+#[test]
+fn test_infer_case_promotes_result_branches_and_keeps_simple_operand() {
+    let catalog = create_test_catalog();
+    let type_checker = TypeChecker::new(&catalog);
+    let table = catalog.get_table("users").unwrap();
+    let expr = Expr {
+        kind: ExprKind::Case {
+            operand: Some(Box::new(Expr {
+                kind: ExprKind::ColumnRef {
+                    table: None,
+                    column: "id".to_string(),
+                },
+                span: test_span(),
+            })),
+            branches: vec![
+                crate::ast::CaseWhen {
+                    when: number_expr("1"),
+                    then: number_expr("1.5"),
+                },
+                crate::ast::CaseWhen {
+                    when: number_expr("2"),
+                    then: number_expr("2"),
+                },
+            ],
+            else_expr: Some(Box::new(number_expr("3"))),
+        },
+        span: test_span(),
+    };
+
+    let typed = type_checker.infer_type(&expr, table).unwrap();
+    assert_eq!(typed.resolved_type, ResolvedType::Double);
+    let TypedExprKind::Case {
+        operand: Some(_),
+        branches,
+        else_expr: Some(else_expr),
+    } = typed.kind
+    else {
+        panic!("expected typed simple CASE");
+    };
+    assert_eq!(branches.len(), 2);
+    assert!(matches!(branches[1].then.kind, TypedExprKind::Cast { .. }));
+    assert!(matches!(else_expr.kind, TypedExprKind::Cast { .. }));
+}
+
+#[test]
+fn test_infer_searched_case_rejects_non_boolean_when() {
+    let catalog = create_test_catalog();
+    let type_checker = TypeChecker::new(&catalog);
+    let table = catalog.get_table("users").unwrap();
+    let expr = Expr {
+        kind: ExprKind::Case {
+            operand: None,
+            branches: vec![crate::ast::CaseWhen {
+                when: number_expr("1"),
+                then: number_expr("2"),
+            }],
+            else_expr: None,
+        },
+        span: test_span(),
+    };
+
+    assert!(matches!(
+        type_checker.infer_type(&expr, table),
+        Err(PlannerError::TypeMismatch { .. })
+    ));
+}
+
+#[test]
+fn test_infer_case_rejects_empty_programmatic_branch_list() {
+    let catalog = create_test_catalog();
+    let type_checker = TypeChecker::new(&catalog);
+    let table = catalog.get_table("users").unwrap();
+    let expr = Expr {
+        kind: ExprKind::Case {
+            operand: None,
+            branches: Vec::new(),
+            else_expr: Some(Box::new(number_expr("1"))),
+        },
+        span: test_span(),
+    };
+
+    assert!(matches!(
+        type_checker.infer_type(&expr, table),
+        Err(PlannerError::InvalidExpression { .. })
+    ));
+}
+
 // =============================================================================
 // infer_type tests - Literals
 // =============================================================================

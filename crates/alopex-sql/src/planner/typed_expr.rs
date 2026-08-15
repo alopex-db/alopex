@@ -87,6 +87,16 @@ pub enum TypedExprKind {
         operand: Box<TypedExpr>,
     },
 
+    /// A searched or simple CASE expression.
+    Case {
+        /// The simple CASE operand, or None for searched CASE.
+        operand: Option<Box<TypedExpr>>,
+        /// WHEN/THEN branches in source order.
+        branches: Vec<TypedCaseWhen>,
+        /// The ELSE expression, or None for the implicit NULL result.
+        else_expr: Option<Box<TypedExpr>>,
+    },
+
     /// A function call.
     FunctionCall {
         /// Function name.
@@ -186,6 +196,12 @@ pub enum TypedExprKind {
         /// Planned subquery.
         subquery: Box<LogicalPlan>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct TypedCaseWhen {
+    pub when: TypedExpr,
+    pub then: TypedExpr,
 }
 
 /// Quantifier for quantified subquery comparisons.

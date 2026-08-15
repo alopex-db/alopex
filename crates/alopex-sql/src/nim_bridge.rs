@@ -691,6 +691,22 @@ fn annotate_expr_natural_joins(
         ExprKind::UnaryOp { operand, .. } | ExprKind::IsNull { expr: operand, .. } => {
             annotate_expr_natural_joins(operand, natural_markers, consumed);
         }
+        ExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            if let Some(operand) = operand {
+                annotate_expr_natural_joins(operand, natural_markers, consumed);
+            }
+            for branch in branches {
+                annotate_expr_natural_joins(&mut branch.when, natural_markers, consumed);
+                annotate_expr_natural_joins(&mut branch.then, natural_markers, consumed);
+            }
+            if let Some(else_expr) = else_expr {
+                annotate_expr_natural_joins(else_expr, natural_markers, consumed);
+            }
+        }
         ExprKind::FunctionCall { args, .. } => {
             for argument in args {
                 annotate_expr_natural_joins(argument, natural_markers, consumed);

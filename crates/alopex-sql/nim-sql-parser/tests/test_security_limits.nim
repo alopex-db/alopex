@@ -49,10 +49,10 @@ proc mixedExpression(depth: int): string =
 
   # VECTOR is a non-recursive container but still consumes one syntactic
   # nesting level. The remaining wrappers exercise every implemented recursive
-  # expression route without adding unsupported CASE grammar.
+  # expression route, including CASE.
   result = "[1]"
   for level in 1 ..< depth:
-    case (level - 1) mod 7
+    case (level - 1) mod 8
     of 0:
       result = "(" & result & ")"
     of 1:
@@ -65,6 +65,8 @@ proc mixedExpression(depth: int): string =
       result = "1 IN (" & result & ")"
     of 5:
       result = "EXISTS (SELECT " & result & ")"
+    of 6:
+      result = "CASE WHEN TRUE THEN " & result & " ELSE 0 END"
     else:
       result = "(SELECT " & result & ")"
 

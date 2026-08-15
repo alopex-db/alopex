@@ -1116,3 +1116,40 @@ fn test_plan_insert_type_compatible() {
     let result = planner.plan(&stmt(StatementKind::Insert(insert)));
     assert!(result.is_ok());
 }
+
+#[test]
+fn test_case_promotion_cast_remains_visible_to_aggregate_walkers() {
+    let aggregate = TypedExpr {
+        kind: TypedExprKind::FunctionCall {
+            name: "SUM".to_string(),
+            args: vec![TypedExpr {
+                kind: TypedExprKind::Literal(Literal::Number("1".to_string())),
+                resolved_type: ResolvedType::Integer,
+                span: span(),
+            }],
+            distinct: false,
+            star: false,
+        },
+        resolved_type: ResolvedType::BigInt,
+        span: span(),
+    };
+    let promoted = TypedExpr {
+        kind: TypedExprKind::Cast {
+            expr: Box::new(aggregate),
+            target_type: ResolvedType::Double,
+        },
+        resolved_type: ResolvedType::Double,
+        span: span(),
+    };
+
+    assert!(typed_expr_contains_aggregate(&promoted));
+
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+    let mut aggregates = Vec::new();
+    let mut aggregate_map = HashMap::new();
+    planner
+        .collect_aggregates_from_typed_expr(&promoted, &mut aggregates, &mut aggregate_map)
+        .unwrap();
+    assert_eq!(aggregates.len(), 1);
+}
