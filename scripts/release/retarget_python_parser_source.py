@@ -19,6 +19,10 @@ EXPECTED_TARGETS = {
 }
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+FIXED_VENDOR_MANIFEST = "parser-vendor-manifest.json"
+VERSIONED_VENDOR_MANIFEST = re.compile(
+    r"^parser-vendor-manifest-v[0-9]+\.[0-9]+\.[0-9]+\.json$"
+)
 
 
 def _validated_manifest(source: Path) -> tuple[bytes, str]:
@@ -71,6 +75,29 @@ def _atomic_write(path: Path, content: bytes) -> None:
     os.replace(temporary, path)
 
 
+def select_vendor_manifest(vendor_dir: Path) -> Path:
+    if not vendor_dir.is_dir():
+        raise ValueError(f"parser vendor directory is missing: {vendor_dir}")
+
+    candidates = sorted(
+        path
+        for path in vendor_dir.iterdir()
+        if not path.is_symlink()
+        and path.is_file()
+        and (
+            path.name == FIXED_VENDOR_MANIFEST
+            or VERSIONED_VENDOR_MANIFEST.fullmatch(path.name)
+        )
+    )
+    if len(candidates) != 1:
+        names = ", ".join(path.name for path in candidates) or "none"
+        raise ValueError(
+            "expected exactly one fixed or versioned parser vendor manifest "
+            f"in {vendor_dir}, found {len(candidates)}: {names}"
+        )
+    return candidates[0]
+
+
 def retarget(source: Path, destination: Path, build_support: Path) -> None:
     raw, version = _validated_manifest(source)
     digest = hashlib.sha256(raw).hexdigest()
@@ -86,10 +113,16 @@ def retarget(source: Path, destination: Path, build_support: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--vendor-manifest", type=Path, required=True)
+    destination = parser.add_mutually_exclusive_group(required=True)
+    destination.add_argument("--vendor-manifest", type=Path)
+    destination.add_argument("--vendor-dir", type=Path)
     parser.add_argument("--build-support", type=Path, required=True)
     args = parser.parse_args()
-    retarget(args.manifest, args.vendor_manifest, args.build_support)
+    vendor_manifest = args.vendor_manifest
+    if args.vendor_dir is not None:
+        vendor_manifest = select_vendor_manifest(args.vendor_dir)
+    assert vendor_manifest is not None
+    retarget(args.manifest, vendor_manifest, args.build_support)
 
 
 if __name__ == "__main__":

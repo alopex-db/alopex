@@ -105,6 +105,16 @@ class FinalJoinWorkflowTests(unittest.TestCase):
             ),
             3,
         )
+        self.assertEqual(
+            text.count(
+                "--vendor-dir crates/alopex-sql/nim-sql-parser/vendor"
+            ),
+            3,
+        )
+        self.assertNotIn(
+            "--vendor-manifest crates/alopex-sql/nim-sql-parser/vendor/",
+            text,
+        )
 
     def test_delivery_builds_pin_maturin_and_repair_macos_dylibs(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
