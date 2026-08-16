@@ -317,7 +317,7 @@ def main() -> int:
             ),
         ]
 
-        # These 12 queries assert row multisets; their SQL does not promise order.
+        # These 10 queries assert row multisets; their SQL does not promise order.
         unordered_checks: list[tuple[str, list[Row]]] = [
             (
                 "SELECT region FROM sales WHERE region = 'west' UNION SELECT region FROM sales WHERE region = 'north'",
@@ -359,23 +359,6 @@ def main() -> int:
                 [{"bonus": None}, {"bonus": 5.0}, {"bonus": 10.0}, {"bonus": 20.0}],
             ),
             (
-                "SELECT bonus FROM sales UNION ALL SELECT bonus FROM sales",
-                [
-                    {"bonus": 10.0}, {"bonus": None}, {"bonus": 20.0}, {"bonus": None}, {"bonus": 5.0},
-                    {"bonus": 10.0}, {"bonus": None}, {"bonus": 20.0}, {"bonus": None}, {"bonus": 5.0},
-                ],
-            ),
-            (
-                "SELECT region FROM sales WHERE amount >= 150 UNION SELECT region FROM sales WHERE qty <= 2 UNION ALL SELECT region FROM sales WHERE bonus IS NULL",
-                [
-                    {"region": "east"},
-                    {"region": "west"},
-                    {"region": "north"},
-                    {"region": "east"},
-                    {"region": "west"},
-                ],
-            ),
-            (
                 "SELECT 1 AS value UNION SELECT 1 UNION ALL SELECT 1",
                 [{"value": 1}, {"value": 1}],
             ),
@@ -402,6 +385,11 @@ def main() -> int:
                 "SELECT SUM(qty) OVER (ORDER BY id RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM sales",
                 "RANGE",
             ),
+            (
+                "WITH RECURSIVE c AS (SELECT 1 AS id) SELECT id FROM c",
+                "recursive common table expression",
+            ),
+            ("WITH defined AS (SELECT 1 AS id) SELECT id FROM missing", "missing"),
         ]
 
         completed = 0

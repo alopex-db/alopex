@@ -365,36 +365,41 @@ fn scenario_local_sql_matrix() -> DemoResult {
             vec![vec![SqlValue::Integer(5)]],
         ),
         (
-            "SELECT id, CASE WHEN qty > 2 THEN 'bulk' ELSE 'small' END AS band, CASE WHEN bonus > 10 THEN 'large' END AS bonus_band, CASE WHEN qty = 0 THEN TRUE ELSE FALSE END AS is_zero FROM sales ORDER BY id",
+            "SELECT id, CASE WHEN qty > 2 THEN 'bulk' ELSE 'small' END AS band, CASE WHEN bonus > 10 THEN 'large' END AS bonus_band, CASE WHEN qty = 0 THEN 1 ELSE 2.5 END AS numeric_case, CASE WHEN qty = 0 THEN TRUE ELSE FALSE END AS is_zero FROM sales ORDER BY id",
             vec![
                 vec![
                     SqlValue::Integer(1),
                     SqlValue::Text("bulk".into()),
                     SqlValue::Null,
+                    SqlValue::Double(2.5),
                     SqlValue::Boolean(false),
                 ],
                 vec![
                     SqlValue::Integer(2),
                     SqlValue::Text("small".into()),
                     SqlValue::Null,
+                    SqlValue::Double(2.5),
                     SqlValue::Boolean(false),
                 ],
                 vec![
                     SqlValue::Integer(3),
                     SqlValue::Text("bulk".into()),
                     SqlValue::Text("large".into()),
+                    SqlValue::Double(2.5),
                     SqlValue::Boolean(false),
                 ],
                 vec![
                     SqlValue::Integer(4),
                     SqlValue::Text("small".into()),
                     SqlValue::Null,
+                    SqlValue::Double(2.5),
                     SqlValue::Boolean(false),
                 ],
                 vec![
                     SqlValue::Integer(5),
                     SqlValue::Text("small".into()),
                     SqlValue::Null,
+                    SqlValue::Double(1.0),
                     SqlValue::Boolean(true),
                 ],
             ],
@@ -409,6 +414,14 @@ fn scenario_local_sql_matrix() -> DemoResult {
                 vec![SqlValue::Integer(4), SqlValue::Integer(3)],
                 vec![SqlValue::Integer(4), SqlValue::Integer(4)],
             ],
+        ),
+        (
+            "SELECT id FROM sales WHERE amount >= 150 EXCEPT SELECT id FROM sales WHERE qty <= 2 ORDER BY id",
+            vec![vec![SqlValue::Integer(3)]],
+        ),
+        (
+            "WITH sales AS (SELECT 101 AS id) SELECT id FROM sales",
+            vec![vec![SqlValue::Integer(101)]],
         ),
         (
             "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn, RANK() OVER (ORDER BY amount) AS rank_value, DENSE_RANK() OVER (ORDER BY amount) AS dense_value, SUM(amount) OVER (ORDER BY id) AS running FROM sales ORDER BY id",
@@ -452,7 +465,7 @@ fn scenario_local_sql_matrix() -> DemoResult {
         ),
     ];
     require(
-        v086_matrix.len() == 10,
+        v086_matrix.len() == 12,
         "v0.8.6 SQL success-check count changed",
     )?;
     for (sql, expected) in &v086_matrix {
@@ -466,12 +479,24 @@ fn scenario_local_sql_matrix() -> DemoResult {
             "SELECT SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM sales",
             "ROWS",
         ),
+        (
+            "SELECT SUM(qty) OVER (ORDER BY id RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM sales",
+            "RANGE",
+        ),
+        (
+            "SELECT amount AS ident FROM sales WHERE ident > 100",
+            "ALOPEX-C003",
+        ),
+        (
+            "SELECT region AS area, COUNT(*) FROM sales GROUP BY area",
+            "ALOPEX-C003",
+        ),
     ];
     for (sql, expected) in rejected_v086 {
         expect_sql_error(&db, sql, expected)?;
     }
     require(
-        v086_matrix.len() + rejected_v086.len() == 13,
+        v086_matrix.len() + rejected_v086.len() == 18,
         "v0.8.6 SQL check count changed",
     )?;
     require(

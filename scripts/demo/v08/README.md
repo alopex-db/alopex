@@ -65,10 +65,16 @@ right (qty <= 2):      {2, 4, 5}
 left-only: {3}; right-only: {5}; intersection: {2, 4}
 ```
 
-The Python demo performs exactly 52 assertions: 30 ordered comparisons, 12
-unordered row-multiset comparisons, and 10 expected errors. The Rust EMB-04
+The Python demo performs exactly 52 assertions: 30 ordered comparisons, 10
+unordered row-multiset comparisons, and 12 expected errors. The Rust EMB-04
 scenario first converts its inherited eight queries to exact row-value checks,
-then performs 13 v0.8.6 checks (10 result checks and three fail-closed checks).
+then performs 18 v0.8.6 checks (12 result checks and six fail-closed checks).
+The initial 13-check plan was expanded rather than deleting feature coverage:
+the five added Rust checks pin CTE shadowing, the second EXCEPT direction,
+explicit RANGE rejection, and both WHERE/GROUP BY alias scope boundaries
+directly at the Embedded API surface. The existing CASE result check was also
+expanded to pin `INTEGER`/`DOUBLE` numeric promotion without consuming another
+check slot.
 `check_rows` reports both expected and actual rows on failure. The nondeterministic
 `NOW()` value is not claimed as an equality check; the inherited TIMESTAMP check
 uses the stored constant instead. Vector-distance fixture values yield exact
