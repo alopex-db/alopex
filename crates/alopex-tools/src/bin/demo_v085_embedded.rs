@@ -65,6 +65,41 @@ fn query_rows(result: ExecutionResult) -> DemoResult<Vec<Vec<SqlValue>>> {
     }
 }
 
+fn check_rows(db: &Database, sql: &str, expected: &[Vec<SqlValue>]) -> DemoResult {
+    let actual = query_rows(db.execute_sql(sql)?)?;
+    if actual == expected {
+        println!("SQL rows={} :: {sql}", actual.len());
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "SQL row mismatch for `{sql}`: expected={expected:?}; actual={actual:?}"
+        ))
+        .into())
+    }
+}
+
+fn expect_sql_error(db: &Database, sql: &str, expected: &str) -> DemoResult {
+    match db.execute_sql(sql) {
+        Err(error)
+            if error
+                .to_string()
+                .to_lowercase()
+                .contains(&expected.to_lowercase()) =>
+        {
+            println!("SQL rejected as expected ({expected}) :: {sql}");
+            Ok(())
+        }
+        Err(error) => Err(std::io::Error::other(format!(
+            "SQL error for `{sql}` did not contain `{expected}`: {error}"
+        ))
+        .into()),
+        Ok(result) => Err(std::io::Error::other(format!(
+            "SQL expected to fail was accepted: `{sql}` returned {result:?}"
+        ))
+        .into()),
+    }
+}
+
 fn run_scenario(id: &str, title: &str, scenario: fn() -> DemoResult) -> DemoResult {
     println!("\n=== {id}: {title} ===");
     scenario()?;
@@ -199,37 +234,271 @@ fn seed_sql_database() -> DemoResult<Database> {
     let results = db.execute_sql_multi(
         "CREATE TABLE departments (id INTEGER PRIMARY KEY, name TEXT);\
          CREATE TABLE metrics (id INTEGER PRIMARY KEY, dept_id INTEGER, n INTEGER, f FLOAT, ts TIMESTAMP, embedding VECTOR(3, L2));\
+         CREATE TABLE sales (id INTEGER PRIMARY KEY, region TEXT, amount REAL, qty INTEGER, bonus REAL);\
          INSERT INTO departments VALUES (1, 'search'), (2, 'storage');\
          INSERT INTO metrics VALUES\
            (1, 1, 2, 1.5, '2025-01-15 10:30:00', [1.0, 0.0, 0.0]),\
-           (2, 1, 3, 2.5, '2025-01-15 10:30:01.25', [0.5, 1.0, 0.0]),\
-           (3, 2, 4, 3.5, '2025-01-15 10:30:02', [0.0, 1.0, 1.0])",
+           (2, 1, 3, 2.5, '2025-01-15 10:30:01.25', [0.0, 0.0, 0.0]),\
+           (3, 2, 4, 3.5, '2025-01-15 10:30:02', [-1.0, 0.0, 0.0]);\
+         INSERT INTO sales VALUES\
+           (1, 'east', 100.0, 3, 10.0),\
+           (2, 'east', 200.0, 1, NULL),\
+           (3, 'west', 150.0, 5, 20.0),\
+           (4, 'west', 150.0, 2, NULL),\
+           (5, 'north', 50.0, 0, 5.0)",
     )?;
-    require(results.len() == 4, "multi-statement result count changed")?;
+    require(results.len() == 6, "multi-statement result count changed")?;
     db.execute_sql("CREATE INDEX idx_metrics_dept ON metrics(dept_id)")?;
     Ok(db)
 }
 
 fn scenario_local_sql_matrix() -> DemoResult {
     let db = seed_sql_database()?;
-    let matrix = [
-        "SELECT DISTINCT dept_id FROM metrics WHERE n IN (2, 3, 4) AND n BETWEEN 2 AND 4 ORDER BY dept_id LIMIT 2 OFFSET 0",
-        "SELECT d.name, SUM(m.n) AS total, AVG(m.n) AS mean FROM departments AS d JOIN metrics AS m ON d.id = m.dept_id GROUP BY d.name HAVING SUM(m.n) >= 4 ORDER BY d.name",
-        "SELECT id FROM metrics WHERE n > (SELECT AVG(n) FROM metrics) ORDER BY id",
-        "SELECT CAST(n AS DOUBLE) AS converted, n * 2.0 AS doubled FROM metrics WHERE id = 1",
-        "SELECT md5('abc') AS digest, hex(unhex('A1B2')) AS roundtrip, upper('alopex') AS name",
-        "SELECT SUM(n) AS integer_sum, COUNT(DISTINCT dept_id) AS departments FROM metrics",
-        "SELECT id, vector_distance(embedding, [1.0, 0.0, 0.0], 'l2') AS distance FROM metrics ORDER BY vector_distance(embedding, [1.0, 0.0, 0.0], 'l2') LIMIT 2",
-        "SELECT ts, NOW() AS observed FROM metrics WHERE id = 1",
+    let inherited_matrix = vec![
+        (
+            "SELECT DISTINCT dept_id FROM metrics WHERE n IN (2, 3, 4) AND n BETWEEN 2 AND 4 ORDER BY dept_id LIMIT 2 OFFSET 0",
+            vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]],
+        ),
+        (
+            "SELECT d.name, SUM(m.n) AS total, AVG(m.n) AS mean FROM departments AS d JOIN metrics AS m ON d.id = m.dept_id GROUP BY d.name HAVING SUM(m.n) >= 4 ORDER BY d.name",
+            vec![
+                vec![
+                    SqlValue::Text("search".into()),
+                    SqlValue::BigInt(5),
+                    SqlValue::Double(2.5),
+                ],
+                vec![
+                    SqlValue::Text("storage".into()),
+                    SqlValue::BigInt(4),
+                    SqlValue::Double(4.0),
+                ],
+            ],
+        ),
+        (
+            "SELECT id FROM metrics WHERE n > (SELECT AVG(n) FROM metrics) ORDER BY id",
+            vec![vec![SqlValue::Integer(3)]],
+        ),
+        (
+            "SELECT CAST(n AS DOUBLE) AS converted, n * 2.0 AS doubled FROM metrics WHERE id = 1",
+            vec![vec![SqlValue::Double(2.0), SqlValue::Double(4.0)]],
+        ),
+        (
+            "SELECT md5('abc') AS digest, hex(unhex('A1B2')) AS roundtrip, upper('alopex') AS name",
+            vec![vec![
+                SqlValue::Text("900150983cd24fb0d6963f7d28e17f72".into()),
+                SqlValue::Text("A1B2".into()),
+                SqlValue::Text("ALOPEX".into()),
+            ]],
+        ),
+        (
+            "SELECT SUM(n) AS integer_sum, COUNT(DISTINCT dept_id) AS departments FROM metrics",
+            vec![vec![SqlValue::BigInt(9), SqlValue::BigInt(2)]],
+        ),
+        (
+            "SELECT id, vector_distance(embedding, [1.0, 0.0, 0.0], 'l2') AS distance FROM metrics ORDER BY vector_distance(embedding, [1.0, 0.0, 0.0], 'l2') LIMIT 2",
+            vec![
+                vec![SqlValue::Integer(1), SqlValue::Double(0.0)],
+                vec![SqlValue::Integer(2), SqlValue::Double(1.0)],
+            ],
+        ),
+        (
+            "SELECT ts FROM metrics WHERE id = 1",
+            vec![vec![SqlValue::Timestamp(1_736_937_000_000_000)]],
+        ),
     ];
-    for sql in matrix {
-        let rows = query_rows(db.execute_sql(sql)?)?;
-        require(
-            !rows.is_empty(),
-            "a required local SQL category returned no rows",
-        )?;
-        println!("SQL rows={} :: {sql}", rows.len());
+    require(
+        inherited_matrix.len() == 8,
+        "inherited SQL exact-check count changed",
+    )?;
+    for (sql, expected) in &inherited_matrix {
+        check_rows(&db, sql, expected)?;
     }
+
+    let v086_matrix = vec![
+        (
+            "SELECT amount AS id FROM sales ORDER BY id",
+            vec![
+                vec![SqlValue::Float(50.0)],
+                vec![SqlValue::Float(100.0)],
+                vec![SqlValue::Float(150.0)],
+                vec![SqlValue::Float(150.0)],
+                vec![SqlValue::Float(200.0)],
+            ],
+        ),
+        (
+            "SELECT region, SUM(amount) AS total FROM sales GROUP BY region HAVING total >= 300 ORDER BY region",
+            vec![
+                vec![SqlValue::Text("east".into()), SqlValue::Double(300.0)],
+                vec![SqlValue::Text("west".into()), SqlValue::Double(300.0)],
+            ],
+        ),
+        (
+            "SELECT amount, pg_typeof(amount) AS kind FROM sales WHERE id = 1",
+            vec![vec![SqlValue::Float(100.0), SqlValue::Text("real".into())]],
+        ),
+        (
+            "SELECT id FROM sales WHERE amount >= 150 UNION SELECT id FROM sales WHERE qty <= 2 ORDER BY id",
+            vec![
+                vec![SqlValue::Integer(2)],
+                vec![SqlValue::Integer(3)],
+                vec![SqlValue::Integer(4)],
+                vec![SqlValue::Integer(5)],
+            ],
+        ),
+        (
+            "SELECT id FROM sales WHERE amount >= 150 UNION ALL SELECT id FROM sales WHERE qty <= 2 ORDER BY id",
+            vec![
+                vec![SqlValue::Integer(2)],
+                vec![SqlValue::Integer(2)],
+                vec![SqlValue::Integer(3)],
+                vec![SqlValue::Integer(4)],
+                vec![SqlValue::Integer(4)],
+                vec![SqlValue::Integer(5)],
+            ],
+        ),
+        (
+            "SELECT id FROM sales WHERE amount >= 150 INTERSECT SELECT id FROM sales WHERE qty <= 2 ORDER BY id",
+            vec![vec![SqlValue::Integer(2)], vec![SqlValue::Integer(4)]],
+        ),
+        (
+            "SELECT id FROM sales WHERE qty <= 2 EXCEPT SELECT id FROM sales WHERE amount >= 150 ORDER BY id",
+            vec![vec![SqlValue::Integer(5)]],
+        ),
+        (
+            "SELECT id, CASE WHEN qty > 2 THEN 'bulk' ELSE 'small' END AS band, CASE WHEN bonus > 10 THEN 'large' END AS bonus_band, CASE WHEN qty = 0 THEN 1 ELSE 2.5 END AS numeric_case, CASE WHEN qty = 0 THEN TRUE ELSE FALSE END AS is_zero FROM sales ORDER BY id",
+            vec![
+                vec![
+                    SqlValue::Integer(1),
+                    SqlValue::Text("bulk".into()),
+                    SqlValue::Null,
+                    SqlValue::Double(2.5),
+                    SqlValue::Boolean(false),
+                ],
+                vec![
+                    SqlValue::Integer(2),
+                    SqlValue::Text("small".into()),
+                    SqlValue::Null,
+                    SqlValue::Double(2.5),
+                    SqlValue::Boolean(false),
+                ],
+                vec![
+                    SqlValue::Integer(3),
+                    SqlValue::Text("bulk".into()),
+                    SqlValue::Text("large".into()),
+                    SqlValue::Double(2.5),
+                    SqlValue::Boolean(false),
+                ],
+                vec![
+                    SqlValue::Integer(4),
+                    SqlValue::Text("small".into()),
+                    SqlValue::Null,
+                    SqlValue::Double(2.5),
+                    SqlValue::Boolean(false),
+                ],
+                vec![
+                    SqlValue::Integer(5),
+                    SqlValue::Text("small".into()),
+                    SqlValue::Null,
+                    SqlValue::Double(1.0),
+                    SqlValue::Boolean(true),
+                ],
+            ],
+        ),
+        (
+            "WITH chosen AS (SELECT id, region FROM sales WHERE amount >= 150) SELECT sales.id AS sales_id, chosen.id AS chosen_id FROM sales JOIN chosen ON sales.region = chosen.region ORDER BY sales_id, chosen_id",
+            vec![
+                vec![SqlValue::Integer(1), SqlValue::Integer(2)],
+                vec![SqlValue::Integer(2), SqlValue::Integer(2)],
+                vec![SqlValue::Integer(3), SqlValue::Integer(3)],
+                vec![SqlValue::Integer(3), SqlValue::Integer(4)],
+                vec![SqlValue::Integer(4), SqlValue::Integer(3)],
+                vec![SqlValue::Integer(4), SqlValue::Integer(4)],
+            ],
+        ),
+        (
+            "SELECT id FROM sales WHERE amount >= 150 EXCEPT SELECT id FROM sales WHERE qty <= 2 ORDER BY id",
+            vec![vec![SqlValue::Integer(3)]],
+        ),
+        (
+            "WITH sales AS (SELECT 101 AS id) SELECT id FROM sales",
+            vec![vec![SqlValue::Integer(101)]],
+        ),
+        (
+            "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn, RANK() OVER (ORDER BY amount) AS rank_value, DENSE_RANK() OVER (ORDER BY amount) AS dense_value, SUM(amount) OVER (ORDER BY id) AS running FROM sales ORDER BY id",
+            vec![
+                vec![
+                    SqlValue::Integer(1),
+                    SqlValue::BigInt(1),
+                    SqlValue::BigInt(2),
+                    SqlValue::BigInt(2),
+                    SqlValue::Double(100.0),
+                ],
+                vec![
+                    SqlValue::Integer(2),
+                    SqlValue::BigInt(2),
+                    SqlValue::BigInt(5),
+                    SqlValue::BigInt(4),
+                    SqlValue::Double(300.0),
+                ],
+                vec![
+                    SqlValue::Integer(3),
+                    SqlValue::BigInt(3),
+                    SqlValue::BigInt(3),
+                    SqlValue::BigInt(3),
+                    SqlValue::Double(450.0),
+                ],
+                vec![
+                    SqlValue::Integer(4),
+                    SqlValue::BigInt(4),
+                    SqlValue::BigInt(3),
+                    SqlValue::BigInt(3),
+                    SqlValue::Double(600.0),
+                ],
+                vec![
+                    SqlValue::Integer(5),
+                    SqlValue::BigInt(5),
+                    SqlValue::BigInt(1),
+                    SqlValue::BigInt(1),
+                    SqlValue::Double(650.0),
+                ],
+            ],
+        ),
+    ];
+    require(
+        v086_matrix.len() == 12,
+        "v0.8.6 SQL success-check count changed",
+    )?;
+    for (sql, expected) in &v086_matrix {
+        check_rows(&db, sql, expected)?;
+    }
+
+    let rejected_v086 = [
+        ("SELECT LAG(amount) OVER (ORDER BY id) FROM sales", "LAG"),
+        ("SELECT LEAD(amount) OVER (ORDER BY id) FROM sales", "LEAD"),
+        (
+            "SELECT SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM sales",
+            "ROWS",
+        ),
+        (
+            "SELECT SUM(qty) OVER (ORDER BY id RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM sales",
+            "RANGE",
+        ),
+        (
+            "SELECT amount AS ident FROM sales WHERE ident > 100",
+            "ALOPEX-C003",
+        ),
+        (
+            "SELECT region AS area, COUNT(*) FROM sales GROUP BY area",
+            "ALOPEX-C003",
+        ),
+    ];
+    for (sql, expected) in rejected_v086 {
+        expect_sql_error(&db, sql, expected)?;
+    }
+    require(
+        v086_matrix.len() + rejected_v086.len() == 18,
+        "v0.8.6 SQL check count changed",
+    )?;
     require(
         matches!(
             db.execute_sql("PRAGMA memory_limit = '64MiB'")?,
