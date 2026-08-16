@@ -15,6 +15,8 @@ type
 
   SqlNodeKind* = enum
     nkSelect
+    nkWithClause
+    nkCommonTableExpr
     nkInsert
     nkUpdate
     nkDelete
@@ -100,6 +102,7 @@ type
     funcStar*: bool
     negated*: bool
     natural*: bool
+    recursive*: bool
     orderAsc*: int          ## -1 = omitted, 0 = DESC, 1 = ASC
     nullsFirst*: int        ## -1 = omitted, 0 = LAST, 1 = FIRST
     quantifier*: QuantifierKind

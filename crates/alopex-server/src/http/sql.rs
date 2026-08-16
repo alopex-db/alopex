@@ -1273,6 +1273,7 @@ mod tests {
                 name: "hourly_metrics".to_string(),
                 name_span: alopex_sql::ast::Span::default(),
                 query: alopex_sql::ast::Select {
+                    with: None,
                     distinct: false,
                     set_operations: vec![],
                     projection: vec![alopex_sql::ast::SelectItem::Wildcard {

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Select {
+    #[serde(default)]
+    pub with: Option<WithClause>,
     pub distinct: bool,
     pub projection: Vec<SelectItem>,
     pub from: Vec<FromItem>,
@@ -32,6 +34,20 @@ pub struct SetOperation {
     pub all: bool,
     pub right: Box<Select>,
     #[serde(default)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithClause {
+    pub recursive: bool,
+    pub ctes: Vec<CommonTableExpr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommonTableExpr {
+    pub name: String,
+    pub query: Box<super::Statement>,
     pub span: Span,
 }
 

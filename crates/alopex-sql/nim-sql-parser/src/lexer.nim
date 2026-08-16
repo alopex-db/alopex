@@ -23,7 +23,7 @@ type
     tkDistinct, tkAll, tkUnion, tkIntersect, tkExcept
     tkCast, tkCase, tkWhen, tkThen, tkElse, tkEnd, tkNow
     tkPrimary, tkKey, tkForeign, tkReferences
-    tkUnique, tkCheck, tkDefault, tkConstraint, tkEscape, tkWith
+    tkUnique, tkCheck, tkDefault, tkConstraint, tkEscape, tkWith, tkRecursive
     tkInt, tkBigint, tkSmallint, tkFloatType, tkReal, tkDouble, tkDecimal
     tkVarchar, tkChar, tkText, tkBlob, tkBoolean, tkBool
     tkTimestamp, tkDate, tkTime, tkVector, tkInterval
@@ -80,7 +80,7 @@ const Keywords = {
   "primary": tkPrimary, "key": tkKey, "foreign": tkForeign,
   "references": tkReferences, "unique": tkUnique, "check": tkCheck,
   "default": tkDefault, "constraint": tkConstraint, "escape": tkEscape,
-  "with": tkWith,
+  "with": tkWith, "recursive": tkRecursive,
   "int": tkInt, "integer": tkInt, "bigint": tkBigint, "smallint": tkSmallint,
   "float": tkFloatType, "real": tkReal, "double": tkDouble, "decimal": tkDecimal,
   "varchar": tkVarchar, "char": tkChar, "text": tkText,

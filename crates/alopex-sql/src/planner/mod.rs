@@ -45,11 +45,14 @@ use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::{AlopexDialect, DataSourceFormat, Parser, SqlError, TableType};
 use std::collections::{HashMap, HashSet};
 
+#[derive(Clone)]
 struct PlannedRelation {
     plan: LogicalPlan,
     schema: Vec<ColumnMetadata>,
     scope: Vec<ScopedTable>,
 }
+
+type CtePlans = HashMap<String, PlannedRelation>;
 
 /// Planning output used by server-side routing analysis.
 ///
@@ -1021,25 +1024,66 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     /// Builds a logical plan tree: Scan -> Filter -> Sort -> Limit
     /// Each layer is optional and only added if the corresponding clause is present.
     fn plan_select(&self, stmt: &Select) -> Result<LogicalPlan, PlannerError> {
-        self.plan_select_relation(stmt, &[])
+        self.plan_select_relation(stmt, &[], &CtePlans::new())
             .map(|relation| relation.plan)
+    }
+
+    fn plan_ctes(
+        &self,
+        stmt: &Select,
+        enclosing_ctes: &CtePlans,
+    ) -> Result<CtePlans, PlannerError> {
+        let Some(with) = &stmt.with else {
+            return Ok(enclosing_ctes.clone());
+        };
+        if with.recursive {
+            return Err(PlannerError::unsupported_feature(
+                "recursive common table expressions",
+                "a future version",
+                with.span,
+            ));
+        }
+
+        let mut plans = enclosing_ctes.clone();
+        let mut local_names = HashSet::new();
+        for cte in &with.ctes {
+            if !local_names.insert(cte.name.clone()) {
+                return Err(PlannerError::invalid_expression(format!(
+                    "common table expression '{}' is defined more than once",
+                    cte.name
+                )));
+            }
+            let StatementKind::Select(select) = &cte.query.kind else {
+                return Err(PlannerError::unsupported_feature(
+                    "non-SELECT common table expression",
+                    "a future version",
+                    cte.span,
+                ));
+            };
+            let relation = self.plan_select_relation(select, &[], &plans)?;
+            plans.insert(cte.name.clone(), relation);
+        }
+        Ok(plans)
     }
 
     fn plan_select_relation(
         &self,
         stmt: &Select,
         outer_scope: &[ScopedTable],
+        enclosing_ctes: &CtePlans,
     ) -> Result<PlannedRelation, PlannerError> {
+        let ctes = self.plan_ctes(stmt, enclosing_ctes)?;
         if !stmt.set_operations.is_empty() {
             let mut left_select = stmt.clone();
+            left_select.with = None;
             left_select.set_operations.clear();
             left_select.order_by.clear();
             left_select.limit = None;
             left_select.offset = None;
-            let mut relation = self.plan_select_relation(&left_select, outer_scope)?;
+            let mut relation = self.plan_select_relation(&left_select, outer_scope, &ctes)?;
 
             for operation in &stmt.set_operations {
-                let right = self.plan_select_relation(&operation.right, outer_scope)?;
+                let right = self.plan_select_relation(&operation.right, outer_scope, &ctes)?;
                 if relation.schema.len() != right.schema.len() {
                     return Err(PlannerError::set_operation_column_count_mismatch(
                         relation.schema.len(),
@@ -1081,6 +1125,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     &stmt.order_by,
                     &relation.scope,
                     &HashMap::new(),
+                    &ctes,
                 )?;
                 relation.plan = LogicalPlan::Sort {
                     input: Box::new(relation.plan),
@@ -1097,7 +1142,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             return Ok(relation);
         }
 
-        let mut relation = self.plan_from_items(&stmt.from, stmt.span, outer_scope)?;
+        let mut relation = self.plan_from_items(&stmt.from, stmt.span, outer_scope, &ctes)?;
         let expr_scope = relation
             .scope
             .iter()
@@ -1127,8 +1172,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         // the FROM-derived base relations, as the SQL standard requires.
         let projection_aliases = collect_projection_aliases(&stmt.projection);
 
-        let final_projection =
-            self.build_projection_with_scope(&stmt.projection, &relation.schema, &expr_scope)?;
+        let final_projection = self.build_projection_with_scope(
+            &stmt.projection,
+            &relation.schema,
+            &expr_scope,
+            &ctes,
+        )?;
         if !has_window {
             install_base_projection(&mut relation.plan, &final_projection);
         }
@@ -1138,7 +1187,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
         // 3. Add Filter if WHERE clause is present
         if let Some(ref selection) = stmt.selection {
-            let predicate = self.infer_expr_with_scope(selection, &expr_scope)?;
+            let predicate = self.infer_expr_with_scope(selection, &expr_scope, &ctes)?;
 
             // Verify predicate returns Boolean
             if predicate.resolved_type != ResolvedType::Boolean {
@@ -1172,7 +1221,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             for order_expr in &stmt.order_by {
                 let sort_source =
                     substitute_projection_aliases(&order_expr.expr, &projection_aliases);
-                let typed = self.infer_expr_with_scope(&sort_source, &expr_scope)?;
+                let typed = self.infer_expr_with_scope(&sort_source, &expr_scope, &ctes)?;
                 self.collect_windows_from_typed_expr(&typed, &mut windows, &mut window_map)?;
                 outer_order_by.push(SortExpr::new(
                     typed,
@@ -1255,14 +1304,16 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     &stmt.projection,
                     &relation.schema,
                     &expr_scope,
+                    &ctes,
                 )?;
                 let group_keys = projected.iter().map(|col| col.expr.clone()).collect();
                 (group_keys, projected)
             } else {
-                let group_keys = self.build_group_keys_with_scope(stmt, &expr_scope)?;
+                let group_keys = self.build_group_keys_with_scope(stmt, &expr_scope, &ctes)?;
                 let projected = self.build_projected_columns_for_aggregate_with_scope(
                     &stmt.projection,
                     &expr_scope,
+                    &ctes,
                 )?;
                 (group_keys, projected)
             };
@@ -1275,7 +1326,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
             let having_typed = if let Some(having) = &stmt.having {
                 let having = substitute_projection_aliases(having, &projection_aliases);
-                let typed = self.infer_expr_with_scope(&having, &expr_scope)?;
+                let typed = self.infer_expr_with_scope(&having, &expr_scope, &ctes)?;
                 if typed.resolved_type != ResolvedType::Boolean {
                     return Err(PlannerError::type_mismatch(
                         "Boolean",
@@ -1294,7 +1345,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 for order_expr in &stmt.order_by {
                     let sort_source =
                         substitute_projection_aliases(&order_expr.expr, &projection_aliases);
-                    let typed = self.infer_expr_with_scope(&sort_source, &expr_scope)?;
+                    let typed = self.infer_expr_with_scope(&sort_source, &expr_scope, &ctes)?;
                     self.collect_aggregates_from_typed_expr(&typed, &mut aggregates, &mut agg_map)?;
                     let asc = order_expr.asc.unwrap_or(true);
                     let nulls_first = order_expr.nulls_first.unwrap_or(false);
@@ -1379,8 +1430,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
         // Non-aggregate path: ORDER BY + LIMIT/OFFSET
         if !stmt.order_by.is_empty() {
-            let order_by =
-                self.build_sort_exprs_with_scope(&stmt.order_by, &expr_scope, &projection_aliases)?;
+            let order_by = self.build_sort_exprs_with_scope(
+                &stmt.order_by,
+                &expr_scope,
+                &projection_aliases,
+                &ctes,
+            )?;
             plan = LogicalPlan::Sort {
                 input: Box::new(plan),
                 order_by,
@@ -1422,6 +1477,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         items: &[FromItem],
         select_span: crate::ast::Span,
         outer_scope: &[ScopedTable],
+        ctes: &CtePlans,
     ) -> Result<PlannedRelation, PlannerError> {
         match items {
             [] => {
@@ -1438,11 +1494,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     )],
                 })
             }
-            [single] => self.plan_from_item(single, 0, outer_scope),
+            [single] => self.plan_from_item(single, 0, outer_scope, ctes),
             [first, rest @ ..] => {
-                let mut relation = self.plan_from_item(first, 0, outer_scope)?;
+                let mut relation = self.plan_from_item(first, 0, outer_scope, ctes)?;
                 for item in rest {
-                    let right = self.plan_from_item(item, relation.schema.len(), outer_scope)?;
+                    let right =
+                        self.plan_from_item(item, relation.schema.len(), outer_scope, ctes)?;
                     relation = self.combine_join_relation(
                         relation,
                         right,
@@ -1462,9 +1519,27 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         item: &FromItem,
         start_index: usize,
         outer_scope: &[ScopedTable],
+        ctes: &CtePlans,
     ) -> Result<PlannedRelation, PlannerError> {
         match item {
             FromItem::Table { name, alias, span } => {
+                if let Some(cte) = ctes.get(name) {
+                    let mut relation = cte.clone();
+                    relation.plan = LogicalPlan::Project {
+                        input: Box::new(relation.plan),
+                        projection: Projection::All(
+                            relation.schema.iter().map(|col| col.name.clone()).collect(),
+                        ),
+                    };
+                    relation.scope = vec![ScopedTable::new(
+                        TableMetadata::new(
+                            alias.clone().unwrap_or_else(|| name.clone()),
+                            relation.schema.clone(),
+                        ),
+                        start_index,
+                    )];
+                    return Ok(relation);
+                }
                 let table = self.name_resolver.resolve_table(name, *span)?.clone();
                 let mut scope_table = table.clone();
                 if let Some(alias) = alias {
@@ -1491,11 +1566,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 natural,
                 span,
             } => {
-                let left_relation = self.plan_from_item(left, start_index, outer_scope)?;
+                let left_relation = self.plan_from_item(left, start_index, outer_scope, ctes)?;
                 let right_relation = self.plan_from_item(
                     right,
                     start_index + left_relation.schema.len(),
                     outer_scope,
+                    ctes,
                 )?;
                 let expr_scope = left_relation
                     .scope
@@ -1516,7 +1592,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     using.clone()
                 };
                 let typed_condition = if let Some(expr) = condition {
-                    let typed = self.infer_expr_with_scope(expr, &expr_scope)?;
+                    let typed = self.infer_expr_with_scope(expr, &expr_scope, ctes)?;
                     if typed.resolved_type != ResolvedType::Boolean {
                         return Err(PlannerError::type_mismatch(
                             "Boolean",
@@ -1560,7 +1636,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 // does not accept LATERAL yet. Passing `outer_scope` through
                 // here would resolve an outer name into a correlated reference
                 // the user never wrote, so the scope stops at this boundary.
-                let mut relation = self.plan_select_relation(select, &[])?;
+                let mut relation = self.plan_select_relation(select, &[], ctes)?;
                 let alias = alias.clone().ok_or_else(|| {
                     PlannerError::invalid_expression("derived table requires an alias".to_string())
                 })?;
@@ -1673,6 +1749,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         &self,
         expr: &crate::ast::expr::Expr,
         scope: &[ScopedTable],
+        ctes: &CtePlans,
     ) -> Result<TypedExpr, PlannerError> {
         self.type_checker
             .infer_type_with_scope(expr, scope, &|stmt, outer_scope| {
@@ -1683,7 +1760,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         stmt.span(),
                     ));
                 };
-                let relation = self.plan_select_relation(select, outer_scope)?;
+                let relation = self.plan_select_relation(select, outer_scope, ctes)?;
                 Ok((relation.plan, relation.schema))
             })
     }
@@ -1758,6 +1835,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         items: &[SelectItem],
         schema: &[ColumnMetadata],
         scope: &[ScopedTable],
+        ctes: &CtePlans,
     ) -> Result<Projection, PlannerError> {
         if items.len() == 1 && matches!(&items[0], SelectItem::Wildcard { .. }) {
             return Ok(Projection::All(visible_wildcard_columns(schema, scope)));
@@ -1816,7 +1894,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     }
                 }
                 SelectItem::Expr { expr, alias, .. } => {
-                    let typed_expr = self.infer_expr_with_scope(expr, scope)?;
+                    let typed_expr = self.infer_expr_with_scope(expr, scope, ctes)?;
                     let projected = if let Some(alias) = alias {
                         ProjectedColumn::with_alias(typed_expr, alias.clone())
                     } else {
@@ -1859,11 +1937,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         order_by: &[OrderByExpr],
         scope: &[ScopedTable],
         projection_aliases: &HashMap<String, crate::ast::expr::Expr>,
+        ctes: &CtePlans,
     ) -> Result<Vec<SortExpr>, PlannerError> {
         let mut sort_exprs = Vec::new();
         for order_expr in order_by {
             let sort_source = substitute_projection_aliases(&order_expr.expr, projection_aliases);
-            let typed_expr = self.infer_expr_with_scope(&sort_source, scope)?;
+            let typed_expr = self.infer_expr_with_scope(&sort_source, scope, ctes)?;
             let asc = order_expr.asc.unwrap_or(true);
             let nulls_first = order_expr.nulls_first.unwrap_or(false);
             sort_exprs.push(SortExpr::new(typed_expr, asc, nulls_first));
@@ -1921,11 +2000,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         &self,
         stmt: &Select,
         scope: &[ScopedTable],
+        ctes: &CtePlans,
     ) -> Result<Vec<TypedExpr>, PlannerError> {
         let mut keys = Vec::new();
         if let Some(items) = &stmt.group_by {
             for expr in items {
-                let typed = self.infer_expr_with_scope(expr, scope)?;
+                let typed = self.infer_expr_with_scope(expr, scope, ctes)?;
                 if typed_expr_contains_aggregate(&typed) {
                     return Err(PlannerError::invalid_expression(
                         "GROUP BY cannot contain aggregate functions".to_string(),
@@ -1972,6 +2052,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         &self,
         items: &[SelectItem],
         scope: &[ScopedTable],
+        ctes: &CtePlans,
     ) -> Result<Vec<ProjectedColumn>, PlannerError> {
         let mut projected = Vec::new();
         for item in items {
@@ -1982,7 +2063,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     ));
                 }
                 SelectItem::Expr { expr, alias, .. } => {
-                    let typed = self.infer_expr_with_scope(expr, scope)?;
+                    let typed = self.infer_expr_with_scope(expr, scope, ctes)?;
                     projected.push(ProjectedColumn {
                         expr: typed,
                         alias: alias.clone(),
@@ -2034,8 +2115,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         items: &[SelectItem],
         schema: &[ColumnMetadata],
         scope: &[ScopedTable],
+        ctes: &CtePlans,
     ) -> Result<Vec<ProjectedColumn>, PlannerError> {
-        let projection = self.build_projection_with_scope(items, schema, scope)?;
+        let projection = self.build_projection_with_scope(items, schema, scope, ctes)?;
         match projection {
             Projection::All(columns) => {
                 let mut projected = Vec::with_capacity(columns.len());
@@ -2568,7 +2650,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 })
             }
             InsertSource::Select { select } => {
-                let source = self.plan_select_relation(select, &[])?;
+                let source = self.plan_select_relation(select, &[], &CtePlans::new())?;
                 if source.schema.len() != columns.len() {
                     return Err(PlannerError::column_value_count_mismatch(
                         columns.len(),

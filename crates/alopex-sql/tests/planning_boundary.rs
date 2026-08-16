@@ -21,6 +21,7 @@ fn table(name: &str) -> TableMetadata {
 fn select_from(name: &str) -> Statement {
     Statement {
         kind: StatementKind::Select(Select {
+            with: None,
             distinct: false,
             projection: vec![SelectItem::Wildcard {
                 span: Span::empty(),
@@ -108,6 +109,7 @@ fn join_plan_extracts_both_table_references() {
 
     let stmt = Statement {
         kind: StatementKind::Select(Select {
+            with: None,
             distinct: false,
             projection: vec![SelectItem::Wildcard {
                 span: Span::empty(),
