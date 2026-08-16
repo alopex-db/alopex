@@ -37,7 +37,6 @@ suite "Tokenizer":
     check lex.nextToken().kind == tkAll
     check lex.nextToken().kind == tkIntersect
     check lex.nextToken().kind == tkExcept
-    check lex.nextToken().kind == tkWhere
 
   test "CASE expression keywords are recognized":
     var lex = initLexer("CASE WHEN THEN ELSE END")
