@@ -7,6 +7,10 @@ use build_support::{LinkBehavior, resolve_native_library};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=NIM_SQL_PARSER_LIB_DIR");
+    println!(
+        "cargo:rerun-if-env-changed={}",
+        build_support::ALLOW_LOCAL_BUILD_ENV
+    );
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let target = env::var("TARGET").expect("TARGET");

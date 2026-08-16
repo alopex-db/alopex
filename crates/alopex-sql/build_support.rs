@@ -1,3 +1,4 @@
+use std::env;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File};
@@ -72,20 +73,55 @@ struct LibraryIdentity {
     size: u64,
 }
 
+/// ローカルで Nim パーサーを再ビルドした際、vendored マニフェストとの
+/// 完全一致検証をスキップするための開発専用スイッチ。
+///
+/// vendored の `.so` は sha256 とバイトサイズがマニフェストに固定されている
+/// ため、Nim ソースを 1 文字でも変更すると再ビルド結果は原理的に受理されない
+/// (issue #131)。この検証は公開物の改竄防止という正当な目的を持つので既定では
+/// 維持し、明示的なオプトインのときだけ緩和する。
+///
+/// 値は `1` のみを有効とする。`0` や空文字、その他の値は無効 (= 厳格検証) と
+/// して扱い、「設定さえすれば何でも通る」曖昧さを排除する。
+pub(crate) const ALLOW_LOCAL_BUILD_ENV: &str = "ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD";
+
+fn local_build_allowed() -> bool {
+    // テスト時は常に厳格検証とする。既存の拒否テスト群
+    // (rejects_library_size_mismatch 等) は「検証が働くこと」を証明するもので、
+    // 実行環境にこの変数が設定されていると誤って緑になり、検証機構の破綻を
+    // 見逃す。ビルドスクリプトとしての実行時だけ環境変数を読む。
+    if cfg!(test) {
+        return false;
+    }
+    env::var_os(ALLOW_LOCAL_BUILD_ENV).is_some_and(|value| value == "1")
+}
+
+/// 検証をスキップした事実を必ず可視化する。気付かないまま未検証の
+/// パーサーを使い続けることを防ぐため、スキップ時は常に警告を出す。
+fn warn_verification_skipped(what: &str) {
+    println!(
+        "cargo:warning={ALLOW_LOCAL_BUILD_ENV}=1 のため{what}を検証していません (issue #131)。リリース検証では使用しないこと。"
+    );
+}
+
 pub(crate) fn resolve_native_library(
     manifest_dir: &Path,
     target: &str,
     explicit_dir: Option<&OsStr>,
 ) -> Result<ResolvedNativeLibrary, ResolveError> {
+    let allow_local_build = local_build_allowed();
     let target_spec = target_spec(target)?;
     let manifest_path = manifest_dir.join(VENDOR_MANIFEST_RELATIVE_PATH);
     let manifest_bytes =
         read_small_regular_file(&manifest_path, "parser vendor manifest", MAX_MANIFEST_BYTES)?;
     let manifest_sha256 = sha256_bytes(&manifest_bytes);
     if manifest_sha256 != VENDOR_MANIFEST_SHA256 {
-        return Err(error(format!(
-            "parser vendor manifest SHA-256 mismatch: expected {VENDOR_MANIFEST_SHA256}, found {manifest_sha256}"
-        )));
+        if !allow_local_build {
+            return Err(error(format!(
+                "parser vendor manifest SHA-256 mismatch: expected {VENDOR_MANIFEST_SHA256}, found {manifest_sha256}"
+            )));
+        }
+        warn_verification_skipped("パーサー vendor マニフェストの SHA-256");
     }
 
     let manifest: VendorManifest = serde_json::from_slice(&manifest_bytes)
@@ -117,7 +153,7 @@ pub(crate) fn resolve_native_library(
     };
 
     require_real_directory(&directory, directory_description)?;
-    verify_target_directory(&directory, target_spec, asset)?;
+    verify_target_directory(&directory, target_spec, asset, allow_local_build)?;
 
     Ok(ResolvedNativeLibrary {
         library_path: directory.join(target_spec.library_filename),
@@ -195,6 +231,7 @@ fn verify_target_directory(
     directory: &Path,
     target_spec: TargetSpec,
     asset: &VendorAsset,
+    allow_local_build: bool,
 ) -> Result<(), ResolveError> {
     let contract_path = directory.join("CONTRACT_VERSION");
     let contract = read_small_regular_file(
@@ -208,6 +245,15 @@ fn verify_target_directory(
             "native parser contract sidecar mismatch: {}",
             contract_path.display()
         )));
+    }
+
+    // ローカル再ビルドを許可する場合、ライブラリ本体の同一性検証(サイズ・
+    // SHA-256・SHA256SUMS サイドカー)をまとめてスキップする。契約バージョンの
+    // 検証は上で必ず行う。あちらは FFI の互換性そのものを守るものであり、
+    // ローカル開発でも緩めてはならない。
+    if allow_local_build {
+        warn_verification_skipped("native パーサーライブラリのサイズ・SHA-256");
+        return Ok(());
     }
 
     let library_path = directory.join(target_spec.library_filename);
