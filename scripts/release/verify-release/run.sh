@@ -23,13 +23,13 @@
 #   ./scripts/release/verify-release/run.sh --report-only RESULTS.json
 #       [--report-dir DIR]
 #   ./scripts/release/verify-release/run.sh --verify-join candidate.json
-#   例: ./scripts/release/verify-release/run.sh 0.8.5
+#   例: ./scripts/release/verify-release/run.sh 0.8.6
 #
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-ALOPEX_VERSION="0.8.5"
+ALOPEX_VERSION="0.8.6"
 DO_REPORT=1
 JOIN_FILE=""
 REPORT_ONLY_FILE=""
@@ -307,7 +307,7 @@ tool_source="$(mktemp -d)"
 trap "rm -rf \"${tool_source}\"" EXIT
 mkdir -p "${tool_source}/src/bin"
 cp crates/alopex-tools/src/bin/verify_release_embedded.rs "${tool_source}/src/bin/"
-cp crates/alopex-tools/src/bin/demo_v085_embedded.rs "${tool_source}/src/bin/"
+cp crates/alopex-tools/src/bin/demo_v086_embedded.rs "${tool_source}/src/bin/"
 cp crates/alopex-tools/build.rs "${tool_source}/"
 cat >"${tool_source}/Cargo.toml" <<EOF
 [workspace]
@@ -323,8 +323,8 @@ name = "verify-release-embedded"
 path = "src/bin/verify_release_embedded.rs"
 
 [[bin]]
-name = "demo-v085-embedded"
-path = "src/bin/demo_v085_embedded.rs"
+name = "demo-v086-embedded"
+path = "src/bin/demo_v086_embedded.rs"
 
 [dependencies]
 serde_json = "1.0"
@@ -521,7 +521,7 @@ run_step "v${ALOPEX_VERSION} ベクトル検索 API (demo_vector_api.py)" \
 
 run_step "v${ALOPEX_VERSION} Embedded API 全シナリオ" \
     "crates.io 公開版 alopex-embedded/alopex-core/alopex-sql だけでビルドした専用バイナリを使い、保存・KV/transaction・local SQL 全カテゴリ・catalog/cluster 診断・owned/SQL stream・DataFrame/columnar・Vector/HNSW・large value・fail-closed 境界の10シナリオを Rust Embedded API から自己検証付きで実演する。外部 cluster、Python 専用 API、未 provision の V08 segment、default feature 外 S3 は成功に偽装せず明示的な境界として確認する。" \
-    -- run_in_container bash scripts/demo/v08/demo_embedded_v085.sh
+    -- run_in_container bash scripts/demo/v08/demo_embedded_v086.sh
 
 echo ""
 log_ok "全デモスクリプトが公開版 v${ALOPEX_VERSION} で完走しました。"

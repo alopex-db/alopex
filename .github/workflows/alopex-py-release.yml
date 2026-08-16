@@ -7,6 +7,9 @@ on:
       # v0.8.5 is published through the repair-forward tag so the immutable
       # source tag cannot start the historical workflow in parallel.
       - "!alopex-py-v0.8.5"
+      # v0.8.6 is dispatched by the core release with explicit source/tag/SHA
+      # inputs; suppress the simultaneous tag-push run.
+      - "!alopex-py-v0.8.6"
   workflow_dispatch:
     inputs:
       source_ref:
@@ -74,10 +77,18 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref }}
-      - name: Stage exact Alopex v0.8.5 parser assets
+      - name: Resolve source release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "ALOPEX_VERSION=${version}" >> "${GITHUB_ENV}"
+          echo "CORE_TAG=v${version}" >> "${GITHUB_ENV}"
+          echo "PARSER_MANIFEST=.core-parser-assets/parser-vendor-manifest-v${version}.json" >> "${GITHUB_ENV}"
+      - name: Stage exact Alopex parser assets
         env:
           GH_TOKEN: ${{ github.token }}
-          CORE_TAG: v0.8.5
           TARGET_TRIPLE: x86_64-unknown-linux-gnu
         run: |
           set -euo pipefail
@@ -85,9 +96,9 @@ jobs:
           mkdir -p .core-parser-assets
           for attempt in $(seq 1 30); do
             if gh release download "$CORE_TAG" --repo alopex-db/alopex \
-              --pattern 'parser-assets-v0.8.5.json' \
-              --pattern 'parser-vendor-manifest-v0.8.5.json' \
-              --pattern 'alopex-parser-v0.8.5-contract-0.4.0-*.tar.gz' \
+              --pattern "parser-assets-v${ALOPEX_VERSION}.json" \
+              --pattern "parser-vendor-manifest-v${ALOPEX_VERSION}.json" \
+              --pattern "alopex-parser-v${ALOPEX_VERSION}-contract-0.4.0-*.tar.gz" \
               --dir .core-parser-assets --clobber; then
               break
             fi
@@ -96,15 +107,16 @@ jobs:
             sleep 20
           done
           python scripts/release/parser_asset_manifest.py verify-manifest \
-            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
+            --manifest "${PARSER_MANIFEST}" \
             --asset-dir .core-parser-assets
           python - <<'PY'
-          import hashlib, json, tarfile
+          import hashlib, json, os, tarfile
           from pathlib import Path
           root = Path('.core-parser-assets')
-          envelope = json.loads((root / 'parser-assets-v0.8.5.json').read_text())
-          assert envelope['source']['tag'] == 'v0.8.5'
-          manifest = json.loads((root / 'parser-vendor-manifest-v0.8.5.json').read_text())
+          version = os.environ['ALOPEX_VERSION']
+          envelope = json.loads((root / f'parser-assets-v{version}.json').read_text())
+          assert envelope['source']['tag'] == f'v{version}'
+          manifest = json.loads((root / f'parser-vendor-manifest-v{version}.json').read_text())
           asset = next(item for item in manifest['assets'] if item['target'] == 'x86_64-unknown-linux-gnu')
           archive = root / asset['archive']['filename']
           with tarfile.open(archive, 'r:gz') as handle:
@@ -130,10 +142,10 @@ jobs:
           path: .release-tools
           sparse-checkout: scripts/release/retarget_python_parser_source.py
           sparse-checkout-cone-mode: false
-      - name: Bind source parser pins to v0.8.5 release assets
+      - name: Bind source parser pins to release assets
         run: |
           python .release-tools/scripts/release/retarget_python_parser_source.py \
-            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
+            --manifest "${PARSER_MANIFEST}" \
             --vendor-dir crates/alopex-sql/nim-sql-parser/vendor \
             --build-support crates/alopex-sql/build_support.rs
       - name: Build wheels
@@ -157,9 +169,10 @@ jobs:
         run: |
           set -euo pipefail
           library_sha="$(python - <<'PY'
-          import json
+          import json, os
           from pathlib import Path
-          manifest = json.loads(Path('.core-parser-assets/parser-vendor-manifest-v0.8.5.json').read_text())
+          version = os.environ['ALOPEX_VERSION']
+          manifest = json.loads(Path(f'.core-parser-assets/parser-vendor-manifest-v{version}.json').read_text())
           print(next(a['library']['sha256'] for a in manifest['assets'] if a['target'] == 'x86_64-unknown-linux-gnu'))
           PY
           )"
@@ -204,7 +217,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref }}
-      - name: Stage exact Alopex v0.8.5 parser assets
+      - name: Resolve source release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "ALOPEX_VERSION=${version}" >> "${GITHUB_ENV}"
+          echo "CORE_TAG=v${version}" >> "${GITHUB_ENV}"
+          echo "PARSER_MANIFEST=.core-parser-assets/parser-vendor-manifest-v${version}.json" >> "${GITHUB_ENV}"
+      - name: Stage exact Alopex parser assets
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET_TRIPLE: ${{ matrix.target_triple }}
@@ -212,10 +234,10 @@ jobs:
           set -euo pipefail
           rm -rf .core-parser-assets && mkdir -p .core-parser-assets
           for attempt in $(seq 1 30); do
-            if gh release download v0.8.5 --repo alopex-db/alopex \
-              --pattern 'parser-assets-v0.8.5.json' \
-              --pattern 'parser-vendor-manifest-v0.8.5.json' \
-              --pattern 'alopex-parser-v0.8.5-contract-0.4.0-*.tar.gz' \
+            if gh release download "${CORE_TAG}" --repo alopex-db/alopex \
+              --pattern "parser-assets-v${ALOPEX_VERSION}.json" \
+              --pattern "parser-vendor-manifest-v${ALOPEX_VERSION}.json" \
+              --pattern "alopex-parser-v${ALOPEX_VERSION}-contract-0.4.0-*.tar.gz" \
               --dir .core-parser-assets --clobber; then
               break
             fi
@@ -224,15 +246,16 @@ jobs:
             sleep 20
           done
           python scripts/release/parser_asset_manifest.py verify-manifest \
-            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
+            --manifest "${PARSER_MANIFEST}" \
             --asset-dir .core-parser-assets
           TARGET_TRIPLE="$TARGET_TRIPLE" python - <<'PY'
           import hashlib, json, os, tarfile
           from pathlib import Path
           root = Path('.core-parser-assets')
-          envelope = json.loads((root / 'parser-assets-v0.8.5.json').read_text())
-          assert envelope['source']['tag'] == 'v0.8.5'
-          manifest = json.loads((root / 'parser-vendor-manifest-v0.8.5.json').read_text())
+          version = os.environ['ALOPEX_VERSION']
+          envelope = json.loads((root / f'parser-assets-v{version}.json').read_text())
+          assert envelope['source']['tag'] == f'v{version}'
+          manifest = json.loads((root / f'parser-vendor-manifest-v{version}.json').read_text())
           target = os.environ['TARGET_TRIPLE']
           asset = next(item for item in manifest['assets'] if item['target'] == target)
           with tarfile.open(root / asset['archive']['filename'], 'r:gz') as handle:
@@ -258,10 +281,10 @@ jobs:
           path: .release-tools
           sparse-checkout: scripts/release/retarget_python_parser_source.py
           sparse-checkout-cone-mode: false
-      - name: Bind source parser pins to v0.8.5 release assets
+      - name: Bind source parser pins to release assets
         run: |
           python .release-tools/scripts/release/retarget_python_parser_source.py \
-            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
+            --manifest "${PARSER_MANIFEST}" \
             --vendor-dir crates/alopex-sql/nim-sql-parser/vendor \
             --build-support crates/alopex-sql/build_support.rs
       - name: Build wheels
@@ -278,7 +301,8 @@ jobs:
           library_sha="$(TARGET_TRIPLE="${{ matrix.target_triple }}" python - <<'PY'
           import json, os
           from pathlib import Path
-          manifest = json.loads(Path('.core-parser-assets/parser-vendor-manifest-v0.8.5.json').read_text())
+          version = os.environ['ALOPEX_VERSION']
+          manifest = json.loads(Path(f'.core-parser-assets/parser-vendor-manifest-v{version}.json').read_text())
           print(next(a['library']['sha256'] for a in manifest['assets'] if a['target'] == os.environ['TARGET_TRIPLE']))
           PY
           )"
@@ -311,17 +335,26 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref }}
-      - name: Stage exact Alopex v0.8.5 parser assets
+      - name: Resolve source release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "ALOPEX_VERSION=${version}" >> "${GITHUB_ENV}"
+          echo "CORE_TAG=v${version}" >> "${GITHUB_ENV}"
+          echo "PARSER_MANIFEST=.core-parser-assets/parser-vendor-manifest-v${version}.json" >> "${GITHUB_ENV}"
+      - name: Stage exact Alopex parser assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           rm -rf .core-parser-assets && mkdir -p .core-parser-assets
           for attempt in $(seq 1 30); do
-            if gh release download v0.8.5 --repo alopex-db/alopex \
-              --pattern 'parser-assets-v0.8.5.json' \
-              --pattern 'parser-vendor-manifest-v0.8.5.json' \
-              --pattern 'alopex-parser-v0.8.5-contract-0.4.0-*.tar.gz' \
+            if gh release download "${CORE_TAG}" --repo alopex-db/alopex \
+              --pattern "parser-assets-v${ALOPEX_VERSION}.json" \
+              --pattern "parser-vendor-manifest-v${ALOPEX_VERSION}.json" \
+              --pattern "alopex-parser-v${ALOPEX_VERSION}-contract-0.4.0-*.tar.gz" \
               --dir .core-parser-assets --clobber; then
               break
             fi
@@ -330,15 +363,16 @@ jobs:
             sleep 20
           done
           python scripts/release/parser_asset_manifest.py verify-manifest \
-            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
+            --manifest "${PARSER_MANIFEST}" \
             --asset-dir .core-parser-assets
           python - <<'PY'
-          import hashlib, json, tarfile
+          import hashlib, json, os, tarfile
           from pathlib import Path
           root = Path('.core-parser-assets')
-          envelope = json.loads((root / 'parser-assets-v0.8.5.json').read_text())
-          assert envelope['source']['tag'] == 'v0.8.5'
-          manifest = json.loads((root / 'parser-vendor-manifest-v0.8.5.json').read_text())
+          version = os.environ['ALOPEX_VERSION']
+          envelope = json.loads((root / f'parser-assets-v{version}.json').read_text())
+          assert envelope['source']['tag'] == f'v{version}'
+          manifest = json.loads((root / f'parser-vendor-manifest-v{version}.json').read_text())
           target = 'x86_64-pc-windows-msvc'
           asset = next(item for item in manifest['assets'] if item['target'] == target)
           with tarfile.open(root / asset['archive']['filename'], 'r:gz') as handle:
@@ -363,10 +397,10 @@ jobs:
           path: .release-tools
           sparse-checkout: scripts/release/retarget_python_parser_source.py
           sparse-checkout-cone-mode: false
-      - name: Bind source parser pins to v0.8.5 release assets
+      - name: Bind source parser pins to release assets
         run: |
           python .release-tools/scripts/release/retarget_python_parser_source.py \
-            --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
+            --manifest "${PARSER_MANIFEST}" \
             --vendor-dir crates/alopex-sql/nim-sql-parser/vendor \
             --build-support crates/alopex-sql/build_support.rs
       - name: Build wheels
@@ -382,9 +416,10 @@ jobs:
           wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
           test -n "$wheel"
           library_sha="$(python - <<'PY'
-          import json
+          import json, os
           from pathlib import Path
-          manifest = json.loads(Path('.core-parser-assets/parser-vendor-manifest-v0.8.5.json').read_text())
+          version = os.environ['ALOPEX_VERSION']
+          manifest = json.loads(Path(f'.core-parser-assets/parser-vendor-manifest-v{version}.json').read_text())
           print(next(a['library']['sha256'] for a in manifest['assets'] if a['target'] == 'x86_64-pc-windows-msvc'))
           PY
           )"
@@ -558,8 +593,12 @@ jobs:
           REPAIR_FORWARD: ${{ inputs.repair_forward }}
         run: |
           set -euo pipefail
-          core_tag_sha="$(gh api "repos/${REPOSITORY}/git/ref/tags/v0.8.5" | jq -r '.object.sha')"
-          core_tag_type="$(gh api "repos/${REPOSITORY}/git/ref/tags/v0.8.5" | jq -r '.object.type')"
+          version="${PYTHON_TAG_NAME#alopex-py-v}"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          core_tag="v${version}"
+          printf 'VERSION=%s\nCORE_TAG=%s\n' "${version}" "${core_tag}" >> "${GITHUB_ENV}"
+          core_tag_sha="$(gh api "repos/${REPOSITORY}/git/ref/tags/${core_tag}" | jq -r '.object.sha')"
+          core_tag_type="$(gh api "repos/${REPOSITORY}/git/ref/tags/${core_tag}" | jq -r '.object.type')"
           if [[ "${core_tag_type}" == "tag" ]]; then
             core_tag_sha="$(gh api "repos/${REPOSITORY}/git/tags/${core_tag_sha}" | jq -r '.object.sha')"
           fi
@@ -618,15 +657,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p join-assets
-          gh release download v0.8.5 --repo "${REPOSITORY}" \
-            --pattern 'parser-assets-v0.8.5.json' \
-            --pattern 'parser-vendor-manifest-v0.8.5.json' \
+          gh release download "${CORE_TAG}" --repo "${REPOSITORY}" \
+            --pattern "parser-assets-v${VERSION}.json" \
+            --pattern "parser-vendor-manifest-v${VERSION}.json" \
             --dir join-assets --clobber
 
       - name: Build and verify the public same-SHA join
         env:
           REPOSITORY: ${{ github.repository }}
-          VERSION: "0.8.5"
         run: |
           set -euo pipefail
           python3 - "${CORE_TAG_SHA}" "${CORE_RUN_ID}" "${CORE_RUN_HEAD_SHA}" \
@@ -638,8 +676,8 @@ jobs:
 
           core_sha, core_run, core_run_head, python_run, python_head, asset_dir, repository, version = sys.argv[1:]
           root = pathlib.Path(asset_dir)
-          envelope = json.loads((root / "parser-assets-v0.8.5.json").read_text())
-          manifest = json.loads((root / "parser-vendor-manifest-v0.8.5.json").read_text())
+          envelope = json.loads((root / f"parser-assets-v{version}.json").read_text())
+          manifest = json.loads((root / f"parser-vendor-manifest-v{version}.json").read_text())
           def get_json(url):
               with urllib.request.urlopen(url) as response:
                   return json.load(response)
@@ -680,7 +718,7 @@ jobs:
               "tag": {"name": f"v{version}", "peeled_sha": core_sha},
               "core": {"status": "success", "published": True, "run_id": core_run, "head_sha": core_run_head, "source_sha": core_sha, "peeled_sha": core_sha, "registry": "crates.io", "crates": crates},
               "python": {"status": "success", "published": True, "run_id": python_run, "head_sha": python_head, "peeled_sha": core_sha, "registry": "pypi", "distributions": distributions},
-              "parser": {"contract": manifest["contract_version"], "manifest_sha256": digest(__import__("hashlib").sha256((root / "parser-vendor-manifest-v0.8.5.json").read_bytes()).hexdigest()), "envelope_sha256": digest(__import__("hashlib").sha256((root / "parser-assets-v0.8.5.json").read_bytes()).hexdigest()), "assets": assets},
+              "parser": {"contract": manifest["contract_version"], "manifest_sha256": digest(__import__("hashlib").sha256((root / f"parser-vendor-manifest-v{version}.json").read_bytes()).hexdigest()), "envelope_sha256": digest(__import__("hashlib").sha256((root / f"parser-assets-v{version}.json").read_bytes()).hexdigest()), "assets": assets},
               "publication_order": {"core_before_python": True},
               "repair_forward": {"complete": True},
           }

@@ -12,7 +12,7 @@
 
 ```toml
 [workspace.package]
-version = "0.8.4"  # ← ここを変更すると全クレートに反映
+version = "0.8.6"  # ← ここを変更すると全クレートに反映
 ```
 
 ### クレート一覧
@@ -36,10 +36,10 @@ version = "0.8.4"  # ← ここを変更すると全クレートに反映
 alopex-core → alopex-sql → alopex-dataframe → alopex-embedded → alopex-cluster → alopex-server → alopex-cli
 ```
 
-## v0.8.4 現行リリース契約
+## v0.8.6 現行リリース契約
 
-v0.8.4 は、main にレビュー済みの同一コミットを取り込み、そのコミットを
-明示的にタグ付けして公開するリリースである。RC は `rc/v0.8.4` を使用し、
+v0.8.6 は、main にレビュー済みの同一コミットを取り込み、そのコミットを
+明示的にタグ付けして公開するリリースである。RC は `rc/v0.8.6` を使用し、
 未公開のローカル生成物や合成コミットを公開入力にしてはならない。
 
 ### パーサー資産の不変条件
@@ -49,7 +49,7 @@ v0.8.4 は、main にレビュー済みの同一コミットを取り込み、�
   Nim 2.2.10 / Nimble 0.22.3 で個別にビルドし、各ターゲットの native smoke
   と SHA-256 検証を通過させてからアップロードする。
 - `parser-vendor-manifest.json` は追跡済みの入力を記録し、公開後に
-  `parser-assets-v0.8.4.json` がタグの peeled SHA、マニフェスト、アーカイブ、
+  `parser-assets-v0.8.6.json` がタグの peeled SHA、マニフェスト、アーカイブ、
   ライブラリ digest を同一性付きで束ねる。手作業コピーや別ビルドで補っては
   ならない。
 - Python 配布物は公開済み Alopex parser 資産を取得して package-local
@@ -75,7 +75,7 @@ Umbrella 全体と各 target/cache の合計は常に 50 GiB 以下であるこ�
 
 | プロジェクト | タグ形式 | 例 |
 |-------------|---------|-----|
-| alopex | `v{major}.{minor}.{patch}` | `v0.8.4` |
+| alopex | `v{major}.{minor}.{patch}` | `v0.8.6` |
 
 ### v0.7.0 リリース契約
 
@@ -175,8 +175,8 @@ Branch cleanup record の最小記録項目:
 
 ### 0. RCブランチの作成（必須）
 
-リリース作業は **必ずRCブランチから開始**する。v0.8.4 のRCブランチは
-`main` から作成し、`rc/v0.8.4` を使用する。
+リリース作業は **必ずRCブランチから開始**する。v0.8.6 のRCブランチは
+`main` から作成し、`rc/v0.8.6` を使用する。
 
 RCブランチの命名規則:
 
@@ -187,8 +187,8 @@ RCブランチの命名規則:
 ```bash
 git checkout main
 git pull origin main
-git checkout -b rc/v0.8.4
-git push -u origin rc/v0.8.4
+git checkout -b rc/v0.8.6
+git push -u origin rc/v0.8.6
 ```
 
 以後のリリース準備はこの RC ブランチで実施する。
