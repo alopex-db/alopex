@@ -41,6 +41,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Verify release workflow contract
+        shell: bash
+        run: bash scripts/release/v07_gate.sh --workflow-contract-only
       - name: Verify immutable tag and approved CI evidence
         env:
           GH_TOKEN: ${{ github.token }}
