@@ -87,9 +87,9 @@ class CiWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("cp \"${pinned_metadata}\" \"${nimble_dir}/packages_temp.json\"", action)
 
-    def test_v08_gate_exposes_staged_parser_dll_on_windows(self) -> None:
+    def test_v08_gate_exposes_just_built_parser_dll_on_windows(self) -> None:
         workflow = self.workflow("ci.yml")
-        stage_offset = workflow.index("name: Stage reviewed parser candidate for v0.8 surfaces")
+        stage_offset = workflow.index("name: Stage just-built parser for v0.8 surfaces")
         v07_offset = workflow.index("name: Run v0.7 baseline gate (Linux)", stage_offset)
         windows_path_step = workflow[stage_offset:v07_offset]
         self.assertIn("name: Add Nim library to PATH (Windows)", windows_path_step)
@@ -98,6 +98,21 @@ class CiWorkflowContractTests(unittest.TestCase):
             'echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"',
             windows_path_step,
         )
+
+    def test_v08_gate_uses_the_just_built_parser_instead_of_vendor(self) -> None:
+        workflow = self.workflow("ci.yml")
+        gate = workflow.split("  v08-release-gate:", maxsplit=1)[1].split(
+            "\n  ci-success:", maxsplit=1
+        )[0]
+
+        self.assertIn('ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"', gate)
+        self.assertIn(
+            "NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser",
+            gate,
+        )
+        self.assertIn("name: Stage just-built parser for v0.8 surfaces", gate)
+        self.assertIn('(cd "${local_dir}" && sha256sum -c SHA256SUMS)', gate)
+        self.assertNotIn('reviewed_dir="${NIM_SQL_PARSER_DIR}/vendor/', gate)
 
     def test_security_audit_is_fail_closed_with_a_guarded_exception(self) -> None:
         workflow = self.workflow("ci.yml")
