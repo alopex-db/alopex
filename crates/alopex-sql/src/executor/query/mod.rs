@@ -293,8 +293,10 @@ fn build_iterator_pipeline_with_outer<
             Ok((Box::new(filter_iter), projection, schema))
         }
         LogicalPlan::Project { input, projection } => {
+            let input_result =
+                execute_query_result_with_outer_and_policy(txn, catalog, *input, outer, memory)?;
             let (mut input_iter, _input_projection, schema) =
-                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer)?;
+                materialize_query_result(input_result);
             let mut rows = Vec::new();
             while let Some(result) = input_iter.next_row() {
                 rows.push(result?);

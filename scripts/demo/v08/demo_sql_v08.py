@@ -240,7 +240,10 @@ def main() -> int:
                     {"sales_id": 4, "chosen_id": 4},
                 ],
             ),
-            ("WITH sales AS (SELECT 101 AS id) SELECT id FROM sales", [{"id": 101}]),
+            (
+                "WITH sales AS (SELECT id + 100 AS id FROM sales WHERE id = 1) SELECT id FROM sales",
+                [{"id": 101}],
+            ),
             (
                 "SELECT id, SUM(amount) OVER () AS grand FROM sales ORDER BY id",
                 [{"id": idx, "grand": 650.0} for idx in range(1, 6)],
@@ -369,7 +372,7 @@ def main() -> int:
         ]
 
         error_checks = [
-            ("SELECT * FROM ints AS x JOIN doubles AS x ON x.id = x.id", "duplicate"),
+            ("SELECT * FROM ints AS x JOIN doubles AS x ON x.id = x.id", "ALOPEX-C004"),
             ("SELECT amount AS ident FROM sales WHERE ident > 100", "ALOPEX-C003"),
             ("SELECT region AS area, COUNT(*) FROM sales GROUP BY area", "ALOPEX-C003"),
             ("SELECT CASE WHEN TRUE THEN 1 ELSE 'text' END", "type mismatch"),

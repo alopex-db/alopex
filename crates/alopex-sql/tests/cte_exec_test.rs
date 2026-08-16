@@ -114,14 +114,13 @@ fn cte_can_be_used_in_a_join() {
 #[test]
 fn cte_name_shadows_a_base_table() {
     let query = last_query(
-        "CREATE TABLE c (id INT);\
-         CREATE TABLE source (id INT);\
-         INSERT INTO c VALUES (99);\
-         INSERT INTO source VALUES (1);\
-         WITH c AS (SELECT id FROM source) SELECT id FROM c;",
+        "CREATE TABLE sales (id INT);\
+         INSERT INTO sales VALUES (1), (99);\
+         WITH sales AS (SELECT id + 100 AS id FROM sales WHERE id = 1)\
+         SELECT id FROM sales;",
     );
 
-    assert_eq!(query.rows, vec![vec![SqlValue::Integer(1)]]);
+    assert_eq!(query.rows, vec![vec![SqlValue::Integer(101)]]);
 }
 
 #[test]

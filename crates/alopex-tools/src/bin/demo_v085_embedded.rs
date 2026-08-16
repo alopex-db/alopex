@@ -420,7 +420,7 @@ fn scenario_local_sql_matrix() -> DemoResult {
             vec![vec![SqlValue::Integer(3)]],
         ),
         (
-            "WITH sales AS (SELECT 101 AS id) SELECT id FROM sales",
+            "WITH sales AS (SELECT id + 100 AS id FROM sales WHERE id = 1) SELECT id FROM sales",
             vec![vec![SqlValue::Integer(101)]],
         ),
         (

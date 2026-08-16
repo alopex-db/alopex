@@ -103,8 +103,8 @@ happened to run:
    `(1,2), (2,2), (3,3), (3,4), (4,3), (4,4)` for
    `(sales.id, cte.id)`; no implicit deduplication is allowed.
 5. A CTE name shadows a same-named base table for that statement. The demo's
-   `WITH sales AS (SELECT 101 AS id)` must return 101 rather than a base-table
-   row.
+   `WITH sales AS (SELECT id + 100 AS id FROM sales WHERE id = 1)` must use the
+   base table inside the CTE body, then shadow it outside and return 101.
 6. Explicit `ROWS BETWEEN` and `RANGE BETWEEN` frames are outside v0.8.6 and
    must be rejected by name. Supported implicit frames are the whole partition
    without window `ORDER BY`, and cumulative through the current row with it.
