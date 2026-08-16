@@ -13,8 +13,7 @@ pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.4.0";
 pub(crate) const VENDOR_MANIFEST_SHA256: &str =
     "db70742bea017a4d2683ad0d17f602b25dbcdfa7f512e3c283fbb9f7fcce298d";
 const VENDOR_MANIFEST_SCHEMA: &str = "alopex-parser-vendor-manifest-v1";
-const VENDOR_MANIFEST_RELATIVE_PATH: &str =
-    "nim-sql-parser/vendor/parser-vendor-manifest.json";
+const VENDOR_MANIFEST_RELATIVE_PATH: &str = "nim-sql-parser/vendor/parser-vendor-manifest.json";
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_SIDECAR_BYTES: u64 = 1024;
 const REQUIRED_TARGETS: [&str; 4] = [
