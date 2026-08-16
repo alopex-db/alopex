@@ -22,7 +22,7 @@ mod embedded {
 
 const NATIVE_SMOKE_FLAG: &str = "--parser-native-smoke";
 const VENDOR_MANIFEST: &str =
-    include_str!("../../../alopex-sql/nim-sql-parser/vendor/parser-vendor-manifest-v0.8.4.json");
+    include_str!("../../../alopex-sql/nim-sql-parser/vendor/parser-vendor-manifest.json");
 const MAX_NATIVE_PAYLOAD_BYTES: usize = 1_048_576;
 const CANONICAL_CONTINUOUS_AGGREGATE_SQL: &str = r#"CREATE CONTINUOUS AGGREGATE cpu_hourly
 AS

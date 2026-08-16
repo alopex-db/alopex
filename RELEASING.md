@@ -48,7 +48,7 @@ v0.8.4 は、main にレビュー済みの同一コミットを取り込み、�
 - Linux x86_64、macOS x86_64、macOS arm64、Windows x86_64 の4ターゲットを
   Nim 2.2.10 / Nimble 0.22.3 で個別にビルドし、各ターゲットの native smoke
   と SHA-256 検証を通過させてからアップロードする。
-- `parser-vendor-manifest-v0.8.4.json` は追跡済みの入力を記録し、公開後に
+- `parser-vendor-manifest.json` は追跡済みの入力を記録し、公開後に
   `parser-assets-v0.8.4.json` がタグの peeled SHA、マニフェスト、アーカイブ、
   ライブラリ digest を同一性付きで束ねる。手作業コピーや別ビルドで補っては
   ならない。
