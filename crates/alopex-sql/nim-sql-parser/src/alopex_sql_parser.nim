@@ -857,8 +857,9 @@ proc writeSelectKind(s: Stream; node: SqlNode) =
   s.writeSelectFields(node)
 
 proc writeContinuousAggregateQuery(s: Stream; node: SqlNode) =
-  # 継続集約のクエリは WITH を含めない(includeWith = false)ため常に 11。
-  s.pack_map(11)
+  # 継続集約のクエリは WITH を含めない(includeWith = false)ため、
+  # Select の固定 11 field と statement span の合計で常に 12。
+  s.pack_map(12)
   s.writeSelectFields(node, false)
   s.writeKey("span")
   s.writeSpan(node.span)
