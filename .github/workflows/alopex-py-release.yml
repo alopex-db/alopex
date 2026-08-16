@@ -134,7 +134,7 @@ jobs:
         run: |
           python .release-tools/scripts/release/retarget_python_parser_source.py \
             --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
-            --vendor-manifest crates/alopex-sql/nim-sql-parser/vendor/parser-vendor-manifest-v0.8.4.json \
+            --vendor-manifest crates/alopex-sql/nim-sql-parser/vendor/parser-vendor-manifest.json \
             --build-support crates/alopex-sql/build_support.rs
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -262,7 +262,7 @@ jobs:
         run: |
           python .release-tools/scripts/release/retarget_python_parser_source.py \
             --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
-            --vendor-manifest crates/alopex-sql/nim-sql-parser/vendor/parser-vendor-manifest-v0.8.4.json \
+            --vendor-manifest crates/alopex-sql/nim-sql-parser/vendor/parser-vendor-manifest.json \
             --build-support crates/alopex-sql/build_support.rs
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -367,7 +367,7 @@ jobs:
         run: |
           python .release-tools/scripts/release/retarget_python_parser_source.py \
             --manifest .core-parser-assets/parser-vendor-manifest-v0.8.5.json \
-            --vendor-manifest crates/alopex-sql/nim-sql-parser/vendor/parser-vendor-manifest-v0.8.4.json \
+            --vendor-manifest crates/alopex-sql/nim-sql-parser/vendor/parser-vendor-manifest.json \
             --build-support crates/alopex-sql/build_support.rs
       - name: Build wheels
         uses: PyO3/maturin-action@v1

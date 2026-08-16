@@ -14,7 +14,7 @@ pub(crate) const VENDOR_MANIFEST_SHA256: &str =
     "db70742bea017a4d2683ad0d17f602b25dbcdfa7f512e3c283fbb9f7fcce298d";
 const VENDOR_MANIFEST_SCHEMA: &str = "alopex-parser-vendor-manifest-v1";
 const VENDOR_MANIFEST_RELATIVE_PATH: &str =
-    "nim-sql-parser/vendor/parser-vendor-manifest-v0.8.4.json";
+    "nim-sql-parser/vendor/parser-vendor-manifest.json";
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_SIDECAR_BYTES: u64 = 1024;
 const REQUIRED_TARGETS: [&str; 4] = [
@@ -411,8 +411,8 @@ mod tests {
             let source_vendor =
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("nim-sql-parser/vendor");
             fs::copy(
-                source_vendor.join("parser-vendor-manifest-v0.8.4.json"),
-                vendor.join("parser-vendor-manifest-v0.8.4.json"),
+                source_vendor.join("parser-vendor-manifest.json"),
+                vendor.join("parser-vendor-manifest.json"),
             )
             .expect("copy vendor manifest");
             if copy_linux {
@@ -439,7 +439,7 @@ mod tests {
 
         fn manifest(&self) -> PathBuf {
             self.crate_root
-                .join("nim-sql-parser/vendor/parser-vendor-manifest-v0.8.4.json")
+                .join("nim-sql-parser/vendor/parser-vendor-manifest.json")
         }
     }
 

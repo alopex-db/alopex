@@ -18,8 +18,7 @@ fn main() {
     let resolved = resolve_native_library(&manifest_dir, &target, explicit_dir.as_deref())
         .unwrap_or_else(|cause| panic!("native parser resolution failed: {cause}"));
 
-    let vendor_manifest =
-        manifest_dir.join("nim-sql-parser/vendor/parser-vendor-manifest-v0.8.4.json");
+    let vendor_manifest = manifest_dir.join("nim-sql-parser/vendor/parser-vendor-manifest.json");
     println!("cargo:rerun-if-changed={}", vendor_manifest.display());
     println!(
         "cargo:rerun-if-changed={}",
