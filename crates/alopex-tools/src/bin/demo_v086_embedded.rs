@@ -1,4 +1,4 @@
-//! Complete v0.8.5 embedded-local public-surface walkthrough.
+//! Complete v0.8.6 embedded-local public-surface walkthrough.
 //!
 //! Every scenario prints a stable ID and checks its observable result. A failed
 //! assertion or API error makes the release verification step fail.
@@ -908,7 +908,7 @@ fn scenario_fail_closed_boundaries() -> DemoResult {
 }
 
 fn run() -> DemoResult {
-    println!("AlopexDB v0.8.5 complete embedded-local API demo");
+    println!("AlopexDB v0.8.6 complete embedded-local API demo");
     run_scenario(
         "EMB-01-storage-durability",
         "storage modes and durability",

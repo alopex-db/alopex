@@ -219,13 +219,13 @@ jobs:
           args=()
           for record in "${records[@]}"; do args+=(--record "$record"); done
           python scripts/release/parser_asset_manifest.py assemble-manifest \
-            "${args[@]}" --asset-dir artifacts --output artifacts/parser-vendor-manifest-v0.8.5.json
+            "${args[@]}" --asset-dir artifacts --output artifacts/parser-vendor-manifest-v0.8.6.json
           python scripts/release/parser_asset_manifest.py verify-manifest \
-            --manifest artifacts/parser-vendor-manifest-v0.8.5.json --asset-dir artifacts
+            --manifest artifacts/parser-vendor-manifest-v0.8.6.json --asset-dir artifacts
           python scripts/release/parser_asset_manifest.py release-envelope \
-            --manifest artifacts/parser-vendor-manifest-v0.8.5.json \
+            --manifest artifacts/parser-vendor-manifest-v0.8.6.json \
             --asset-dir artifacts --tag "$GITHUB_REF_NAME" --tag-sha "$GITHUB_SHA" \
-            --output artifacts/parser-assets-v0.8.5.json
+            --output artifacts/parser-assets-v0.8.6.json
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -285,6 +285,85 @@ jobs:
           echo "RELEASE_TAG_NAME=${RELEASE_TAG_NAME}" >> "$GITHUB_ENV"
           echo "RELEASE_TARGET_SHA=${RELEASE_TARGET_SHA}" >> "$GITHUB_ENV"
           echo "RELEASE_STAGE=$stage" >> "$GITHUB_ENV"
+
+      - name: Bind crate source staging to freshly built parser assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG_NAME#v}"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          asset_dir="${RUNNER_TEMP}/alopex-release-parser-assets"
+          rm -rf "${asset_dir}"
+          mkdir -p "${asset_dir}"
+          gh release download "${RELEASE_TAG_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern "parser-vendor-manifest-v${version}.json" \
+            --pattern "alopex-parser-v${version}-contract-0.4.0-*.tar.gz" \
+            --dir "${asset_dir}" --clobber
+          manifest="${asset_dir}/parser-vendor-manifest-v${version}.json"
+          python "${RELEASE_STAGE}/scripts/release/parser_asset_manifest.py" verify-manifest \
+            --manifest "${manifest}" --asset-dir "${asset_dir}"
+          RELEASE_STAGE="${RELEASE_STAGE}" MANIFEST="${manifest}" ASSET_DIR="${asset_dir}" \
+            python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path, PurePosixPath
+          import tarfile
+
+          stage = Path(os.environ["RELEASE_STAGE"])
+          manifest_path = Path(os.environ["MANIFEST"])
+          asset_dir = Path(os.environ["ASSET_DIR"])
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          vendor = stage / "crates/alopex-sql/nim-sql-parser/vendor"
+          for asset in manifest["assets"]:
+              archive = asset_dir / asset["archive"]["filename"]
+              library_path = PurePosixPath(asset["library"]["path"])
+              if library_path.is_absolute() or ".." in library_path.parts:
+                  raise SystemExit(f"unsafe parser library path: {library_path}")
+              with tarfile.open(archive, "r:gz") as handle:
+                  member = handle.getmember(str(library_path))
+                  source = handle.extractfile(member)
+                  if source is None:
+                      raise SystemExit(f"parser library is not a file: {library_path}")
+                  library = source.read()
+              expected = asset["library"]["sha256"]
+              if hashlib.sha256(library).hexdigest() != expected:
+                  raise SystemExit(f"parser library digest mismatch: {asset['target']}")
+              target_dir = vendor / asset["target"]
+              target_dir.mkdir(parents=True, exist_ok=True)
+              name = library_path.name
+              (target_dir / name).write_bytes(library)
+              (target_dir / "CONTRACT_VERSION").write_bytes(b"0.4.0\n")
+              (target_dir / "SHA256SUMS").write_bytes(
+                  f"{expected}  {name}\n".encode()
+              )
+          fixed_manifest = vendor / "parser-vendor-manifest.json"
+          versioned_manifests = sorted(vendor.glob("parser-vendor-manifest-v*.json"))
+          if fixed_manifest.is_file() and not versioned_manifests:
+              destination_manifest = fixed_manifest
+          elif not fixed_manifest.exists() and len(versioned_manifests) == 1:
+              destination_manifest = versioned_manifests[0]
+          else:
+              raise SystemExit(
+                  "unknown or ambiguous parser vendor manifest layout in release staging"
+              )
+          destination_manifest.write_bytes(manifest_path.read_bytes())
+          PY
+          python scripts/release/retarget_python_parser_source.py \
+            --manifest "${manifest}" \
+            --vendor-dir "${RELEASE_STAGE}/crates/alopex-sql/nim-sql-parser/vendor" \
+            --build-support "${RELEASE_STAGE}/crates/alopex-sql/build_support.rs"
+          staged_manifest="${RELEASE_STAGE}/crates/alopex-sql/nim-sql-parser/vendor/parser-vendor-manifest.json"
+          if [[ ! -f "${staged_manifest}" ]]; then
+            mapfile -t historical_manifests < <(find \
+              "${RELEASE_STAGE}/crates/alopex-sql/nim-sql-parser/vendor" \
+              -maxdepth 1 -name 'parser-vendor-manifest-v*.json' -type f | sort)
+            test "${#historical_manifests[@]}" -eq 1
+            staged_manifest="${historical_manifests[0]}"
+          fi
+          python "${RELEASE_STAGE}/scripts/release/parser_asset_manifest.py" verify-manifest \
+            --manifest "${staged_manifest}" \
+            --asset-dir "${asset_dir}"
 
       - name: Create publish helper
         run: |

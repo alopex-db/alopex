@@ -53,3 +53,6 @@ crates/*/fuzz/corpus/
 /.spec-workflow/
 /release-verification-output/
 formal/**/_apalache-out/
+
+# 並行作業用 worktree (Codex sandbox が alopex/ 配下しか書けないため)
+/.wt/

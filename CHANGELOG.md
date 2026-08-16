@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.6] — 2026-08-17
+
+### Added
+
+- SQL projection aliases resolve in `ORDER BY` and `HAVING` with explicit
+  scope errors in `WHERE` and `GROUP BY`.
+- `REAL` is accepted as a SQL type and is preserved through Rust, Arrow, and
+  Python value surfaces.
+- Searched and simple `CASE` expressions support numeric promotion, implicit
+  `NULL`, and typed Boolean results.
+- `UNION`, `UNION ALL`, `INTERSECT`, and `EXCEPT` implement duplicate,
+  precedence, associativity, NULL, and type/column-count contracts.
+- Non-recursive common table expressions support multiple definitions, joins,
+  aggregation, and statement-local table shadowing.
+- Aggregate and ranking window functions support partition-wide and implicit
+  cumulative frames; unsupported positional functions and explicit
+  `ROWS`/`RANGE` frames fail closed.
+
+### Release verification
+
+- Python and Rust public demos compare complete row values for the v0.8.6 SQL
+  contracts, including duplicate rows, NULLs, asymmetric set operands, CTE join
+  multiplicity, and window ordering.
+- CI builds and links the just-built Nim parser for the v0.8.6 gate and checks
+  that test binaries do not resolve the historical vendored library.
+- Parser release assets retain FFI contract `0.4.0` while being rebuilt from
+  the v0.8.6 source tag for every supported native target.
+
 ## [0.8.5] — 2026-08-14
 
 ### Fixed

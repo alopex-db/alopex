@@ -1,4 +1,4 @@
-# v0.8.5 embedded-local and v0.8.6 SQL demo coverage
+# v0.8.6 embedded-local and SQL demo coverage
 
 `demo_embedded_v085.sh` is the single Rust Embedded API walkthrough used by
 post-release verification. It builds against local path dependencies during

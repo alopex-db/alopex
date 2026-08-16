@@ -27,8 +27,10 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         )
         self.assertNotIn("if len(repaired) != 1:", block)
         self.assertIn("bash scripts/release/verify-release/run.sh --verify-join", block)
-        self.assertIn("parser-assets-v0.8.5.json", block)
-        self.assertIn("parser-vendor-manifest-v0.8.5.json", block)
+        self.assertIn('parser-assets-v${VERSION}.json', block)
+        self.assertIn('parser-vendor-manifest-v${VERSION}.json', block)
+        self.assertIn('f"parser-assets-v{version}.json"', block)
+        self.assertIn('f"parser-vendor-manifest-v{version}.json"', block)
         self.assertIn("core and Python tags do not share a peeled SHA", block)
 
     def test_join_does_not_use_unbound_latest_run_or_rebuild(self) -> None:
@@ -80,6 +82,7 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         trigger = text.split("  workflow_dispatch:", maxsplit=1)[0]
         self.assertIn('- "alopex-py-v*"', trigger)
         self.assertIn('- "!alopex-py-v0.8.5"', trigger)
+        self.assertIn('- "!alopex-py-v0.8.6"', trigger)
 
     def test_public_verifier_uses_immutable_tag_for_repair_run(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
@@ -114,6 +117,11 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertNotIn(
             "--vendor-manifest crates/alopex-sql/nim-sql-parser/vendor/",
             text,
+        )
+        self.assertEqual(text.count("name: Resolve source release version"), 3)
+        self.assertEqual(text.count('echo "CORE_TAG=v${version}"'), 3)
+        self.assertGreaterEqual(
+            text.count('parser-vendor-manifest-v${ALOPEX_VERSION}.json'), 3
         )
 
     def test_delivery_builds_pin_maturin_and_repair_macos_dylibs(self) -> None:

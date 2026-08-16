@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 
 
-class V085ReleaseContractTests(unittest.TestCase):
+class V086ReleaseContractTests(unittest.TestCase):
     def test_target_version_is_consistent(self) -> None:
         workspace = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
@@ -24,12 +24,12 @@ class V085ReleaseContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         version = re.search(r'^version = "([0-9.]+)"$', workspace, re.MULTILINE)
         self.assertIsNotNone(version)
-        self.assertEqual(version.group(1), "0.8.5")
-        self.assertIn('ALOPEX_VERSION="0.8.5"', run)
-        self.assertIn("parser-assets-v0.8.5.json", release)
-        self.assertIn("parser-assets-v0.8.5.json", python_release)
-        self.assertIn('REQUIRED_ALOPEX_VERSION="0.8.5"', parser_build)
-        self.assertIn('REQUIRED_ALOPEX_VERSION = "0.8.5"', parser_manifest)
+        self.assertEqual(version.group(1), "0.8.6")
+        self.assertIn('ALOPEX_VERSION="0.8.6"', run)
+        self.assertIn("parser-assets-v0.8.6.json", release)
+        self.assertIn('parser-assets-v${ALOPEX_VERSION}.json', python_release)
+        self.assertIn('REQUIRED_ALOPEX_VERSION="0.8.6"', parser_build)
+        self.assertIn('REQUIRED_ALOPEX_VERSION = "0.8.6"', parser_manifest)
 
     def test_release_separates_fresh_parser_assets_from_crate_vendor(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
@@ -99,6 +99,20 @@ class V085ReleaseContractTests(unittest.TestCase):
         self.assertIn(
             "env -u NIM_SQL_PARSER_LIB_DIR cargo publish", publish
         )
+        self.assertIn(
+            "Bind crate source staging to freshly built parser assets", publish
+        )
+        self.assertIn(
+            '--vendor-dir "${RELEASE_STAGE}/crates/alopex-sql/nim-sql-parser/vendor"',
+            publish,
+        )
+        self.assertIn("parser library digest mismatch", publish)
+        self.assertIn(
+            "unknown or ambiguous parser vendor manifest layout", publish
+        )
+        self.assertIn(
+            "python scripts/release/retarget_python_parser_source.py", publish
+        )
 
     def test_core_repair_forward_is_bound_to_the_immutable_release_tag(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
@@ -140,16 +154,16 @@ class V085ReleaseContractTests(unittest.TestCase):
 
     def test_embedded_demo_covers_every_v08_local_capability_group(self) -> None:
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
-        wrapper = (ROOT / "scripts/demo/v08/demo_embedded_v085.sh").read_text(
+        wrapper = (ROOT / "scripts/demo/v08/demo_embedded_v086.sh").read_text(
             encoding="utf-8"
         )
         source = (
-            ROOT / "crates/alopex-tools/src/bin/demo_v085_embedded.rs"
+            ROOT / "crates/alopex-tools/src/bin/demo_v086_embedded.rs"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("scripts/demo/v08/demo_embedded_v085.sh", run)
+        self.assertIn("scripts/demo/v08/demo_embedded_v086.sh", run)
         self.assertIn('cp crates/alopex-tools/build.rs "${tool_source}/"', run)
-        self.assertIn("demo-v085-embedded", wrapper)
+        self.assertIn("demo-v086-embedded", wrapper)
         build = (ROOT / "crates/alopex-tools/build.rs").read_text(encoding="utf-8")
         self.assertIn("DEP_ALOPEX_SQL_PARSER_LIBDIR", build)
         self.assertIn("rustc-link-arg-bins", build)

@@ -20,9 +20,9 @@ targets = [
     "x86_64-pc-windows-msvc",
 ]
 candidate = {
-    "version": "0.8.5",
+    "version": "0.8.6",
     "reviewed_main_sha": sha,
-    "tag": {"name": "v0.8.5", "peeled_sha": sha},
+    "tag": {"name": "v0.8.6", "peeled_sha": sha},
     "core": {
         "status": "success",
         "published": True,
