@@ -84,6 +84,39 @@ class V086ReleaseContractTests(unittest.TestCase):
         self.assertIn("publish_report: true", python)
         self.assertIn("verify_python_vector_api.py", python)
 
+    def test_immutable_tag_can_resume_full_release_after_early_gate_failure(self) -> None:
+        release = (ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        gate = release.split("  ci-gate:", maxsplit=1)[1].split(
+            "  build-release:", maxsplit=1
+        )[0]
+        dispatch = release.split("  dispatch-python-release:", maxsplit=1)[1]
+
+        self.assertIn(
+            "RELEASE_TAG_NAME: ${{ inputs.release_tag || github.ref_name }}", release
+        )
+        self.assertIn(
+            "RELEASE_TARGET_SHA: ${{ inputs.target_sha || github.sha }}", release
+        )
+        self.assertGreaterEqual(
+            release.count("ref: ${{ inputs.release_tag || github.ref }}"), 4
+        )
+        self.assertIn(
+            "ref: ${{ inputs.repair_forward && github.ref || inputs.release_tag || github.ref }}",
+            release,
+        )
+        self.assertIn('git rev-parse "${RELEASE_TAG_NAME}^{commit}"', gate)
+        self.assertIn('--commit "${RELEASE_TARGET_SHA}"', gate)
+        self.assertIn("for attempt in $(seq 1 30)", gate)
+        self.assertNotIn("env.GITHUB_SHA", gate)
+        self.assertIn(
+            "!inputs.repair_forward && needs.publish-crate.result == 'success'",
+            dispatch,
+        )
+        self.assertIn('--ref "${RELEASE_TAG_NAME}"', dispatch)
+        self.assertIn('target_sha=${RELEASE_TARGET_SHA}', dispatch)
+
     def test_crate_publish_verifies_the_packaged_vendor_tree(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
