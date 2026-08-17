@@ -150,7 +150,7 @@ jobs:
         run: |
           set -euo pipefail
           branch="report/verify-release-v${VERSION}"
-          public_url="https://raw.githubusercontent.com/alopex-db/docs/main/reports/release-verification/v${VERSION}.md"
+          public_url="https://raw.githubusercontent.com/alopex-db/docs/main/reports/release-verification/v${VERSION}.md?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           if curl -fsSL "${public_url}" -o "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
             cmp -s "${REPORT_ROOT}/v${VERSION}.md" "${RUNNER_TEMP}/docs-v${VERSION}.md"; then
             echo "The exact report is already present on docs main."
@@ -178,7 +178,7 @@ jobs:
           source_report="${REPORT_ROOT}/v${VERSION}.md"
           for attempt in $(seq 1 60); do
             if curl -fsSL \
-              "https://raw.githubusercontent.com/alopex-db/docs/main/reports/release-verification/v${VERSION}.md" \
+              "https://raw.githubusercontent.com/alopex-db/docs/main/reports/release-verification/v${VERSION}.md?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
               -o "${RUNNER_TEMP}/docs-v${VERSION}.md" && \
               cmp -s "${source_report}" "${RUNNER_TEMP}/docs-v${VERSION}.md"; then
               exit 0

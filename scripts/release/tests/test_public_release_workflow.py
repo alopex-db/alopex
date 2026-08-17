@@ -33,6 +33,11 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("must not contain executed SKIP", reporter)
         self.assertIn("cmp -s", self.text)
+        self.assertIn("?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}", self.text)
+        self.assertIn(
+            "?cachebust=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}",
+            self.text,
+        )
         self.assertNotIn("git push --force", self.text)
 
     def test_verification_and_publication_have_separate_permissions(self) -> None:
