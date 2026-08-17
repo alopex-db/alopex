@@ -2493,6 +2493,64 @@
       "ref": "refs/tags/v0.8.6",
       "schema_version": 1,
       "workload_signature": "c9e29248f7675a19ab02fa947b04916d26449187a7b14b4d6fe1340aedeeb72c"
+    },
+    {
+      "commit": "1c07c9e87da3e5c58cbe1699a1796a53ba79bbc6",
+      "dependencies": {
+        "alopex": "0.8.6",
+        "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
+        "iniconfig": "2.3.0",
+        "maturin": "1.14.1",
+        "nim": "unavailable",
+        "numpy": "2.4.6",
+        "packaging": "26.3",
+        "patchelf": "patchelf 0.18.0",
+        "pip": "26.2",
+        "pluggy": "1.6.0",
+        "polars": "1.43.2",
+        "polars-runtime-32": "1.43.2",
+        "py-cpuinfo": "9.0.0",
+        "pygments": "2.20.0",
+        "pytest": "9.1.1",
+        "pytest-benchmark": "5.2.3",
+        "python": "3.11.11",
+        "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+        "setuptools": "65.5.0"
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz",
+        "cpu_governor": "performance",
+        "fingerprint": "c9892154e84e679a",
+        "kernel": "6.17.0-1022-azure",
+        "machine": "x86_64",
+        "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+        "python": "3.11.11",
+        "system": "Linux",
+        "turbo_policy": "no_turbo=0"
+      },
+      "lock_hash": "d464bfc157b87d319280c2f53bace9a993460381898855a10731d65da002bdce",
+      "measured_at": "2026-08-17T01:01:25.434852+00:00",
+      "metrics": {
+        "read_overhead_pct": {
+          "direction": "lower_is_better",
+          "unit": "%",
+          "value": 0.5912005634093727
+        },
+        "scan_overhead_ms": {
+          "direction": "lower_is_better",
+          "unit": "ms",
+          "value": 0.001397899990251971
+        },
+        "write_overhead_pct": {
+          "direction": "lower_is_better",
+          "unit": "%",
+          "value": 0.627713715795944
+        }
+      },
+      "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+      "ref": "refs/heads/main",
+      "schema_version": 1,
+      "workload_signature": "c9e29248f7675a19ab02fa947b04916d26449187a7b14b4d6fe1340aedeeb72c"
     }
   ],
   "schema_version": 1
