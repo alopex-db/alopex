@@ -886,7 +886,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         upload = self.workflow.index("uses: actions/upload-artifact@v4")
         self.assertLess(verify, upload)
         self.assertIn("native smoke", self.workflow.lower())
-        self.assertIn("parser-assets-v0.8.6.json", self.workflow)
+        self.assertIn('envelope="artifacts/parser-assets-v${version}.json"', self.workflow)
 
     def test_release_envelope_binds_peeled_tag_sha_and_manifest(self) -> None:
         self.assertIn("git rev-parse", self.workflow)

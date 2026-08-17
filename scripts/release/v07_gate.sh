@@ -155,8 +155,10 @@ check_release_workflow_contract() {
         "release workflow downloads build artifacts before release"
     require_file_contains "${release_workflow}" "softprops/action-gh-release@v2" \
         "release workflow creates GitHub release"
-    require_file_contains "${py_release_workflow}" "alopex-py-v\\*" \
-        "independent alopex-py release tag trigger is preserved"
+    require_file_contains "${py_release_workflow}" "core_run_id:" \
+        "alopex-py release requires an explicitly bound core run"
+    require_file_contains "${release_workflow}" "core_run_id=\\\${GITHUB_RUN_ID}" \
+        "core release dispatches Python with its exact run identity"
 }
 
 verify_release_binary() {

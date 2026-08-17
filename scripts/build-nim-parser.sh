@@ -11,7 +11,15 @@ MANIFEST_TOOL="${ROOT_DIR}/scripts/release/parser_asset_manifest.py"
 BACKEND="${NIM_PARSER_BACKEND:-auto}"
 TARGET=""
 ARCHIVE_DIR=""
-REQUIRED_ALOPEX_VERSION="0.8.6"
+REQUIRED_ALOPEX_VERSION="$(python3 - "${ROOT_DIR}/Cargo.toml" <<'PY'
+import pathlib
+import sys
+import tomllib
+
+with pathlib.Path(sys.argv[1]).open("rb") as stream:
+    print(tomllib.load(stream)["workspace"]["package"]["version"])
+PY
+)"
 REQUIRED_CONTRACT_VERSION="0.4.0"
 REQUIRED_NIM_VERSION="2.2.10"
 REQUIRED_NIMBLE_VERSION="0.22.3"

@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 
 
-class V086ReleaseContractTests(unittest.TestCase):
+class ReleaseContractTests(unittest.TestCase):
     def test_target_version_is_consistent(self) -> None:
         workspace = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
@@ -22,14 +22,26 @@ class V086ReleaseContractTests(unittest.TestCase):
         parser_manifest = (
             ROOT / "scripts/release/parser_asset_manifest.py"
         ).read_text(encoding="utf-8")
+        verifier_image = (
+            ROOT / "scripts/release/verify-release/Dockerfile"
+        ).read_text(encoding="utf-8")
         version = re.search(r'^version = "([0-9.]+)"$', workspace, re.MULTILINE)
         self.assertIsNotNone(version)
-        self.assertEqual(version.group(1), "0.8.6")
-        self.assertIn('ALOPEX_VERSION="0.8.6"', run)
-        self.assertIn("parser-assets-v0.8.6.json", release)
+        self.assertIsNotNone(version.group(1))
+        self.assertIn('["workspace"]["package"]["version"]', run)
+        self.assertIn('envelope="artifacts/parser-assets-v${version}.json"', release)
         self.assertIn('parser-assets-v${ALOPEX_VERSION}.json', python_release)
-        self.assertIn('REQUIRED_ALOPEX_VERSION="0.8.6"', parser_build)
-        self.assertIn('REQUIRED_ALOPEX_VERSION = "0.8.6"', parser_manifest)
+        self.assertIn('["workspace"]["package"]["version"]', parser_build)
+        self.assertIn("REQUIRED_ALOPEX_VERSION = _workspace_version()", parser_manifest)
+        for operational_file in (
+            run,
+            release,
+            python_release,
+            parser_build,
+            parser_manifest,
+            verifier_image,
+        ):
+            self.assertNotIn("0.8.6", operational_file)
 
     def test_release_separates_fresh_parser_assets_from_crate_vendor(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
@@ -110,12 +122,13 @@ class V086ReleaseContractTests(unittest.TestCase):
         self.assertIn('--commit "${RELEASE_TARGET_SHA}"', gate)
         self.assertIn("for attempt in $(seq 1 30)", gate)
         self.assertNotIn("env.GITHUB_SHA", gate)
-        self.assertIn(
-            "!inputs.repair_forward && needs.publish-crate.result == 'success'",
-            dispatch,
-        )
-        self.assertIn('--ref "${RELEASE_TAG_NAME}"', dispatch)
+        self.assertIn("needs.publish-crate.result == 'success'", dispatch)
+        self.assertIn('python_workflow_ref="${python_tag}"', dispatch)
+        self.assertIn('python_workflow_ref="${GITHUB_REF_NAME}"', dispatch)
+        self.assertIn('expected_workflow_sha="${RELEASE_TARGET_SHA}"', dispatch)
         self.assertIn('target_sha=${RELEASE_TARGET_SHA}', dispatch)
+        self.assertIn('core_run_id=${GITHUB_RUN_ID}', dispatch)
+        self.assertIn('--event workflow_dispatch', dispatch)
 
     def test_crate_publish_verifies_the_packaged_vendor_tree(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
@@ -176,7 +189,23 @@ class V086ReleaseContractTests(unittest.TestCase):
         self.assertIn(
             "needs.build-release.result == 'success'", publish
         )
-        self.assertIn("!inputs.repair_forward", dispatch)
+        self.assertIn('-f "repair_forward=${REPAIR_FORWARD}"', dispatch)
+        self.assertIn("needs.publish-crate.result == 'success'", dispatch)
+
+    def test_python_repair_skips_protected_publish_and_runs_public_join(self) -> None:
+        workflow = (ROOT / ".github/workflows/alopex-py-release.yml").read_text(
+            encoding="utf-8"
+        )
+        for job in ("linux", "macos", "windows", "sdist"):
+            header = workflow.split(f"  {job}:", maxsplit=1)[1].split(
+                "    steps:", maxsplit=1
+            )[0]
+            self.assertIn("if: ${{ !inputs.repair_forward }}", header)
+        join = workflow.split("  final-release-join:", maxsplit=1)[1].split(
+            "  verify-public-release:", maxsplit=1
+        )[0]
+        self.assertIn("inputs.repair_forward ||", join)
+        self.assertIn("prepare-repair-release", join)
 
     def test_v08_demos_are_mandatory(self) -> None:
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
@@ -187,16 +216,16 @@ class V086ReleaseContractTests(unittest.TestCase):
 
     def test_embedded_demo_covers_every_v08_local_capability_group(self) -> None:
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
-        wrapper = (ROOT / "scripts/demo/v08/demo_embedded_v086.sh").read_text(
+        wrapper = (ROOT / "scripts/demo/v08/demo_embedded_v08.sh").read_text(
             encoding="utf-8"
         )
         source = (
-            ROOT / "crates/alopex-tools/src/bin/demo_v086_embedded.rs"
+            ROOT / "crates/alopex-tools/src/bin/demo_v08_embedded.rs"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("scripts/demo/v08/demo_embedded_v086.sh", run)
+        self.assertIn("scripts/demo/v08/demo_embedded_v08.sh", run)
         self.assertIn('cp crates/alopex-tools/build.rs "${tool_source}/"', run)
-        self.assertIn("demo-v086-embedded", wrapper)
+        self.assertIn("demo-v08-embedded", wrapper)
         build = (ROOT / "crates/alopex-tools/build.rs").read_text(encoding="utf-8")
         self.assertIn("DEP_ALOPEX_SQL_PARSER_LIBDIR", build)
         self.assertIn("rustc-link-arg-bins", build)

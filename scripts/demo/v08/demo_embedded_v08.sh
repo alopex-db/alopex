@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# v0.8.6 の embedded-local 公開能力を、Rust の alopex-embedded API から
+# v0.8 系の embedded-local 公開能力を、Rust の alopex-embedded API から
 # 一続きで実演する。公開リリース検証では crates.io の完全一致依存だけで
-# ビルド済みの demo-v086-embedded を PATH から実行する。
+# ビルド済みの demo-v08-embedded を PATH から実行する。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 if [[ "${ALOPEX_BINARY_SOURCE:-}" == "released" ]]; then
-    exec demo-v086-embedded
+    exec demo-v08-embedded
 fi
 
 exec cargo run --quiet \
     --manifest-path "${ROOT}/crates/alopex-tools/Cargo.toml" \
-    --bin demo-v086-embedded
+    --bin demo-v08-embedded

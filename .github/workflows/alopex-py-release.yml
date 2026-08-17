@@ -1,15 +1,8 @@
 name: alopex-py-release
 
 on:
-  push:
-    tags:
-      - "alopex-py-v*"
-      # v0.8.5 is published through the repair-forward tag so the immutable
-      # source tag cannot start the historical workflow in parallel.
-      - "!alopex-py-v0.8.5"
-      # v0.8.6 is dispatched by the core release with explicit source/tag/SHA
-      # inputs; suppress the simultaneous tag-push run.
-      - "!alopex-py-v0.8.6"
+  # The core release dispatches this workflow with all immutable identities.
+  # Tag creation alone cannot race a second publication run.
   workflow_dispatch:
     inputs:
       source_ref:
@@ -26,6 +19,10 @@ on:
         description: "Existing immutable Python tag to publish"
         required: false
         default: ""
+        type: string
+      core_run_id:
+        description: "Core release workflow run that published crates and assets"
+        required: true
         type: string
       repair_forward:
         description: "Create/verify the historical Python tag without a push-triggered workflow"
@@ -63,6 +60,7 @@ jobs:
     name: linux (${{ matrix.target }})
     runs-on: ubuntu-latest
     needs: [prepare-repair-release]
+    if: ${{ !inputs.repair_forward }}
     strategy:
       fail-fast: false
       matrix:
@@ -76,7 +74,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref }}
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Resolve source release version
         shell: bash
         run: |
@@ -200,6 +198,7 @@ jobs:
     name: macos (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     needs: [prepare-repair-release]
+    if: ${{ !inputs.repair_forward }}
     strategy:
       fail-fast: false
       matrix:
@@ -216,7 +215,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref }}
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Resolve source release version
         shell: bash
         run: |
@@ -330,11 +329,12 @@ jobs:
     name: windows (x86_64)
     runs-on: windows-latest
     needs: [prepare-repair-release]
+    if: ${{ !inputs.repair_forward }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref }}
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Resolve source release version
         shell: bash
         run: |
@@ -452,11 +452,12 @@ jobs:
     name: sdist
     runs-on: ubuntu-latest
     needs: [prepare-repair-release]
+    if: ${{ !inputs.repair_forward }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref }}
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Remove native parser vendor files from sdist staging
         run: |
           set -euo pipefail
@@ -565,13 +566,14 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref_name }}
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: dist/**/*
 
   final-release-join:
     name: final-release-join
     runs-on: ubuntu-latest
-    needs: [publish-pypi, github-release]
+    needs: [prepare-repair-release, publish-pypi, github-release]
+    if: ${{ always() && needs.prepare-repair-release.result == 'success' && (inputs.repair_forward || (needs.publish-pypi.result == 'success' && needs.github-release.result == 'success')) }}
     permissions:
       contents: read
       actions: read
@@ -589,7 +591,8 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           PYTHON_RUN_ID: ${{ github.run_id }}
           PYTHON_HEAD_SHA: ${{ inputs.target_sha || github.sha }}
-          PYTHON_TAG_NAME: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref_name }}
+          PYTHON_TAG_NAME: ${{ inputs.release_tag || github.ref_name }}
+          CORE_RUN_ID: ${{ inputs.core_run_id }}
           REPAIR_FORWARD: ${{ inputs.repair_forward }}
         run: |
           set -euo pipefail
@@ -607,7 +610,7 @@ jobs:
           if [[ "${python_tag_type}" == "tag" ]]; then
             python_tag_sha="$(gh api "repos/${REPOSITORY}/git/tags/${python_tag_sha}" | jq -r '.object.sha')"
           fi
-          if [[ "${REPAIR_FORWARD}" == "true" || "${GITHUB_REF_NAME}" == alopex-py-v0.8.5-repair* ]]; then
+          if [[ "${REPAIR_FORWARD}" == "true" ]]; then
             PYTHON_HEAD_SHA="${python_tag_sha}"
             printf 'PYTHON_HEAD_SHA=%s\n' "${PYTHON_HEAD_SHA}" >> "${GITHUB_ENV}"
           fi
@@ -619,34 +622,26 @@ jobs:
             echo "Python workflow HEAD is not the peeled Python tag SHA" >&2
             exit 1
           }
-          runs="$(gh run list --workflow release.yml \
-            --json databaseId,headSha,headBranch,status,conclusion --limit 50)"
-          core_run="$(printf '%s' "${runs}" | python3 -c '
-          import json, sys
-          runs = json.load(sys.stdin)
-          core_sha, ref_name, repair_forward = sys.argv[1:]
-          successful = [r for r in runs
-                        if r.get("status") == "completed"
-                        and r.get("conclusion") == "success"]
-          same_sha = [r for r in successful if r.get("headSha") == core_sha]
-          if len(same_sha) == 1:
-              match = same_sha[0]
-          elif repair_forward == "true" or ref_name.startswith("alopex-py-v0.8.5-repair"):
-              repaired = [r for r in successful
-                          if r.get("headBranch") == "repair/v0.8.5-release"]
-              if not repaired:
-                  raise SystemExit(
-                      "expected at least one successful v0.8.5 repair core run"
-                  )
-              match = max(repaired, key=lambda run: int(run["databaseId"]))
-          else:
-              raise SystemExit(
-                  "expected exactly one successful core run on the core tag SHA, "
-                  f"found {len(same_sha)}"
-              )
-          print("{}\t{}".format(match["databaseId"], match["headSha"]))
-          ' "${core_tag_sha}" "${GITHUB_REF_NAME}" "${REPAIR_FORWARD}")"
-          IFS=$'\t' read -r core_run_id core_run_head_sha <<< "${core_run}"
+          [[ "${CORE_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          core_run_json="$(gh api "repos/${REPOSITORY}/actions/runs/${CORE_RUN_ID}")"
+          core_run_head_sha="$(jq -r '.head_sha' <<< "${core_run_json}")"
+          test "$(jq -r '.repository.full_name' <<< "${core_run_json}")" = "${REPOSITORY}"
+          test "$(jq -r '.path' <<< "${core_run_json}")" = ".github/workflows/release.yml"
+          jobs="$(gh api "repos/${REPOSITORY}/actions/runs/${CORE_RUN_ID}/jobs?per_page=100")"
+          JOBS="${jobs}" REPAIR_FORWARD="${REPAIR_FORWARD}" python3 - <<'PY'
+          import json
+          import os
+
+          jobs = json.loads(os.environ["JOBS"])["jobs"]
+          conclusions = {job["name"]: job.get("conclusion") for job in jobs}
+          if conclusions.get("Publish to crates.io") != "success":
+              raise SystemExit("bound core run has not successfully published crates")
+          if os.environ["REPAIR_FORWARD"] != "true" and conclusions.get(
+              "Create GitHub Release"
+          ) != "success":
+              raise SystemExit("bound core run has not successfully created the release")
+          PY
+          core_run_id="${CORE_RUN_ID}"
           printf 'CORE_TAG_SHA=%s\nCORE_RUN_ID=%s\nCORE_RUN_HEAD_SHA=%s\nPYTHON_RUN_ID=%s\n' \
             "${core_tag_sha}" "${core_run_id}" "${core_run_head_sha}" "${PYTHON_RUN_ID}" >> "${GITHUB_ENV}"
 
@@ -734,5 +729,5 @@ jobs:
       issues: write
     uses: ./.github/workflows/public-release-verification.yml
     with:
-      version: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref_name }}
+      version: ${{ inputs.release_tag || github.ref_name }}
       publish_report: true

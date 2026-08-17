@@ -13,19 +13,16 @@ class FinalJoinWorkflowTests(unittest.TestCase):
     def test_final_join_is_required_after_public_surfaces(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split("  final-release-join:", maxsplit=1)[1]
-        self.assertIn("needs: [publish-pypi, github-release]", block)
+        self.assertIn(
+            "needs: [prepare-repair-release, publish-pypi, github-release]", block
+        )
         self.assertIn("contents: read", block)
         self.assertIn("actions: read", block)
-        self.assertIn("gh run list --workflow release.yml", block)
-        self.assertIn("headBranch,status,conclusion", block)
-        self.assertIn("repair/v0.8.5-release", block)
+        self.assertIn('actions/runs/${CORE_RUN_ID}', block)
+        self.assertIn('actions/runs/${CORE_RUN_ID}/jobs?per_page=100', block)
+        self.assertIn("Publish to crates.io", block)
         self.assertIn("CORE_RUN_HEAD_SHA", block)
-        self.assertIn("expected exactly one successful core run", block)
-        self.assertIn("if not repaired:", block)
-        self.assertIn(
-            'max(repaired, key=lambda run: int(run["databaseId"]))', block
-        )
-        self.assertNotIn("if len(repaired) != 1:", block)
+        self.assertIn("CORE_RUN_ID: ${{ inputs.core_run_id }}", block)
         self.assertIn("bash scripts/release/verify-release/run.sh --verify-join", block)
         self.assertIn('parser-assets-v${VERSION}.json', block)
         self.assertIn('parser-vendor-manifest-v${VERSION}.json', block)
@@ -46,15 +43,12 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertIn("source_ref:", text)
         self.assertIn("target_sha:", text)
         self.assertIn("release_tag:", text)
+        self.assertIn("core_run_id:", text)
         self.assertIn("repair_forward:", text)
         self.assertIn("type: boolean", text)
-        self.assertIn(
-            "ref: ${{ inputs.source_ref || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref }}",
-            text,
-        )
+        self.assertIn("ref: ${{ inputs.source_ref || github.ref }}", text)
         self.assertIn("PYTHON_HEAD_SHA: ${{ inputs.target_sha || github.sha }}", text)
-        self.assertIn("PYTHON_TAG_NAME: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref_name }}", text)
-        self.assertIn("alopex-py-v0.8.5-repair", text)
+        self.assertIn("PYTHON_TAG_NAME: ${{ inputs.release_tag || github.ref_name }}", text)
         self.assertIn("PYTHON_HEAD_SHA=%s", text)
 
     def test_repair_dispatch_creates_or_verifies_tag_before_packaging(self) -> None:
@@ -75,20 +69,20 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split("  final-release-join:", maxsplit=1)[1]
         self.assertIn("REPAIR_FORWARD: ${{ inputs.repair_forward }}", block)
-        self.assertIn('repair_forward == "true"', block)
+        self.assertIn('REPAIR_FORWARD="${REPAIR_FORWARD}"', block)
+        self.assertNotIn("repair/v", block)
 
-    def test_v085_immutable_tag_does_not_start_historical_workflow(self) -> None:
+    def test_python_release_requires_explicit_core_dispatch(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         trigger = text.split("  workflow_dispatch:", maxsplit=1)[0]
-        self.assertIn('- "alopex-py-v*"', trigger)
-        self.assertIn('- "!alopex-py-v0.8.5"', trigger)
-        self.assertIn('- "!alopex-py-v0.8.6"', trigger)
+        self.assertNotIn("push:", trigger)
+        self.assertIn("core release dispatches", trigger)
 
     def test_public_verifier_uses_immutable_tag_for_repair_run(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split("  verify-public-release:", maxsplit=1)[1]
         self.assertIn(
-            "version: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref_name }}",
+            "version: ${{ inputs.release_tag || github.ref_name }}",
             block,
         )
 
@@ -142,7 +136,7 @@ class FinalJoinWorkflowTests(unittest.TestCase):
     def test_manual_release_uses_the_existing_immutable_tag(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split("  github-release:", maxsplit=1)[1].split("  final-release-join:", maxsplit=1)[0]
-        self.assertIn("tag_name: ${{ inputs.release_tag || (startsWith(github.ref_name, 'alopex-py-v0.8.5-repair') && 'alopex-py-v0.8.5') || github.ref_name }}", block)
+        self.assertIn("tag_name: ${{ inputs.release_tag || github.ref_name }}", block)
 
 
 if __name__ == "__main__":
