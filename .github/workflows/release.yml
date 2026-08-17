@@ -26,6 +26,10 @@ env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
+  # A tag push uses github.ref_name/github.sha. A workflow_dispatch recovery
+  # must name the already-immutable tag and its peeled SHA explicitly.
+  RELEASE_TAG_NAME: ${{ inputs.release_tag || github.ref_name }}
+  RELEASE_TARGET_SHA: ${{ inputs.target_sha || github.sha }}
 
 jobs:
   # Implementation correctness belongs to local tests and the normal CI lane.
@@ -41,21 +45,32 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.release_tag || github.ref }}
       - name: Verify immutable tag and approved CI evidence
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          [[ "${GITHUB_REF}" == refs/tags/v* ]]
-          [[ "$(git cat-file -t "${GITHUB_REF_NAME}")" == "tag" ]]
-          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "${GITHUB_SHA}"
+          [[ "${RELEASE_TAG_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "${RELEASE_TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git cat-file -t "${RELEASE_TAG_NAME}")" == "tag" ]]
+          test "$(git rev-parse "${RELEASE_TAG_NAME}^{commit}")" = "${RELEASE_TARGET_SHA}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_TARGET_SHA}"
           git fetch origin main
-          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
-          gh run list --workflow ci.yml --commit "${GITHUB_SHA}" \
-            --json status,conclusion,headSha --limit 20 \
-            --jq 'any(.[]; .headSha == env.GITHUB_SHA and .status == "completed" and .conclusion == "success")' \
-            | grep -qx true
+          git merge-base --is-ancestor "${RELEASE_TARGET_SHA}" origin/main
+          approved=false
+          for attempt in $(seq 1 30); do
+            if gh run list --workflow ci.yml --commit "${RELEASE_TARGET_SHA}" \
+              --json status,conclusion,headSha --limit 20 \
+              --jq 'any(.[]; .status == "completed" and .conclusion == "success")' \
+              | grep -qx true; then
+              approved=true
+              break
+            fi
+            sleep 10
+          done
+          test "${approved}" = true
 
   build-release:
     name: Build Release (${{ matrix.target }})
@@ -87,6 +102,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.90.0
@@ -173,6 +190,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Verify release workflow contract
         shell: bash
@@ -183,8 +203,9 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --force --tags origin
-          test "$(git describe --tags --exact-match HEAD)" = "${GITHUB_REF_NAME}"
-          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "${GITHUB_SHA}"
+          test "$(git describe --tags --exact-match HEAD)" = "${RELEASE_TAG_NAME}"
+          test "$(git rev-parse "${RELEASE_TAG_NAME}^{commit}")" = "${RELEASE_TARGET_SHA}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_TARGET_SHA}"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -224,12 +245,13 @@ jobs:
             --manifest artifacts/parser-vendor-manifest-v0.8.6.json --asset-dir artifacts
           python scripts/release/parser_asset_manifest.py release-envelope \
             --manifest artifacts/parser-vendor-manifest-v0.8.6.json \
-            --asset-dir artifacts --tag "$GITHUB_REF_NAME" --tag-sha "$GITHUB_SHA" \
+            --asset-dir artifacts --tag "$RELEASE_TAG_NAME" --tag-sha "$RELEASE_TARGET_SHA" \
             --output artifacts/parser-assets-v0.8.6.json
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG_NAME }}
           files: artifacts/*
           generate_release_notes: true
         env:
@@ -248,6 +270,11 @@ jobs:
       REPAIR_FORWARD: ${{ inputs.repair_forward || false }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Historical repair-forward needs the current workflow tooling;
+          # a pre-publication resume checks out the immutable release tag.
+          ref: ${{ inputs.repair_forward && github.ref || inputs.release_tag || github.ref }}
       - uses: dtolnay/rust-toolchain@1.90.0
       - uses: Swatinem/rust-cache@v2
 
@@ -271,7 +298,7 @@ jobs:
             release_tag="${release_tag:-${GITHUB_REF_NAME}}"
             release_target_sha="${release_target_sha:-${GITHUB_SHA}}"
             test "$(git describe --tags --exact-match HEAD)" = "${release_tag}"
-            test "${GITHUB_SHA}" = "${release_target_sha}"
+            test "$(git rev-parse HEAD)" = "${release_target_sha}"
           fi
           RELEASE_TAG_NAME="${release_tag}"
           RELEASE_TARGET_SHA="${release_target_sha}"
@@ -451,7 +478,7 @@ jobs:
   dispatch-python-release:
     name: Publish Python and require public demos
     needs: [publish-crate]
-    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.repair_forward }}
+    if: ${{ !inputs.repair_forward && needs.publish-crate.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -460,6 +487,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Create or verify matching Python tag
         id: release
@@ -469,19 +497,20 @@ jobs:
         run: |
           set -euo pipefail
           version="$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' Cargo.toml | head -1)"
-          [[ "${GITHUB_REF_NAME}" == "v${version}" ]]
+          [[ "${RELEASE_TAG_NAME}" == "v${version}" ]]
+          test "$(git rev-parse HEAD)" = "${RELEASE_TARGET_SHA}"
           python_tag="alopex-py-v${version}"
           if git rev-parse --verify --quiet "refs/tags/${python_tag}" >/dev/null; then
-            test "$(git rev-parse "${python_tag}^{commit}")" = "${GITHUB_SHA}"
+            test "$(git rev-parse "${python_tag}^{commit}")" = "${RELEASE_TARGET_SHA}"
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag -a "${python_tag}" "${GITHUB_SHA}" -m "Release ${python_tag}"
+            git tag -a "${python_tag}" "${RELEASE_TARGET_SHA}" -m "Release ${python_tag}"
             git push origin "${python_tag}"
           fi
           started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          gh workflow run alopex-py-release.yml --ref "${GITHUB_REF_NAME}" \
-            -f "source_ref=${python_tag}" -f "target_sha=${GITHUB_SHA}" \
+          gh workflow run alopex-py-release.yml --ref "${RELEASE_TAG_NAME}" \
+            -f "source_ref=${python_tag}" -f "target_sha=${RELEASE_TARGET_SHA}" \
             -f "release_tag=${python_tag}"
           echo "python_tag=${python_tag}" >> "${GITHUB_OUTPUT}"
           echo "started_at=${started_at}" >> "${GITHUB_OUTPUT}"
@@ -498,7 +527,7 @@ jobs:
           for attempt in $(seq 1 60); do
             run_id="$(gh run list --workflow alopex-py-release.yml \
               --event workflow_dispatch --limit 20 --json databaseId,headSha,createdAt \
-              --jq ".[] | select(.headSha == \"${GITHUB_SHA}\" and .createdAt >= \"${STARTED_AT}\") | .databaseId" | head -1)"
+              --jq ".[] | select(.headSha == \"${RELEASE_TARGET_SHA}\" and .createdAt >= \"${STARTED_AT}\") | .databaseId" | head -1)"
             [[ -n "${run_id}" ]] && break
             sleep 10
           done
