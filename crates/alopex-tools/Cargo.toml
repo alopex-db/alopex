@@ -23,8 +23,8 @@ name = "verify-release-embedded"
 path = "src/bin/verify_release_embedded.rs"
 
 [[bin]]
-name = "demo-v086-embedded"
-path = "src/bin/demo_v086_embedded.rs"
+name = "demo-v08-embedded"
+path = "src/bin/demo_v08_embedded.rs"
 
 [dependencies]
 serde_json = "1.0"

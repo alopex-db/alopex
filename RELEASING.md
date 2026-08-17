@@ -12,7 +12,7 @@
 
 ```toml
 [workspace.package]
-version = "0.8.6"  # ← ここを変更すると全クレートに反映
+version = "X.Y.Z"  # 唯一の release version 入力
 ```
 
 ### クレート一覧
@@ -33,14 +33,16 @@ version = "0.8.6"  # ← ここを変更すると全クレートに反映
 依存関係により、以下の順序で公開する必要があります（`.github/workflows/release.yml` の `publish-crates` ジョブと一致させること）：
 
 ```
-alopex-core → alopex-sql → alopex-dataframe → alopex-embedded → alopex-cluster → alopex-server → alopex-cli
+alopex-core → alopex-sql → alopex-dataframe → alopex-cluster → alopex-embedded → alopex-server → alopex-cli
 ```
 
-## v0.8.6 現行リリース契約
+## 現行リリース契約
 
-v0.8.6 は、main にレビュー済みの同一コミットを取り込み、そのコミットを
-明示的にタグ付けして公開するリリースである。RC は `rc/v0.8.6` を使用し、
+対象版は `Cargo.toml` の `[workspace.package].version` からのみ取得する。
+main にレビュー済みの同一コミットを取り込み、そのコミットを annotated
+tag `v${version}` で公開する。RC は `rc/v${version}` を使用し、
 未公開のローカル生成物や合成コミットを公開入力にしてはならない。
+個別の workflow や script に対象版を直書きしない。
 
 ### パーサー資産の不変条件
 
@@ -49,7 +51,7 @@ v0.8.6 は、main にレビュー済みの同一コミットを取り込み、�
   Nim 2.2.10 / Nimble 0.22.3 で個別にビルドし、各ターゲットの native smoke
   と SHA-256 検証を通過させてからアップロードする。
 - `parser-vendor-manifest.json` は追跡済みの入力を記録し、公開後に
-  `parser-assets-v0.8.6.json` がタグの peeled SHA、マニフェスト、アーカイブ、
+  `parser-assets-v${version}.json` がタグの peeled SHA、マニフェスト、アーカイブ、
   ライブラリ digest を同一性付きで束ねる。手作業コピーや別ビルドで補っては
   ならない。
 - Python 配布物は公開済み Alopex parser 資産を取得して package-local
@@ -75,7 +77,7 @@ Umbrella 全体と各 target/cache の合計は常に 50 GiB 以下であるこ�
 
 | プロジェクト | タグ形式 | 例 |
 |-------------|---------|-----|
-| alopex | `v{major}.{minor}.{patch}` | `v0.8.6` |
+| alopex | `v{major}.{minor}.{patch}` | `vX.Y.Z` |
 
 ### v0.7.0 リリース契約
 
@@ -166,17 +168,20 @@ Branch cleanup record の最小記録項目:
 
 タグをプッシュすると、GitHub Actions が以下を自動実行します：
 
-1. **CI Gate**: fmt, clippy, test の実行
+1. **Approved source evidence**: tag の peeled SHA と、同一 SHA の成功済み main CI を照合
 2. **Build Release**: マルチプラットフォームバイナリのビルド
 3. **Create Release**: GitHub Release の作成
 4. **Publish Crate**: crates.io への公開（依存順）
+5. **Publish Python**: 同一 peeled SHA の Python tag を作成し、PyPI へ公開
+6. **Public verification**: crates.io / PyPI の対象版だけでデモを実行
+7. **Docs join**: 成功レポートが `alopex-db/docs@main` に同一バイトで反映されたことを確認
 
 ## リリース手順
 
 ### 0. RCブランチの作成（必須）
 
-リリース作業は **必ずRCブランチから開始**する。v0.8.6 のRCブランチは
-`main` から作成し、`rc/v0.8.6` を使用する。
+リリース作業は **必ずRCブランチと専用 worktree から開始**する。
+project root は `main` のまま固定し、`Cargo.toml` の版から branch/worktree 名を導出する。
 
 RCブランチの命名規則:
 
@@ -185,10 +190,10 @@ RCブランチの命名規則:
 - プレフィックスは必ず `rc/` とし、`release/` などは使用しない
 
 ```bash
-git checkout main
-git pull origin main
-git checkout -b rc/v0.8.6
-git push -u origin rc/v0.8.6
+VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+git pull --ff-only origin main
+git worktree add ".wt/rc-v${VERSION}" -b "rc/v${VERSION}" main
+git -C ".wt/rc-v${VERSION}" push -u origin "rc/v${VERSION}"
 ```
 
 以後のリリース準備はこの RC ブランチで実施する。

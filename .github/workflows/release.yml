@@ -235,18 +235,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          version="${RELEASE_TAG_NAME#v}"
+          test "${RELEASE_TAG_NAME}" = "v${version}"
+          manifest="artifacts/parser-vendor-manifest-v${version}.json"
+          envelope="artifacts/parser-assets-v${version}.json"
           mapfile -t records < <(find artifacts -maxdepth 1 -name 'alopex-parser-*.json' -type f | sort)
           test "${#records[@]}" -eq 4
           args=()
           for record in "${records[@]}"; do args+=(--record "$record"); done
           python scripts/release/parser_asset_manifest.py assemble-manifest \
-            "${args[@]}" --asset-dir artifacts --output artifacts/parser-vendor-manifest-v0.8.6.json
+            "${args[@]}" --asset-dir artifacts --output "${manifest}"
           python scripts/release/parser_asset_manifest.py verify-manifest \
-            --manifest artifacts/parser-vendor-manifest-v0.8.6.json --asset-dir artifacts
+            --manifest "${manifest}" --asset-dir artifacts
           python scripts/release/parser_asset_manifest.py release-envelope \
-            --manifest artifacts/parser-vendor-manifest-v0.8.6.json \
+            --manifest "${manifest}" \
             --asset-dir artifacts --tag "$RELEASE_TAG_NAME" --tag-sha "$RELEASE_TARGET_SHA" \
-            --output artifacts/parser-assets-v0.8.6.json
+            --output "${envelope}"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -478,7 +482,7 @@ jobs:
   dispatch-python-release:
     name: Publish Python and require public demos
     needs: [publish-crate]
-    if: ${{ !inputs.repair_forward && needs.publish-crate.result == 'success' }}
+    if: ${{ needs.publish-crate.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -493,6 +497,8 @@ jobs:
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
+          REPAIR_FORWARD: ${{ inputs.repair_forward }}
+          WORKFLOW_SHA: ${{ github.sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -500,6 +506,7 @@ jobs:
           [[ "${RELEASE_TAG_NAME}" == "v${version}" ]]
           test "$(git rev-parse HEAD)" = "${RELEASE_TARGET_SHA}"
           python_tag="alopex-py-v${version}"
+          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           if git rev-parse --verify --quiet "refs/tags/${python_tag}" >/dev/null; then
             test "$(git rev-parse "${python_tag}^{commit}")" = "${RELEASE_TARGET_SHA}"
           else
@@ -508,17 +515,24 @@ jobs:
             git tag -a "${python_tag}" "${RELEASE_TARGET_SHA}" -m "Release ${python_tag}"
             git push origin "${python_tag}"
           fi
-          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          gh workflow run alopex-py-release.yml --ref "${RELEASE_TAG_NAME}" \
+          # Execute the Python workflow definition from the same immutable
+          # workflow ref as this core run. Product bytes still come only from
+          # source_ref/python_tag, so a recovery can use corrected orchestration
+          # without moving the release tag.
+          python_workflow_ref="${GITHUB_REF_NAME}"
+          gh workflow run alopex-py-release.yml --ref "${python_workflow_ref}" \
             -f "source_ref=${python_tag}" -f "target_sha=${RELEASE_TARGET_SHA}" \
-            -f "release_tag=${python_tag}"
+            -f "release_tag=${python_tag}" -f "core_run_id=${GITHUB_RUN_ID}" \
+            -f "repair_forward=${REPAIR_FORWARD}"
           echo "python_tag=${python_tag}" >> "${GITHUB_OUTPUT}"
+          echo "workflow_sha=${WORKFLOW_SHA}" >> "${GITHUB_OUTPUT}"
           echo "started_at=${started_at}" >> "${GITHUB_OUTPUT}"
 
       - name: Wait for Python publish, demos, and docs report
         env:
           GH_TOKEN: ${{ github.token }}
           PYTHON_TAG: ${{ steps.release.outputs.python_tag }}
+          WORKFLOW_SHA: ${{ steps.release.outputs.workflow_sha }}
           STARTED_AT: ${{ steps.release.outputs.started_at }}
         shell: bash
         run: |
@@ -527,7 +541,7 @@ jobs:
           for attempt in $(seq 1 60); do
             run_id="$(gh run list --workflow alopex-py-release.yml \
               --event workflow_dispatch --limit 20 --json databaseId,headSha,createdAt \
-              --jq ".[] | select(.headSha == \"${RELEASE_TARGET_SHA}\" and .createdAt >= \"${STARTED_AT}\") | .databaseId" | head -1)"
+              --jq ".[] | select(.headSha == \"${WORKFLOW_SHA}\" and .createdAt >= \"${STARTED_AT}\") | .databaseId" | head -1)"
             [[ -n "${run_id}" ]] && break
             sleep 10
           done

@@ -18,6 +18,7 @@ import stat
 import sys
 import tarfile
 import tempfile
+import tomllib
 from typing import Any
 import zlib
 
@@ -27,7 +28,18 @@ BUILD_IDENTITY_SCHEMA = "alopex-parser-build-identity-v1"
 VENDOR_MANIFEST_SCHEMA = "alopex-parser-vendor-manifest-v1"
 RELEASE_ENVELOPE_SCHEMA = "alopex-parser-release-envelope-v1"
 
-REQUIRED_ALOPEX_VERSION = "0.8.6"
+
+def _workspace_version() -> str:
+    """Read the release version from the workspace's canonical manifest."""
+    manifest = Path(__file__).resolve().parents[2] / "Cargo.toml"
+    with manifest.open("rb") as stream:
+        value = tomllib.load(stream)["workspace"]["package"]["version"]
+    if not isinstance(value, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value) is None:
+        raise RuntimeError(f"invalid workspace release version: {value!r}")
+    return value
+
+
+REQUIRED_ALOPEX_VERSION = _workspace_version()
 REQUIRED_CONTRACT_VERSION = "0.4.0"
 REQUIRED_NIM_VERSION = "2.2.10"
 REQUIRED_NIMBLE_VERSION = "0.22.3"
