@@ -210,6 +210,10 @@ class ReleaseContractTests(unittest.TestCase):
         )[0]
         self.assertIn("inputs.repair_forward ||", join)
         self.assertIn("prepare-repair-release", join)
+        public = workflow.split("  verify-public-release:", maxsplit=1)[1]
+        self.assertIn(
+            "always() && needs.final-release-join.result == 'success'", public
+        )
 
     def test_v08_demos_are_mandatory(self) -> None:
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")

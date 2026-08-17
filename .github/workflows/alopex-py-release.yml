@@ -724,6 +724,7 @@ jobs:
   verify-public-release:
     name: Verify demos and publish docs report
     needs: [final-release-join]
+    if: ${{ always() && needs.final-release-join.result == 'success' }}
     permissions:
       contents: write
       issues: write
