@@ -482,7 +482,10 @@ jobs:
   dispatch-python-release:
     name: Publish Python and require public demos
     needs: [publish-crate]
-    if: ${{ needs.publish-crate.result == 'success' }}
+    # repair-forward intentionally skips build/create ancestors; always() is
+    # required so GitHub evaluates the immediate publish result instead of
+    # applying the implicit success() gate to those skipped ancestors.
+    if: ${{ always() && needs.publish-crate.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -519,13 +522,15 @@ jobs:
           # protection applies. Repair-forward uses corrected orchestration,
           # skips protected publication jobs, and verifies public packages.
           python_workflow_ref="${python_tag}"
+          python_source_ref="${python_tag}"
           expected_workflow_sha="${RELEASE_TARGET_SHA}"
           if [[ "${REPAIR_FORWARD}" == "true" ]]; then
             python_workflow_ref="${GITHUB_REF_NAME}"
+            python_source_ref="${RELEASE_TARGET_SHA}"
             expected_workflow_sha="${WORKFLOW_SHA}"
           fi
           gh workflow run alopex-py-release.yml --ref "${python_workflow_ref}" \
-            -f "source_ref=${python_tag}" -f "target_sha=${RELEASE_TARGET_SHA}" \
+            -f "source_ref=${python_source_ref}" -f "target_sha=${RELEASE_TARGET_SHA}" \
             -f "release_tag=${python_tag}" -f "core_run_id=${GITHUB_RUN_ID}" \
             -f "repair_forward=${REPAIR_FORWARD}"
           echo "python_tag=${python_tag}" >> "${GITHUB_OUTPUT}"
