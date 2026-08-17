@@ -1,0 +1,100 @@
+{
+  "comparison": {
+    "advisory_only": true,
+    "current_commit": "aac7333048fd395e979ffcee6a184d3742e309b3",
+    "environment_fingerprint": "579e8febe7deb59c",
+    "has_regressions": false,
+    "metrics": {
+      "read_overhead_pct": {
+        "current": 0.7118330055284567,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 0,
+        "status": "insufficient_history",
+        "unit": "%"
+      },
+      "scan_overhead_ms": {
+        "current": 0.001152700002648999,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 0,
+        "status": "insufficient_history",
+        "unit": "ms"
+      },
+      "write_overhead_pct": {
+        "current": 5.339192236529704,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 0,
+        "status": "insufficient_history",
+        "unit": "%"
+      }
+    },
+    "notification_metrics": [],
+    "notification_ready": false,
+    "schema_version": 1,
+    "status": "insufficient_history",
+    "workload_signature": "c9e29248f7675a19ab02fa947b04916d26449187a7b14b4d6fe1340aedeeb72c"
+  },
+  "record": {
+    "commit": "aac7333048fd395e979ffcee6a184d3742e309b3",
+    "dependencies": {
+      "alopex": "0.8.6",
+      "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
+      "iniconfig": "2.3.0",
+      "maturin": "1.14.1",
+      "nim": "unavailable",
+      "numpy": "2.4.6",
+      "packaging": "26.3",
+      "patchelf": "patchelf 0.18.0",
+      "pip": "26.2",
+      "pluggy": "1.6.0",
+      "polars": "1.43.2",
+      "polars-runtime-32": "1.43.2",
+      "py-cpuinfo": "9.0.0",
+      "pygments": "2.20.0",
+      "pytest": "9.1.1",
+      "pytest-benchmark": "5.2.3",
+      "python": "3.11.11",
+      "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+      "setuptools": "65.5.0"
+    },
+    "environment": {
+      "cpu": "INTEL(R) XEON(R) PLATINUM 8573C",
+      "cpu_governor": "performance",
+      "fingerprint": "579e8febe7deb59c",
+      "kernel": "6.17.0-1022-azure",
+      "machine": "x86_64",
+      "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+      "python": "3.11.11",
+      "system": "Linux",
+      "turbo_policy": "no_turbo=0"
+    },
+    "lock_hash": "d464bfc157b87d319280c2f53bace9a993460381898855a10731d65da002bdce",
+    "measured_at": "2026-08-17T00:54:38.015778+00:00",
+    "metrics": {
+      "read_overhead_pct": {
+        "direction": "lower_is_better",
+        "unit": "%",
+        "value": 0.7118330055284567
+      },
+      "scan_overhead_ms": {
+        "direction": "lower_is_better",
+        "unit": "ms",
+        "value": 0.001152700002648999
+      },
+      "write_overhead_pct": {
+        "direction": "lower_is_better",
+        "unit": "%",
+        "value": 5.339192236529704
+      }
+    },
+    "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+    "ref": "refs/tags/v0.8.6",
+    "schema_version": 1,
+    "workload_signature": "c9e29248f7675a19ab02fa947b04916d26449187a7b14b4d6fe1340aedeeb72c"
+  }
+}
