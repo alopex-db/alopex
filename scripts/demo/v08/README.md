@@ -65,10 +65,10 @@ right (qty <= 2):      {2, 4, 5}
 left-only: {3}; right-only: {5}; intersection: {2, 4}
 ```
 
-The Python demo performs exactly 52 assertions: 30 ordered comparisons, 10
+The Python demo performs exactly 53 assertions: 31 ordered comparisons, 10
 unordered row-multiset comparisons, and 12 expected errors. The Rust EMB-04
 scenario first converts its inherited eight queries to exact row-value checks,
-then performs 18 v0.8.6 checks (12 result checks and six fail-closed checks).
+then performs 19 v0.8.6 checks (13 result checks and six fail-closed checks).
 The initial 13-check plan was expanded rather than deleting feature coverage:
 the five added Rust checks pin CTE shadowing, the second EXCEPT direction,
 explicit RANGE rejection, and both WHERE/GROUP BY alias scope boundaries
@@ -105,13 +105,16 @@ happened to run:
 5. A CTE name shadows a same-named base table for that statement. The demo's
    `WITH sales AS (SELECT id + 100 AS id FROM sales WHERE id = 1)` must use the
    base table inside the CTE body, then shadow it outside and return 101.
-6. Explicit `ROWS BETWEEN` and `RANGE BETWEEN` frames are outside v0.8.6 and
+6. A CTE column-name list renames its query output by position without changing
+   values or types. Its length must match the query width, names must be unique,
+   and quoted names preserve case while bare names use normal identifier folding.
+7. Explicit `ROWS BETWEEN` and `RANGE BETWEEN` frames are outside v0.8.6 and
    must be rejected by name. Supported implicit frames are the whole partition
    without window `ORDER BY`, and cumulative through the current row with it.
-7. SQL NULL is represented as Python `None` and Rust `SqlValue::Null`; the
+8. SQL NULL is represented as Python `None` and Rust `SqlValue::Null`; the
    unordered comparator retains a type tag so NULL cannot compare equal to a
    textual or numeric sentinel.
-8. SQL BOOLEAN is represented as Python `bool` (`True`/`False`) and Rust
+9. SQL BOOLEAN is represented as Python `bool` (`True`/`False`) and Rust
    `SqlValue::Boolean`, never integer 1/0. The Python canonicalizer is
    type-sensitive specifically because Python otherwise considers `True == 1`.
 

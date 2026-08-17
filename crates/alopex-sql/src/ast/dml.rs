@@ -47,6 +47,8 @@ pub struct WithClause {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommonTableExpr {
     pub name: String,
+    #[serde(default)]
+    pub columns: Vec<String>,
     pub query: Box<super::Statement>,
     pub span: Span,
 }

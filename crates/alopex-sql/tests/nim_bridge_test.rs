@@ -1,15 +1,24 @@
 #![cfg(target_os = "linux")]
 
 use alopex_sql::{
-    AlopexDialect, CreateContinuousAggregate, DataType, ExprKind, FromItem, InsertSource, JoinType,
-    Literal, Parser, ParserError, SelectItem, StatementKind, VectorMetric, parser_contract_version,
+    AlopexDialect, CommonTableExpr, CreateContinuousAggregate, DataType, ExprKind, FromItem,
+    InsertSource, JoinType, Literal, Parser, ParserError, SelectItem, Span, Statement,
+    StatementKind, VectorMetric, parser_contract_version,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const MAX_SQL_INPUT_BYTES: usize = 1_048_576;
 const MAX_MESSAGEPACK_PAYLOAD_BYTES: usize = 1_048_576;
 const MINIMAL_CONTINUOUS_AGGREGATE_SQL: &str = "CREATE CONTINUOUS AGGREGATE cpu_hourly AS SELECT 1 FROM cpu_metrics \
      WITH (retention = '30d', refresh_interval = '1h')";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LegacyCommonTableExpr {
+    name: String,
+    query: Box<Statement>,
+    span: Span,
+}
 
 fn wire_span(start_line: u64, start_column: u64, end_line: u64, end_column: u64) -> Value {
     json!({
@@ -155,6 +164,30 @@ fn public_nul_guard_and_normal_sql_behavior_are_stable() {
     let statements =
         Parser::parse_sql(&AlopexDialect, "SELECT 1").expect("ordinary SQL must remain unchanged");
     assert_eq!(statements.len(), 1);
+}
+
+#[test]
+fn cte_column_names_cross_the_nim_messagepack_boundary_compatibly() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "WITH c(identifier, label) AS (SELECT 1, 'one') SELECT identifier FROM c",
+    )
+    .expect("CTE column names should deserialize from Nim MessagePack");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    let cte = &select.with.as_ref().expect("expected WITH clause").ctes[0];
+    assert_eq!(cte.columns, vec!["identifier", "label"]);
+
+    let current_payload = rmp_serde::to_vec_named(cte).expect("encode current CTE payload");
+    let legacy: LegacyCommonTableExpr =
+        rmp_serde::from_slice(&current_payload).expect("legacy consumer should ignore columns");
+    assert_eq!(legacy.name, "c");
+
+    let legacy_payload = rmp_serde::to_vec_named(&legacy).expect("encode legacy CTE payload");
+    let current: CommonTableExpr =
+        rmp_serde::from_slice(&legacy_payload).expect("current consumer should default columns");
+    assert!(current.columns.is_empty());
 }
 
 #[test]

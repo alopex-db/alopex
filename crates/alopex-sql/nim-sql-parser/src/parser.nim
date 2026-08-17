@@ -103,6 +103,7 @@ proc parseExpr(p: var Parser): SqlNode
 proc parseConcat(p: var Parser): SqlNode
 proc parseSelectStmt(p: var Parser): SqlNode
 proc parseWithSelectStmt(p: var Parser): SqlNode
+proc parseQueryStmt(p: var Parser): SqlNode
 proc parseInsertStmt(p: var Parser): SqlNode
 proc parseUpdateStmt(p: var Parser): SqlNode
 proc parseDeleteStmt(p: var Parser): SqlNode
@@ -143,9 +144,9 @@ proc parseSubqueryInParens(p: var Parser): SqlNode =
   p.enterNesting()
   defer: p.leaveNesting()
   discard p.expect(tkLParen)
-  if not p.check(tkSelect):
-    p.error("expected SELECT subquery")
-  result = p.parseSelectStmt()
+  if p.current.kind notin {tkSelect, tkWith}:
+    p.error("expected SELECT or WITH subquery")
+  result = p.parseQueryStmt()
   discard p.expect(tkRParen)
 
 proc parseExistsExpr(p: var Parser; negated: bool): SqlNode =
@@ -343,8 +344,8 @@ proc parsePrimary(p: var Parser): SqlNode =
     p.enterNesting()
     defer: p.leaveNesting()
     let start = p.advance()
-    if p.check(tkSelect):
-      let subquery = p.parseSelectStmt()
+    if p.current.kind in {tkSelect, tkWith}:
+      let subquery = p.parseQueryStmt()
       discard p.expect(tkRParen)
       result = newNode(nkScalarSubquery, tokenSpan(start))
       result.children.add(subquery)
@@ -443,11 +444,11 @@ proc parseInExpr(p: var Parser; left: SqlNode; negated: bool): SqlNode =
   defer: p.leaveNesting()
   discard p.expect(tkIn)
   discard p.expect(tkLParen)
-  if p.check(tkSelect):
+  if p.current.kind in {tkSelect, tkWith}:
     result = newNode(nkInSubquery)
     result.negated = negated
     result.children.add(left)
-    result.children.add(p.parseSelectStmt())
+    result.children.add(p.parseQueryStmt())
     discard p.expect(tkRParen)
   else:
     let list = newNode(nkExprList)
@@ -585,14 +586,14 @@ proc parseFromItem(p: var Parser): SqlNode =
     p.enterNesting()
     defer: p.leaveNesting()
     let start = p.advance()
-    if p.check(tkSelect):
-      let subquery = p.parseSelectStmt()
+    if p.current.kind in {tkSelect, tkWith}:
+      let subquery = p.parseQueryStmt()
       discard p.expect(tkRParen)
       result = newNode(nkFromDerived, tokenSpan(start))
       result.children.add(subquery)
       result = p.parseOptionalAlias(result)
     else:
-      p.error("expected SELECT in FROM derived table")
+      p.error("expected SELECT or WITH in FROM derived table")
   else:
     let name = p.expectIdent("table name")
     result = newIdent(name.value, tokenSpan(name))
@@ -784,11 +785,22 @@ proc parseWithSelectStmt(p: var Parser): SqlNode =
     let name = p.expectIdent("common table expression name")
     let cte = newNode(nkCommonTableExpr, tokenSpan(name))
     cte.children.add(newIdent(name.value, tokenSpan(name)))
+    if p.check(tkLParen):
+      let columnsStart = p.advance()
+      let columns = newNode(nkCteColumnList, tokenSpan(columnsStart))
+      let firstColumn = p.expectIdent("common table expression column name")
+      columns.children.add(newIdent(firstColumn.value, tokenSpan(firstColumn)))
+      while p.check(tkComma):
+        discard p.advance()
+        let column = p.expectIdent("common table expression column name")
+        columns.children.add(newIdent(column.value, tokenSpan(column)))
+      discard p.expect(tkRParen)
+      cte.children.add(columns)
     discard p.expect(tkAs)
     discard p.expect(tkLParen)
-    if not p.check(tkSelect):
-      p.error("expected SELECT in common table expression")
-    cte.children.add(p.parseSelectStmt())
+    if p.current.kind notin {tkSelect, tkWith}:
+      p.error("expected SELECT or WITH in common table expression")
+    cte.children.add(p.parseQueryStmt())
     discard p.expect(tkRParen)
     withClause.children.add(cte)
     if p.check(tkComma):
@@ -801,6 +813,15 @@ proc parseWithSelectStmt(p: var Parser): SqlNode =
   result = p.parseSelectStmt()
   result.children.insert(withClause, 0)
   result.span.start = tokenSpan(start).start
+
+proc parseQueryStmt(p: var Parser): SqlNode =
+  case p.current.kind
+  of tkWith:
+    result = p.parseWithSelectStmt()
+  of tkSelect:
+    result = p.parseSelectStmt()
+  else:
+    p.error("expected SELECT or WITH query")
 
 # --- DML parsing ---
 
@@ -839,10 +860,10 @@ proc parseInsertStmt(p: var Parser): SqlNode =
         discard p.advance()
       else:
         break
-  elif p.check(tkSelect):
+  elif p.current.kind in {tkSelect, tkWith}:
     p.enterNesting()
     defer: p.leaveNesting()
-    result.children.add(p.parseSelectStmt())
+    result.children.add(p.parseQueryStmt())
   else:
     discard p.expect(tkValues)
 
@@ -1158,10 +1179,8 @@ proc parsePragmaStmt(p: var Parser): SqlNode =
 
 proc parseStatement*(p: var Parser): SqlNode =
   case p.current.kind
-  of tkWith:
-    result = p.parseWithSelectStmt()
-  of tkSelect:
-    result = p.parseSelectStmt()
+  of tkWith, tkSelect:
+    result = p.parseQueryStmt()
   of tkInsert:
     result = p.parseInsertStmt()
   of tkUpdate:

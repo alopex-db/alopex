@@ -69,6 +69,14 @@ def test_execute_sql_select_empty_returns_empty_list(users_db):
     assert users_db.execute_sql("SELECT * FROM users") == []
 
 
+def test_execute_sql_cte_column_name_list_renames_result_keys(db):
+    rows = db.execute_sql(
+        "WITH renamed(identifier, label) AS (SELECT 7, 'seven') "
+        "SELECT label, identifier FROM renamed"
+    )
+    assert rows == [{"label": "seven", "identifier": 7}]
+
+
 def test_execute_sql_params_binding(users_db):
     users_db.execute_sql(
         "INSERT INTO users (id, name, email) VALUES (?, ?, ?)",

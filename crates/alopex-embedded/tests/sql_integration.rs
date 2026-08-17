@@ -71,6 +71,30 @@ fn sql_integration_database_execute_sql_query() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_cte_column_name_list_is_public_schema() {
+    let db = Database::new();
+    let result = db
+        .execute_sql(
+            "WITH renamed(identifier, label) AS (SELECT 7, 'seven') \
+             SELECT label, identifier FROM renamed;",
+        )
+        .unwrap();
+
+    match result {
+        ExecutionResult::Query(query) => {
+            assert_eq!(query.columns[0].name, "label");
+            assert_eq!(query.columns[1].name, "identifier");
+            assert_eq!(
+                query.rows,
+                vec![vec![SqlValue::Text("seven".into()), SqlValue::Integer(7),]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_database_execute_sql_pragma_uses_store_path() {
     let db = Database::new();
 

@@ -342,6 +342,31 @@ impl From<PlannerError> for SqlError {
                 location: ErrorLocation { line, column },
                 code: "ALOPEX-T008",
             },
+            PlannerError::CteColumnCountMismatch {
+                cte,
+                declared,
+                actual,
+                line,
+                column,
+            } => Self::Plan {
+                message: format!(
+                    "common table expression '{cte}' declares {declared} column names but its query returns {actual} columns"
+                ),
+                location: ErrorLocation { line, column },
+                code: "ALOPEX-T009",
+            },
+            PlannerError::DuplicateCteColumn {
+                cte,
+                name,
+                line,
+                column,
+            } => Self::Plan {
+                message: format!(
+                    "common table expression '{cte}' declares column '{name}' more than once"
+                ),
+                location: ErrorLocation { line, column },
+                code: "ALOPEX-T010",
+            },
             PlannerError::InvalidPragma { name, reason } => Self::Plan {
                 message: format!("invalid PRAGMA '{name}': {reason}"),
                 location: ErrorLocation::default(),
@@ -474,6 +499,33 @@ mod tests {
         let unified: SqlError = planner_error.into();
         assert_eq!(unified.code(), "ALOPEX-C001");
         assert_eq!(unified.location(), ErrorLocation { line: 1, column: 8 });
+    }
+
+    #[test]
+    fn cte_column_errors_preserve_public_codes_and_locations() {
+        let count_mismatch: SqlError = PlannerError::CteColumnCountMismatch {
+            cte: "items".into(),
+            declared: 2,
+            actual: 1,
+            line: 3,
+            column: 6,
+        }
+        .into();
+        assert_eq!(count_mismatch.code(), "ALOPEX-T009");
+        assert_eq!(
+            count_mismatch.location(),
+            ErrorLocation { line: 3, column: 6 }
+        );
+
+        let duplicate: SqlError = PlannerError::DuplicateCteColumn {
+            cte: "items".into(),
+            name: "identifier".into(),
+            line: 4,
+            column: 7,
+        }
+        .into();
+        assert_eq!(duplicate.code(), "ALOPEX-T010");
+        assert_eq!(duplicate.location(), ErrorLocation { line: 4, column: 7 });
     }
 
     #[test]

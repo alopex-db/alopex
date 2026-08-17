@@ -56,10 +56,12 @@ allocation or recursive decoding:
 
 The C boundary also rejects a negative length, a null input pointer, and an
 interior NUL byte. The decoder rejects truncated payloads, the reserved marker
-`0xc1`, trailing bytes, unknown fields, mismatched outer/kind spans, and
-malformed continuous-aggregate shapes. A non-zero parse result is returned as
-`prkError`; no Nim exception crosses the C ABI. `ALOPEX-P007` identifies an
-internal Nim invariant defect and is distinct from invalid user SQL.
+`0xc1`, trailing bytes, unknown variants, mismatched outer/kind spans, and
+malformed continuous-aggregate shapes. Additive fields on map-encoded structs
+are permitted only when their compatibility behavior is explicit below. A
+non-zero parse result is returned as `prkError`; no Nim exception crosses the C
+ABI. `ALOPEX-P007` identifies an internal Nim invariant defect and is distinct
+from invalid user SQL.
 
 ## Common Types
 
@@ -85,7 +87,7 @@ internal Nim invariant defect and is distinct from invalid user SQL.
 
 | Variant | Fields |
 | --- | --- |
-| `Select` | `distinct: bool`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [Expr]?`, `having: Expr?`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?` |
+| `Select` | `with: WithClause?`, `distinct: bool`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [Expr]?`, `having: Expr?`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?` |
 | `Insert` | `table: string`, `columns: [string]?`, `source: InsertSource`, `span: Span` |
 | `Update` | `table: string`, `assignments: [Assignment]`, `selection: Expr?`, `span: Span` |
 | `Delete` | `table: string`, `selection: Expr?`, `span: Span` |
@@ -106,6 +108,19 @@ The canonical v0.4.0 grammar requires exactly two options, in this order:
 measurement and the `time_bucket(...)` grouping expression uses the contextual
 identifier alias `time`. Quoted identifiers, escaped quotes, multiline text,
 and inclusive source spans are preserved by the Nim lexer.
+
+### Common Table Expressions
+
+`WithClause = { "recursive": bool, "ctes": [CommonTableExpr], "span": Span }`
+
+`CommonTableExpr = { "name": string, "columns": [string], "query": Statement, "span": Span }`
+
+`columns` preserves the declared order in `WITH c(first_name, second_name) AS
+(...)`; an omitted list is encoded as an empty array. The field is an additive
+part of contract `0.4.0`: current Rust consumers use an empty-list default when
+reading an older payload, while older map consumers ignore the new field. It
+therefore ships with the Alopex v0.8 line rather than as a separate parser
+release. Nested non-recursive `WITH` queries use the same `Statement` shape.
 
 `SelectItem` variants:
 

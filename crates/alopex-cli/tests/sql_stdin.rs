@@ -16,6 +16,7 @@ fn sql_reads_from_stdin_pipe() {
 CREATE TABLE stdin_test (id INTEGER PRIMARY KEY);
 INSERT INTO stdin_test (id) VALUES (1);
 SELECT * FROM stdin_test;
+WITH renamed(identifier) AS (SELECT 42) SELECT identifier FROM renamed;
 "#;
 
     {
@@ -39,7 +40,7 @@ SELECT * FROM stdin_test;
         .expect("json output should be an array of result sets");
     assert_eq!(
         sets.len(),
-        3,
+        4,
         "one result set per statement\nstdout:\n{stdout}"
     );
     let select_rows = sets[2].as_array().expect("SELECT result set");
@@ -54,4 +55,7 @@ SELECT * FROM stdin_test;
         stdout,
         String::from_utf8_lossy(&output.stderr)
     );
+
+    let cte_rows = sets[3].as_array().expect("CTE SELECT result set");
+    assert_eq!(cte_rows, &[serde_json::json!({ "identifier": 42 })]);
 }

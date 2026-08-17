@@ -213,6 +213,10 @@ def main() -> int:
                 [{"id": 2, "amount": 200.0}, {"id": 3, "amount": 150.0}, {"id": 4, "amount": 150.0}],
             ),
             (
+                "WITH renamed(identifier, territory) AS (SELECT id, region FROM sales WHERE id = 1) SELECT territory, identifier FROM renamed",
+                [{"territory": "east", "identifier": 1}],
+            ),
+            (
                 "WITH a AS (SELECT id FROM sales WHERE id <= 2), b AS (SELECT id FROM sales WHERE id >= 4) SELECT a.id AS left_id, b.id AS right_id FROM a, b ORDER BY left_id, right_id",
                 [
                     {"left_id": 1, "right_id": 4},
@@ -406,12 +410,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 52:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 52")
+        if completed != 53:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 53")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 52 checks passed")
+    print("v0.8 SQL correctness demo completed: 53 checks passed")
     return 0
 
 

@@ -133,6 +133,29 @@ pub enum PlannerError {
         column: u64,
     },
 
+    /// ALOPEX-T009: A CTE column-name list does not match its query width.
+    #[error(
+        "error[ALOPEX-T009]: common table expression '{cte}' declares {declared} column names but its query returns {actual} columns at line {line}, column {column}"
+    )]
+    CteColumnCountMismatch {
+        cte: String,
+        declared: usize,
+        actual: usize,
+        line: u64,
+        column: u64,
+    },
+
+    /// ALOPEX-T010: A CTE column-name list contains the same name twice.
+    #[error(
+        "error[ALOPEX-T010]: common table expression '{cte}' declares column '{name}' more than once at line {line}, column {column}"
+    )]
+    DuplicateCteColumn {
+        cte: String,
+        name: String,
+        line: u64,
+        column: u64,
+    },
+
     // === Feature Errors (ALOPEX-F*) ===
     /// ALOPEX-F001: Unsupported feature.
     #[error(
@@ -221,6 +244,36 @@ impl PlannerError {
         Self::SetOperationColumnCountMismatch {
             left,
             right,
+            line: span.start.line,
+            column: span.start.column,
+        }
+    }
+
+    /// Create a CTE column-count error from a span.
+    pub fn cte_column_count_mismatch(
+        cte: impl Into<String>,
+        declared: usize,
+        actual: usize,
+        span: Span,
+    ) -> Self {
+        Self::CteColumnCountMismatch {
+            cte: cte.into(),
+            declared,
+            actual,
+            line: span.start.line,
+            column: span.start.column,
+        }
+    }
+
+    /// Create a duplicate CTE column-name error from a span.
+    pub fn duplicate_cte_column(
+        cte: impl Into<String>,
+        column_name: impl Into<String>,
+        span: Span,
+    ) -> Self {
+        Self::DuplicateCteColumn {
+            cte: cte.into(),
+            name: column_name.into(),
             line: span.start.line,
             column: span.start.column,
         }

@@ -416,6 +416,13 @@ fn scenario_local_sql_matrix() -> DemoResult {
             ],
         ),
         (
+            "WITH renamed(identifier, territory) AS (SELECT id, region FROM sales WHERE id = 1) SELECT territory, identifier FROM renamed",
+            vec![vec![
+                SqlValue::Text("east".into()),
+                SqlValue::Integer(1),
+            ]],
+        ),
+        (
             "SELECT id FROM sales WHERE amount >= 150 EXCEPT SELECT id FROM sales WHERE qty <= 2 ORDER BY id",
             vec![vec![SqlValue::Integer(3)]],
         ),
@@ -465,7 +472,7 @@ fn scenario_local_sql_matrix() -> DemoResult {
         ),
     ];
     require(
-        v086_matrix.len() == 12,
+        v086_matrix.len() == 13,
         "v0.8.6 SQL success-check count changed",
     )?;
     for (sql, expected) in &v086_matrix {
@@ -496,7 +503,7 @@ fn scenario_local_sql_matrix() -> DemoResult {
         expect_sql_error(&db, sql, expected)?;
     }
     require(
-        v086_matrix.len() + rejected_v086.len() == 18,
+        v086_matrix.len() + rejected_v086.len() == 19,
         "v0.8.6 SQL check count changed",
     )?;
     require(

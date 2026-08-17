@@ -249,11 +249,21 @@ proc writeCaseBranch(s: Stream; node: SqlNode) =
   s.writeExpr(node.caseThen)
 
 proc writeCommonTableExpr(s: Stream; node: SqlNode) =
-  s.pack_map(3)
+  let hasColumns = node.children.len > 2 and
+    node.children[1].kind == nkCteColumnList
+  let queryIndex = if hasColumns: 2 else: 1
+  s.pack_map(4)
   s.writeKey("name")
   s.pack_type(node.children[0].firstIdent())
+  s.writeKey("columns")
+  if hasColumns:
+    s.pack_array(node.children[1].children.len)
+    for column in node.children[1].children:
+      s.pack_type(column.firstIdent())
+  else:
+    s.pack_array(0)
   s.writeKey("query")
-  s.writeStatement(node.children[1])
+  s.writeStatement(node.children[queryIndex])
   s.writeKey("span")
   s.writeSpan(node.span)
 

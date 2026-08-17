@@ -17,6 +17,7 @@ type
     nkSelect
     nkWithClause
     nkCommonTableExpr
+    nkCteColumnList
     nkInsert
     nkUpdate
     nkDelete

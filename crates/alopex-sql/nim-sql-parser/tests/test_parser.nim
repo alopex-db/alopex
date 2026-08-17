@@ -609,6 +609,30 @@ suite "DML — SELECT":
     check cols.kind == nkExprList
     check cols.children.len == 3
 
+  test "WITH common table expression keeps its column name list":
+    let ast = parseSql(
+      "WITH c(identifier, label) AS (SELECT 1, 'one') SELECT identifier FROM c")
+    let withClause = ast.children[0]
+    let cte = withClause.children[0]
+
+    check withClause.kind == nkWithClause
+    check cte.kind == nkCommonTableExpr
+    check cte.children[0].strVal == "c"
+    check cte.children[1].kind == nkCteColumnList
+    check cte.children[1].children[0].strVal == "identifier"
+    check cte.children[1].children[1].strVal == "label"
+    check cte.children[2].kind == nkSelect
+
+  test "WITH common table expression accepts a nested WITH query":
+    let ast = parseSql(
+      "WITH outer_cte(value) AS (WITH inner_cte(source) AS (SELECT 7) " &
+      "SELECT source FROM inner_cte) SELECT value FROM outer_cte")
+    let outerQuery = ast.children[0].children[0].children[2]
+
+    check outerQuery.kind == nkSelect
+    check outerQuery.children[0].kind == nkWithClause
+    check outerQuery.children[0].children[0].children[1].kind == nkCteColumnList
+
   test "trailing semicolon":
     let ast = parseSql("SELECT 1;")
     check ast.kind == nkSelect

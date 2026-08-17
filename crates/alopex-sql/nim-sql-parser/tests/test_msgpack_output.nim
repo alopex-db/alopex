@@ -119,6 +119,22 @@ suite "MessagePack output - roundtrip":
 
 suite "MessagePack output - contract shape":
 
+  test "CTE emits its optional ordered column name list":
+    let kind = selectKind(
+      "WITH c(identifier, label) AS (SELECT 1, 'one') SELECT identifier FROM c")
+    let cte = kind["with"]["ctes"][0]
+
+    check cte["name"].getStr() == "c"
+    check cte["columns"].len == 2
+    check cte["columns"][0].getStr() == "identifier"
+    check cte["columns"][1].getStr() == "label"
+    check cte["query"]["kind"]["variant"].getStr() == "Select"
+
+  test "CTE without a column name list emits an empty list":
+    let cte = selectKind("WITH c AS (SELECT 1) SELECT * FROM c")["with"]["ctes"][0]
+    check cte["columns"].kind == JArray
+    check cte["columns"].len == 0
+
   test "CASE emits operand branches and optional ELSE":
     let searched = selectKind(
       "SELECT CASE WHEN active THEN 'yes' ELSE 'no' END FROM users")

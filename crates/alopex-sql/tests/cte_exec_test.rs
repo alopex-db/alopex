@@ -37,6 +37,17 @@ fn last_query(sql: &str) -> QueryResult {
         .expect("query result")
 }
 
+fn planner_error(sql: &str) -> PlannerError {
+    let statement = Parser::parse_sql(&AlopexDialect, sql)
+        .expect("parse SQL")
+        .remove(0);
+    let catalog = MemoryCatalog::new();
+
+    Planner::new(&catalog)
+        .plan(&statement)
+        .expect_err("planning must fail")
+}
+
 #[test]
 fn single_cte_executes() {
     let query = last_query(
@@ -49,6 +60,127 @@ fn single_cte_executes() {
         query.rows,
         vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]
     );
+}
+
+#[test]
+fn cte_column_name_list_renames_the_output_schema() {
+    let query = last_query("WITH c(number) AS (SELECT 1) SELECT number FROM c;");
+
+    assert_eq!(query.columns[0].name, "number");
+    assert_eq!(query.rows, vec![vec![SqlValue::Integer(1)]]);
+}
+
+#[test]
+fn cte_column_name_list_preserves_position_and_type() {
+    let query = last_query(
+        "WITH c(identifier, label) AS (SELECT 7, 'seven') \
+         SELECT label, identifier FROM c;",
+    );
+
+    assert_eq!(
+        query
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["label", "identifier"]
+    );
+    assert_eq!(
+        query.rows,
+        vec![vec![SqlValue::Text("seven".into()), SqlValue::Integer(7),]]
+    );
+}
+
+#[test]
+fn cte_column_name_count_mismatch_is_stable() {
+    let error = planner_error("WITH c(col_one, col_two) AS (SELECT 1) SELECT col_one FROM c;");
+
+    assert!(matches!(
+        error,
+        PlannerError::CteColumnCountMismatch {
+            cte,
+            declared: 2,
+            actual: 1,
+            ..
+        } if cte == "c"
+    ));
+}
+
+#[test]
+fn duplicate_cte_column_name_is_rejected() {
+    let error = planner_error("WITH c(value, value) AS (SELECT 1, 2) SELECT value FROM c;");
+
+    assert!(matches!(
+        error,
+        PlannerError::DuplicateCteColumn { cte, name, .. }
+            if cte == "c" && name == "value"
+    ));
+}
+
+#[test]
+fn cte_column_names_compose_with_shadowing_and_nested_with() {
+    let query = last_query(
+        "CREATE TABLE c (value INT);\
+         INSERT INTO c VALUES (99);\
+         WITH c(outer_value) AS (\
+             WITH inner_cte(inner_value) AS (SELECT 7)\
+             SELECT inner_value FROM inner_cte\
+         )\
+         SELECT outer_value FROM c;",
+    );
+
+    assert_eq!(query.rows, vec![vec![SqlValue::Integer(7)]]);
+}
+
+#[test]
+fn quoted_cte_column_names_preserve_case_while_bare_names_fold() {
+    let query = last_query(
+        "WITH quoted(\"MixedCase\") AS (SELECT 1), bare(LOUD) AS (SELECT 2) \
+         SELECT \"MixedCase\", loud FROM quoted, bare;",
+    );
+
+    assert_eq!(
+        query
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["MixedCase", "loud"]
+    );
+    assert_eq!(
+        query.rows,
+        vec![vec![SqlValue::Integer(1), SqlValue::Integer(2)]]
+    );
+}
+
+#[test]
+fn cte_column_names_keep_cross_relation_ambiguity_checks() {
+    let error = planner_error(
+        "WITH left_cte(shared) AS (SELECT 1), right_cte(shared) AS (SELECT 2) \
+         SELECT shared FROM left_cte, right_cte;",
+    );
+
+    assert!(matches!(
+        error,
+        PlannerError::AmbiguousColumn { column, .. } if column == "shared"
+    ));
+}
+
+#[test]
+fn recursive_cte_column_names_cross_the_parser_contract() {
+    let statement = Parser::parse_sql(
+        &AlopexDialect,
+        "WITH RECURSIVE counter(n) AS (SELECT 1) SELECT n FROM counter;",
+    )
+    .expect("recursive CTE column names should parse")
+    .remove(0);
+    let alopex_sql::StatementKind::Select(select) = statement.kind else {
+        panic!("expected SELECT");
+    };
+    let with = select.with.expect("expected WITH clause");
+
+    assert!(with.recursive);
+    assert_eq!(with.ctes[0].columns, vec!["n"]);
 }
 
 #[test]

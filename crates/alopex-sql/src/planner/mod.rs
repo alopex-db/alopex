@@ -1060,7 +1060,32 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     cte.span,
                 ));
             };
-            let relation = self.plan_select_relation(select, &[], &plans)?;
+            let mut relation = self.plan_select_relation(select, &[], &plans)?;
+            if !cte.columns.is_empty() {
+                if cte.columns.len() != relation.schema.len() {
+                    return Err(PlannerError::cte_column_count_mismatch(
+                        &cte.name,
+                        cte.columns.len(),
+                        relation.schema.len(),
+                        cte.span,
+                    ));
+                }
+
+                let mut column_names = HashSet::new();
+                for column_name in &cte.columns {
+                    if !column_names.insert(column_name) {
+                        return Err(PlannerError::duplicate_cte_column(
+                            &cte.name,
+                            column_name,
+                            cte.span,
+                        ));
+                    }
+                }
+
+                for (column, column_name) in relation.schema.iter_mut().zip(&cte.columns) {
+                    column.name.clone_from(column_name);
+                }
+            }
             plans.insert(cte.name.clone(), relation);
         }
         Ok(plans)
