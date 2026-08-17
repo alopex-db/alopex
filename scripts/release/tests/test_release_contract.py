@@ -123,7 +123,9 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("for attempt in $(seq 1 30)", gate)
         self.assertNotIn("env.GITHUB_SHA", gate)
         self.assertIn("needs.publish-crate.result == 'success'", dispatch)
+        self.assertIn('python_workflow_ref="${python_tag}"', dispatch)
         self.assertIn('python_workflow_ref="${GITHUB_REF_NAME}"', dispatch)
+        self.assertIn('expected_workflow_sha="${RELEASE_TARGET_SHA}"', dispatch)
         self.assertIn('target_sha=${RELEASE_TARGET_SHA}', dispatch)
         self.assertIn('core_run_id=${GITHUB_RUN_ID}', dispatch)
         self.assertIn('--event workflow_dispatch', dispatch)
@@ -189,6 +191,21 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertIn('-f "repair_forward=${REPAIR_FORWARD}"', dispatch)
         self.assertIn("needs.publish-crate.result == 'success'", dispatch)
+
+    def test_python_repair_skips_protected_publish_and_runs_public_join(self) -> None:
+        workflow = (ROOT / ".github/workflows/alopex-py-release.yml").read_text(
+            encoding="utf-8"
+        )
+        for job in ("linux", "macos", "windows", "sdist"):
+            header = workflow.split(f"  {job}:", maxsplit=1)[1].split(
+                "    steps:", maxsplit=1
+            )[0]
+            self.assertIn("if: ${{ !inputs.repair_forward }}", header)
+        join = workflow.split("  final-release-join:", maxsplit=1)[1].split(
+            "  verify-public-release:", maxsplit=1
+        )[0]
+        self.assertIn("inputs.repair_forward ||", join)
+        self.assertIn("prepare-repair-release", join)
 
     def test_v08_demos_are_mandatory(self) -> None:
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")

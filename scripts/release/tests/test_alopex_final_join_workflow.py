@@ -13,7 +13,9 @@ class FinalJoinWorkflowTests(unittest.TestCase):
     def test_final_join_is_required_after_public_surfaces(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split("  final-release-join:", maxsplit=1)[1]
-        self.assertIn("needs: [publish-pypi, github-release]", block)
+        self.assertIn(
+            "needs: [prepare-repair-release, publish-pypi, github-release]", block
+        )
         self.assertIn("contents: read", block)
         self.assertIn("actions: read", block)
         self.assertIn('actions/runs/${CORE_RUN_ID}', block)

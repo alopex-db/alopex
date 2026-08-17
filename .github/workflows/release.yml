@@ -515,17 +515,21 @@ jobs:
             git tag -a "${python_tag}" "${RELEASE_TARGET_SHA}" -m "Release ${python_tag}"
             git push origin "${python_tag}"
           fi
-          # Execute the Python workflow definition from the same immutable
-          # workflow ref as this core run. Product bytes still come only from
-          # source_ref/python_tag, so a recovery can use corrected orchestration
-          # without moving the release tag.
-          python_workflow_ref="${GITHUB_REF_NAME}"
+          # Normal publication runs from the Python tag so environment tag
+          # protection applies. Repair-forward uses corrected orchestration,
+          # skips protected publication jobs, and verifies public packages.
+          python_workflow_ref="${python_tag}"
+          expected_workflow_sha="${RELEASE_TARGET_SHA}"
+          if [[ "${REPAIR_FORWARD}" == "true" ]]; then
+            python_workflow_ref="${GITHUB_REF_NAME}"
+            expected_workflow_sha="${WORKFLOW_SHA}"
+          fi
           gh workflow run alopex-py-release.yml --ref "${python_workflow_ref}" \
             -f "source_ref=${python_tag}" -f "target_sha=${RELEASE_TARGET_SHA}" \
             -f "release_tag=${python_tag}" -f "core_run_id=${GITHUB_RUN_ID}" \
             -f "repair_forward=${REPAIR_FORWARD}"
           echo "python_tag=${python_tag}" >> "${GITHUB_OUTPUT}"
-          echo "workflow_sha=${WORKFLOW_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "workflow_sha=${expected_workflow_sha}" >> "${GITHUB_OUTPUT}"
           echo "started_at=${started_at}" >> "${GITHUB_OUTPUT}"
 
       - name: Wait for Python publish, demos, and docs report
