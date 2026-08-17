@@ -132,12 +132,7 @@ fn evaluate_partition(
             let mut rank = 1_i64;
             let mut dense_rank = 1_i64;
             for (position, row) in partition.iter().enumerate() {
-                let order_values = window
-                    .order_by
-                    .iter()
-                    .map(|sort| evaluator::evaluate(&sort.expr, &EvalContext::new(&row.values)))
-                    .collect::<Result<Vec<_>>>()?;
-                let key = encode_group_key(&order_values)?;
+                let key = order_key(row, &window.order_by)?;
                 if position > 0
                     && previous_key
                         .as_ref()
@@ -166,14 +161,37 @@ fn evaluate_partition(
                     set_output(output, row, value.clone())?;
                 }
             } else {
-                for row in partition {
-                    accumulator.update(aggregate_value(aggregate, row)?)?;
-                    set_output(output, row, accumulator.finalize()?)?;
+                let mut peer_start = 0;
+                while peer_start < partition.len() {
+                    let peer_key = order_key(&partition[peer_start], &window.order_by)?;
+                    let mut peer_end = peer_start + 1;
+                    while peer_end < partition.len()
+                        && order_key(&partition[peer_end], &window.order_by)? == peer_key
+                    {
+                        peer_end += 1;
+                    }
+
+                    for row in &partition[peer_start..peer_end] {
+                        accumulator.update(aggregate_value(aggregate, row)?)?;
+                    }
+                    let value = accumulator.finalize()?;
+                    for row in &partition[peer_start..peer_end] {
+                        set_output(output, row, value.clone())?;
+                    }
+                    peer_start = peer_end;
                 }
             }
         }
     }
     Ok(())
+}
+
+fn order_key(row: &Row, order_by: &[SortExpr]) -> Result<Vec<u8>> {
+    let order_values = order_by
+        .iter()
+        .map(|sort| evaluator::evaluate(&sort.expr, &EvalContext::new(&row.values)))
+        .collect::<Result<Vec<_>>>()?;
+    encode_group_key(&order_values)
 }
 
 fn aggregate_value(

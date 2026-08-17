@@ -271,6 +271,92 @@ fn order_by_inside_over_produces_a_running_total() {
     );
 }
 
+/// SQL's implicit frame for an ordered aggregate window is
+/// `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. Rows sharing the same
+/// complete sort key are peers, so every aggregate must observe the whole peer
+/// group rather than the executor's incidental row-by-row traversal order.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn ordered_window_aggregates_include_the_complete_peer_group() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, \
+                SUM(amount) OVER (ORDER BY amount) AS s, \
+                COUNT(amount) OVER (ORDER BY amount) AS c, \
+                AVG(amount) OVER (ORDER BY amount) AS a, \
+                MIN(amount) OVER (ORDER BY amount) AS lo, \
+                MAX(amount) OVER (ORDER BY amount) AS hi \
+         FROM sales ORDER BY id",
+    );
+
+    assert_eq!(int_column(&result, 0), vec![1, 2, 3, 4, 5]);
+    assert_floats_eq(
+        &float_column(&result, 1),
+        &[150.0, 650.0, 450.0, 450.0, 50.0],
+    );
+    assert_eq!(int_column(&result, 2), vec![2, 5, 4, 4, 1]);
+    assert_floats_eq(
+        &float_column(&result, 3),
+        &[75.0, 130.0, 112.5, 112.5, 50.0],
+    );
+    assert_floats_eq(&float_column(&result, 4), &[50.0, 50.0, 50.0, 50.0, 50.0]);
+    assert_floats_eq(
+        &float_column(&result, 5),
+        &[100.0, 200.0, 150.0, 150.0, 50.0],
+    );
+}
+
+/// Peer grouping follows the complete window sort key and is independent of
+/// sort direction. Adding `id` breaks the amount tie, while descending amount
+/// alone keeps the tied rows in one implicit RANGE frame.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn implicit_range_uses_direction_and_the_complete_sort_key() {
+    let mut h = Harness::new();
+    let descending = query(
+        &mut h,
+        "SELECT id, SUM(amount) OVER (ORDER BY amount DESC) AS s \
+         FROM sales ORDER BY id",
+    );
+    assert_floats_eq(
+        &float_column(&descending, 1),
+        &[600.0, 200.0, 500.0, 500.0, 650.0],
+    );
+
+    let tie_broken = query(
+        &mut h,
+        "SELECT id, SUM(amount) OVER (ORDER BY amount, id) AS s \
+         FROM sales ORDER BY id",
+    );
+    assert_floats_eq(
+        &float_column(&tie_broken, 1),
+        &[150.0, 650.0, 300.0, 450.0, 50.0],
+    );
+}
+
+/// NULL ordering changes where a peer group appears, not whether NULL sort
+/// keys are peers. The two NULL `bonus` rows therefore receive the same count
+/// with either explicit placement.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn implicit_range_groups_null_sort_keys_for_both_null_placements() {
+    let mut h = Harness::new();
+    let nulls_first = query(
+        &mut h,
+        "SELECT id, COUNT(*) OVER (ORDER BY bonus NULLS FIRST) AS c \
+         FROM sales ORDER BY id",
+    );
+    assert_eq!(int_column(&nulls_first, 1), vec![4, 2, 5, 2, 3]);
+
+    let nulls_last = query(
+        &mut h,
+        "SELECT id, COUNT(*) OVER (ORDER BY bonus NULLS LAST) AS c \
+         FROM sales ORDER BY id",
+    );
+    assert_eq!(int_column(&nulls_last, 1), vec![2, 5, 3, 5, 1]);
+}
+
 // ---------------------------------------------------------------------------
 // Ranking functions
 // ---------------------------------------------------------------------------
