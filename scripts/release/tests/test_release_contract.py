@@ -122,7 +122,9 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn('--commit "${RELEASE_TARGET_SHA}"', gate)
         self.assertIn("for attempt in $(seq 1 30)", gate)
         self.assertNotIn("env.GITHUB_SHA", gate)
-        self.assertIn("needs.publish-crate.result == 'success'", dispatch)
+        self.assertIn(
+            "always() && needs.publish-crate.result == 'success'", dispatch
+        )
         self.assertIn('python_workflow_ref="${python_tag}"', dispatch)
         self.assertIn('python_workflow_ref="${GITHUB_REF_NAME}"', dispatch)
         self.assertIn('expected_workflow_sha="${RELEASE_TARGET_SHA}"', dispatch)

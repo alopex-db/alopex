@@ -482,7 +482,10 @@ jobs:
   dispatch-python-release:
     name: Publish Python and require public demos
     needs: [publish-crate]
-    if: ${{ needs.publish-crate.result == 'success' }}
+    # repair-forward intentionally skips build/create ancestors; always() is
+    # required so GitHub evaluates the immediate publish result instead of
+    # applying the implicit success() gate to those skipped ancestors.
+    if: ${{ always() && needs.publish-crate.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
