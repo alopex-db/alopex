@@ -1111,20 +1111,18 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         plan_subquery: &SubqueryPlanner<'_>,
         span: Span,
     ) -> Result<TypedExpr, PlannerError> {
-        let typed_args: Vec<TypedExpr> = args
+        let lower_name = name.to_ascii_lowercase();
+        if over.is_some() && matches!(lower_name.as_str(), "lag" | "lead") {
+            validate_offset_window_call(name, args.len(), distinct, star)?;
+        }
+
+        let mut typed_args: Vec<TypedExpr> = args
             .iter()
             .map(|arg| self.infer_type_with_scope(arg, scope, plan_subquery))
             .collect::<Result<Vec<_>, _>>()?;
-        let lower_name = name.to_ascii_lowercase();
         let result_type = if over.is_some() {
             match lower_name.as_str() {
-                "lag" | "lead" => {
-                    return Err(PlannerError::unsupported_feature(
-                        format!("{} window function", name.to_ascii_uppercase()),
-                        "future",
-                        span,
-                    ));
-                }
+                "lag" | "lead" => self.infer_offset_window_result_type(name, &mut typed_args)?,
                 "row_number" | "rank" | "dense_rank" => {
                     if !typed_args.is_empty() || distinct || star {
                         return Err(PlannerError::invalid_expression(format!(
@@ -1186,6 +1184,75 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             resolved_type: result_type,
             span,
         })
+    }
+
+    fn infer_offset_window_result_type(
+        &self,
+        name: &str,
+        args: &mut [TypedExpr],
+    ) -> Result<ResolvedType, PlannerError> {
+        if let Some(offset) = args.get(1)
+            && !matches!(
+                offset.resolved_type,
+                ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Null
+            )
+        {
+            return Err(PlannerError::type_mismatch(
+                "INTEGER offset",
+                offset.resolved_type.type_name(),
+                offset.span,
+            ));
+        }
+
+        let value_type = args
+            .first()
+            .map(|arg| arg.resolved_type.clone())
+            .ok_or_else(|| {
+                PlannerError::invalid_expression(format!(
+                    "{}() window function expects 1 to 3 arguments",
+                    name.to_ascii_uppercase()
+                ))
+            })?;
+        let result_type = if let Some(default) = args.get(2) {
+            self.common_compatible_result_type(&value_type, &default.resolved_type, default.span)?
+        } else {
+            value_type
+        };
+
+        coerce_compatible_result(&mut args[0], &result_type);
+        if let Some(default) = args.get_mut(2) {
+            coerce_compatible_result(default, &result_type);
+        }
+
+        Ok(result_type)
+    }
+
+    fn common_compatible_result_type(
+        &self,
+        current: &ResolvedType,
+        next: &ResolvedType,
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        if matches!(current, ResolvedType::Null) {
+            return Ok(next.clone());
+        }
+        if matches!(next, ResolvedType::Null) || current == next {
+            return Ok(current.clone());
+        }
+        if is_numeric_type(current) && is_numeric_type(next) {
+            return self.check_arithmetic_op(current, next, span);
+        }
+        if next.can_cast_to(current) {
+            return Ok(current.clone());
+        }
+        if current.can_cast_to(next) {
+            return Ok(next.clone());
+        }
+        Err(PlannerError::type_mismatch(
+            current.type_name(),
+            next.type_name(),
+            span,
+        ))
     }
 
     /// Infer the type of a BETWEEN expression.
@@ -2343,6 +2410,39 @@ fn is_numeric_type(ty: &ResolvedType) -> bool {
         ty,
         ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Float | ResolvedType::Double
     )
+}
+
+fn validate_offset_window_call(
+    name: &str,
+    arg_count: usize,
+    distinct: bool,
+    star: bool,
+) -> Result<(), PlannerError> {
+    let display_name = name.to_ascii_uppercase();
+    if distinct {
+        return Err(PlannerError::invalid_expression(format!(
+            "{display_name}() window function does not accept DISTINCT"
+        )));
+    }
+    if star {
+        return Err(PlannerError::invalid_expression(format!(
+            "{display_name}() window function does not accept a star argument"
+        )));
+    }
+    if !(1..=3).contains(&arg_count) {
+        return Err(PlannerError::invalid_expression(format!(
+            "{display_name}() window function expects 1 to 3 arguments"
+        )));
+    }
+    Ok(())
+}
+
+fn coerce_compatible_result(expr: &mut TypedExpr, target: &ResolvedType) {
+    if expr.resolved_type == *target || matches!(expr.resolved_type, ResolvedType::Null) {
+        return;
+    }
+    let span = expr.span;
+    *expr = TypedExpr::cast(expr.clone(), target.clone(), span);
 }
 
 fn coerce_case_result(expr: &mut TypedExpr, target: &ResolvedType) {

@@ -24,7 +24,9 @@ mod planner_tests;
 pub use aggregate_expr::{AggregateExpr, AggregateFunction};
 pub use error::PlannerError;
 pub use knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
-pub use logical_plan::{JoinType, LogicalPlan, SetOperator, WindowExpr, WindowFunction};
+pub use logical_plan::{
+    JoinType, LogicalPlan, OffsetWindowFunction, SetOperator, WindowExpr, WindowFunction,
+};
 pub use name_resolver::{NameResolver, ResolvedColumn};
 pub use type_checker::{ScopedTable, TypeChecker};
 pub use typed_expr::{
@@ -368,10 +370,24 @@ impl TableReferenceExtractor {
                     for sort_expr in &window.order_by {
                         self.extract_typed_expr(&sort_expr.expr, diagnostics, references);
                     }
-                    if let WindowFunction::Aggregate(aggregate) = &window.function
-                        && let Some(arg) = &aggregate.arg
-                    {
-                        self.extract_typed_expr(arg, diagnostics, references);
+                    match &window.function {
+                        WindowFunction::Aggregate(aggregate) => {
+                            if let Some(arg) = &aggregate.arg {
+                                self.extract_typed_expr(arg, diagnostics, references);
+                            }
+                        }
+                        WindowFunction::Lag(function) | WindowFunction::Lead(function) => {
+                            self.extract_typed_expr(&function.value, diagnostics, references);
+                            if let Some(offset) = &function.offset {
+                                self.extract_typed_expr(offset, diagnostics, references);
+                            }
+                            if let Some(default) = &function.default {
+                                self.extract_typed_expr(default, diagnostics, references);
+                            }
+                        }
+                        WindowFunction::RowNumber
+                        | WindowFunction::Rank
+                        | WindowFunction::DenseRank => {}
                     }
                 }
             }
@@ -2312,11 +2328,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         WindowFunction::Aggregate(aggregate)
                     }
                     "lag" | "lead" => {
-                        return Err(PlannerError::unsupported_feature(
-                            format!("{} window function", name.to_ascii_uppercase()),
-                            "future",
-                            expr.span,
-                        ));
+                        let positional = build_offset_window_function(name, args)?;
+                        if name.eq_ignore_ascii_case("lag") {
+                            WindowFunction::Lag(positional)
+                        } else {
+                            WindowFunction::Lead(positional)
+                        }
                     }
                     _ => {
                         return Err(PlannerError::unsupported_feature(
@@ -3121,6 +3138,29 @@ fn substitute_projection_aliases(
         kind,
         span: expr.span,
     }
+}
+
+fn build_offset_window_function(
+    name: &str,
+    args: &[TypedExpr],
+) -> Result<OffsetWindowFunction, PlannerError> {
+    let value = args.first().cloned().ok_or_else(|| {
+        PlannerError::invalid_expression(format!(
+            "{}() window function expects 1 to 3 arguments",
+            name.to_ascii_uppercase()
+        ))
+    })?;
+    if args.len() > 3 {
+        return Err(PlannerError::invalid_expression(format!(
+            "{}() window function expects 1 to 3 arguments",
+            name.to_ascii_uppercase()
+        )));
+    }
+    Ok(OffsetWindowFunction {
+        value,
+        offset: args.get(1).cloned(),
+        default: args.get(2).cloned(),
+    })
 }
 
 fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {

@@ -95,6 +95,63 @@ fn sql_integration_cte_column_name_list_is_public_schema() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_lag_and_lead_preserve_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER); \
+         INSERT INTO samples VALUES \
+             (1, 'east', 10), (2, 'east', 20), \
+             (3, 'west', 30), (4, 'west', 40);",
+    )
+    .unwrap();
+
+    let result = db
+        .execute_sql(
+            "SELECT id, \
+                    LAG(value, 1, -1) OVER (PARTITION BY region ORDER BY id) AS previous, \
+                    LEAD(value) OVER (PARTITION BY region ORDER BY id) AS following, \
+                    value - LAG(value, 1, value) \
+                        OVER (PARTITION BY region ORDER BY id) AS delta \
+             FROM samples ORDER BY id;",
+        )
+        .unwrap();
+
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![
+                SqlValue::Integer(1),
+                SqlValue::Integer(-1),
+                SqlValue::Integer(20),
+                SqlValue::Integer(0),
+            ],
+            vec![
+                SqlValue::Integer(2),
+                SqlValue::Integer(10),
+                SqlValue::Null,
+                SqlValue::Integer(10),
+            ],
+            vec![
+                SqlValue::Integer(3),
+                SqlValue::Integer(-1),
+                SqlValue::Integer(40),
+                SqlValue::Integer(0),
+            ],
+            vec![
+                SqlValue::Integer(4),
+                SqlValue::Integer(30),
+                SqlValue::Null,
+                SqlValue::Integer(10),
+            ],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_database_execute_sql_pragma_uses_store_path() {
     let db = Database::new();
 

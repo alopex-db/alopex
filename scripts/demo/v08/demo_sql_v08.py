@@ -98,7 +98,7 @@ def main() -> int:
         for sql in statements:
             show(sql, db.execute_sql(sql))
 
-        # These 30 queries have an explicit or single-row order contract.
+        # These 33 queries have an explicit or single-row order contract.
         ordered_checks: list[tuple[str, list[Row]]] = [
             ("SELECT SUM(n) AS total FROM metrics", [{"total": 5}]),
             (
@@ -322,6 +322,62 @@ def main() -> int:
                     {"region": "west", "rn": 2},
                 ],
             ),
+            (
+                "SELECT id, LAG(amount) OVER (ORDER BY id) AS previous, "
+                "LEAD(amount, 2, -1) OVER (ORDER BY id) AS two_ahead, "
+                "LAG(amount, 0) OVER (ORDER BY id) AS current_value, "
+                "amount - LAG(amount, 1, amount) OVER (ORDER BY id) AS delta "
+                "FROM sales ORDER BY id",
+                [
+                    {
+                        "id": 1,
+                        "previous": None,
+                        "two_ahead": 150.0,
+                        "current_value": 100.0,
+                        "delta": 0.0,
+                    },
+                    {
+                        "id": 2,
+                        "previous": 100.0,
+                        "two_ahead": 150.0,
+                        "current_value": 200.0,
+                        "delta": 100.0,
+                    },
+                    {
+                        "id": 3,
+                        "previous": 200.0,
+                        "two_ahead": 50.0,
+                        "current_value": 150.0,
+                        "delta": -50.0,
+                    },
+                    {
+                        "id": 4,
+                        "previous": 150.0,
+                        "two_ahead": -1.0,
+                        "current_value": 150.0,
+                        "delta": 0.0,
+                    },
+                    {
+                        "id": 5,
+                        "previous": 150.0,
+                        "two_ahead": -1.0,
+                        "current_value": 50.0,
+                        "delta": -100.0,
+                    },
+                ],
+            ),
+            (
+                "SELECT id, LAG(amount, 1, -1) OVER (PARTITION BY region ORDER BY id) AS previous, "
+                "LEAD(bonus, 1, -1) OVER (PARTITION BY region ORDER BY id) AS following_bonus "
+                "FROM sales ORDER BY id",
+                [
+                    {"id": 1, "previous": -1.0, "following_bonus": None},
+                    {"id": 2, "previous": 100.0, "following_bonus": -1.0},
+                    {"id": 3, "previous": -1.0, "following_bonus": None},
+                    {"id": 4, "previous": 150.0, "following_bonus": -1.0},
+                    {"id": 5, "previous": -1.0, "following_bonus": -1.0},
+                ],
+            ),
         ]
 
         # These 10 queries assert row multisets; their SQL does not promise order.
@@ -382,8 +438,6 @@ def main() -> int:
             ("SELECT CASE WHEN TRUE THEN 1 ELSE 'text' END", "type mismatch"),
             ("SELECT id FROM sales UNION SELECT id, region FROM sales", "column count mismatch"),
             ("SELECT id FROM sales UNION SELECT region FROM sales", "type mismatch"),
-            ("SELECT LAG(amount) OVER (ORDER BY id) FROM sales", "LAG"),
-            ("SELECT LEAD(amount) OVER (ORDER BY id) FROM sales", "LEAD"),
             (
                 "SELECT SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM sales",
                 "ROWS",

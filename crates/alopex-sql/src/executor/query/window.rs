@@ -4,7 +4,7 @@ use crate::catalog::ColumnMetadata;
 use crate::executor::evaluator::{self, EvalContext};
 use crate::executor::memory::MemoryPolicy;
 use crate::executor::{ExecutorError, Result, Row};
-use crate::planner::logical_plan::{WindowExpr, WindowFunction};
+use crate::planner::logical_plan::{OffsetWindowFunction, WindowExpr, WindowFunction};
 use crate::planner::typed_expr::SortExpr;
 use crate::storage::SqlValue;
 
@@ -142,7 +142,7 @@ fn evaluate_partition(
                     dense_rank += 1;
                 }
                 previous_key = Some(key);
-                let value = match window.function {
+                let value = match &window.function {
                     WindowFunction::Rank => rank,
                     WindowFunction::DenseRank => dense_rank,
                     _ => unreachable!(),
@@ -182,8 +182,91 @@ fn evaluate_partition(
                 }
             }
         }
+        WindowFunction::Lag(function) => {
+            evaluate_offset_window(function, OffsetDirection::Preceding, partition, output)?
+        }
+        WindowFunction::Lead(function) => {
+            evaluate_offset_window(function, OffsetDirection::Following, partition, output)?
+        }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OffsetDirection {
+    Preceding,
+    Following,
+}
+
+fn evaluate_offset_window(
+    function: &OffsetWindowFunction,
+    direction: OffsetDirection,
+    partition: &[Row],
+    output: &mut [SqlValue],
+) -> Result<()> {
+    for (position, current_row) in partition.iter().enumerate() {
+        let current_context = EvalContext::new(&current_row.values);
+        let value = match evaluate_offset(function.offset.as_ref(), &current_context)? {
+            None => SqlValue::Null,
+            Some(offset) => {
+                match addressed_position(position, offset, direction, partition.len()) {
+                    Some(target) => evaluator::evaluate(
+                        &function.value,
+                        &EvalContext::new(&partition[target].values),
+                    )?,
+                    None => function
+                        .default
+                        .as_ref()
+                        .map(|default| evaluator::evaluate(default, &current_context))
+                        .transpose()?
+                        .unwrap_or(SqlValue::Null),
+                }
+            }
+        };
+        set_output(output, current_row, value)?;
+    }
+    Ok(())
+}
+
+fn evaluate_offset(
+    offset: Option<&crate::planner::TypedExpr>,
+    context: &EvalContext<'_>,
+) -> Result<Option<u64>> {
+    let value = offset
+        .map(|expr| evaluator::evaluate(expr, context))
+        .transpose()?
+        .unwrap_or(SqlValue::Integer(1));
+    match value {
+        SqlValue::Null => Ok(None),
+        SqlValue::Integer(value) => non_negative_offset(i64::from(value)).map(Some),
+        SqlValue::BigInt(value) => non_negative_offset(value).map(Some),
+        other => Err(ExecutorError::InvalidOperation {
+            operation: "window offset".into(),
+            reason: format!("offset must be INTEGER, got {}", other.type_name()),
+        }),
+    }
+}
+
+fn non_negative_offset(offset: i64) -> Result<u64> {
+    u64::try_from(offset).map_err(|_| ExecutorError::InvalidOperation {
+        operation: "window offset".into(),
+        reason: "offset must be non-negative".into(),
+    })
+}
+
+fn addressed_position(
+    position: usize,
+    offset: u64,
+    direction: OffsetDirection,
+    partition_len: usize,
+) -> Option<usize> {
+    let position = u64::try_from(position).ok()?;
+    let target = match direction {
+        OffsetDirection::Preceding => position.checked_sub(offset)?,
+        OffsetDirection::Following => position.checked_add(offset)?,
+    };
+    let target = usize::try_from(target).ok()?;
+    (target < partition_len).then_some(target)
 }
 
 fn order_key(row: &Row, order_by: &[SortExpr]) -> Result<Vec<u8>> {

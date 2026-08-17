@@ -1,4 +1,4 @@
-//! Complete v0.8.6 embedded-local public-surface walkthrough.
+//! Complete v0.8.x embedded-local public-surface walkthrough.
 //!
 //! Every scenario prints a stable ID and checks its observable result. A failed
 //! assertion or API error makes the release verification step fail.
@@ -314,7 +314,7 @@ fn scenario_local_sql_matrix() -> DemoResult {
         check_rows(&db, sql, expected)?;
     }
 
-    let v086_matrix = vec![
+    let v08_matrix = vec![
         (
             "SELECT amount AS id FROM sales ORDER BY id",
             vec![
@@ -470,18 +470,86 @@ fn scenario_local_sql_matrix() -> DemoResult {
                 ],
             ],
         ),
+        (
+            "SELECT id, LAG(amount) OVER (ORDER BY id) AS previous, LEAD(amount, 2, -1) OVER (ORDER BY id) AS two_ahead, LAG(amount, 0) OVER (ORDER BY id) AS current_value, amount - LAG(amount, 1, amount) OVER (ORDER BY id) AS delta FROM sales ORDER BY id",
+            vec![
+                vec![
+                    SqlValue::Integer(1),
+                    SqlValue::Null,
+                    SqlValue::Double(150.0),
+                    SqlValue::Float(100.0),
+                    SqlValue::Float(0.0),
+                ],
+                vec![
+                    SqlValue::Integer(2),
+                    SqlValue::Float(100.0),
+                    SqlValue::Double(150.0),
+                    SqlValue::Float(200.0),
+                    SqlValue::Float(100.0),
+                ],
+                vec![
+                    SqlValue::Integer(3),
+                    SqlValue::Float(200.0),
+                    SqlValue::Double(50.0),
+                    SqlValue::Float(150.0),
+                    SqlValue::Float(-50.0),
+                ],
+                vec![
+                    SqlValue::Integer(4),
+                    SqlValue::Float(150.0),
+                    SqlValue::Double(-1.0),
+                    SqlValue::Float(150.0),
+                    SqlValue::Float(0.0),
+                ],
+                vec![
+                    SqlValue::Integer(5),
+                    SqlValue::Float(150.0),
+                    SqlValue::Double(-1.0),
+                    SqlValue::Float(50.0),
+                    SqlValue::Float(-100.0),
+                ],
+            ],
+        ),
+        (
+            "SELECT id, LAG(amount, 1, -1) OVER (PARTITION BY region ORDER BY id) AS previous, LEAD(bonus, 1, -1) OVER (PARTITION BY region ORDER BY id) AS following_bonus FROM sales ORDER BY id",
+            vec![
+                vec![
+                    SqlValue::Integer(1),
+                    SqlValue::Double(-1.0),
+                    SqlValue::Null,
+                ],
+                vec![
+                    SqlValue::Integer(2),
+                    SqlValue::Double(100.0),
+                    SqlValue::Double(-1.0),
+                ],
+                vec![
+                    SqlValue::Integer(3),
+                    SqlValue::Double(-1.0),
+                    SqlValue::Null,
+                ],
+                vec![
+                    SqlValue::Integer(4),
+                    SqlValue::Double(150.0),
+                    SqlValue::Double(-1.0),
+                ],
+                vec![
+                    SqlValue::Integer(5),
+                    SqlValue::Double(-1.0),
+                    SqlValue::Double(-1.0),
+                ],
+            ],
+        ),
     ];
     require(
-        v086_matrix.len() == 13,
-        "v0.8.6 SQL success-check count changed",
+        v08_matrix.len() == 15,
+        "v0.8.x SQL success-check count changed",
     )?;
-    for (sql, expected) in &v086_matrix {
+    for (sql, expected) in &v08_matrix {
         check_rows(&db, sql, expected)?;
     }
 
-    let rejected_v086 = [
-        ("SELECT LAG(amount) OVER (ORDER BY id) FROM sales", "LAG"),
-        ("SELECT LEAD(amount) OVER (ORDER BY id) FROM sales", "LEAD"),
+    let rejected_v08 = [
         (
             "SELECT SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM sales",
             "ROWS",
@@ -499,12 +567,12 @@ fn scenario_local_sql_matrix() -> DemoResult {
             "ALOPEX-C003",
         ),
     ];
-    for (sql, expected) in rejected_v086 {
+    for (sql, expected) in rejected_v08 {
         expect_sql_error(&db, sql, expected)?;
     }
     require(
-        v086_matrix.len() + rejected_v086.len() == 19,
-        "v0.8.6 SQL check count changed",
+        v08_matrix.len() + rejected_v08.len() == 19,
+        "v0.8.x SQL check count changed",
     )?;
     require(
         matches!(
@@ -915,7 +983,7 @@ fn scenario_fail_closed_boundaries() -> DemoResult {
 }
 
 fn run() -> DemoResult {
-    println!("AlopexDB v0.8.6 complete embedded-local API demo");
+    println!("AlopexDB v0.8.x complete embedded-local API demo");
     run_scenario(
         "EMB-01-storage-durability",
         "storage modes and durability",

@@ -77,6 +77,32 @@ def test_execute_sql_cte_column_name_list_renames_result_keys(db):
     assert rows == [{"label": "seven", "identifier": 7}]
 
 
+def test_execute_sql_lag_and_lead_preserve_exact_rows(db):
+    db.execute_sql(
+        "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER)"
+    )
+    db.execute_sql(
+        "INSERT INTO samples VALUES "
+        "(1, 'east', 10), (2, 'east', 20), "
+        "(3, 'west', 30), (4, 'west', 40)"
+    )
+
+    rows = db.execute_sql(
+        "SELECT id, "
+        "LAG(value, 1, -1) OVER (PARTITION BY region ORDER BY id) AS previous, "
+        "LEAD(value) OVER (PARTITION BY region ORDER BY id) AS following, "
+        "value - LAG(value, 1, value) "
+        "OVER (PARTITION BY region ORDER BY id) AS delta "
+        "FROM samples ORDER BY id"
+    )
+    assert rows == [
+        {"id": 1, "previous": -1, "following": 20, "delta": 0},
+        {"id": 2, "previous": 10, "following": None, "delta": 10},
+        {"id": 3, "previous": -1, "following": 40, "delta": 0},
+        {"id": 4, "previous": 30, "following": None, "delta": 10},
+    ]
+
+
 def test_execute_sql_params_binding(users_db):
     users_db.execute_sql(
         "INSERT INTO users (id, name, email) VALUES (?, ?, ?)",

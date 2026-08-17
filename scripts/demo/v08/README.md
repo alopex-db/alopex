@@ -1,4 +1,8 @@
-# v0.8.6 embedded-local and SQL demo coverage
+# v0.8.x embedded-local and SQL demo coverage
+
+The v0.8 release verifier now treats `LAG` and `LEAD` as supported positional
+window functions. Both the Python and Rust demos compare their complete result
+sets, including a time-series delta, partition boundaries, defaults, and NULLs.
 
 `demo_embedded_v085.sh` is the single Rust Embedded API walkthrough used by
 post-release verification. It builds against local path dependencies during
@@ -10,7 +14,7 @@ verifier.
 | `EMB-01-storage-durability` | memory options/limits, snapshot, clone, clear, persist, file URI reopen and flush | inherited local compatibility; Phase 1 R5 |
 | `EMB-02-kv-transactions` | KV CRUD, prefix scan, commit, rollback | Phase 2 R1 local Transaction compatibility |
 | `EMB-03-persisted-transaction-manager` | named transaction metadata, staged reads, commit and rollback | Phase 2 R1 local multi-operation workflow |
-| `EMB-04-local-sql-matrix` | DDL/DML, SELECT clauses, JOIN, subquery, aggregates, scalar/hash/encoding, TIMESTAMP, Vector SQL, PRAGMA, and v0.8.6 alias/REAL/set-operation/CASE/CTE/window contracts; every query is verified by full row-value equality, not row presence | Phase 2 R1 local SQL baseline; #122-#130 |
+| `EMB-04-local-sql-matrix` | DDL/DML, SELECT clauses, JOIN, subquery, aggregates, scalar/hash/encoding, TIMESTAMP, Vector SQL, PRAGMA, and v0.8.x alias/REAL/set-operation/CASE/CTE/window contracts; every query is verified by full row-value equality, not row presence | Phase 2 R1 local SQL baseline; #122-#130, #141 |
 | `EMB-05-catalog-cluster-diagnostics` | catalog/namespace/table/index observation, cache invalidation, single-node cluster status and routing diagnostics | Phase 1 R1/R2 local diagnostic boundary |
 | `EMB-06-owned-and-sql-streams` | callback/iterator/owned SQL streams, owned transaction commit/rollback and preflight rejection | Phase 4 R1/R2 Rust backend contract |
 | `EMB-07-dataframe-columnar` | SQL-to-DataFrame with FLOAT-to-Arrow-Float32 preservation, columnar projection/scan/stats/index, and fail-closed legacy-to-V08 streaming boundary | Phase 3 R1/R2; v0.8.5 #93 |
@@ -34,7 +38,7 @@ fabricated as Embedded API successes:
 - S3 is outside the default v0.8 local package profile and requires the `s3`
   Cargo feature and external credentials.
 
-## v0.8.6 SQL correctness fixture
+## v0.8.x SQL correctness fixture
 
 `demo_sql_v08.py` and `EMB-04-local-sql-matrix` share this deliberately
 non-trivial table:
@@ -65,23 +69,19 @@ right (qty <= 2):      {2, 4, 5}
 left-only: {3}; right-only: {5}; intersection: {2, 4}
 ```
 
-The Python demo performs exactly 53 assertions: 31 ordered comparisons, 10
-unordered row-multiset comparisons, and 12 expected errors. The Rust EMB-04
-scenario first converts its inherited eight queries to exact row-value checks,
-then performs 19 v0.8.6 checks (13 result checks and six fail-closed checks).
-The initial 13-check plan was expanded rather than deleting feature coverage:
-the five added Rust checks pin CTE shadowing, the second EXCEPT direction,
-explicit RANGE rejection, and both WHERE/GROUP BY alias scope boundaries
-directly at the Embedded API surface. The existing CASE result check was also
-expanded to pin `INTEGER`/`DOUBLE` numeric promotion without consuming another
-check slot.
+The Python demo performs exactly 53 assertions: 33 ordered comparisons, 10
+unordered row-multiset comparisons, and 10 expected errors. The Rust EMB-04
+scenario performs 19 v0.8.x checks: 15 exact result checks and four fail-closed
+checks. The matrix grows cumulatively: CTE column aliases and both positional
+window examples were added without removing the inherited set-operation, CASE,
+CTE-shadowing, frame-rejection, or alias-scope coverage.
 `check_rows` reports both expected and actual rows on failure. The nondeterministic
 `NOW()` value is not claimed as an equality check; the inherited TIMESTAMP check
 uses the stored constant instead. Vector-distance fixture values yield exact
 distances 0 and 1 so the equality contract does not depend on approximate square
 roots.
 
-## v0.8.6 SQL decisions captured by the demos
+## v0.8.x SQL decisions captured by the demos
 
 These are contract decisions, not observations inferred from whichever binary
 happened to run:
@@ -108,21 +108,25 @@ happened to run:
 6. A CTE column-name list renames its query output by position without changing
    values or types. Its length must match the query width, names must be unique,
    and quoted names preserve case while bare names use normal identifier folding.
-7. Explicit `ROWS BETWEEN` and `RANGE BETWEEN` frames are outside v0.8.6 and
-   must be rejected by name. Supported implicit frames are the whole partition
-   without window `ORDER BY`, and cumulative through the current row with it.
-8. SQL NULL is represented as Python `None` and Rust `SqlValue::Null`; the
+7. `LAG(value [, offset [, default]])` and `LEAD(...)` use offset 1 and NULL by
+   default. Offset and default expressions use the current row; the value uses
+   the addressed row. NULL values are respected rather than skipped, and the
+   default is used only when the target falls outside its partition.
+8. Positional lookups use the whole partition, independently of the aggregate
+   window frame. Equal window `ORDER BY` keys retain stable upstream order; add
+   a unique final key when the SQL statement must define a portable total order.
+   Explicit `ROWS BETWEEN` and `RANGE BETWEEN` syntax remains unsupported and
+   must be rejected by name.
+9. SQL NULL is represented as Python `None` and Rust `SqlValue::Null`; the
    unordered comparator retains a type tag so NULL cannot compare equal to a
    textual or numeric sentinel.
-9. SQL BOOLEAN is represented as Python `bool` (`True`/`False`) and Rust
+10. SQL BOOLEAN is represented as Python `bool` (`True`/`False`) and Rust
    `SqlValue::Boolean`, never integer 1/0. The Python canonicalizer is
    type-sensitive specifically because Python otherwise considers `True == 1`.
 
-The following are intentionally excluded from positive v0.8.6 coverage and are
+The following are intentionally excluded from positive v0.8.x coverage and are
 instead checked as explicit rejection contracts:
 
-- `LAG()` and `LEAD()` require positional partition access not provided by the
-  current accumulator model;
 - explicit `ROWS BETWEEN` and `RANGE BETWEEN` frame specifications are not
   implemented;
 - recursive CTEs remain outside the non-recursive CTE scope.

@@ -1,25 +1,18 @@
-//! Window functions / `OVER` clause (issue #128, v0.8.6).
+//! Window functions / `OVER` clause (issues #128 and #141, v0.8.x).
 //!
-//! Scope implemented by v0.8.6:
+//! Implemented scope:
 //!   * `ROW_NUMBER()` / `RANK()` / `DENSE_RANK()`
+//!   * positional `LAG()` / `LEAD()` with optional offset and default
 //!   * aggregate `OVER`: `SUM` / `COUNT` / `AVG` / `MIN` / `MAX`
 //!   * `PARTITION BY`
 //!   * window-local `ORDER BY`
 //!   * implicit frames: bare `OVER ()` spans the whole partition, while an
 //!     `ORDER BY` inside `OVER` makes the frame cumulative.
 //!
-//! Explicitly out of scope for v0.8.6 (must be rejected, not silently
+//! Explicitly out of scope for v0.8.x (must be rejected, not silently
 //! mis-evaluated):
-//!   * `LAG()` / `LEAD()` — the `Accumulator` trait
-//!     (`executor/query/aggregate.rs:91-103`) is a sequential
-//!     `update`/`merge`/`finalize` model and cannot express positional access
-//!     to the "N-th preceding row"; that needs whole-partition materialization.
 //!   * explicit frame clauses `ROWS BETWEEN` / `RANGE BETWEEN` — the concept of
 //!     a frame specification does not exist anywhere in the crate.
-//!
-//! At the base commit every query below fails during parsing: the Nim parser
-//! stops at the `(` that follows `OVER`. That makes the whole file RED for a
-//! single shared reason, which is exactly the starting point we want.
 
 use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::MemoryCatalog;
@@ -160,6 +153,21 @@ fn float_column(result: &QueryResult, index: usize) -> Vec<f64> {
             SqlValue::Integer(v) => f64::from(*v),
             SqlValue::BigInt(v) => *v as f64,
             other => panic!("expected a float at column {index}, got {other:?}"),
+        })
+        .collect()
+}
+
+fn optional_float_column(result: &QueryResult, index: usize) -> Vec<Option<f64>> {
+    result
+        .rows
+        .iter()
+        .map(|row| match &row[index] {
+            SqlValue::Null => None,
+            SqlValue::Float(v) => Some(f64::from(*v)),
+            SqlValue::Double(v) => Some(*v),
+            SqlValue::Integer(v) => Some(f64::from(*v)),
+            SqlValue::BigInt(v) => Some(*v as f64),
+            other => panic!("expected a float or NULL at column {index}, got {other:?}"),
         })
         .collect()
 }
@@ -490,6 +498,198 @@ fn outer_order_by_resolves_window_function_alias() {
 }
 
 // ---------------------------------------------------------------------------
+// Positional value functions
+// ---------------------------------------------------------------------------
+
+/// The one-argument forms default to offset 1 and NULL outside the partition.
+/// LEAD deliberately reads beyond the aggregate window's implicit
+/// `RANGE ... CURRENT ROW` frame: positional value functions address the whole
+/// partition and are not constrained by aggregate frame semantics.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn lag_and_lead_default_to_one_row_and_null() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, LAG(amount) OVER (ORDER BY id) AS previous, \
+                LEAD(amount) OVER (ORDER BY id) AS following \
+         FROM sales ORDER BY id",
+    );
+
+    assert_eq!(int_column(&result, 0), vec![1, 2, 3, 4, 5]);
+    assert_eq!(
+        optional_float_column(&result, 1),
+        vec![None, Some(100.0), Some(200.0), Some(150.0), Some(150.0)]
+    );
+    assert_eq!(
+        optional_float_column(&result, 2),
+        vec![Some(200.0), Some(150.0), Some(150.0), Some(50.0), None]
+    );
+}
+
+/// Explicit offsets and defaults are evaluated relative to the current row.
+/// Numeric defaults are coerced to a common result type with the value.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn lag_and_lead_support_offsets_and_current_row_defaults() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, LAG(amount, 2, -1) OVER (ORDER BY id) AS previous, \
+                LEAD(amount, 99, qty) OVER (ORDER BY id) AS following, \
+                LAG(amount, 0) OVER (ORDER BY id) AS current_value, \
+                LAG(id, qty, -1) OVER (ORDER BY id) AS dynamic_offset, \
+                amount - LAG(amount, 1, amount) OVER (ORDER BY id) AS delta \
+         FROM sales ORDER BY id",
+    );
+
+    assert_floats_eq(
+        &float_column(&result, 1),
+        &[-1.0, -1.0, 100.0, 200.0, 150.0],
+    );
+    assert_floats_eq(&float_column(&result, 2), &[3.0, 1.0, 5.0, 2.0, 0.0]);
+    assert_floats_eq(
+        &float_column(&result, 3),
+        &[100.0, 200.0, 150.0, 150.0, 50.0],
+    );
+    assert_eq!(int_column(&result, 4), vec![-1, 1, -1, 2, 5]);
+    assert_floats_eq(&float_column(&result, 5), &[0.0, 100.0, -50.0, 0.0, -100.0]);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn lag_and_lead_do_not_cross_partition_boundaries() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, LAG(amount, 1, -1) OVER (PARTITION BY region ORDER BY id) AS previous, \
+                LEAD(amount, 1, -1) OVER (PARTITION BY region ORDER BY id) AS following \
+         FROM sales ORDER BY id",
+    );
+
+    assert_floats_eq(&float_column(&result, 1), &[-1.0, 100.0, -1.0, 150.0, -1.0]);
+    assert_floats_eq(&float_column(&result, 2), &[200.0, -1.0, 150.0, -1.0, -1.0]);
+}
+
+/// NULL values are respected rather than skipped. The default is used only
+/// when the requested position is outside the partition.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn lag_and_lead_preserve_null_values() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, LAG(bonus, 1, -1) OVER (ORDER BY id) AS previous, \
+                LEAD(bonus, 1, -1) OVER (ORDER BY id) AS following \
+         FROM sales ORDER BY id",
+    );
+
+    assert_eq!(
+        optional_float_column(&result, 1),
+        vec![Some(-1.0), Some(10.0), None, Some(20.0), None]
+    );
+    assert_eq!(
+        optional_float_column(&result, 2),
+        vec![None, Some(20.0), None, Some(5.0), Some(-1.0)]
+    );
+}
+
+/// Equal ORDER BY keys retain their upstream order as a deterministic
+/// tie-breaker. The outer ORDER BY only changes presentation order.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn lag_and_lead_use_stable_upstream_order_for_peer_ties() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, LAG(id) OVER (ORDER BY amount) AS previous, \
+                LEAD(id) OVER (ORDER BY amount) AS following \
+         FROM sales ORDER BY id DESC",
+    );
+
+    assert_eq!(int_column(&result, 0), vec![5, 4, 3, 2, 1]);
+    assert_eq!(
+        result
+            .rows
+            .iter()
+            .map(|row| row[1].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            SqlValue::Null,
+            SqlValue::Integer(3),
+            SqlValue::Integer(1),
+            SqlValue::Integer(4),
+            SqlValue::Integer(5),
+        ]
+    );
+    assert_eq!(
+        result
+            .rows
+            .iter()
+            .map(|row| row[2].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            SqlValue::Integer(1),
+            SqlValue::Integer(2),
+            SqlValue::Integer(4),
+            SqlValue::Null,
+            SqlValue::Integer(3),
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn lag_and_lead_validate_arity_and_argument_types() {
+    let mut h = Harness::new();
+    for (sql, expected) in [
+        ("SELECT LAG() OVER (ORDER BY id) FROM sales", "1 to 3"),
+        (
+            "SELECT LEAD(amount, 1, 0, 99) OVER (ORDER BY id) FROM sales",
+            "1 to 3",
+        ),
+        (
+            "SELECT LAG(amount, region) OVER (ORDER BY id) FROM sales",
+            "offset",
+        ),
+        (
+            "SELECT LEAD(amount, 1, region) OVER (ORDER BY id) FROM sales",
+            "type mismatch",
+        ),
+        (
+            "SELECT LAG(DISTINCT amount) OVER (ORDER BY id) FROM sales",
+            "DISTINCT",
+        ),
+        ("SELECT LEAD(*) OVER (ORDER BY id) FROM sales", "star"),
+    ] {
+        let err = h.run_err(sql);
+        assert!(
+            err.to_ascii_lowercase()
+                .contains(&expected.to_ascii_lowercase()),
+            "error for `{sql}` must contain `{expected}`, got: {err}"
+        );
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn lag_and_lead_reject_negative_offsets_and_propagate_null_offsets() {
+    let mut h = Harness::new();
+    let err = h.run_err("SELECT LAG(amount, -1) OVER (ORDER BY id) FROM sales");
+    assert!(
+        err.to_ascii_lowercase().contains("non-negative"),
+        "negative offset error must explain the constraint, got: {err}"
+    );
+
+    let result = query(
+        &mut h,
+        "SELECT id, LEAD(amount, NULL, -1) OVER (ORDER BY id) AS following \
+         FROM sales ORDER BY id",
+    );
+    assert_eq!(optional_float_column(&result, 1), vec![None; 5]);
+}
+
+// ---------------------------------------------------------------------------
 // Unsupported constructs must be rejected explicitly
 // ---------------------------------------------------------------------------
 
@@ -512,25 +712,6 @@ fn assert_rejects_named(err: &str, construct: &str) {
             || haystack.contains("not implemented"),
         "error must state that `{construct}` is unsupported, got: {err}"
     );
-}
-
-/// `LAG()` is out of scope for v0.8.6 and must be refused with a message that
-/// names it, never accepted and silently evaluated to some other value.
-#[cfg_attr(not(feature = "lane_ci"), ignore)]
-#[test]
-fn lag_is_rejected_as_unsupported() {
-    let mut h = Harness::new();
-    let err = h.run_err("SELECT LAG(amount) OVER (ORDER BY id) FROM sales");
-    assert_rejects_named(&err, "LAG");
-}
-
-/// `LEAD()` is out of scope for v0.8.6 and must be refused by name.
-#[cfg_attr(not(feature = "lane_ci"), ignore)]
-#[test]
-fn lead_is_rejected_as_unsupported() {
-    let mut h = Harness::new();
-    let err = h.run_err("SELECT LEAD(amount) OVER (ORDER BY id) FROM sales");
-    assert_rejects_named(&err, "LEAD");
 }
 
 /// Explicit frame specifications are out of scope. Accepting the clause and

@@ -80,6 +80,40 @@ fn batch_json_single_statement_is_one_element_array() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn batch_json_lag_and_lead_preserve_exact_rows() {
+    let output = run_alopex(&[
+        "--in-memory",
+        "--batch",
+        "--quiet",
+        "--output",
+        "json",
+        "sql",
+        "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER); \
+         INSERT INTO samples VALUES (1, 'east', 10); \
+         INSERT INTO samples VALUES (2, 'east', 20); \
+         INSERT INTO samples VALUES (3, 'west', 30); \
+         INSERT INTO samples VALUES (4, 'west', 40); \
+         SELECT id, \
+                LAG(value, 1, -1) OVER (PARTITION BY region ORDER BY id) AS previous, \
+                LEAD(value) OVER (PARTITION BY region ORDER BY id) AS following, \
+                value - LAG(value, 1, value) OVER (PARTITION BY region ORDER BY id) AS delta \
+         FROM samples ORDER BY id",
+    ]);
+
+    let value = parse_json_stdout(&output);
+    assert_eq!(
+        value,
+        serde_json::json!([[
+            {"id": 1, "previous": -1, "following": 20, "delta": 0},
+            {"id": 2, "previous": 10, "following": null, "delta": 10},
+            {"id": 3, "previous": -1, "following": 40, "delta": 0},
+            {"id": 4, "previous": 30, "following": null, "delta": 10}
+        ]])
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn batch_json_includes_ddl_dml_status_per_statement() {
     let output = run_alopex(&[
         "--in-memory",

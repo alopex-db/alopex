@@ -54,6 +54,23 @@ pub enum WindowFunction {
     Rank,
     DenseRank,
     Aggregate(AggregateExpr),
+    /// Value at an offset before the current row in the whole partition.
+    Lag(OffsetWindowFunction),
+    /// Value at an offset after the current row in the whole partition.
+    Lead(OffsetWindowFunction),
+}
+
+/// Arguments shared by the positional `LAG` and `LEAD` window functions.
+///
+/// Offset and default expressions are evaluated against the current row. The
+/// value expression is evaluated against the addressed partition row. Unlike
+/// aggregate windows, these functions do not restrict lookup to the current
+/// aggregate frame.
+#[derive(Debug, Clone)]
+pub struct OffsetWindowFunction {
+    pub value: TypedExpr,
+    pub offset: Option<TypedExpr>,
+    pub default: Option<TypedExpr>,
 }
 
 /// A planned window expression and its partition/order specification.
