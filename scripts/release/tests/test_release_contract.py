@@ -127,6 +127,8 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertIn('python_workflow_ref="${python_tag}"', dispatch)
         self.assertIn('python_workflow_ref="${GITHUB_REF_NAME}"', dispatch)
+        self.assertIn('python_source_ref="${python_tag}"', dispatch)
+        self.assertIn('python_source_ref="${RELEASE_TARGET_SHA}"', dispatch)
         self.assertIn('expected_workflow_sha="${RELEASE_TARGET_SHA}"', dispatch)
         self.assertIn('target_sha=${RELEASE_TARGET_SHA}', dispatch)
         self.assertIn('core_run_id=${GITHUB_RUN_ID}', dispatch)
