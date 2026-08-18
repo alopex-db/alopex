@@ -51,6 +51,27 @@ class FinalJoinWorkflowTests(unittest.TestCase):
         self.assertIn("PYTHON_TAG_NAME: ${{ inputs.release_tag || github.ref_name }}", text)
         self.assertIn("PYTHON_HEAD_SHA=%s", text)
 
+    def test_python_head_sha_is_exported_for_normal_and_repair_runs(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        block = text.split(
+            "      - name: Resolve exact core and Python workflow identities",
+            maxsplit=1,
+        )[1].split(
+            "      - name: Download the immutable parser envelope",
+            maxsplit=1,
+        )[0]
+        repair = block.split(
+            '          if [[ "${REPAIR_FORWARD}" == "true" ]]; then',
+            maxsplit=1,
+        )[1]
+        conditional, after_conditional = repair.split("          fi", maxsplit=1)
+        self.assertIn('PYTHON_HEAD_SHA="${python_tag_sha}"', conditional)
+        self.assertNotIn("GITHUB_ENV", conditional)
+        self.assertIn(
+            "printf 'PYTHON_HEAD_SHA=%s\\n' \"${PYTHON_HEAD_SHA}\" >> \"${GITHUB_ENV}\"",
+            after_conditional,
+        )
+
     def test_repair_dispatch_creates_or_verifies_tag_before_packaging(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         block = text.split("  prepare-repair-release:", maxsplit=1)[1].split(

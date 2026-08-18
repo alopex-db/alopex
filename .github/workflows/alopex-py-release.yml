@@ -612,8 +612,8 @@ jobs:
           fi
           if [[ "${REPAIR_FORWARD}" == "true" ]]; then
             PYTHON_HEAD_SHA="${python_tag_sha}"
-            printf 'PYTHON_HEAD_SHA=%s\n' "${PYTHON_HEAD_SHA}" >> "${GITHUB_ENV}"
           fi
+          printf 'PYTHON_HEAD_SHA=%s\n' "${PYTHON_HEAD_SHA}" >> "${GITHUB_ENV}"
           [[ "${core_tag_sha}" == "${python_tag_sha}" ]] || {
             echo "core and Python tags do not share a peeled SHA" >&2
             exit 1
