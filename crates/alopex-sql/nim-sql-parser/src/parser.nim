@@ -155,6 +155,75 @@ proc parseExistsExpr(p: var Parser; negated: bool): SqlNode =
   result.negated = negated
   result.children.add(p.parseSubqueryInParens())
 
+proc parseWindowFrameBound(p: var Parser): SqlNode =
+  let startTok = p.current
+  if p.checkContextual("unbounded"):
+    discard p.advance()
+    if p.checkContextual("preceding"):
+      let endTok = p.advance()
+      result = SqlNode(kind: nkWindowFrameBound,
+        frameBoundKind: wfbUnboundedPreceding, frameOffset: 0,
+        span: Span(start: tokenSpan(startTok).start, `end`: tokenSpan(endTok).`end`),
+        orderAsc: -1, nullsFirst: -1)
+    elif p.checkContextual("following"):
+      let endTok = p.advance()
+      result = SqlNode(kind: nkWindowFrameBound,
+        frameBoundKind: wfbUnboundedFollowing, frameOffset: 0,
+        span: Span(start: tokenSpan(startTok).start, `end`: tokenSpan(endTok).`end`),
+        orderAsc: -1, nullsFirst: -1)
+    else:
+      p.error("expected PRECEDING or FOLLOWING after UNBOUNDED")
+  elif p.checkContextual("current"):
+    discard p.advance()
+    let endTok = p.expectContextual("row")
+    result = SqlNode(kind: nkWindowFrameBound,
+      frameBoundKind: wfbCurrentRow, frameOffset: 0,
+      span: Span(start: tokenSpan(startTok).start, `end`: tokenSpan(endTok).`end`),
+      orderAsc: -1, nullsFirst: -1)
+  elif p.check(tkInteger):
+    let offsetTok = p.advance()
+    var offset: uint64
+    try:
+      offset = uint64(parseBiggestUInt(offsetTok.value))
+    except ValueError:
+      p.error("window frame offset exceeds unsigned 64-bit range")
+    if p.checkContextual("preceding"):
+      let endTok = p.advance()
+      result = SqlNode(kind: nkWindowFrameBound,
+        frameBoundKind: wfbPreceding, frameOffset: offset,
+        span: Span(start: tokenSpan(startTok).start, `end`: tokenSpan(endTok).`end`),
+        orderAsc: -1, nullsFirst: -1)
+    elif p.checkContextual("following"):
+      let endTok = p.advance()
+      result = SqlNode(kind: nkWindowFrameBound,
+        frameBoundKind: wfbFollowing, frameOffset: offset,
+        span: Span(start: tokenSpan(startTok).start, `end`: tokenSpan(endTok).`end`),
+        orderAsc: -1, nullsFirst: -1)
+    else:
+      p.error("expected PRECEDING or FOLLOWING after window frame offset")
+  else:
+    p.error("expected window frame bound")
+
+proc parseWindowFrame(p: var Parser): SqlNode =
+  let unitTok = p.advance()
+  let unit = if unitTok.kind == tkRows: wfuRows else: wfuRange
+  var startBound: SqlNode
+  var endBound: SqlNode
+  if p.check(tkBetween):
+    discard p.advance()
+    startBound = p.parseWindowFrameBound()
+    discard p.expect(tkAnd)
+    endBound = p.parseWindowFrameBound()
+  else:
+    startBound = p.parseWindowFrameBound()
+    endBound = SqlNode(kind: nkWindowFrameBound,
+      frameBoundKind: wfbCurrentRow, frameOffset: 0,
+      span: startBound.span, orderAsc: -1, nullsFirst: -1)
+  result = SqlNode(kind: nkWindowFrame, frameUnit: unit,
+    frameStart: startBound, frameEnd: endBound,
+    span: Span(start: tokenSpan(unitTok).start, `end`: endBound.span.`end`),
+    orderAsc: -1, nullsFirst: -1)
+
 proc parseWindowSpec(p: var Parser): SqlNode =
   p.enterNesting()
   defer: p.leaveNesting()
@@ -182,10 +251,8 @@ proc parseWindowSpec(p: var Parser): SqlNode =
       orderBy.children.add(p.parseOrderByItem())
     result.children.add(orderBy)
 
-  if p.check(tkRows):
-    p.error("ROWS window frames are unsupported")
-  if p.check(tkRange):
-    p.error("RANGE window frames are unsupported")
+  if p.current.kind in {tkRows, tkRange}:
+    result.children.add(p.parseWindowFrame())
 
   let closeTok = p.expect(tkRParen)
   result.span = Span(start: tokenSpan(overTok).start,

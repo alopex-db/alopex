@@ -44,6 +44,8 @@ type
     nkCaseWhen
     nkFunctionCall
     nkWindowSpec
+    nkWindowFrame
+    nkWindowFrameBound
     nkPartitionByClause
     nkCast
     nkAlias
@@ -93,6 +95,13 @@ type
 
   SetOperatorKind* = enum
     soUnion, soIntersect, soExcept
+
+  WindowFrameUnitKind* = enum
+    wfuRows, wfuRange
+
+  WindowFrameBoundKind* = enum
+    wfbUnboundedPreceding, wfbPreceding, wfbCurrentRow,
+    wfbFollowing, wfbUnboundedFollowing
 
   SqlNode* = ref object
     span*: Span
@@ -144,6 +153,12 @@ type
       setOp*: SetOperatorKind
       setAll*: bool
       setRight*: SqlNode
+    of nkWindowFrame:
+      frameUnit*: WindowFrameUnitKind
+      frameStart*, frameEnd*: SqlNode
+    of nkWindowFrameBound:
+      frameBoundKind*: WindowFrameBoundKind
+      frameOffset*: uint64
     else:
       children*: seq[SqlNode]
 
@@ -235,6 +250,11 @@ proc fillMissingSpans*(node: SqlNode; fallback: Span) =
       child.fillMissingSpans(node.span)
   of nkSetOperation:
     node.setRight.fillMissingSpans(node.span)
+  of nkWindowFrame:
+    node.frameStart.fillMissingSpans(node.span)
+    node.frameEnd.fillMissingSpans(node.span)
+  of nkWindowFrameBound:
+    discard
   else:
     for child in node.children:
       child.fillMissingSpans(node.span)
@@ -290,6 +310,14 @@ proc `$`*(node: SqlNode): string =
   of nkSetOperation:
     result = "SetOperation(" & $node.setOp &
       (if node.setAll: " ALL, " else: ", ") & $node.setRight & ")"
+  of nkWindowFrame:
+    result = "WindowFrame(" & $node.frameUnit & ", " &
+      $node.frameStart & ", " & $node.frameEnd & ")"
+  of nkWindowFrameBound:
+    result = "WindowFrameBound(" & $node.frameBoundKind
+    if node.frameBoundKind in {wfbPreceding, wfbFollowing}:
+      result &= ", " & $node.frameOffset
+    result &= ")"
   else:
     result = $node.kind & "("
     for i, child in node.children:

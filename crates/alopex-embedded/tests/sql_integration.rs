@@ -199,6 +199,55 @@ fn sql_integration_lag_and_lead_preserve_exact_rows() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_rows_and_range_frames_preserve_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE samples (id INTEGER PRIMARY KEY, amount INTEGER, qty INTEGER); \
+         INSERT INTO samples VALUES (1, 10, 3), (2, 20, 1), (3, 20, 5), (4, 30, 2);",
+    )
+    .unwrap();
+
+    let result = db
+        .execute_sql(
+            "SELECT id, \
+                    SUM(qty) OVER (ORDER BY id \
+                      ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS physical, \
+                    SUM(qty) OVER (ORDER BY amount RANGE CURRENT ROW) AS peers \
+             FROM samples ORDER BY id;",
+        )
+        .unwrap();
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![
+                SqlValue::Integer(1),
+                SqlValue::BigInt(4),
+                SqlValue::BigInt(3)
+            ],
+            vec![
+                SqlValue::Integer(2),
+                SqlValue::BigInt(9),
+                SqlValue::BigInt(6)
+            ],
+            vec![
+                SqlValue::Integer(3),
+                SqlValue::BigInt(8),
+                SqlValue::BigInt(6)
+            ],
+            vec![
+                SqlValue::Integer(4),
+                SqlValue::BigInt(7),
+                SqlValue::BigInt(2)
+            ],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_database_execute_sql_pragma_uses_store_path() {
     let db = Database::new();
 

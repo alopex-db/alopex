@@ -98,7 +98,7 @@ def main() -> int:
         for sql in statements:
             show(sql, db.execute_sql(sql))
 
-        # These 33 queries have an explicit or single-row order contract.
+        # These 35 queries have an explicit or single-row order contract.
         ordered_checks: list[tuple[str, list[Row]]] = [
             ("SELECT SUM(n) AS total FROM metrics", [{"total": 5}]),
             (
@@ -386,6 +386,30 @@ def main() -> int:
                     {"id": 5, "previous": -1.0, "following_bonus": -1.0},
                 ],
             ),
+            (
+                "SELECT id, SUM(qty) OVER (ORDER BY id "
+                "ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS physical "
+                "FROM sales ORDER BY id",
+                [
+                    {"id": 1, "physical": 4},
+                    {"id": 2, "physical": 9},
+                    {"id": 3, "physical": 8},
+                    {"id": 4, "physical": 7},
+                    {"id": 5, "physical": 2},
+                ],
+            ),
+            (
+                "SELECT id, SUM(qty) OVER (ORDER BY amount "
+                "RANGE BETWEEN 50 PRECEDING AND CURRENT ROW) AS value_frame "
+                "FROM sales ORDER BY id",
+                [
+                    {"id": 1, "value_frame": 3},
+                    {"id": 2, "value_frame": 8},
+                    {"id": 3, "value_frame": 10},
+                    {"id": 4, "value_frame": 10},
+                    {"id": 5, "value_frame": 0},
+                ],
+            ),
         ]
 
         # These 10 queries assert row multisets; their SQL does not promise order.
@@ -446,14 +470,6 @@ def main() -> int:
             ("SELECT CASE WHEN TRUE THEN 1 ELSE 'text' END", "type mismatch"),
             ("SELECT id FROM sales UNION SELECT id, region FROM sales", "column count mismatch"),
             ("SELECT id FROM sales UNION SELECT region FROM sales", "type mismatch"),
-            (
-                "SELECT SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM sales",
-                "ROWS",
-            ),
-            (
-                "SELECT SUM(qty) OVER (ORDER BY id RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM sales",
-                "RANGE",
-            ),
             ("WITH defined AS (SELECT 1 AS id) SELECT id FROM missing", "missing"),
         ]
 

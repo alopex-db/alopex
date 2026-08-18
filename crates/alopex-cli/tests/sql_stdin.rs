@@ -13,13 +13,14 @@ fn sql_reads_from_stdin_pipe() {
         .expect("spawn alopex");
 
     let sql = r#"
-CREATE TABLE stdin_test (id INTEGER PRIMARY KEY);
-INSERT INTO stdin_test (id) VALUES (1);
+CREATE TABLE stdin_test (id INTEGER PRIMARY KEY, qty INTEGER);
+INSERT INTO stdin_test (id, qty) VALUES (1, 3), (2, 1), (3, 5);
 SELECT * FROM stdin_test;
 WITH renamed(identifier) AS (SELECT 42) SELECT identifier FROM renamed;
 WITH RECURSIVE counter(n) AS (
     SELECT 1 UNION ALL SELECT n + 1 FROM counter WHERE n < 3
 ) SELECT n FROM counter ORDER BY n;
+SELECT id, SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS framed FROM stdin_test ORDER BY id;
 "#;
 
     {
@@ -43,7 +44,7 @@ WITH RECURSIVE counter(n) AS (
         .expect("json output should be an array of result sets");
     assert_eq!(
         sets.len(),
-        5,
+        6,
         "one result set per statement\nstdout:\n{stdout}"
     );
     let select_rows = sets[2].as_array().expect("SELECT result set");
@@ -69,6 +70,16 @@ WITH RECURSIVE counter(n) AS (
             serde_json::json!({ "n": 1 }),
             serde_json::json!({ "n": 2 }),
             serde_json::json!({ "n": 3 }),
+        ]
+    );
+
+    let frame_rows = sets[5].as_array().expect("window frame SELECT result set");
+    assert_eq!(
+        frame_rows,
+        &[
+            serde_json::json!({ "id": 1, "framed": 4 }),
+            serde_json::json!({ "id": 2, "framed": 9 }),
+            serde_json::json!({ "id": 3, "framed": 6 }),
         ]
     );
 }

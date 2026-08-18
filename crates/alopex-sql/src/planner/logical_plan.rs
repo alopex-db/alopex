@@ -43,6 +43,7 @@
 //! };
 //! ```
 
+use crate::ast::expr::WindowFrame;
 use crate::catalog::{IndexMetadata, TableMetadata};
 use crate::planner::aggregate_expr::AggregateExpr;
 use crate::planner::typed_expr::{Projection, SortExpr, TypedAssignment, TypedExpr};
@@ -79,6 +80,7 @@ pub struct WindowExpr {
     pub function: WindowFunction,
     pub partition_by: Vec<TypedExpr>,
     pub order_by: Vec<SortExpr>,
+    pub frame: Option<WindowFrame>,
     pub result_type: crate::planner::types::ResolvedType,
 }
 

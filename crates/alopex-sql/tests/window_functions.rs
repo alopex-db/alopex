@@ -9,10 +9,7 @@
 //!   * implicit frames: bare `OVER ()` spans the whole partition, while an
 //!     `ORDER BY` inside `OVER` makes the frame cumulative.
 //!
-//! Explicitly out of scope for v0.8.x (must be rejected, not silently
-//! mis-evaluated):
-//!   * explicit frame clauses `ROWS BETWEEN` / `RANGE BETWEEN` — the concept of
-//!     a frame specification does not exist anywhere in the crate.
+//!   * explicit `ROWS` physical-row frames and `RANGE` value/peer frames
 
 use alopex_core::kv::memory::MemoryKV;
 use alopex_sql::catalog::MemoryCatalog;
@@ -690,52 +687,210 @@ fn lag_and_lead_reject_negative_offsets_and_propagate_null_offsets() {
 }
 
 // ---------------------------------------------------------------------------
-// Unsupported constructs must be rejected explicitly
+// Explicit ROWS / RANGE frames (issue #140)
 // ---------------------------------------------------------------------------
 
-/// Assert an error rejects an out-of-scope construct by naming it.
-///
-/// Requiring the construct's own name in the message is deliberate: once `OVER`
-/// parsing lands, a generic "unexpected token" would no longer prove that the
-/// construct was recognised and refused rather than mangled into something
-/// else. The message must identify what was rejected.
-#[track_caller]
-fn assert_rejects_named(err: &str, construct: &str) {
-    let haystack = err.to_ascii_lowercase();
-    assert!(
-        haystack.contains(&construct.to_ascii_lowercase()),
-        "error must name the unsupported construct `{construct}`, got: {err}"
+/// ROWS addresses physical positions in the window-local order. The one-row
+/// neighbors differ from the existing cumulative implicit frame on every row.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn rows_between_uses_physical_row_boundaries() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS s \
+         FROM sales ORDER BY id",
+    );
+    assert_eq!(int_column(&result, 0), vec![1, 2, 3, 4, 5]);
+    assert_eq!(int_column(&result, 1), vec![4, 9, 8, 7, 2]);
+}
+
+/// RANGE addresses order-key values and expands each endpoint to the complete
+/// peer group. The tied amount=150 rows therefore share a frame.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn range_between_uses_value_boundaries_and_peers() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, SUM(qty) OVER (ORDER BY amount \
+                    RANGE BETWEEN 50 PRECEDING AND CURRENT ROW) AS s \
+         FROM sales ORDER BY id",
+    );
+    assert_eq!(int_column(&result, 0), vec![1, 2, 3, 4, 5]);
+    assert_eq!(int_column(&result, 1), vec![3, 8, 10, 10, 0]);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn explicit_default_range_matches_the_implicit_ordered_frame() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, \
+                SUM(qty) OVER (ORDER BY amount) AS implicit, \
+                SUM(qty) OVER (ORDER BY amount \
+                  RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS explicit \
+         FROM sales ORDER BY id",
+    );
+    assert_eq!(int_column(&result, 1), int_column(&result, 2));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn explicit_default_range_keeps_large_input_parity_with_implicit_frame() {
+    let mut h = Harness::new();
+    let values = (1..=1001)
+        .map(|value| format!("({value}, {value})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    h.run_ok(&format!(
+        "CREATE TABLE large_frame (id INTEGER PRIMARY KEY, qty INTEGER); \
+         INSERT INTO large_frame VALUES {values};"
+    ));
+
+    let result = query(
+        &mut h,
+        "SELECT id, \
+                SUM(qty) OVER (ORDER BY id) AS implicit, \
+                SUM(qty) OVER (ORDER BY id \
+                  RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS explicit \
+         FROM large_frame ORDER BY id",
+    );
+
+    assert_eq!(int_column(&result, 1), int_column(&result, 2));
+    assert_eq!(int_column(&result, 2).last(), Some(&501_501));
+
+    let bounded = h.run_err(
+        "SELECT SUM(qty) OVER (ORDER BY id \
+           RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) \
+         FROM large_frame",
     );
     assert!(
-        haystack.contains("not supported")
-            || haystack.contains("unsupported")
-            || haystack.contains("not implemented"),
-        "error must state that `{construct}` is unsupported, got: {err}"
+        bounded.contains("explicit RANGE frame requires more than"),
+        "large generic RANGE frame must fail closed: {bounded}"
+    );
+
+    let visit_bounded = h.run_err(
+        "SELECT SUM(qty) OVER (ORDER BY id \
+           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) \
+         FROM large_frame",
+    );
+    assert!(
+        visit_bounded.contains("aggregate input visits"),
+        "large generic ROWS frame must fail closed: {visit_bounded}"
     );
 }
 
-/// Explicit frame specifications are out of scope. Accepting the clause and
-/// falling back to the implicit frame would return the cumulative total instead
-/// of the requested sliding window — a silently wrong answer, which is exactly
-/// what this test forbids.
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
-fn rows_between_frame_is_rejected_as_unsupported() {
+fn rows_frames_stop_at_partition_boundaries_and_can_be_empty() {
     let mut h = Harness::new();
-    let err = h.run_err(
-        "SELECT SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM sales",
+    let result = query(
+        &mut h,
+        "SELECT id, \
+                SUM(qty) OVER (PARTITION BY region ORDER BY id \
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running, \
+                COUNT(*) OVER (PARTITION BY region ORDER BY id \
+                  ROWS BETWEEN 2 FOLLOWING AND 1 FOLLOWING) AS empty_count, \
+                SUM(qty) OVER (PARTITION BY region ORDER BY id \
+                  ROWS BETWEEN 2 FOLLOWING AND 1 FOLLOWING) AS empty_sum \
+         FROM sales ORDER BY id",
     );
-    assert_rejects_named(&err, "ROWS");
+    assert_eq!(int_column(&result, 1), vec![3, 4, 5, 7, 0]);
+    assert_eq!(int_column(&result, 2), vec![0, 0, 0, 0, 0]);
+    assert!(result.rows.iter().all(|row| row[3] == SqlValue::Null));
 }
 
-/// `RANGE BETWEEN` is likewise out of scope and must be refused by name.
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
-fn range_between_frame_is_rejected_as_unsupported() {
+fn range_respects_descending_direction_and_null_peers() {
     let mut h = Harness::new();
-    let err = h.run_err(
-        "SELECT SUM(qty) OVER (ORDER BY id RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) \
+    let descending = query(
+        &mut h,
+        "SELECT id, SUM(qty) OVER (ORDER BY amount DESC \
+                    RANGE BETWEEN 50 PRECEDING AND CURRENT ROW) AS s \
+         FROM sales ORDER BY id",
+    );
+    assert_eq!(int_column(&descending, 1), vec![10, 1, 8, 8, 3]);
+
+    let nulls = query(
+        &mut h,
+        "SELECT id, COUNT(*) OVER (ORDER BY bonus NULLS FIRST RANGE CURRENT ROW) AS c \
+         FROM sales ORDER BY id",
+    );
+    assert_eq!(int_column(&nulls, 1), vec![1, 2, 1, 2, 1]);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn invalid_frame_shapes_and_types_have_deterministic_errors() {
+    let mut h = Harness::new();
+    let no_order = h.run_err("SELECT SUM(qty) OVER (ROWS CURRENT ROW) FROM sales");
+    assert!(no_order.contains("require ORDER BY"), "{no_order}");
+
+    let reversed = h.run_err(
+        "SELECT SUM(qty) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 1 PRECEDING) \
          FROM sales",
     );
-    assert_rejects_named(&err, "RANGE");
+    assert!(reversed.contains("bounds are reversed"), "{reversed}");
+
+    let multiple_keys =
+        h.run_err("SELECT SUM(qty) OVER (ORDER BY amount, id RANGE 1 PRECEDING) FROM sales");
+    assert!(
+        multiple_keys.contains("exactly one ORDER BY"),
+        "{multiple_keys}"
+    );
+
+    let wrong_type =
+        h.run_err("SELECT SUM(qty) OVER (ORDER BY region RANGE 1 PRECEDING) FROM sales");
+    assert!(wrong_type.contains("must be numeric"), "{wrong_type}");
+
+    let value_function =
+        h.run_err("SELECT LAG(qty) OVER (ORDER BY id ROWS CURRENT ROW) FROM sales");
+    assert!(
+        value_function.contains("only supported for aggregate functions"),
+        "{value_function}"
+    );
+
+    let ranking_function =
+        h.run_err("SELECT RANK() OVER (ORDER BY id ROWS CURRENT ROW) FROM sales");
+    assert!(
+        ranking_function.contains("only supported for aggregate functions"),
+        "{ranking_function}"
+    );
+
+    let invalid_start = h.run_err(
+        "SELECT SUM(qty) OVER (ORDER BY id \
+           ROWS BETWEEN UNBOUNDED FOLLOWING AND UNBOUNDED FOLLOWING) \
+         FROM sales",
+    );
+    assert!(
+        invalid_start.contains("start cannot be UNBOUNDED FOLLOWING"),
+        "{invalid_start}"
+    );
+
+    let invalid_end = h.run_err(
+        "SELECT SUM(qty) OVER (ORDER BY id \
+           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED PRECEDING) \
+         FROM sales",
+    );
+    assert!(
+        invalid_end.contains("end cannot be UNBOUNDED PRECEDING"),
+        "{invalid_end}"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn frame_offset_overflow_is_rejected_without_execution() {
+    let mut h = Harness::new();
+    let overflow = h.run_err(
+        "SELECT SUM(qty) OVER (ORDER BY id ROWS 18446744073709551616 PRECEDING) FROM sales",
+    );
+    assert!(
+        overflow.to_ascii_lowercase().contains("range")
+            || overflow.to_ascii_lowercase().contains("overflow"),
+        "{overflow}"
+    );
 }

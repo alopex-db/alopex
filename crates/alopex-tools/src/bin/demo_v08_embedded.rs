@@ -540,9 +540,29 @@ fn scenario_local_sql_matrix() -> DemoResult {
                 ],
             ],
         ),
+        (
+            "SELECT id, SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS physical FROM sales ORDER BY id",
+            vec![
+                vec![SqlValue::Integer(1), SqlValue::BigInt(4)],
+                vec![SqlValue::Integer(2), SqlValue::BigInt(9)],
+                vec![SqlValue::Integer(3), SqlValue::BigInt(8)],
+                vec![SqlValue::Integer(4), SqlValue::BigInt(7)],
+                vec![SqlValue::Integer(5), SqlValue::BigInt(2)],
+            ],
+        ),
+        (
+            "SELECT id, SUM(qty) OVER (ORDER BY amount RANGE BETWEEN 50 PRECEDING AND CURRENT ROW) AS value_frame FROM sales ORDER BY id",
+            vec![
+                vec![SqlValue::Integer(1), SqlValue::BigInt(3)],
+                vec![SqlValue::Integer(2), SqlValue::BigInt(8)],
+                vec![SqlValue::Integer(3), SqlValue::BigInt(10)],
+                vec![SqlValue::Integer(4), SqlValue::BigInt(10)],
+                vec![SqlValue::Integer(5), SqlValue::BigInt(0)],
+            ],
+        ),
     ];
     require(
-        v08_matrix.len() == 15,
+        v08_matrix.len() == 17,
         "v0.8.x SQL success-check count changed",
     )?;
     for (sql, expected) in &v08_matrix {
@@ -550,14 +570,6 @@ fn scenario_local_sql_matrix() -> DemoResult {
     }
 
     let rejected_v08 = [
-        (
-            "SELECT SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM sales",
-            "ROWS",
-        ),
-        (
-            "SELECT SUM(qty) OVER (ORDER BY id RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM sales",
-            "RANGE",
-        ),
         (
             "SELECT amount AS ident FROM sales WHERE ident > 100",
             "ALOPEX-C003",

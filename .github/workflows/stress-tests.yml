@@ -13,6 +13,8 @@ on:
 
 env:
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
+  ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
+  NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
 
 jobs:
   stress-tests:

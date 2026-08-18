@@ -87,13 +87,13 @@ class ParserAssetManifestTests(unittest.TestCase):
         self.source = self.root / "parser-source"
         (self.source / "src").mkdir(parents=True)
         (self.source / "PARSER_CONTRACT_VERSION").write_text(
-            "0.4.0\n", encoding="utf-8"
+            "0.5.0\n", encoding="utf-8"
         )
         (self.source / "nim_sql_parser.nimble").write_text(
-            'version = "0.4.0"\n', encoding="utf-8"
+            'version = "0.5.0"\n', encoding="utf-8"
         )
         (self.source / "src/alopex_sql_parser.nim").write_text(
-            "proc parserVersion(): string = \"0.4.0\"\n", encoding="utf-8"
+            "proc parserVersion(): string = \"0.5.0\"\n", encoding="utf-8"
         )
 
         self.nim = self.root / "nim"
@@ -233,7 +233,7 @@ class ParserAssetManifestTests(unittest.TestCase):
             "--alopex-version",
             "0.8.6",
             "--contract-version",
-            "0.4.0",
+            "0.5.0",
             "--target",
             target,
             "--library",
@@ -261,7 +261,7 @@ class ParserAssetManifestTests(unittest.TestCase):
             arguments.extend(("--registry-metadata", f"{name}={path}"))
         arguments.extend(("--output-dir", str(output)))
         self.run_cli(*arguments, expected=expected)
-        stem = f"alopex-parser-v0.8.6-contract-0.4.0-{target}"
+        stem = f"alopex-parser-v0.8.6-contract-0.5.0-{target}"
         return output / f"{stem}.json", output / f"{stem}.tar.gz"
 
     def verify_target(
@@ -354,6 +354,10 @@ print(matches[0])
     def run_build_script(
         self, environment: dict[str, str], destination: Path
     ) -> subprocess.CompletedProcess[str]:
+        isolated_output = self.root / "build-script-output" / TARGET_LIBRARIES[
+            "x86_64-unknown-linux-gnu"
+        ]
+        isolated_output.parent.mkdir(exist_ok=True)
         return subprocess.run(
             [
                 "bash",
@@ -364,6 +368,8 @@ print(matches[0])
                 "x86_64-unknown-linux-gnu",
                 "--archive-dir",
                 str(destination),
+                "--output",
+                str(isolated_output),
             ],
             cwd=REPOSITORY_ROOT,
             env=environment,
@@ -385,7 +391,7 @@ print(matches[0])
         record = json.loads(second_record.read_text(encoding="utf-8"))
         self.assertEqual(record["schema"], "alopex-parser-target-record-v1")
         self.assertEqual(record["alopex_version"], "0.8.6")
-        self.assertEqual(record["contract_version"], "0.4.0")
+        self.assertEqual(record["contract_version"], "0.5.0")
         self.assertEqual(record["target"], "x86_64-unknown-linux-gnu")
         self.assertEqual(
             record["builder"]["compile"]["profile"], BUILD_PROFILE
@@ -443,7 +449,7 @@ print(matches[0])
             "--alopex-version",
             "0.8.6",
             "--contract-version",
-            "0.4.0",
+            "0.5.0",
             "--target",
             "x86_64-unknown-freebsd",
             "--library",
@@ -515,7 +521,7 @@ print(matches[0])
         first = json.loads(first_record.read_text(encoding="utf-8"))
 
         (self.source / "CONTRACT_VERSION").write_text(
-            "0.4.0\n", encoding="utf-8"
+            "0.5.0\n", encoding="utf-8"
         )
         (self.source / "SHA256SUMS").write_text(
             f"{'0' * 64}  libalopex_sql_parser.so\n", encoding="utf-8"
@@ -606,7 +612,7 @@ print(matches[0])
         )
         self.pack(expected=2)
         (self.source / "PARSER_CONTRACT_VERSION").write_text(
-            "0.4.0\n", encoding="utf-8"
+            "0.5.0\n", encoding="utf-8"
         )
         os.symlink(
             self.source / "src/alopex_sql_parser.nim",
@@ -836,8 +842,14 @@ print(matches[0])
         self.assertLess(text.index("verify-inputs"), text.index('"${NIM_BIN}" c'))
 
     def test_build_script_rejects_nimble_0_22_2_before_target_bytes(self) -> None:
-        library = PARSER_DIR / "libalopex_sql_parser.so"
-        self.addCleanup(library.unlink, missing_ok=True)
+        repo_outputs = [
+            PARSER_DIR / "libalopex_sql_parser.so",
+            PARSER_DIR / "CONTRACT_VERSION",
+            PARSER_DIR / "SHA256SUMS",
+        ]
+        before = {
+            path: path.read_bytes() if path.exists() else None for path in repo_outputs
+        }
         destination = self.root / "wrong-nimble"
         result = self.run_build_script(
             self.build_script_fixture(nimble_version="0.22.2"), destination
@@ -845,7 +857,153 @@ print(matches[0])
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("Nimble 0.22.3 is required", result.stderr)
         self.assertFalse(destination.exists())
-        self.assertFalse(library.exists())
+        isolated_output = self.root / "build-script-output"
+        self.assertFalse(
+            (isolated_output / "libalopex_sql_parser.so").exists()
+        )
+        self.assertFalse((isolated_output / "CONTRACT_VERSION").exists())
+        self.assertFalse((isolated_output / "SHA256SUMS").exists())
+        after = {
+            path: path.read_bytes() if path.exists() else None for path in repo_outputs
+        }
+        self.assertEqual(after, before, "test build must not mutate worktree output")
+
+    def test_docker_build_writes_only_to_the_explicit_output_directory(self) -> None:
+        fake_bin = self.root / "fake-docker-bin"
+        fake_bin.mkdir()
+        capture = self.root / "docker-arguments.json"
+        docker = fake_bin / "docker"
+        docker.write_text(
+            """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+arguments = sys.argv[1:]
+output_setting = next(
+    (value for value in arguments if "ALOPEX_NIM_PARSER_OUTPUT=" in value),
+    None,
+)
+Path(os.environ["ALOPEX_DOCKER_CAPTURE"]).write_text(
+    json.dumps({"arguments": arguments, "output_setting": output_setting}),
+    encoding="utf-8",
+)
+if output_setting is None:
+    raise SystemExit(42)
+container_output = Path(output_setting.split("=", 1)[1])
+mounts = [
+    arguments[index + 1]
+    for index, argument in enumerate(arguments[:-1])
+    if argument == "-v"
+]
+for mount in mounts:
+    host, container = mount.rsplit(":", 1)
+    container_root = Path(container)
+    try:
+        relative = container_output.relative_to(container_root)
+    except ValueError:
+        continue
+    output = Path(host) / relative
+    output.write_bytes(b"docker-parser-output")
+    raise SystemExit(0)
+raise SystemExit(43)
+""",
+            encoding="utf-8",
+        )
+        docker.chmod(0o755)
+        isolated_dir = self.root / "docker-output"
+        isolated_dir.mkdir()
+        isolated_output = isolated_dir / TARGET_LIBRARIES[
+            "x86_64-unknown-linux-gnu"
+        ]
+        repo_outputs = [
+            PARSER_DIR / "libalopex_sql_parser.so",
+            PARSER_DIR / "CONTRACT_VERSION",
+            PARSER_DIR / "SHA256SUMS",
+        ]
+        before = {
+            path: path.read_bytes() if path.exists() else None for path in repo_outputs
+        }
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+        environment["ALOPEX_DOCKER_CAPTURE"] = str(capture)
+
+        result = subprocess.run(
+            [
+                "bash",
+                str(BUILD_SCRIPT),
+                "--backend",
+                "docker",
+                "--output",
+                str(isolated_output),
+            ],
+            cwd=REPOSITORY_ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        docker_arguments = capture.read_text(encoding="utf-8") if capture.exists() else ""
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"{result.stderr}\ndocker arguments: {docker_arguments}",
+        )
+        self.assertEqual(isolated_output.read_bytes(), b"docker-parser-output")
+        self.assertEqual(
+            (isolated_dir / "CONTRACT_VERSION").read_text(encoding="utf-8"),
+            "0.5.0\n",
+        )
+        self.assertIn("ALOPEX_NIM_PARSER_OUTPUT=/output/", docker_arguments)
+        after = {
+            path: path.read_bytes() if path.exists() else None for path in repo_outputs
+        }
+        self.assertEqual(after, before, "docker build must not mutate worktree output")
+
+    def test_docker_build_rejects_a_non_linux_target_before_output_cleanup(self) -> None:
+        fake_bin = self.root / "rejecting-docker-bin"
+        fake_bin.mkdir()
+        docker = fake_bin / "docker"
+        docker.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+        docker.chmod(0o755)
+        isolated_dir = self.root / "non-linux-output"
+        isolated_dir.mkdir()
+        isolated_output = isolated_dir / TARGET_LIBRARIES[
+            "x86_64-unknown-linux-gnu"
+        ]
+        isolated_output.write_bytes(b"existing-output")
+        contract = isolated_dir / "CONTRACT_VERSION"
+        checksum = isolated_dir / "SHA256SUMS"
+        contract.write_bytes(b"existing-contract")
+        checksum.write_bytes(b"existing-checksum")
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+
+        result = subprocess.run(
+            [
+                "bash",
+                str(BUILD_SCRIPT),
+                "--backend",
+                "docker",
+                "--target",
+                "x86_64-apple-darwin",
+                "--output",
+                str(isolated_output),
+            ],
+            cwd=REPOSITORY_ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("x86_64 Linux", result.stderr)
+        self.assertEqual(isolated_output.read_bytes(), b"existing-output")
+        self.assertEqual(contract.read_bytes(), b"existing-contract")
+        self.assertEqual(checksum.read_bytes(), b"existing-checksum")
 
     def test_build_script_rejects_archive_on_non_host_backend(self) -> None:
         result = subprocess.run(

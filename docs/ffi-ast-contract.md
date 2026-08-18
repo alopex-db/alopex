@@ -6,7 +6,7 @@ Nim parser boundary.
 
 ## Contract Overview
 
-- Current contract version: `0.4.0`, returned by `alopex_parser_version()`.
+- Current contract version: `0.5.0`, returned by `alopex_parser_version()`.
 - Alopex v0.8.4 is the first release whose public producer emits the
   `CreateContinuousAggregate` variant. The variant is owned by Skulk; Alopex
   transports and validates it but does not execute the statement.
@@ -16,6 +16,8 @@ Nim parser boundary.
   buffers that the caller releases with `alopex_free_buffer`.
 - A non-zero parse error is returned as `prkError`; no Nim exception crosses
   the C ABI boundary.
+- Contract `0.5.0` is compatibility metadata inside the Alopex release; it is
+  not an independent parser feature or release lane.
 
 ## Encoding Rules
 
@@ -33,12 +35,13 @@ Nim parser boundary.
 ### Version and Compatibility Boundary
 
 The linked Nim shared library, the Rust crate, and the staged payload must all
-report exactly `0.4.0`. A mismatch is rejected before MessagePack decoding;
+report exactly `0.5.0`. A mismatch is rejected before MessagePack decoding;
 callers must not attempt to interpret a payload produced by another contract.
 The v0.8.2 and v0.8.3 releases remain immutable historical `0.3.0` releases:
 they do not emit `CreateContinuousAggregate` and must continue to be consumed
-by a `0.3.0` binding. This document describes the current `0.4.0` surface and
-does not retroactively change those releases.
+by a `0.3.0` binding. Alopex v0.8.4-v0.8.6 remain historical `0.4.0`
+releases. This document describes the current `0.5.0` surface and does not
+retroactively change those releases.
 
 ### Input, Payload, and Resource Bounds
 
@@ -166,7 +169,7 @@ release. Nested non-recursive `WITH` queries use the same `Statement` shape.
 | `BinaryOp` | `left: Expr`, `op: BinaryOp`, `right: Expr` |
 | `UnaryOp` | `op: UnaryOp`, `operand: Expr` |
 | `Case` | `operand: Expr?`, `branches: [CaseWhen]`, `else_expr: Expr?` |
-| `FunctionCall` | `name: string`, `args: [Expr]`, `distinct: bool`, `star: bool` |
+| `FunctionCall` | `name: string`, `args: [Expr]`, `distinct: bool`, `star: bool`, `over: WindowSpec?` |
 | `Cast` | `expr: Expr`, `target_type: DataType` |
 | `Between` | `expr: Expr`, `low: Expr`, `high: Expr`, `negated: bool` |
 | `Like` | `expr: Expr`, `pattern: Expr`, `escape: Expr?`, `negated: bool` |
@@ -197,6 +200,26 @@ denotes searched CASE; a missing `else_expr` denotes the implicit NULL result.
 `UnaryOp` is a string: `Not` or `Minus`.
 
 `Quantifier` is a string: `Any` or `All`.
+
+### Window specifications
+
+`WindowSpec = { "partition_by": [Expr], "order_by": [OrderByExpr], "frame": WindowFrame? }`
+
+`WindowFrame = { "units": WindowFrameUnits, "start_bound": WindowFrameBound, "end_bound": WindowFrameBound }`
+
+`WindowFrameUnits` is `Rows` or `Range`. `WindowFrameBound` is an internally
+tagged variant: `UnboundedPreceding`, `Preceding(value: u64)`, `CurrentRow`,
+`Following(value: u64)`, or `UnboundedFollowing`.
+
+`frame` is introduced by contract `0.5.0`. Although the map field is additive,
+an older consumer would ignore a frame emitted for newly accepted SQL and then
+execute the implicit default frame, producing a silently different result.
+Therefore producer and consumer contract identifiers must match before decode;
+`0.4.0` and `0.5.0` are intentionally incompatible. A captured `0.4.0`
+producer payload still decodes into the new AST with `frame = None`, but that
+one-way migration property is not permission to load a `0.4.0` parser. See
+[`sql-window-frames.md`](sql-window-frames.md) for execution semantics and the
+four-target asset lifecycle.
 
 ## DDL Types
 
@@ -251,6 +274,7 @@ denotes searched CASE; a missing `else_expr` denotes the implicit NULL result.
 | `nkExists` | `ExprKind.variant = "Exists"` | `ExprKind::Exists` |
 | `nkQuantified` | `ExprKind.variant = "Quantified"` | `ExprKind::Quantified` |
 | `nkCase` | `ExprKind.variant = "Case"` | `ExprKind::Case` |
+| `nkWindowFrame` | `WindowSpec.frame` | `WindowFrame` |
 | `nkDataTypeVector` / `VECTOR(...)` type node | `DataType.variant = "Vector"` | `DataType::Vector` |
 | `nkCreateContinuousAggregate` | `StatementKind.kind.variant = "CreateContinuousAggregate"` | `StatementKind::CreateContinuousAggregate` |
 

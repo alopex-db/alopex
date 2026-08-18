@@ -9,7 +9,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 pub(crate) const REQUIRED_ALOPEX_VERSION: &str = "0.8.4";
-pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.4.0";
+pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.5.0";
 pub(crate) const VENDOR_MANIFEST_SHA256: &str =
     "db70742bea017a4d2683ad0d17f602b25dbcdfa7f512e3c283fbb9f7fcce298d";
 const VENDOR_MANIFEST_SCHEMA: &str = "alopex-parser-vendor-manifest-v1";
@@ -72,8 +72,8 @@ struct LibraryIdentity {
     size: u64,
 }
 
-/// ローカルで Nim パーサーを再ビルドした際、vendored マニフェストとの
-/// 完全一致検証をスキップするための開発専用スイッチ。
+/// 明示された developer parser output と vendored マニフェストとの完全一致
+/// 検証をスキップするための開発専用スイッチ。
 ///
 /// vendored の `.so` は sha256 とバイトサイズがマニフェストに固定されている
 /// ため、Nim ソースを 1 文字でも変更すると再ビルド結果は原理的に受理されない
@@ -84,6 +84,9 @@ struct LibraryIdentity {
 /// して扱い、「設定さえすれば何でも通る」曖昧さを排除する。
 pub(crate) const ALLOW_LOCAL_BUILD_ENV: &str = "ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD";
 
+// This entry point is consumed by build.rs; the standalone build-support test
+// target includes this file directly and exercises the injected option path.
+#[cfg_attr(test, allow(dead_code))]
 fn local_build_allowed() -> bool {
     // テスト時は常に厳格検証とする。既存の拒否テスト群
     // (rejects_library_size_mismatch 等) は「検証が働くこと」を証明するもので、
@@ -95,32 +98,68 @@ fn local_build_allowed() -> bool {
     env::var_os(ALLOW_LOCAL_BUILD_ENV).is_some_and(|value| value == "1")
 }
 
-/// 検証をスキップした事実を必ず可視化する。気付かないまま未検証の
-/// パーサーを使い続けることを防ぐため、スキップ時は常に警告を出す。
-fn warn_verification_skipped(what: &str) {
+/// build-time identity の証明範囲を必ず可視化する。sidecar の再ラベルだけでは
+/// producer 実体を証明できず、runtime exported-contract gate が不可欠である。
+fn warn_local_identity_scope() {
     println!(
-        "cargo:warning={ALLOW_LOCAL_BUILD_ENV}=1 のため{what}を検証していません (issue #131)。リリース検証では使用しないこと。"
+        "cargo:warning={ALLOW_LOCAL_BUILD_ENV}=1 は明示 parser の sidecar/SHA 自己整合だけを検証します。producer 実体は runtime exported-contract gate で検証され、release staging の asset identity 証明には使えません。"
     );
 }
 
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn resolve_native_library(
     manifest_dir: &Path,
     target: &str,
     explicit_dir: Option<&OsStr>,
 ) -> Result<ResolvedNativeLibrary, ResolveError> {
-    let allow_local_build = local_build_allowed();
+    resolve_native_library_with_options(
+        manifest_dir,
+        target,
+        explicit_dir,
+        local_build_allowed(),
+        VENDOR_MANIFEST_SHA256,
+    )
+}
+
+fn resolve_native_library_with_options(
+    manifest_dir: &Path,
+    target: &str,
+    explicit_dir: Option<&OsStr>,
+    allow_local_build: bool,
+    expected_manifest_sha256: &str,
+) -> Result<ResolvedNativeLibrary, ResolveError> {
     let target_spec = target_spec(target)?;
+
+    // An explicit developer parser is the only route allowed to bypass a stale
+    // vendored manifest. Build time proves only target/file shape and that its
+    // sidecars are self-consistent; the exported producer contract is checked
+    // before every runtime decode. The release workflow uses this branch only
+    // after the same job verifies the fresh target record and runs a native
+    // exported-contract smoke. Later crate staging/publish uses the strict
+    // manifest-bound path.
+    if allow_local_build && let Some(explicit_dir) = explicit_dir {
+        if explicit_dir.is_empty() {
+            return Err(error("explicit native parser directory is empty"));
+        }
+        let directory = PathBuf::from(explicit_dir);
+        require_real_directory(&directory, "explicit native parser directory")?;
+        verify_local_source_directory(&directory, target_spec)?;
+        warn_local_identity_scope();
+        return Ok(ResolvedNativeLibrary {
+            library_path: directory.join(target_spec.library_filename),
+            directory,
+            link_behavior: target_spec.link_behavior,
+        });
+    }
+
     let manifest_path = manifest_dir.join(VENDOR_MANIFEST_RELATIVE_PATH);
     let manifest_bytes =
         read_small_regular_file(&manifest_path, "parser vendor manifest", MAX_MANIFEST_BYTES)?;
     let manifest_sha256 = sha256_bytes(&manifest_bytes);
-    if manifest_sha256 != VENDOR_MANIFEST_SHA256 {
-        if !allow_local_build {
-            return Err(error(format!(
-                "parser vendor manifest SHA-256 mismatch: expected {VENDOR_MANIFEST_SHA256}, found {manifest_sha256}"
-            )));
-        }
-        warn_verification_skipped("パーサー vendor マニフェストの SHA-256");
+    if manifest_sha256 != expected_manifest_sha256 {
+        return Err(error(format!(
+            "parser vendor manifest SHA-256 mismatch: expected {expected_manifest_sha256}, found {manifest_sha256}"
+        )));
     }
 
     let manifest: VendorManifest = serde_json::from_slice(&manifest_bytes)
@@ -152,13 +191,55 @@ pub(crate) fn resolve_native_library(
     };
 
     require_real_directory(&directory, directory_description)?;
-    verify_target_directory(&directory, target_spec, asset, allow_local_build)?;
+    verify_target_directory(&directory, target_spec, asset)?;
 
     Ok(ResolvedNativeLibrary {
         library_path: directory.join(target_spec.library_filename),
         directory,
         link_behavior: target_spec.link_behavior,
     })
+}
+
+fn verify_contract_sidecar(directory: &Path) -> Result<(), ResolveError> {
+    let contract_path = directory.join("CONTRACT_VERSION");
+    let contract = read_small_regular_file(
+        &contract_path,
+        "native parser contract sidecar",
+        MAX_SIDECAR_BYTES,
+    )?;
+    let expected_contract = format!("{REQUIRED_CONTRACT_VERSION}\n");
+    if contract != expected_contract.as_bytes() {
+        return Err(error(format!(
+            "native parser contract sidecar mismatch: {}",
+            contract_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn verify_local_source_directory(
+    directory: &Path,
+    target_spec: TargetSpec,
+) -> Result<(), ResolveError> {
+    verify_contract_sidecar(directory)?;
+    let library_path = directory.join(target_spec.library_filename);
+    let metadata = regular_file_metadata(&library_path, "native parser library")?;
+    let library_sha256 =
+        sha256_regular_file(&library_path, "native parser library", metadata.len())?;
+    let checksum_path = directory.join("SHA256SUMS");
+    let checksum = read_small_regular_file(
+        &checksum_path,
+        "native parser checksum sidecar",
+        MAX_SIDECAR_BYTES,
+    )?;
+    let expected_checksum = format!("{library_sha256}  {}\n", target_spec.library_filename);
+    if checksum != expected_checksum.as_bytes() {
+        return Err(error(format!(
+            "native parser checksum sidecar mismatch: {}",
+            checksum_path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn target_spec(target: &str) -> Result<TargetSpec, ResolveError> {
@@ -230,30 +311,8 @@ fn verify_target_directory(
     directory: &Path,
     target_spec: TargetSpec,
     asset: &VendorAsset,
-    allow_local_build: bool,
 ) -> Result<(), ResolveError> {
-    let contract_path = directory.join("CONTRACT_VERSION");
-    let contract = read_small_regular_file(
-        &contract_path,
-        "native parser contract sidecar",
-        MAX_SIDECAR_BYTES,
-    )?;
-    let expected_contract = format!("{REQUIRED_CONTRACT_VERSION}\n");
-    if contract != expected_contract.as_bytes() {
-        return Err(error(format!(
-            "native parser contract sidecar mismatch: {}",
-            contract_path.display()
-        )));
-    }
-
-    // ローカル再ビルドを許可する場合、ライブラリ本体の同一性検証(サイズ・
-    // SHA-256・SHA256SUMS サイドカー)をまとめてスキップする。契約バージョンの
-    // 検証は上で必ず行う。あちらは FFI の互換性そのものを守るものであり、
-    // ローカル開発でも緩めてはならない。
-    if allow_local_build {
-        warn_verification_skipped("native パーサーライブラリのサイズ・SHA-256");
-        return Ok(());
-    }
+    verify_contract_sidecar(directory)?;
 
     let library_path = directory.join(target_spec.library_filename);
     let library_sha256 =
@@ -402,6 +461,14 @@ mod tests {
 
     impl Fixture {
         fn new(copy_linux: bool) -> Self {
+            Self::with_contract(copy_linux, REQUIRED_CONTRACT_VERSION)
+        }
+
+        fn stale(copy_linux: bool) -> Self {
+            Self::with_contract(copy_linux, "0.4.0")
+        }
+
+        fn with_contract(copy_linux: bool, contract: &str) -> Self {
             let temporary = TempDir::new().expect("fixture tempdir");
             let crate_root = temporary.path().join("alopex-sql");
             let vendor = crate_root.join("nim-sql-parser/vendor");
@@ -414,8 +481,24 @@ mod tests {
                 vendor.join("parser-vendor-manifest.json"),
             )
             .expect("copy vendor manifest");
+            let manifest_path = vendor.join("parser-vendor-manifest.json");
+            let mut manifest: serde_json::Value = serde_json::from_slice(
+                &fs::read(&manifest_path).expect("read copied vendor manifest"),
+            )
+            .expect("decode copied vendor manifest");
+            manifest["contract_version"] = serde_json::Value::String(contract.to_owned());
+            fs::write(
+                &manifest_path,
+                serde_json::to_vec(&manifest).expect("encode fixture vendor manifest"),
+            )
+            .expect("write fixture vendor manifest");
             if copy_linux {
                 copy_target(&source_vendor, &vendor, LINUX_TARGET);
+                fs::write(
+                    vendor.join(LINUX_TARGET).join("CONTRACT_VERSION"),
+                    format!("{contract}\n"),
+                )
+                .expect("write fixture target contract");
             }
 
             Self {
@@ -429,6 +512,11 @@ mod tests {
             let explicit = self.crate_root.join("explicit");
             fs::create_dir_all(&explicit).expect("explicit directory");
             copy_target_contents(&self.source_vendor.join(target), &explicit);
+            fs::write(
+                explicit.join("CONTRACT_VERSION"),
+                format!("{REQUIRED_CONTRACT_VERSION}\n"),
+            )
+            .expect("write explicit target contract");
             explicit
         }
 
@@ -439,6 +527,10 @@ mod tests {
         fn manifest(&self) -> PathBuf {
             self.crate_root
                 .join("nim-sql-parser/vendor/parser-vendor-manifest.json")
+        }
+
+        fn manifest_sha256(&self) -> String {
+            sha256_bytes(&fs::read(self.manifest()).expect("read fixture manifest"))
         }
     }
 
@@ -471,16 +563,28 @@ mod tests {
     }
 
     fn failure(fixture: &Fixture, target: &str, explicit: Option<&Path>) -> String {
-        resolve_native_library(&fixture.crate_root, target, explicit.map(Path::as_os_str))
-            .expect_err("resolver must reject inconsistent input")
-            .to_string()
+        resolve_native_library_with_options(
+            &fixture.crate_root,
+            target,
+            explicit.map(Path::as_os_str),
+            false,
+            &fixture.manifest_sha256(),
+        )
+        .expect_err("resolver must reject inconsistent input")
+        .to_string()
     }
 
     #[test]
     fn resolves_verified_vendored_library() {
         let fixture = Fixture::new(true);
-        let resolved = resolve_native_library(&fixture.crate_root, LINUX_TARGET, None)
-            .expect("verified vendor library");
+        let resolved = resolve_native_library_with_options(
+            &fixture.crate_root,
+            LINUX_TARGET,
+            None,
+            false,
+            &fixture.manifest_sha256(),
+        )
+        .expect("verified vendor library");
 
         assert_eq!(resolved.directory, fixture.vendor_dir(LINUX_TARGET));
         assert_eq!(
@@ -495,10 +599,12 @@ mod tests {
     fn resolves_verified_explicit_directory() {
         let fixture = Fixture::new(false);
         let explicit = fixture.explicit_dir(LINUX_TARGET);
-        let resolved = resolve_native_library(
+        let resolved = resolve_native_library_with_options(
             &fixture.crate_root,
             LINUX_TARGET,
             Some(explicit.as_os_str()),
+            false,
+            &fixture.manifest_sha256(),
         )
         .expect("verified explicit library");
 
@@ -532,7 +638,7 @@ mod tests {
         let fixture = Fixture::new(true);
         fs::write(
             fixture.vendor_dir(LINUX_TARGET).join("CONTRACT_VERSION"),
-            b"0.3.0\n",
+            b"0.4.0\n",
         )
         .expect("replace fixture contract");
 
@@ -588,11 +694,112 @@ mod tests {
     #[test]
     fn rejects_modified_manifest_before_asset_selection() {
         let fixture = Fixture::new(true);
+        let expected_manifest_sha256 = fixture.manifest_sha256();
         let mut bytes = fs::read(fixture.manifest()).expect("read fixture manifest");
         bytes[0] ^= 1;
         fs::write(fixture.manifest(), bytes).expect("replace fixture manifest");
 
-        assert!(failure(&fixture, LINUX_TARGET, None).contains("vendor manifest SHA-256"));
+        let message = resolve_native_library_with_options(
+            &fixture.crate_root,
+            LINUX_TARGET,
+            None,
+            false,
+            &expected_manifest_sha256,
+        )
+        .expect_err("modified manifest must be rejected")
+        .to_string();
+        assert!(message.contains("vendor manifest SHA-256"));
+    }
+
+    #[test]
+    fn checked_in_v040_vendor_is_rejected_by_current_requirements() {
+        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let message = resolve_native_library_with_options(
+            &crate_root,
+            LINUX_TARGET,
+            None,
+            false,
+            VENDOR_MANIFEST_SHA256,
+        )
+        .expect_err("the immutable pre-frame vendor must not satisfy contract 0.5.0")
+        .to_string();
+
+        assert!(message.contains("vendor manifest contract mismatch"));
+    }
+
+    #[test]
+    fn local_opt_in_without_an_explicit_source_directory_does_not_bypass_stale_vendor() {
+        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let message = resolve_native_library_with_options(
+            &crate_root,
+            LINUX_TARGET,
+            None,
+            true,
+            VENDOR_MANIFEST_SHA256,
+        )
+        .expect_err("the local bypass requires both opt-in and an explicit source directory")
+        .to_string();
+
+        assert!(message.contains("vendor manifest contract mismatch"));
+    }
+
+    #[test]
+    fn local_mode_proves_only_current_sidecar_and_checksum_self_consistency() {
+        let fixture = Fixture::stale(false);
+        let explicit = fixture.explicit_dir(LINUX_TARGET);
+        let resolved = resolve_native_library_with_options(
+            &fixture.crate_root,
+            LINUX_TARGET,
+            Some(explicit.as_os_str()),
+            true,
+            &fixture.manifest_sha256(),
+        )
+        .expect("build time accepts self-consistent identity sidecars");
+
+        assert_eq!(resolved.directory, explicit);
+        // This fixture deliberately contains the historical producer bytes.
+        // Acceptance here is not a contract-compatibility claim: the runtime
+        // exported-version gate rejects those bytes before MessagePack decode.
+    }
+
+    #[test]
+    fn local_source_mode_rejects_stale_contract_sidecar() {
+        let fixture = Fixture::stale(false);
+        let explicit = fixture.explicit_dir(LINUX_TARGET);
+        fs::write(explicit.join("CONTRACT_VERSION"), b"0.4.0\n").expect("restore stale sidecar");
+
+        let message = resolve_native_library_with_options(
+            &fixture.crate_root,
+            LINUX_TARGET,
+            Some(explicit.as_os_str()),
+            true,
+            &fixture.manifest_sha256(),
+        )
+        .expect_err("local source mode must reject stale sidecar")
+        .to_string();
+        assert!(message.contains("contract sidecar"));
+    }
+
+    #[test]
+    fn local_source_mode_rejects_a_checksum_not_bound_to_the_library() {
+        let fixture = Fixture::stale(false);
+        let explicit = fixture.explicit_dir(LINUX_TARGET);
+        fs::write(
+            explicit.join("SHA256SUMS"),
+            format!("{}  libalopex_sql_parser.so\n", "0".repeat(64)),
+        )
+        .expect("replace local checksum sidecar");
+
+        let message = resolve_native_library_with_options(
+            &fixture.crate_root,
+            LINUX_TARGET,
+            Some(explicit.as_os_str()),
+            true,
+            &fixture.manifest_sha256(),
+        )
+        .expect_err("local source mode must bind the checksum to the actual library")
+        .to_string();
+        assert!(message.contains("checksum sidecar"));
     }
 
     #[test]

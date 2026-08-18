@@ -33,7 +33,7 @@ class RetargetPythonParserSourceTests(unittest.TestCase):
         return {
             "schema": "alopex-parser-vendor-manifest-v1",
             "alopex_version": "0.8.5",
-            "contract_version": "0.4.0",
+            "contract_version": "0.5.0",
             "assets": [
                 {
                     "target": target,
@@ -84,6 +84,24 @@ class RetargetPythonParserSourceTests(unittest.TestCase):
             build_support.write_text("unchanged")
 
             with self.assertRaises(ValueError):
+                module.retarget(source, destination, build_support)
+
+            self.assertFalse(destination.exists())
+            self.assertEqual(build_support.read_text(), "unchanged")
+
+    def test_contract_v040_manifest_is_rejected_before_retargeting(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "release.json"
+            destination = root / "vendor.json"
+            build_support = root / "build_support.rs"
+            manifest = self.manifest()
+            manifest["contract_version"] = "0.4.0"
+            source.write_text(json.dumps(manifest))
+            build_support.write_text("unchanged")
+
+            with self.assertRaisesRegex(ValueError, "contract mismatch"):
                 module.retarget(source, destination, build_support)
 
             self.assertFalse(destination.exists())

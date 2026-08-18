@@ -343,7 +343,11 @@ fn map_core_spill_error(err: CoreError) -> ExecutorError {
     }
 }
 
-fn compare_key_values(a: &[SqlValue], b: &[SqlValue], order_by: &[SortExpr]) -> Ordering {
+pub(super) fn compare_key_values(
+    a: &[SqlValue],
+    b: &[SqlValue],
+    order_by: &[SortExpr],
+) -> Ordering {
     for (i, sort_expr) in order_by.iter().enumerate() {
         let left = &a[i];
         let right = &b[i];
@@ -356,7 +360,12 @@ fn compare_key_values(a: &[SqlValue], b: &[SqlValue], order_by: &[SortExpr]) -> 
 }
 
 /// Compare two SqlValues according to sort direction and NULL ordering.
-fn compare_single(left: &SqlValue, right: &SqlValue, asc: bool, nulls_first: bool) -> Ordering {
+pub(super) fn compare_single(
+    left: &SqlValue,
+    right: &SqlValue,
+    asc: bool,
+    nulls_first: bool,
+) -> Ordering {
     match (left, right) {
         (SqlValue::Null, SqlValue::Null) => Ordering::Equal,
         (SqlValue::Null, _) => {
@@ -373,12 +382,62 @@ fn compare_single(left: &SqlValue, right: &SqlValue, asc: bool, nulls_first: boo
                 Ordering::Less
             }
         }
-        _ => match left.partial_cmp(right).unwrap_or(Ordering::Equal) {
+        _ => match compare_non_null_values(left, right) {
             Ordering::Equal => Ordering::Equal,
             ord if asc => ord,
             ord => ord.reverse(),
         },
     }
+}
+
+fn compare_non_null_values(left: &SqlValue, right: &SqlValue) -> Ordering {
+    if let Some(ordering) = left.partial_cmp(right) {
+        return ordering;
+    }
+    match (left, right) {
+        (SqlValue::Float(left), SqlValue::Float(right)) => compare_f32(*left, *right),
+        (SqlValue::Double(left), SqlValue::Double(right)) => compare_f64(*left, *right),
+        (SqlValue::Vector(left), SqlValue::Vector(right)) => compare_vectors(left, right),
+        // A typed sort expression normally makes this unreachable, but a total
+        // type-tag fallback prevents inconsistent inputs from becoming peers.
+        _ => left.type_tag().cmp(&right.type_tag()),
+    }
+}
+
+fn compare_f32(left: f32, right: f32) -> Ordering {
+    if left.partial_cmp(&right) == Some(Ordering::Equal) || (left.is_nan() && right.is_nan()) {
+        Ordering::Equal
+    } else if left.is_nan() {
+        Ordering::Greater
+    } else if right.is_nan() {
+        Ordering::Less
+    } else {
+        left.partial_cmp(&right)
+            .expect("non-NaN f32 values are totally ordered")
+    }
+}
+
+fn compare_f64(left: f64, right: f64) -> Ordering {
+    if left.partial_cmp(&right) == Some(Ordering::Equal) || (left.is_nan() && right.is_nan()) {
+        Ordering::Equal
+    } else if left.is_nan() {
+        Ordering::Greater
+    } else if right.is_nan() {
+        Ordering::Less
+    } else {
+        left.partial_cmp(&right)
+            .expect("non-NaN f64 values are totally ordered")
+    }
+}
+
+fn compare_vectors(left: &[f32], right: &[f32]) -> Ordering {
+    for (left, right) in left.iter().zip(right) {
+        let ordering = compare_f32(*left, *right);
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.len().cmp(&right.len())
 }
 
 // ============================================================================

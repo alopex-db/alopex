@@ -13,7 +13,7 @@
 //! - [`ProjectedColumn`]: A projected column for SELECT clauses
 //! - [`Projection`]: The projection specification for SELECT
 
-use crate::ast::expr::{BinaryOp, Literal, PatternMatchKind, UnaryOp};
+use crate::ast::expr::{BinaryOp, Literal, PatternMatchKind, UnaryOp, WindowFrame};
 use crate::ast::span::Span;
 use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::types::ResolvedType;
@@ -207,6 +207,8 @@ pub struct TypedWindowSpec {
     pub partition_by: Vec<TypedExpr>,
     /// Window-local ordering.
     pub order_by: Vec<SortExpr>,
+    /// Semantically validated explicit frame, if supplied.
+    pub frame: Option<WindowFrame>,
 }
 
 #[derive(Debug, Clone)]

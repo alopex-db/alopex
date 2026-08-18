@@ -398,6 +398,46 @@ suite "Expressions — standard function syntax":
     check expr.binRight.kind == nkExprList
     check expr.binRight.children.len == 2
 
+suite "Window frames":
+
+  test "ROWS BETWEEN preserves physical bounds":
+    let ast = parseSql(
+      "SELECT SUM(qty) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND 1 FOLLOWING) FROM sales"
+    )
+    let call = ast.children[0].children[0]
+    let window = call.children[^1]
+    check window.kind == nkWindowSpec
+    let frame = window.children[^1]
+    check frame.kind == nkWindowFrame
+    check frame.frameUnit == wfuRows
+    check frame.frameStart.frameBoundKind == wfbPreceding
+    check frame.frameStart.frameOffset == 2'u64
+    check frame.frameEnd.frameBoundKind == wfbFollowing
+    check frame.frameEnd.frameOffset == 1'u64
+
+  test "RANGE shorthand ends at CURRENT ROW":
+    let ast = parseSql(
+      "SELECT SUM(qty) OVER (ORDER BY amount DESC RANGE 50 PRECEDING) FROM sales"
+    )
+    let frame = ast.children[0].children[0].children[^1].children[^1]
+    check frame.frameUnit == wfuRange
+    check frame.frameStart.frameBoundKind == wfbPreceding
+    check frame.frameStart.frameOffset == 50'u64
+    check frame.frameEnd.frameBoundKind == wfbCurrentRow
+
+  test "all unbounded and current bounds parse":
+    for sql in [
+      "SELECT SUM(qty) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM sales",
+      "SELECT SUM(qty) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM sales",
+    ]:
+      check parseSql(sql).kind == nkSelect
+
+  test "offset overflow is deterministic":
+    expect ParseError:
+      discard parseSql(
+        "SELECT SUM(qty) OVER (ORDER BY id ROWS 18446744073709551616 PRECEDING) FROM sales"
+      )
+
 suite "Expressions — IN / NOT IN":
 
   test "IN list":

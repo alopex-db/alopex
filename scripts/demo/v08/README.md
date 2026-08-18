@@ -1,8 +1,10 @@
 # v0.8.x embedded-local and SQL demo coverage
 
-The v0.8 release verifier now treats `LAG` and `LEAD` as supported positional
-window functions. Both the Python and Rust demos compare their complete result
-sets, including a time-series delta, partition boundaries, defaults, and NULLs.
+The v0.8 release verifier treats `LAG` and `LEAD` as supported positional
+window functions and explicit `ROWS`/`RANGE` as supported aggregate frames.
+Both the Python and Rust demos compare complete result sets, including physical
+neighbors, value/peer boundaries, a time-series delta, partition boundaries,
+defaults, and NULLs.
 
 `demo_embedded_v085.sh` is the single Rust Embedded API walkthrough used by
 post-release verification. It builds against local path dependencies during
@@ -69,12 +71,12 @@ right (qty <= 2):      {2, 4, 5}
 left-only: {3}; right-only: {5}; intersection: {2, 4}
 ```
 
-The Python demo performs exactly 53 assertions: 33 ordered comparisons, 10
-unordered row-multiset comparisons, and 10 expected errors. The Rust EMB-04
-scenario performs 19 v0.8.x checks: 15 exact result checks and four fail-closed
+The Python demo performs exactly 53 assertions: 35 ordered comparisons, 10
+unordered row-multiset comparisons, and 8 expected errors. The Rust EMB-04
+scenario performs 19 v0.8.x checks: 17 exact result checks and two fail-closed
 checks. The matrix grows cumulatively: CTE column aliases and both positional
-window examples were added without removing the inherited set-operation, CASE,
-CTE-shadowing, frame-rejection, or alias-scope coverage.
+window examples were preserved while ROWS/RANGE result coverage replaced the
+former frame-rejection checks.
 `check_rows` reports both expected and actual rows on failure. The nondeterministic
 `NOW()` value is not claimed as an equality check; the inherited TIMESTAMP check
 uses the stored constant instead. Vector-distance fixture values yield exact
@@ -112,11 +114,11 @@ happened to run:
    default. Offset and default expressions use the current row; the value uses
    the addressed row. NULL values are respected rather than skipped, and the
    default is used only when the target falls outside its partition.
-8. Positional lookups use the whole partition, independently of the aggregate
-   window frame. Equal window `ORDER BY` keys retain stable upstream order; add
-   a unique final key when the SQL statement must define a portable total order.
-   Explicit `ROWS BETWEEN` and `RANGE BETWEEN` syntax remains unsupported and
-   must be rejected by name.
+8. Positional lookups use the whole partition, independently of aggregate
+   frames. `ROWS` uses physical sorted positions; `RANGE` expands value bounds
+   to complete peer groups and follows ASC/DESC and NULL placement. Equal
+   window `ORDER BY` keys retain stable upstream order; add a unique final key
+   when a ROWS statement must define a portable total order.
 9. SQL NULL is represented as Python `None` and Rust `SqlValue::Null`; the
    unordered comparator retains a type tag so NULL cannot compare equal to a
    textual or numeric sentinel.
@@ -124,9 +126,6 @@ happened to run:
    `SqlValue::Boolean`, never integer 1/0. The Python canonicalizer is
    type-sensitive specifically because Python otherwise considers `True == 1`.
 
-The following are intentionally excluded from positive v0.8.x coverage and are
-instead checked as explicit rejection contracts:
-
-- explicit `ROWS BETWEEN` and `RANGE BETWEEN` frame specifications are not
-  implemented;
-- recursive CTEs remain outside the non-recursive CTE scope.
+Recursive CTEs remain outside the non-recursive CTE scope and are checked as an
+explicit rejection contract. Detailed window-frame behavior and resource limits
+are in [`docs/sql-window-frames.md`](../../../docs/sql-window-frames.md).

@@ -3,7 +3,7 @@
 use alopex_sql::{
     AlopexDialect, CommonTableExpr, CreateContinuousAggregate, DataType, ExprKind, FromItem,
     InsertSource, JoinType, Literal, Parser, ParserError, SelectItem, Span, Statement,
-    StatementKind, VectorMetric, parser_contract_version,
+    StatementKind, VectorMetric, WindowFrameBound, WindowFrameUnits, parser_contract_version,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -191,6 +191,56 @@ fn cte_column_names_cross_the_nim_messagepack_boundary_compatibly() {
 }
 
 #[test]
+fn window_frame_crosses_the_nim_messagepack_boundary_compatibly() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT SUM(value) OVER (ORDER BY value ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) \
+         FROM samples",
+    )
+    .expect("window frame should deserialize from Nim MessagePack");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    let SelectItem::Expr { expr, .. } = &select.projection[0] else {
+        panic!("expected expression projection");
+    };
+    let ExprKind::FunctionCall {
+        over: Some(window), ..
+    } = &expr.kind
+    else {
+        panic!("expected window function");
+    };
+    let frame = window.frame.as_ref().expect("expected explicit frame");
+    assert_eq!(frame.units, WindowFrameUnits::Rows);
+    assert_eq!(frame.start_bound, WindowFrameBound::Preceding(2));
+    assert_eq!(frame.end_bound, WindowFrameBound::CurrentRow);
+}
+
+#[test]
+fn pre_frame_nim_producer_payload_defaults_frame_to_none() {
+    // Captured from the real contract-0.4.0 Nim producer built from 157f214
+    // before WindowSpec.frame existed (library SHA-256
+    // 770ebbf668326b3184f4c6aeab364b7c4113da60d7cececb27492bd6a5e526e1).
+    let payload = hex::decode(include_str!("fixtures/window_spec_v040_pre_frame.hex").trim())
+        .expect("legacy Nim fixture must be valid hex");
+    let statements: Vec<Statement> =
+        rmp_serde::from_slice(&payload).expect("current Rust consumer must decode old Nim payload");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    let SelectItem::Expr { expr, .. } = &select.projection[0] else {
+        panic!("expected expression projection");
+    };
+    let ExprKind::FunctionCall {
+        over: Some(window), ..
+    } = &expr.kind
+    else {
+        panic!("expected legacy window function");
+    };
+    assert!(window.frame.is_none());
+}
+
+#[test]
 fn case_expression_crosses_the_nim_messagepack_boundary() {
     let statements = Parser::parse_sql(
         &AlopexDialect,
@@ -225,13 +275,13 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.4.0");
+    assert_eq!(parser_contract_version(), "0.5.0");
 }
 
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.4.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.5.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -239,7 +289,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.4.0");
+    assert_eq!(parser_contract_version(), "0.5.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);

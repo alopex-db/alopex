@@ -347,6 +347,8 @@ jobs:
     env:
       PYO3_PYTHON: python
       PYTHON_SYS_EXECUTABLE: python
+      ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
+      NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
     strategy:
       fail-fast: false
       matrix:

@@ -20,7 +20,7 @@ with pathlib.Path(sys.argv[1]).open("rb") as stream:
     print(tomllib.load(stream)["workspace"]["package"]["version"])
 PY
 )"
-REQUIRED_CONTRACT_VERSION="0.4.0"
+REQUIRED_CONTRACT_VERSION="0.5.0"
 REQUIRED_NIM_VERSION="2.2.10"
 REQUIRED_NIMBLE_VERSION="0.22.3"
 REQUIRED_NIMBLE_SHA="42ef70c2102a942c46f13eb76872326edd525cec"
@@ -58,6 +58,7 @@ case "$(uname -s)" in
     HOST_TARGET=""
     ;;
 esac
+DEFAULT_OUTPUT="${OUTPUT}"
 
 usage() {
   cat <<'EOF'
@@ -67,6 +68,7 @@ Options:
   --backend auto|host|docker  Select the build backend (default: auto).
   --target TARGET            Declare the native release target triple.
   --archive-dir DIRECTORY    Emit a deterministic target record and tar.gz.
+  --output FILE              Write the target library and sidecars to FILE.
 
 Host builds require exact Nim 2.2.10, Nimble 0.22.3 from release commit
 42ef70c2102a942c46f13eb76872326edd525cec, and ALOPEX_NIMBLE_SEED_DIR or
@@ -94,6 +96,11 @@ while [[ "$#" -gt 0 ]]; do
     --archive-dir)
       [[ "$#" -ge 2 ]] || { echo "--archive-dir requires a value" >&2; exit 2; }
       ARCHIVE_DIR="$2"
+      shift 2
+      ;;
+    --output)
+      [[ "$#" -ge 2 ]] || { echo "--output requires a value" >&2; exit 2; }
+      OUTPUT="$2"
       shift 2
       ;;
     *)
@@ -133,6 +140,33 @@ to_native_path() {
     candidate="$(cygpath -w "${candidate}")"
   fi
   printf '%s\n' "${candidate}"
+}
+
+validate_output_path() {
+  local expected_name
+  local output_name
+  local output_parent
+  local canonical_parent
+
+  OUTPUT="$(to_posix_path "${OUTPUT}")"
+  expected_name="$(basename "${DEFAULT_OUTPUT}")"
+  output_name="$(basename "${OUTPUT}")"
+  if [[ "${output_name}" != "${expected_name}" ]]; then
+    echo "--output basename must be ${expected_name}" >&2
+    exit 2
+  fi
+
+  output_parent="$(dirname "${OUTPUT}")"
+  if [[ ! -d "${output_parent}" || -L "${output_parent}" ]]; then
+    echo "--output parent must be an existing real directory: ${output_parent}" >&2
+    exit 2
+  fi
+  canonical_parent="$(cd "${output_parent}" && pwd -P)"
+  OUTPUT="${canonical_parent}/${output_name}"
+  if [[ -L "${OUTPUT}" || ( -e "${OUTPUT}" && ! -f "${OUTPUT}" ) ]]; then
+    echo "--output must be absent or a regular file: ${OUTPUT}" >&2
+    exit 2
+  fi
 }
 
 resolve_executable() {
@@ -519,18 +553,40 @@ EOF
 )
 
 build_docker() {
+  local container_output
+  local output_dir
+  local output_name
+  local -a output_mount=()
   command -v docker >/dev/null 2>&1 || {
     echo "docker is required for the Docker backend" >&2
     return 1
   }
+  output_dir="$(dirname "${OUTPUT}")"
+  output_name="$(basename "${OUTPUT}")"
+  if [[ "${output_dir}" == "${PARSER_DIR}" ]]; then
+    container_output="/workspace/${output_name}"
+  else
+    container_output="/output/${output_name}"
+    output_mount=(-v "${output_dir}:/output")
+  fi
   docker run --rm \
     --entrypoint /bin/bash \
     -v "${PARSER_DIR}:/workspace" \
+    "${output_mount[@]}" \
     -w "/workspace" \
     -e HOME=/tmp \
+    -e "ALOPEX_NIM_PARSER_OUTPUT=${container_output}" \
     --user "$(id -u):$(id -g)" \
     "${NIM_IMAGE}" \
     -c 'export PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin; nimble install -y "npeg@1.3.0" "msgpack4nim@0.4.4" && nimble lib'
+}
+
+validate_docker_target() {
+  if [[ "${HOST_TARGET}" != "x86_64-unknown-linux-gnu" || \
+        ( -n "${TARGET}" && "${TARGET}" != "x86_64-unknown-linux-gnu" ) ]]; then
+    echo "Docker backend only supports a native x86_64 Linux parser build" >&2
+    exit 2
+  fi
 }
 
 write_identity_sidecars() (
@@ -571,6 +627,10 @@ write_identity_sidecars() (
 )
 
 echo "Building Nim SQL parser (${BACKEND} backend)"
+validate_output_path
+if [[ "${BACKEND}" == "docker" ]]; then
+  validate_docker_target
+fi
 rm -f -- "${OUTPUT}" "$(dirname "${OUTPUT}")/CONTRACT_VERSION" \
   "$(dirname "${OUTPUT}")/SHA256SUMS"
 if [[ "${BACKEND}" == "host" ]]; then

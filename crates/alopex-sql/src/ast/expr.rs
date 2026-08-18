@@ -111,6 +111,33 @@ pub struct WindowSpec {
     pub partition_by: Vec<Expr>,
     #[serde(default)]
     pub order_by: Vec<OrderByExpr>,
+    /// Optional explicit frame. `None` selects the SQL implicit frame.
+    #[serde(default)]
+    pub frame: Option<WindowFrame>,
+}
+
+/// An explicit SQL window frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowFrame {
+    pub units: WindowFrameUnits,
+    pub start_bound: WindowFrameBound,
+    pub end_bound: WindowFrameBound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WindowFrameUnits {
+    Rows,
+    Range,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "variant", content = "value")]
+pub enum WindowFrameBound {
+    UnboundedPreceding,
+    Preceding(u64),
+    CurrentRow,
+    Following(u64),
+    UnboundedFollowing,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -127,13 +127,14 @@ task lib, "Build shared library":
   #   Windows: alopex_sql_parser.dll      (接頭辞なし + .dll)
   # `--app:lib` の OS 既定名に依存せず、-o: で明示することで
   # クロスプラットフォームで build.rs の nim_lib_filename() と一致させる。
-  let outName =
+  let defaultOutName =
     when defined(windows):
       "alopex_sql_parser.dll"
     elif defined(macosx):
       "libalopex_sql_parser.dylib"
     else:
       "libalopex_sql_parser.so"
+  let outName = getEnv("ALOPEX_NIM_PARSER_OUTPUT", defaultOutName)
   # Windows: MinGW ランタイム (libgcc_s_seh-1.dll / libwinpthread-1.dll 等) を
   # DLL へ静的リンクし、DLL を自己完結にする。Python の os.add_dll_directory()
   # は登録ディレクトリから推移的依存も解決するが、MinGW ランタイム DLL は

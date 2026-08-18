@@ -9,7 +9,7 @@ use crate::ast::Statement;
 use crate::ast::ddl::VectorMetric;
 use crate::ast::expr::{
     BinaryOp, Expr, ExprKind, Literal, PatternMatchKind, Quantifier as AstQuantifier, UnaryOp,
-    WindowSpec,
+    WindowFrame, WindowFrameBound, WindowFrameUnits, WindowSpec,
 };
 use crate::catalog::{Catalog, ColumnMetadata, TableMetadata};
 use crate::planner::aggregate_expr::{AggregateExpr, AggregateFunction};
@@ -1166,9 +1166,13 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                         ))
                     })
                     .collect::<Result<Vec<_>, PlannerError>>()?;
+                if let Some(frame) = &window.frame {
+                    validate_window_frame(&lower_name, frame, &order_by)?;
+                }
                 Ok(TypedWindowSpec {
                     partition_by,
                     order_by,
+                    frame: window.frame.clone(),
                 })
             })
             .transpose()?;
@@ -2410,6 +2414,68 @@ fn is_numeric_type(ty: &ResolvedType) -> bool {
         ty,
         ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Float | ResolvedType::Double
     )
+}
+
+fn validate_window_frame(
+    function_name: &str,
+    frame: &WindowFrame,
+    order_by: &[SortExpr],
+) -> Result<(), PlannerError> {
+    if !matches!(function_name, "sum" | "count" | "avg" | "min" | "max") {
+        return Err(PlannerError::invalid_expression(format!(
+            "explicit window frames are only supported for aggregate functions, not {}()",
+            function_name.to_ascii_uppercase()
+        )));
+    }
+    if order_by.is_empty() {
+        return Err(PlannerError::invalid_expression(
+            "explicit ROWS/RANGE window frames require ORDER BY for deterministic evaluation",
+        ));
+    }
+    if matches!(frame.start_bound, WindowFrameBound::UnboundedFollowing) {
+        return Err(PlannerError::invalid_expression(
+            "window frame start cannot be UNBOUNDED FOLLOWING",
+        ));
+    }
+    if matches!(frame.end_bound, WindowFrameBound::UnboundedPreceding) {
+        return Err(PlannerError::invalid_expression(
+            "window frame end cannot be UNBOUNDED PRECEDING",
+        ));
+    }
+    if (matches!(frame.start_bound, WindowFrameBound::CurrentRow)
+        && matches!(frame.end_bound, WindowFrameBound::Preceding(_)))
+        || (matches!(frame.start_bound, WindowFrameBound::Following(_))
+            && matches!(
+                frame.end_bound,
+                WindowFrameBound::Preceding(_) | WindowFrameBound::CurrentRow
+            ))
+    {
+        return Err(PlannerError::invalid_expression(
+            "window frame bounds are reversed",
+        ));
+    }
+
+    let has_offset = matches!(
+        frame.start_bound,
+        WindowFrameBound::Preceding(_) | WindowFrameBound::Following(_)
+    ) || matches!(
+        frame.end_bound,
+        WindowFrameBound::Preceding(_) | WindowFrameBound::Following(_)
+    );
+    if frame.units == WindowFrameUnits::Range && has_offset {
+        if order_by.len() != 1 {
+            return Err(PlannerError::invalid_expression(
+                "RANGE offset frames require exactly one ORDER BY expression",
+            ));
+        }
+        if !is_numeric_type(&order_by[0].expr.resolved_type) {
+            return Err(PlannerError::invalid_expression(format!(
+                "RANGE offset ORDER BY expression must be numeric, found {:?}",
+                order_by[0].expr.resolved_type
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_offset_window_call(

@@ -145,11 +145,10 @@ pub(crate) mod continuous_aggregate_select_wire {
 }
 
 impl CreateContinuousAggregate {
-    /// Decode the staged 0.4 wire shape without adding it to `StatementKind`.
+    /// Decode the staged continuous-aggregate wire shape.
     ///
-    /// This narrow seam lets the contract shape be proven while the checked-in
-    /// producer remains on 0.3. The linked-version check is the same one used
-    /// by the production parser path and always runs before payload preflight.
+    /// The linked-version check is the same one used by the production parser
+    /// path and always runs before payload preflight.
     #[doc(hidden)]
     pub fn decode_staged_messagepack(linked_parser_contract: &str, payload: &[u8]) -> Result<Self> {
         ensure_linked_parser_contract(linked_parser_contract)?;
@@ -536,7 +535,10 @@ fn expected_parser_contract() -> &'static str {
 }
 
 fn ensure_linked_parser_contract(linked_parser_contract: &str) -> Result<()> {
-    let expected = expected_parser_contract();
+    ensure_parser_contract(expected_parser_contract(), linked_parser_contract)
+}
+
+fn ensure_parser_contract(expected: &str, linked_parser_contract: &str) -> Result<()> {
     if linked_parser_contract == expected {
         return Ok(());
     }
@@ -1195,6 +1197,30 @@ fn parse_nim_line_col(message: &str) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod input_preflight_tests {
     use super::*;
+
+    #[test]
+    fn relabeled_v040_parser_is_rejected_by_exported_contract_before_decode() {
+        // The value checked here is the library export, not CONTRACT_VERSION.
+        // Rewriting a sidecar therefore cannot change this runtime decision.
+        let error = ensure_linked_parser_contract("0.4.0")
+            .expect_err("sidecar labels cannot make a pre-frame producer compatible");
+        let rendered = error.to_string();
+
+        assert!(rendered.contains("linked Nim parser contract 0.5.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.4.0"));
+    }
+
+    #[test]
+    fn legacy_v040_consumer_rejects_a_v050_frame_producer_before_decode() {
+        let linked_producer_contract = nim_ffi::parser_contract_version();
+        assert_eq!(linked_producer_contract, "0.5.0");
+        let error = ensure_parser_contract("0.4.0", &linked_producer_contract)
+            .expect_err("legacy consumer must reject a producer with frame semantics");
+        let rendered = error.to_string();
+
+        assert!(rendered.contains("linked Nim parser contract 0.4.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.5.0"));
+    }
 
     #[test]
     fn raw_sql_guard_accepts_boundary_minus_and_exact_but_rejects_plus() {

@@ -8,6 +8,11 @@ it is not a product artifact. It has two intentionally separate modes:
 - `crates/alopex-tools/v08/verify-v08-embedded` uses the checked-out v0.8
   Embedded/SQL crates and runs the v0.8 local SQL compatibility corpus.
 
+The nested v08 tool's `--parser-native-smoke` manifest is immutable v0.8.4 /
+contract-0.4.0 evidence for the checked-in historical vendor. Current
+contract-0.5.0 publication smoke is owned by the four-target release workflow;
+do not relabel the nested fixture or its archived digests.
+
 The embedded verifier does not claim to exercise distributed-read routing,
 cluster management, CLI output, DataFrame streaming, or Python bindings. Those
 surfaces are verified by their owning integration suites and the candidate

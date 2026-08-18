@@ -2753,6 +2753,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     function,
                     partition_by: over.partition_by.clone(),
                     order_by: over.order_by.clone(),
+                    frame: over.frame.clone(),
                     result_type: expr.resolved_type.clone(),
                 });
                 window_map.insert(key, index);
@@ -3470,6 +3471,7 @@ fn substitute_projection_aliases(
                         span: order.span,
                     })
                     .collect(),
+                frame: window.frame.clone(),
             }),
         },
         ExprKind::Case {

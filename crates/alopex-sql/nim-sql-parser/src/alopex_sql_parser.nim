@@ -15,7 +15,7 @@ const parserContractDescriptor = staticRead("../PARSER_CONTRACT_VERSION")
 
 static:
   doAssert isExactContractDescriptor(parserContractDescriptor, "0.3.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.4.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.5.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -331,19 +331,58 @@ proc writeOrderByExpr(s: Stream; node: SqlNode) =
   s.writeKey("span")
   s.writeSpan(node.span)
 
+proc writeWindowFrameBound(s: Stream; node: SqlNode) =
+  case node.frameBoundKind
+  of wfbUnboundedPreceding:
+    s.pack_map(1)
+    s.writeKey("variant")
+    s.pack_type("UnboundedPreceding")
+  of wfbPreceding:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Preceding")
+    s.writeKey("value")
+    s.pack_type(node.frameOffset)
+  of wfbCurrentRow:
+    s.pack_map(1)
+    s.writeKey("variant")
+    s.pack_type("CurrentRow")
+  of wfbFollowing:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Following")
+    s.writeKey("value")
+    s.pack_type(node.frameOffset)
+  of wfbUnboundedFollowing:
+    s.pack_map(1)
+    s.writeKey("variant")
+    s.pack_type("UnboundedFollowing")
+
+proc writeWindowFrame(s: Stream; node: SqlNode) =
+  s.pack_map(3)
+  s.writeKey("units")
+  s.pack_type(if node.frameUnit == wfuRows: "Rows" else: "Range")
+  s.writeKey("start_bound")
+  s.writeWindowFrameBound(node.frameStart)
+  s.writeKey("end_bound")
+  s.writeWindowFrameBound(node.frameEnd)
+
 proc writeWindowSpec(s: Stream; node: SqlNode) =
   var partitionByNode: SqlNode = nil
   var orderByNode: SqlNode = nil
+  var frameNode: SqlNode = nil
   for child in node.children:
     case child.kind
     of nkPartitionByClause:
       partitionByNode = child
     of nkOrderByClause:
       orderByNode = child
+    of nkWindowFrame:
+      frameNode = child
     else:
       discard
 
-  s.pack_map(2)
+  s.pack_map(3)
   s.writeKey("partition_by")
   if partitionByNode == nil:
     s.pack_array(0)
@@ -356,6 +395,11 @@ proc writeWindowSpec(s: Stream; node: SqlNode) =
     s.pack_array(orderByNode.children.len)
     for item in orderByNode.children:
       s.writeOrderByExpr(item)
+  s.writeKey("frame")
+  if frameNode == nil:
+    s.writeNil()
+  else:
+    s.writeWindowFrame(frameNode)
 
 proc writeIndexOption(s: Stream; node: SqlNode) =
   s.pack_map(3)
@@ -1262,18 +1306,31 @@ proc validateStagedWriterShape(node: SqlNode) =
   of nkWindowSpec:
     var sawPartitionBy = false
     var sawOrderBy = false
+    var sawFrame = false
     for child in node.children:
       case child.kind
       of nkPartitionByClause:
-        if sawPartitionBy or sawOrderBy or child.children.len == 0:
+        if sawPartitionBy or sawOrderBy or sawFrame or child.children.len == 0:
           stagedValidationError("invalid PARTITION BY in window specification")
         sawPartitionBy = true
       of nkOrderByClause:
-        if sawOrderBy or child.children.len == 0:
+        if sawOrderBy or sawFrame or child.children.len == 0:
           stagedValidationError("invalid ORDER BY in window specification")
         sawOrderBy = true
+      of nkWindowFrame:
+        if sawFrame or child.frameStart == nil or child.frameEnd == nil:
+          stagedValidationError("invalid frame in window specification")
+        sawFrame = true
       else:
         stagedValidationError("invalid child in window specification")
+  of nkWindowFrame:
+    if node.frameStart == nil or node.frameStart.kind != nkWindowFrameBound or
+        node.frameEnd == nil or node.frameEnd.kind != nkWindowFrameBound:
+      stagedValidationError("window frame must contain two bounds")
+  of nkWindowFrameBound:
+    if node.frameBoundKind notin {wfbPreceding, wfbFollowing} and
+        node.frameOffset != 0:
+      stagedValidationError("non-offset window frame bound has an offset")
   of nkCast:
     requireChildren(2, "CAST expression")
   of nkCase:
@@ -1357,6 +1414,11 @@ proc validateStagedAst(node: SqlNode; depth: int;
     node.aliasExpr.validateStagedAst(depth + 1, ancestors)
   of nkSetOperation:
     node.setRight.validateStagedAst(depth + 1, ancestors)
+  of nkWindowFrame:
+    node.frameStart.validateStagedAst(depth + 1, ancestors)
+    node.frameEnd.validateStagedAst(depth + 1, ancestors)
+  of nkWindowFrameBound:
+    discard
   of nkColumnDef:
     node.colType.validateStagedAst(depth + 1, ancestors)
     for child in node.colConstraints:

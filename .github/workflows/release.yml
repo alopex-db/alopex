@@ -155,11 +155,14 @@ jobs:
           loaded = ctypes.CDLL(str(library))
           loaded.alopex_parser_version.restype = ctypes.c_char_p
           version = loaded.alopex_parser_version().decode("ascii")
-          if version != "0.4.0":
+          if version != "0.5.0":
               raise SystemExit(f"native smoke version mismatch: {version}")
           print(f"native smoke passed: {record['target']} parser {version}")
           PY
       - name: Build
+        env:
+          ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
+          NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
         run: cargo build --release --target ${{ matrix.target }} -p alopex-cli
 
       - name: Strip binary (Linux and macOS)
@@ -328,7 +331,7 @@ jobs:
           mkdir -p "${asset_dir}"
           gh release download "${RELEASE_TAG_NAME}" --repo "${GITHUB_REPOSITORY}" \
             --pattern "parser-vendor-manifest-v${version}.json" \
-            --pattern "alopex-parser-v${version}-contract-0.4.0-*.tar.gz" \
+            --pattern "alopex-parser-v${version}-contract-0.5.0-*.tar.gz" \
             --dir "${asset_dir}" --clobber
           manifest="${asset_dir}/parser-vendor-manifest-v${version}.json"
           python "${RELEASE_STAGE}/scripts/release/parser_asset_manifest.py" verify-manifest \
@@ -364,7 +367,7 @@ jobs:
               target_dir.mkdir(parents=True, exist_ok=True)
               name = library_path.name
               (target_dir / name).write_bytes(library)
-              (target_dir / "CONTRACT_VERSION").write_bytes(b"0.4.0\n")
+              (target_dir / "CONTRACT_VERSION").write_bytes(b"0.5.0\n")
               (target_dir / "SHA256SUMS").write_bytes(
                   f"{expected}  {name}\n".encode()
               )

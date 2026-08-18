@@ -99,6 +99,13 @@ pub trait Accumulator: Send {
     fn finalize(&self) -> Result<SqlValue>;
     /// Clone the accumulator as a trait object.
     fn clone_box(&self) -> Box<dyn Accumulator>;
+    /// Estimated bytes retained by dynamically allocated accumulator state.
+    ///
+    /// Window execution uses this to charge the shared operator memory budget
+    /// while an accumulator is alive.
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
 }
 
 impl Clone for Box<dyn Accumulator> {
@@ -178,6 +185,35 @@ fn distinct_allows(
     Ok(distinct.insert(encoded))
 }
 
+fn estimated_distinct_retained_bytes(distinct_values: &Option<HashSet<Vec<u8>>>) -> u64 {
+    let Some(values) = distinct_values else {
+        return 0;
+    };
+    // Charge every allocated hash bucket conservatively as a stored Vec plus
+    // hash/control metadata, then add each encoded key's owned allocation.
+    let bucket_bytes = values
+        .capacity()
+        .saturating_mul(std::mem::size_of::<Vec<u8>>() + std::mem::size_of::<u64>() + 1);
+    values.iter().fold(
+        u64::try_from(bucket_bytes).unwrap_or(u64::MAX),
+        |total, value| total.saturating_add(u64::try_from(value.capacity()).unwrap_or(u64::MAX)),
+    )
+}
+
+fn estimated_string_collection_bytes(
+    values: &[String],
+    values_capacity: usize,
+    separator_capacity: usize,
+) -> u64 {
+    let slots = values_capacity.saturating_mul(std::mem::size_of::<String>());
+    values
+        .iter()
+        .fold(u64::try_from(slots).unwrap_or(u64::MAX), |total, value| {
+            total.saturating_add(u64::try_from(value.capacity()).unwrap_or(u64::MAX))
+        })
+        .saturating_add(u64::try_from(separator_capacity).unwrap_or(u64::MAX))
+}
+
 /// Accumulator for COUNT / COUNT(DISTINCT).
 #[derive(Debug, Clone)]
 pub struct CountAccumulator {
@@ -245,6 +281,10 @@ impl Accumulator for CountAccumulator {
 
     fn clone_box(&self) -> Box<dyn Accumulator> {
         Box::new(self.clone())
+    }
+
+    fn retained_bytes(&self) -> u64 {
+        estimated_distinct_retained_bytes(&self.distinct_values)
     }
 }
 
@@ -357,6 +397,15 @@ impl Accumulator for SumAccumulator {
 
     fn clone_box(&self) -> Box<dyn Accumulator> {
         Box::new(self.clone())
+    }
+
+    fn retained_bytes(&self) -> u64 {
+        estimated_distinct_retained_bytes(&self.distinct_values).saturating_add(
+            self.sum
+                .as_ref()
+                .map(ByteSized::estimated_bytes)
+                .unwrap_or(0),
+        )
     }
 }
 
@@ -491,6 +540,10 @@ impl Accumulator for AvgAccumulator {
     fn clone_box(&self) -> Box<dyn Accumulator> {
         Box::new(self.clone())
     }
+
+    fn retained_bytes(&self) -> u64 {
+        estimated_distinct_retained_bytes(&self.distinct_values)
+    }
 }
 
 fn numeric_to_f64(value: &SqlValue) -> Result<f64> {
@@ -600,6 +653,15 @@ impl Accumulator for MinMaxAccumulator {
     fn clone_box(&self) -> Box<dyn Accumulator> {
         Box::new(self.clone())
     }
+
+    fn retained_bytes(&self) -> u64 {
+        estimated_distinct_retained_bytes(&self.distinct_values).saturating_add(
+            self.value
+                .as_ref()
+                .map(ByteSized::estimated_bytes)
+                .unwrap_or(0),
+        )
+    }
 }
 
 /// Accumulator for GROUP_CONCAT.
@@ -695,6 +757,16 @@ impl Accumulator for GroupConcatAccumulator {
     fn clone_box(&self) -> Box<dyn Accumulator> {
         Box::new(self.clone())
     }
+
+    fn retained_bytes(&self) -> u64 {
+        estimated_distinct_retained_bytes(&self.distinct_values).saturating_add(
+            estimated_string_collection_bytes(
+                &self.values,
+                self.values.capacity(),
+                self.separator.capacity(),
+            ),
+        )
+    }
 }
 
 /// Accumulator for STRING_AGG.
@@ -789,6 +861,16 @@ impl Accumulator for StringAggAccumulator {
 
     fn clone_box(&self) -> Box<dyn Accumulator> {
         Box::new(self.clone())
+    }
+
+    fn retained_bytes(&self) -> u64 {
+        estimated_distinct_retained_bytes(&self.distinct_values).saturating_add(
+            estimated_string_collection_bytes(
+                &self.values,
+                self.values.capacity(),
+                self.separator.capacity(),
+            ),
+        )
     }
 }
 

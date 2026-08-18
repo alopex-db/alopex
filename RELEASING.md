@@ -46,7 +46,8 @@ tag `v${version}` で公開する。RC は `rc/v${version}` を使用し、
 
 ### パーサー資産の不変条件
 
-- Alopex SQL parser の FFI 契約は `0.4.0` とする。
+- Alopex SQL parser の FFI 契約は `0.5.0` とする。この識別子は Alopex
+  リリース内の互換メタデータであり、独立した parser リリース lane ではない。
 - Linux x86_64、macOS x86_64、macOS arm64、Windows x86_64 の4ターゲットを
   Nim 2.2.10 / Nimble 0.22.3 で個別にビルドし、各ターゲットの native smoke
   と SHA-256 検証を通過させてからアップロードする。
@@ -57,6 +58,10 @@ tag `v${version}` で公開する。RC は `rc/v${version}` を使用し、
 - Python 配布物は公開済み Alopex parser 資産を取得して package-local
   `alopex/native/` に配置する。Python ジョブで Nim を再ビルドせず、任意の
   外部ライブラリディレクトリをローダー入力にしない。
+- 追跡済み v0.8.4 / contract-0.4.0 vendor bytes と sidecar は履歴資産として
+  書き換えない。release staging だけが新規4ターゲットの contract-0.5.0
+  archive から library/sidecar/manifest を展開し、`build_support.rs` の Alopex
+  version と manifest SHA pin を同時に更新する。
 
 ### 公開順序と失敗時の扱い
 

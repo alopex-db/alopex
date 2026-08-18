@@ -124,6 +124,30 @@ def test_execute_sql_lag_and_lead_preserve_exact_rows(db):
     ]
 
 
+def test_execute_sql_rows_and_range_frames_preserve_exact_rows(db):
+    db.execute_sql(
+        "CREATE TABLE frame_samples "
+        "(id INTEGER PRIMARY KEY, amount INTEGER, qty INTEGER)"
+    )
+    db.execute_sql(
+        "INSERT INTO frame_samples VALUES "
+        "(1, 10, 3), (2, 20, 1), (3, 20, 5), (4, 30, 2)"
+    )
+    rows = db.execute_sql(
+        "SELECT id, "
+        "SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) "
+        "AS physical, "
+        "SUM(qty) OVER (ORDER BY amount RANGE CURRENT ROW) AS peers "
+        "FROM frame_samples ORDER BY id"
+    )
+    assert rows == [
+        {"id": 1, "physical": 4, "peers": 3},
+        {"id": 2, "physical": 9, "peers": 6},
+        {"id": 3, "physical": 8, "peers": 6},
+        {"id": 4, "physical": 7, "peers": 2},
+    ]
+
+
 def test_execute_sql_params_binding(users_db):
     users_db.execute_sql(
         "INSERT INTO users (id, name, email) VALUES (?, ?, ?)",

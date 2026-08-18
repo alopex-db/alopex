@@ -7,7 +7,7 @@ import msgpack4nim/msgpack2json
 import ../src/[alopex_sql_parser, ast, parser]
 
 const ContractDescriptor = staticRead("../PARSER_CONTRACT_VERSION").strip()
-const ContinuousAggregateProducerEnabled = ContractDescriptor == "0.4.0"
+const ContinuousAggregateProducerEnabled = ContractDescriptor == "0.5.0"
 
 const
   MinimalContinuousAggregateSql =
@@ -553,3 +553,15 @@ suite "MessagePack output - staged continuous aggregate contract":
     check recovered.buffer_ptr != nil
     check recovered.buffer_len > 0
     alopex_free_buffer(recovered.buffer_ptr)
+
+  test "window frame is emitted as an additive optional WindowSpec field":
+    let payload = toJsonNode(encodeSqlToMsgPack(
+      "SELECT SUM(qty) OVER (ORDER BY amount RANGE BETWEEN 50 PRECEDING AND CURRENT ROW) FROM sales"
+    ))
+    let window = payload[0]["kind"]["projection"][0]["expr"]["kind"]["over"]
+    check window["partition_by"].len == 0
+    check window["order_by"].len == 1
+    check window["frame"]["units"].getStr() == "Range"
+    check window["frame"]["start_bound"]["variant"].getStr() == "Preceding"
+    check window["frame"]["start_bound"]["value"].getBiggestInt() == 50
+    check window["frame"]["end_bound"]["variant"].getStr() == "CurrentRow"

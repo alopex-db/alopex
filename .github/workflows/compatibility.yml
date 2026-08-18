@@ -25,6 +25,9 @@ jobs:
   native:
     name: Native Compatibility (${{ matrix.target }} | ${{ matrix.compression }})
     runs-on: ${{ matrix.runner }}
+    env:
+      ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
+      NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
     strategy:
       fail-fast: false
       matrix:
