@@ -10,7 +10,9 @@ use crate::catalog::ColumnMetadata;
 use crate::executor::evaluator::{self, EvalContext};
 use crate::executor::memory::{MemoryPolicy, MemoryTracker, map_core_memory_error};
 use crate::executor::{ExecutorError, Result, Row};
-use crate::planner::logical_plan::{OffsetWindowFunction, WindowExpr, WindowFunction};
+use crate::planner::logical_plan::{
+    OffsetWindowFunction, ValueWindowFunction, WindowExpr, WindowFunction,
+};
 use crate::planner::typed_expr::SortExpr;
 use crate::storage::SqlValue;
 
@@ -163,7 +165,9 @@ impl WindowIterator {
             let mut partition = Vec::with_capacity(rows.len());
             let partition_slots = estimated_slots_bytes::<Row>(partition.capacity())?;
             let output_slots = estimated_slots_bytes::<SqlValue>(rows.len())?;
-            let range_slots = if window.frame.is_some() {
+            let range_slots = if window.frame.is_some()
+                && matches!(&window.function, WindowFunction::Aggregate(_))
+            {
                 estimated_slots_bytes::<Option<RangeInclusive<usize>>>(rows.len())?
             } else {
                 0
@@ -401,9 +405,18 @@ fn evaluate_partition(
                 set_output(output, row, SqlValue::BigInt(value), memory)?;
             }
         }
+        WindowFunction::PercentRank => {
+            evaluate_percent_rank(window, partition, output, memory)?;
+        }
+        WindowFunction::CumeDist => {
+            evaluate_cume_dist(window, partition, output, memory)?;
+        }
+        WindowFunction::Ntile(argument) => {
+            evaluate_ntile(argument, partition, output, memory)?;
+        }
         WindowFunction::Aggregate(aggregate) => {
             if let Some(frame) = &window.frame
-                && !is_default_ordered_aggregate_frame(frame)
+                && !is_default_ordered_frame(frame)
             {
                 evaluate_framed_aggregate(
                     window,
@@ -465,6 +478,9 @@ fn evaluate_partition(
                 memory.release_bytes(accumulator_bytes)?;
             }
         }
+        WindowFunction::Value(function) => {
+            evaluate_value_window(window, function, partition, output, frame_budget, memory)?;
+        }
         WindowFunction::Lag(function) => evaluate_offset_window(
             function,
             OffsetDirection::Preceding,
@@ -483,7 +499,234 @@ fn evaluate_partition(
     Ok(())
 }
 
-fn is_default_ordered_aggregate_frame(frame: &WindowFrame) -> bool {
+fn evaluate_percent_rank(
+    window: &WindowExpr,
+    partition: &[Row],
+    output: &mut [SqlValue],
+    memory: &mut WindowMemory,
+) -> Result<()> {
+    let denominator = partition.len().saturating_sub(1) as f64;
+    let mut previous_key: Option<Vec<SqlValue>> = None;
+    let mut rank = 1_usize;
+    for (position, row) in partition.iter().enumerate() {
+        let key = order_values(row, &window.order_by)?;
+        if position > 0
+            && previous_key.as_ref().is_some_and(|previous| {
+                compare_key_values(previous, &key, &window.order_by) != Ordering::Equal
+            })
+        {
+            rank = position + 1;
+        }
+        previous_key = Some(key);
+        let value = if denominator == 0.0 {
+            0.0
+        } else {
+            rank.saturating_sub(1) as f64 / denominator
+        };
+        set_output(output, row, SqlValue::Double(value), memory)?;
+    }
+    Ok(())
+}
+
+fn evaluate_cume_dist(
+    window: &WindowExpr,
+    partition: &[Row],
+    output: &mut [SqlValue],
+    memory: &mut WindowMemory,
+) -> Result<()> {
+    let denominator = partition.len() as f64;
+    let mut peer_start = 0;
+    while peer_start < partition.len() {
+        let peer_key = order_values(&partition[peer_start], &window.order_by)?;
+        let mut peer_end = peer_start + 1;
+        while peer_end < partition.len() {
+            let candidate = order_values(&partition[peer_end], &window.order_by)?;
+            if compare_key_values(&candidate, &peer_key, &window.order_by) != Ordering::Equal {
+                break;
+            }
+            peer_end += 1;
+        }
+        let value = SqlValue::Double(peer_end as f64 / denominator);
+        set_repeated_output(output, &partition[peer_start..peer_end], value, memory)?;
+        peer_start = peer_end;
+    }
+    Ok(())
+}
+
+fn evaluate_ntile(
+    argument: &crate::planner::TypedExpr,
+    partition: &[Row],
+    output: &mut [SqlValue],
+    memory: &mut WindowMemory,
+) -> Result<()> {
+    let buckets = partition_constant_positive_integer("NTILE", argument, partition)?;
+    let rows = u64::try_from(partition.len()).map_err(|_| window_argument_overflow("NTILE"))?;
+    let larger_bucket_count = rows % buckets;
+    let smaller_bucket_size = rows / buckets;
+    let larger_bucket_size = smaller_bucket_size
+        .checked_add(1)
+        .ok_or_else(|| window_argument_overflow("NTILE"))?;
+    let larger_rows = larger_bucket_count
+        .checked_mul(larger_bucket_size)
+        .ok_or_else(|| window_argument_overflow("NTILE"))?;
+
+    for (position, row) in partition.iter().enumerate() {
+        let position = u64::try_from(position).map_err(|_| window_argument_overflow("NTILE"))?;
+        let bucket = if position < larger_rows {
+            position / larger_bucket_size + 1
+        } else {
+            debug_assert!(smaller_bucket_size > 0);
+            larger_bucket_count + (position - larger_rows) / smaller_bucket_size + 1
+        };
+        let bucket = i64::try_from(bucket).map_err(|_| window_argument_overflow("NTILE"))?;
+        set_output(output, row, SqlValue::BigInt(bucket), memory)?;
+    }
+    Ok(())
+}
+
+fn partition_constant_positive_integer(
+    name: &str,
+    argument: &crate::planner::TypedExpr,
+    partition: &[Row],
+) -> Result<u64> {
+    let first = positive_integer_argument(
+        name,
+        evaluator::evaluate(argument, &EvalContext::new(&partition[0].values))?,
+    )?;
+    for row in &partition[1..] {
+        let current = positive_integer_argument(
+            name,
+            evaluator::evaluate(argument, &EvalContext::new(&row.values))?,
+        )?;
+        if current != first {
+            return Err(ExecutorError::InvalidOperation {
+                operation: format!("{name} window function"),
+                reason: "argument must be constant within a partition".into(),
+            });
+        }
+    }
+    Ok(first)
+}
+
+fn positive_integer_argument(name: &str, value: SqlValue) -> Result<u64> {
+    let value = match value {
+        SqlValue::Integer(value) => i64::from(value),
+        SqlValue::BigInt(value) => value,
+        _ => {
+            return Err(ExecutorError::InvalidOperation {
+                operation: format!("{name} window function"),
+                reason: "argument must be a positive INTEGER".into(),
+            });
+        }
+    };
+    u64::try_from(value)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| ExecutorError::InvalidOperation {
+            operation: format!("{name} window function"),
+            reason: "argument must be a positive INTEGER".into(),
+        })
+}
+
+fn window_argument_overflow(name: &str) -> ExecutorError {
+    ExecutorError::InvalidOperation {
+        operation: format!("{name} window function"),
+        reason: "partition or argument exceeds supported range".into(),
+    }
+}
+
+fn evaluate_value_window(
+    window: &WindowExpr,
+    function: &ValueWindowFunction,
+    partition: &[Row],
+    output: &mut [SqlValue],
+    frame_budget: &mut ExplicitFrameBudget,
+    memory: &mut WindowMemory,
+) -> Result<()> {
+    if let Some(frame) = &window.frame
+        && !is_default_ordered_frame(frame)
+    {
+        if frame.units == WindowFrameUnits::Range {
+            ensure_range_boundary_budget(partition.len(), frame_budget)?;
+        }
+        for (position, current_row) in partition.iter().enumerate() {
+            let range = match frame.units {
+                WindowFrameUnits::Rows => rows_frame_range(position, partition.len(), frame)?,
+                WindowFrameUnits::Range => {
+                    range_frame_range(position, partition, frame, &window.order_by)?
+                }
+            };
+            let value = value_from_frame(function, current_row, partition, range.as_ref())?;
+            set_output(output, current_row, value, memory)?;
+        }
+        return Ok(());
+    }
+
+    if window.order_by.is_empty() {
+        let range = 0..=partition.len() - 1;
+        for current_row in partition {
+            let value = value_from_frame(function, current_row, partition, Some(&range))?;
+            set_output(output, current_row, value, memory)?;
+        }
+        return Ok(());
+    }
+
+    let mut peer_start = 0;
+    while peer_start < partition.len() {
+        let peer_key = order_values(&partition[peer_start], &window.order_by)?;
+        let mut peer_end = peer_start + 1;
+        while peer_end < partition.len() {
+            let candidate = order_values(&partition[peer_end], &window.order_by)?;
+            if compare_key_values(&candidate, &peer_key, &window.order_by) != Ordering::Equal {
+                break;
+            }
+            peer_end += 1;
+        }
+        let range = 0..=peer_end - 1;
+        for current_row in &partition[peer_start..peer_end] {
+            let value = value_from_frame(function, current_row, partition, Some(&range))?;
+            set_output(output, current_row, value, memory)?;
+        }
+        peer_start = peer_end;
+    }
+    Ok(())
+}
+
+fn value_from_frame(
+    function: &ValueWindowFunction,
+    current_row: &Row,
+    partition: &[Row],
+    range: Option<&RangeInclusive<usize>>,
+) -> Result<SqlValue> {
+    let target = match function {
+        ValueWindowFunction::FirstValue(_) => range.map(|range| *range.start()),
+        ValueWindowFunction::LastValue(_) => range.map(|range| *range.end()),
+        ValueWindowFunction::NthValue { nth, .. } => {
+            let nth = positive_integer_argument(
+                "NTH_VALUE",
+                evaluator::evaluate(nth, &EvalContext::new(&current_row.values))?,
+            )?;
+            range.and_then(|range| {
+                let offset = usize::try_from(nth.checked_sub(1)?).ok()?;
+                range
+                    .start()
+                    .checked_add(offset)
+                    .filter(|target| target <= range.end())
+            })
+        }
+    };
+    let Some(target) = target else {
+        return Ok(SqlValue::Null);
+    };
+    let value = match function {
+        ValueWindowFunction::FirstValue(value)
+        | ValueWindowFunction::LastValue(value)
+        | ValueWindowFunction::NthValue { value, .. } => value,
+    };
+    evaluator::evaluate(value, &EvalContext::new(&partition[target].values))
+}
+
+fn is_default_ordered_frame(frame: &WindowFrame) -> bool {
     frame.units == WindowFrameUnits::Range
         && frame.start_bound == WindowFrameBound::UnboundedPreceding
         && frame.end_bound == WindowFrameBound::CurrentRow

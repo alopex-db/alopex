@@ -1,14 +1,15 @@
 # v0.8.x embedded-local and SQL demo coverage
 
-The v0.8 release verifier treats `LAG` and `LEAD` as supported positional
-window functions and explicit `ROWS`/`RANGE` as supported aggregate frames. It
-also covers their composition with grouped aggregation, `HAVING`, projection,
-`DISTINCT`, and outer `ORDER BY`. Both the Python and Rust demos compare
-complete result sets, including physical neighbors, value/peer boundaries, a
-time-series delta, partition boundaries, defaults, NULLs, and post-window
-deduplication.
+The v0.8 release verifier exercises positional, value, ranking, distribution,
+and aggregate windows. It covers `LAG`/`LEAD`,
+`FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE`, `NTILE`, `PERCENT_RANK`, `CUME_DIST`,
+explicit `ROWS`/`RANGE` frames, and composition with grouped aggregation,
+`HAVING`, projection, `DISTINCT`, and outer `ORDER BY`. Both the Python and Rust
+demos compare complete result sets, including physical neighbors, peer
+boundaries, partition resets, defaults, NULLs, frame-local value selection,
+bucket allocation, cumulative distributions, and post-window deduplication.
 
-`demo_embedded_v085.sh` is the single Rust Embedded API walkthrough used by
+`demo_embedded_v08.sh` is the single Rust Embedded API walkthrough used by
 post-release verification. It builds against local path dependencies during
 development and against exact-version crates.io packages in the release
 verifier.
@@ -18,7 +19,7 @@ verifier.
 | `EMB-01-storage-durability` | memory options/limits, snapshot, clone, clear, persist, file URI reopen and flush | inherited local compatibility; Phase 1 R5 |
 | `EMB-02-kv-transactions` | KV CRUD, prefix scan, commit, rollback | Phase 2 R1 local Transaction compatibility |
 | `EMB-03-persisted-transaction-manager` | named transaction metadata, staged reads, commit and rollback | Phase 2 R1 local multi-operation workflow |
-| `EMB-04-local-sql-matrix` | DDL/DML, SELECT clauses, JOIN, subquery, aggregates, scalar/hash/encoding, TIMESTAMP, Vector SQL, PRAGMA, and v0.8.x alias/REAL/set-operation/CASE/CTE/window contracts; every query is verified by full row-value equality, not row presence | Phase 2 R1 local SQL baseline; #122-#130, #141-#142 |
+| `EMB-04-local-sql-matrix` | DDL/DML, SELECT clauses, JOIN, subquery, aggregates, scalar/hash/encoding, TIMESTAMP, Vector SQL, PRAGMA, and v0.8.x alias/REAL/set-operation/CASE/CTE/window contracts; every query is verified by full row-value equality, not row presence | Phase 2 R1 local SQL baseline; #122-#130, #141-#143 |
 | `EMB-05-catalog-cluster-diagnostics` | catalog/namespace/table/index observation, cache invalidation, single-node cluster status and routing diagnostics | Phase 1 R1/R2 local diagnostic boundary |
 | `EMB-06-owned-and-sql-streams` | callback/iterator/owned SQL streams, owned transaction commit/rollback and preflight rejection | Phase 4 R1/R2 Rust backend contract |
 | `EMB-07-dataframe-columnar` | SQL-to-DataFrame with FLOAT-to-Arrow-Float32 preservation, columnar projection/scan/stats/index, and fail-closed legacy-to-V08 streaming boundary | Phase 3 R1/R2; v0.8.5 #93 |
@@ -73,14 +74,14 @@ right (qty <= 2):      {2, 4, 5}
 left-only: {3}; right-only: {5}; intersection: {2, 4}
 ```
 
-The Python demo performs exactly 55 assertions: 38 ordered comparisons, 10
+The Python demo performs exactly 56 assertions: 39 ordered comparisons, 10
 unordered row-multiset comparisons, and 7 expected errors. The Rust EMB-04
-scenario performs 20 v0.8.x checks: 18 exact result checks and two fail-closed
+scenario performs 21 v0.8.x checks: 19 exact result checks and two fail-closed
 checks. The matrix grows cumulatively: CTE column aliases, recursive CTEs,
-positional windows, explicit frames, and grouped-window composition are all
-positive checks; their former unsupported-feature rejections are gone while
-the inherited set-operation, CASE, CTE-shadowing, and alias-scope coverage
-remains.
+positional/value/distribution windows, explicit frames, and grouped-window
+composition are all positive checks; their former unsupported-feature
+rejections are gone while the inherited set-operation, CASE, CTE-shadowing,
+and alias-scope coverage remains.
 `check_rows` reports both expected and actual rows on failure. The nondeterministic
 `NOW()` value is not claimed as an equality check; the inherited TIMESTAMP check
 uses the stored constant instead. Vector-distance fixture values yield exact
@@ -127,13 +128,20 @@ happened to run:
    then outer `ORDER BY`. An aggregate result may feed a window argument or
    window-local ordering; `HAVING`-filtered groups never re-enter the window,
    and `DISTINCT` removes equal projected window rows only after evaluation.
-10. SQL NULL is represented as Python `None` and Rust `SqlValue::Null`; the
+10. `FIRST_VALUE`, `LAST_VALUE`, and `NTH_VALUE` select from the effective
+    frame and preserve NULL values. `NTH_VALUE` is one-based and returns NULL
+    for an empty frame or an index beyond it. `NTILE` assigns larger buckets
+    first, while `PERCENT_RANK` and `CUME_DIST` use peer-aware rank and peer-end
+    boundaries; a single-row partition returns `0.0` and `1.0` respectively.
+11. SQL NULL is represented as Python `None` and Rust `SqlValue::Null`; the
    unordered comparator retains a type tag so NULL cannot compare equal to a
    textual or numeric sentinel.
-11. SQL BOOLEAN is represented as Python `bool` (`True`/`False`) and Rust
+12. SQL BOOLEAN is represented as Python `bool` (`True`/`False`) and Rust
    `SqlValue::Boolean`, never integer 1/0. The Python canonicalizer is
    type-sensitive specifically because Python otherwise considers `True == 1`.
 
-Recursive CTEs remain outside the non-recursive CTE scope and are checked as an
-explicit rejection contract. Detailed window-frame behavior and resource limits
-are in [`docs/sql-window-frames.md`](../../../docs/sql-window-frames.md).
+Recursive CTEs use the bounded fixed-point contract added for v0.8.7; invalid
+recursive shapes, dependency cycles, and exhausted iteration or memory budgets
+fail closed instead of falling back to a non-recursive plan. Detailed
+window-frame behavior and resource limits are in
+[`docs/sql-window-frames.md`](../../../docs/sql-window-frames.md).

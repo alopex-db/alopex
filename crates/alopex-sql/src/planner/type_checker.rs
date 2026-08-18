@@ -1112,8 +1112,22 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         span: Span,
     ) -> Result<TypedExpr, PlannerError> {
         let lower_name = name.to_ascii_lowercase();
-        if over.is_some() && matches!(lower_name.as_str(), "lag" | "lead") {
-            validate_offset_window_call(name, args.len(), distinct, star)?;
+        if over.is_some() {
+            match lower_name.as_str() {
+                "lag" | "lead" => {
+                    validate_offset_window_call(name, args.len(), distinct, star)?;
+                }
+                "first_value" | "last_value" | "ntile" => {
+                    validate_exact_window_call(name, args.len(), 1, distinct, star)?;
+                }
+                "nth_value" => {
+                    validate_exact_window_call(name, args.len(), 2, distinct, star)?;
+                }
+                "percent_rank" | "cume_dist" => {
+                    validate_exact_window_call(name, args.len(), 0, distinct, star)?;
+                }
+                _ => {}
+            }
         }
 
         let mut typed_args: Vec<TypedExpr> = args
@@ -1123,6 +1137,16 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         let result_type = if over.is_some() {
             match lower_name.as_str() {
                 "lag" | "lead" => self.infer_offset_window_result_type(name, &mut typed_args)?,
+                "first_value" | "last_value" => typed_args[0].resolved_type.clone(),
+                "nth_value" => {
+                    validate_positive_integer_argument(name, &typed_args[1])?;
+                    typed_args[0].resolved_type.clone()
+                }
+                "ntile" => {
+                    validate_positive_integer_argument(name, &typed_args[0])?;
+                    ResolvedType::BigInt
+                }
+                "percent_rank" | "cume_dist" => ResolvedType::Double,
                 "row_number" | "rank" | "dense_rank" => {
                     if !typed_args.is_empty() || distinct || star {
                         return Err(PlannerError::invalid_expression(format!(
@@ -2421,9 +2445,13 @@ fn validate_window_frame(
     frame: &WindowFrame,
     order_by: &[SortExpr],
 ) -> Result<(), PlannerError> {
-    if !matches!(function_name, "sum" | "count" | "avg" | "min" | "max") {
+    if !matches!(
+        function_name,
+        "sum" | "count" | "avg" | "min" | "max" | "first_value" | "last_value" | "nth_value"
+    ) {
         return Err(PlannerError::invalid_expression(format!(
-            "explicit window frames are only supported for aggregate functions, not {}()",
+            "explicit window frames are only supported for aggregate functions and \
+             FIRST_VALUE/LAST_VALUE/NTH_VALUE, not {}()",
             function_name.to_ascii_uppercase()
         )));
     }
@@ -2501,6 +2529,55 @@ fn validate_offset_window_call(
         )));
     }
     Ok(())
+}
+
+fn validate_exact_window_call(
+    name: &str,
+    arg_count: usize,
+    expected: usize,
+    distinct: bool,
+    star: bool,
+) -> Result<(), PlannerError> {
+    let display_name = name.to_ascii_uppercase();
+    if distinct {
+        return Err(PlannerError::invalid_expression(format!(
+            "{display_name}() window function does not support DISTINCT"
+        )));
+    }
+    if star {
+        return Err(PlannerError::invalid_expression(format!(
+            "{display_name}() window function does not support a star argument"
+        )));
+    }
+    if arg_count != expected {
+        let signature = match expected {
+            0 => "no arguments",
+            1 => "one argument",
+            2 => "two arguments",
+            _ => unreachable!("window signatures are bounded above"),
+        };
+        return Err(PlannerError::invalid_expression(format!(
+            "{display_name}() window function takes {signature}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_positive_integer_argument(
+    name: &str,
+    argument: &TypedExpr,
+) -> Result<(), PlannerError> {
+    if matches!(
+        argument.resolved_type,
+        ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Null
+    ) {
+        return Ok(());
+    }
+    Err(PlannerError::type_mismatch(
+        format!("positive INTEGER {} argument", name.to_ascii_uppercase()),
+        argument.resolved_type.type_name(),
+        argument.span,
+    ))
 }
 
 fn coerce_compatible_result(expr: &mut TypedExpr, target: &ResolvedType) {

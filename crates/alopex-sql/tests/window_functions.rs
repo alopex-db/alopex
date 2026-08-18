@@ -1,8 +1,10 @@
-//! Window functions / `OVER` clause (issues #128 and #141, v0.8.x).
+//! Window functions / `OVER` clause (issues #128, #141, and #143, v0.8.x).
 //!
 //! Implemented scope:
 //!   * `ROW_NUMBER()` / `RANK()` / `DENSE_RANK()`
 //!   * positional `LAG()` / `LEAD()` with optional offset and default
+//!   * value `FIRST_VALUE()` / `LAST_VALUE()` / `NTH_VALUE()`
+//!   * bucket/distribution `NTILE()` / `PERCENT_RANK()` / `CUME_DIST()`
 //!   * aggregate `OVER`: `SUM` / `COUNT` / `AVG` / `MIN` / `MAX`
 //!   * `PARTITION BY`
 //!   * window-local `ORDER BY`
@@ -761,6 +763,17 @@ fn explicit_default_range_keeps_large_input_parity_with_implicit_frame() {
     assert_eq!(int_column(&result, 1), int_column(&result, 2));
     assert_eq!(int_column(&result, 2).last(), Some(&501_501));
 
+    let value_result = query(
+        &mut h,
+        "SELECT id, \
+                LAST_VALUE(id) OVER (ORDER BY id) AS implicit, \
+                LAST_VALUE(id) OVER (ORDER BY id \
+                  RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS explicit \
+         FROM large_frame ORDER BY id",
+    );
+    assert_eq!(int_column(&value_result, 1), int_column(&value_result, 2));
+    assert_eq!(int_column(&value_result, 2).last(), Some(&1001));
+
     let bounded = h.run_err(
         "SELECT SUM(qty) OVER (ORDER BY id \
            RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) \
@@ -892,5 +905,304 @@ fn frame_offset_overflow_is_rejected_without_execution() {
         overflow.to_ascii_lowercase().contains("range")
             || overflow.to_ascii_lowercase().contains("overflow"),
         "{overflow}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Value / distribution / bucket window functions (issue #143)
+// ---------------------------------------------------------------------------
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn value_window_functions_respect_rows_frames_and_nulls() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, \
+                FIRST_VALUE(amount) OVER (ORDER BY id \
+                  ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS first_amount, \
+                LAST_VALUE(amount) OVER (ORDER BY id \
+                  ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS last_amount, \
+                NTH_VALUE(amount, 2) OVER (ORDER BY id \
+                  ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS second_amount, \
+                FIRST_VALUE(bonus) OVER (ORDER BY id \
+                  ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS first_bonus, \
+                LAST_VALUE(bonus) OVER (ORDER BY id \
+                  ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS last_bonus \
+         FROM sales ORDER BY id",
+    );
+
+    assert_eq!(
+        optional_float_column(&result, 1),
+        vec![
+            Some(100.0),
+            Some(100.0),
+            Some(200.0),
+            Some(150.0),
+            Some(150.0)
+        ]
+    );
+    assert_eq!(
+        optional_float_column(&result, 2),
+        vec![
+            Some(100.0),
+            Some(200.0),
+            Some(150.0),
+            Some(150.0),
+            Some(50.0)
+        ]
+    );
+    assert_eq!(
+        optional_float_column(&result, 3),
+        vec![None, Some(200.0), Some(150.0), Some(150.0), Some(50.0)]
+    );
+    assert_eq!(
+        optional_float_column(&result, 4),
+        vec![Some(10.0), None, Some(20.0), None, Some(5.0)]
+    );
+    assert_eq!(
+        optional_float_column(&result, 5),
+        vec![None, Some(20.0), None, Some(5.0), Some(5.0)]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn value_window_functions_use_default_range_peer_frame() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, \
+                FIRST_VALUE(id) OVER (ORDER BY amount) AS first_id, \
+                LAST_VALUE(id) OVER (ORDER BY amount) AS last_id, \
+                NTH_VALUE(id, 3) OVER (ORDER BY amount) AS third_id \
+         FROM sales ORDER BY id",
+    );
+
+    assert_eq!(int_column(&result, 1), vec![5, 5, 5, 5, 5]);
+    assert_eq!(int_column(&result, 2), vec![1, 2, 4, 4, 5]);
+    assert_eq!(
+        result
+            .rows
+            .iter()
+            .map(|row| match &row[3] {
+                SqlValue::Integer(value) => Some(i64::from(*value)),
+                SqlValue::BigInt(value) => Some(*value),
+                SqlValue::Null => None,
+                other => panic!("expected integer or NULL, got {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        vec![None, Some(3), Some(3), Some(3), None]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn value_window_functions_use_each_unordered_partition_as_the_full_frame() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, \
+                FIRST_VALUE(id) OVER (PARTITION BY region) AS first_id, \
+                LAST_VALUE(id) OVER (PARTITION BY region) AS last_id, \
+                NTH_VALUE(id, 2) OVER (PARTITION BY region) AS second_id \
+         FROM sales ORDER BY id",
+    );
+
+    assert_eq!(int_column(&result, 1), vec![1, 1, 3, 3, 5]);
+    assert_eq!(int_column(&result, 2), vec![2, 2, 4, 4, 5]);
+    assert_eq!(
+        result
+            .rows
+            .iter()
+            .map(|row| match &row[3] {
+                SqlValue::Integer(value) => Some(i64::from(*value)),
+                SqlValue::BigInt(value) => Some(*value),
+                SqlValue::Null => None,
+                other => panic!("expected integer or NULL, got {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        vec![Some(2), Some(2), Some(4), Some(4), None]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn bucket_and_distribution_functions_honor_peers() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, \
+                NTILE(3) OVER (ORDER BY amount) AS bucket, \
+                PERCENT_RANK() OVER (ORDER BY amount) AS percent_rank, \
+                CUME_DIST() OVER (ORDER BY amount) AS cume_dist \
+         FROM sales ORDER BY id",
+    );
+
+    assert_eq!(int_column(&result, 1), vec![1, 3, 2, 2, 1]);
+    assert_eq!(float_column(&result, 2), vec![0.25, 1.0, 0.5, 0.5, 0.0]);
+    assert_eq!(float_column(&result, 3), vec![0.4, 1.0, 0.8, 0.8, 0.2]);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn bucket_and_distribution_single_row_boundaries_are_defined() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT NTILE(4) OVER (ORDER BY id) AS bucket, \
+                PERCENT_RANK() OVER (ORDER BY id) AS percent_rank, \
+                CUME_DIST() OVER (ORDER BY id) AS cume_dist \
+         FROM sales WHERE id = 1",
+    );
+
+    assert_eq!(int_column(&result, 0), vec![1]);
+    assert_eq!(float_column(&result, 1), vec![0.0]);
+    assert_eq!(float_column(&result, 2), vec![1.0]);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn bucket_and_distribution_functions_restart_at_partition_boundaries() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, \
+                NTILE(3) OVER (PARTITION BY region ORDER BY id) AS bucket, \
+                PERCENT_RANK() OVER (PARTITION BY region ORDER BY id) AS percent_rank, \
+                CUME_DIST() OVER (PARTITION BY region ORDER BY id) AS cume_dist \
+         FROM sales ORDER BY id",
+    );
+
+    assert_eq!(int_column(&result, 1), vec![1, 2, 1, 2, 1]);
+    assert_eq!(float_column(&result, 2), vec![0.0, 1.0, 0.0, 1.0, 0.0]);
+    assert_eq!(float_column(&result, 3), vec![0.5, 1.0, 0.5, 1.0, 1.0]);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn distribution_functions_treat_null_order_keys_as_peers() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT id, \
+                PERCENT_RANK() OVER (ORDER BY bonus NULLS FIRST) AS percent_rank, \
+                CUME_DIST() OVER (ORDER BY bonus NULLS FIRST) AS cume_dist \
+         FROM sales ORDER BY id",
+    );
+
+    assert_eq!(float_column(&result, 1), vec![0.75, 0.0, 1.0, 0.0, 0.5]);
+    assert_eq!(float_column(&result, 2), vec![0.8, 0.4, 1.0, 0.4, 0.6]);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn value_bucket_and_distribution_functions_accept_an_empty_partition() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT FIRST_VALUE(id) OVER (ORDER BY id), \
+                LAST_VALUE(id) OVER (ORDER BY id), \
+                NTH_VALUE(id, 1) OVER (ORDER BY id), \
+                NTILE(2) OVER (ORDER BY id), \
+                PERCENT_RANK() OVER (ORDER BY id), \
+                CUME_DIST() OVER (ORDER BY id) \
+         FROM sales WHERE FALSE",
+    );
+
+    assert!(result.rows.is_empty());
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn value_window_functions_return_null_for_empty_frames() {
+    let mut h = Harness::new();
+    let result = query(
+        &mut h,
+        "SELECT \
+                FIRST_VALUE(amount) OVER (ORDER BY id \
+                  ROWS BETWEEN 2 FOLLOWING AND 1 FOLLOWING), \
+                LAST_VALUE(amount) OVER (ORDER BY id \
+                  ROWS BETWEEN 2 FOLLOWING AND 1 FOLLOWING), \
+                NTH_VALUE(amount, 1) OVER (ORDER BY id \
+                  ROWS BETWEEN 2 FOLLOWING AND 1 FOLLOWING) \
+         FROM sales ORDER BY id",
+    );
+
+    for column in 0..3 {
+        assert_eq!(optional_float_column(&result, column), vec![None; 5]);
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn nth_value_and_ntile_reject_invalid_arguments_deterministically() {
+    let mut h = Harness::new();
+    for sql in [
+        "SELECT NTH_VALUE(amount, 0) OVER (ORDER BY id) FROM sales",
+        "SELECT NTH_VALUE(amount, -1) OVER (ORDER BY id) FROM sales",
+        "SELECT NTH_VALUE(amount, NULL) OVER (ORDER BY id) FROM sales",
+        "SELECT NTH_VALUE(amount, 1.5) OVER (ORDER BY id) FROM sales",
+        "SELECT NTILE(0) OVER (ORDER BY id) FROM sales",
+        "SELECT NTILE(-1) OVER (ORDER BY id) FROM sales",
+        "SELECT NTILE(NULL) OVER (ORDER BY id) FROM sales",
+        "SELECT NTILE(1.5) OVER (ORDER BY id) FROM sales",
+    ] {
+        let err = h.run_err(sql);
+        assert!(
+            err.to_ascii_lowercase().contains("positive"),
+            "invalid call must explain its positive-integer constraint: {err}"
+        );
+    }
+
+    let varying = h.run_err("SELECT NTILE(qty) OVER (ORDER BY id) FROM sales");
+    assert!(
+        varying.to_ascii_lowercase().contains("constant")
+            || varying.to_ascii_lowercase().contains("positive"),
+        "partition-varying NTILE argument must fail deterministically: {varying}"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn value_and_distribution_window_signatures_are_checked() {
+    let mut h = Harness::new();
+    for (sql, expected) in [
+        (
+            "SELECT FIRST_VALUE() OVER (ORDER BY id) FROM sales",
+            "one argument",
+        ),
+        (
+            "SELECT LAST_VALUE(id, amount) OVER (ORDER BY id) FROM sales",
+            "one argument",
+        ),
+        (
+            "SELECT NTH_VALUE(id) OVER (ORDER BY id) FROM sales",
+            "two arguments",
+        ),
+        (
+            "SELECT NTILE() OVER (ORDER BY id) FROM sales",
+            "one argument",
+        ),
+        (
+            "SELECT PERCENT_RANK(id) OVER (ORDER BY id) FROM sales",
+            "no arguments",
+        ),
+        (
+            "SELECT CUME_DIST(DISTINCT id) OVER (ORDER BY id) FROM sales",
+            "does not support distinct",
+        ),
+    ] {
+        let err = h.run_err(sql);
+        assert!(
+            err.to_ascii_lowercase().contains(expected),
+            "expected {expected:?} from {sql:?}, got: {err}"
+        );
+    }
+
+    let ranking_frame = h.run_err("SELECT NTILE(2) OVER (ORDER BY id ROWS CURRENT ROW) FROM sales");
+    assert!(
+        ranking_frame.contains("only supported") && ranking_frame.contains("NTILE"),
+        "ranking functions must reject explicit frames: {ranking_frame}"
     );
 }

@@ -21,6 +21,14 @@ WITH RECURSIVE counter(n) AS (
     SELECT 1 UNION ALL SELECT n + 1 FROM counter WHERE n < 3
 ) SELECT n FROM counter ORDER BY n;
 SELECT id, SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS framed FROM stdin_test ORDER BY id;
+SELECT id,
+       FIRST_VALUE(id) OVER (ORDER BY qty) AS first_id,
+       LAST_VALUE(id) OVER (ORDER BY qty) AS last_id,
+       NTH_VALUE(id, 2) OVER (ORDER BY qty) AS second_id,
+       NTILE(2) OVER (ORDER BY qty) AS bucket,
+       PERCENT_RANK() OVER (ORDER BY qty) AS percent_rank,
+       CUME_DIST() OVER (ORDER BY qty) AS cume_dist
+FROM stdin_test ORDER BY id;
 "#;
 
     {
@@ -44,7 +52,7 @@ SELECT id, SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) 
         .expect("json output should be an array of result sets");
     assert_eq!(
         sets.len(),
-        6,
+        7,
         "one result set per statement\nstdout:\n{stdout}"
     );
     let select_rows = sets[2].as_array().expect("SELECT result set");
@@ -80,6 +88,42 @@ SELECT id, SUM(qty) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) 
             serde_json::json!({ "id": 1, "framed": 4 }),
             serde_json::json!({ "id": 2, "framed": 9 }),
             serde_json::json!({ "id": 3, "framed": 6 }),
+        ]
+    );
+
+    let extended_window_rows = sets[6]
+        .as_array()
+        .expect("extended window SELECT result set");
+    assert_eq!(
+        extended_window_rows,
+        &[
+            serde_json::json!({
+                "id": 1,
+                "first_id": 2,
+                "last_id": 1,
+                "second_id": 1,
+                "bucket": 1,
+                "percent_rank": 0.5,
+                "cume_dist": 2.0 / 3.0,
+            }),
+            serde_json::json!({
+                "id": 2,
+                "first_id": 2,
+                "last_id": 2,
+                "second_id": null,
+                "bucket": 1,
+                "percent_rank": 0.0,
+                "cume_dist": 1.0 / 3.0,
+            }),
+            serde_json::json!({
+                "id": 3,
+                "first_id": 2,
+                "last_id": 3,
+                "second_id": 1,
+                "bucket": 2,
+                "percent_rank": 1.0,
+                "cume_dist": 1.0,
+            }),
         ]
     );
 }

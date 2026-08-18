@@ -54,11 +54,23 @@ pub enum WindowFunction {
     RowNumber,
     Rank,
     DenseRank,
+    PercentRank,
+    CumeDist,
+    Ntile(TypedExpr),
     Aggregate(AggregateExpr),
+    Value(ValueWindowFunction),
     /// Value at an offset before the current row in the whole partition.
     Lag(OffsetWindowFunction),
     /// Value at an offset after the current row in the whole partition.
     Lead(OffsetWindowFunction),
+}
+
+/// Value selected from the current row's effective window frame.
+#[derive(Debug, Clone)]
+pub enum ValueWindowFunction {
+    FirstValue(TypedExpr),
+    LastValue(TypedExpr),
+    NthValue { value: TypedExpr, nth: TypedExpr },
 }
 
 /// Arguments shared by the positional `LAG` and `LEAD` window functions.

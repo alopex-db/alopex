@@ -148,6 +148,65 @@ def test_execute_sql_rows_and_range_frames_preserve_exact_rows(db):
     ]
 
 
+def test_execute_sql_value_and_distribution_windows_preserve_exact_rows(db):
+    db.execute_sql(
+        "CREATE TABLE window_samples "
+        "(id INTEGER PRIMARY KEY, amount INTEGER)"
+    )
+    db.execute_sql(
+        "INSERT INTO window_samples VALUES "
+        "(1, 10), (2, 20), (3, 20), (4, 30)"
+    )
+    rows = db.execute_sql(
+        "SELECT id, "
+        "FIRST_VALUE(id) OVER (ORDER BY amount) AS first_id, "
+        "LAST_VALUE(id) OVER (ORDER BY amount) AS last_id, "
+        "NTH_VALUE(id, 2) OVER (ORDER BY amount) AS second_id, "
+        "NTILE(3) OVER (ORDER BY amount) AS bucket, "
+        "PERCENT_RANK() OVER (ORDER BY amount) AS percent_rank, "
+        "CUME_DIST() OVER (ORDER BY amount) AS cume_dist "
+        "FROM window_samples ORDER BY id"
+    )
+    assert rows == [
+        {
+            "id": 1,
+            "first_id": 1,
+            "last_id": 1,
+            "second_id": None,
+            "bucket": 1,
+            "percent_rank": 0.0,
+            "cume_dist": 0.25,
+        },
+        {
+            "id": 2,
+            "first_id": 1,
+            "last_id": 3,
+            "second_id": 2,
+            "bucket": 1,
+            "percent_rank": 1.0 / 3.0,
+            "cume_dist": 0.75,
+        },
+        {
+            "id": 3,
+            "first_id": 1,
+            "last_id": 3,
+            "second_id": 2,
+            "bucket": 2,
+            "percent_rank": 1.0 / 3.0,
+            "cume_dist": 0.75,
+        },
+        {
+            "id": 4,
+            "first_id": 1,
+            "last_id": 4,
+            "second_id": 2,
+            "bucket": 3,
+            "percent_rank": 1.0,
+            "cume_dist": 1.0,
+        },
+    ]
+
+
 def test_execute_sql_grouped_window_composition_preserves_exact_rows(db):
     db.execute_sql(
         "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER)"

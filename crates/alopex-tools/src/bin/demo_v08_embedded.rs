@@ -575,9 +575,59 @@ fn scenario_local_sql_matrix() -> DemoResult {
                 vec![SqlValue::Integer(5), SqlValue::BigInt(0)],
             ],
         ),
+        (
+            "SELECT id, FIRST_VALUE(amount) OVER (ORDER BY amount ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS first_amount, LAST_VALUE(amount) OVER (ORDER BY amount ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS last_amount, NTH_VALUE(amount, 2) OVER (ORDER BY amount ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS second_amount, NTILE(3) OVER (ORDER BY amount) AS bucket, PERCENT_RANK() OVER (ORDER BY amount) AS percent_rank, CUME_DIST() OVER (ORDER BY amount) AS cumulative_distribution FROM sales ORDER BY id",
+            vec![
+                vec![
+                    SqlValue::Integer(1),
+                    SqlValue::Float(50.0),
+                    SqlValue::Float(150.0),
+                    SqlValue::Float(100.0),
+                    SqlValue::BigInt(1),
+                    SqlValue::Double(0.25),
+                    SqlValue::Double(0.4),
+                ],
+                vec![
+                    SqlValue::Integer(2),
+                    SqlValue::Float(150.0),
+                    SqlValue::Float(200.0),
+                    SqlValue::Float(100.0),
+                    SqlValue::BigInt(3),
+                    SqlValue::Double(1.0),
+                    SqlValue::Double(1.0),
+                ],
+                vec![
+                    SqlValue::Integer(3),
+                    SqlValue::Float(100.0),
+                    SqlValue::Float(150.0),
+                    SqlValue::Float(100.0),
+                    SqlValue::BigInt(2),
+                    SqlValue::Double(0.5),
+                    SqlValue::Double(0.8),
+                ],
+                vec![
+                    SqlValue::Integer(4),
+                    SqlValue::Float(150.0),
+                    SqlValue::Float(200.0),
+                    SqlValue::Float(100.0),
+                    SqlValue::BigInt(2),
+                    SqlValue::Double(0.5),
+                    SqlValue::Double(0.8),
+                ],
+                vec![
+                    SqlValue::Integer(5),
+                    SqlValue::Float(50.0),
+                    SqlValue::Float(100.0),
+                    SqlValue::Null,
+                    SqlValue::BigInt(1),
+                    SqlValue::Double(0.0),
+                    SqlValue::Double(0.2),
+                ],
+            ],
+        ),
     ];
     require(
-        v08_matrix.len() == 18,
+        v08_matrix.len() == 19,
         "v0.8.x SQL success-check count changed",
     )?;
     for (sql, expected) in &v08_matrix {
@@ -598,7 +648,7 @@ fn scenario_local_sql_matrix() -> DemoResult {
         expect_sql_error(&db, sql, expected)?;
     }
     require(
-        v08_matrix.len() + rejected_v08.len() == 20,
+        v08_matrix.len() + rejected_v08.len() == 21,
         "v0.8.x SQL check count changed",
     )?;
     require(

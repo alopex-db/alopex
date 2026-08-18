@@ -25,8 +25,8 @@ pub use aggregate_expr::{AggregateExpr, AggregateFunction};
 pub use error::PlannerError;
 pub use knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
 pub use logical_plan::{
-    JoinType, LogicalPlan, OffsetWindowFunction, RecursiveCteLimits, SetOperator, WindowExpr,
-    WindowFunction,
+    JoinType, LogicalPlan, OffsetWindowFunction, RecursiveCteLimits, SetOperator,
+    ValueWindowFunction, WindowExpr, WindowFunction,
 };
 pub use name_resolver::{NameResolver, ResolvedColumn};
 pub use type_checker::{ScopedTable, TypeChecker};
@@ -596,9 +596,24 @@ impl TableReferenceExtractor {
                                 self.extract_typed_expr(default, diagnostics, references);
                             }
                         }
+                        WindowFunction::Ntile(argument) => {
+                            self.extract_typed_expr(argument, diagnostics, references);
+                        }
+                        WindowFunction::Value(function) => match function {
+                            ValueWindowFunction::FirstValue(value)
+                            | ValueWindowFunction::LastValue(value) => {
+                                self.extract_typed_expr(value, diagnostics, references);
+                            }
+                            ValueWindowFunction::NthValue { value, nth } => {
+                                self.extract_typed_expr(value, diagnostics, references);
+                                self.extract_typed_expr(nth, diagnostics, references);
+                            }
+                        },
                         WindowFunction::RowNumber
                         | WindowFunction::Rank
-                        | WindowFunction::DenseRank => {}
+                        | WindowFunction::DenseRank
+                        | WindowFunction::PercentRank
+                        | WindowFunction::CumeDist => {}
                     }
                 }
             }
@@ -3042,6 +3057,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     "row_number" => WindowFunction::RowNumber,
                     "rank" => WindowFunction::Rank,
                     "dense_rank" => WindowFunction::DenseRank,
+                    "percent_rank" => WindowFunction::PercentRank,
+                    "cume_dist" => WindowFunction::CumeDist,
+                    "ntile" => WindowFunction::Ntile(args[0].clone()),
+                    "first_value" => {
+                        WindowFunction::Value(ValueWindowFunction::FirstValue(args[0].clone()))
+                    }
+                    "last_value" => {
+                        WindowFunction::Value(ValueWindowFunction::LastValue(args[0].clone()))
+                    }
+                    "nth_value" => WindowFunction::Value(ValueWindowFunction::NthValue {
+                        value: args[0].clone(),
+                        nth: args[1].clone(),
+                    }),
                     "sum" | "count" | "avg" | "min" | "max" => {
                         let (aggregate, _) = self
                             .build_aggregate_expr_from_typed(expr, name, args, *distinct, *star)?;

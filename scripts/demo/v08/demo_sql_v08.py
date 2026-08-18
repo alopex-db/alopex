@@ -420,6 +420,63 @@ def main() -> int:
                     {"id": 5, "value_frame": 0},
                 ],
             ),
+            (
+                "SELECT id, "
+                "FIRST_VALUE(amount) OVER (ORDER BY amount ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS first_amount, "
+                "LAST_VALUE(amount) OVER (ORDER BY amount ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS last_amount, "
+                "NTH_VALUE(amount, 2) OVER (ORDER BY amount ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS second_amount, "
+                "NTILE(3) OVER (ORDER BY amount) AS bucket, "
+                "PERCENT_RANK() OVER (ORDER BY amount) AS percent_rank, "
+                "CUME_DIST() OVER (ORDER BY amount) AS cumulative_distribution "
+                "FROM sales ORDER BY id",
+                [
+                    {
+                        "id": 1,
+                        "first_amount": 50.0,
+                        "last_amount": 150.0,
+                        "second_amount": 100.0,
+                        "bucket": 1,
+                        "percent_rank": 0.25,
+                        "cumulative_distribution": 0.4,
+                    },
+                    {
+                        "id": 2,
+                        "first_amount": 150.0,
+                        "last_amount": 200.0,
+                        "second_amount": 100.0,
+                        "bucket": 3,
+                        "percent_rank": 1.0,
+                        "cumulative_distribution": 1.0,
+                    },
+                    {
+                        "id": 3,
+                        "first_amount": 100.0,
+                        "last_amount": 150.0,
+                        "second_amount": 100.0,
+                        "bucket": 2,
+                        "percent_rank": 0.5,
+                        "cumulative_distribution": 0.8,
+                    },
+                    {
+                        "id": 4,
+                        "first_amount": 150.0,
+                        "last_amount": 200.0,
+                        "second_amount": 100.0,
+                        "bucket": 2,
+                        "percent_rank": 0.5,
+                        "cumulative_distribution": 0.8,
+                    },
+                    {
+                        "id": 5,
+                        "first_amount": 50.0,
+                        "last_amount": 100.0,
+                        "second_amount": None,
+                        "bucket": 1,
+                        "percent_rank": 0.0,
+                        "cumulative_distribution": 0.2,
+                    },
+                ],
+            ),
         ]
 
         # These 10 queries assert row multisets; their SQL does not promise order.
@@ -494,12 +551,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 55:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 55")
+        if completed != 56:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 56")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 55 checks passed")
+    print("v0.8 SQL correctness demo completed: 56 checks passed")
     return 0
 
 

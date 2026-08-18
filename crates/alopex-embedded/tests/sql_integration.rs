@@ -248,6 +248,74 @@ fn sql_integration_rows_and_range_frames_preserve_exact_rows() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_value_and_distribution_windows_preserve_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE window_samples (id INTEGER PRIMARY KEY, amount INTEGER); \
+         INSERT INTO window_samples VALUES (1, 10), (2, 20), (3, 20), (4, 30);",
+    )
+    .unwrap();
+
+    let result = db
+        .execute_sql(
+            "SELECT id, \
+                    FIRST_VALUE(id) OVER (ORDER BY amount) AS first_id, \
+                    LAST_VALUE(id) OVER (ORDER BY amount) AS last_id, \
+                    NTH_VALUE(id, 2) OVER (ORDER BY amount) AS second_id, \
+                    NTILE(3) OVER (ORDER BY amount) AS bucket, \
+                    PERCENT_RANK() OVER (ORDER BY amount) AS percent_rank, \
+                    CUME_DIST() OVER (ORDER BY amount) AS cume_dist \
+             FROM window_samples ORDER BY id;",
+        )
+        .unwrap();
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![
+                SqlValue::Integer(1),
+                SqlValue::Integer(1),
+                SqlValue::Integer(1),
+                SqlValue::Null,
+                SqlValue::BigInt(1),
+                SqlValue::Double(0.0),
+                SqlValue::Double(0.25),
+            ],
+            vec![
+                SqlValue::Integer(2),
+                SqlValue::Integer(1),
+                SqlValue::Integer(3),
+                SqlValue::Integer(2),
+                SqlValue::BigInt(1),
+                SqlValue::Double(1.0 / 3.0),
+                SqlValue::Double(0.75),
+            ],
+            vec![
+                SqlValue::Integer(3),
+                SqlValue::Integer(1),
+                SqlValue::Integer(3),
+                SqlValue::Integer(2),
+                SqlValue::BigInt(2),
+                SqlValue::Double(1.0 / 3.0),
+                SqlValue::Double(0.75),
+            ],
+            vec![
+                SqlValue::Integer(4),
+                SqlValue::Integer(1),
+                SqlValue::Integer(4),
+                SqlValue::Integer(2),
+                SqlValue::BigInt(3),
+                SqlValue::Double(1.0),
+                SqlValue::Double(1.0),
+            ],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_grouped_window_composition_preserves_exact_rows() {
     let db = Database::new();
     db.execute_sql(

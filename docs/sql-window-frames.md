@@ -1,14 +1,15 @@
 # SQL window frames
 
-This document is the public contract for aggregate window frames in the Alopex
-v0.8.x release line. The SQL AST and execution semantics in `alopex-sql` are the
-source of truth; Python, CLI, Embedded, demos, and parser assets expose that same
-Alopex release rather than a separately versioned SQL-parser feature lane.
+This document is the public contract for aggregate and value window frames in
+the Alopex v0.8.x release line. The SQL AST and execution semantics in
+`alopex-sql` are the source of truth; Python, CLI, Embedded, demos, and parser
+assets expose that same Alopex release rather than a separately versioned
+SQL-parser feature lane.
 
 ## Supported syntax
 
-`SUM`, `COUNT`, `AVG`, `MIN`, and `MAX` accept explicit `ROWS` and `RANGE`
-frames inside `OVER (...)`:
+`SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, `FIRST_VALUE`, `LAST_VALUE`, and
+`NTH_VALUE` accept explicit `ROWS` and `RANGE` frames inside `OVER (...)`:
 
 ```sql
 SUM(qty) OVER (
@@ -21,6 +22,12 @@ SUM(qty) OVER (
   ORDER BY amount
   RANGE BETWEEN 50 PRECEDING AND CURRENT ROW
 )
+
+NTH_VALUE(amount, 2) OVER (
+  PARTITION BY region
+  ORDER BY id
+  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+)
 ```
 
 The supported bounds are `UNBOUNDED PRECEDING`, `n PRECEDING`, `CURRENT ROW`,
@@ -29,8 +36,9 @@ The supported bounds are `UNBOUNDED PRECEDING`, `n PRECEDING`, `CURRENT ROW`,
 non-negative unsigned 64-bit integer literals.
 
 An explicit frame requires `ORDER BY`. Explicit frames on `ROW_NUMBER`, `RANK`,
-`DENSE_RANK`, `LAG`, or `LEAD` are rejected rather than silently ignored.
-`LAG` and `LEAD` continue to address the whole partition.
+`DENSE_RANK`, `NTILE`, `PERCENT_RANK`, `CUME_DIST`, `LAG`, or `LEAD` are
+rejected rather than silently ignored. `LAG` and `LEAD` continue to address the
+whole partition.
 
 ## Semantics
 
@@ -45,28 +53,34 @@ An explicit frame requires `ORDER BY`. Explicit frames on `ROW_NUMBER`, `RANK`,
   explicit `NULLS FIRST` or `NULLS LAST` controls where that group occurs.
 - Bounds never cross a `PARTITION BY` boundary.
 - A valid start position after the end position is an empty frame. `COUNT`
-  returns zero; the other supported aggregates return NULL.
+  returns zero; the other supported aggregates and all value functions return
+  NULL.
+- `FIRST_VALUE` and `LAST_VALUE` evaluate their value expression at the first
+  or last row of the effective frame. `NTH_VALUE` is one-based, evaluates its
+  index against the current row, and returns NULL when the frame has fewer than
+  that many rows. A NULL, zero, negative, or non-integer index is rejected.
 - `UNBOUNDED FOLLOWING` cannot start a frame, `UNBOUNDED PRECEDING` cannot end
   one, and category-reversed bounds are deterministic planning errors.
 
-Without an explicit frame, behavior is unchanged: `OVER ()` spans the whole
-partition, while aggregate `OVER (ORDER BY ...)` means
-`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` and includes complete peer
-groups.
+Without an explicit frame, `OVER ()` spans the whole partition. Aggregate and
+value functions with `OVER (ORDER BY ...)` use
+`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` and include complete peer
+groups. Writing that default frame explicitly uses the same linear execution
+path and has identical resource behavior.
 
 ## Resource and failure contract
 
-The generic explicit-frame evaluator is bounded to 1,000,000 aggregate input
+The generic aggregate explicit-frame evaluator is bounded to 1,000,000 input
 visits across all partitions of each planned window expression. RANGE boundary
-discovery has the same expression-wide 1,000,000-probe bound before quadratic
-scanning begins. The explicit
-default `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is semantically
-identical to the implicit ordered frame and uses the existing linear peer-aware
-cumulative path, so this generic cap does not create a size-dependent semantic
-difference. Exceeding either limit for other frames returns
-`ResourceExhausted`; checked offset arithmetic returns a deterministic
-window-frame overflow error. Parser overflow, invalid bounds, wrong RANGE
-types, and multiple RANGE sort keys fail without partial rows.
+discovery for aggregate and value functions has the same expression-wide
+1,000,000-probe bound before quadratic scanning begins. The explicit default
+`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is semantically identical
+to the implicit ordered frame and uses the existing linear peer-aware path, so
+this generic cap does not create a size-dependent semantic difference.
+Exceeding either applicable limit for other frames returns `ResourceExhausted`;
+checked offset arithmetic returns a deterministic window-frame overflow error.
+Parser overflow, invalid bounds, wrong RANGE types, and multiple RANGE sort
+keys fail without partial rows.
 
 Window materialization also uses the query `MemoryPolicy` as one shared byte
 budget. Input rows, sortable copies and keys, partition/range slots, output
@@ -79,10 +93,11 @@ disk-spill representation of its complete state, so it fails closed with
 `ResourceExhausted` at the byte limit even when another operator could use a
 configured spill directory.
 
-Implicit whole-partition and cumulative frames retain their existing linear
-accumulator path. Explicit frame evaluation is otherwise
-`O(partition_rows * average_frame_width)`; RANGE boundary discovery is bounded
-`O(partition_rows²)` and fails before exceeding the probe cap.
+Implicit whole-partition and cumulative frames retain their linear aggregate or
+peer-aware value path. Explicit aggregate frame evaluation is otherwise
+`O(partition_rows * average_frame_width)`; RANGE boundary discovery for
+aggregate and value functions is bounded `O(partition_rows²)` and fails before
+exceeding the probe cap.
 
 ## Parser contract and release assets
 
@@ -113,8 +128,8 @@ Python wheel native copy, and release evidence. Historical v0.8.4 contract
 `0.4.0` vendor binaries and sidecars remain unchanged and are rejected by the
 current `0.5.0` requirement. Alopex version, source-tree digest, archive digest,
 and library digest must all match. The release verifier runs the Python and
-Rust v0.8 demos with positive ROWS/RANGE result checks, so a stale parser asset
-fails closed.
+Rust v0.8 demos with positive aggregate/value ROWS/RANGE and distribution
+result checks, so a stale parser asset fails closed.
 
 The explicit local-development override proves only a regular target library
 and self-consistent `CONTRACT_VERSION`/`SHA256SUMS` sidecars. It cannot prove
