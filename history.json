@@ -2725,6 +2725,64 @@
       "ref": "refs/heads/main",
       "schema_version": 1,
       "workload_signature": "f9939dea90811d032eebe53de7fe24dc71ee17b1b6e4a3f1e4400899bc3ff048"
+    },
+    {
+      "commit": "8db41a0affd2197f7306c3517fae8bb927461d71",
+      "dependencies": {
+        "alopex": "0.8.6",
+        "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
+        "iniconfig": "2.3.0",
+        "maturin": "1.14.1",
+        "nim": "unavailable",
+        "numpy": "2.4.6",
+        "packaging": "26.3",
+        "patchelf": "patchelf 0.18.0",
+        "pip": "26.2",
+        "pluggy": "1.6.0",
+        "polars": "1.43.2",
+        "polars-runtime-32": "1.43.2",
+        "py-cpuinfo": "9.0.0",
+        "pygments": "2.21.0",
+        "pytest": "9.1.1",
+        "pytest-benchmark": "5.2.3",
+        "python": "3.11.11",
+        "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+        "setuptools": "65.5.0"
+      },
+      "environment": {
+        "cpu": "AMD EPYC 7763 64-Core Processor",
+        "cpu_governor": "unavailable",
+        "fingerprint": "5085be655afe9b76",
+        "kernel": "6.17.0-1022-azure",
+        "machine": "x86_64",
+        "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+        "python": "3.11.11",
+        "system": "Linux",
+        "turbo_policy": "unavailable"
+      },
+      "lock_hash": "d464bfc157b87d319280c2f53bace9a993460381898855a10731d65da002bdce",
+      "measured_at": "2026-08-18T04:06:38.379513+00:00",
+      "metrics": {
+        "read_overhead_pct": {
+          "direction": "lower_is_better",
+          "unit": "%",
+          "value": 0.18249211483480032
+        },
+        "scan_overhead_ms": {
+          "direction": "lower_is_better",
+          "unit": "ms",
+          "value": -0.0026360000163094836
+        },
+        "write_overhead_pct": {
+          "direction": "lower_is_better",
+          "unit": "%",
+          "value": 0.43143445051129675
+        }
+      },
+      "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+      "ref": "refs/heads/main",
+      "schema_version": 1,
+      "workload_signature": "f9939dea90811d032eebe53de7fe24dc71ee17b1b6e4a3f1e4400899bc3ff048"
     }
   ],
   "schema_version": 1
