@@ -32,6 +32,8 @@ All notable changes to this project will be documented in this file.
 
 - Implicit ordered aggregate windows include the complete peer group.
 - Grouped-window expression rewriting preserves explicit frame metadata.
+- The locked HTTP/2 stack uses `h2` 0.4.16, which fixes
+  `RUSTSEC-2026-0258` (unbounded empty DATA frames).
 
 ### Release verification
 
