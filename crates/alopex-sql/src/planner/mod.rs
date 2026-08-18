@@ -25,7 +25,8 @@ pub use aggregate_expr::{AggregateExpr, AggregateFunction};
 pub use error::PlannerError;
 pub use knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
 pub use logical_plan::{
-    JoinType, LogicalPlan, OffsetWindowFunction, SetOperator, WindowExpr, WindowFunction,
+    JoinType, LogicalPlan, OffsetWindowFunction, RecursiveCteLimits, SetOperator, WindowExpr,
+    WindowFunction,
 };
 pub use name_resolver::{NameResolver, ResolvedColumn};
 pub use type_checker::{ScopedTable, TypeChecker};
@@ -41,7 +42,7 @@ use crate::ast::dml::{
     Delete, FromItem, Insert, InsertSource, LITERAL_TABLE, OrderByExpr, Select, SelectItem,
     SetOperator as AstSetOperator, Update,
 };
-use crate::ast::expr::Literal;
+use crate::ast::expr::{Expr, ExprKind, Literal};
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::{AlopexDialect, DataSourceFormat, Parser, SqlError, TableType};
@@ -55,6 +56,216 @@ struct PlannedRelation {
 }
 
 type CtePlans = HashMap<String, PlannedRelation>;
+
+fn direct_from_reference_count(items: &[FromItem], name: &str) -> usize {
+    items
+        .iter()
+        .map(|item| match item {
+            FromItem::Table {
+                name: table_name, ..
+            } => usize::from(table_name == name),
+            FromItem::Join { left, right, .. } => {
+                direct_from_item_reference_count(left, name)
+                    + direct_from_item_reference_count(right, name)
+            }
+            FromItem::Derived { .. } => 0,
+        })
+        .sum()
+}
+
+fn direct_from_item_reference_count(item: &FromItem, name: &str) -> usize {
+    match item {
+        FromItem::Table {
+            name: table_name, ..
+        } => usize::from(table_name == name),
+        FromItem::Join { left, right, .. } => {
+            direct_from_item_reference_count(left, name)
+                + direct_from_item_reference_count(right, name)
+        }
+        FromItem::Derived { .. } => 0,
+    }
+}
+
+fn select_table_reference_count(select: &Select, name: &str) -> usize {
+    fn from_item_count(item: &FromItem, name: &str) -> usize {
+        match item {
+            FromItem::Table {
+                name: table_name, ..
+            } => usize::from(table_name == name),
+            FromItem::Join { left, right, .. } => {
+                from_item_count(left, name) + from_item_count(right, name)
+            }
+            FromItem::Derived { subquery, .. } => match &subquery.kind {
+                StatementKind::Select(select) => select_table_reference_count(select, name),
+                _ => 0,
+            },
+        }
+    }
+
+    let from_count = select
+        .from
+        .iter()
+        .map(|item| from_item_count(item, name))
+        .sum::<usize>();
+    let set_count = select
+        .set_operations
+        .iter()
+        .map(|operation| select_table_reference_count(&operation.right, name))
+        .sum::<usize>();
+    let with_count = select.with.as_ref().map_or(0, |with| {
+        with.ctes
+            .iter()
+            .map(|cte| match &cte.query.kind {
+                StatementKind::Select(select) => select_table_reference_count(select, name),
+                _ => 0,
+            })
+            .sum()
+    });
+    from_count + set_count + with_count
+}
+
+fn cte_dependency_cycle(with: &crate::ast::WithClause) -> bool {
+    fn visit(node: usize, dependencies: &[Vec<usize>], state: &mut [u8]) -> bool {
+        state[node] = 1;
+        for &dependency in &dependencies[node] {
+            if state[dependency] == 1
+                || (state[dependency] == 0 && visit(dependency, dependencies, state))
+            {
+                return true;
+            }
+        }
+        state[node] = 2;
+        false
+    }
+
+    let dependencies = with
+        .ctes
+        .iter()
+        .map(|cte| {
+            with.ctes
+                .iter()
+                .enumerate()
+                .filter_map(|(dependency, candidate)| match &cte.query.kind {
+                    StatementKind::Select(select)
+                        if select_table_reference_count(select, &candidate.name) > 0 =>
+                    {
+                        Some(dependency)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut state = vec![0; dependencies.len()];
+    (0..dependencies.len()).any(|node| state[node] == 0 && visit(node, &dependencies, &mut state))
+}
+
+fn expr_contains_subquery(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Literal { .. } | ExprKind::ColumnRef { .. } | ExprKind::VectorLiteral { .. } => {
+            false
+        }
+        ExprKind::BinaryOp { left, right, .. } => {
+            expr_contains_subquery(left) || expr_contains_subquery(right)
+        }
+        ExprKind::UnaryOp { operand, .. } => expr_contains_subquery(operand),
+        ExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            operand.as_deref().is_some_and(expr_contains_subquery)
+                || branches.iter().any(|branch| {
+                    expr_contains_subquery(&branch.when) || expr_contains_subquery(&branch.then)
+                })
+                || else_expr.as_deref().is_some_and(expr_contains_subquery)
+        }
+        ExprKind::FunctionCall { args, over, .. } => {
+            args.iter().any(expr_contains_subquery)
+                || over.as_ref().is_some_and(|window| {
+                    window.partition_by.iter().any(expr_contains_subquery)
+                        || window
+                            .order_by
+                            .iter()
+                            .any(|order| expr_contains_subquery(&order.expr))
+                })
+        }
+        ExprKind::Cast { expr, .. } | ExprKind::IsNull { expr, .. } => expr_contains_subquery(expr),
+        ExprKind::Between {
+            expr, low, high, ..
+        } => {
+            expr_contains_subquery(expr)
+                || expr_contains_subquery(low)
+                || expr_contains_subquery(high)
+        }
+        ExprKind::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_subquery(expr)
+                || expr_contains_subquery(pattern)
+                || escape.as_deref().is_some_and(expr_contains_subquery)
+        }
+        ExprKind::InList { expr, list, .. } => {
+            expr_contains_subquery(expr) || list.iter().any(expr_contains_subquery)
+        }
+        ExprKind::ScalarSubquery { .. }
+        | ExprKind::InSubquery { .. }
+        | ExprKind::Exists { .. }
+        | ExprKind::Quantified { .. } => true,
+    }
+}
+
+fn from_item_contains_subquery(item: &FromItem) -> bool {
+    match item {
+        FromItem::Table { .. } => false,
+        FromItem::Derived { .. } => true,
+        FromItem::Join {
+            left,
+            right,
+            condition,
+            ..
+        } => {
+            from_item_contains_subquery(left)
+                || from_item_contains_subquery(right)
+                || condition.as_ref().is_some_and(expr_contains_subquery)
+        }
+    }
+}
+
+fn select_contains_subquery(select: &Select) -> bool {
+    select.projection.iter().any(|item| match item {
+        SelectItem::Expr { expr, .. } => expr_contains_subquery(expr),
+        SelectItem::Wildcard { .. } | SelectItem::QualifiedWildcard { .. } => false,
+    }) || select.from.iter().any(from_item_contains_subquery)
+        || select
+            .selection
+            .as_ref()
+            .is_some_and(expr_contains_subquery)
+        || select
+            .group_by
+            .as_ref()
+            .is_some_and(|group| group.iter().any(expr_contains_subquery))
+        || select.having.as_ref().is_some_and(expr_contains_subquery)
+        || select
+            .set_operations
+            .iter()
+            .any(|operation| select_contains_subquery(&operation.right))
+        || select
+            .order_by
+            .iter()
+            .any(|order| expr_contains_subquery(&order.expr))
+        || select.limit.as_ref().is_some_and(expr_contains_subquery)
+        || select.offset.as_ref().is_some_and(expr_contains_subquery)
+        || select.with.as_ref().is_some_and(|with| {
+            with.ctes.iter().any(|cte| match &cte.query.kind {
+                StatementKind::Select(select) => select_contains_subquery(select),
+                _ => false,
+            })
+        })
+}
 
 /// Planning output used by server-side routing analysis.
 ///
@@ -395,6 +606,21 @@ impl TableReferenceExtractor {
                 self.extract_plan(left, root_access, scan_source, diagnostics, references);
                 self.extract_plan(right, root_access, scan_source, diagnostics, references);
             }
+            LogicalPlan::RecursiveCte {
+                anchor,
+                recursive_term,
+                ..
+            } => {
+                self.extract_plan(anchor, root_access, scan_source, diagnostics, references);
+                self.extract_plan(
+                    recursive_term,
+                    root_access,
+                    scan_source,
+                    diagnostics,
+                    references,
+                );
+            }
+            LogicalPlan::RecursiveReference { .. } => {}
             LogicalPlan::Sort { input, order_by } => {
                 self.extract_plan(input, root_access, scan_source, diagnostics, references);
                 for sort_expr in order_by {
@@ -1052,12 +1278,17 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let Some(with) = &stmt.with else {
             return Ok(enclosing_ctes.clone());
         };
-        if with.recursive {
-            return Err(PlannerError::unsupported_feature(
-                "recursive common table expressions",
-                "a future version",
-                with.span,
-            ));
+        let mut declared_names = HashSet::new();
+        for cte in &with.ctes {
+            if !declared_names.insert(&cte.name) {
+                return Err(PlannerError::invalid_expression(format!(
+                    "common table expression '{}' is defined more than once",
+                    cte.name
+                )));
+            }
+        }
+        if with.recursive && cte_dependency_cycle(with) {
+            return self.plan_recursive_cte(with, enclosing_ctes);
         }
 
         let mut plans = enclosing_ctes.clone();
@@ -1104,6 +1335,180 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             }
             plans.insert(cte.name.clone(), relation);
         }
+        Ok(plans)
+    }
+
+    fn plan_recursive_cte(
+        &self,
+        with: &crate::ast::WithClause,
+        enclosing_ctes: &CtePlans,
+    ) -> Result<CtePlans, PlannerError> {
+        if with.ctes.len() != 1 {
+            return Err(PlannerError::unsupported_feature(
+                "recursive WITH containing anything other than exactly one common table expression",
+                "a future version",
+                with.span,
+            ));
+        }
+
+        let cte = &with.ctes[0];
+        let mut column_names = HashSet::new();
+        for column_name in &cte.columns {
+            if !column_names.insert(column_name) {
+                return Err(PlannerError::duplicate_cte_column(
+                    &cte.name,
+                    column_name,
+                    cte.span,
+                ));
+            }
+        }
+
+        let StatementKind::Select(body) = &cte.query.kind else {
+            return Err(PlannerError::unsupported_feature(
+                "non-SELECT recursive common table expression",
+                "a future version",
+                cte.span,
+            ));
+        };
+        if body.set_operations.len() != 1 {
+            return Err(PlannerError::unsupported_feature(
+                "recursive common table expression without exactly one UNION or UNION ALL",
+                "a future version",
+                cte.span,
+            ));
+        }
+        if !body.order_by.is_empty() || body.limit.is_some() || body.offset.is_some() {
+            return Err(PlannerError::unsupported_feature(
+                "ORDER BY, LIMIT, or OFFSET inside a recursive common table expression",
+                "a future version",
+                body.span,
+            ));
+        }
+
+        let operation = &body.set_operations[0];
+        if operation.operator != AstSetOperator::Union {
+            return Err(PlannerError::unsupported_feature(
+                "recursive common table expression using an operator other than UNION or UNION ALL",
+                "a future version",
+                operation.span,
+            ));
+        }
+
+        let mut anchor = body.clone();
+        anchor.with = None;
+        anchor.set_operations.clear();
+        if select_table_reference_count(&anchor, &cte.name) != 0 {
+            return Err(PlannerError::unsupported_feature(
+                "recursive common table expression without an anchor term that does not reference itself",
+                "a future version",
+                anchor.span,
+            ));
+        }
+
+        let recursive_term = operation.right.as_ref();
+        if select_contains_subquery(recursive_term) {
+            return Err(PlannerError::unsupported_feature(
+                "subquery in a recursive term",
+                "a future version",
+                recursive_term.span,
+            ));
+        }
+        let total_references = select_table_reference_count(recursive_term, &cte.name);
+        let direct_references = direct_from_reference_count(&recursive_term.from, &cte.name);
+        if total_references != 1 || direct_references != 1 {
+            return Err(PlannerError::unsupported_feature(
+                "recursive term without exactly one direct self-reference",
+                "a future version",
+                recursive_term.span,
+            ));
+        }
+        if recursive_term.with.is_some() || !recursive_term.set_operations.is_empty() {
+            return Err(PlannerError::unsupported_feature(
+                "nested WITH or set operation in a recursive term",
+                "a future version",
+                recursive_term.span,
+            ));
+        }
+
+        let mut anchor_relation = self.plan_select_relation(&anchor, &[], enclosing_ctes)?;
+        if cte.columns.is_empty() {
+            let mut anchor_names = HashSet::new();
+            for column in &anchor_relation.schema {
+                if !anchor_names.insert(&column.name) {
+                    return Err(PlannerError::duplicate_cte_column(
+                        &cte.name,
+                        &column.name,
+                        cte.span,
+                    ));
+                }
+            }
+        } else {
+            if cte.columns.len() != anchor_relation.schema.len() {
+                return Err(PlannerError::cte_column_count_mismatch(
+                    &cte.name,
+                    cte.columns.len(),
+                    anchor_relation.schema.len(),
+                    cte.span,
+                ));
+            }
+            for (column, name) in anchor_relation.schema.iter_mut().zip(&cte.columns) {
+                column.name.clone_from(name);
+            }
+        }
+
+        let mut recursive_scope = enclosing_ctes.clone();
+        recursive_scope.insert(
+            cte.name.clone(),
+            PlannedRelation {
+                plan: LogicalPlan::RecursiveReference {
+                    name: cte.name.clone(),
+                    schema: anchor_relation.schema.clone(),
+                },
+                schema: anchor_relation.schema.clone(),
+                scope: vec![ScopedTable::new(
+                    TableMetadata::new(&cte.name, anchor_relation.schema.clone()),
+                    0,
+                )],
+            },
+        );
+        let recursive_relation =
+            self.plan_select_relation(recursive_term, &[], &recursive_scope)?;
+        if recursive_relation.schema.len() != anchor_relation.schema.len() {
+            return Err(PlannerError::set_operation_column_count_mismatch(
+                anchor_relation.schema.len(),
+                recursive_relation.schema.len(),
+                operation.span,
+            ));
+        }
+        for (anchor_column, recursive_column) in anchor_relation
+            .schema
+            .iter()
+            .zip(&recursive_relation.schema)
+        {
+            if anchor_column.data_type != recursive_column.data_type {
+                return Err(PlannerError::type_mismatch(
+                    anchor_column.data_type.type_name(),
+                    recursive_column.data_type.type_name(),
+                    operation.span,
+                ));
+            }
+        }
+
+        let schema = anchor_relation.schema.clone();
+        let relation = PlannedRelation {
+            plan: LogicalPlan::RecursiveCte {
+                name: cte.name.clone(),
+                anchor: Box::new(anchor_relation.plan),
+                recursive_term: Box::new(recursive_relation.plan),
+                union_all: operation.all,
+                schema: schema.clone(),
+                limits: RecursiveCteLimits::default(),
+            },
+            schema: schema.clone(),
+            scope: vec![ScopedTable::new(TableMetadata::new(&cte.name, schema), 0)],
+        };
+        let mut plans = enclosing_ctes.clone();
+        plans.insert(cte.name.clone(), relation);
         Ok(plans)
     }
 

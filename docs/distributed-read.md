@@ -15,6 +15,7 @@ This matrix is generated from the closed `RemoteReadCatalogV0_8` contract. A `lo
 | `relation.join` | JOIN | `pre_execution_rejection` | Local execution profile | v0.7.4 local behavior | `join_not_supported_remote` |
 | `relation.subquery` | Scalar, IN, EXISTS, quantified subqueries | `pre_execution_rejection` | Local execution profile | v0.7.4 local behavior | `subquery_not_supported_remote` |
 | `relation.compound_window` | Compound and window forms | `pre_execution_rejection` | Future catalog version | Not a v0.8 remote-read form | `function_not_in_remote_catalog` |
+| `relation.recursive_cte` | Recursive common table expressions | `pre_execution_rejection` | Local execution profile | Bounded local fixed-point evaluation | `recursive_cte_not_supported_remote` |
 | `transaction.multi_statement` | Existing Transaction API workflow | `local_only` | Local transaction workflow | v0.7.4 local transaction behavior | Explicit pre-execution classification |
 
 The catalog contains the explicit scalar identities. Adding a scalar function elsewhere does not make it remote-supported.

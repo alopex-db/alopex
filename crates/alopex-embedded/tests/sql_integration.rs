@@ -95,6 +95,53 @@ fn sql_integration_cte_column_name_list_is_public_schema() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_recursive_cte_reaches_fixed_point() {
+    let db = Database::new();
+    let result = db
+        .execute_sql(
+            "WITH RECURSIVE counter(n) AS (\
+                 SELECT 1 UNION ALL SELECT n + 1 FROM counter WHERE n < 4\
+             ) SELECT n FROM counter ORDER BY n;",
+        )
+        .unwrap();
+
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1)],
+            vec![SqlValue::Integer(2)],
+            vec![SqlValue::Integer(3)],
+            vec![SqlValue::Integer(4)],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn sql_integration_recursive_cte_resource_limit_has_stable_error_contract() {
+    let db = Database::new();
+    let error = db
+        .execute_sql(
+            "WITH RECURSIVE cycle(n) AS (\
+                 SELECT 1 UNION ALL SELECT n FROM cycle\
+             ) SELECT n FROM cycle;",
+        )
+        .expect_err("an unbounded recursive CTE must fail");
+
+    assert_eq!(error.sql_error_code(), Some("ALOPEX-E003"));
+    assert!(
+        error
+            .to_string()
+            .contains("recursive CTE 'cycle' reached iteration limit"),
+        "unexpected public error: {error}"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_lag_and_lead_preserve_exact_rows() {
     let db = Database::new();
     db.execute_sql(

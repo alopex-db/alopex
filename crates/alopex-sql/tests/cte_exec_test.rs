@@ -256,26 +256,208 @@ fn cte_name_shadows_a_base_table() {
 }
 
 #[test]
-fn with_recursive_is_explicitly_unsupported() {
-    let statement = Parser::parse_sql(
-        &AlopexDialect,
-        "WITH RECURSIVE c AS (SELECT 1 AS id) SELECT id FROM c",
-    )
-    .expect("WITH RECURSIVE should parse so the planner can reject it")
-    .remove(0);
-    let catalog = MemoryCatalog::new();
+fn recursive_cte_union_all_reaches_a_fixed_point() {
+    let query = last_query(
+        "WITH RECURSIVE counter(n) AS (\
+             SELECT 1 \
+             UNION ALL \
+             SELECT n + 1 FROM counter WHERE n < 5\
+         )\
+         SELECT n FROM counter ORDER BY n;",
+    );
 
-    let error = Planner::new(&catalog)
-        .plan(&statement)
-        .expect_err("recursive CTE must be rejected");
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1)],
+            vec![SqlValue::Integer(2)],
+            vec![SqlValue::Integer(3)],
+            vec![SqlValue::Integer(4)],
+            vec![SqlValue::Integer(5)],
+        ]
+    );
+}
+
+#[test]
+fn recursive_cte_union_deduplicates_before_the_next_iteration() {
+    let query = last_query(
+        "WITH RECURSIVE cycle(n) AS (\
+             SELECT 1 UNION SELECT n FROM cycle\
+         )\
+         SELECT n FROM cycle;",
+    );
+
+    assert_eq!(query.rows, vec![vec![SqlValue::Integer(1)]]);
+}
+
+#[test]
+fn recursive_cte_walks_a_hierarchy() {
+    let query = last_query(
+        "CREATE TABLE employees (id INT, parent_id INT, name TEXT);\
+         INSERT INTO employees VALUES\
+             (1, NULL, 'root'), (2, 1, 'manager'), (3, 2, 'worker');\
+         WITH RECURSIVE ancestors AS (\
+             SELECT id, parent_id, name FROM employees WHERE id = 3\
+             UNION ALL \
+             SELECT employees.id, employees.parent_id, employees.name \
+             FROM employees \
+             JOIN ancestors ON employees.id = ancestors.parent_id\
+         )\
+         SELECT id, name FROM ancestors ORDER BY id;",
+    );
+
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Text("root".into())],
+            vec![SqlValue::Integer(2), SqlValue::Text("manager".into())],
+            vec![SqlValue::Integer(3), SqlValue::Text("worker".into())],
+        ]
+    );
+}
+
+#[test]
+fn with_recursive_without_self_reference_executes_as_an_ordinary_cte() {
+    let query = last_query("WITH RECURSIVE c AS (SELECT 1 AS id) SELECT id FROM c;");
+
+    assert_eq!(query.columns[0].name, "id");
+    assert_eq!(query.rows, vec![vec![SqlValue::Integer(1)]]);
+}
+
+#[test]
+fn with_recursive_non_self_union_executes_as_an_ordinary_cte() {
+    let query = last_query("WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT 2) SELECT n FROM c;");
+
+    assert_eq!(
+        query.rows,
+        vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]
+    );
+}
+
+#[test]
+fn with_recursive_forward_dependency_executes_as_ordinary_ctes() {
+    let query = last_query(
+        "WITH RECURSIVE a(value) AS (SELECT 7),\
+                        b(copied) AS (SELECT value FROM a)\
+         SELECT copied FROM b;",
+    );
+
+    assert_eq!(query.rows, vec![vec![SqlValue::Integer(7)]]);
+}
+
+#[test]
+fn recursive_cte_can_derive_its_working_schema_from_the_anchor() {
+    let query = last_query(
+        "WITH RECURSIVE counter AS (\
+             SELECT 1 AS n UNION ALL SELECT n + 1 FROM counter WHERE n < 3\
+         ) SELECT n FROM counter ORDER BY n;",
+    );
+
+    assert_eq!(query.columns[0].name, "n");
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1)],
+            vec![SqlValue::Integer(2)],
+            vec![SqlValue::Integer(3)],
+        ]
+    );
+}
+
+#[test]
+fn recursive_cte_rejects_duplicate_derived_anchor_names() {
+    let error = planner_error(
+        "WITH RECURSIVE ambiguous AS (\
+             SELECT 1 AS value, 2 AS value UNION ALL \
+             SELECT value + 1, value + 2 FROM ambiguous WHERE value < 2\
+         ) SELECT value FROM ambiguous;",
+    );
 
     assert!(
-        matches!(
-            &error,
-            PlannerError::UnsupportedFeature { feature, .. }
-                if feature.contains("recursive common table expression")
+        matches!(&error, PlannerError::DuplicateCteColumn { cte, name, .. }
+            if cte == "ambiguous" && name == "value"),
+        "expected duplicate derived working-table names to fail closed, got: {error}"
+    );
+}
+
+#[test]
+fn recursive_cte_rejects_multiple_direct_self_references() {
+    let sql = "WITH RECURSIVE c(n) AS (\
+         SELECT 1 UNION ALL SELECT left_c.n FROM c AS left_c, c AS right_c\
+     ) SELECT n FROM c;";
+    let error = planner_error(sql);
+
+    assert!(
+        matches!(&error, PlannerError::UnsupportedFeature { feature, .. }
+            if feature.contains("exactly one direct self-reference")),
+        "expected a fail-closed self-reference error for `{sql}`, got: {error}"
+    );
+}
+
+#[test]
+fn recursive_cte_rejects_subqueries_in_the_recursive_term() {
+    let error = planner_error(
+        "WITH RECURSIVE c(n) AS (\
+             SELECT 1 UNION ALL \
+             SELECT n + (SELECT COUNT(*) FROM c) FROM c WHERE n < 2\
+         ) SELECT n FROM c;",
+    );
+
+    assert!(
+        matches!(&error, PlannerError::UnsupportedFeature { feature, .. }
+            if feature.contains("subquery in a recursive term")),
+        "expected recursive-term subqueries to fail closed, got: {error}"
+    );
+}
+
+#[test]
+fn recursive_cte_rejects_anchor_self_reference_and_non_union_shape() {
+    for (sql, expected) in [
+        (
+            "WITH RECURSIVE c(n) AS (SELECT n FROM c UNION ALL SELECT 1) SELECT n FROM c;",
+            "anchor term that does not reference itself",
         ),
-        "expected an explicit unsupported_feature error, got: {error}"
+        (
+            "WITH RECURSIVE c(n) AS (SELECT 1 INTERSECT SELECT n FROM c) SELECT n FROM c;",
+            "UNION or UNION ALL",
+        ),
+    ] {
+        let error = planner_error(sql);
+        assert!(
+            matches!(&error, PlannerError::UnsupportedFeature { feature, .. }
+                if feature.contains(expected)),
+            "expected `{expected}` to be rejected for `{sql}`, got: {error}"
+        );
+    }
+}
+
+#[test]
+fn recursive_cte_rejects_multiple_or_mutually_recursive_definitions() {
+    let error = planner_error(
+        "WITH RECURSIVE a(n) AS (SELECT 1 UNION ALL SELECT n FROM b),\
+                        b(n) AS (SELECT 1 UNION ALL SELECT n FROM a)\
+         SELECT n FROM a;",
+    );
+
+    assert!(
+        matches!(&error, PlannerError::UnsupportedFeature { feature, .. }
+            if feature.contains("exactly one common table expression")),
+        "expected mutual recursion to be rejected before planning, got: {error}"
+    );
+}
+
+#[test]
+fn recursive_union_all_cycle_hits_a_stable_resource_limit() {
+    let error = execute_sql(
+        "WITH RECURSIVE cycle(n) AS (SELECT 1 UNION ALL SELECT n FROM cycle)\
+         SELECT n FROM cycle;",
+    )
+    .expect_err("UNION ALL cycle must not run forever");
+
+    assert!(
+        matches!(&error, ExecutorError::ResourceExhausted { message }
+            if message.contains("recursive CTE 'cycle'") && message.contains("iteration limit")),
+        "expected a named recursive-CTE resource error, got: {error}"
     );
 }
 

@@ -100,6 +100,26 @@ pub enum SetOperator {
     Except,
 }
 
+/// Hard execution bounds for a recursive common table expression.
+///
+/// Recursive evaluation is deliberately bounded even when the SQL uses
+/// `UNION ALL`, where a repeated row is semantically significant and cannot
+/// be used as an implicit convergence signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecursiveCteLimits {
+    pub max_iterations: usize,
+    pub max_rows: usize,
+}
+
+impl Default for RecursiveCteLimits {
+    fn default() -> Self {
+        Self {
+            max_iterations: 1_000,
+            max_rows: 100_000,
+        }
+    }
+}
+
 /// Logical query plan representation.
 ///
 /// This enum represents all possible logical operations that can be performed.
@@ -195,6 +215,24 @@ pub enum LogicalPlan {
         right: Box<LogicalPlan>,
         operator: SetOperator,
         all: bool,
+    },
+
+    /// Materialized fixed-point evaluation for one directly self-recursive
+    /// common table expression.
+    RecursiveCte {
+        name: String,
+        anchor: Box<LogicalPlan>,
+        recursive_term: Box<LogicalPlan>,
+        union_all: bool,
+        schema: Vec<crate::catalog::ColumnMetadata>,
+        limits: RecursiveCteLimits,
+    },
+
+    /// Read the current working-table delta of an enclosing `RecursiveCte`.
+    /// The executor resolves this through an explicit per-query context.
+    RecursiveReference {
+        name: String,
+        schema: Vec<crate::catalog::ColumnMetadata>,
     },
 
     /// Sort operation (ORDER BY clause).
@@ -322,6 +360,8 @@ impl LogicalPlan {
             | LogicalPlan::Aggregate { .. }
             | LogicalPlan::Window { .. }
             | LogicalPlan::SetOperation { .. }
+            | LogicalPlan::RecursiveCte { .. }
+            | LogicalPlan::RecursiveReference { .. }
             | LogicalPlan::Sort { .. }
             | LogicalPlan::Limit { .. } => "SELECT",
             LogicalPlan::Insert { .. } => "INSERT",
@@ -476,6 +516,8 @@ impl LogicalPlan {
             LogicalPlan::Aggregate { .. } => "Aggregate",
             LogicalPlan::Window { .. } => "Window",
             LogicalPlan::SetOperation { .. } => "SetOperation",
+            LogicalPlan::RecursiveCte { .. } => "RecursiveCte",
+            LogicalPlan::RecursiveReference { .. } => "RecursiveReference",
             LogicalPlan::Sort { .. } => "Sort",
             LogicalPlan::Limit { .. } => "Limit",
             LogicalPlan::Insert { .. } => "Insert",
@@ -500,6 +542,8 @@ impl LogicalPlan {
                 | LogicalPlan::Aggregate { .. }
                 | LogicalPlan::Window { .. }
                 | LogicalPlan::SetOperation { .. }
+                | LogicalPlan::RecursiveCte { .. }
+                | LogicalPlan::RecursiveReference { .. }
                 | LogicalPlan::Sort { .. }
                 | LogicalPlan::Limit { .. }
         )
@@ -539,6 +583,7 @@ impl LogicalPlan {
             | LogicalPlan::Limit { input, .. } => Some(input),
             LogicalPlan::Join { .. } => None,
             LogicalPlan::SetOperation { .. } => None,
+            LogicalPlan::RecursiveCte { .. } | LogicalPlan::RecursiveReference { .. } => None,
             _ => None,
         }
     }
@@ -566,6 +611,7 @@ impl LogicalPlan {
             LogicalPlan::SetOperation { left, right, .. } => left
                 .table_name()
                 .filter(|name| right.table_name() == Some(*name)),
+            LogicalPlan::RecursiveCte { .. } | LogicalPlan::RecursiveReference { .. } => None,
         }
     }
 
@@ -581,6 +627,11 @@ impl LogicalPlan {
             LogicalPlan::SetOperation { left, right, .. } => {
                 left.contains_join() || right.contains_join()
             }
+            LogicalPlan::RecursiveCte {
+                anchor,
+                recursive_term,
+                ..
+            } => anchor.contains_join() || recursive_term.contains_join(),
             LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
@@ -594,7 +645,7 @@ impl LogicalPlan {
     /// Returns whether this plan tree contains a set-operation boundary.
     pub fn contains_set_operation(&self) -> bool {
         match self {
-            LogicalPlan::SetOperation { .. } => true,
+            LogicalPlan::SetOperation { .. } | LogicalPlan::RecursiveCte { .. } => true,
             LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }

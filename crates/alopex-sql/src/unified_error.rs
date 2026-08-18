@@ -431,6 +431,10 @@ impl From<ExecutorError> for SqlError {
                 message: format!("read-only transaction: cannot execute {operation}"),
                 code: "ALOPEX-E002",
             },
+            ExecutorError::ResourceExhausted { message } => Self::Execution {
+                message: format!("resource exhausted: {message}"),
+                code: "ALOPEX-E003",
+            },
             ExecutorError::TableNotFound(name) => Self::Catalog {
                 message: format!("table '{name}' not found"),
                 location: ErrorLocation::default(),
@@ -575,6 +579,20 @@ mod tests {
         assert_eq!(
             unified.message_with_location(),
             "error[ALOPEX-E002]: read-only transaction: cannot execute INSERT"
+        );
+    }
+
+    #[test]
+    fn from_executor_resource_exhausted_maps_to_stable_execution_code() {
+        let unified: SqlError = ExecutorError::ResourceExhausted {
+            message: "recursive CTE 'numbers' reached row limit 100000".to_string(),
+        }
+        .into();
+
+        assert_eq!(unified.code(), "ALOPEX-E003");
+        assert_eq!(
+            unified.message_with_location(),
+            "error[ALOPEX-E003]: resource exhausted: recursive CTE 'numbers' reached row limit 100000"
         );
     }
 }

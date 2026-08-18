@@ -249,6 +249,14 @@ def main() -> int:
                 [{"id": 101}],
             ),
             (
+                "WITH RECURSIVE ordinary AS (SELECT 1 AS id) SELECT id FROM ordinary",
+                [{"id": 1}],
+            ),
+            (
+                "WITH RECURSIVE counter AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM counter WHERE n < 4) SELECT n FROM counter ORDER BY n",
+                [{"n": 1}, {"n": 2}, {"n": 3}, {"n": 4}],
+            ),
+            (
                 "SELECT id, SUM(amount) OVER () AS grand FROM sales ORDER BY id",
                 [{"id": idx, "grand": 650.0} for idx in range(1, 6)],
             ),
@@ -446,10 +454,6 @@ def main() -> int:
                 "SELECT SUM(qty) OVER (ORDER BY id RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM sales",
                 "RANGE",
             ),
-            (
-                "WITH RECURSIVE c AS (SELECT 1 AS id) SELECT id FROM c",
-                "recursive common table expression",
-            ),
             ("WITH defined AS (SELECT 1 AS id) SELECT id FROM missing", "missing"),
         ]
 
@@ -464,12 +468,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 53:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 53")
+        if completed != 54:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 54")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 53 checks passed")
+    print("v0.8 SQL correctness demo completed: 54 checks passed")
     return 0
 
 

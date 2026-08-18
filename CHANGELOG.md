@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Direct self-recursive single CTEs execute `UNION` or `UNION ALL` to a bounded
+  fixed point across Rust, embedded, CLI, and Python SQL surfaces. Anchor
+  output names are used when the CTE column-name list is omitted.
+
+### Changed
+
+- Execution resource exhaustion now maps to stable public code `ALOPEX-E003`
+  instead of the generic `ALOPEX-E999`. This applies to existing aggregate and
+  memory limits as well as recursive CTE iteration, row, and memory limits.
+- Unsupported mutual recursion, multiple self-references, recursive-term
+  subqueries, nested `WITH`, and nested set operations fail closed.
+
 ## [0.8.6] — 2026-08-17
 
 ### Added

@@ -929,6 +929,13 @@ fn annotate_select_natural_joins(
     natural_markers: &mut impl Iterator<Item = bool>,
     consumed: &mut usize,
 ) {
+    if let Some(with) = &mut select.with {
+        for cte in &mut with.ctes {
+            if let StatementKind::Select(select) = &mut cte.query.kind {
+                annotate_select_natural_joins(select, natural_markers, consumed);
+            }
+        }
+    }
     for item in &mut select.projection {
         if let SelectItem::Expr { expr, .. } = item {
             annotate_expr_natural_joins(expr, natural_markers, consumed);
@@ -947,6 +954,9 @@ fn annotate_select_natural_joins(
     }
     if let Some(having) = &mut select.having {
         annotate_expr_natural_joins(having, natural_markers, consumed);
+    }
+    for operation in &mut select.set_operations {
+        annotate_select_natural_joins(&mut operation.right, natural_markers, consumed);
     }
     for order_by in &mut select.order_by {
         annotate_expr_natural_joins(&mut order_by.expr, natural_markers, consumed);

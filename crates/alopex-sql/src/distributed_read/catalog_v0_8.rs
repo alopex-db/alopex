@@ -351,6 +351,15 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
             failure_outcome: "function_not_in_remote_catalog before transport",
         },
         RemoteReadCoverageEntry {
+            id: "relation.recursive_cte",
+            public_surface: "recursive common table expressions",
+            identities: &["with_recursive"],
+            remote_status: PreExecutionRejection,
+            prerequisite: "local execution profile",
+            normal_outcome: "bounded fixed-point evaluation by the local executor",
+            failure_outcome: "recursive_cte_not_supported_remote before transport",
+        },
+        RemoteReadCoverageEntry {
             id: "transaction.multi_statement",
             public_surface: "existing multi-statement Transaction API workflow",
             identities: &["transaction_api"],
@@ -493,6 +502,12 @@ fn validate_plan(
             "set_operation_not_supported_remote",
             "set operations are outside the v0.8 remote-read catalog",
         )),
+        LogicalPlan::RecursiveCte { .. } | LogicalPlan::RecursiveReference { .. } => {
+            Err(RemoteReadRejection::unsupported(
+                "recursive_cte_not_supported_remote",
+                "recursive common table expressions are outside the v0.8 remote-read catalog",
+            ))
+        }
         LogicalPlan::Scan { table, projection } => {
             analysis.scan_count += 1;
             analysis.scan_tables.push(table.clone());
@@ -703,7 +718,8 @@ mod tests {
     use super::*;
     use crate::Span;
     use crate::ast::expr::Literal;
-    use crate::planner::{Projection, ResolvedType, SortExpr, TypedExpr};
+    use crate::catalog::ColumnMetadata;
+    use crate::planner::{Projection, RecursiveCteLimits, ResolvedType, SortExpr, TypedExpr};
 
     fn references() -> Vec<TableReference> {
         vec![TableReference::new(
@@ -785,6 +801,32 @@ mod tests {
             RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
                 if code == "pragma_local_only"
         ));
+    }
+
+    #[test]
+    fn recursive_cte_is_rejected_before_remote_transport() {
+        let schema = vec![ColumnMetadata::new("id", ResolvedType::Integer)];
+        let reference = LogicalPlan::RecursiveReference {
+            name: "counter".to_string(),
+            schema: schema.clone(),
+        };
+        let recursive = LogicalPlan::RecursiveCte {
+            name: "counter".to_string(),
+            anchor: Box::new(scan()),
+            recursive_term: Box::new(reference.clone()),
+            union_all: true,
+            schema,
+            limits: RecursiveCteLimits::default(),
+        };
+
+        for plan in [&recursive, &reference] {
+            assert!(matches!(
+                classify(plan, &references()),
+                RemoteReadClassification::UnsupportedRemote(RemoteReadRejection { code, reason })
+                    if code == "recursive_cte_not_supported_remote"
+                        && reason.contains("outside the v0.8 remote-read catalog")
+            ));
+        }
     }
 
     #[test]

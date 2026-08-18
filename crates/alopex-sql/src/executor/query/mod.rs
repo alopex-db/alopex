@@ -1,12 +1,13 @@
 use alopex_core::kv::KVStore;
+use alopex_core::sql::stream::ByteSized;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::LITERAL_TABLE;
 use crate::catalog::{Catalog, StorageType};
 use crate::executor::evaluator::EvalContext;
-use crate::executor::memory::MemoryPolicy;
+use crate::executor::memory::{MemoryPolicy, MemoryTracker, map_core_memory_error};
 use crate::executor::{ExecutionResult, ExecutorError, QueryResult, QueryRowIterator, Result};
-use crate::planner::logical_plan::{LogicalPlan, SetOperator};
+use crate::planner::logical_plan::{LogicalPlan, RecursiveCteLimits, SetOperator};
 use crate::planner::typed_expr::{Projection, SortExpr};
 use crate::storage::{SqlTxn, SqlValue};
 
@@ -28,6 +29,56 @@ pub use project::{project_row_values, projected_columns};
 pub use scan::{
     create_fenced_range_scan_iterator, create_scan_iterator, execute_fenced_range_scan,
 };
+
+#[derive(Clone)]
+struct RecursiveWorkingTable {
+    rows: Vec<Vec<SqlValue>>,
+    schema: Vec<crate::catalog::ColumnMetadata>,
+}
+
+/// Per-query state supplied explicitly to operators that can read a recursive
+/// working table. A fresh context is created at each public execution entry.
+#[derive(Clone, Default)]
+struct QueryExecutionContext {
+    recursive_tables: HashMap<String, RecursiveWorkingTable>,
+}
+
+struct RecursiveCteExecution {
+    name: String,
+    anchor: LogicalPlan,
+    recursive_term: LogicalPlan,
+    union_all: bool,
+    schema: Vec<crate::catalog::ColumnMetadata>,
+    limits: RecursiveCteLimits,
+}
+
+impl QueryExecutionContext {
+    fn with_recursive_table(
+        &self,
+        name: String,
+        table: RecursiveWorkingTable,
+    ) -> QueryExecutionContext {
+        let mut next = self.clone();
+        next.recursive_tables.insert(name, table);
+        next
+    }
+}
+
+fn plan_contains_recursive_cte(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::RecursiveCte { .. } | LogicalPlan::RecursiveReference { .. } => true,
+        LogicalPlan::Filter { input, .. }
+        | LogicalPlan::Project { input, .. }
+        | LogicalPlan::Aggregate { input, .. }
+        | LogicalPlan::Window { input, .. }
+        | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::Limit { input, .. } => plan_contains_recursive_cte(input),
+        LogicalPlan::Join { left, right, .. } | LogicalPlan::SetOperation { left, right, .. } => {
+            plan_contains_recursive_cte(left) || plan_contains_recursive_cte(right)
+        }
+        _ => false,
+    }
+}
 
 /// Execute a SELECT logical plan and return a query result.
 ///
@@ -93,8 +144,31 @@ fn execute_query_result_with_outer_and_policy<
     outer: Option<&Row>,
     memory: Option<&MemoryPolicy>,
 ) -> Result<QueryResult> {
+    execute_query_result_with_context(
+        txn,
+        catalog,
+        plan,
+        outer,
+        memory,
+        &QueryExecutionContext::default(),
+    )
+}
+
+fn execute_query_result_with_context<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    plan: LogicalPlan,
+    outer: Option<&Row>,
+    memory: Option<&MemoryPolicy>,
+    context: &QueryExecutionContext,
+) -> Result<QueryResult> {
     let (mut iter, projection, schema) =
-        build_iterator_pipeline_with_outer(txn, catalog, plan, memory, outer)?;
+        build_iterator_pipeline_with_outer(txn, catalog, plan, memory, outer, context)?;
     let mut rows = Vec::new();
     while let Some(result) = iter.next_row() {
         rows.push(result?);
@@ -154,7 +228,7 @@ pub fn execute_query_streaming_with_policy<
     // iterators borrow exclusively. Execute through the materializing path
     // (the same one used by `execute_query`) so results are identical to the
     // non-streaming API instead of failing or silently dropping rows.
-    if subquery::plan_contains_subquery(&plan) {
+    if subquery::plan_contains_subquery(&plan) || plan_contains_recursive_cte(&plan) {
         let result = execute_query_result_with_outer_and_policy(txn, catalog, plan, None, memory)?;
         let (iter, projection, schema) = materialize_query_result(result);
         return Ok(QueryRowIterator::new(iter, projection, schema));
@@ -192,6 +266,190 @@ fn materialize_query_result(
     (Box::new(iter), Projection::All(column_names), schema)
 }
 
+fn execute_recursive_cte_result<
+    'txn,
+    S: KVStore + 'txn,
+    C: Catalog + ?Sized,
+    T: SqlTxn<'txn, S>,
+>(
+    txn: &mut T,
+    catalog: &C,
+    context: &QueryExecutionContext,
+    outer: Option<&Row>,
+    memory: Option<&MemoryPolicy>,
+    execution: RecursiveCteExecution,
+) -> Result<QueryResult> {
+    let RecursiveCteExecution {
+        name,
+        anchor,
+        recursive_term,
+        union_all,
+        schema,
+        limits,
+    } = execution;
+    let anchor_result =
+        execute_query_result_with_context(txn, catalog, anchor, outer, memory, context)?;
+    let mut accumulated = Vec::new();
+    let mut seen = HashSet::new();
+    let mut accumulated_bytes = 0u64;
+    let mut seen_bytes = 0u64;
+    for row in anchor_result.rows {
+        let should_accumulate = if union_all {
+            true
+        } else {
+            let key = aggregate::encode_group_key(&row)?;
+            let key_bytes = key.len() as u64;
+            if seen.insert(key) {
+                seen_bytes = seen_bytes.saturating_add(key_bytes);
+                true
+            } else {
+                false
+            }
+        };
+        if should_accumulate {
+            accumulated_bytes = accumulated_bytes.saturating_add(estimated_row_bytes(&row));
+            accumulated.push(row);
+        }
+    }
+    ensure_recursive_row_limit(&name, accumulated.len(), limits.max_rows)?;
+
+    let mut working = accumulated.clone();
+    let mut working_bytes = accumulated_bytes;
+    enforce_recursive_memory(
+        memory,
+        accumulated_bytes
+            .saturating_add(working_bytes)
+            .saturating_add(seen_bytes),
+    )?;
+    let mut iterations = 0usize;
+    while !working.is_empty() {
+        if iterations >= limits.max_iterations {
+            return Err(ExecutorError::ResourceExhausted {
+                message: format!(
+                    "recursive CTE '{name}' reached iteration limit {}",
+                    limits.max_iterations
+                ),
+            });
+        }
+        iterations += 1;
+
+        // The iteration context owns the delta rows, and RecursiveReference
+        // clones them into its iterator. Account for both retained copies at
+        // the point where their lifetimes overlap.
+        enforce_recursive_memory(
+            memory,
+            accumulated_bytes
+                .saturating_add(working_bytes.saturating_mul(2))
+                .saturating_add(seen_bytes),
+        )?;
+
+        let iteration_context = context.with_recursive_table(
+            name.clone(),
+            RecursiveWorkingTable {
+                rows: working,
+                schema: schema.clone(),
+            },
+        );
+        let recursive_result = execute_query_result_with_context(
+            txn,
+            catalog,
+            recursive_term.clone(),
+            outer,
+            memory,
+            &iteration_context,
+        )?;
+        let recursive_result_bytes = recursive_result
+            .rows
+            .iter()
+            .map(|row| estimated_row_bytes(row))
+            .sum::<u64>();
+        // The materialized recursive result and the context's delta rows are
+        // both retained until the recursive operator returns. Inner operator
+        // buffers enforce the same MemoryPolicy independently; the current
+        // policy API has no shared remaining-budget tracker to combine their
+        // transient high-water marks with these retained recursive sets.
+        enforce_recursive_memory(
+            memory,
+            accumulated_bytes
+                .saturating_add(working_bytes)
+                .saturating_add(recursive_result_bytes)
+                .saturating_add(seen_bytes),
+        )?;
+        drop(iteration_context);
+        let mut next = Vec::new();
+        let mut next_bytes = 0u64;
+        for row in recursive_result.rows {
+            let should_accumulate = if union_all {
+                true
+            } else {
+                let key = aggregate::encode_group_key(&row)?;
+                let key_bytes = key.len() as u64;
+                if seen.insert(key) {
+                    seen_bytes = seen_bytes.saturating_add(key_bytes);
+                    true
+                } else {
+                    false
+                }
+            };
+            if should_accumulate {
+                next_bytes = next_bytes.saturating_add(estimated_row_bytes(&row));
+                next.push(row);
+            }
+        }
+        ensure_recursive_row_limit(
+            &name,
+            accumulated.len().saturating_add(next.len()),
+            limits.max_rows,
+        )?;
+        accumulated.extend(next.iter().cloned());
+        accumulated_bytes = accumulated_bytes.saturating_add(next_bytes);
+        working_bytes = next_bytes;
+        enforce_recursive_memory(
+            memory,
+            accumulated_bytes
+                .saturating_add(working_bytes)
+                .saturating_add(seen_bytes),
+        )?;
+        working = next;
+    }
+
+    let columns = schema
+        .into_iter()
+        .map(|column| ColumnInfo::new(column.name, column.data_type))
+        .collect();
+    Ok(QueryResult::new(columns, accumulated))
+}
+
+fn estimated_row_bytes(row: &[SqlValue]) -> u64 {
+    row.iter().map(ByteSized::estimated_bytes).sum()
+}
+
+fn enforce_recursive_memory(memory: Option<&MemoryPolicy>, bytes: u64) -> Result<()> {
+    let Some(policy) = memory else {
+        return Ok(());
+    };
+    let mut tracker = MemoryTracker::new(policy.clone());
+    tracker.add_bytes(bytes).map_err(map_core_memory_error)?;
+    if tracker.over_limit() {
+        return Err(ExecutorError::ResourceExhausted {
+            message: format!(
+                "query memory limit exceeded by recursive CTE materialization at {} bytes",
+                tracker.used_bytes()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_recursive_row_limit(name: &str, rows: usize, max_rows: usize) -> Result<()> {
+    if rows <= max_rows {
+        return Ok(());
+    }
+    Err(ExecutorError::ResourceExhausted {
+        message: format!("recursive CTE '{name}' reached row limit {max_rows}"),
+    })
+}
+
 /// Build an iterator pipeline from a logical plan.
 ///
 /// This recursively constructs a tree of iterators that mirrors the logical plan
@@ -208,7 +466,14 @@ fn build_iterator_pipeline<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlT
     Projection,
     Vec<crate::catalog::ColumnMetadata>,
 )> {
-    build_iterator_pipeline_with_outer(txn, catalog, plan, memory, None)
+    build_iterator_pipeline_with_outer(
+        txn,
+        catalog,
+        plan,
+        memory,
+        None,
+        &QueryExecutionContext::default(),
+    )
 }
 
 fn build_iterator_pipeline_with_outer<
@@ -222,12 +487,70 @@ fn build_iterator_pipeline_with_outer<
     plan: LogicalPlan,
     memory: Option<&MemoryPolicy>,
     outer: Option<&Row>,
+    context: &QueryExecutionContext,
 ) -> Result<(
     Box<dyn RowIterator>,
     Projection,
     Vec<crate::catalog::ColumnMetadata>,
 )> {
     match plan {
+        LogicalPlan::RecursiveReference { name, schema } => {
+            let table = context.recursive_tables.get(&name).ok_or_else(|| {
+                ExecutorError::InvalidOperation {
+                    operation: "recursive common table expression".into(),
+                    reason: format!("working table '{name}' is not active"),
+                }
+            })?;
+            if table.schema.len() != schema.len()
+                || table.schema.iter().zip(&schema).any(|(left, right)| {
+                    left.name != right.name || left.data_type != right.data_type
+                })
+            {
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "recursive common table expression".into(),
+                    reason: format!("working table '{name}' schema changed during evaluation"),
+                });
+            }
+            let rows = table
+                .rows
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, values)| Row::new(index as u64, values))
+                .collect();
+            let projection =
+                Projection::All(schema.iter().map(|column| column.name.clone()).collect());
+            Ok((
+                Box::new(iterator::VecIterator::new(rows, schema.clone())),
+                projection,
+                schema,
+            ))
+        }
+        LogicalPlan::RecursiveCte {
+            name,
+            anchor,
+            recursive_term,
+            union_all,
+            schema,
+            limits,
+        } => {
+            let result = execute_recursive_cte_result(
+                txn,
+                catalog,
+                context,
+                outer,
+                memory,
+                RecursiveCteExecution {
+                    name,
+                    anchor: *anchor,
+                    recursive_term: *recursive_term,
+                    union_all,
+                    schema,
+                    limits,
+                },
+            )?;
+            Ok(materialize_query_result(result))
+        }
         LogicalPlan::Scan { table, projection } => {
             if table == LITERAL_TABLE {
                 let schema = Vec::new();
@@ -274,7 +597,7 @@ fn build_iterator_pipeline_with_outer<
                 return Ok((Box::new(iter), projection.clone(), schema));
             }
             let (mut input_iter, projection, schema) =
-                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer)?;
+                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
             if outer.is_some() || subquery::contains_subquery(&predicate) {
                 let mut rows = Vec::new();
                 while let Some(result) = input_iter.next_row() {
@@ -294,7 +617,7 @@ fn build_iterator_pipeline_with_outer<
         }
         LogicalPlan::Project { input, projection } => {
             let input_result =
-                execute_query_result_with_outer_and_policy(txn, catalog, *input, outer, memory)?;
+                execute_query_result_with_context(txn, catalog, *input, outer, memory, context)?;
             let (mut input_iter, _input_projection, schema) =
                 materialize_query_result(input_result);
             let mut rows = Vec::new();
@@ -327,9 +650,9 @@ fn build_iterator_pipeline_with_outer<
             using: _,
         } => {
             let (mut left_iter, _left_projection, left_schema) =
-                build_iterator_pipeline_with_outer(txn, catalog, *left, memory, outer)?;
+                build_iterator_pipeline_with_outer(txn, catalog, *left, memory, outer, context)?;
             let (mut right_iter, _right_projection, right_schema) =
-                build_iterator_pipeline_with_outer(txn, catalog, *right, memory, outer)?;
+                build_iterator_pipeline_with_outer(txn, catalog, *right, memory, outer, context)?;
             let mut left_rows = Vec::new();
             while let Some(result) = left_iter.next_row() {
                 left_rows.push(result?);
@@ -362,7 +685,7 @@ fn build_iterator_pipeline_with_outer<
             projection,
         } => {
             let (input_iter, _projection, _schema) =
-                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer)?;
+                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
             let schema = aggregate::build_aggregate_schema(&group_keys, &aggregates);
             if let Some(policy) = memory
                 && policy.spill_directory().is_some()
@@ -430,7 +753,7 @@ fn build_iterator_pipeline_with_outer<
         }
         LogicalPlan::Window { input, windows } => {
             let (input_iter, _projection, _schema) =
-                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer)?;
+                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
             let iter = window::WindowIterator::new(input_iter, windows, memory)?;
             let schema = iter.schema().to_vec();
             let projection =
@@ -444,9 +767,9 @@ fn build_iterator_pipeline_with_outer<
             all,
         } => {
             let left_result =
-                execute_query_result_with_outer_and_policy(txn, catalog, *left, outer, memory)?;
+                execute_query_result_with_context(txn, catalog, *left, outer, memory, context)?;
             let right_result =
-                execute_query_result_with_outer_and_policy(txn, catalog, *right, outer, memory)?;
+                execute_query_result_with_context(txn, catalog, *right, outer, memory, context)?;
             let rows = execute_set_operation(operator, all, left_result.rows, right_result.rows)?;
             let schema = left_result
                 .columns
@@ -475,7 +798,7 @@ fn build_iterator_pipeline_with_outer<
         }
         LogicalPlan::Sort { input, order_by } => {
             let (input_iter, projection, schema) =
-                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer)?;
+                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
             let sort_iter = if let Some(policy) = memory {
                 SortIterator::new_with_policy(input_iter, &order_by, Some(policy.clone()))?
             } else {
@@ -489,7 +812,7 @@ fn build_iterator_pipeline_with_outer<
             offset,
         } => {
             let (input_iter, projection, schema) =
-                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer)?;
+                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
             let limit_iter = LimitIterator::new(input_iter, limit, offset);
             Ok((Box::new(limit_iter), projection, schema))
         }
@@ -549,7 +872,7 @@ pub fn build_streaming_pipeline_with_policy<
     // (the same one used by `execute_query`) so results are identical to the
     // non-streaming API instead of failing or silently dropping rows
     // (GitHub issues #23 / #24).
-    if subquery::plan_contains_subquery(&plan) {
+    if subquery::plan_contains_subquery(&plan) || plan_contains_recursive_cte(&plan) {
         let result = execute_query_result_with_outer_and_policy(txn, catalog, plan, None, memory)?;
         return Ok(materialize_query_result(result));
     }
@@ -1061,12 +1384,27 @@ fn column_infos_from_all(
 mod tests {
     use super::*;
     use crate::catalog::{ColumnMetadata, MemoryCatalog, TableMetadata};
+    use crate::executor::SpillPolicy;
     use crate::executor::ddl::create_table::execute_create_table;
-    use crate::planner::typed_expr::TypedExpr;
+    use crate::planner::typed_expr::{ProjectedColumn, TypedExpr};
     use crate::planner::types::ResolvedType;
     use crate::storage::TxnBridge;
     use alopex_core::kv::memory::MemoryKV;
     use std::sync::Arc;
+
+    fn text_literal_plan(value: &str) -> LogicalPlan {
+        LogicalPlan::Project {
+            input: Box::new(LogicalPlan::Scan {
+                table: LITERAL_TABLE.into(),
+                projection: Projection::All(Vec::new()),
+            }),
+            projection: Projection::Columns(vec![ProjectedColumn::new(TypedExpr::literal(
+                crate::ast::expr::Literal::String(value.into()),
+                ResolvedType::Text,
+                crate::Span::default(),
+            ))]),
+        }
+    }
 
     #[test]
     fn execute_query_scan_only_returns_rows() {
@@ -1125,5 +1463,116 @@ mod tests {
             }
             other => panic!("unexpected result {other:?}"),
         }
+    }
+
+    #[test]
+    fn recursive_cte_accounts_for_reference_clone_high_water() {
+        let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+        let catalog = MemoryCatalog::new();
+        let schema = vec![ColumnMetadata::new("value", ResolvedType::Text)];
+        let anchor = text_literal_plan(&"x".repeat(32));
+        let recursive_term = LogicalPlan::RecursiveReference {
+            name: "memory_cycle".into(),
+            schema: schema.clone(),
+        };
+        let plan = LogicalPlan::RecursiveCte {
+            name: "memory_cycle".into(),
+            anchor: Box::new(anchor),
+            recursive_term: Box::new(recursive_term),
+            union_all: false,
+            schema,
+            limits: RecursiveCteLimits::default(),
+        };
+        let policy = MemoryPolicy::new(Some(115), SpillPolicy::FailFast);
+        let mut txn = bridge.begin_write().unwrap();
+
+        let error = execute_query_with_policy(&mut txn, &catalog, plan, Some(&policy))
+            .expect_err("the working table and its iterator clone must both be accounted");
+
+        assert!(
+            matches!(&error, ExecutorError::ResourceExhausted { message }
+                if message.contains("query memory limit exceeded")),
+            "expected recursive materialization to honor the query memory limit, got: {error}"
+        );
+    }
+
+    #[test]
+    fn recursive_cte_enforces_accumulated_row_limit() {
+        let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+        let catalog = MemoryCatalog::new();
+        let schema = vec![ColumnMetadata::new("value", ResolvedType::Text)];
+        let anchor = LogicalPlan::SetOperation {
+            left: Box::new(text_literal_plan("first")),
+            right: Box::new(text_literal_plan("second")),
+            operator: SetOperator::Union,
+            all: true,
+        };
+        let plan = LogicalPlan::RecursiveCte {
+            name: "bounded".into(),
+            anchor: Box::new(anchor),
+            recursive_term: Box::new(LogicalPlan::RecursiveReference {
+                name: "bounded".into(),
+                schema: schema.clone(),
+            }),
+            union_all: true,
+            schema,
+            limits: RecursiveCteLimits {
+                max_iterations: 10,
+                max_rows: 1,
+            },
+        };
+        let mut txn = bridge.begin_write().unwrap();
+
+        let error = execute_query(&mut txn, &catalog, plan)
+            .expect_err("the accumulated row limit must be checked before iteration");
+
+        assert!(
+            matches!(&error, ExecutorError::ResourceExhausted { message }
+                if message.contains("recursive CTE 'bounded' reached row limit 1")),
+            "expected a named recursive row-limit error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn recursive_cte_accounts_for_result_before_releasing_working_table() {
+        let bridge = TxnBridge::new(Arc::new(MemoryKV::new()));
+        let catalog = MemoryCatalog::new();
+        let value = "y".repeat(16);
+        let schema = vec![ColumnMetadata::new("value", ResolvedType::Text)];
+        let reference = LogicalPlan::RecursiveReference {
+            name: "result_overlap".into(),
+            schema: schema.clone(),
+        };
+        let two_literals = LogicalPlan::SetOperation {
+            left: Box::new(text_literal_plan(&value)),
+            right: Box::new(text_literal_plan(&value)),
+            operator: SetOperator::Union,
+            all: true,
+        };
+        let recursive_term = LogicalPlan::SetOperation {
+            left: Box::new(reference),
+            right: Box::new(two_literals),
+            operator: SetOperator::Union,
+            all: true,
+        };
+        let plan = LogicalPlan::RecursiveCte {
+            name: "result_overlap".into(),
+            anchor: Box::new(text_literal_plan(&value)),
+            recursive_term: Box::new(recursive_term),
+            union_all: false,
+            schema,
+            limits: RecursiveCteLimits::default(),
+        };
+        let policy = MemoryPolicy::new(Some(92), SpillPolicy::FailFast);
+        let mut txn = bridge.begin_write().unwrap();
+
+        let error = execute_query_with_policy(&mut txn, &catalog, plan, Some(&policy))
+            .expect_err("recursive result must be counted before the working table is released");
+
+        assert!(
+            matches!(&error, ExecutorError::ResourceExhausted { message }
+                if message.contains("query memory limit exceeded")),
+            "expected result/working-table overlap to honor the query memory limit, got: {error}"
+        );
     }
 }

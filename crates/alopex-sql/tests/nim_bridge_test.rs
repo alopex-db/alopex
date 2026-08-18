@@ -479,6 +479,36 @@ fn parse_join_subquery_and_vector_variants_from_nim() {
 }
 
 #[test]
+fn join_markers_are_applied_inside_recursive_set_operation_terms() {
+    let sql = "WITH RECURSIVE ancestors AS (\
+         SELECT id, parent_id FROM employees WHERE id = 3 \
+         UNION ALL \
+         SELECT employees.id, employees.parent_id \
+         FROM employees JOIN ancestors ON employees.id = ancestors.parent_id\
+     ) SELECT id FROM ancestors";
+
+    let statements = Parser::parse_sql(&AlopexDialect, sql)
+        .expect("join metadata in the recursive term must cross the Nim boundary");
+    let StatementKind::Select(outer) = &statements[0].kind else {
+        panic!("expected outer SELECT");
+    };
+    let cte = &outer.with.as_ref().expect("expected WITH clause").ctes[0];
+    let StatementKind::Select(body) = &cte.query.kind else {
+        panic!("expected CTE SELECT");
+    };
+
+    assert!(matches!(
+        &body.set_operations[0].right.from[0],
+        FromItem::Join {
+            join_type: JoinType::Inner,
+            natural: false,
+            condition: Some(_),
+            ..
+        }
+    ));
+}
+
+#[test]
 fn parse_multi_row_insert_without_column_list_from_nim() {
     // issue #40: 「カラムリスト省略 × 多行 VALUES」で先頭行が列リストと
     // 誤判別され、FieldDefect が FFI から漏れて ALOPEX-P001 になっていた。

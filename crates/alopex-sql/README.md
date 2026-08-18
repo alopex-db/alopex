@@ -1,6 +1,6 @@
 # alopex-sql
 
-alopex-sql は Alopex の SQL レイヤーを提供します。v0.5.0 では GROUP BY/HAVING と集約関数をサポートします。
+alopex-sql は Alopex の SQL 解析・計画・実行レイヤーを提供します。
 
 ## Quick Start
 
@@ -56,16 +56,36 @@ SELECT category, COUNT(*) FROM products GROUP BY category ORDER BY COUNT(*) DESC
 - `GROUP_CONCAT(column)` / `GROUP_CONCAT(column, separator)`
 - `STRING_AGG(column, separator)`
 
-## Limitations
+## Recursive CTE
 
-- JOIN/Subquery/Window 関数は未対応。
-- `SUM/AVG/MIN/MAX` の `DISTINCT` は未対応。
-- `GROUP BY` の式は現状カラム参照のみを想定。
+直接自己再帰する単一 CTE を `UNION` または `UNION ALL` で実行できます。列名リストを省略した場合は、anchor term の出力名が公開スキーマになります。
+
+```sql
+WITH RECURSIVE counter(n) AS (
+    SELECT 1
+    UNION ALL
+    SELECT n + 1 FROM counter WHERE n < 5
+)
+SELECT n FROM counter ORDER BY n;
+```
+
+実行は delta working table による固定点反復です。既定上限は 1,000 iterations、100,000 accumulated rows で、保持する working/result/accumulated/dedup key は query memory policy の対象です。
+
+## Recursive CTE Limitations
+
+- 相互再帰、複数の直接自己参照、recursive term 内の subquery・nested `WITH`・set operation は fail-closed で拒否します。
+- 再帰 CTE のリモート分散 read は未対応です。
+- 各 inner operator の独自 buffer は同じ memory policy を検査しますが、現在の policy API は retained recursive sets と transient buffer の合算 high-water tracker を共有しません。
 
 ## Error Scenarios
+
+| Code | Contract |
+| --- | --- |
+| `ALOPEX-E001` | Transaction conflict during execution. |
+| `ALOPEX-E002` | A write was attempted through a read-only transaction. |
+| `ALOPEX-E003` | 実行時の resource exhaustion。再帰 CTE の iteration/row/memory limit と既存の aggregate/memory limit が対象。 |
 
 - `ColumnNotFound`: 存在しないカラムを `GROUP BY` で参照した場合。
 - `TypeMismatch`: `SUM/AVG` に非数値型、`GROUP_CONCAT` に非 TEXT を指定した場合。
 - `InvalidExpression`: `HAVING` や `SELECT` で GROUP BY に含まれない非集約列を参照した場合。
-- `ResourceExhausted`: グループ数が上限を超えた場合（デフォルト 1,000,000）。
-```
+- `ResourceExhausted`: resource limit を超えた場合。公開 SQL error code は `ALOPEX-E003`。

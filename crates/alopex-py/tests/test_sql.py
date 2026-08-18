@@ -77,6 +77,27 @@ def test_execute_sql_cte_column_name_list_renames_result_keys(db):
     assert rows == [{"label": "seven", "identifier": 7}]
 
 
+def test_execute_sql_recursive_cte_reaches_fixed_point(db):
+    rows = db.execute_sql(
+        "WITH RECURSIVE counter(n) AS ("
+        "SELECT 1 UNION ALL SELECT n + 1 FROM counter WHERE n < 4"
+        ") SELECT n FROM counter ORDER BY n"
+    )
+    assert rows == [{"n": 1}, {"n": 2}, {"n": 3}, {"n": 4}]
+
+
+def test_execute_sql_recursive_cte_resource_limit_has_stable_code(db):
+    with pytest.raises(AlopexError) as raised:
+        db.execute_sql(
+            "WITH RECURSIVE cycle(n) AS ("
+            "SELECT 1 UNION ALL SELECT n FROM cycle"
+            ") SELECT n FROM cycle"
+        )
+
+    assert raised.value.code == "ALOPEX-E003"
+    assert "recursive CTE 'cycle' reached iteration limit" in str(raised.value)
+
+
 def test_execute_sql_lag_and_lead_preserve_exact_rows(db):
     db.execute_sql(
         "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER)"

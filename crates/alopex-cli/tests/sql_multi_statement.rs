@@ -267,3 +267,24 @@ fn batch_multi_statement_error_exits_nonzero() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn recursive_cte_resource_limit_reports_stable_error_code() {
+    let output = run_alopex(&[
+        "--in-memory",
+        "--batch",
+        "sql",
+        "WITH RECURSIVE cycle(n) AS (\
+             SELECT 1 UNION ALL SELECT n FROM cycle\
+         ) SELECT n FROM cycle",
+    ]);
+
+    assert!(!output.status.success(), "an unbounded cycle must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ALOPEX-E003"), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("recursive CTE 'cycle' reached iteration limit"),
+        "stderr:\n{stderr}"
+    );
+}
