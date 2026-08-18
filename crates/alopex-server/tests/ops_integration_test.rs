@@ -73,7 +73,10 @@ where
     F: FnMut() -> alopex_server::error::Result<OperationState>,
 {
     let timeout = if cfg!(windows) {
-        TokioDuration::from_secs(60)
+        // The default 512 MiB WAL must be scanned during backup. Windows hosted
+        // runners have taken nearly three minutes under the full release gate,
+        // so retain a finite bound without treating normal I/O as a deadlock.
+        TokioDuration::from_secs(5 * 60)
     } else {
         TokioDuration::from_secs(20)
     };
