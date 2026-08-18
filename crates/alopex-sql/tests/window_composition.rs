@@ -2,8 +2,8 @@
 //!
 //! The contract under test is the SQL logical evaluation order:
 //! aggregate -> HAVING -> window -> projection -> DISTINCT -> ORDER BY.
-//! Explicit `ROWS` / `RANGE` frames belong to issue #140 and are deliberately
-//! absent here so this suite remains independently mergeable.
+//! The integrated suite also verifies that explicit `ROWS` / `RANGE` metadata
+//! survives aggregate-expression rewriting into the window stage.
 
 use std::sync::{Arc, RwLock};
 
@@ -198,6 +198,29 @@ fn plan_orders_aggregate_having_window_projection_distinct_and_sort() {
 fn grouped_aggregates_feed_window_order_and_window_aggregate_after_having() {
     let (store, catalog) = setup();
     assert_composed_rows(&materialized(&store, &catalog, COMPOSED_SQL));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn grouped_aggregate_window_rewrite_preserves_explicit_frame() {
+    let (store, catalog) = setup();
+    let result = materialized(
+        &store,
+        &catalog,
+        "SELECT region, SUM(amount) AS total, \
+                SUM(SUM(amount)) OVER (ORDER BY SUM(amount), region \
+                    ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS rolling_total \
+         FROM sales GROUP BY region ORDER BY total, region",
+    );
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![text("north"), SqlValue::BigInt(50), SqlValue::BigInt(50)],
+            vec![text("east"), SqlValue::BigInt(300), SqlValue::BigInt(350)],
+            vec![text("west"), SqlValue::BigInt(300), SqlValue::BigInt(600)],
+            vec![text("south"), SqlValue::BigInt(400), SqlValue::BigInt(700)],
+        ]
+    );
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

@@ -4699,6 +4699,7 @@ fn rewrite_expr_with_maps(
                     Ok(crate::planner::typed_expr::TypedWindowSpec {
                         partition_by,
                         order_by,
+                        frame: window.frame.clone(),
                     })
                 })
                 .transpose()?;
