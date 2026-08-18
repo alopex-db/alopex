@@ -15,7 +15,7 @@ const parserContractDescriptor = staticRead("../PARSER_CONTRACT_VERSION")
 
 static:
   doAssert isExactContractDescriptor(parserContractDescriptor, "0.3.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.5.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.6.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -368,11 +368,14 @@ proc writeWindowFrame(s: Stream; node: SqlNode) =
   s.writeWindowFrameBound(node.frameEnd)
 
 proc writeWindowSpec(s: Stream; node: SqlNode) =
+  var baseNode: SqlNode = nil
   var partitionByNode: SqlNode = nil
   var orderByNode: SqlNode = nil
   var frameNode: SqlNode = nil
   for child in node.children:
     case child.kind
+    of nkIdentifier:
+      baseNode = child
     of nkPartitionByClause:
       partitionByNode = child
     of nkOrderByClause:
@@ -382,7 +385,12 @@ proc writeWindowSpec(s: Stream; node: SqlNode) =
     else:
       discard
 
-  s.pack_map(3)
+  s.pack_map(4)
+  s.writeKey("base")
+  if baseNode == nil:
+    s.writeNil()
+  else:
+    s.pack_type(baseNode.strVal)
   s.writeKey("partition_by")
   if partitionByNode == nil:
     s.pack_array(0)
@@ -807,6 +815,8 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
   var selectionNode: SqlNode = nil
   var groupByNode: SqlNode = nil
   var havingNode: SqlNode = nil
+  var windowsNode: SqlNode = nil
+  var qualifyNode: SqlNode = nil
   var orderByNode: SqlNode = nil
   var limitNode: SqlNode = nil
   var setOperations: seq[SqlNode] = @[]
@@ -829,6 +839,10 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
       groupByNode = child
     of nkHavingClause:
       havingNode = child.children[0]
+    of nkWindowClause:
+      windowsNode = child
+    of nkQualifyClause:
+      qualifyNode = child.children[0]
     of nkOrderByClause:
       orderByNode = child
     of nkLimitClause:
@@ -868,6 +882,25 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
     s.writeExprSeq(groupByNode.children)
   s.writeKey("having")
   s.writeExprOpt(havingNode)
+  # The staged continuous-aggregate encoder intentionally remains byte-for-byte
+  # compatible with its historical payload. Named windows and QUALIFY belong to
+  # the current public Select contract only.
+  if includeWith:
+    s.writeKey("windows")
+    if windowsNode == nil:
+      s.pack_array(0)
+    else:
+      s.pack_array(windowsNode.children.len)
+      for namedWindow in windowsNode.children:
+        s.pack_map(3)
+        s.writeKey("name")
+        s.pack_type(namedWindow.children[0].strVal)
+        s.writeKey("spec")
+        s.writeWindowSpec(namedWindow.children[1])
+        s.writeKey("span")
+        s.writeSpan(namedWindow.span)
+    s.writeKey("qualify")
+    s.writeExprOpt(qualifyNode)
   s.writeKey("set_operations")
   s.pack_array(setOperations.len)
   for setOperation in setOperations:
@@ -899,20 +932,21 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
     s.writeNil()
 
 proc writeSelectKind(s: Stream; node: SqlNode) =
-  # 固定 11 キー(variant/distinct/projection/from/selection/group_by/
-  # having/set_operations/order_by/limit/offset)に、WITH 句があれば
-  # with を加えて 12 になる。
-  var fieldCount = 11
+  # 固定 13 キー(variant/distinct/projection/from/selection/group_by/
+  # having/windows/qualify/set_operations/order_by/limit/offset)に、WITH 句が
+  # あれば with を加えて 14 になる。
+  var fieldCount = 13
   for child in node.children:
     if child.kind == nkWithClause:
-      fieldCount = 12
+      fieldCount = 14
       break
   s.pack_map(fieldCount)
   s.writeSelectFields(node)
 
 proc writeContinuousAggregateQuery(s: Stream; node: SqlNode) =
   # 継続集約のクエリは WITH を含めない(includeWith = false)ため、
-  # Select の固定 11 field と statement span の合計で常に 12。
+  # Historical staged payload: Select の固定 11 field と statement span の
+  # 合計で常に 12。Current-only fields must not alter this byte contract.
   s.pack_map(12)
   s.writeSelectFields(node, false)
   s.writeKey("span")
@@ -1304,11 +1338,16 @@ proc validateStagedWriterShape(node: SqlNode) =
         if node.children[i].kind == nkWindowSpec:
           stagedValidationError("window specification must be the last function-call child")
   of nkWindowSpec:
+    var sawBase = false
     var sawPartitionBy = false
     var sawOrderBy = false
     var sawFrame = false
     for child in node.children:
       case child.kind
+      of nkIdentifier:
+        if sawBase or sawPartitionBy or sawOrderBy or sawFrame:
+          stagedValidationError("invalid base in window specification")
+        sawBase = true
       of nkPartitionByClause:
         if sawPartitionBy or sawOrderBy or sawFrame or child.children.len == 0:
           stagedValidationError("invalid PARTITION BY in window specification")
@@ -1323,6 +1362,17 @@ proc validateStagedWriterShape(node: SqlNode) =
         sawFrame = true
       else:
         stagedValidationError("invalid child in window specification")
+  of nkWindowClause:
+    if node.children.len == 0:
+      stagedValidationError("WINDOW clause must contain a definition")
+    for child in node.children:
+      if child.kind != nkNamedWindow:
+        stagedValidationError("WINDOW clause contains an invalid definition")
+  of nkNamedWindow:
+    requireChildren(2, "named window")
+    if node.children[0].kind != nkIdentifier or
+        node.children[1].kind != nkWindowSpec:
+      stagedValidationError("named window must contain a name and specification")
   of nkWindowFrame:
     if node.frameStart == nil or node.frameStart.kind != nkWindowFrameBound or
         node.frameEnd == nil or node.frameEnd.kind != nkWindowFrameBound:
@@ -1353,6 +1403,8 @@ proc validateStagedWriterShape(node: SqlNode) =
     requireChildren(1, "WHERE clause")
   of nkHavingClause:
     requireChildren(1, "HAVING clause")
+  of nkQualifyClause:
+    requireChildren(1, "QUALIFY clause")
   of nkBinaryOp:
     if node.binLeft == nil or node.binRight == nil:
       stagedValidationError("binary expression operands must not be nil")
@@ -1445,6 +1497,18 @@ proc validateContinuousAggregateV040(statement: SqlNode) =
     stagedValidationError("continuous aggregate name must be nkIdentifier")
   if queryNode.kind != nkSelect:
     stagedValidationError("continuous aggregate query must be nkSelect")
+  for child in queryNode.children:
+    case child.kind
+    of nkWindowClause:
+      stagedValidationError(
+        "staged continuous aggregate query cannot contain WINDOW"
+      )
+    of nkQualifyClause:
+      stagedValidationError(
+        "staged continuous aggregate query cannot contain QUALIFY"
+      )
+    else:
+      discard
   if optionsNode.kind != nkWithOptions:
     stagedValidationError("continuous aggregate options must be nkWithOptions")
   if optionsNode.children.len != 2:

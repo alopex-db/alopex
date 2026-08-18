@@ -98,7 +98,7 @@ def main() -> int:
         for sql in statements:
             show(sql, db.execute_sql(sql))
 
-        # These 35 queries have an explicit or single-row order contract.
+        # These 40 queries have an explicit or single-row order contract.
         ordered_checks: list[tuple[str, list[Row]]] = [
             ("SELECT SUM(n) AS total FROM metrics", [{"total": 5}]),
             (
@@ -477,6 +477,18 @@ def main() -> int:
                     },
                 ],
             ),
+            (
+                "SELECT id, ROW_NUMBER() OVER ranked AS row_number "
+                "FROM sales "
+                "WINDOW ranked AS (base ORDER BY amount DESC, id), "
+                "base AS (PARTITION BY region) "
+                "QUALIFY row_number = 1 ORDER BY id",
+                [
+                    {"id": 2, "row_number": 1},
+                    {"id": 3, "row_number": 1},
+                    {"id": 5, "row_number": 1},
+                ],
+            ),
         ]
 
         # These 10 queries assert row multisets; their SQL does not promise order.
@@ -551,12 +563,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 56:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 56")
+        if completed != 57:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 57")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 56 checks passed")
+    print("v0.8 SQL correctness demo completed: 57 checks passed")
     return 0
 
 

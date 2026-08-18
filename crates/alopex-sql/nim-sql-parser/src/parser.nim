@@ -224,12 +224,10 @@ proc parseWindowFrame(p: var Parser): SqlNode =
     span: Span(start: tokenSpan(unitTok).start, `end`: endBound.span.`end`),
     orderAsc: -1, nullsFirst: -1)
 
-proc parseWindowSpec(p: var Parser): SqlNode =
-  p.enterNesting()
-  defer: p.leaveNesting()
-  let overTok = p.expect(tkOver)
-  result = newNode(nkWindowSpec, tokenSpan(overTok))
-  discard p.expect(tkLParen)
+proc parseWindowSpecContents(p: var Parser; window: SqlNode) =
+  if p.check(tkIdent):
+    let base = p.advance()
+    window.children.add(newIdent(base.value, tokenSpan(base)))
 
   if p.check(tkPartition):
     let partitionTok = p.advance()
@@ -239,7 +237,7 @@ proc parseWindowSpec(p: var Parser): SqlNode =
     while p.check(tkComma):
       discard p.advance()
       partitionBy.children.add(p.parseExpr())
-    result.children.add(partitionBy)
+    window.children.add(partitionBy)
 
   if p.check(tkOrder):
     let orderTok = p.advance()
@@ -249,14 +247,33 @@ proc parseWindowSpec(p: var Parser): SqlNode =
     while p.check(tkComma):
       discard p.advance()
       orderBy.children.add(p.parseOrderByItem())
-    result.children.add(orderBy)
+    window.children.add(orderBy)
 
   if p.current.kind in {tkRows, tkRange}:
-    result.children.add(p.parseWindowFrame())
+    window.children.add(p.parseWindowFrame())
 
+proc parseWindowSpecBody(p: var Parser): SqlNode =
+  let openTok = p.expect(tkLParen)
+  result = newNode(nkWindowSpec, tokenSpan(openTok))
+  p.parseWindowSpecContents(result)
   let closeTok = p.expect(tkRParen)
-  result.span = Span(start: tokenSpan(overTok).start,
+  result.span = Span(start: tokenSpan(openTok).start,
                      `end`: tokenSpan(closeTok).`end`)
+
+proc parseWindowSpec(p: var Parser): SqlNode =
+  p.enterNesting()
+  defer: p.leaveNesting()
+  let overTok = p.expect(tkOver)
+  if p.check(tkIdent):
+    let base = p.advance()
+    result = newNode(nkWindowSpec,
+      Span(start: tokenSpan(overTok).start, `end`: tokenSpan(base).`end`))
+    result.children.add(newIdent(base.value, tokenSpan(base)))
+    return
+
+  result = p.parseWindowSpecBody()
+  result.span = Span(start: tokenSpan(overTok).start,
+                     `end`: result.span.`end`)
 
 proc parseOptionalOver(p: var Parser; functionCall: SqlNode) =
   if p.check(tkOver):
@@ -791,6 +808,30 @@ proc parseSelectCore(p: var Parser): SqlNode =
     let having = newNode(nkHavingClause)
     having.children.add(p.parseExpr())
     result.children.add(having)
+
+  if p.check(tkWindow):
+    let windowTok = p.advance()
+    let windowClause = newNode(nkWindowClause, tokenSpan(windowTok))
+    while true:
+      let name = p.expectIdent("window name")
+      let namedWindow = newNode(nkNamedWindow, tokenSpan(name))
+      namedWindow.children.add(newIdent(name.value, tokenSpan(name)))
+      discard p.expect(tkAs)
+      namedWindow.children.add(p.parseWindowSpecBody())
+      namedWindow.span = Span(start: tokenSpan(name).start,
+                              `end`: namedWindow.children[^1].span.`end`)
+      windowClause.children.add(namedWindow)
+      if p.check(tkComma):
+        discard p.advance()
+      else:
+        break
+    result.children.add(windowClause)
+
+  if p.check(tkQualify):
+    let qualifyTok = p.advance()
+    let qualify = newNode(nkQualifyClause, tokenSpan(qualifyTok))
+    qualify.children.add(p.parseExpr())
+    result.children.add(qualify)
 
 proc parseIntersectTerm(p: var Parser): SqlNode =
   result = p.parseSelectCore()

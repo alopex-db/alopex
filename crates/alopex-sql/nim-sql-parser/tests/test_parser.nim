@@ -400,6 +400,36 @@ suite "Expressions — standard function syntax":
 
 suite "Window frames":
 
+  test "named WINDOW definitions, inheritance, and QUALIFY preserve structure":
+    let ast = parseSql(
+      "SELECT ROW_NUMBER() OVER ranked FROM sales " &
+      "WINDOW base AS (PARTITION BY region), " &
+      "ranked AS (base ORDER BY amount DESC) " &
+      "QUALIFY ROW_NUMBER() OVER ranked = 1"
+    )
+    let call = ast.children[0].children[0]
+    let direct = call.children[^1]
+    check direct.kind == nkWindowSpec
+    check direct.children.len == 1
+    check direct.children[0].kind == nkIdentifier
+    check direct.children[0].strVal == "ranked"
+
+    let windowClause = ast.children[^2]
+    check windowClause.kind == nkWindowClause
+    check windowClause.children.len == 2
+    check windowClause.children[0].kind == nkNamedWindow
+    check windowClause.children[0].children[0].strVal == "base"
+    let inherited = windowClause.children[1].children[1]
+    check inherited.kind == nkWindowSpec
+    check inherited.children[0].kind == nkIdentifier
+    check inherited.children[0].strVal == "base"
+    check inherited.children[1].kind == nkOrderByClause
+
+    let qualify = ast.children[^1]
+    check qualify.kind == nkQualifyClause
+    check qualify.children.len == 1
+    check qualify.children[0].kind == nkBinaryOp
+
   test "ROWS BETWEEN preserves physical bounds":
     let ast = parseSql(
       "SELECT SUM(qty) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND 1 FOLLOWING) FROM sales"

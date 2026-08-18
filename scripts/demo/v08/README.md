@@ -3,8 +3,9 @@
 The v0.8 release verifier exercises positional, value, ranking, distribution,
 and aggregate windows. It covers `LAG`/`LEAD`,
 `FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE`, `NTILE`, `PERCENT_RANK`, `CUME_DIST`,
-explicit `ROWS`/`RANGE` frames, and composition with grouped aggregation,
-`HAVING`, projection, `DISTINCT`, and outer `ORDER BY`. Both the Python and Rust
+explicit `ROWS`/`RANGE` frames, named `WINDOW` inheritance, `QUALIFY`, and
+composition with grouped aggregation, `HAVING`, projection, `DISTINCT`, and
+outer `ORDER BY`. Both the Python and Rust
 demos compare complete result sets, including physical neighbors, peer
 boundaries, partition resets, defaults, NULLs, frame-local value selection,
 bucket allocation, cumulative distributions, and post-window deduplication.
@@ -19,7 +20,7 @@ verifier.
 | `EMB-01-storage-durability` | memory options/limits, snapshot, clone, clear, persist, file URI reopen and flush | inherited local compatibility; Phase 1 R5 |
 | `EMB-02-kv-transactions` | KV CRUD, prefix scan, commit, rollback | Phase 2 R1 local Transaction compatibility |
 | `EMB-03-persisted-transaction-manager` | named transaction metadata, staged reads, commit and rollback | Phase 2 R1 local multi-operation workflow |
-| `EMB-04-local-sql-matrix` | DDL/DML, SELECT clauses, JOIN, subquery, aggregates, scalar/hash/encoding, TIMESTAMP, Vector SQL, PRAGMA, and v0.8.x alias/REAL/set-operation/CASE/CTE/window contracts; every query is verified by full row-value equality, not row presence | Phase 2 R1 local SQL baseline; #122-#130, #141-#143 |
+| `EMB-04-local-sql-matrix` | DDL/DML, SELECT clauses, JOIN, subquery, aggregates, scalar/hash/encoding, TIMESTAMP, Vector SQL, PRAGMA, and v0.8.x alias/REAL/set-operation/CASE/CTE/window contracts; every query is verified by full row-value equality, not row presence | Phase 2 R1 local SQL baseline; #122-#130, #141-#144 |
 | `EMB-05-catalog-cluster-diagnostics` | catalog/namespace/table/index observation, cache invalidation, single-node cluster status and routing diagnostics | Phase 1 R1/R2 local diagnostic boundary |
 | `EMB-06-owned-and-sql-streams` | callback/iterator/owned SQL streams, owned transaction commit/rollback and preflight rejection | Phase 4 R1/R2 Rust backend contract |
 | `EMB-07-dataframe-columnar` | SQL-to-DataFrame with FLOAT-to-Arrow-Float32 preservation, columnar projection/scan/stats/index, and fail-closed legacy-to-V08 streaming boundary | Phase 3 R1/R2; v0.8.5 #93 |
@@ -74,9 +75,9 @@ right (qty <= 2):      {2, 4, 5}
 left-only: {3}; right-only: {5}; intersection: {2, 4}
 ```
 
-The Python demo performs exactly 56 assertions: 39 ordered comparisons, 10
+The Python demo performs exactly 57 assertions: 40 ordered comparisons, 10
 unordered row-multiset comparisons, and 7 expected errors. The Rust EMB-04
-scenario performs 21 v0.8.x checks: 19 exact result checks and two fail-closed
+scenario performs 22 v0.8.x checks: 20 exact result checks and two fail-closed
 checks. The matrix grows cumulatively: CTE column aliases, recursive CTEs,
 positional/value/distribution windows, explicit frames, and grouped-window
 composition are all positive checks; their former unsupported-feature
@@ -133,10 +134,15 @@ happened to run:
     for an empty frame or an index beyond it. `NTILE` assigns larger buckets
     first, while `PERCENT_RANK` and `CUME_DIST` use peer-aware rank and peer-end
     boundaries; a single-row partition returns `0.0` and `1.0` respectively.
-11. SQL NULL is represented as Python `None` and Rust `SqlValue::Null`; the
+11. Named windows are scoped to one query block. Forward references are
+    allowed, inheritance composes partition/order/frame exactly once, cycles
+    and conflicting overrides fail deterministically, and `QUALIFY` runs after
+    window evaluation but before projection, `DISTINCT`, and outer `ORDER BY`.
+    Projection aliases are visible to `QUALIFY`.
+12. SQL NULL is represented as Python `None` and Rust `SqlValue::Null`; the
    unordered comparator retains a type tag so NULL cannot compare equal to a
    textual or numeric sentinel.
-12. SQL BOOLEAN is represented as Python `bool` (`True`/`False`) and Rust
+13. SQL BOOLEAN is represented as Python `bool` (`True`/`False`) and Rust
    `SqlValue::Boolean`, never integer 1/0. The Python canonicalizer is
    type-sensitive specifically because Python otherwise considers `True == 1`.
 
@@ -145,3 +151,5 @@ recursive shapes, dependency cycles, and exhausted iteration or memory budgets
 fail closed instead of falling back to a non-recursive plan. Detailed
 window-frame behavior and resource limits are in
 [`docs/sql-window-frames.md`](../../../docs/sql-window-frames.md).
+Named-window and `QUALIFY` rules are in
+[`docs/sql-named-window-qualify.md`](../../../docs/sql-named-window-qualify.md).

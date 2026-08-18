@@ -241,6 +241,34 @@ fn pre_frame_nim_producer_payload_defaults_frame_to_none() {
 }
 
 #[test]
+fn v050_nim_payload_defaults_named_window_fields_without_loading_v050_code() {
+    // Captured from the real contract-0.5.0 producer at SHA-256
+    // 362b912093223890b2ff69328490a604a09522622c07dcbdbf837dd2cc88e182.
+    // Decode compatibility is one-way migration evidence only; the runtime
+    // contract gate still rejects a 0.5.0 shared library before parsing.
+    let payload = hex::decode(include_str!("fixtures/select_v050_pre_named_window.hex").trim())
+        .expect("v0.5.0 Nim fixture must be valid hex");
+    let statements: Vec<Statement> =
+        rmp_serde::from_slice(&payload).expect("current Rust AST must decode old map fields");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    assert!(select.windows.is_empty());
+    assert!(select.qualify.is_none());
+    let SelectItem::Expr { expr, .. } = &select.projection[0] else {
+        panic!("expected expression projection");
+    };
+    let ExprKind::FunctionCall {
+        over: Some(window), ..
+    } = &expr.kind
+    else {
+        panic!("expected window function");
+    };
+    assert!(window.base.is_none());
+    assert!(window.frame.is_none());
+}
+
+#[test]
 fn case_expression_crosses_the_nim_messagepack_boundary() {
     let statements = Parser::parse_sql(
         &AlopexDialect,
@@ -275,13 +303,13 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.5.0");
+    assert_eq!(parser_contract_version(), "0.6.0");
 }
 
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.5.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.6.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -289,7 +317,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.5.0");
+    assert_eq!(parser_contract_version(), "0.6.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);

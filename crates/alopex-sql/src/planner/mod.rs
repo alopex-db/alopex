@@ -14,6 +14,7 @@ mod error;
 pub mod knn_optimizer;
 pub mod logical_plan;
 pub mod name_resolver;
+mod named_window;
 pub mod type_checker;
 pub mod typed_expr;
 pub mod types;
@@ -46,6 +47,7 @@ use crate::ast::expr::{Expr, ExprKind, Literal};
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::{AlopexDialect, DataSourceFormat, Parser, SqlError, TableType};
+use named_window::resolve_named_windows;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
@@ -53,6 +55,15 @@ struct PlannedRelation {
     plan: LogicalPlan,
     schema: Vec<ColumnMetadata>,
     scope: Vec<ScopedTable>,
+}
+
+struct WindowSelectStages {
+    plan: LogicalPlan,
+    windows: Vec<WindowExpr>,
+    qualify: Option<TypedExpr>,
+    projection: Projection,
+    order_by: Vec<SortExpr>,
+    window_schema: Vec<ColumnMetadata>,
 }
 
 type CtePlans = HashMap<String, PlannedRelation>;
@@ -1533,6 +1544,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         outer_scope: &[ScopedTable],
         enclosing_ctes: &CtePlans,
     ) -> Result<PlannedRelation, PlannerError> {
+        let resolved_stmt = resolve_named_windows(stmt)?;
+        let stmt = &resolved_stmt;
         let ctes = self.plan_ctes(stmt, enclosing_ctes)?;
         if !stmt.set_operations.is_empty() {
             let mut left_select = stmt.clone();
@@ -1617,6 +1630,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             .is_some_and(|items| !items.is_empty());
         let has_aggregate = self.select_contains_aggregate(stmt);
         let has_window = select_contains_window(stmt);
+        if stmt.qualify.is_some() && !has_window {
+            return Err(PlannerError::invalid_expression(
+                "QUALIFY requires at least one window function in the query block".to_string(),
+            ));
+        }
         let distinct_only =
             stmt.distinct && !has_group_by && !has_aggregate && stmt.having.is_none();
 
@@ -1635,9 +1653,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             ));
         }
 
-        // SELECT-list aliases are visible to HAVING and ORDER BY only. `expr_scope`
-        // above stays alias-free so that WHERE and GROUP BY keep resolving against
-        // the FROM-derived base relations, as the SQL standard requires.
+        // SELECT-list aliases are visible to HAVING, QUALIFY, and ORDER BY.
+        // `expr_scope` above stays alias-free so that WHERE and GROUP BY keep
+        // resolving against the FROM-derived base relations.
         let projection_aliases = collect_projection_aliases(&stmt.projection);
 
         let final_projection = self.build_projection_with_scope(
@@ -1713,6 +1731,22 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 ));
             }
 
+            let qualify = if let Some(qualify) = &stmt.qualify {
+                let source = substitute_projection_aliases(qualify, &projection_aliases);
+                let typed = self.infer_expr_with_scope(&source, &expr_scope, &ctes)?;
+                if typed.resolved_type != ResolvedType::Boolean {
+                    return Err(PlannerError::type_mismatch(
+                        "Boolean",
+                        typed.resolved_type.type_name().to_string(),
+                        typed.span,
+                    ));
+                }
+                self.collect_windows_from_typed_expr(&typed, &mut windows, &mut window_map)?;
+                Some(typed)
+            } else {
+                None
+            };
+
             let window_names = (0..windows.len())
                 .map(|idx| format!("__window_{idx}"))
                 .collect::<Vec<_>>();
@@ -1742,14 +1776,28 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     ))
                 })
                 .collect::<Result<Vec<_>, PlannerError>>()?;
+            let qualify = qualify
+                .as_ref()
+                .map(|expr| {
+                    rewrite_expr_for_windows(
+                        expr,
+                        &window_map,
+                        relation.schema.len(),
+                        &window_names,
+                    )
+                })
+                .transpose()?;
 
             return self.finish_window_select(
                 stmt,
-                plan,
-                windows,
-                projection,
-                order_by,
-                window_schema,
+                WindowSelectStages {
+                    plan,
+                    windows,
+                    qualify,
+                    projection,
+                    order_by,
+                    window_schema,
+                },
             );
         }
 
@@ -1981,6 +2029,22 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             None
         };
 
+        let qualify_typed = if let Some(qualify) = &stmt.qualify {
+            let qualify = substitute_projection_aliases(qualify, projection_aliases);
+            let typed = self.infer_expr_with_scope(&qualify, expr_scope, ctes)?;
+            if typed.resolved_type != ResolvedType::Boolean {
+                return Err(PlannerError::type_mismatch(
+                    "Boolean",
+                    typed.resolved_type.type_name().to_string(),
+                    typed.span,
+                ));
+            }
+            self.collect_aggregates_from_typed_expr(&typed, &mut aggregates, &mut aggregate_map)?;
+            Some(typed)
+        } else {
+            None
+        };
+
         let mut outer_order_by = Vec::new();
         for order_expr in &stmt.order_by {
             let source = substitute_projection_aliases(&order_expr.expr, projection_aliases);
@@ -2026,6 +2090,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 ))
             })
             .collect::<Result<Vec<_>, PlannerError>>()?;
+        let qualify = qualify_typed
+            .as_ref()
+            .map(|expr| {
+                self.rewrite_expr_for_aggregate(expr, &group_keys, &aggregates, &aggregate_names)
+            })
+            .transpose()?;
 
         plan = LogicalPlan::Aggregate {
             input: Box::new(plan),
@@ -2044,6 +2114,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
         for sort in &outer_order_by {
             self.collect_windows_from_typed_expr(&sort.expr, &mut windows, &mut window_map)?;
+        }
+        if let Some(qualify) = &qualify {
+            self.collect_windows_from_typed_expr(qualify, &mut windows, &mut window_map)?;
         }
 
         let window_names = (0..windows.len())
@@ -2074,14 +2147,28 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 ))
             })
             .collect::<Result<Vec<_>, PlannerError>>()?;
+        let qualify = qualify
+            .as_ref()
+            .map(|expr| {
+                rewrite_expr_for_windows(
+                    expr,
+                    &window_map,
+                    window_schema.len() - windows.len(),
+                    &window_names,
+                )
+            })
+            .transpose()?;
 
         self.finish_window_select(
             stmt,
-            plan,
-            windows,
-            projection,
-            outer_order_by,
-            window_schema,
+            WindowSelectStages {
+                plan,
+                windows,
+                qualify,
+                projection,
+                order_by: outer_order_by,
+                window_schema,
+            },
         )
     }
 
@@ -2089,16 +2176,26 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     fn finish_window_select(
         &self,
         stmt: &Select,
-        mut plan: LogicalPlan,
-        windows: Vec<WindowExpr>,
-        projection: Projection,
-        order_by: Vec<SortExpr>,
-        window_schema: Vec<ColumnMetadata>,
+        stages: WindowSelectStages,
     ) -> Result<PlannedRelation, PlannerError> {
+        let WindowSelectStages {
+            mut plan,
+            windows,
+            qualify,
+            projection,
+            order_by,
+            window_schema,
+        } = stages;
         plan = LogicalPlan::Window {
             input: Box::new(plan),
             windows,
         };
+        if let Some(predicate) = qualify {
+            plan = LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate,
+            };
+        }
 
         let output_schema = projection_schema(&projection, &window_schema);
         let mut hidden_order_keys = Vec::new();
@@ -2720,6 +2817,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             .unwrap_or(false)
             || stmt
                 .having
+                .as_ref()
+                .map(expr_contains_aggregate)
+                .unwrap_or(false)
+            || stmt
+                .qualify
                 .as_ref()
                 .map(expr_contains_aggregate)
                 .unwrap_or(false)
@@ -3803,6 +3905,7 @@ fn substitute_projection_aliases(
             distinct: *distinct,
             star: *star,
             over: over.as_ref().map(|window| crate::ast::expr::WindowSpec {
+                base: window.base.clone(),
                 partition_by: window.partition_by.iter().map(recurse).collect(),
                 order_by: window
                     .order_by
@@ -4054,10 +4157,11 @@ fn select_contains_window(stmt: &Select) -> bool {
     stmt.projection.iter().any(|item| match item {
         SelectItem::Wildcard { .. } | SelectItem::QualifiedWildcard { .. } => false,
         SelectItem::Expr { expr, .. } => expr_contains_window(expr),
-    }) || stmt
-        .order_by
-        .iter()
-        .any(|order| expr_contains_window(&order.expr))
+    }) || stmt.qualify.as_ref().is_some_and(expr_contains_window)
+        || stmt
+            .order_by
+            .iter()
+            .any(|order| expr_contains_window(&order.expr))
 }
 
 fn expr_contains_window(expr: &crate::ast::expr::Expr) -> bool {

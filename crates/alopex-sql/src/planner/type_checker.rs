@@ -1173,6 +1173,11 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
 
         let typed_over = over
             .map(|window| {
+                if let Some(base) = &window.base {
+                    return Err(PlannerError::invalid_expression(format!(
+                        "named window '{base}' was not resolved in its query block"
+                    )));
+                }
                 let partition_by = window
                     .partition_by
                     .iter()

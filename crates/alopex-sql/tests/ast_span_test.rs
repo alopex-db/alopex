@@ -50,6 +50,8 @@ fn dml_nodes_carry_spans() {
         selection: None,
         group_by: None,
         having: None,
+        windows: vec![],
+        qualify: None,
         set_operations: vec![],
         order_by: vec![OrderByExpr {
             expr: alopex_sql::Expr::new(

@@ -29,6 +29,11 @@ SELECT id,
        PERCENT_RANK() OVER (ORDER BY qty) AS percent_rank,
        CUME_DIST() OVER (ORDER BY qty) AS cume_dist
 FROM stdin_test ORDER BY id;
+SELECT id, ROW_NUMBER() OVER ranked AS row_number
+FROM stdin_test
+WINDOW base AS (), ranked AS (base ORDER BY qty DESC, id)
+QUALIFY row_number <= 2
+ORDER BY id;
 "#;
 
     {
@@ -52,7 +57,7 @@ FROM stdin_test ORDER BY id;
         .expect("json output should be an array of result sets");
     assert_eq!(
         sets.len(),
-        7,
+        8,
         "one result set per statement\nstdout:\n{stdout}"
     );
     let select_rows = sets[2].as_array().expect("SELECT result set");
@@ -124,6 +129,17 @@ FROM stdin_test ORDER BY id;
                 "percent_rank": 1.0,
                 "cume_dist": 1.0,
             }),
+        ]
+    );
+
+    let qualify_rows = sets[7]
+        .as_array()
+        .expect("named WINDOW/QUALIFY SELECT result set");
+    assert_eq!(
+        qualify_rows,
+        &[
+            serde_json::json!({ "id": 1, "row_number": 2 }),
+            serde_json::json!({ "id": 3, "row_number": 1 }),
         ]
     );
 }

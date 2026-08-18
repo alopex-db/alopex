@@ -1283,6 +1283,8 @@ mod tests {
                     selection: None,
                     group_by: None,
                     having: None,
+                    windows: vec![],
+                    qualify: None,
                     order_by: vec![],
                     limit: None,
                     offset: None,

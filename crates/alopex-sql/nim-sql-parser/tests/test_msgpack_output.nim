@@ -7,7 +7,7 @@ import msgpack4nim/msgpack2json
 import ../src/[alopex_sql_parser, ast, parser]
 
 const ContractDescriptor = staticRead("../PARSER_CONTRACT_VERSION").strip()
-const ContinuousAggregateProducerEnabled = ContractDescriptor == "0.5.0"
+const ContinuousAggregateProducerEnabled = ContractDescriptor == "0.6.0"
 
 const
   MinimalContinuousAggregateSql =
@@ -259,8 +259,17 @@ suite "MessagePack output - INSERT (issue #40)":
 suite "MessagePack output - stability":
 
   test "SELECT literal payload is stable":
-    check hexPayload("SELECT 1") ==
+    let v050Payload =
       "9182A46B696E648BA776617269616E74A653656C656374A864697374696E6374C2AA70726F6A656374696F6E9184A776617269616E74A445787072A46578707282A46B696E6482A776617269616E74A74C69746572616CA76C69746572616C82A776617269616E74A64E756D626572A576616C7565A131A47370616E82A5737461727482A46C696E6501A6636F6C756D6E08A3656E6482A46C696E6501A6636F6C756D6E08A5616C696173C0A47370616E82A5737461727482A46C696E6501A6636F6C756D6E08A3656E6482A46C696E6501A6636F6C756D6E08A466726F6D90A973656C656374696F6EC0A867726F75705F6279C0A6686176696E67C0AE7365745F6F7065726174696F6E7390A86F726465725F627990A56C696D6974C0A66F6666736574C0A47370616E82A5737461727482A46C696E6501A6636F6C756D6E01A3656E6482A46C696E6501A6636F6C756D6E06"
+
+    let v060Payload = v050Payload
+      .replace("A46B696E648B", "A46B696E648D")
+      .replace(
+        "A6686176696E67C0AE7365745F6F7065726174696F6E73",
+        "A6686176696E67C0A777696E646F777390A77175616C696679C0" &
+          "AE7365745F6F7065726174696F6E73"
+      )
+    check hexPayload("SELECT 1") == v060Payload
 
 suite "MessagePack output - staged continuous aggregate contract":
 
@@ -309,6 +318,19 @@ suite "MessagePack output - staged continuous aggregate contract":
     var wrongQuery = canonicalContinuousAggregate()
     wrongQuery.children[1] = newNode(nkPragma, wrongQuery.children[1].span)
     checkStagedError(wrongQuery, "query must be nkSelect")
+
+    let namedWindowQuery = parseSql(
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+      "SELECT ROW_NUMBER() OVER w FROM m WINDOW w AS (ORDER BY id) " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    checkStagedError(namedWindowQuery, "cannot contain WINDOW")
+
+    let qualifyQuery = parseSql(
+      "CREATE CONTINUOUS AGGREGATE c AS SELECT 1 FROM m QUALIFY 1 = 1 " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    checkStagedError(qualifyQuery, "cannot contain QUALIFY")
 
     var malformedWhere = canonicalContinuousAggregate()
     malformedWhere.children[1].children.add(
@@ -565,3 +587,20 @@ suite "MessagePack output - staged continuous aggregate contract":
     check window["frame"]["start_bound"]["variant"].getStr() == "Preceding"
     check window["frame"]["start_bound"]["value"].getBiggestInt() == 50
     check window["frame"]["end_bound"]["variant"].getStr() == "CurrentRow"
+
+  test "named windows and QUALIFY are emitted in the Select contract":
+    let kind = selectKind(
+      "SELECT ROW_NUMBER() OVER ranked AS rn FROM sales " &
+      "WINDOW base AS (PARTITION BY region), " &
+      "ranked AS (base ORDER BY amount DESC) QUALIFY rn = 1"
+    )
+    check kind["windows"].len == 2
+    check kind["windows"][0]["name"].getStr() == "base"
+    check kind["windows"][0]["spec"]["base"].kind == JNull
+    check kind["windows"][0]["spec"]["partition_by"].len == 1
+    check kind["windows"][1]["name"].getStr() == "ranked"
+    check kind["windows"][1]["spec"]["base"].getStr() == "base"
+    check kind["windows"][1]["spec"]["order_by"].len == 1
+    check kind["projection"][0]["expr"]["kind"]["over"]["base"].getStr() ==
+      "ranked"
+    check kind["qualify"]["kind"]["variant"].getStr() == "BinaryOp"

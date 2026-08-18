@@ -13,10 +13,22 @@ pub struct Select {
     pub group_by: Option<Vec<Expr>>,
     pub having: Option<Expr>,
     #[serde(default)]
+    pub windows: Vec<NamedWindow>,
+    #[serde(default)]
+    pub qualify: Option<Expr>,
+    #[serde(default)]
     pub set_operations: Vec<SetOperation>,
     pub order_by: Vec<OrderByExpr>,
     pub limit: Option<Expr>,
     pub offset: Option<Expr>,
+    #[serde(default)]
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedWindow {
+    pub name: String,
+    pub spec: super::expr::WindowSpec,
     #[serde(default)]
     pub span: Span,
 }

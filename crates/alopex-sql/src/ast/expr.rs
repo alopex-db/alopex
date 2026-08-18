@@ -104,9 +104,13 @@ pub enum ExprKind {
     },
 }
 
-/// A window specification attached to a function call through `OVER (...)`.
+/// A window specification attached to a function call through `OVER name` or
+/// `OVER (...)`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowSpec {
+    /// Optional named specification inherited by this window.
+    #[serde(default)]
+    pub base: Option<String>,
     #[serde(default)]
     pub partition_by: Vec<Expr>,
     #[serde(default)]

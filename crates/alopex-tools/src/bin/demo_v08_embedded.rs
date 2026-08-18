@@ -625,9 +625,17 @@ fn scenario_local_sql_matrix() -> DemoResult {
                 ],
             ],
         ),
+        (
+            "SELECT id, ROW_NUMBER() OVER ranked AS row_number FROM sales WINDOW ranked AS (base ORDER BY amount DESC, id), base AS (PARTITION BY region) QUALIFY row_number = 1 ORDER BY id",
+            vec![
+                vec![SqlValue::Integer(2), SqlValue::BigInt(1)],
+                vec![SqlValue::Integer(3), SqlValue::BigInt(1)],
+                vec![SqlValue::Integer(5), SqlValue::BigInt(1)],
+            ],
+        ),
     ];
     require(
-        v08_matrix.len() == 19,
+        v08_matrix.len() == 20,
         "v0.8.x SQL success-check count changed",
     )?;
     for (sql, expected) in &v08_matrix {
@@ -648,7 +656,7 @@ fn scenario_local_sql_matrix() -> DemoResult {
         expect_sql_error(&db, sql, expected)?;
     }
     require(
-        v08_matrix.len() + rejected_v08.len() == 21,
+        v08_matrix.len() + rejected_v08.len() == 22,
         "v0.8.x SQL check count changed",
     )?;
     require(

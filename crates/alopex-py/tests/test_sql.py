@@ -207,6 +207,29 @@ def test_execute_sql_value_and_distribution_windows_preserve_exact_rows(db):
     ]
 
 
+def test_execute_sql_named_windows_and_qualify_preserve_exact_rows(db):
+    db.execute_sql(
+        "CREATE TABLE qualify_samples "
+        "(id INTEGER PRIMARY KEY, region TEXT, amount INTEGER)"
+    )
+    db.execute_sql(
+        "INSERT INTO qualify_samples VALUES "
+        "(1, 'east', 10), (2, 'east', 20), "
+        "(3, 'west', 30), (4, 'west', 30)"
+    )
+    rows = db.execute_sql(
+        "SELECT id, ROW_NUMBER() OVER ranked AS row_number "
+        "FROM qualify_samples "
+        "WINDOW ranked AS (base ORDER BY amount DESC, id), "
+        "base AS (PARTITION BY region) "
+        "QUALIFY row_number = 1 ORDER BY id"
+    )
+    assert rows == [
+        {"id": 2, "row_number": 1},
+        {"id": 3, "row_number": 1},
+    ]
+
+
 def test_execute_sql_grouped_window_composition_preserves_exact_rows(db):
     db.execute_sql(
         "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER)"

@@ -316,6 +316,40 @@ fn sql_integration_value_and_distribution_windows_preserve_exact_rows() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_named_windows_and_qualify_preserve_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE qualify_samples \
+             (id INTEGER PRIMARY KEY, region TEXT, amount INTEGER); \
+         INSERT INTO qualify_samples VALUES \
+             (1, 'east', 10), (2, 'east', 20), \
+             (3, 'west', 30), (4, 'west', 30);",
+    )
+    .unwrap();
+
+    let result = db
+        .execute_sql(
+            "SELECT id, ROW_NUMBER() OVER ranked AS row_number \
+             FROM qualify_samples \
+             WINDOW ranked AS (base ORDER BY amount DESC, id), \
+                    base AS (PARTITION BY region) \
+             QUALIFY row_number = 1 ORDER BY id;",
+        )
+        .unwrap();
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(2), SqlValue::BigInt(1)],
+            vec![SqlValue::Integer(3), SqlValue::BigInt(1)],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_grouped_window_composition_preserves_exact_rows() {
     let db = Database::new();
     db.execute_sql(

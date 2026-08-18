@@ -87,13 +87,13 @@ class ParserAssetManifestTests(unittest.TestCase):
         self.source = self.root / "parser-source"
         (self.source / "src").mkdir(parents=True)
         (self.source / "PARSER_CONTRACT_VERSION").write_text(
-            "0.5.0\n", encoding="utf-8"
+            "0.6.0\n", encoding="utf-8"
         )
         (self.source / "nim_sql_parser.nimble").write_text(
-            'version = "0.5.0"\n', encoding="utf-8"
+            'version = "0.6.0"\n', encoding="utf-8"
         )
         (self.source / "src/alopex_sql_parser.nim").write_text(
-            "proc parserVersion(): string = \"0.5.0\"\n", encoding="utf-8"
+            "proc parserVersion(): string = \"0.6.0\"\n", encoding="utf-8"
         )
 
         self.nim = self.root / "nim"
@@ -233,7 +233,7 @@ class ParserAssetManifestTests(unittest.TestCase):
             "--alopex-version",
             "0.8.7",
             "--contract-version",
-            "0.5.0",
+            "0.6.0",
             "--target",
             target,
             "--library",
@@ -261,7 +261,7 @@ class ParserAssetManifestTests(unittest.TestCase):
             arguments.extend(("--registry-metadata", f"{name}={path}"))
         arguments.extend(("--output-dir", str(output)))
         self.run_cli(*arguments, expected=expected)
-        stem = f"alopex-parser-v0.8.7-contract-0.5.0-{target}"
+        stem = f"alopex-parser-v0.8.7-contract-0.6.0-{target}"
         return output / f"{stem}.json", output / f"{stem}.tar.gz"
 
     def verify_target(
@@ -391,7 +391,7 @@ print(matches[0])
         record = json.loads(second_record.read_text(encoding="utf-8"))
         self.assertEqual(record["schema"], "alopex-parser-target-record-v1")
         self.assertEqual(record["alopex_version"], "0.8.7")
-        self.assertEqual(record["contract_version"], "0.5.0")
+        self.assertEqual(record["contract_version"], "0.6.0")
         self.assertEqual(record["target"], "x86_64-unknown-linux-gnu")
         self.assertEqual(
             record["builder"]["compile"]["profile"], BUILD_PROFILE
@@ -449,7 +449,7 @@ print(matches[0])
             "--alopex-version",
             "0.8.7",
             "--contract-version",
-            "0.5.0",
+            "0.6.0",
             "--target",
             "x86_64-unknown-freebsd",
             "--library",
@@ -521,7 +521,7 @@ print(matches[0])
         first = json.loads(first_record.read_text(encoding="utf-8"))
 
         (self.source / "CONTRACT_VERSION").write_text(
-            "0.5.0\n", encoding="utf-8"
+            "0.6.0\n", encoding="utf-8"
         )
         (self.source / "SHA256SUMS").write_text(
             f"{'0' * 64}  libalopex_sql_parser.so\n", encoding="utf-8"
@@ -612,7 +612,7 @@ print(matches[0])
         )
         self.pack(expected=2)
         (self.source / "PARSER_CONTRACT_VERSION").write_text(
-            "0.5.0\n", encoding="utf-8"
+            "0.6.0\n", encoding="utf-8"
         )
         os.symlink(
             self.source / "src/alopex_sql_parser.nim",
@@ -954,7 +954,7 @@ raise SystemExit(43)
         self.assertEqual(isolated_output.read_bytes(), b"docker-parser-output")
         self.assertEqual(
             (isolated_dir / "CONTRACT_VERSION").read_text(encoding="utf-8"),
-            "0.5.0\n",
+            "0.6.0\n",
         )
         self.assertIn("ALOPEX_NIM_PARSER_OUTPUT=/output/", docker_arguments)
         after = {

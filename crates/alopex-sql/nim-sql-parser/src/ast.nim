@@ -44,6 +44,9 @@ type
     nkCaseWhen
     nkFunctionCall
     nkWindowSpec
+    nkWindowClause
+    nkNamedWindow
+    nkQualifyClause
     nkWindowFrame
     nkWindowFrameBound
     nkPartitionByClause
