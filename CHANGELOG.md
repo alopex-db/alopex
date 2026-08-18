@@ -2,13 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.8.7] — 2026-08-18
 
 ### Added
 
+- Common table expressions accept ordered column-name lists and preserve their
+  names across parser, planner, executor, CLI, Embedded, and Python surfaces.
 - Direct self-recursive single CTEs execute `UNION` or `UNION ALL` to a bounded
   fixed point across Rust, embedded, CLI, and Python SQL surfaces. Anchor
   output names are used when the CTE column-name list is omitted.
+- `LAG` and `LEAD` support offsets, defaults, partition boundaries, NULLs, and
+  stable peer ordering.
+- Aggregate window functions support explicit `ROWS` and `RANGE` frames with
+  bounded work and memory accounting.
+- Grouped aggregation and `HAVING` compose with window evaluation, projection,
+  `DISTINCT`, and outer `ORDER BY` in SQL evaluation order.
 
 ### Changed
 
@@ -17,6 +25,21 @@ All notable changes to this project will be documented in this file.
   memory limits as well as recursive CTE iteration, row, and memory limits.
 - Unsupported mutual recursion, multiple self-references, recursive-term
   subqueries, nested `WITH`, and nested set operations fail closed.
+- The Nim parser wire contract is `0.5.0`. It remains compatibility metadata
+  inside the unified Alopex release; it is not a separate parser release lane.
+
+### Fixed
+
+- Implicit ordered aggregate windows include the complete peer group.
+- Grouped-window expression rewriting preserves explicit frame metadata.
+
+### Release verification
+
+- Python and Rust demos verify recursive CTEs, positional windows, explicit
+  frames, and grouped-window composition with exact results.
+- Publication remains blocked until all four contract-0.5 parser targets are
+  rebuilt with the pinned Nim/Nimble toolchain, bound to the immutable v0.8.7
+  tag, published, and accepted by the post-release verifier.
 
 ## [0.8.6] — 2026-08-17
 
