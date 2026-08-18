@@ -398,8 +398,15 @@ fn alopex_batch_with_profile(profile: &str, args: &[&str]) -> std::io::Result<()
             && stderr.contains("conflict: writes are blocked in maintenance mode")
     }
 
+    // Backup/restore completion is reported before the server has necessarily left
+    // maintenance mode. Loaded CI hosts have exceeded the former 10-second
+    // allowance, so keep retrying this exact transient response for up to one
+    // minute while still failing every other error immediately.
+    const MAINTENANCE_RETRY_ATTEMPTS: usize = 120;
+    const MAINTENANCE_RETRY_DELAY: Duration = Duration::from_millis(500);
+
     let mut last_stderr = String::new();
-    for _ in 0..20 {
+    for _ in 0..MAINTENANCE_RETRY_ATTEMPTS {
         let mut cmd = Command::new(alopex_bin());
         cmd.env("ALOPEX_TEST_TTY", "1");
         cmd.env("ALOPEX_MODE", "tui");
@@ -419,7 +426,7 @@ fn alopex_batch_with_profile(profile: &str, args: &[&str]) -> std::io::Result<()
         if !is_transient_maintenance_rejection(&last_stderr) {
             break;
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(MAINTENANCE_RETRY_DELAY);
     }
     Err(std::io::Error::other(format!(
         "alopex batch command failed: {last_stderr}"
