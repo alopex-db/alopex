@@ -1,0 +1,28 @@
+{
+  "verified_with": {
+    "duckdb": "1.5.5",
+    "datafusion": "54.0.0"
+  },
+  "cases": [
+    {
+      "name": "group_having_window",
+      "sql": "SELECT region, SUM(amount) AS total, RANK() OVER (ORDER BY SUM(amount) DESC) AS sales_rank, SUM(SUM(amount)) OVER () AS retained_total FROM sales GROUP BY region HAVING SUM(amount) >= 300 ORDER BY sales_rank, region",
+      "columns": ["region", "total", "sales_rank", "retained_total"],
+      "rows": [
+        ["south", 400, 1, 1000],
+        ["east", 300, 2, 1000],
+        ["west", 300, 2, 1000]
+      ]
+    },
+    {
+      "name": "window_then_distinct",
+      "sql": "SELECT DISTINCT SUM(amount) AS total, DENSE_RANK() OVER (ORDER BY SUM(amount)) AS sales_rank FROM sales GROUP BY region ORDER BY total",
+      "columns": ["total", "sales_rank"],
+      "rows": [
+        [50, 1],
+        [300, 2],
+        [400, 3]
+      ]
+    }
+  ]
+}

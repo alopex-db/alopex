@@ -1605,11 +1605,18 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let distinct_only =
             stmt.distinct && !has_group_by && !has_aggregate && stmt.having.is_none();
 
-        if has_window && (has_group_by || has_aggregate || stmt.having.is_some() || stmt.distinct) {
-            return Err(PlannerError::unsupported_feature(
-                "window functions combined with GROUP BY, ordinary aggregates, HAVING, or DISTINCT",
-                "future",
-                stmt.span,
+        if stmt.having.as_ref().is_some_and(expr_contains_window) {
+            return Err(PlannerError::invalid_expression(
+                "HAVING cannot contain window functions".to_string(),
+            ));
+        }
+        if stmt
+            .group_by
+            .as_ref()
+            .is_some_and(|items| items.iter().any(expr_contains_window))
+        {
+            return Err(PlannerError::invalid_expression(
+                "GROUP BY cannot contain window functions".to_string(),
             ));
         }
 
@@ -1633,6 +1640,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
         // 3. Add Filter if WHERE clause is present
         if let Some(ref selection) = stmt.selection {
+            if expr_contains_window(selection) {
+                return Err(PlannerError::invalid_expression(
+                    "WHERE cannot contain window functions".to_string(),
+                ));
+            }
             let predicate = self.infer_expr_with_scope(selection, &expr_scope, &ctes)?;
 
             // Verify predicate returns Boolean
@@ -1648,6 +1660,16 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 input: Box::new(plan),
                 predicate,
             };
+        }
+
+        if has_window && (has_group_by || has_aggregate || stmt.having.is_some()) {
+            return self.plan_grouped_window_select(
+                stmt,
+                &ctes,
+                &expr_scope,
+                &projection_aliases,
+                plan,
+            );
         }
 
         if has_window {
@@ -1706,36 +1728,14 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 })
                 .collect::<Result<Vec<_>, PlannerError>>()?;
 
-            plan = LogicalPlan::Window {
-                input: Box::new(plan),
-                windows,
-            };
-            if !order_by.is_empty() {
-                plan = LogicalPlan::Sort {
-                    input: Box::new(plan),
-                    order_by,
-                };
-            }
-            if stmt.limit.is_some() || stmt.offset.is_some() {
-                plan = LogicalPlan::Limit {
-                    input: Box::new(plan),
-                    limit: self.extract_limit_value(&stmt.limit, stmt.span)?,
-                    offset: self.extract_limit_value(&stmt.offset, stmt.span)?,
-                };
-            }
-            let output_schema = projection_schema(&projection, &window_schema);
-            plan = LogicalPlan::Project {
-                input: Box::new(plan),
-                projection,
-            };
-            return Ok(PlannedRelation {
+            return self.finish_window_select(
+                stmt,
                 plan,
-                schema: output_schema.clone(),
-                scope: vec![ScopedTable::new(
-                    TableMetadata::new(LITERAL_TABLE, output_schema),
-                    0,
-                )],
-            });
+                windows,
+                projection,
+                order_by,
+                window_schema,
+            );
         }
 
         if has_group_by || has_aggregate || stmt.having.is_some() || stmt.distinct {
@@ -1905,6 +1905,304 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 projection: final_projection,
             };
         }
+        Ok(PlannedRelation {
+            plan,
+            schema: output_schema.clone(),
+            scope: vec![ScopedTable::new(
+                TableMetadata::new(LITERAL_TABLE, output_schema),
+                0,
+            )],
+        })
+    }
+
+    /// Plan the aggregate/HAVING stages that feed a window query.
+    ///
+    /// Grouped aggregation deliberately exposes its internal group-key plus
+    /// aggregate schema to the window stage. The user-facing projection stays
+    /// above the window so aggregate results can participate in window
+    /// arguments and ordering without being evaluated against base rows.
+    fn plan_grouped_window_select(
+        &self,
+        stmt: &Select,
+        ctes: &CtePlans,
+        expr_scope: &[ScopedTable],
+        projection_aliases: &HashMap<String, crate::ast::expr::Expr>,
+        mut plan: LogicalPlan,
+    ) -> Result<PlannedRelation, PlannerError> {
+        let group_keys = self.build_group_keys_with_scope(stmt, expr_scope, ctes)?;
+        let projected = self.build_projected_columns_for_aggregate_with_scope(
+            &stmt.projection,
+            expr_scope,
+            ctes,
+        )?;
+        let mut aggregates = Vec::new();
+        let mut aggregate_map = HashMap::new();
+        for column in &projected {
+            self.collect_aggregates_from_typed_expr(
+                &column.expr,
+                &mut aggregates,
+                &mut aggregate_map,
+            )?;
+        }
+
+        let having_typed = if let Some(having) = &stmt.having {
+            let having = substitute_projection_aliases(having, projection_aliases);
+            if expr_contains_window(&having) {
+                return Err(PlannerError::invalid_expression(
+                    "HAVING cannot contain window functions".to_string(),
+                ));
+            }
+            let typed = self.infer_expr_with_scope(&having, expr_scope, ctes)?;
+            if typed.resolved_type != ResolvedType::Boolean {
+                return Err(PlannerError::type_mismatch(
+                    "Boolean",
+                    typed.resolved_type.type_name().to_string(),
+                    typed.span,
+                ));
+            }
+            self.collect_aggregates_from_typed_expr(&typed, &mut aggregates, &mut aggregate_map)?;
+            Some(typed)
+        } else {
+            None
+        };
+
+        let mut outer_order_by = Vec::new();
+        for order_expr in &stmt.order_by {
+            let source = substitute_projection_aliases(&order_expr.expr, projection_aliases);
+            let typed = self.infer_expr_with_scope(&source, expr_scope, ctes)?;
+            self.collect_aggregates_from_typed_expr(&typed, &mut aggregates, &mut aggregate_map)?;
+            outer_order_by.push(SortExpr::new(
+                typed,
+                order_expr.asc.unwrap_or(true),
+                order_expr.nulls_first.unwrap_or(false),
+            ));
+        }
+
+        if let Some(having) = &having_typed {
+            self.type_checker
+                .validate_having_expr(having, &group_keys, &aggregates)?;
+        }
+
+        let aggregate_schema = build_aggregate_schema(&group_keys, &aggregates);
+        let aggregate_names = aggregate_schema
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let projection =
+            self.build_aggregate_projection(projected, &group_keys, &aggregates, &aggregate_names)?;
+        let having = having_typed
+            .as_ref()
+            .map(|expr| {
+                self.rewrite_expr_for_aggregate(expr, &group_keys, &aggregates, &aggregate_names)
+            })
+            .transpose()?;
+        let outer_order_by = outer_order_by
+            .into_iter()
+            .map(|sort| {
+                Ok(SortExpr::new(
+                    self.rewrite_expr_for_aggregate(
+                        &sort.expr,
+                        &group_keys,
+                        &aggregates,
+                        &aggregate_names,
+                    )?,
+                    sort.asc,
+                    sort.nulls_first,
+                ))
+            })
+            .collect::<Result<Vec<_>, PlannerError>>()?;
+
+        plan = LogicalPlan::Aggregate {
+            input: Box::new(plan),
+            group_keys,
+            aggregates,
+            having,
+            projection: Projection::All(aggregate_names),
+        };
+
+        let mut windows = Vec::new();
+        let mut window_map = HashMap::new();
+        if let Projection::Columns(columns) = &projection {
+            for column in columns {
+                self.collect_windows_from_typed_expr(&column.expr, &mut windows, &mut window_map)?;
+            }
+        }
+        for sort in &outer_order_by {
+            self.collect_windows_from_typed_expr(&sort.expr, &mut windows, &mut window_map)?;
+        }
+
+        let window_names = (0..windows.len())
+            .map(|index| format!("__window_{index}"))
+            .collect::<Vec<_>>();
+        let mut window_schema = aggregate_schema;
+        window_schema.extend(windows.iter().enumerate().map(|(index, window)| {
+            ColumnMetadata::new(window_names[index].clone(), window.result_type.clone())
+        }));
+        let projection = rewrite_projection_for_windows(
+            &projection,
+            &window_map,
+            window_schema.len() - windows.len(),
+            &window_names,
+        )?;
+        let outer_order_by = outer_order_by
+            .into_iter()
+            .map(|sort| {
+                Ok(SortExpr::new(
+                    rewrite_expr_for_windows(
+                        &sort.expr,
+                        &window_map,
+                        window_schema.len() - windows.len(),
+                        &window_names,
+                    )?,
+                    sort.asc,
+                    sort.nulls_first,
+                ))
+            })
+            .collect::<Result<Vec<_>, PlannerError>>()?;
+
+        self.finish_window_select(
+            stmt,
+            plan,
+            windows,
+            projection,
+            outer_order_by,
+            window_schema,
+        )
+    }
+
+    /// Finish the stages shared by base-row and grouped window queries.
+    fn finish_window_select(
+        &self,
+        stmt: &Select,
+        mut plan: LogicalPlan,
+        windows: Vec<WindowExpr>,
+        projection: Projection,
+        order_by: Vec<SortExpr>,
+        window_schema: Vec<ColumnMetadata>,
+    ) -> Result<PlannedRelation, PlannerError> {
+        plan = LogicalPlan::Window {
+            input: Box::new(plan),
+            windows,
+        };
+
+        let output_schema = projection_schema(&projection, &window_schema);
+        let mut hidden_order_keys = Vec::new();
+        let mut projected_order_by = Vec::with_capacity(order_by.len());
+        for sort in order_by {
+            let expr =
+                match rewrite_expr_for_projected_output(&sort.expr, &projection, &output_schema) {
+                    Ok(expr) => expr,
+                    Err(_) if !stmt.distinct => {
+                        let hidden_index = hidden_order_keys.len();
+                        let name = format!("__order_{hidden_index}");
+                        let output_index = output_schema.len() + hidden_index;
+                        hidden_order_keys.push(ProjectedColumn {
+                            expr: sort.expr.clone(),
+                            alias: Some(name.clone()),
+                        });
+                        TypedExpr::column_ref(
+                            "__project__".to_string(),
+                            name,
+                            output_index,
+                            sort.expr.resolved_type.clone(),
+                            sort.expr.span,
+                        )
+                    }
+                    Err(error) => return Err(error),
+                };
+            projected_order_by.push(SortExpr::new(expr, sort.asc, sort.nulls_first));
+        }
+        let has_hidden_order_keys = !hidden_order_keys.is_empty();
+        let projection = if has_hidden_order_keys {
+            let mut columns = match projection {
+                Projection::Columns(columns) => columns,
+                Projection::All(_) => output_schema
+                    .iter()
+                    .enumerate()
+                    .map(|(index, column)| ProjectedColumn {
+                        expr: TypedExpr::column_ref(
+                            "__window__".to_string(),
+                            column.name.clone(),
+                            index,
+                            column.data_type.clone(),
+                            stmt.span,
+                        ),
+                        alias: None,
+                    })
+                    .collect(),
+            };
+            columns.extend(hidden_order_keys);
+            Projection::Columns(columns)
+        } else {
+            projection
+        };
+        plan = LogicalPlan::Project {
+            input: Box::new(plan),
+            projection,
+        };
+
+        if stmt.distinct {
+            let group_keys = output_schema
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    TypedExpr::column_ref(
+                        LITERAL_TABLE.to_string(),
+                        column.name.clone(),
+                        index,
+                        column.data_type.clone(),
+                        stmt.span,
+                    )
+                })
+                .collect();
+            plan = LogicalPlan::Aggregate {
+                input: Box::new(plan),
+                group_keys,
+                aggregates: Vec::new(),
+                having: None,
+                projection: Projection::All(
+                    output_schema
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect(),
+                ),
+            };
+        }
+        if !projected_order_by.is_empty() {
+            plan = LogicalPlan::Sort {
+                input: Box::new(plan),
+                order_by: projected_order_by,
+            };
+        }
+        if stmt.limit.is_some() || stmt.offset.is_some() {
+            plan = LogicalPlan::Limit {
+                input: Box::new(plan),
+                limit: self.extract_limit_value(&stmt.limit, stmt.span)?,
+                offset: self.extract_limit_value(&stmt.offset, stmt.span)?,
+            };
+        }
+        if has_hidden_order_keys {
+            plan = LogicalPlan::Project {
+                input: Box::new(plan),
+                projection: Projection::Columns(
+                    output_schema
+                        .iter()
+                        .enumerate()
+                        .map(|(index, column)| ProjectedColumn {
+                            expr: TypedExpr::column_ref(
+                                "__ordered__".to_string(),
+                                column.name.clone(),
+                                index,
+                                column.data_type.clone(),
+                                stmt.span,
+                            ),
+                            alias: Some(column.name.clone()),
+                        })
+                        .collect(),
+                ),
+            };
+        }
+
         Ok(PlannedRelation {
             plan,
             schema: output_schema.clone(),
@@ -2601,6 +2899,11 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 star,
                 over: None,
             } if is_aggregate_function(name) => {
+                if args.iter().any(typed_expr_contains_window) {
+                    return Err(PlannerError::invalid_expression(
+                        "aggregate functions cannot contain window functions".to_string(),
+                    ));
+                }
                 for arg in args {
                     if typed_expr_contains_aggregate(arg) {
                         return Err(PlannerError::invalid_expression(
@@ -2652,9 +2955,21 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 }
                 Ok(())
             }
-            TypedExprKind::FunctionCall { args, .. } => {
+            TypedExprKind::FunctionCall { args, over, .. } => {
                 for arg in args {
                     self.collect_aggregates_from_typed_expr(arg, aggregates, aggregate_map)?;
+                }
+                if let Some(window) = over {
+                    for expr in &window.partition_by {
+                        self.collect_aggregates_from_typed_expr(expr, aggregates, aggregate_map)?;
+                    }
+                    for sort in &window.order_by {
+                        self.collect_aggregates_from_typed_expr(
+                            &sort.expr,
+                            aggregates,
+                            aggregate_map,
+                        )?;
+                    }
                 }
                 Ok(())
             }
@@ -3917,6 +4232,49 @@ fn rewrite_expr_for_windows(
     })
 }
 
+/// Rebind an outer ORDER BY expression to the visible projection schema.
+///
+/// Projection aliases have already been substituted before type inference, so
+/// expression identity is enough to map both aliases and repeated expressions
+/// without making aliases visible to WHERE/GROUP BY/window specifications.
+fn rewrite_expr_for_projected_output(
+    expr: &TypedExpr,
+    projection: &Projection,
+    output_schema: &[ColumnMetadata],
+) -> Result<TypedExpr, PlannerError> {
+    let index = match projection {
+        Projection::Columns(columns) => columns
+            .iter()
+            .position(|column| expr_key(&column.expr) == expr_key(expr)),
+        Projection::All(_) => match &expr.kind {
+            TypedExprKind::ColumnRef { column_index, .. }
+                if *column_index < output_schema.len() =>
+            {
+                Some(*column_index)
+            }
+            _ => None,
+        },
+    };
+    let Some(index) = index else {
+        return Err(PlannerError::invalid_expression(
+            "ORDER BY expression must appear in the SELECT projection for window queries"
+                .to_string(),
+        ));
+    };
+    let column = output_schema.get(index).ok_or_else(|| {
+        PlannerError::invalid_expression(
+            "ORDER BY projection index is outside the output schema".to_string(),
+        )
+    })?;
+    Ok(TypedExpr::column_ref(
+        "__project__".to_string(),
+        column.name.clone(),
+        index,
+        column.data_type.clone(),
+        expr.span,
+    ))
+}
+
 fn map_join_type(join_type: crate::ast::dml::JoinType) -> JoinType {
     match join_type {
         crate::ast::dml::JoinType::Inner => JoinType::Inner,
@@ -4298,12 +4656,7 @@ fn rewrite_expr_with_maps(
             star,
             over,
         } => {
-            if over.is_some() {
-                return Err(PlannerError::invalid_expression(
-                    "window function reached aggregate expression rewrite".to_string(),
-                ));
-            }
-            if *distinct || *star {
+            if over.is_none() && (*distinct || *star) {
                 return Err(PlannerError::invalid_expression(
                     "DISTINCT/STAR modifiers are only supported for aggregates".to_string(),
                 ));
@@ -4317,13 +4670,45 @@ fn rewrite_expr_with_maps(
                     output_names,
                 )?);
             }
+            let over = over
+                .as_ref()
+                .map(|window| {
+                    let partition_by = window
+                        .partition_by
+                        .iter()
+                        .map(|expr| {
+                            rewrite_expr_with_maps(expr, group_key_map, aggregate_map, output_names)
+                        })
+                        .collect::<Result<Vec<_>, PlannerError>>()?;
+                    let order_by = window
+                        .order_by
+                        .iter()
+                        .map(|sort| {
+                            Ok(SortExpr::new(
+                                rewrite_expr_with_maps(
+                                    &sort.expr,
+                                    group_key_map,
+                                    aggregate_map,
+                                    output_names,
+                                )?,
+                                sort.asc,
+                                sort.nulls_first,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, PlannerError>>()?;
+                    Ok(crate::planner::typed_expr::TypedWindowSpec {
+                        partition_by,
+                        order_by,
+                    })
+                })
+                .transpose()?;
             Ok(TypedExpr {
                 kind: TypedExprKind::FunctionCall {
                     name: name.clone(),
                     args: rewritten_args,
-                    distinct: false,
-                    star: false,
-                    over: None,
+                    distinct: *distinct,
+                    star: *star,
+                    over,
                 },
                 resolved_type: expr.resolved_type.clone(),
                 span: expr.span,

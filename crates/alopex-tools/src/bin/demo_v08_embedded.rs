@@ -471,6 +471,21 @@ fn scenario_local_sql_matrix() -> DemoResult {
             ],
         ),
         (
+            "SELECT DISTINCT SUM(amount) AS total, DENSE_RANK() OVER (ORDER BY SUM(amount)) AS sales_rank, SUM(SUM(amount)) OVER () AS grand FROM sales GROUP BY region HAVING SUM(amount) >= 50 ORDER BY total",
+            vec![
+                vec![
+                    SqlValue::Double(50.0),
+                    SqlValue::BigInt(1),
+                    SqlValue::Double(650.0),
+                ],
+                vec![
+                    SqlValue::Double(300.0),
+                    SqlValue::BigInt(2),
+                    SqlValue::Double(650.0),
+                ],
+            ],
+        ),
+        (
             "SELECT id, LAG(amount) OVER (ORDER BY id) AS previous, LEAD(amount, 2, -1) OVER (ORDER BY id) AS two_ahead, LAG(amount, 0) OVER (ORDER BY id) AS current_value, amount - LAG(amount, 1, amount) OVER (ORDER BY id) AS delta FROM sales ORDER BY id",
             vec![
                 vec![
@@ -562,7 +577,7 @@ fn scenario_local_sql_matrix() -> DemoResult {
         ),
     ];
     require(
-        v08_matrix.len() == 17,
+        v08_matrix.len() == 18,
         "v0.8.x SQL success-check count changed",
     )?;
     for (sql, expected) in &v08_matrix {
@@ -583,7 +598,7 @@ fn scenario_local_sql_matrix() -> DemoResult {
         expect_sql_error(&db, sql, expected)?;
     }
     require(
-        v08_matrix.len() + rejected_v08.len() == 19,
+        v08_matrix.len() + rejected_v08.len() == 20,
         "v0.8.x SQL check count changed",
     )?;
     require(

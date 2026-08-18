@@ -114,6 +114,36 @@ fn batch_json_lag_and_lead_preserve_exact_rows() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn batch_json_grouped_window_composition_preserves_exact_rows() {
+    let output = run_alopex(&[
+        "--in-memory",
+        "--batch",
+        "--quiet",
+        "--output",
+        "json",
+        "sql",
+        "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER); \
+         INSERT INTO samples VALUES (1, 'east', 10), (2, 'east', 20); \
+         INSERT INTO samples VALUES (3, 'west', 30), (4, 'west', 40); \
+         SELECT region, SUM(value) AS total, \
+                RANK() OVER (ORDER BY SUM(value) DESC) AS sales_rank, \
+                SUM(SUM(value)) OVER () AS retained_total \
+         FROM samples GROUP BY region HAVING SUM(value) >= 30 \
+         ORDER BY sales_rank, region",
+    ]);
+
+    assert_eq!(
+        parse_json_stdout(&output),
+        serde_json::json!([[{
+            "region": "west", "total": 70, "sales_rank": 1, "retained_total": 100
+        }, {
+            "region": "east", "total": 30, "sales_rank": 2, "retained_total": 100
+        }]])
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn batch_json_includes_ddl_dml_status_per_statement() {
     let output = run_alopex(&[
         "--in-memory",

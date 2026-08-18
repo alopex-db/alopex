@@ -148,6 +148,29 @@ def test_execute_sql_rows_and_range_frames_preserve_exact_rows(db):
     ]
 
 
+def test_execute_sql_grouped_window_composition_preserves_exact_rows(db):
+    db.execute_sql(
+        "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER)"
+    )
+    db.execute_sql(
+        "INSERT INTO samples VALUES "
+        "(1, 'east', 10), (2, 'east', 20), "
+        "(3, 'west', 30), (4, 'west', 40)"
+    )
+
+    rows = db.execute_sql(
+        "SELECT region, SUM(value) AS total, "
+        "RANK() OVER (ORDER BY SUM(value) DESC) AS sales_rank, "
+        "SUM(SUM(value)) OVER () AS retained_total "
+        "FROM samples GROUP BY region HAVING SUM(value) >= 30 "
+        "ORDER BY sales_rank, region"
+    )
+    assert rows == [
+        {"region": "west", "total": 70, "sales_rank": 1, "retained_total": 100},
+        {"region": "east", "total": 30, "sales_rank": 2, "retained_total": 100},
+    ]
+
+
 def test_execute_sql_params_binding(users_db):
     users_db.execute_sql(
         "INSERT INTO users (id, name, email) VALUES (?, ?, ?)",

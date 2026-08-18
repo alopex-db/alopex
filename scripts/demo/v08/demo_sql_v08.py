@@ -331,6 +331,16 @@ def main() -> int:
                 ],
             ),
             (
+                "SELECT DISTINCT SUM(amount) AS total, "
+                "DENSE_RANK() OVER (ORDER BY SUM(amount)) AS sales_rank, "
+                "SUM(SUM(amount)) OVER () AS grand "
+                "FROM sales GROUP BY region HAVING SUM(amount) >= 50 ORDER BY total",
+                [
+                    {"total": 50.0, "sales_rank": 1, "grand": 650.0},
+                    {"total": 300.0, "sales_rank": 2, "grand": 650.0},
+                ],
+            ),
+            (
                 "SELECT id, LAG(amount) OVER (ORDER BY id) AS previous, "
                 "LEAD(amount, 2, -1) OVER (ORDER BY id) AS two_ahead, "
                 "LAG(amount, 0) OVER (ORDER BY id) AS current_value, "
@@ -484,12 +494,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 54:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 54")
+        if completed != 55:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 55")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 54 checks passed")
+    print("v0.8 SQL correctness demo completed: 55 checks passed")
     return 0
 
 

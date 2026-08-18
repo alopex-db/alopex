@@ -248,6 +248,49 @@ fn sql_integration_rows_and_range_frames_preserve_exact_rows() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_grouped_window_composition_preserves_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER); \
+         INSERT INTO samples VALUES \
+             (1, 'east', 10), (2, 'east', 20), \
+             (3, 'west', 30), (4, 'west', 40);",
+    )
+    .unwrap();
+
+    let result = db
+        .execute_sql(
+            "SELECT region, SUM(value) AS total, \
+                    RANK() OVER (ORDER BY SUM(value) DESC) AS sales_rank, \
+                    SUM(SUM(value)) OVER () AS retained_total \
+             FROM samples GROUP BY region HAVING SUM(value) >= 30 \
+             ORDER BY sales_rank, region;",
+        )
+        .unwrap();
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![
+                SqlValue::Text("west".into()),
+                SqlValue::BigInt(70),
+                SqlValue::BigInt(1),
+                SqlValue::BigInt(100),
+            ],
+            vec![
+                SqlValue::Text("east".into()),
+                SqlValue::BigInt(30),
+                SqlValue::BigInt(2),
+                SqlValue::BigInt(100),
+            ],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_database_execute_sql_pragma_uses_store_path() {
     let db = Database::new();
 
