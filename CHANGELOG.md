@@ -21,6 +21,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Rust consumers of the published Embedded/SQL crates no longer require the
+  Nim parser shared library at runtime: target-specific static parser archives
+  are bundled into `alopex-sql`, while shared libraries remain Python-wheel
+  assets. The release verifier now runs a published dependency smoke without
+  `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH`.
+- Internal Alopex crate dependencies use exact `=0.8.7` patch requirements so
+  pinning `alopex-embedded = "=0.8.7"` cannot resolve sibling Alopex crates to a
+  newer patch line. The public verifier checks the generated Cargo.lock.
 - An explicit default RANGE frame for a value window uses the same linear
   peer-group path as its implicit form, avoiding a size-dependent resource
   failure for semantically identical queries.

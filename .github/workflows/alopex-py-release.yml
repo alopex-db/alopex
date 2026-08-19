@@ -120,13 +120,17 @@ jobs:
           with tarfile.open(archive, 'r:gz') as handle:
               members = {member.name: handle.extractfile(member).read() for member in handle.getmembers()}
           library = members[asset['library']['path']]
+          static_library = members[asset['static_library']['path']]
           assert hashlib.sha256(library).hexdigest() == asset['library']['sha256']
+          assert hashlib.sha256(static_library).hexdigest() == asset['static_library']['sha256']
           destination = Path('crates/alopex-sql/nim-sql-parser/vendor/x86_64-unknown-linux-gnu')
           destination.mkdir(parents=True, exist_ok=True)
           name = Path(asset['library']['path']).name
+          static_name = Path(asset['static_library']['path']).name
           (destination / name).write_bytes(library)
+          (destination / static_name).write_bytes(static_library)
           (destination / 'CONTRACT_VERSION').write_bytes(b'0.9.0\n')
-          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
+          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n{asset['static_library']['sha256']}  {static_name}\n".encode())
           package_native = Path('crates/alopex-py/python/alopex/native')
           package_native.mkdir(parents=True, exist_ok=True)
           (package_native / name).write_bytes(library)
@@ -260,13 +264,17 @@ jobs:
           with tarfile.open(root / asset['archive']['filename'], 'r:gz') as handle:
               members = {m.name: handle.extractfile(m).read() for m in handle.getmembers()}
           library = members[asset['library']['path']]
+          static_library = members[asset['static_library']['path']]
           assert hashlib.sha256(library).hexdigest() == asset['library']['sha256']
+          assert hashlib.sha256(static_library).hexdigest() == asset['static_library']['sha256']
           destination = Path('crates/alopex-sql/nim-sql-parser/vendor') / target
           destination.mkdir(parents=True, exist_ok=True)
           name = Path(asset['library']['path']).name
+          static_name = Path(asset['static_library']['path']).name
           (destination / name).write_bytes(library)
+          (destination / static_name).write_bytes(static_library)
           (destination / 'CONTRACT_VERSION').write_bytes(b'0.9.0\n')
-          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
+          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n{asset['static_library']['sha256']}  {static_name}\n".encode())
           package_native = Path('crates/alopex-py/python/alopex/native')
           package_native.mkdir(parents=True, exist_ok=True)
           (package_native / name).write_bytes(library)
@@ -378,13 +386,17 @@ jobs:
           with tarfile.open(root / asset['archive']['filename'], 'r:gz') as handle:
               members = {m.name: handle.extractfile(m).read() for m in handle.getmembers()}
           library = members[asset['library']['path']]
+          static_library = members[asset['static_library']['path']]
           assert hashlib.sha256(library).hexdigest() == asset['library']['sha256']
+          assert hashlib.sha256(static_library).hexdigest() == asset['static_library']['sha256']
           destination = Path('crates/alopex-sql/nim-sql-parser/vendor') / target
           destination.mkdir(parents=True, exist_ok=True)
           name = Path(asset['library']['path']).name
+          static_name = Path(asset['static_library']['path']).name
           (destination / name).write_bytes(library)
+          (destination / static_name).write_bytes(static_library)
           (destination / 'CONTRACT_VERSION').write_bytes(b'0.9.0\n')
-          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
+          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n{asset['static_library']['sha256']}  {static_name}\n".encode())
           Path('crates/alopex-py/python/alopex/native').mkdir(parents=True, exist_ok=True)
           Path('crates/alopex-py/python/alopex/native', name).write_bytes(library)
           Path('crates/alopex-py/python/alopex/native/CONTRACT_VERSION').write_bytes(b'0.9.0\n')

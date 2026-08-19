@@ -316,7 +316,17 @@ trap "rm -rf \"${tool_source}\"" EXIT
 mkdir -p "${tool_source}/src/bin"
 cp crates/alopex-tools/src/bin/verify_release_embedded.rs "${tool_source}/src/bin/"
 cp crates/alopex-tools/src/bin/demo_v08_embedded.rs "${tool_source}/src/bin/"
-cp crates/alopex-tools/build.rs "${tool_source}/"
+cat >"${tool_source}/src/bin/embedded-dependency-smoke.rs" <<'EOF'
+use alopex_embedded::Database;
+
+fn main() {
+    let database = Database::new();
+    database
+        .execute_sql("CREATE TABLE smoke (id INTEGER); INSERT INTO smoke VALUES (1);")
+        .expect("published alopex-embedded must execute SQL without parser runtime assets");
+    println!("ok");
+}
+EOF
 cat >"${tool_source}/Cargo.toml" <<EOF
 [workspace]
 
@@ -334,6 +344,10 @@ path = "src/bin/verify_release_embedded.rs"
 name = "demo-v08-embedded"
 path = "src/bin/demo_v08_embedded.rs"
 
+[[bin]]
+name = "embedded-dependency-smoke"
+path = "src/bin/embedded-dependency-smoke.rs"
+
 [dependencies]
 serde_json = "1.0"
 alopex-embedded = { version = "=${ALOPEX_VERSION}" }
@@ -341,7 +355,37 @@ alopex-core = { version = "=${ALOPEX_VERSION}" }
 alopex-sql = { version = "=${ALOPEX_VERSION}" }
 EOF
 CARGO_TARGET_DIR=/tools-target cargo build --manifest-path "${tool_source}/Cargo.toml" --release
+cargo generate-lockfile --manifest-path "${tool_source}/Cargo.toml"
+python3 - "${tool_source}/Cargo.lock" "${ALOPEX_VERSION}" <<'PY'
+import sys
+import tomllib
+
+lock_path, expected = sys.argv[1:]
+with open(lock_path, "rb") as stream:
+    packages = tomllib.load(stream).get("package", [])
+owned = {
+    "alopex-core",
+    "alopex-dataframe",
+    "alopex-sql",
+    "alopex-embedded",
+    "alopex-cluster",
+    "alopex-cli",
+    "alopex-server",
+    "alopex-py",
+}
+alopex = [p for p in packages if p["name"] in owned]
+bad = sorted((p["name"], p["version"]) for p in alopex if p["version"] != expected)
+if bad:
+    raise SystemExit(f"Alopex dependency resolution escaped v{expected}: {bad}")
+if not any(p["name"] == "alopex-embedded" for p in alopex):
+    raise SystemExit("Cargo.lock does not contain the published alopex-embedded package")
+PY
 '
+
+run_step "公開版 alopex-embedded 実行時依存 smoke" \
+    "最小の依存crateを共有ライブラリ探索環境なしで実行し、#179の実行時parser欠落を検出する。" \
+    -- run_in_container bash -c \
+    'env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH /tools-target/release/embedded-dependency-smoke'
 
 run_step "mode-parity 検証 (verify.py)" \
     "「ライブラリ・組み込み・サーバー・gRPC・クラスタの各サーフェスが同一 SQL コーパスに対して同一結果を返す」ことを機械検証する。S2a(単一プロセス内での全ペア比較)・S2b(writer/reader を分けた永続化データの相互可搬性)・S2c(旧版データの全reader互換)を全件実行し、SKIPを許可しない。" \

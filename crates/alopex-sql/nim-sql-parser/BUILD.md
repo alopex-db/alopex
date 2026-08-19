@@ -1,8 +1,8 @@
 # Nim SQL Parser Build Procedure
 
-The parser shared library is a generated local artifact and is intentionally
+The parser native artifacts are generated local outputs and are intentionally
 ignored by Git. Use the repository-level scripts so the toolchain and output
-name stay aligned with Cargo's FFI build script.
+names stay aligned with Cargo's FFI build script.
 
 ## Linux, macOS, and Windows
 
@@ -31,11 +31,17 @@ only `crates/alopex-sql/nim-sql-parser`. Mounting only the parser directory is
 intentional: a Git worktree's `.git` file points outside the container and can
 break Nimble's dependency resolution.
 
-The build output is one of:
+The build produces two target-specific artifacts:
 
 - Linux: `libalopex_sql_parser.so`
 - macOS: `libalopex_sql_parser.dylib`
 - Windows: `alopex_sql_parser.dll`
+- Linux/macOS: `libalopex_sql_parser.a`
+- Windows MSVC: `alopex_sql_parser.lib`
+
+Rust consumers use the static artifact, bundled into `alopex-sql` by Cargo.
+The shared artifact remains available for the Python wheel's native asset
+directory; Rust applications do not need a parser DLL/SO at runtime.
 
 The library exports `alopex_parse_sql`, `alopex_parse_promql`,
 `alopex_parser_version`, `alopex_parser_init`, and `alopex_free_buffer`.
@@ -62,7 +68,6 @@ sidecars with the library and use:
 ```sh
 NIM_SQL_PARSER_LIB_DIR="$PWD/crates/alopex-sql/nim-sql-parser" \
 ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD=1 \
-LD_LIBRARY_PATH="$PWD/crates/alopex-sql/nim-sql-parser" \
 cargo test -p alopex-sql --lib
 ```
 

@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-pub(crate) const REQUIRED_ALOPEX_VERSION: &str = "0.8.4";
+pub(crate) const REQUIRED_ALOPEX_VERSION: &str = "0.8.7";
 pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.9.0";
 pub(crate) const VENDOR_MANIFEST_SHA256: &str =
     "db70742bea017a4d2683ad0d17f602b25dbcdfa7f512e3c283fbb9f7fcce298d";
-const VENDOR_MANIFEST_SCHEMA: &str = "alopex-parser-vendor-manifest-v1";
+const VENDOR_MANIFEST_SCHEMA: &str = "alopex-parser-vendor-manifest-v2";
 const VENDOR_MANIFEST_RELATIVE_PATH: &str = "nim-sql-parser/vendor/parser-vendor-manifest.json";
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_SIDECAR_BYTES: u64 = 1024;
@@ -36,19 +36,13 @@ impl fmt::Display for ResolveError {
 pub(crate) struct ResolvedNativeLibrary {
     pub(crate) directory: PathBuf,
     pub(crate) library_path: PathBuf,
-    pub(crate) link_behavior: LinkBehavior,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum LinkBehavior {
-    UnixRpath,
-    WindowsRawDylib,
+    pub(crate) static_library_path: PathBuf,
 }
 
 #[derive(Clone, Copy)]
 struct TargetSpec {
     library_filename: &'static str,
-    link_behavior: LinkBehavior,
+    static_library_filename: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -62,6 +56,7 @@ struct VendorManifest {
 #[derive(Deserialize)]
 struct VendorAsset {
     library: LibraryIdentity,
+    static_library: LibraryIdentity,
     target: String,
 }
 
@@ -147,8 +142,8 @@ fn resolve_native_library_with_options(
         warn_local_identity_scope();
         return Ok(ResolvedNativeLibrary {
             library_path: directory.join(target_spec.library_filename),
+            static_library_path: directory.join(target_spec.static_library_filename),
             directory,
-            link_behavior: target_spec.link_behavior,
         });
     }
 
@@ -195,8 +190,8 @@ fn resolve_native_library_with_options(
 
     Ok(ResolvedNativeLibrary {
         library_path: directory.join(target_spec.library_filename),
+        static_library_path: directory.join(target_spec.static_library_filename),
         directory,
-        link_behavior: target_spec.link_behavior,
     })
 }
 
@@ -226,13 +221,24 @@ fn verify_local_source_directory(
     let metadata = regular_file_metadata(&library_path, "native parser library")?;
     let library_sha256 =
         sha256_regular_file(&library_path, "native parser library", metadata.len())?;
+    let static_library_path = directory.join(target_spec.static_library_filename);
+    let static_metadata =
+        regular_file_metadata(&static_library_path, "native parser static library")?;
+    let static_library_sha256 = sha256_regular_file(
+        &static_library_path,
+        "native parser static library",
+        static_metadata.len(),
+    )?;
     let checksum_path = directory.join("SHA256SUMS");
     let checksum = read_small_regular_file(
         &checksum_path,
         "native parser checksum sidecar",
         MAX_SIDECAR_BYTES,
     )?;
-    let expected_checksum = format!("{library_sha256}  {}\n", target_spec.library_filename);
+    let expected_checksum = format!(
+        "{library_sha256}  {}\n{static_library_sha256}  {}\n",
+        target_spec.library_filename, target_spec.static_library_filename
+    );
     if checksum != expected_checksum.as_bytes() {
         return Err(error(format!(
             "native parser checksum sidecar mismatch: {}",
@@ -246,15 +252,15 @@ fn target_spec(target: &str) -> Result<TargetSpec, ResolveError> {
     match target {
         "x86_64-unknown-linux-gnu" => Ok(TargetSpec {
             library_filename: "libalopex_sql_parser.so",
-            link_behavior: LinkBehavior::UnixRpath,
+            static_library_filename: "libalopex_sql_parser.a",
         }),
         "x86_64-apple-darwin" | "aarch64-apple-darwin" => Ok(TargetSpec {
             library_filename: "libalopex_sql_parser.dylib",
-            link_behavior: LinkBehavior::UnixRpath,
+            static_library_filename: "libalopex_sql_parser.a",
         }),
         "x86_64-pc-windows-msvc" => Ok(TargetSpec {
             library_filename: "alopex_sql_parser.dll",
-            link_behavior: LinkBehavior::WindowsRawDylib,
+            static_library_filename: "alopex_sql_parser.lib",
         }),
         _ => Err(error(format!(
             "unsupported target for the native parser: {target}"
@@ -303,6 +309,26 @@ fn validate_manifest(manifest: &VendorManifest) -> Result<(), ResolveError> {
             )));
         }
         require_sha256(&asset.library.sha256, "parser vendor library SHA-256")?;
+        let expected_static_path = format!(
+            "alopex-sql-parser/{}/{}",
+            asset.target, spec.static_library_filename
+        );
+        if asset.static_library.path != expected_static_path {
+            return Err(error(format!(
+                "parser vendor static library path mismatch for {}",
+                asset.target
+            )));
+        }
+        if asset.static_library.size == 0 {
+            return Err(error(format!(
+                "parser vendor static library size is zero for {}",
+                asset.target
+            )));
+        }
+        require_sha256(
+            &asset.static_library.sha256,
+            "parser vendor static library SHA-256",
+        )?;
     }
     Ok(())
 }
@@ -324,6 +350,19 @@ fn verify_target_directory(
         )));
     }
 
+    let static_library_path = directory.join(target_spec.static_library_filename);
+    let static_library_sha256 = sha256_regular_file(
+        &static_library_path,
+        "native parser static library",
+        asset.static_library.size,
+    )?;
+    if static_library_sha256 != asset.static_library.sha256 {
+        return Err(error(format!(
+            "native parser static library SHA-256 mismatch for {}: expected {}, found {}",
+            asset.target, asset.static_library.sha256, static_library_sha256
+        )));
+    }
+
     let checksum_path = directory.join("SHA256SUMS");
     let checksum = read_small_regular_file(
         &checksum_path,
@@ -331,8 +370,11 @@ fn verify_target_directory(
         MAX_SIDECAR_BYTES,
     )?;
     let expected_checksum = format!(
-        "{}  {}\n",
-        asset.library.sha256, target_spec.library_filename
+        "{}  {}\n{}  {}\n",
+        asset.library.sha256,
+        target_spec.library_filename,
+        asset.static_library.sha256,
+        target_spec.static_library_filename
     );
     if checksum != expected_checksum.as_bytes() {
         return Err(error(format!(
@@ -487,6 +529,20 @@ mod tests {
             )
             .expect("decode copied vendor manifest");
             manifest["contract_version"] = serde_json::Value::String(contract.to_owned());
+            manifest["alopex_version"] =
+                serde_json::Value::String(REQUIRED_ALOPEX_VERSION.to_owned());
+            manifest["schema"] =
+                serde_json::Value::String("alopex-parser-vendor-manifest-v2".to_owned());
+            for asset in manifest["assets"].as_array_mut().expect("manifest assets") {
+                let target = asset["target"].as_str().expect("manifest target");
+                let dynamic = asset["library"].clone();
+                let mut static_library = dynamic;
+                static_library["path"] = serde_json::Value::String(format!(
+                    "alopex-sql-parser/{target}/{}",
+                    static_library_name_for_target(target)
+                ));
+                asset["static_library"] = static_library;
+            }
             fs::write(
                 &manifest_path,
                 serde_json::to_vec(&manifest).expect("encode fixture vendor manifest"),
@@ -543,11 +599,35 @@ mod tests {
     fn copy_target_contents(source: &Path, destination: &Path) {
         for name in [
             "CONTRACT_VERSION",
-            "SHA256SUMS",
             library_name_for_source(source),
+            static_library_name_for_source(source),
         ] {
-            fs::copy(source.join(name), destination.join(name)).expect("copy target identity");
+            let source_path = source.join(name);
+            if source_path.exists() {
+                fs::copy(source_path, destination.join(name)).expect("copy target identity");
+            } else if name == static_library_name_for_source(source) {
+                fs::copy(
+                    source.join(library_name_for_source(source)),
+                    destination.join(name),
+                )
+                .expect("copy fixture static library");
+            } else {
+                panic!("missing target identity fixture: {}", source_path.display());
+            }
         }
+        let dynamic_name = library_name_for_source(source);
+        let static_name = static_library_name_for_source(source);
+        let dynamic_sha = sha256_bytes(
+            &fs::read(destination.join(dynamic_name)).expect("read fixture dynamic library"),
+        );
+        let static_sha = sha256_bytes(
+            &fs::read(destination.join(static_name)).expect("read fixture static library"),
+        );
+        fs::write(
+            destination.join("SHA256SUMS"),
+            format!("{dynamic_sha}  {dynamic_name}\n{static_sha}  {static_name}\n"),
+        )
+        .expect("write fixture checksum");
     }
 
     fn library_name_for_source(source: &Path) -> &'static str {
@@ -559,6 +639,23 @@ mod tests {
             "libalopex_sql_parser.dylib"
         } else {
             "libalopex_sql_parser.so"
+        }
+    }
+
+    fn static_library_name_for_source(source: &Path) -> &'static str {
+        static_library_name_for_target(
+            source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("target directory name"),
+        )
+    }
+
+    fn static_library_name_for_target(target: &str) -> &'static str {
+        if target == WINDOWS_TARGET {
+            "alopex_sql_parser.lib"
+        } else {
+            "libalopex_sql_parser.a"
         }
     }
 
@@ -592,6 +689,12 @@ mod tests {
             fixture
                 .vendor_dir(LINUX_TARGET)
                 .join("libalopex_sql_parser.so")
+        );
+        assert_eq!(
+            resolved.static_library_path,
+            fixture
+                .vendor_dir(LINUX_TARGET)
+                .join("libalopex_sql_parser.a")
         );
     }
 
@@ -650,7 +753,11 @@ mod tests {
         let fixture = Fixture::new(true);
         fs::write(
             fixture.vendor_dir(LINUX_TARGET).join("SHA256SUMS"),
-            format!("{}  libalopex_sql_parser.so\n", "0".repeat(64)),
+            format!(
+                "{}  libalopex_sql_parser.so\n{}  libalopex_sql_parser.a\n",
+                "0".repeat(64),
+                "0".repeat(64)
+            ),
         )
         .expect("replace fixture checksum");
 
@@ -724,7 +831,7 @@ mod tests {
         .expect_err("the immutable pre-frame vendor must not satisfy contract 0.9.0")
         .to_string();
 
-        assert!(message.contains("vendor manifest contract mismatch"));
+        assert!(message.contains("invalid parser vendor manifest"));
     }
 
     #[test]
@@ -740,7 +847,7 @@ mod tests {
         .expect_err("the local bypass requires both opt-in and an explicit source directory")
         .to_string();
 
-        assert!(message.contains("vendor manifest contract mismatch"));
+        assert!(message.contains("invalid parser vendor manifest"));
     }
 
     #[test]

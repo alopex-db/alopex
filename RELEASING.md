@@ -58,6 +58,10 @@ tag `v${version}` で公開する。RC は `rc/v${version}` を使用し、
 - Python 配布物は公開済み Alopex parser 資産を取得して package-local
   `alopex/native/` に配置する。Python ジョブで Nim を再ビルドせず、任意の
   外部ライブラリディレクトリをローダー入力にしない。
+- Rust向けcrate資産は各targetの静的parser archive（Linux/macOS `.a`、Windows
+  MSVC `.lib`）を同じtarget recordとSHA-256で検証し、`#[link(kind = "static", modifiers = "+bundle")]`
+  で`alopex-sql`へ取り込む。共有parser libraryはPython wheel専用であり、公開版
+  `alopex-embedded`の実行に`LD_LIBRARY_PATH`や利用者側rpathを要求してはならない。
 - 追跡済み v0.8.4 / contract-0.4.0 vendor bytes と sidecar は履歴資産として
   書き換えない。release staging だけが新規4ターゲットの contract-0.9.0
   archive から library/sidecar/manifest を展開し、`build_support.rs` の Alopex

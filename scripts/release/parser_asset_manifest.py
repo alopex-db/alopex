@@ -23,9 +23,9 @@ from typing import Any
 import zlib
 
 
-TARGET_RECORD_SCHEMA = "alopex-parser-target-record-v1"
-BUILD_IDENTITY_SCHEMA = "alopex-parser-build-identity-v1"
-VENDOR_MANIFEST_SCHEMA = "alopex-parser-vendor-manifest-v1"
+TARGET_RECORD_SCHEMA = "alopex-parser-target-record-v2"
+BUILD_IDENTITY_SCHEMA = "alopex-parser-build-identity-v2"
+VENDOR_MANIFEST_SCHEMA = "alopex-parser-vendor-manifest-v2"
 RELEASE_ENVELOPE_SCHEMA = "alopex-parser-release-envelope-v1"
 
 
@@ -44,13 +44,19 @@ REQUIRED_CONTRACT_VERSION = "0.9.0"
 REQUIRED_NIM_VERSION = "2.2.10"
 REQUIRED_NIMBLE_VERSION = "0.22.3"
 REQUIRED_NIMBLE_SHA = "42ef70c2102a942c46f13eb76872326edd525cec"
-REQUIRED_BUILD_PROFILE = "nim-release-library-v1"
+REQUIRED_BUILD_PROFILE = "nim-release-dual-library-v2"
 
 TARGET_LIBRARIES = {
     "aarch64-apple-darwin": "libalopex_sql_parser.dylib",
     "x86_64-apple-darwin": "libalopex_sql_parser.dylib",
     "x86_64-pc-windows-msvc": "alopex_sql_parser.dll",
     "x86_64-unknown-linux-gnu": "libalopex_sql_parser.so",
+}
+TARGET_STATIC_LIBRARIES = {
+    "aarch64-apple-darwin": "libalopex_sql_parser.a",
+    "x86_64-apple-darwin": "libalopex_sql_parser.a",
+    "x86_64-pc-windows-msvc": "alopex_sql_parser.lib",
+    "x86_64-unknown-linux-gnu": "libalopex_sql_parser.a",
 }
 REQUIRED_PACKAGES = {
     "msgpack4nim": {
@@ -275,6 +281,8 @@ def source_path_ignored(relative: PurePosixPath, is_dir: bool) -> bool:
         "alopex_sql_parser.dll",
         "libalopex_sql_parser.dylib",
         "libalopex_sql_parser.so",
+        "libalopex_sql_parser.a",
+        "alopex_sql_parser.lib",
         "poc_msgpack",
         "test_ffi_boundary",
         "test_harness_failure",
@@ -289,6 +297,8 @@ def source_path_ignored(relative: PurePosixPath, is_dir: bool) -> bool:
         ".exe",
         ".pdb",
         ".so",
+        ".a",
+        ".lib",
     }
 
 
@@ -477,6 +487,7 @@ def compile_identity(target: str) -> dict[str, Any]:
         "arguments": [
             "-d:release",
             "--app:lib",
+            "--app:staticlib",
             "--mm:orc",
             "--opt:speed",
         ],
@@ -490,6 +501,9 @@ def compile_identity(target: str) -> dict[str, Any]:
         },
         "linker_flags": TARGET_LINKER_FLAGS[target],
         "profile": REQUIRED_BUILD_PROFILE,
+        "static_c_compiler": (
+            "vcc" if target == "x86_64-pc-windows-msvc" else "default"
+        ),
     }
 
 
@@ -633,9 +647,13 @@ def archive_stem(alopex_version: str, contract_version: str, target: str) -> str
     )
 
 
-def internal_paths(target: str) -> tuple[str, str]:
+def internal_paths(target: str) -> tuple[str, str, str]:
     base = f"alopex-sql-parser/{target}"
-    return f"{base}/{TARGET_LIBRARIES[target]}", f"{base}/BUILD_IDENTITY.json"
+    return (
+        f"{base}/{TARGET_LIBRARIES[target]}",
+        f"{base}/{TARGET_STATIC_LIBRARIES[target]}",
+        f"{base}/BUILD_IDENTITY.json",
+    )
 
 
 def build_identity_from_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -644,6 +662,7 @@ def build_identity_from_record(record: dict[str, Any]) -> dict[str, Any]:
         "builder": record["builder"],
         "contract_version": record["contract_version"],
         "library": record["library"],
+        "static_library": record["static_library"],
         "packages": record["packages"],
         "packing": record["packing"],
         "parser_source": record["parser_source"],
@@ -940,6 +959,7 @@ def validate_record_shape(record: dict[str, Any]) -> None:
             "parser_source",
             "registry_metadata",
             "schema",
+            "static_library",
             "target",
         },
         "target record",
@@ -961,6 +981,9 @@ def validate_record_shape(record: dict[str, Any]) -> None:
     validate_sized_digest(record["archive"], "archive", include_path=False)
     validate_sized_digest(record["library"], "library", include_path=True)
     validate_sized_digest(
+        record["static_library"], "static_library", include_path=True
+    )
+    validate_sized_digest(
         record["build_identity"], "build_identity", include_path=True
     )
 
@@ -969,12 +992,15 @@ def validate_record_shape(record: dict[str, Any]) -> None:
     )
     if record["archive"]["filename"] != f"{stem}.tar.gz":
         raise ParserAssetError("archive filename does not match target identity")
-    library_path, identity_path = internal_paths(target)
+    library_path, static_library_path, identity_path = internal_paths(target)
     if record["library"]["path"] != library_path:
         raise ParserAssetError("internal library path does not match target")
+    if record["static_library"]["path"] != static_library_path:
+        raise ParserAssetError("internal static library path does not match target")
     if record["build_identity"]["path"] != identity_path:
         raise ParserAssetError("internal build identity path does not match target")
     safe_archive_path(record["library"]["path"], "library path")
+    safe_archive_path(record["static_library"]["path"], "static library path")
     safe_archive_path(record["build_identity"]["path"], "build identity path")
 
 
@@ -994,6 +1020,7 @@ def verify_record_archive(record: dict[str, Any], archive_path: Path) -> None:
     expected_paths = {
         record["build_identity"]["path"],
         record["library"]["path"],
+        record["static_library"]["path"],
     }
     if set(members) != expected_paths:
         raise ParserAssetError(
@@ -1004,6 +1031,12 @@ def verify_record_archive(record: dict[str, Any], archive_path: Path) -> None:
         raise ParserAssetError("internal library size mismatch")
     if sha256_bytes(library_content) != record["library"]["sha256"]:
         raise ParserAssetError("internal library digest mismatch")
+
+    static_library_content = members[record["static_library"]["path"]]
+    if len(static_library_content) != record["static_library"]["size"]:
+        raise ParserAssetError("internal static library size mismatch")
+    if sha256_bytes(static_library_content) != record["static_library"]["sha256"]:
+        raise ParserAssetError("internal static library digest mismatch")
 
     identity_content = members[record["build_identity"]["path"]]
     if len(identity_content) != record["build_identity"]["size"]:
@@ -1056,6 +1089,17 @@ def pack_target(args: argparse.Namespace) -> None:
         "native parser library",
         max_bytes=MAX_ARCHIVE_MEMBER_BYTES,
     )
+    static_library_path = Path(args.static_library)
+    if static_library_path.name != TARGET_STATIC_LIBRARIES[target]:
+        raise ParserAssetError(
+            f"static library name for target {target} must be "
+            f"{TARGET_STATIC_LIBRARIES[target]}"
+        )
+    static_library_content = read_regular_file(
+        static_library_path,
+        "native parser static library",
+        max_bytes=MAX_ARCHIVE_MEMBER_BYTES,
+    )
 
     source_root = Path(args.source_root)
     contract_content = read_regular_file(
@@ -1088,11 +1132,16 @@ def pack_target(args: argparse.Namespace) -> None:
         },
         "packer": packer_identity(),
     }
-    library_member, identity_member = internal_paths(target)
+    library_member, static_library_member, identity_member = internal_paths(target)
     library = {
         "path": library_member,
         "sha256": sha256_bytes(library_content),
         "size": len(library_content),
+    }
+    static_library = {
+        "path": static_library_member,
+        "sha256": sha256_bytes(static_library_content),
+        "size": len(static_library_content),
     }
     record: dict[str, Any] = {
         "alopex_version": args.alopex_version,
@@ -1106,6 +1155,7 @@ def pack_target(args: argparse.Namespace) -> None:
         "parser_source": parser_source,
         "registry_metadata": registry_metadata,
         "schema": TARGET_RECORD_SCHEMA,
+        "static_library": static_library,
         "target": target,
     }
     identity = build_identity_from_record(record)
@@ -1116,7 +1166,11 @@ def pack_target(args: argparse.Namespace) -> None:
         "size": len(identity_content),
     }
     archive_content = normalized_archive_bytes(
-        {identity_member: identity_content, library_member: library_content}
+        {
+            identity_member: identity_content,
+            library_member: library_content,
+            static_library_member: static_library_content,
+        }
     )
     stem = archive_stem(args.alopex_version, args.contract_version, target)
     archive_filename = f"{stem}.tar.gz"
@@ -1129,6 +1183,7 @@ def pack_target(args: argparse.Namespace) -> None:
     if read_normalized_archive(archive_content) != {
         identity_member: identity_content,
         library_member: library_content,
+        static_library_member: static_library_content,
     }:
         raise ParserAssetError("generated archive did not replay byte-identically")
 
@@ -1179,6 +1234,7 @@ def manifest_asset(record: dict[str, Any]) -> dict[str, Any]:
         "build_identity": record["build_identity"],
         "builder": record["builder"],
         "library": record["library"],
+        "static_library": record["static_library"],
         "target": record["target"],
     }
 
@@ -1198,6 +1254,7 @@ def record_from_manifest(
         "parser_source": manifest["parser_source"],
         "registry_metadata": manifest["registry_metadata"],
         "schema": TARGET_RECORD_SCHEMA,
+        "static_library": asset["static_library"],
         "target": asset["target"],
     }
 
@@ -1264,7 +1321,14 @@ def validate_manifest_shape(manifest: dict[str, Any]) -> None:
             raise ParserAssetError(f"assets[{index}] must be an object")
         require_exact_keys(
             asset,
-            {"archive", "build_identity", "builder", "library", "target"},
+            {
+                "archive",
+                "build_identity",
+                "builder",
+                "library",
+                "static_library",
+                "target",
+            },
             f"assets[{index}]",
         )
         record = record_from_manifest(manifest, asset)
@@ -1386,6 +1450,7 @@ def parser() -> argparse.ArgumentParser:
     pack.add_argument("--contract-version", required=True)
     pack.add_argument("--target", required=True)
     pack.add_argument("--library", required=True)
+    pack.add_argument("--static-library", required=True)
     pack.add_argument("--source-root", required=True)
     pack.add_argument("--nim-version", required=True)
     pack.add_argument("--nim-binary", required=True)
