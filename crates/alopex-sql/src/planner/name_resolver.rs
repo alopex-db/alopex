@@ -341,7 +341,9 @@ impl<'a, C: Catalog + ?Sized> NameResolver<'a, C> {
                 Ok(())
             }
 
-            ExprKind::Cast { expr, .. } => self.resolve_expr_recursive(expr, table),
+            ExprKind::Cast { expr, .. } | ExprKind::TryCast { expr, .. } => {
+                self.resolve_expr_recursive(expr, table)
+            }
 
             ExprKind::Between {
                 expr: e, low, high, ..

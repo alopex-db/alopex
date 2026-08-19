@@ -79,7 +79,7 @@ suite "FFI boundary (issue #40)":
 suite "Skulk query parser FFI contract":
 
   test "contract version covers SQL-TS and PromQL payloads":
-    check $alopex_parser_version() == "0.8.0"
+    check $alopex_parser_version() == "0.9.0"
 
   test "SQL-TS interval is emitted as an explicit literal variant":
     let res = callFfi("SELECT NOW() - INTERVAL '24 hours'")

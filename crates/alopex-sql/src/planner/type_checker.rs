@@ -236,6 +236,15 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 ))
             }
 
+            ExprKind::TryCast { expr, target_type } => {
+                let typed_expr = self.infer_type_with_scope(expr, scope, plan_subquery)?;
+                Ok(TypedExpr::try_cast(
+                    typed_expr,
+                    ResolvedType::from_ast(target_type),
+                    span,
+                ))
+            }
+
             ExprKind::Between {
                 expr,
                 low,

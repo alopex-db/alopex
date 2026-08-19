@@ -8,7 +8,7 @@ use std::fmt;
 
 use crate::catalog::CatalogError;
 use crate::error::ParserError;
-use crate::executor::ExecutorError;
+use crate::executor::{EvaluationError, ExecutorError};
 use crate::planner::PlannerError;
 use crate::storage::StorageError;
 
@@ -471,6 +471,14 @@ impl From<ExecutorError> for SqlError {
                 message: format!("resource exhausted: {message}"),
                 code: "ALOPEX-E003",
             },
+            ExecutorError::Evaluation(EvaluationError::CastFailed {
+                source_type,
+                target,
+                reason,
+            }) => Self::Execution {
+                message: format!("cannot cast {source_type} to {target}: {reason}"),
+                code: "ALOPEX-E004",
+            },
             ExecutorError::TableNotFound(name) => Self::Catalog {
                 message: format!("table '{name}' not found"),
                 location: ErrorLocation::default(),
@@ -671,5 +679,20 @@ mod tests {
             unified.message_with_location(),
             "error[ALOPEX-E003]: resource exhausted: recursive CTE 'numbers' reached row limit 100000"
         );
+    }
+
+    #[test]
+    fn from_cast_failure_preserves_stable_e004_without_internal_vocabulary() {
+        let unified = SqlError::from(ExecutorError::Evaluation(EvaluationError::CastFailed {
+            source_type: "Text".to_string(),
+            target: "INTEGER".to_string(),
+            reason: "invalid integer text".to_string(),
+        }));
+
+        assert_eq!(unified.code(), "ALOPEX-E004");
+        let rendered = unified.to_string();
+        assert!(rendered.contains("cannot cast Text to INTEGER"));
+        assert!(!rendered.contains("TypedExpr"));
+        assert!(!rendered.contains("MessagePack"));
     }
 }

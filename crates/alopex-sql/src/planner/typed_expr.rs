@@ -119,6 +119,14 @@ pub enum TypedExprKind {
         target_type: ResolvedType,
     },
 
+    /// An explicit type cast that returns NULL on conversion failure.
+    TryCast {
+        /// Expression to cast.
+        expr: Box<TypedExpr>,
+        /// Target type.
+        target_type: ResolvedType,
+    },
+
     /// A BETWEEN expression.
     Between {
         /// Expression to test.
@@ -433,6 +441,18 @@ impl TypedExpr {
     pub fn cast(expr: TypedExpr, target_type: ResolvedType, span: Span) -> Self {
         Self::new(
             TypedExprKind::Cast {
+                expr: Box::new(expr),
+                target_type: target_type.clone(),
+            },
+            target_type,
+            span,
+        )
+    }
+
+    /// Creates a typed TRY_CAST expression.
+    pub fn try_cast(expr: TypedExpr, target_type: ResolvedType, span: Span) -> Self {
+        Self::new(
+            TypedExprKind::TryCast {
                 expr: Box::new(expr),
                 target_type: target_type.clone(),
             },

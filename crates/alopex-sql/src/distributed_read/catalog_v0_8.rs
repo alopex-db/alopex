@@ -360,6 +360,15 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
             failure_outcome: "standard_predicate_local_only before transport",
         },
         RemoteReadCoverageEntry {
+            id: "scalar.try_cast",
+            public_surface: "TRY_CAST safe conversion",
+            identities: &["try_cast"],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "NULL-on-conversion-failure evaluation by the local executor",
+            failure_outcome: "try_cast_local_only before transport",
+        },
+        RemoteReadCoverageEntry {
             id: "relation.recursive_cte",
             public_surface: "recursive common table expressions",
             identities: &["with_recursive"],
@@ -606,6 +615,10 @@ fn validate_expr(
         TypedExprKind::VectorLiteral(_) => Err(RemoteReadRejection::local_only(
             "vector_sql_local_only",
             "vector SQL is not in the v0.8 remote-read catalog",
+        )),
+        TypedExprKind::TryCast { .. } => Err(RemoteReadRejection::local_only(
+            "try_cast_local_only",
+            "TRY_CAST is not in the v0.8 remote-read catalog",
         )),
         TypedExprKind::BinaryOp { left, right, .. } => {
             validate_expr(left, allow_aggregate, analysis)?;
@@ -912,6 +925,24 @@ mod tests {
             classify(&LogicalPlan::filter(scan(), predicate), &references()),
             RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
                 if code == "standard_predicate_local_only"
+        ));
+    }
+
+    #[test]
+    fn try_cast_remains_local_only() {
+        let expression = TypedExpr::try_cast(
+            TypedExpr::literal(
+                Literal::String("42".to_string()),
+                ResolvedType::Text,
+                Span::default(),
+            ),
+            ResolvedType::Integer,
+            Span::default(),
+        );
+        assert!(matches!(
+            classify(&LogicalPlan::filter(scan(), expression), &references()),
+            RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                if code == "try_cast_local_only"
         ));
     }
 

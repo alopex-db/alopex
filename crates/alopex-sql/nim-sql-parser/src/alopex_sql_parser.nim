@@ -17,7 +17,8 @@ static:
   doAssert isExactContractDescriptor(parserContractDescriptor, "0.3.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.6.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.7.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.8.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.8.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.9.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -788,6 +789,14 @@ proc writeExpr(s: Stream; node: SqlNode) =
     s.writeExpr(node.children[0])
     s.writeKey("target_type")
     s.writeDataType(node.children[1])
+  of nkTryCast:
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("TryCast")
+    s.writeKey("expr")
+    s.writeExpr(node.children[0])
+    s.writeKey("target_type")
+    s.writeDataType(node.children[1])
   of nkVectorLiteral:
     s.pack_map(2)
     s.writeKey("variant")
@@ -1496,8 +1505,8 @@ proc validateStagedWriterShape(node: SqlNode) =
     if node.frameBoundKind notin {wfbPreceding, wfbFollowing} and
         node.frameOffset != 0:
       stagedValidationError("non-offset window frame bound has an offset")
-  of nkCast:
-    requireChildren(2, "CAST expression")
+  of nkCast, nkTryCast:
+    requireChildren(2, "cast expression")
   of nkCase:
     if node.caseBranches.len == 0:
       stagedValidationError("CASE expression must have at least 1 branch")

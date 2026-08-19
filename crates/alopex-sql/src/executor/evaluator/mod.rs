@@ -28,7 +28,7 @@ pub use vector_ops::{VectorError, VectorMetric, vector_distance, vector_similari
 
 pub use context::EvalContext;
 pub(crate) use context::begin_statement;
-pub(crate) use timestamp::coerce_value;
+pub(crate) use timestamp::{coerce_value, try_coerce_value};
 
 use crate::executor::{EvaluationError, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;
@@ -72,6 +72,9 @@ pub fn evaluate(expr: &TypedExpr, ctx: &EvalContext<'_>) -> Result<SqlValue> {
         }
         TypedExprKind::Cast { expr, target_type } => {
             timestamp::evaluate_cast(expr, target_type, ctx)
+        }
+        TypedExprKind::TryCast { expr, target_type } => {
+            timestamp::evaluate_try_cast(expr, target_type, ctx)
         }
         TypedExprKind::Like {
             expr,

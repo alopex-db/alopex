@@ -415,6 +415,37 @@ fn sql_integration_standard_predicates_preserve_exact_values() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_try_cast_preserves_values_and_cast_errors() {
+    let db = Database::new();
+    let result = db
+        .execute_sql(
+            "SELECT TRY_CAST('42' AS INTEGER), \
+             TRY_CAST('bad' AS INTEGER), \
+             TRY_CAST([1.0, 2.0] AS VECTOR(3))",
+        )
+        .unwrap();
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![vec![SqlValue::Integer(42), SqlValue::Null, SqlValue::Null,]]
+    );
+
+    let error = db
+        .execute_sql("SELECT CAST('bad' AS INTEGER)")
+        .expect_err("CAST conversion failure must remain an error");
+    let rendered = error.to_string();
+    assert!(rendered.contains("ALOPEX-E004"), "{rendered}");
+    assert!(
+        rendered.contains("cannot cast Text to INTEGER"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("TypedExpr"), "{rendered}");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_grouped_window_composition_preserves_exact_rows() {
     let db = Database::new();
     db.execute_sql(

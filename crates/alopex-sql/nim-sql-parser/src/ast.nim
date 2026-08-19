@@ -57,6 +57,7 @@ type
     nkWindowFrameBound
     nkPartitionByClause
     nkCast
+    nkTryCast
     nkAlias
     nkFromClause
     nkFromTable

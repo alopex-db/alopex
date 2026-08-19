@@ -9,7 +9,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 pub(crate) const REQUIRED_ALOPEX_VERSION: &str = "0.8.4";
-pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.8.0";
+pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.9.0";
 pub(crate) const VENDOR_MANIFEST_SHA256: &str =
     "db70742bea017a4d2683ad0d17f602b25dbcdfa7f512e3c283fbb9f7fcce298d";
 const VENDOR_MANIFEST_SCHEMA: &str = "alopex-parser-vendor-manifest-v1";
@@ -721,7 +721,7 @@ mod tests {
             false,
             VENDOR_MANIFEST_SHA256,
         )
-        .expect_err("the immutable pre-frame vendor must not satisfy contract 0.8.0")
+        .expect_err("the immutable pre-frame vendor must not satisfy contract 0.9.0")
         .to_string();
 
         assert!(message.contains("vendor manifest contract mismatch"));
@@ -814,6 +814,25 @@ mod tests {
             &fixture.manifest_sha256(),
         )
         .expect_err("contract 0.7.0 must not load as the row-predicate producer")
+        .to_string();
+        assert!(message.contains("contract sidecar"));
+    }
+
+    #[test]
+    fn local_source_mode_rejects_pre_try_cast_contract_0_8_sidecar() {
+        let fixture = Fixture::with_contract(false, "0.8.0");
+        let explicit = fixture.explicit_dir(LINUX_TARGET);
+        fs::write(explicit.join("CONTRACT_VERSION"), b"0.8.0\n")
+            .expect("restore pre-TRY_CAST sidecar");
+
+        let message = resolve_native_library_with_options(
+            &fixture.crate_root,
+            LINUX_TARGET,
+            Some(explicit.as_os_str()),
+            true,
+            &fixture.manifest_sha256(),
+        )
+        .expect_err("contract 0.8.0 must not load as the TRY_CAST producer")
         .to_string();
         assert!(message.contains("contract sidecar"));
     }

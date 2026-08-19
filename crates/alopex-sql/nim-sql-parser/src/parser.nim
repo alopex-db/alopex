@@ -354,16 +354,19 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
   discard p.expect(tkRParen)
   p.parseOptionalOver(result)
 
-proc parseCastExpr(p: var Parser): SqlNode =
+proc parseCastBody(p: var Parser; tok: Token; kind: SqlNodeKind): SqlNode =
   p.enterNesting()
   defer: p.leaveNesting()
-  let tok = p.expect(tkCast)
-  result = newNode(nkCast, tokenSpan(tok))
+  result = newNode(kind, tokenSpan(tok))
   discard p.expect(tkLParen)
   result.children.add(p.parseExpr())
   discard p.expect(tkAs)
   result.children.add(p.parseTypeName())
   discard p.expect(tkRParen)
+
+proc parseCastExpr(p: var Parser): SqlNode =
+  let tok = p.expect(tkCast)
+  result = p.parseCastBody(tok, nkCast)
 
 proc parseCaseExpr(p: var Parser): SqlNode =
   p.enterNesting()
@@ -467,7 +470,9 @@ proc parsePrimary(p: var Parser): SqlNode =
     result = newUnaryOp(opNeg, p.parsePrimary(), tokenSpan(tok))
   of tkIdent, tkFirst, tkLast, tkTime:
     let tok = p.advance()
-    if p.check(tkLParen):
+    if tok.value.cmpIgnoreCase("try_cast") == 0 and p.check(tkLParen):
+      result = p.parseCastBody(tok, nkTryCast)
+    elif p.check(tkLParen):
       result = p.parseFunctionCall(tok)
     elif p.check(tkDot):
       discard p.advance()

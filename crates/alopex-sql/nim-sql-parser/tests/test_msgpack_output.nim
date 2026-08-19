@@ -605,6 +605,19 @@ suite "MessagePack output - staged continuous aggregate contract":
     check castKind["variant"].getStr() == "Cast"
     check castKind["target_type"]["variant"].getStr() == "Double"
 
+  test "TRY_CAST has a dedicated MessagePack expression variant":
+    let statement = parseSql(
+      "CREATE CONTINUOUS AGGREGATE hourly AS " &
+      "SELECT TRY_CAST(value AS INTEGER) FROM samples " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    let query = toJsonNode(
+      encodeContinuousAggregateV040ToMsgPack(statement)
+    )["kind"]["query"]
+    let castKind = query["projection"][0]["expr"]["kind"]
+    check castKind["variant"].getStr() == "TryCast"
+    check castKind["target_type"]["variant"].getStr() == "Integer"
+
   test "descriptor compile-time selects the public encoder route and C entry recovers":
     let statement = canonicalContinuousAggregate()
 

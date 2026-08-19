@@ -39,6 +39,9 @@ SELECT TRUE IS TRUE AS truth_value,
        NULL IS DISTINCT FROM 1 AS distinct_null,
        (1, 2) < (1, 3) AS row_less,
        (1, NULL) = (1, NULL) AS row_unknown;
+SELECT TRY_CAST('42' AS INTEGER) AS parsed,
+       TRY_CAST('bad' AS INTEGER) AS rejected,
+       TRY_CAST([1.0, 2.0] AS VECTOR(3)) AS wrong_dimension;
 "#;
 
     {
@@ -62,7 +65,7 @@ SELECT TRUE IS TRUE AS truth_value,
         .expect("json output should be an array of result sets");
     assert_eq!(
         sets.len(),
-        10,
+        11,
         "one result set per statement\nstdout:\n{stdout}"
     );
     let select_rows = sets[2].as_array().expect("SELECT result set");
@@ -167,4 +170,43 @@ SELECT TRUE IS TRUE AS truth_value,
             "row_unknown": null,
         })]
     );
+
+    let try_cast_rows = sets[10].as_array().expect("TRY_CAST result set");
+    assert_eq!(
+        try_cast_rows,
+        &[serde_json::json!({
+            "parsed": 42,
+            "rejected": null,
+            "wrong_dimension": null,
+        })]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn cast_failure_reports_stable_public_error() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(["--in-memory", "--output", "json", "sql"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn alopex");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"SELECT CAST('bad' AS INTEGER);")
+        .expect("write stdin");
+
+    let output = child.wait_with_output().expect("wait");
+    assert!(!output.status.success(), "CAST failure must fail the CLI");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ALOPEX-E004"), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cannot cast Text to INTEGER"),
+        "stderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("TypedExpr"), "stderr:\n{stderr}");
+    assert!(!stderr.contains("MessagePack"), "stderr:\n{stderr}");
 }

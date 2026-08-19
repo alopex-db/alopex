@@ -84,8 +84,10 @@ SELECT n FROM counter ORDER BY n;
 | `ALOPEX-E001` | Transaction conflict during execution. |
 | `ALOPEX-E002` | A write was attempted through a read-only transaction. |
 | `ALOPEX-E003` | 実行時の resource exhaustion。再帰 CTE の iteration/row/memory limit と既存の aggregate/memory limit が対象。 |
+| `ALOPEX-E004` | CAST conversion failure。source/target type と bounded reason を公開し、内部 AST/MessagePack 名は公開しない。 |
 
 - `ColumnNotFound`: 存在しないカラムを `GROUP BY` で参照した場合。
 - `TypeMismatch`: `SUM/AVG` に非数値型、`GROUP_CONCAT` に非 TEXT を指定した場合。
 - `InvalidExpression`: `HAVING` や `SELECT` で GROUP BY に含まれない非集約列を参照した場合。
 - `ResourceExhausted`: resource limit を超えた場合。公開 SQL error code は `ALOPEX-E003`。
+- `CastFailed`: CAST の変換不能。TRY_CAST はこの失敗だけを NULL に変換し、source expression の失敗は保持する。公開 SQL error code は `ALOPEX-E004`。

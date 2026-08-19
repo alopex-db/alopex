@@ -649,9 +649,17 @@ fn scenario_local_sql_matrix() -> DemoResult {
                 vec![SqlValue::Integer(2), SqlValue::Text("b".into())],
             ],
         ),
+        (
+            "SELECT TRY_CAST('42' AS INTEGER), TRY_CAST('bad' AS INTEGER), TRY_CAST([1.0, 2.0] AS VECTOR(3))",
+            vec![vec![
+                SqlValue::Integer(42),
+                SqlValue::Null,
+                SqlValue::Null,
+            ]],
+        ),
     ];
     require(
-        v08_matrix.len() == 22,
+        v08_matrix.len() == 23,
         "v0.8.x SQL success-check count changed",
     )?;
     for (sql, expected) in &v08_matrix {
@@ -667,12 +675,13 @@ fn scenario_local_sql_matrix() -> DemoResult {
             "SELECT region AS area, COUNT(*) FROM sales GROUP BY area",
             "ALOPEX-C003",
         ),
+        ("SELECT CAST('bad' AS INTEGER)", "ALOPEX-E004"),
     ];
     for (sql, expected) in rejected_v08 {
         expect_sql_error(&db, sql, expected)?;
     }
     require(
-        v08_matrix.len() + rejected_v08.len() == 24,
+        v08_matrix.len() + rejected_v08.len() == 26,
         "v0.8.x SQL check count changed",
     )?;
     require(

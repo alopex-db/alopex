@@ -208,6 +208,20 @@ pub(crate) fn evaluate_expr_with_subqueries<
                 Ok(SqlValue::Null)
             }
         }
+        TypedExprKind::Cast {
+            expr: inner,
+            target_type,
+        } if contains_subquery(expr) => {
+            let value = evaluate_expr_with_subqueries(txn, catalog, inner, row)?;
+            crate::executor::evaluator::coerce_value(value, target_type)
+        }
+        TypedExprKind::TryCast {
+            expr: inner,
+            target_type,
+        } if contains_subquery(expr) => {
+            let value = evaluate_expr_with_subqueries(txn, catalog, inner, row)?;
+            crate::executor::evaluator::try_coerce_value(value, target_type)
+        }
         _ => {
             let ctx = EvalContext::new(&row.values);
             crate::executor::evaluator::evaluate(expr, &ctx)
@@ -237,9 +251,9 @@ pub(crate) fn contains_subquery(expr: &TypedExpr) -> bool {
                 || else_expr.as_deref().is_some_and(contains_subquery)
         }
         TypedExprKind::FunctionCall { args, .. } => args.iter().any(contains_subquery),
-        TypedExprKind::Cast { expr, .. } | TypedExprKind::IsNull { expr, .. } => {
-            contains_subquery(expr)
-        }
+        TypedExprKind::Cast { expr, .. }
+        | TypedExprKind::TryCast { expr, .. }
+        | TypedExprKind::IsNull { expr, .. } => contains_subquery(expr),
         TypedExprKind::Between {
             expr, low, high, ..
         } => contains_subquery(expr) || contains_subquery(low) || contains_subquery(high),

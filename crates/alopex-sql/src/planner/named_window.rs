@@ -160,6 +160,7 @@ impl NamedWindowResolver {
             }
             ExprKind::UnaryOp { operand, .. }
             | ExprKind::Cast { expr: operand, .. }
+            | ExprKind::TryCast { expr: operand, .. }
             | ExprKind::IsNull { expr: operand, .. }
             | ExprKind::TruthPredicate { expr: operand, .. } => {
                 **operand = self.resolve_expr(operand)?;

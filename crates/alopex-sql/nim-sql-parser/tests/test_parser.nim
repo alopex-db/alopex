@@ -1323,6 +1323,21 @@ suite "Roadmap — DDL and Vector":
     check castExpr.children[1].span.start == Location(line: 1, column: 37)
     check cols.children[2].children[0].strVal == "NOW"
 
+  test "TRY_CAST is a dedicated expression and remains a contextual identifier":
+    let select = parseSql(
+      "SELECT TRY_CAST(raw_value AS INTEGER), try_cast FROM samples"
+    )
+    let cols = select.children[0]
+    let tryCastExpr = cols.children[0]
+    check tryCastExpr.kind == nkTryCast
+    check tryCastExpr.children.len == 2
+    check tryCastExpr.children[0].kind == nkIdentifier
+    check tryCastExpr.children[0].strVal == "raw_value"
+    check tryCastExpr.children[1].kind == nkTypeName
+    check tryCastExpr.children[1].children[0].strVal == "INTEGER"
+    check cols.children[1].kind == nkIdentifier
+    check cols.children[1].strVal == "try_cast"
+
 suite "Roadmap — aggregation":
 
   test "COUNT DISTINCT, COUNT star, aggregates and string concat":

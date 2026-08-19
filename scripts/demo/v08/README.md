@@ -75,8 +75,8 @@ right (qty <= 2):      {2, 4, 5}
 left-only: {3}; right-only: {5}; intersection: {2, 4}
 ```
 
-The Python demo performs exactly 59 result/error checks. The Rust EMB-04
-scenario performs 24 v0.8.x checks: 22 exact result checks and two fail-closed
+The Python demo performs exactly 61 result/error checks. The Rust EMB-04
+scenario performs 26 v0.8.x checks: 23 exact result checks and three fail-closed
 checks. The matrix grows cumulatively: CTE column aliases, recursive CTEs,
 positional/value/distribution windows, explicit frames, and grouped-window
 composition are all positive checks; their former unsupported-feature
@@ -150,6 +150,9 @@ happened to run:
 15. Truth predicates are total Boolean tests, `IS DISTINCT FROM` is null-safe,
     and row equality/ordering follows SQL three-valued and left-to-right
     lexicographic rules. Row-width mismatches fail with `ALOPEX-T013`.
+16. `TRY_CAST` returns NULL for invalid text, overflow, invalid UTF-8, and
+    vector-dimension failures. Ordinary CAST keeps a stable `ALOPEX-E004`
+    error, and source-expression errors are never hidden.
 
 Recursive CTEs use the bounded fixed-point contract added for v0.8.7; invalid
 recursive shapes, dependency cycles, and exhausted iteration or memory budgets
@@ -162,3 +165,5 @@ The constructor grammar, type rules, errors, and parser-contract migration are
 in [`docs/sql-values-query.md`](../../../docs/sql-values-query.md).
 Standard truth, distinctness, row comparison, and error rules are in
 [`docs/sql-standard-predicates.md`](../../../docs/sql-standard-predicates.md).
+Conversion rules and parser-asset migration are in
+[`docs/sql-try-cast.md`](../../../docs/sql-try-cast.md).

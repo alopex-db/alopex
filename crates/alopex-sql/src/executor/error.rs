@@ -177,6 +177,14 @@ pub enum EvaluationError {
     #[error("type mismatch: expected {expected}, got {actual}")]
     TypeMismatch { expected: String, actual: String },
 
+    /// An explicit CAST conversion could not represent the source value.
+    #[error("cannot cast {source_type} to {target}: {reason}")]
+    CastFailed {
+        source_type: String,
+        target: String,
+        reason: String,
+    },
+
     /// Invalid column reference (index out of bounds).
     #[error("invalid column reference: index {index}")]
     InvalidColumnRef { index: usize },

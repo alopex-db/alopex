@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- SQL supports `TRY_CAST`, returning NULL only for conversion failures while
+  preserving source-expression errors; CAST and TRY_CAST share bounded
+  numeric, text, boolean, timestamp, BLOB, and vector conversion rules.
 - SQL supports `IS [NOT] TRUE/FALSE/UNKNOWN`, null-safe
   `IS [NOT] DISTINCT FROM`, and row-value equality, ordering, `IN`, and
   `BETWEEN` with deterministic arity/type diagnostics.
@@ -24,14 +27,14 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- The Nim parser wire contract is `0.8.0`. It adds dedicated `Row`,
-  `TruthPredicate`, and `IsDistinctFrom` expression variants; contract `0.7.0`
-  producers are rejected before decode. This remains internal metadata of the
-  unified Alopex v0.8.8 release, not a separate parser release lane.
+- The Nim parser wire contract is `0.9.0`. It adds a dedicated `TryCast`
+  expression variant; contract `0.8.0` producers are rejected before decode.
+  This remains internal metadata of the unified Alopex v0.8.8 release, not a
+  separate parser release lane.
 
 ### Release verification
 
-- Python and Rust v0.8 demos verify `VALUES` query composition and all six
+- Python and Rust v0.8 demos verify `TRY_CAST`, `VALUES` query composition, and all six
   window functions with exact frame, peer, NULL, bucket, rank, and
   cumulative-distribution results.
 

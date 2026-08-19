@@ -218,7 +218,9 @@ fn expr_contains_subquery(expr: &Expr) -> bool {
                             .any(|order| expr_contains_subquery(&order.expr))
                 })
         }
-        ExprKind::Cast { expr, .. } | ExprKind::IsNull { expr, .. } => expr_contains_subquery(expr),
+        ExprKind::Cast { expr, .. }
+        | ExprKind::TryCast { expr, .. }
+        | ExprKind::IsNull { expr, .. } => expr_contains_subquery(expr),
         ExprKind::Between {
             expr, low, high, ..
         } => {
@@ -843,6 +845,7 @@ impl TableReferenceExtractor {
             }
             TypedExprKind::UnaryOp { operand, .. }
             | TypedExprKind::Cast { expr: operand, .. }
+            | TypedExprKind::TryCast { expr: operand, .. }
             | TypedExprKind::IsNull { expr: operand, .. } => {
                 self.extract_typed_expr(operand, diagnostics, references);
             }
@@ -3306,7 +3309,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             TypedExprKind::UnaryOp { operand, .. } => {
                 self.collect_aggregates_from_typed_expr(operand, aggregates, aggregate_map)
             }
-            TypedExprKind::Cast { expr, .. } => {
+            TypedExprKind::Cast { expr, .. } | TypedExprKind::TryCast { expr, .. } => {
                 self.collect_aggregates_from_typed_expr(expr, aggregates, aggregate_map)
             }
             TypedExprKind::Case {
@@ -3479,7 +3482,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             TypedExprKind::UnaryOp { operand, .. } => {
                 self.collect_windows_from_typed_expr(operand, windows, window_map)
             }
-            TypedExprKind::Cast { expr, .. } | TypedExprKind::IsNull { expr, .. } => {
+            TypedExprKind::Cast { expr, .. }
+            | TypedExprKind::TryCast { expr, .. }
+            | TypedExprKind::IsNull { expr, .. } => {
                 self.collect_windows_from_typed_expr(expr, windows, window_map)
             }
             TypedExprKind::Between {
@@ -4215,6 +4220,10 @@ fn substitute_projection_aliases(
             expr: Box::new(recurse(expr)),
             target_type: target_type.clone(),
         },
+        ExprKind::TryCast { expr, target_type } => ExprKind::TryCast {
+            expr: Box::new(recurse(expr)),
+            target_type: target_type.clone(),
+        },
         ExprKind::Between {
             expr,
             low,
@@ -4352,7 +4361,9 @@ fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
                 })
                 || else_expr.as_deref().is_some_and(expr_contains_aggregate)
         }
-        ExprKind::Cast { expr, .. } => expr_contains_aggregate(expr),
+        ExprKind::Cast { expr, .. } | ExprKind::TryCast { expr, .. } => {
+            expr_contains_aggregate(expr)
+        }
         ExprKind::Between {
             expr, low, high, ..
         } => {
@@ -4408,7 +4419,9 @@ fn typed_expr_contains_aggregate(expr: &TypedExpr) -> bool {
             typed_expr_contains_aggregate(left) || typed_expr_contains_aggregate(right)
         }
         TypedExprKind::UnaryOp { operand, .. } => typed_expr_contains_aggregate(operand),
-        TypedExprKind::Cast { expr, .. } => typed_expr_contains_aggregate(expr),
+        TypedExprKind::Cast { expr, .. } | TypedExprKind::TryCast { expr, .. } => {
+            typed_expr_contains_aggregate(expr)
+        }
         TypedExprKind::Case {
             operand,
             branches,
@@ -4476,6 +4489,7 @@ fn expr_contains_window(expr: &crate::ast::expr::Expr) -> bool {
         }
         crate::ast::expr::ExprKind::UnaryOp { operand, .. }
         | crate::ast::expr::ExprKind::Cast { expr: operand, .. }
+        | crate::ast::expr::ExprKind::TryCast { expr: operand, .. }
         | crate::ast::expr::ExprKind::IsNull { expr: operand, .. } => expr_contains_window(operand),
         crate::ast::expr::ExprKind::Between {
             expr, low, high, ..
@@ -4507,6 +4521,7 @@ fn typed_expr_contains_window(expr: &TypedExpr) -> bool {
         }
         TypedExprKind::UnaryOp { operand, .. }
         | TypedExprKind::Cast { expr: operand, .. }
+        | TypedExprKind::TryCast { expr: operand, .. }
         | TypedExprKind::IsNull { expr: operand, .. } => typed_expr_contains_window(operand),
         TypedExprKind::Between {
             expr, low, high, ..
@@ -4614,6 +4629,13 @@ fn rewrite_expr_for_windows(
             expr: inner,
             target_type,
         } => TypedExprKind::Cast {
+            expr: Box::new(rewrite(inner)?),
+            target_type: target_type.clone(),
+        },
+        TypedExprKind::TryCast {
+            expr: inner,
+            target_type,
+        } => TypedExprKind::TryCast {
             expr: Box::new(rewrite(inner)?),
             target_type: target_type.clone(),
         },
@@ -5322,6 +5344,20 @@ fn rewrite_expr_with_maps(
             let inner = rewrite_expr_with_maps(inner, group_key_map, aggregate_map, output_names)?;
             Ok(TypedExpr {
                 kind: TypedExprKind::Cast {
+                    expr: Box::new(inner),
+                    target_type: target_type.clone(),
+                },
+                resolved_type: expr.resolved_type.clone(),
+                span: expr.span,
+            })
+        }
+        TypedExprKind::TryCast {
+            expr: inner,
+            target_type,
+        } => {
+            let inner = rewrite_expr_with_maps(inner, group_key_map, aggregate_map, output_names)?;
+            Ok(TypedExpr {
+                kind: TypedExprKind::TryCast {
                     expr: Box::new(inner),
                     target_type: target_type.clone(),
                 },

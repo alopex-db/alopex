@@ -113,6 +113,12 @@ def main() -> int:
                 ],
             ),
             (
+                "SELECT TRY_CAST('42' AS INTEGER) AS parsed, "
+                "TRY_CAST('bad' AS INTEGER) AS rejected, "
+                "TRY_CAST([1.0, 2.0] AS VECTOR(3)) AS wrong_dimension",
+                [{"parsed": 42, "rejected": None, "wrong_dimension": None}],
+            ),
+            (
                 "SELECT id, label FROM (VALUES (2, 'b'), (1, 'a')) AS v(id, label) ORDER BY id",
                 [{"id": 1, "label": "a"}, {"id": 2, "label": "b"}],
             ),
@@ -566,6 +572,7 @@ def main() -> int:
             ("SELECT id FROM sales UNION SELECT id, region FROM sales", "column count mismatch"),
             ("SELECT id FROM sales UNION SELECT region FROM sales", "type mismatch"),
             ("WITH defined AS (SELECT 1 AS id) SELECT id FROM missing", "missing"),
+            ("SELECT CAST('bad' AS INTEGER)", "ALOPEX-E004"),
         ]
 
         completed = 0
@@ -579,12 +586,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 59:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 59")
+        if completed != 61:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 61")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 59 checks passed")
+    print("v0.8 SQL correctness demo completed: 61 checks passed")
     return 0
 
 

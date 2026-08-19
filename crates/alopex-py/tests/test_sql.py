@@ -255,6 +255,24 @@ def test_execute_sql_standard_predicates_preserve_exact_values(db):
     ]
 
 
+def test_execute_sql_try_cast_preserves_values_and_cast_errors(db):
+    rows = db.execute_sql(
+        "SELECT TRY_CAST('42' AS INTEGER) AS parsed, "
+        "TRY_CAST('bad' AS INTEGER) AS rejected, "
+        "TRY_CAST([1.0, 2.0] AS VECTOR(3)) AS wrong_dimension"
+    )
+    assert rows == [
+        {"parsed": 42, "rejected": None, "wrong_dimension": None}
+    ]
+
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT CAST('bad' AS INTEGER)")
+    rendered = str(captured.value)
+    assert "ALOPEX-E004" in rendered
+    assert "cannot cast Text to INTEGER" in rendered
+    assert "TypedExpr" not in rendered
+
+
 def test_execute_sql_grouped_window_composition_preserves_exact_rows(db):
     db.execute_sql(
         "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER)"

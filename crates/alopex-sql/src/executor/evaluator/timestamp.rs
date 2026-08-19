@@ -16,6 +16,24 @@ pub(crate) fn evaluate_cast(
     coerce_value(evaluate(expr, ctx)?, target_type)
 }
 
+/// Evaluate a TRY_CAST without hiding failures from the source expression.
+pub(crate) fn evaluate_try_cast(
+    expr: &TypedExpr,
+    target_type: &ResolvedType,
+    ctx: &EvalContext<'_>,
+) -> Result<SqlValue> {
+    let value = evaluate(expr, ctx)?;
+    try_coerce_value(value, target_type)
+}
+
+pub(crate) fn try_coerce_value(value: SqlValue, target_type: &ResolvedType) -> Result<SqlValue> {
+    match coerce_value(value, target_type) {
+        Ok(value) => Ok(value),
+        Err(ExecutorError::Evaluation(EvaluationError::CastFailed { .. })) => Ok(SqlValue::Null),
+        Err(error) => Err(error),
+    }
+}
+
 /// Normalize a value to the representation required by a typed assignment.
 ///
 /// INSERT ... SELECT does not retain the source expressions after its query
@@ -27,22 +45,33 @@ pub(crate) fn coerce_value(value: SqlValue, target_type: &ResolvedType) -> Resul
         ResolvedType::Integer | ResolvedType::BigInt => coerce_integer(value, target_type),
         ResolvedType::Float | ResolvedType::Double => coerce_double(value, target_type),
         ResolvedType::Text => coerce_text(value),
+        ResolvedType::Blob => coerce_blob(value),
         ResolvedType::Boolean => coerce_boolean(value),
-        other => Err(ExecutorError::Evaluation(
-            EvaluationError::UnsupportedExpression(format!("cast to {other}")),
-        )),
+        ResolvedType::Vector { dimension, .. } => coerce_vector(value, target_type, *dimension),
+        ResolvedType::Null => {
+            cast_failure(value.type_name(), target_type, "NULL is not a cast target")
+        }
     }
 }
 
-fn cast_error(value: &SqlValue, target: &ResolvedType) -> ExecutorError {
-    ExecutorError::Evaluation(EvaluationError::TypeMismatch {
-        expected: target.to_string(),
-        actual: format!("{value:?}"),
+fn cast_error(value: &SqlValue, target: &ResolvedType, reason: &str) -> ExecutorError {
+    cast_error_from(value.type_name(), target, reason)
+}
+
+fn cast_error_from(source: &str, target: &ResolvedType, reason: &str) -> ExecutorError {
+    ExecutorError::Evaluation(EvaluationError::CastFailed {
+        source_type: source.to_string(),
+        target: target.to_string(),
+        reason: reason.to_string(),
     })
 }
 
-/// Cast to INTEGER/BIGINT. Floating point values truncate toward zero, matching
-/// SQLite and PostgreSQL's `CAST(... AS INTEGER)`. Text is parsed as an integer.
+fn cast_failure<T>(source: &str, target: &ResolvedType, reason: &str) -> Result<T> {
+    Err(cast_error_from(source, target, reason))
+}
+
+/// Cast to INTEGER/BIGINT. Alopex floating-point conversion truncates toward
+/// zero; text is parsed as a base-10 integer.
 fn coerce_integer(value: SqlValue, target: &ResolvedType) -> Result<SqlValue> {
     let wide: i64 = match value {
         SqlValue::Null => return Ok(SqlValue::Null),
@@ -51,29 +80,37 @@ fn coerce_integer(value: SqlValue, target: &ResolvedType) -> Result<SqlValue> {
         SqlValue::Boolean(b) => i64::from(b),
         SqlValue::Float(v) => {
             let t = f64::from(v).trunc();
-            if !t.is_finite() || t < i64::MIN as f64 || t > i64::MAX as f64 {
-                return Err(cast_error(&SqlValue::Float(v), target));
+            if !t.is_finite() || t < i64::MIN as f64 || t >= -(i64::MIN as f64) {
+                return Err(cast_error(
+                    &SqlValue::Float(v),
+                    target,
+                    "non-finite or out-of-range numeric value",
+                ));
             }
             t as i64
         }
         SqlValue::Double(v) => {
             let t = v.trunc();
-            if !t.is_finite() || t < i64::MIN as f64 || t > i64::MAX as f64 {
-                return Err(cast_error(&SqlValue::Double(v), target));
+            if !t.is_finite() || t < i64::MIN as f64 || t >= -(i64::MIN as f64) {
+                return Err(cast_error(
+                    &SqlValue::Double(v),
+                    target,
+                    "non-finite or out-of-range numeric value",
+                ));
             }
             t as i64
         }
         SqlValue::Text(ref s) => match s.trim().parse::<i64>() {
             Ok(v) => v,
-            Err(_) => return Err(cast_error(&value, target)),
+            Err(_) => return Err(cast_error(&value, target, "invalid integer text")),
         },
-        other => return Err(cast_error(&other, target)),
+        other => return Err(cast_error(&other, target, "conversion is not supported")),
     };
 
     if matches!(target, ResolvedType::Integer) {
         i32::try_from(wide)
             .map(SqlValue::Integer)
-            .map_err(|_| cast_error(&SqlValue::BigInt(wide), target))
+            .map_err(|_| cast_error(&SqlValue::BigInt(wide), target, "value is out of range"))
     } else {
         Ok(SqlValue::BigInt(wide))
     }
@@ -81,6 +118,7 @@ fn coerce_integer(value: SqlValue, target: &ResolvedType) -> Result<SqlValue> {
 
 /// Cast to FLOAT/DOUBLE. Text is parsed as a floating point literal.
 fn coerce_double(value: SqlValue, target: &ResolvedType) -> Result<SqlValue> {
+    let source = value.type_name();
     let wide: f64 = match value {
         SqlValue::Null => return Ok(SqlValue::Null),
         SqlValue::Double(v) => v,
@@ -90,13 +128,21 @@ fn coerce_double(value: SqlValue, target: &ResolvedType) -> Result<SqlValue> {
         SqlValue::Boolean(b) => f64::from(b),
         SqlValue::Text(ref s) => match s.trim().parse::<f64>() {
             Ok(v) => v,
-            Err(_) => return Err(cast_error(&value, target)),
+            Err(_) => return Err(cast_error(&value, target, "invalid floating-point text")),
         },
-        other => return Err(cast_error(&other, target)),
+        other => return Err(cast_error(&other, target, "conversion is not supported")),
     };
 
+    if !wide.is_finite() {
+        return cast_failure(source, target, "non-finite numeric value");
+    }
+
     if matches!(target, ResolvedType::Float) {
-        Ok(SqlValue::Float(wide as f32))
+        let narrowed = wide as f32;
+        if !narrowed.is_finite() {
+            return cast_failure(source, target, "value is out of range");
+        }
+        Ok(SqlValue::Float(narrowed))
     } else {
         Ok(SqlValue::Double(wide))
     }
@@ -112,7 +158,50 @@ fn coerce_text(value: SqlValue) -> Result<SqlValue> {
         SqlValue::Float(v) => Ok(SqlValue::Text(v.to_string())),
         SqlValue::Double(v) => Ok(SqlValue::Text(v.to_string())),
         SqlValue::Boolean(b) => Ok(SqlValue::Text(if b { "true" } else { "false" }.to_string())),
-        other => Err(cast_error(&other, &ResolvedType::Text)),
+        SqlValue::Blob(bytes) => String::from_utf8(bytes)
+            .map(SqlValue::Text)
+            .map_err(|_| cast_error_from("Blob", &ResolvedType::Text, "invalid UTF-8")),
+        other => Err(cast_error(
+            &other,
+            &ResolvedType::Text,
+            "conversion is not supported",
+        )),
+    }
+}
+
+fn coerce_blob(value: SqlValue) -> Result<SqlValue> {
+    match value {
+        SqlValue::Null => Ok(SqlValue::Null),
+        SqlValue::Blob(bytes) => Ok(SqlValue::Blob(bytes)),
+        SqlValue::Text(text) => Ok(SqlValue::Blob(text.into_bytes())),
+        other => Err(cast_error(
+            &other,
+            &ResolvedType::Blob,
+            "conversion is not supported",
+        )),
+    }
+}
+
+fn coerce_vector(value: SqlValue, target: &ResolvedType, dimension: u32) -> Result<SqlValue> {
+    match value {
+        SqlValue::Null => Ok(SqlValue::Null),
+        SqlValue::Vector(values)
+            if values.len() == dimension as usize
+                && values.iter().all(|value| value.is_finite()) =>
+        {
+            Ok(SqlValue::Vector(values))
+        }
+        SqlValue::Vector(values) if values.len() != dimension as usize => Err(cast_error(
+            &SqlValue::Vector(values),
+            target,
+            "vector dimension does not match",
+        )),
+        SqlValue::Vector(values) => Err(cast_error(
+            &SqlValue::Vector(values),
+            target,
+            "vector contains a non-finite value",
+        )),
+        other => Err(cast_error(&other, target, "conversion is not supported")),
     }
 }
 
@@ -123,14 +212,32 @@ fn coerce_boolean(value: SqlValue) -> Result<SqlValue> {
         SqlValue::Boolean(b) => Ok(SqlValue::Boolean(b)),
         SqlValue::Integer(v) => Ok(SqlValue::Boolean(v != 0)),
         SqlValue::BigInt(v) | SqlValue::Timestamp(v) => Ok(SqlValue::Boolean(v != 0)),
-        SqlValue::Float(v) => Ok(SqlValue::Boolean(v != 0.0)),
-        SqlValue::Double(v) => Ok(SqlValue::Boolean(v != 0.0)),
+        SqlValue::Float(v) if v.is_finite() => Ok(SqlValue::Boolean(v != 0.0)),
+        SqlValue::Double(v) if v.is_finite() => Ok(SqlValue::Boolean(v != 0.0)),
+        SqlValue::Float(v) => Err(cast_error(
+            &SqlValue::Float(v),
+            &ResolvedType::Boolean,
+            "non-finite numeric value",
+        )),
+        SqlValue::Double(v) => Err(cast_error(
+            &SqlValue::Double(v),
+            &ResolvedType::Boolean,
+            "non-finite numeric value",
+        )),
         SqlValue::Text(ref s) => match s.trim().to_ascii_lowercase().as_str() {
             "true" | "t" | "yes" | "y" | "1" => Ok(SqlValue::Boolean(true)),
             "false" | "f" | "no" | "n" | "0" => Ok(SqlValue::Boolean(false)),
-            _ => Err(cast_error(&value, &ResolvedType::Boolean)),
+            _ => Err(cast_error(
+                &value,
+                &ResolvedType::Boolean,
+                "invalid boolean text",
+            )),
         },
-        other => Err(cast_error(&other, &ResolvedType::Boolean)),
+        other => Err(cast_error(
+            &other,
+            &ResolvedType::Boolean,
+            "conversion is not supported",
+        )),
     }
 }
 
@@ -148,21 +255,27 @@ pub(crate) fn coerce_timestamp(value: SqlValue) -> Result<SqlValue> {
         SqlValue::Integer(value) => Ok(SqlValue::Timestamp(i64::from(value))),
         SqlValue::BigInt(value) => Ok(SqlValue::Timestamp(value)),
         SqlValue::Float(value) => {
-            epoch_micros_from_float(f64::from(value)).map(SqlValue::Timestamp)
+            epoch_micros_from_float(f64::from(value), "Float").map(SqlValue::Timestamp)
         }
-        SqlValue::Double(value) => epoch_micros_from_float(value).map(SqlValue::Timestamp),
-        other => timestamp_type_mismatch(other.type_name()),
+        SqlValue::Double(value) => {
+            epoch_micros_from_float(value, "Double").map(SqlValue::Timestamp)
+        }
+        other => cast_failure(
+            other.type_name(),
+            &ResolvedType::Timestamp,
+            "conversion is not supported",
+        ),
     }
 }
 
 fn parse_timestamp(value: &str) -> Result<i64> {
     match NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f") {
         Ok(timestamp) => Ok(timestamp.and_utc().timestamp_micros()),
-        Err(_) => timestamp_type_mismatch("TEXT"),
+        Err(_) => cast_failure("Text", &ResolvedType::Timestamp, "invalid timestamp text"),
     }
 }
 
-fn epoch_micros_from_float(value: f64) -> Result<i64> {
+fn epoch_micros_from_float(value: f64, source: &str) -> Result<i64> {
     if value.is_finite()
         && value.fract() == 0.0
         && value >= i64::MIN as f64
@@ -170,14 +283,11 @@ fn epoch_micros_from_float(value: f64) -> Result<i64> {
     {
         return Ok(value as i64);
     }
-    timestamp_type_mismatch("non-integral or out-of-range numeric value")
-}
-
-fn timestamp_type_mismatch<T>(actual: &str) -> Result<T> {
-    Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {
-        expected: "Timestamp".into(),
-        actual: actual.into(),
-    }))
+    cast_failure(
+        source,
+        &ResolvedType::Timestamp,
+        "non-integral or out-of-range numeric value",
+    )
 }
 
 #[cfg(test)]
@@ -196,5 +306,58 @@ mod tests {
     fn timestamp_rejects_time_zone_suffixes_and_fractional_epoch_micros() {
         assert!(coerce_timestamp(SqlValue::Text("2025-01-15T10:30:00Z".into())).is_err());
         assert!(coerce_timestamp(SqlValue::Double(1.5)).is_err());
+    }
+
+    #[test]
+    fn numeric_casts_reject_non_finite_values_and_float_overflow() {
+        for value in ["NaN", "Infinity", "-Infinity"] {
+            assert!(coerce_value(SqlValue::Text(value.into()), &ResolvedType::Double).is_err());
+        }
+        assert!(coerce_value(SqlValue::Text("3.5e38".into()), &ResolvedType::Float).is_err());
+        assert!(coerce_value(SqlValue::Float(f32::NAN), &ResolvedType::Boolean).is_err());
+        assert!(coerce_value(SqlValue::Double(f64::INFINITY), &ResolvedType::Boolean).is_err());
+    }
+
+    #[test]
+    fn numeric_casts_reject_the_exclusive_i64_upper_bound() {
+        let exclusive_upper_bound = -(i64::MIN as f64);
+        assert!(
+            coerce_value(
+                SqlValue::Double(exclusive_upper_bound),
+                &ResolvedType::BigInt,
+            )
+            .is_err()
+        );
+        assert!(coerce_timestamp(SqlValue::Double(exclusive_upper_bound)).is_err());
+    }
+
+    #[test]
+    fn blob_text_and_vector_casts_enforce_encoding_and_dimension() {
+        assert_eq!(
+            coerce_value(SqlValue::Text("hello".into()), &ResolvedType::Blob).unwrap(),
+            SqlValue::Blob(b"hello".to_vec())
+        );
+        assert!(coerce_value(SqlValue::Blob(vec![0xff]), &ResolvedType::Text).is_err());
+
+        let vector_two = ResolvedType::Vector {
+            dimension: 2,
+            metric: crate::ast::ddl::VectorMetric::Cosine,
+        };
+        assert_eq!(
+            coerce_value(SqlValue::Vector(vec![1.0, 2.0]), &vector_two).unwrap(),
+            SqlValue::Vector(vec![1.0, 2.0])
+        );
+        assert!(coerce_value(SqlValue::Vector(vec![1.0]), &vector_two).is_err());
+        assert!(coerce_value(SqlValue::Vector(vec![f32::NAN, 1.0]), &vector_two).is_err());
+        assert!(coerce_value(SqlValue::Vector(vec![f32::INFINITY, 1.0]), &vector_two).is_err());
+
+        let vector_l2 = ResolvedType::Vector {
+            dimension: 2,
+            metric: crate::ast::ddl::VectorMetric::L2,
+        };
+        let rendered = coerce_value(SqlValue::Vector(vec![1.0]), &vector_l2)
+            .expect_err("dimension mismatch")
+            .to_string();
+        assert!(rendered.contains("VECTOR(2, L2)"), "{rendered}");
     }
 }

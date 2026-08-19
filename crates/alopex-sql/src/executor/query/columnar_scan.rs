@@ -891,7 +891,9 @@ fn collect_column_indices(expr: &TypedExpr, acc: &mut BTreeSet<usize>) {
             collect_column_indices(right, acc);
         }
         TypedExprKind::UnaryOp { operand, .. } => collect_column_indices(operand, acc),
-        TypedExprKind::Cast { expr, .. } => collect_column_indices(expr, acc),
+        TypedExprKind::Cast { expr, .. } | TypedExprKind::TryCast { expr, .. } => {
+            collect_column_indices(expr, acc)
+        }
         TypedExprKind::Case {
             operand,
             branches,

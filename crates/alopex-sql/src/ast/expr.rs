@@ -71,6 +71,11 @@ pub enum ExprKind {
         expr: Box<Expr>,
         target_type: DataType,
     },
+    /// A cast that returns NULL when conversion is impossible.
+    TryCast {
+        expr: Box<Expr>,
+        target_type: DataType,
+    },
     Between {
         expr: Box<Expr>,
         low: Box<Expr>,
