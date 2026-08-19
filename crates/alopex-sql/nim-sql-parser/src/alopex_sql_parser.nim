@@ -15,7 +15,8 @@ const parserContractDescriptor = staticRead("../PARSER_CONTRACT_VERSION")
 
 static:
   doAssert isExactContractDescriptor(parserContractDescriptor, "0.3.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.6.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.6.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.7.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -188,6 +189,7 @@ proc writeExpr(s: Stream; node: SqlNode)
 proc writeFromItem(s: Stream; node: SqlNode)
 proc writeDataType(s: Stream; node: SqlNode)
 proc writeSelectKind(s: Stream; node: SqlNode)
+proc writeQueryBody(s: Stream; node: SqlNode)
 
 proc writeLiteralKind(s: Stream; node: SqlNode) =
   case node.kind
@@ -263,7 +265,7 @@ proc writeCommonTableExpr(s: Stream; node: SqlNode) =
   else:
     s.pack_array(0)
   s.writeKey("query")
-  s.writeStatement(node.children[queryIndex])
+  s.writeQueryBody(node.children[queryIndex])
   s.writeKey("span")
   s.writeSpan(node.span)
 
@@ -523,13 +525,17 @@ proc writeFromItem(s: Stream; node: SqlNode) =
   case node.kind
   of nkAlias:
     if node.aliasExpr.kind == nkFromDerived:
-      s.pack_map(4)
+      s.pack_map(5)
       s.writeKey("variant")
       s.pack_type("Derived")
       s.writeKey("subquery")
-      s.writeStatement(node.aliasExpr.children[0])
+      s.writeQueryBody(node.aliasExpr.children[0])
       s.writeKey("alias")
       s.pack_type(node.aliasName)
+      s.writeKey("columns")
+      s.pack_array(node.aliasColumns.len)
+      for column in node.aliasColumns:
+        s.pack_type(column)
       s.writeKey("span")
       s.writeSpan(node.span)
     else:
@@ -553,13 +559,15 @@ proc writeFromItem(s: Stream; node: SqlNode) =
     s.writeKey("span")
     s.writeSpan(node.span)
   of nkFromDerived:
-    s.pack_map(4)
+    s.pack_map(5)
     s.writeKey("variant")
     s.pack_type("Derived")
     s.writeKey("subquery")
-    s.writeStatement(node.children[0])
+    s.writeQueryBody(node.children[0])
     s.writeKey("alias")
     s.writeNil()
+    s.writeKey("columns")
+    s.pack_array(0)
     s.writeKey("span")
     s.writeSpan(node.span)
   of nkJoin, nkFromJoin:
@@ -910,7 +918,7 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
     s.writeKey("all")
     s.pack_type(setOperation.setAll)
     s.writeKey("right")
-    s.writeSelectKind(setOperation.setRight)
+    s.writeQueryBody(setOperation.setRight)
     s.writeKey("span")
     s.writeSpan(setOperation.span)
   s.writeKey("order_by")
@@ -942,6 +950,80 @@ proc writeSelectKind(s: Stream; node: SqlNode) =
       break
   s.pack_map(fieldCount)
   s.writeSelectFields(node)
+
+proc writeValuesKind(s: Stream; node: SqlNode) =
+  var withNode: SqlNode = nil
+  var orderByNode: SqlNode = nil
+  var limitNode: SqlNode = nil
+  var rows: seq[SqlNode] = @[]
+  var setOperations: seq[SqlNode] = @[]
+
+  for child in node.children:
+    case child.kind
+    of nkWithClause:
+      withNode = child
+    of nkExprList:
+      rows.add(child)
+    of nkSetOperation:
+      setOperations.add(child)
+    of nkOrderByClause:
+      orderByNode = child
+    of nkLimitClause:
+      limitNode = child
+    else:
+      discard
+
+  s.pack_map(if withNode == nil: 7 else: 8)
+  s.writeKey("variant")
+  s.pack_type("Values")
+  if withNode != nil:
+    s.writeKey("with")
+    s.writeWithClause(withNode)
+  s.writeKey("rows")
+  s.pack_array(rows.len)
+  for row in rows:
+    s.writeExprSeq(row.children)
+  s.writeKey("set_operations")
+  s.pack_array(setOperations.len)
+  for setOperation in setOperations:
+    s.pack_map(4)
+    s.writeKey("operator")
+    s.pack_type(normalizedSetOperator(setOperation.setOp))
+    s.writeKey("all")
+    s.pack_type(setOperation.setAll)
+    s.writeKey("right")
+    s.writeQueryBody(setOperation.setRight)
+    s.writeKey("span")
+    s.writeSpan(setOperation.span)
+  s.writeKey("order_by")
+  if orderByNode == nil:
+    s.pack_array(0)
+  else:
+    s.pack_array(orderByNode.children.len)
+    for item in orderByNode.children:
+      s.writeOrderByExpr(item)
+  s.writeKey("limit")
+  if limitNode != nil and limitNode.children.len > 0:
+    s.writeExpr(limitNode.children[0])
+  else:
+    s.writeNil()
+  s.writeKey("offset")
+  if limitNode != nil and limitNode.children.len > 1:
+    s.writeExpr(limitNode.children[1])
+  else:
+    s.writeNil()
+  s.writeKey("span")
+  s.writeSpan(node.span)
+
+proc writeQueryBody(s: Stream; node: SqlNode) =
+  case node.kind
+  of nkSelect:
+    s.writeSelectKind(node)
+  of nkValues:
+    s.writeValuesKind(node)
+  else:
+    raise newException(ParseError,
+      "unsupported query body node for MessagePack: " & $node.kind)
 
 proc writeContinuousAggregateQuery(s: Stream; node: SqlNode) =
   # 継続集約のクエリは WITH を含めない(includeWith = false)ため、
@@ -980,6 +1062,12 @@ proc writeInsertKind(s: Stream; node: SqlNode) =
     s.pack_type("Select")
     s.writeKey("select")
     s.writeSelectKind(source)
+  elif source != nil and source.kind == nkValues:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Query")
+    s.writeKey("query")
+    s.writeQueryBody(source)
   else:
     s.pack_map(2)
     s.writeKey("variant")
@@ -1563,6 +1651,8 @@ proc writeStatementKind(s: Stream; node: SqlNode) =
   case node.kind
   of nkSelect:
     s.writeSelectKind(node)
+  of nkValues:
+    s.writeValuesKind(node)
   of nkInsert:
     s.writeInsertKind(node)
   of nkUpdate:

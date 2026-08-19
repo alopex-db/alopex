@@ -544,6 +544,55 @@ impl RowIterator for VecIterator {
 }
 
 // ============================================================================
+// ValuesIterator - Lazily evaluates inline VALUES rows
+// ============================================================================
+
+/// Streaming iterator for a type-checked VALUES relation.
+pub struct ValuesIterator {
+    rows: std::vec::IntoIter<Vec<TypedExpr>>,
+    schema: Vec<ColumnMetadata>,
+    context_values: Vec<SqlValue>,
+    next_row_id: u64,
+}
+
+impl ValuesIterator {
+    /// Creates a VALUES iterator without materializing every evaluated row.
+    ///
+    /// Correlated VALUES subqueries evaluate column references against a copy
+    /// of the current outer row. Top-level VALUES queries use an empty context.
+    pub fn new(
+        rows: Vec<Vec<TypedExpr>>,
+        schema: Vec<ColumnMetadata>,
+        outer: Option<&Row>,
+    ) -> Self {
+        Self {
+            rows: rows.into_iter(),
+            schema,
+            context_values: outer.map(|row| row.values.clone()).unwrap_or_default(),
+            next_row_id: 0,
+        }
+    }
+}
+
+impl RowIterator for ValuesIterator {
+    fn next_row(&mut self) -> Option<Result<Row>> {
+        let expressions = self.rows.next()?;
+        let context = EvalContext::new(&self.context_values);
+        let values = expressions
+            .iter()
+            .map(|expression| crate::executor::evaluator::evaluate(expression, &context))
+            .collect::<Result<Vec<_>>>();
+        let row_id = self.next_row_id;
+        self.next_row_id = self.next_row_id.saturating_add(1);
+        Some(values.map(|values| Row::new(row_id, values)))
+    }
+
+    fn schema(&self) -> &[ColumnMetadata] {
+        &self.schema
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

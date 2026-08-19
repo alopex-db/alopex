@@ -34,6 +34,7 @@ FROM stdin_test
 WINDOW base AS (), ranked AS (base ORDER BY qty DESC, id)
 QUALIFY row_number <= 2
 ORDER BY id;
+VALUES (2, 'b'), (1, 'a') ORDER BY column1;
 "#;
 
     {
@@ -57,7 +58,7 @@ ORDER BY id;
         .expect("json output should be an array of result sets");
     assert_eq!(
         sets.len(),
-        8,
+        9,
         "one result set per statement\nstdout:\n{stdout}"
     );
     let select_rows = sets[2].as_array().expect("SELECT result set");
@@ -140,6 +141,15 @@ ORDER BY id;
         &[
             serde_json::json!({ "id": 1, "row_number": 2 }),
             serde_json::json!({ "id": 3, "row_number": 1 }),
+        ]
+    );
+
+    let values_rows = sets[8].as_array().expect("VALUES result set");
+    assert_eq!(
+        values_rows,
+        &[
+            serde_json::json!({ "column1": 1, "column2": "a" }),
+            serde_json::json!({ "column1": 2, "column2": "b" }),
         ]
     );
 }

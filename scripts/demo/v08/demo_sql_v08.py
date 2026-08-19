@@ -98,8 +98,12 @@ def main() -> int:
         for sql in statements:
             show(sql, db.execute_sql(sql))
 
-        # These 40 queries have an explicit or single-row order contract.
+        # These 41 queries have an explicit or single-row order contract.
         ordered_checks: list[tuple[str, list[Row]]] = [
+            (
+                "SELECT id, label FROM (VALUES (2, 'b'), (1, 'a')) AS v(id, label) ORDER BY id",
+                [{"id": 1, "label": "a"}, {"id": 2, "label": "b"}],
+            ),
             ("SELECT SUM(n) AS total FROM metrics", [{"total": 5}]),
             (
                 "SELECT id, n * 2.0 AS doubled FROM metrics ORDER BY doubled",
@@ -563,12 +567,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 57:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 57")
+        if completed != 58:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 58")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 57 checks passed")
+    print("v0.8 SQL correctness demo completed: 58 checks passed")
     return 0
 
 

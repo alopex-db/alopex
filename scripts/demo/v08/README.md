@@ -145,6 +145,9 @@ happened to run:
 13. SQL BOOLEAN is represented as Python `bool` (`True`/`False`) and Rust
    `SqlValue::Boolean`, never integer 1/0. The Python canonicalizer is
    type-sensitive specifically because Python otherwise considers `True == 1`.
+14. `VALUES` is a query body, not only INSERT syntax. Top-level constructors,
+    derived tables with positional aliases, CTE bodies, set operations, and
+    `ORDER BY`/`LIMIT` preserve exact row order and common column types.
 
 Recursive CTEs use the bounded fixed-point contract added for v0.8.7; invalid
 recursive shapes, dependency cycles, and exhausted iteration or memory budgets
@@ -153,3 +156,5 @@ window-frame behavior and resource limits are in
 [`docs/sql-window-frames.md`](../../../docs/sql-window-frames.md).
 Named-window and `QUALIFY` rules are in
 [`docs/sql-named-window-qualify.md`](../../../docs/sql-named-window-qualify.md).
+The constructor grammar, type rules, errors, and parser-contract migration are
+in [`docs/sql-values-query.md`](../../../docs/sql-values-query.md).

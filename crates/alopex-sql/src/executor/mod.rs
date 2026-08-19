@@ -185,6 +185,7 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
 
             // Query Operations
             LogicalPlan::Scan { .. }
+            | LogicalPlan::Values { .. }
             | LogicalPlan::Filter { .. }
             | LogicalPlan::Project { .. }
             | LogicalPlan::Join { .. }
@@ -320,6 +321,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             && !matches!(
                 plan,
                 LogicalPlan::Scan { .. }
+                    | LogicalPlan::Values { .. }
                     | LogicalPlan::Filter { .. }
                     | LogicalPlan::Project { .. }
                     | LogicalPlan::Join { .. }
@@ -418,6 +420,7 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                 dml::execute_delete(&mut sql_txn, &view, &table, filter)
             }
             LogicalPlan::Scan { .. }
+            | LogicalPlan::Values { .. }
             | LogicalPlan::Filter { .. }
             | LogicalPlan::Project { .. }
             | LogicalPlan::Join { .. }

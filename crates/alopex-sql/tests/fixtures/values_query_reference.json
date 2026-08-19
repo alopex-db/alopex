@@ -1,0 +1,31 @@
+{
+  "verified_with": {
+    "duckdb": "1.5.5",
+    "datafusion": "54.0.0"
+  },
+  "source_docs": {
+    "duckdb_values": "https://duckdb.org/docs/current/sql/query_syntax/values",
+    "duckdb_from": "https://duckdb.org/docs/stable/sql/query_syntax/from",
+    "datafusion_select": "https://datafusion.apache.org/user-guide/sql/select.html"
+  },
+  "cases": [
+    {
+      "name": "derived_values_aliases",
+      "sql": "SELECT id, label FROM (VALUES (2, 'b'), (1, 'a')) AS v(id, label) ORDER BY id",
+      "columns": ["id", "label"],
+      "rows": [[1, "a"], [2, "b"]]
+    },
+    {
+      "name": "values_cte",
+      "sql": "WITH v(id, label) AS (VALUES (2, 'b'), (1, 'a')) SELECT id, label FROM v ORDER BY id",
+      "columns": ["id", "label"],
+      "rows": [[1, "a"], [2, "b"]]
+    },
+    {
+      "name": "values_set_order_limit",
+      "sql": "SELECT id FROM (VALUES (3), (1) UNION ALL SELECT 2) AS v(id) ORDER BY id LIMIT 2",
+      "columns": ["id"],
+      "rows": [[1], [2]]
+    }
+  ]
+}

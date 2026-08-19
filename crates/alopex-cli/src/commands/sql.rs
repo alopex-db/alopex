@@ -228,15 +228,14 @@ fn execute_with_output_control<W: Write>(
 }
 
 fn is_select_query(sql: &str) -> Result<bool> {
-    use alopex_sql::{AlopexDialect, Parser, StatementKind};
+    use alopex_sql::{AlopexDialect, Parser};
 
     let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(&dialect, sql).map_err(|e| CliError::Parse(format!("{}", e)))?;
     Ok(stmts.len() == 1
-        && matches!(
-            stmts.first().map(|s| &s.kind),
-            Some(StatementKind::Select(_))
-        ))
+        && stmts
+            .first()
+            .is_some_and(|statement| statement.kind.is_query()))
 }
 
 /// Execute a SQL command against a remote server using HttpClient.
@@ -2008,15 +2007,16 @@ fn execute_sql<W: Write>(db: &Database, sql: &str, writer: &mut StreamingWriter<
 
 /// Execute SQL locally, emitting one result block per statement.
 ///
-/// - A single SELECT statement uses the streaming path (FR-7).
+/// - A single query statement uses the streaming path (FR-7).
 /// - Everything else (DDL/DML and multi-statement input) executes all
 ///   statements in one transaction via [`Database::execute_sql_multi`] and
 ///   emits each statement's result in order.
 /// - For `--output json` the output is always an array of per-statement
 ///   result sets (a single statement yields a 1-element array).
 ///
-/// FR-7 Compliance: Uses SQL parser to detect SELECT queries instead of heuristic.
+/// FR-7 Compliance: Uses the SQL parser to detect query statements instead of a heuristic.
 /// This properly handles:
+/// - VALUES query bodies
 /// - WITH clauses (CTEs)
 /// - Leading comments
 /// - Complex query structures
@@ -2027,21 +2027,20 @@ fn execute_sql_with_formatter<W: Write>(
     output: &mut SqlOutput<'_>,
     options: &SqlExecutionOptions<'_>,
 ) -> Result<()> {
-    use alopex_sql::{AlopexDialect, Parser, StatementKind};
+    use alopex_sql::{AlopexDialect, Parser};
 
-    // FR-7: Use parser to detect SELECT instead of starts_with("SELECT") heuristic
-    // This correctly handles WITH clauses, leading comments, and complex query structures
+    // FR-7: Parse the statement instead of relying on a SELECT-prefix heuristic.
+    // This handles VALUES, WITH clauses, leading comments, and complex query structures.
     let dialect = AlopexDialect;
     let stmts = Parser::parse_sql(&dialect, sql).map_err(|e| CliError::Parse(format!("{}", e)))?;
 
-    let is_single_select = stmts.len() == 1
-        && matches!(
-            stmts.first().map(|s| &s.kind),
-            Some(StatementKind::Select(_))
-        );
+    let is_single_query = stmts.len() == 1
+        && stmts
+            .first()
+            .is_some_and(|statement| statement.kind.is_query());
 
-    if is_single_select {
-        // Single SELECT: use streaming path (FR-7).
+    if is_single_query {
+        // A single query statement uses the streaming path (FR-7).
         let formatter = output.create_block_formatter();
         if !output.statement_array() {
             return execute_sql_select_streaming(db, sql, writer, formatter, options, false);

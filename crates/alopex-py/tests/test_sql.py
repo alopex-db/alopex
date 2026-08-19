@@ -230,6 +230,14 @@ def test_execute_sql_named_windows_and_qualify_preserve_exact_rows(db):
     ]
 
 
+def test_execute_sql_values_query_preserves_exact_rows(db):
+    rows = db.execute_sql("VALUES (2, 'b'), (1, 'a') ORDER BY column1")
+    assert rows == [
+        {"column1": 1, "column2": "a"},
+        {"column1": 2, "column2": "b"},
+    ]
+
+
 def test_execute_sql_grouped_window_composition_preserves_exact_rows(db):
     db.execute_sql(
         "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER)"

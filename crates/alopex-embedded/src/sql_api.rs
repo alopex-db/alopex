@@ -124,7 +124,7 @@ fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
 }
 
 fn stmt_requires_write(stmt: &Statement) -> bool {
-    !matches!(stmt.kind, StatementKind::Select(_))
+    !stmt.kind.is_query()
 }
 
 fn stmt_changes_catalog(stmt: &Statement) -> bool {
@@ -499,7 +499,7 @@ impl Database {
         }
 
         // For streaming SELECT, use the new pipeline
-        if stmts.len() == 1 && matches!(stmts[0].kind, StatementKind::Select(_)) {
+        if stmts.len() == 1 && stmts[0].kind.is_query() {
             let stmt = &stmts[0];
             let mode = TxnMode::ReadOnly;
 
@@ -646,7 +646,7 @@ impl Database {
         }
 
         // For streaming, only support single SELECT statement
-        if stmts.len() == 1 && matches!(stmts[0].kind, StatementKind::Select(_)) {
+        if stmts.len() == 1 && stmts[0].kind.is_query() {
             let stmt = &stmts[0];
             let mode = TxnMode::ReadOnly;
 

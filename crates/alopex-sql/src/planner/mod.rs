@@ -40,8 +40,8 @@ use crate::ast::ddl::{
     ColumnConstraint, ColumnDef, CreateIndex, CreateTable, DropIndex, DropTable,
 };
 use crate::ast::dml::{
-    Delete, FromItem, Insert, InsertSource, LITERAL_TABLE, OrderByExpr, Select, SelectItem,
-    SetOperator as AstSetOperator, Update,
+    Delete, FromItem, Insert, InsertSource, LITERAL_TABLE, OrderByExpr, QueryBody, Select,
+    SelectItem, SetOperation as AstSetOperation, SetOperator as AstSetOperator, Update, Values,
 };
 use crate::ast::expr::{Expr, ExprKind, Literal};
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
@@ -106,10 +106,7 @@ fn select_table_reference_count(select: &Select, name: &str) -> usize {
             FromItem::Join { left, right, .. } => {
                 from_item_count(left, name) + from_item_count(right, name)
             }
-            FromItem::Derived { subquery, .. } => match &subquery.kind {
-                StatementKind::Select(select) => select_table_reference_count(select, name),
-                _ => 0,
-            },
+            FromItem::Derived { subquery, .. } => query_body_table_reference_count(subquery, name),
         }
     }
 
@@ -121,18 +118,37 @@ fn select_table_reference_count(select: &Select, name: &str) -> usize {
     let set_count = select
         .set_operations
         .iter()
-        .map(|operation| select_table_reference_count(&operation.right, name))
+        .map(|operation| query_body_table_reference_count(&operation.right, name))
         .sum::<usize>();
     let with_count = select.with.as_ref().map_or(0, |with| {
         with.ctes
             .iter()
-            .map(|cte| match &cte.query.kind {
-                StatementKind::Select(select) => select_table_reference_count(select, name),
-                _ => 0,
-            })
+            .map(|cte| query_body_table_reference_count(&cte.query, name))
             .sum()
     });
     from_count + set_count + with_count
+}
+
+fn values_table_reference_count(values: &Values, name: &str) -> usize {
+    let set_count = values
+        .set_operations
+        .iter()
+        .map(|operation| query_body_table_reference_count(&operation.right, name))
+        .sum::<usize>();
+    let with_count = values.with.as_ref().map_or(0, |with| {
+        with.ctes
+            .iter()
+            .map(|cte| query_body_table_reference_count(&cte.query, name))
+            .sum()
+    });
+    set_count + with_count
+}
+
+fn query_body_table_reference_count(body: &QueryBody, name: &str) -> usize {
+    match body {
+        QueryBody::Select(select) => select_table_reference_count(select, name),
+        QueryBody::Values(values) => values_table_reference_count(values, name),
+    }
 }
 
 fn cte_dependency_cycle(with: &crate::ast::WithClause) -> bool {
@@ -156,13 +172,9 @@ fn cte_dependency_cycle(with: &crate::ast::WithClause) -> bool {
             with.ctes
                 .iter()
                 .enumerate()
-                .filter_map(|(dependency, candidate)| match &cte.query.kind {
-                    StatementKind::Select(select)
-                        if select_table_reference_count(select, &candidate.name) > 0 =>
-                    {
-                        Some(dependency)
-                    }
-                    _ => None,
+                .filter_map(|(dependency, candidate)| {
+                    (query_body_table_reference_count(&cte.query, &candidate.name) > 0)
+                        .then_some(dependency)
                 })
                 .collect::<Vec<_>>()
         })
@@ -263,7 +275,7 @@ fn select_contains_subquery(select: &Select) -> bool {
         || select
             .set_operations
             .iter()
-            .any(|operation| select_contains_subquery(&operation.right))
+            .any(|operation| query_body_contains_subquery(&operation.right))
         || select
             .order_by
             .iter()
@@ -271,11 +283,60 @@ fn select_contains_subquery(select: &Select) -> bool {
         || select.limit.as_ref().is_some_and(expr_contains_subquery)
         || select.offset.as_ref().is_some_and(expr_contains_subquery)
         || select.with.as_ref().is_some_and(|with| {
-            with.ctes.iter().any(|cte| match &cte.query.kind {
-                StatementKind::Select(select) => select_contains_subquery(select),
-                _ => false,
-            })
+            with.ctes
+                .iter()
+                .any(|cte| query_body_contains_subquery(&cte.query))
         })
+}
+
+fn values_contains_subquery(values: &Values) -> bool {
+    values.rows.iter().flatten().any(expr_contains_subquery)
+        || values
+            .set_operations
+            .iter()
+            .any(|operation| query_body_contains_subquery(&operation.right))
+        || values
+            .order_by
+            .iter()
+            .any(|order| expr_contains_subquery(&order.expr))
+        || values.limit.as_ref().is_some_and(expr_contains_subquery)
+        || values.offset.as_ref().is_some_and(expr_contains_subquery)
+        || values.with.as_ref().is_some_and(|with| {
+            with.ctes
+                .iter()
+                .any(|cte| query_body_contains_subquery(&cte.query))
+        })
+}
+
+fn query_body_contains_subquery(body: &QueryBody) -> bool {
+    match body {
+        QueryBody::Select(select) => select_contains_subquery(select),
+        QueryBody::Values(values) => values_contains_subquery(values),
+    }
+}
+
+fn common_values_type(
+    current: &ResolvedType,
+    next: &ResolvedType,
+    span: crate::ast::Span,
+) -> Result<ResolvedType, PlannerError> {
+    use ResolvedType::{BigInt, Double, Float, Integer, Null};
+
+    if *current == Null {
+        return Ok(next.clone());
+    }
+    if *next == Null || current == next {
+        return Ok(current.clone());
+    }
+    match (current, next) {
+        (Integer, BigInt) | (BigInt, Integer) => Ok(BigInt),
+        (Integer | BigInt | Float | Double, Integer | BigInt | Float | Double) => Ok(Double),
+        _ => Err(PlannerError::type_mismatch(
+            current.type_name(),
+            next.type_name(),
+            span,
+        )),
+    }
 }
 
 /// Planning output used by server-side routing analysis.
@@ -529,6 +590,13 @@ impl TableReferenceExtractor {
                     );
                 }
                 self.extract_projection(projection, diagnostics, references);
+            }
+            LogicalPlan::Values { rows, .. } => {
+                for row in rows {
+                    for value in row {
+                        self.extract_typed_expr(value, diagnostics, references);
+                    }
+                }
             }
             LogicalPlan::Filter { input, predicate } => {
                 self.extract_plan(input, root_access, scan_source, diagnostics, references);
@@ -883,6 +951,7 @@ enum GenericHostStatement<'a> {
         value: &'a Option<PragmaValue>,
     },
     Select(&'a Select),
+    Values(&'a Values),
     Insert(&'a Insert),
     Update(&'a Update),
     Delete(&'a Delete),
@@ -900,6 +969,7 @@ fn classify_generic_host_statement(statement_kind: &StatementKind) -> GenericHos
         StatementKind::DropIndex(statement) => GenericHostStatement::DropIndex(statement),
         StatementKind::Pragma { name, value } => GenericHostStatement::Pragma { name, value },
         StatementKind::Select(statement) => GenericHostStatement::Select(statement),
+        StatementKind::Values(statement) => GenericHostStatement::Values(statement),
         StatementKind::Insert(statement) => GenericHostStatement::Insert(statement),
         StatementKind::Update(statement) => GenericHostStatement::Update(statement),
         StatementKind::Delete(statement) => GenericHostStatement::Delete(statement),
@@ -927,7 +997,9 @@ fn table_reference_access_for_classified(
     classified: GenericHostStatement<'_>,
 ) -> Result<TableReferenceAccess, PlannerError> {
     match classified {
-        GenericHostStatement::Select(_) => Ok(TableReferenceAccess::Read),
+        GenericHostStatement::Select(_) | GenericHostStatement::Values(_) => {
+            Ok(TableReferenceAccess::Read)
+        }
         GenericHostStatement::Insert(_)
         | GenericHostStatement::Update(_)
         | GenericHostStatement::Delete(_) => Ok(TableReferenceAccess::Write),
@@ -1011,6 +1083,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
 
             // DML statements
             GenericHostStatement::Select(statement) => self.plan_select(statement),
+            GenericHostStatement::Values(statement) => self.plan_values(statement),
             GenericHostStatement::Insert(statement) => self.plan_insert(statement),
             GenericHostStatement::Update(statement) => self.plan_update(statement),
             GenericHostStatement::Delete(statement) => self.plan_delete(statement),
@@ -1296,12 +1369,41 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             .map(|relation| relation.plan)
     }
 
+    fn plan_values(&self, stmt: &Values) -> Result<LogicalPlan, PlannerError> {
+        self.plan_values_relation(stmt, &[], &CtePlans::new())
+            .map(|relation| relation.plan)
+    }
+
+    fn plan_query_body_relation(
+        &self,
+        body: &QueryBody,
+        outer_scope: &[ScopedTable],
+        enclosing_ctes: &CtePlans,
+    ) -> Result<PlannedRelation, PlannerError> {
+        match body {
+            QueryBody::Select(select) => {
+                self.plan_select_relation(select, outer_scope, enclosing_ctes)
+            }
+            QueryBody::Values(values) => {
+                self.plan_values_relation(values, outer_scope, enclosing_ctes)
+            }
+        }
+    }
+
     fn plan_ctes(
         &self,
         stmt: &Select,
         enclosing_ctes: &CtePlans,
     ) -> Result<CtePlans, PlannerError> {
-        let Some(with) = &stmt.with else {
+        self.plan_with_clause(stmt.with.as_ref(), enclosing_ctes)
+    }
+
+    fn plan_with_clause(
+        &self,
+        with: Option<&crate::ast::WithClause>,
+        enclosing_ctes: &CtePlans,
+    ) -> Result<CtePlans, PlannerError> {
+        let Some(with) = with else {
             return Ok(enclosing_ctes.clone());
         };
         let mut declared_names = HashSet::new();
@@ -1326,14 +1428,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     cte.name
                 )));
             }
-            let StatementKind::Select(select) = &cte.query.kind else {
-                return Err(PlannerError::unsupported_feature(
-                    "non-SELECT common table expression",
-                    "a future version",
-                    cte.span,
-                ));
-            };
-            let mut relation = self.plan_select_relation(select, &[], &plans)?;
+            let mut relation = self.plan_query_body_relation(&cte.query, &[], &plans)?;
             if !cte.columns.is_empty() {
                 if cte.columns.len() != relation.schema.len() {
                     return Err(PlannerError::cte_column_count_mismatch(
@@ -1389,9 +1484,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             }
         }
 
-        let StatementKind::Select(body) = &cte.query.kind else {
+        let QueryBody::Select(body) = cte.query.as_ref() else {
             return Err(PlannerError::unsupported_feature(
-                "non-SELECT recursive common table expression",
+                "recursive common table expression whose outer body is not SELECT",
                 "a future version",
                 cte.span,
             ));
@@ -1431,7 +1526,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             ));
         }
 
-        let recursive_term = operation.right.as_ref();
+        let QueryBody::Select(recursive_term) = operation.right.as_ref() else {
+            return Err(PlannerError::unsupported_feature(
+                "recursive common table expression whose recursive term is not SELECT",
+                "a future version",
+                operation.span,
+            ));
+        };
         if select_contains_subquery(recursive_term) {
             return Err(PlannerError::unsupported_feature(
                 "subquery in a recursive term",
@@ -1538,6 +1639,185 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         Ok(plans)
     }
 
+    fn plan_values_relation(
+        &self,
+        stmt: &Values,
+        outer_scope: &[ScopedTable],
+        enclosing_ctes: &CtePlans,
+    ) -> Result<PlannedRelation, PlannerError> {
+        let ctes = self.plan_with_clause(stmt.with.as_ref(), enclosing_ctes)?;
+        let relation = self.plan_values_core(stmt, outer_scope, &ctes)?;
+        self.apply_set_operations_and_tail(
+            relation,
+            &stmt.set_operations,
+            &stmt.order_by,
+            &stmt.limit,
+            &stmt.offset,
+            stmt.span,
+            outer_scope,
+            &ctes,
+        )
+    }
+
+    fn plan_values_core(
+        &self,
+        stmt: &Values,
+        outer_scope: &[ScopedTable],
+        ctes: &CtePlans,
+    ) -> Result<PlannedRelation, PlannerError> {
+        if stmt.rows.is_empty() {
+            let schema = Vec::new();
+            return Ok(PlannedRelation {
+                plan: LogicalPlan::Values {
+                    rows: Vec::new(),
+                    schema: schema.clone(),
+                },
+                schema: schema.clone(),
+                scope: vec![ScopedTable::new(
+                    TableMetadata::new(LITERAL_TABLE, schema),
+                    0,
+                )],
+            });
+        }
+
+        let width = stmt.rows[0].len();
+        if width == 0 {
+            return Err(PlannerError::values_column_count_mismatch(
+                1, 1, 0, stmt.span,
+            ));
+        }
+
+        let mut typed_rows = Vec::with_capacity(stmt.rows.len());
+        for (row_index, row) in stmt.rows.iter().enumerate() {
+            if row.len() != width {
+                return Err(PlannerError::values_column_count_mismatch(
+                    row_index + 1,
+                    width,
+                    row.len(),
+                    stmt.span,
+                ));
+            }
+            let mut typed_row = Vec::with_capacity(width);
+            for expr in row {
+                if expr_contains_subquery(expr) {
+                    return Err(PlannerError::invalid_expression(
+                        "VALUES expressions cannot contain subqueries".to_string(),
+                    ));
+                }
+                let typed = self.infer_expr_with_scope(expr, outer_scope, ctes)?;
+                if typed_expr_contains_aggregate(&typed) || typed_expr_contains_window(&typed) {
+                    return Err(PlannerError::invalid_expression(
+                        "VALUES expressions must be scalar".to_string(),
+                    ));
+                }
+                typed_row.push(typed);
+            }
+            typed_rows.push(typed_row);
+        }
+
+        let mut common_types = vec![ResolvedType::Null; width];
+        for row in &typed_rows {
+            for (column_index, value) in row.iter().enumerate() {
+                common_types[column_index] = common_values_type(
+                    &common_types[column_index],
+                    &value.resolved_type,
+                    value.span,
+                )?;
+            }
+        }
+        for row in &mut typed_rows {
+            for (value, target) in row.iter_mut().zip(&common_types) {
+                if value.resolved_type != *target && value.resolved_type != ResolvedType::Null {
+                    *value = TypedExpr::cast(value.clone(), target.clone(), value.span);
+                }
+            }
+        }
+
+        let schema = common_types
+            .into_iter()
+            .enumerate()
+            .map(|(index, data_type)| {
+                ColumnMetadata::new(format!("column{}", index + 1), data_type)
+            })
+            .collect::<Vec<_>>();
+        Ok(PlannedRelation {
+            plan: LogicalPlan::Values {
+                rows: typed_rows,
+                schema: schema.clone(),
+            },
+            schema: schema.clone(),
+            scope: vec![ScopedTable::new(
+                TableMetadata::new(LITERAL_TABLE, schema),
+                0,
+            )],
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_set_operations_and_tail(
+        &self,
+        mut relation: PlannedRelation,
+        operations: &[AstSetOperation],
+        order_by: &[OrderByExpr],
+        limit: &Option<Expr>,
+        offset: &Option<Expr>,
+        span: crate::ast::Span,
+        outer_scope: &[ScopedTable],
+        ctes: &CtePlans,
+    ) -> Result<PlannedRelation, PlannerError> {
+        for operation in operations {
+            let right = self.plan_query_body_relation(&operation.right, outer_scope, ctes)?;
+            if relation.schema.len() != right.schema.len() {
+                return Err(PlannerError::set_operation_column_count_mismatch(
+                    relation.schema.len(),
+                    right.schema.len(),
+                    operation.span,
+                ));
+            }
+            for (left_column, right_column) in relation.schema.iter().zip(&right.schema) {
+                if left_column.data_type != right_column.data_type {
+                    return Err(PlannerError::type_mismatch(
+                        left_column.data_type.type_name(),
+                        right_column.data_type.type_name(),
+                        operation.span,
+                    ));
+                }
+            }
+
+            relation.plan = LogicalPlan::SetOperation {
+                left: Box::new(relation.plan),
+                right: Box::new(right.plan),
+                operator: match operation.operator {
+                    AstSetOperator::Union => SetOperator::Union,
+                    AstSetOperator::Intersect => SetOperator::Intersect,
+                    AstSetOperator::Except => SetOperator::Except,
+                },
+                all: operation.all,
+            };
+        }
+
+        relation.scope = vec![ScopedTable::new(
+            TableMetadata::new(LITERAL_TABLE, relation.schema.clone()),
+            0,
+        )];
+        if !order_by.is_empty() {
+            let order_by =
+                self.build_sort_exprs_with_scope(order_by, &relation.scope, &HashMap::new(), ctes)?;
+            relation.plan = LogicalPlan::Sort {
+                input: Box::new(relation.plan),
+                order_by,
+            };
+        }
+        if limit.is_some() || offset.is_some() {
+            relation.plan = LogicalPlan::Limit {
+                input: Box::new(relation.plan),
+                limit: self.extract_limit_value(limit, span)?,
+                offset: self.extract_limit_value(offset, span)?,
+            };
+        }
+        Ok(relation)
+    }
+
     fn plan_select_relation(
         &self,
         stmt: &Select,
@@ -1554,66 +1834,18 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             left_select.order_by.clear();
             left_select.limit = None;
             left_select.offset = None;
-            let mut relation = self.plan_select_relation(&left_select, outer_scope, &ctes)?;
+            let relation = self.plan_select_relation(&left_select, outer_scope, &ctes)?;
 
-            for operation in &stmt.set_operations {
-                let right = self.plan_select_relation(&operation.right, outer_scope, &ctes)?;
-                if relation.schema.len() != right.schema.len() {
-                    return Err(PlannerError::set_operation_column_count_mismatch(
-                        relation.schema.len(),
-                        right.schema.len(),
-                        operation.span,
-                    ));
-                }
-                for (left_column, right_column) in relation.schema.iter().zip(&right.schema) {
-                    if left_column.data_type != right_column.data_type {
-                        return Err(PlannerError::type_mismatch(
-                            left_column.data_type.type_name(),
-                            right_column.data_type.type_name(),
-                            operation.span,
-                        ));
-                    }
-                }
-
-                relation.plan = LogicalPlan::SetOperation {
-                    left: Box::new(relation.plan),
-                    right: Box::new(right.plan),
-                    operator: match operation.operator {
-                        AstSetOperator::Union => SetOperator::Union,
-                        AstSetOperator::Intersect => SetOperator::Intersect,
-                        AstSetOperator::Except => SetOperator::Except,
-                    },
-                    all: operation.all,
-                };
-            }
-
-            relation.scope = vec![ScopedTable::new(
-                TableMetadata::new(LITERAL_TABLE, relation.schema.clone()),
-                0,
-            )];
-            if !stmt.order_by.is_empty() {
-                // 集合演算の ORDER BY は結果列(左辺の出力列名)を参照する。
-                // 射影別名は既に relation.schema へ反映済みなので、別名置換の
-                // マップは空でよい。
-                let order_by = self.build_sort_exprs_with_scope(
-                    &stmt.order_by,
-                    &relation.scope,
-                    &HashMap::new(),
-                    &ctes,
-                )?;
-                relation.plan = LogicalPlan::Sort {
-                    input: Box::new(relation.plan),
-                    order_by,
-                };
-            }
-            if stmt.limit.is_some() || stmt.offset.is_some() {
-                relation.plan = LogicalPlan::Limit {
-                    input: Box::new(relation.plan),
-                    limit: self.extract_limit_value(&stmt.limit, stmt.span)?,
-                    offset: self.extract_limit_value(&stmt.offset, stmt.span)?,
-                };
-            }
-            return Ok(relation);
+            return self.apply_set_operations_and_tail(
+                relation,
+                &stmt.set_operations,
+                &stmt.order_by,
+                &stmt.limit,
+                &stmt.offset,
+                stmt.span,
+                outer_scope,
+                &ctes,
+            );
         }
 
         let mut relation = self.plan_from_items(&stmt.from, stmt.span, outer_scope, &ctes)?;
@@ -2477,31 +2709,49 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             FromItem::Derived {
                 subquery,
                 alias,
+                columns,
                 span,
             } => {
-                let crate::ast::StatementKind::Select(select) = &subquery.kind else {
-                    return Err(PlannerError::unsupported_feature(
-                        "non-SELECT derived table",
-                        "v0.6.0-subquery Phase 6",
-                        *span,
-                    ));
-                };
                 // A derived table is evaluated independently of the query it
                 // sits in, so nothing from the enclosing scopes is visible
                 // inside it. Only LATERAL lifts that restriction, and Alopex
                 // does not accept LATERAL yet. Passing `outer_scope` through
                 // here would resolve an outer name into a correlated reference
                 // the user never wrote, so the scope stops at this boundary.
-                let mut relation = self.plan_select_relation(select, &[], ctes)?;
+                let mut relation = self.plan_query_body_relation(subquery, &[], ctes)?;
                 let alias = alias.clone().ok_or_else(|| {
                     PlannerError::invalid_expression("derived table requires an alias".to_string())
                 })?;
+                let source_names = relation
+                    .schema
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect();
                 relation.plan = LogicalPlan::Project {
                     input: Box::new(relation.plan),
-                    projection: Projection::All(
-                        relation.schema.iter().map(|col| col.name.clone()).collect(),
-                    ),
+                    projection: Projection::All(source_names),
                 };
+                if !columns.is_empty() {
+                    if columns.len() != relation.schema.len() {
+                        return Err(PlannerError::table_alias_column_count_mismatch(
+                            &alias,
+                            columns.len(),
+                            relation.schema.len(),
+                            *span,
+                        ));
+                    }
+                    let mut names = HashSet::new();
+                    for name in columns {
+                        if !names.insert(name) {
+                            return Err(PlannerError::invalid_expression(format!(
+                                "derived table alias '{alias}' declares column '{name}' more than once"
+                            )));
+                        }
+                    }
+                    for (column, alias) in relation.schema.iter_mut().zip(columns) {
+                        column.name.clone_from(alias);
+                    }
+                }
                 relation.scope = vec![ScopedTable::new(
                     TableMetadata::new(alias, relation.schema.clone()),
                     start_index,
@@ -2609,14 +2859,21 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     ) -> Result<TypedExpr, PlannerError> {
         self.type_checker
             .infer_type_with_scope(expr, scope, &|stmt, outer_scope| {
-                let crate::ast::StatementKind::Select(select) = &stmt.kind else {
-                    return Err(PlannerError::unsupported_feature(
-                        "non-SELECT subquery",
-                        "v0.6.0-subquery Phase 6",
-                        stmt.span(),
-                    ));
+                let relation = match &stmt.kind {
+                    StatementKind::Select(select) => {
+                        self.plan_select_relation(select, outer_scope, ctes)?
+                    }
+                    StatementKind::Values(values) => {
+                        self.plan_values_relation(values, outer_scope, ctes)?
+                    }
+                    _ => {
+                        return Err(PlannerError::unsupported_feature(
+                            "non-query subquery",
+                            "a future version",
+                            stmt.span(),
+                        ));
+                    }
                 };
-                let relation = self.plan_select_relation(select, outer_scope, ctes)?;
                 Ok((relation.plan, relation.schema))
             })
     }
@@ -3544,38 +3801,52 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             }
             InsertSource::Select { select } => {
                 let source = self.plan_select_relation(select, &[], &CtePlans::new())?;
-                if source.schema.len() != columns.len() {
-                    return Err(PlannerError::column_value_count_mismatch(
-                        columns.len(),
-                        source.schema.len(),
-                        stmt.span,
-                    ));
-                }
-
-                for (source_column, target_column) in source.schema.iter().zip(&columns) {
-                    let target = table
-                        .get_column(target_column)
-                        .expect("validated target column");
-                    if target.not_null && source_column.data_type == ResolvedType::Null {
-                        return Err(PlannerError::null_constraint_violation(
-                            target_column,
-                            stmt.span,
-                        ));
-                    }
-                    self.validate_resolved_type_assignment(
-                        &source_column.data_type,
-                        &target.data_type,
-                        stmt.span,
-                    )?;
-                }
-
-                Ok(LogicalPlan::InsertSelect {
-                    table: table.name.clone(),
-                    columns,
-                    source: Box::new(source.plan),
-                })
+                self.finish_insert_query(stmt, table, columns, source)
+            }
+            InsertSource::Query { query } => {
+                let source = self.plan_query_body_relation(query, &[], &CtePlans::new())?;
+                self.finish_insert_query(stmt, table, columns, source)
             }
         }
+    }
+
+    fn finish_insert_query(
+        &self,
+        stmt: &Insert,
+        table: &TableMetadata,
+        columns: Vec<String>,
+        source: PlannedRelation,
+    ) -> Result<LogicalPlan, PlannerError> {
+        if source.schema.len() != columns.len() {
+            return Err(PlannerError::column_value_count_mismatch(
+                columns.len(),
+                source.schema.len(),
+                stmt.span,
+            ));
+        }
+
+        for (source_column, target_column) in source.schema.iter().zip(&columns) {
+            let target = table
+                .get_column(target_column)
+                .expect("validated target column");
+            if target.not_null && source_column.data_type == ResolvedType::Null {
+                return Err(PlannerError::null_constraint_violation(
+                    target_column,
+                    stmt.span,
+                ));
+            }
+            self.validate_resolved_type_assignment(
+                &source_column.data_type,
+                &target.data_type,
+                stmt.span,
+            )?;
+        }
+
+        Ok(LogicalPlan::InsertSelect {
+            table: table.name.clone(),
+            columns,
+            source: Box::new(source.plan),
+        })
     }
 
     /// Type-check INSERT values against column definitions.

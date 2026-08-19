@@ -1,4 +1,4 @@
-use alopex_embedded::{Database, Error, TxnMode};
+use alopex_embedded::{Database, Error, StreamingQueryResult, TxnMode};
 use alopex_sql::ExecutionResult;
 use alopex_sql::SqlValue;
 
@@ -344,6 +344,45 @@ fn sql_integration_named_windows_and_qualify_preserve_exact_rows() {
         vec![
             vec![SqlValue::Integer(2), SqlValue::BigInt(1)],
             vec![SqlValue::Integer(3), SqlValue::BigInt(1)],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn sql_integration_values_query_preserves_exact_rows() {
+    let db = Database::new();
+    let result = db
+        .execute_sql("VALUES (2, 'b'), (1, 'a') ORDER BY column1")
+        .unwrap();
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Text("a".into())],
+            vec![SqlValue::Integer(2), SqlValue::Text("b".into())],
+        ]
+    );
+
+    let streamed = db
+        .execute_sql_with_rows("VALUES (2, 'b'), (1, 'a') ORDER BY column1", |mut rows| {
+            let mut actual = Vec::new();
+            while let Some(row) = rows.next_row()? {
+                actual.push(row);
+            }
+            Ok(actual)
+        })
+        .unwrap();
+    let StreamingQueryResult::QueryProcessed(streamed_rows) = streamed else {
+        panic!("expected streaming query result");
+    };
+    assert_eq!(
+        streamed_rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Text("a".into())],
+            vec![SqlValue::Integer(2), SqlValue::Text("b".into())],
         ]
     );
 }

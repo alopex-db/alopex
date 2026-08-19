@@ -1,7 +1,7 @@
 # Named WINDOW and QUALIFY
 
 Named window definitions and post-window filtering are part of the unified
-Alopex v0.8.x SQL surface. The parser contract is `0.6.0`; there is no separate
+Alopex v0.8.x SQL surface. The parser contract is `0.7.0`; there is no separate
 SQL-parser version or release lane.
 
 ## Current contract
@@ -79,10 +79,10 @@ and parser contract.
 
 | Path or artifact | Current responsibility | Target responsibility | Action | Replacement/deletion condition | Proof |
 | --- | --- | --- | --- | --- | --- |
-| `nim-sql-parser/src/` | syntax and MessagePack producer | contract-0.6 parser source | keep/extend | never deleted | Nim parser and wire tests |
+| `nim-sql-parser/src/` | syntax and MessagePack producer | contract-0.7 parser source | keep/extend | never deleted | Nim parser and wire tests |
 | Rust AST and planner | typed schema and execution order | query-block resolution and QUALIFY staging | keep/extend | never deleted | public-behavior and plan-shape tests |
 | v0.8.7 / contract-0.5 assets | immutable release history | historical input only | keep | never relabel or use for current release | strict mismatch tests |
-| four current parser archives | current release producer | v0.8.8 / contract-0.6 assets | replace at release staging | all target attestations pass | target record, SHA, native smoke |
+| four current parser archives | current release producer | v0.8.8 / contract-0.7 assets | replace at release staging | all target attestations pass | target record, SHA, native smoke |
 | Python/CLI/Embedded demos | public behavior examples | release-blocking named-window/QUALIFY evidence | keep/extend | obsolete rejection examples are absent | exact row comparisons in release verifier |
 
 The four-target build is a publication blocker. Local source builds and their
@@ -94,7 +94,7 @@ the task; they never replace tagged release assets.
 | Layer | Required evidence |
 | --- | --- |
 | Parser | direct reference, inheritance, forward reference, multiple definitions |
-| Wire | `windows`, `qualify`, and `base` round-trip with contract `0.6.0` |
+| Wire | `windows`, `qualify`, and `base` round-trip with current contract `0.7.0` |
 | Planner | undefined/duplicate/cycle/override errors and exact stage order |
 | Executor | alias filtering, QUALIFY-only window, grouped/HAVING/DISTINCT composition |
 | Public surfaces | Rust, CLI, Embedded, Python, and both v0.8 demos compare exact rows |

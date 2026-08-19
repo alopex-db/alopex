@@ -1,7 +1,7 @@
 ## Comprehensive tests for Alopex SQL Parser
 ## Covers tokenizer, expression, DML, and DDL tests ported from the Rust test suite.
 
-import std/[strutils, unittest]
+import std/[sequtils, strutils, unittest]
 import ../src/[ast, lexer, parser]
 
 proc parseErrorMessage(sql: string): string =
@@ -706,6 +706,53 @@ suite "DML — SELECT":
   test "trailing semicolon":
     let ast = parseSql("SELECT 1;")
     check ast.kind == nkSelect
+
+suite "VALUES query and table constructor":
+
+  test "top-level VALUES keeps one or many expression rows":
+    let ast = parseSql("VALUES (1 + 2, 'a', NULL), (4, 'b', 6)")
+    check ast.kind == nkValues
+    check ast.children.len == 2
+    check ast.children[0].kind == nkExprList
+    check ast.children[0].children.len == 3
+    check ast.children[0].children[0].kind == nkBinaryOp
+    check ast.children[1].children[2].kind == nkIntLit
+
+  test "VALUES composes with SELECT set operands and query tail":
+    let ast = parseSql(
+      "VALUES (3), (1) UNION ALL SELECT 2 UNION ALL VALUES (4) " &
+      "ORDER BY column1 LIMIT 3")
+    check ast.kind == nkValues
+    check ast.children.filterIt(it.kind == nkSetOperation).len == 2
+    check ast.children.filterIt(it.kind == nkOrderByClause).len == 1
+    check ast.children.filterIt(it.kind == nkLimitClause).len == 1
+    let operations = ast.children.filterIt(it.kind == nkSetOperation)
+    check operations[0].setRight.kind == nkSelect
+    check operations[1].setRight.kind == nkValues
+
+  test "derived VALUES keeps table and column aliases":
+    let ast = parseSql(
+      "SELECT id, label FROM (VALUES (2, 'b'), (1, 'a')) AS t(id, label)")
+    let fromItem = ast.children.filterIt(it.kind == nkFromClause)[0].children[0]
+    check fromItem.kind == nkAlias
+    check fromItem.aliasExpr.kind == nkFromDerived
+    check fromItem.aliasExpr.children[0].kind == nkValues
+    check fromItem.aliasName == "t"
+    check fromItem.aliasColumns == @["id", "label"]
+
+  test "WITH accepts VALUES as a CTE body and final query":
+    let selectQuery = parseSql(
+      "WITH v(id, label) AS (VALUES (1, 'a')) SELECT id, label FROM v")
+    let cte = selectQuery.children[0].children[0]
+    check cte.children[^1].kind == nkValues
+
+    let valuesQuery = parseSql("WITH v(id) AS (SELECT 1) VALUES (2)")
+    check valuesQuery.kind == nkValues
+    check valuesQuery.children[0].kind == nkWithClause
+
+  test "empty VALUES constructors fail closed":
+    check "expected tkLParen" in parseErrorMessage("VALUES")
+    check "expected expression" in parseErrorMessage("VALUES ()")
 
 # ---------------------------------------------------------------------------
 # DML tests — INSERT

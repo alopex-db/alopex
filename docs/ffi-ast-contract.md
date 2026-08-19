@@ -6,7 +6,7 @@ Nim parser boundary.
 
 ## Contract Overview
 
-- Current contract version: `0.6.0`, returned by `alopex_parser_version()`.
+- Current contract version: `0.7.0`, returned by `alopex_parser_version()`.
 - Alopex v0.8.4 is the first release whose public producer emits the
   `CreateContinuousAggregate` variant. The variant is owned by Skulk; Alopex
   transports and validates it but does not execute the statement.
@@ -16,7 +16,7 @@ Nim parser boundary.
   buffers that the caller releases with `alopex_free_buffer`.
 - A non-zero parse error is returned as `prkError`; no Nim exception crosses
   the C ABI boundary.
-- Contract `0.6.0` is compatibility metadata inside the Alopex release; it is
+- Contract `0.7.0` is compatibility metadata inside the Alopex release; it is
   not an independent parser feature or release lane.
 
 ## Encoding Rules
@@ -35,13 +35,13 @@ Nim parser boundary.
 ### Version and Compatibility Boundary
 
 The linked Nim shared library, the Rust crate, and the staged payload must all
-report exactly `0.6.0`. A mismatch is rejected before MessagePack decoding;
+report exactly `0.7.0`. A mismatch is rejected before MessagePack decoding;
 callers must not attempt to interpret a payload produced by another contract.
 The v0.8.2 and v0.8.3 releases remain immutable historical `0.3.0` releases:
 they do not emit `CreateContinuousAggregate` and must continue to be consumed
 by a `0.3.0` binding. Alopex v0.8.4-v0.8.6 remain historical `0.4.0`
 releases, and v0.8.7 remains the historical `0.5.0` release. This document
-describes the current `0.6.0` surface and does not retroactively change them.
+describes the current `0.7.0` surface and does not retroactively change them.
 
 ### Input, Payload, and Resource Bounds
 
@@ -91,6 +91,7 @@ from invalid user SQL.
 | Variant | Fields |
 | --- | --- |
 | `Select` | `with: WithClause?`, `distinct: bool`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [Expr]?`, `having: Expr?`, `windows: [NamedWindow]`, `qualify: Expr?`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?` |
+| `Values` | `with: WithClause?`, `rows: [[Expr]]`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `span: Span` |
 | `Insert` | `table: string`, `columns: [string]?`, `source: InsertSource`, `span: Span` |
 | `Update` | `table: string`, `assignments: [Assignment]`, `selection: Expr?`, `span: Span` |
 | `Delete` | `table: string`, `selection: Expr?`, `span: Span` |
@@ -116,14 +117,24 @@ and inclusive source spans are preserved by the Nim lexer.
 
 `WithClause = { "recursive": bool, "ctes": [CommonTableExpr], "span": Span }`
 
-`CommonTableExpr = { "name": string, "columns": [string], "query": Statement, "span": Span }`
+`QueryBody` variants:
+
+| Variant | Fields |
+| --- | --- |
+| `Select` | the `Select` fields listed above |
+| `Values` | the `Values` fields listed above |
+
+`SetOperation = { "operator": SetOperator, "all": bool, "right": QueryBody, "span": Span }`.
+`SetOperator` is `Union`, `Intersect`, or `Except`.
+
+`CommonTableExpr = { "name": string, "columns": [string], "query": QueryBody, "span": Span }`
 
 `columns` preserves the declared order in `WITH c(first_name, second_name) AS
-(...)`; an omitted list is encoded as an empty array. The field is an additive
-part of contract `0.4.0`: current Rust consumers use an empty-list default when
-reading an older payload, while older map consumers ignore the new field. It
-therefore ships with the Alopex v0.8 line rather than as a separate parser
-release. Nested non-recursive `WITH` queries use the same `Statement` shape.
+(...)`; an omitted list is encoded as an empty array. The field was introduced
+in contract `0.4.0`. Contract `0.7.0` changes `query` from an untagged SELECT
+object to the tagged `QueryBody` union so a CTE can contain `VALUES`. This is an
+intentional incompatible cutover checked before decode, and it ships inside
+the Alopex v0.8.8 release rather than on a separate parser release lane.
 
 `SelectItem` variants:
 
@@ -139,6 +150,11 @@ release. Nested non-recursive `WITH` queries use the same `Statement` shape.
 | --- | --- |
 | `Values` | `values: [[Expr]]` |
 | `Select` | `select: Select` |
+| `Query` | `query: QueryBody` |
+
+`Select` preserves the pre-0.7 wire shape for ordinary `INSERT ... SELECT`.
+`Query` carries query-body forms introduced by contract `0.7.0`, including an
+`INSERT` source whose `WITH` clause ends in `VALUES`.
 
 `OrderByExpr = { "expr": Expr, "asc": bool?, "nulls_first": bool?, "span": Span }`
 
@@ -152,7 +168,7 @@ release. Nested non-recursive `WITH` queries use the same `Statement` shape.
 | --- | --- |
 | `Table` | `name: string`, `alias: string?`, `span: Span` |
 | `Join` | `left: FromItem`, `right: FromItem`, `join_type: JoinType`, `condition: Expr?`, `using: [string]?`, `span: Span` |
-| `Derived` | `subquery: Statement`, `alias: string?`, `span: Span` |
+| `Derived` | `subquery: QueryBody`, `alias: string?`, `columns: [string]`, `span: Span` |
 
 `JoinType` is a string: `Inner`, `Left`, `Right`, `Full`, or `Cross`.
 
@@ -234,8 +250,15 @@ scope, inheritance rules, and logical evaluation order.
 The staged `CreateContinuousAggregate.query` payload deliberately retains its
 historical 11-field Select shape. Its validator therefore rejects top-level
 `WINDOW` and `QUALIFY` clauses before encoding instead of silently omitting
-their semantics. Ordinary public `SELECT` payloads carry the full `0.6.0`
+their semantics. Ordinary public `SELECT` payloads carry the full `0.7.0`
 fields above.
+
+Contract `0.7.0` introduces `StatementKind::Values` and the tagged `QueryBody`
+shape for CTE, derived-table, and set-operation positions. A `0.6.0` consumer
+cannot safely decode these positions and a `0.6.0` producer cannot express
+them, so both directions are rejected at the exported-version gate. See
+[`sql-values-query.md`](sql-values-query.md) for SQL semantics and the release
+asset lifecycle.
 
 ## DDL Types
 

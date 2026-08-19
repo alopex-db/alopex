@@ -156,6 +156,30 @@ pub enum PlannerError {
         column: u64,
     },
 
+    /// ALOPEX-T011: VALUES rows expose different numbers of columns.
+    #[error(
+        "error[ALOPEX-T011]: VALUES row {row} has {actual} columns but row 1 has {expected} at line {line}, column {column}"
+    )]
+    ValuesColumnCountMismatch {
+        row: usize,
+        expected: usize,
+        actual: usize,
+        line: u64,
+        column: u64,
+    },
+
+    /// ALOPEX-T012: A derived-table alias list does not match its query width.
+    #[error(
+        "error[ALOPEX-T012]: derived table alias '{alias}' declares {declared} column names but its query returns {actual} columns at line {line}, column {column}"
+    )]
+    TableAliasColumnCountMismatch {
+        alias: String,
+        declared: usize,
+        actual: usize,
+        line: u64,
+        column: u64,
+    },
+
     // === Feature Errors (ALOPEX-F*) ===
     /// ALOPEX-F001: Unsupported feature.
     #[error(
@@ -274,6 +298,38 @@ impl PlannerError {
         Self::DuplicateCteColumn {
             cte: cte.into(),
             name: column_name.into(),
+            line: span.start.line,
+            column: span.start.column,
+        }
+    }
+
+    /// Create a VALUES row-width error from a span.
+    pub fn values_column_count_mismatch(
+        row: usize,
+        expected: usize,
+        actual: usize,
+        span: Span,
+    ) -> Self {
+        Self::ValuesColumnCountMismatch {
+            row,
+            expected,
+            actual,
+            line: span.start.line,
+            column: span.start.column,
+        }
+    }
+
+    /// Create a derived-table alias-width error from a span.
+    pub fn table_alias_column_count_mismatch(
+        alias: impl Into<String>,
+        declared: usize,
+        actual: usize,
+        span: Span,
+    ) -> Self {
+        Self::TableAliasColumnCountMismatch {
+            alias: alias.into(),
+            declared,
+            actual,
             line: span.start.line,
             column: span.start.column,
         }

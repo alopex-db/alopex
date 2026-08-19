@@ -657,6 +657,7 @@ fn is_query_plan(plan: &LogicalPlan) -> bool {
     matches!(
         plan,
         LogicalPlan::Scan { .. }
+            | LogicalPlan::Values { .. }
             | LogicalPlan::Filter { .. }
             | LogicalPlan::Project { .. }
             | LogicalPlan::Join { .. }

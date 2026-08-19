@@ -103,6 +103,28 @@ fn streaming_scalar_subquery_in_select_list_executes() {
 }
 
 #[test]
+fn streaming_correlated_values_subquery_matches_materialized_execution() {
+    let (store, catalog) = setup();
+    let sql = "SELECT users.id, (VALUES (users.id + 10)) AS shifted \
+               FROM users ORDER BY users.id";
+    let (columns, streaming_rows) =
+        run_streaming(&store, &catalog, sql).expect("streaming VALUES subquery must execute");
+    let materialized_rows = run_non_streaming(&store, &catalog, sql)
+        .expect("materialized VALUES subquery must execute");
+
+    assert_eq!(columns, vec!["id".to_string(), "shifted".to_string()]);
+    assert_eq!(streaming_rows, materialized_rows);
+    assert_eq!(
+        streaming_rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(11)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(12)],
+            vec![SqlValue::Integer(3), SqlValue::Integer(13)],
+        ]
+    );
+}
+
+#[test]
 fn streaming_correlated_exists_subquery_executes() {
     let (store, catalog) = setup();
     let (columns, rows) = run_streaming(

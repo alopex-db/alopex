@@ -280,6 +280,7 @@ pub(crate) fn plan_contains_subquery(plan: &LogicalPlan) -> bool {
 
     match plan {
         LogicalPlan::Scan { projection, .. } => projection_contains_subquery(projection),
+        LogicalPlan::Values { rows, .. } => rows.iter().flatten().any(contains_subquery),
         LogicalPlan::Filter { input, predicate } => {
             contains_subquery(predicate) || plan_contains_subquery(input)
         }

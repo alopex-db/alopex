@@ -581,6 +581,12 @@ fn build_iterator_pipeline_with_outer<
             let iter = iterator::VecIterator::new(rows, schema.clone());
             Ok((Box::new(iter), projection, schema))
         }
+        LogicalPlan::Values { rows, schema } => {
+            let projection =
+                Projection::All(schema.iter().map(|column| column.name.clone()).collect());
+            let iterator = iterator::ValuesIterator::new(rows, schema.clone(), outer);
+            Ok((Box::new(iterator), projection, schema))
+        }
         LogicalPlan::Filter { input, predicate } => {
             if let LogicalPlan::Scan { table, projection } = input.as_ref()
                 && let Some(table_meta) = catalog.get_table(table)
@@ -1063,6 +1069,12 @@ fn build_streaming_pipeline_inner<
             let schema = table_meta.columns.clone();
             let scan_iter = scan::create_scan_iterator(txn, &table_meta)?;
             Ok((Box::new(scan_iter), projection, schema))
+        }
+        LogicalPlan::Values { rows, schema } => {
+            let projection =
+                Projection::All(schema.iter().map(|column| column.name.clone()).collect());
+            let iterator = iterator::ValuesIterator::new(rows, schema.clone(), None);
+            Ok((Box::new(iterator), projection, schema))
         }
         LogicalPlan::Filter { input, predicate } => {
             if let LogicalPlan::Scan { table, projection } = input.as_ref()

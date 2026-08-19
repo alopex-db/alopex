@@ -7,7 +7,7 @@ import msgpack4nim/msgpack2json
 import ../src/[alopex_sql_parser, ast, parser]
 
 const ContractDescriptor = staticRead("../PARSER_CONTRACT_VERSION").strip()
-const ContinuousAggregateProducerEnabled = ContractDescriptor == "0.6.0"
+const ContinuousAggregateProducerEnabled = ContractDescriptor != "0.3.0"
 
 const
   MinimalContinuousAggregateSql =
@@ -128,7 +128,7 @@ suite "MessagePack output - contract shape":
     check cte["columns"].len == 2
     check cte["columns"][0].getStr() == "identifier"
     check cte["columns"][1].getStr() == "label"
-    check cte["query"]["kind"]["variant"].getStr() == "Select"
+    check cte["query"]["variant"].getStr() == "Select"
 
   test "CTE without a column name list emits an empty list":
     let cte = selectKind("WITH c AS (SELECT 1) SELECT * FROM c")["with"]["ctes"][0]
@@ -182,7 +182,7 @@ suite "MessagePack output - contract shape":
     let item = kind["from"][0]
     check item["variant"].getStr() == "Derived"
     check item["alias"].getStr() == "active_users"
-    check item["subquery"]["kind"]["variant"].getStr() == "Select"
+    check item["subquery"]["variant"].getStr() == "Select"
 
   test "Vector DataType and VectorLiteral emit contract variants":
     let table = payloadJson("CREATE TABLE items (id INT, embedding VECTOR(3, COSINE))")
@@ -253,8 +253,49 @@ suite "MessagePack output - INSERT (issue #40)":
     check kind["source"]["variant"].getStr() == "Select"
     check kind["source"]["select"]["variant"].getStr() == "Select"
 
+  test "INSERT WITH VALUES emits a Query source":
+    let kind = payloadJson(
+      "INSERT INTO t1 WITH seed(n) AS (VALUES (1)) VALUES (2), (3)").stmtKind()
+    check kind["source"]["variant"].getStr() == "Query"
+    check kind["source"]["query"]["variant"].getStr() == "Values"
+    check kind["source"]["query"]["with"]["ctes"].len == 1
+    check kind["source"]["query"]["rows"].len == 2
+
   test "multi-row INSERT without column list round-trips":
     assertMsgpackRoundtrip("INSERT INTO t1 VALUES (1, 'a'), (2, 'b')")
+
+suite "MessagePack output - VALUES query (issue #145)":
+
+  test "top-level VALUES emits rows and query-tail fields":
+    let kind = payloadJson(
+      "VALUES (3), (1) UNION ALL SELECT 2 ORDER BY column1 LIMIT 2").stmtKind()
+    check kind["variant"].getStr() == "Values"
+    check kind["rows"].len == 2
+    check kind["rows"][0][0]["kind"]["literal"]["value"].getStr() == "3"
+    check kind["set_operations"].len == 1
+    check kind["set_operations"][0]["right"]["variant"].getStr() == "Select"
+    check kind["order_by"].len == 1
+    check kind["limit"]["kind"]["literal"]["value"].getStr() == "2"
+
+  test "derived VALUES emits its query body and column aliases":
+    let kind = payloadJson(
+      "SELECT * FROM (VALUES (1, 'a')) AS t(id, label)").stmtKind()
+    let source = kind["from"][0]
+    check source["variant"].getStr() == "Derived"
+    check source["subquery"]["variant"].getStr() == "Values"
+    check source["columns"][0].getStr() == "id"
+    check source["columns"][1].getStr() == "label"
+
+  test "CTE VALUES body is a QueryBody value":
+    let kind = payloadJson(
+      "WITH v(id) AS (VALUES (1), (2)) SELECT id FROM v").stmtKind()
+    let cte = kind["with"]["ctes"][0]
+    check cte["query"]["variant"].getStr() == "Values"
+    check cte["query"]["rows"].len == 2
+
+  test "VALUES query round-trips":
+    assertMsgpackRoundtrip(
+      "WITH v(id) AS (VALUES (1)) VALUES (2) UNION ALL SELECT id FROM v")
 
 suite "MessagePack output - stability":
 

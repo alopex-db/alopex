@@ -367,6 +367,30 @@ impl From<PlannerError> for SqlError {
                 location: ErrorLocation { line, column },
                 code: "ALOPEX-T010",
             },
+            PlannerError::ValuesColumnCountMismatch {
+                row,
+                expected,
+                actual,
+                line,
+                column,
+            } => Self::Plan {
+                message: format!("VALUES row {row} has {actual} columns but row 1 has {expected}"),
+                location: ErrorLocation { line, column },
+                code: "ALOPEX-T011",
+            },
+            PlannerError::TableAliasColumnCountMismatch {
+                alias,
+                declared,
+                actual,
+                line,
+                column,
+            } => Self::Plan {
+                message: format!(
+                    "derived table alias '{alias}' declares {declared} column names but its query returns {actual} columns"
+                ),
+                location: ErrorLocation { line, column },
+                code: "ALOPEX-T012",
+            },
             PlannerError::InvalidPragma { name, reason } => Self::Plan {
                 message: format!("invalid PRAGMA '{name}': {reason}"),
                 location: ErrorLocation::default(),
@@ -530,6 +554,31 @@ mod tests {
         .into();
         assert_eq!(duplicate.code(), "ALOPEX-T010");
         assert_eq!(duplicate.location(), ErrorLocation { line: 4, column: 7 });
+    }
+
+    #[test]
+    fn values_shape_errors_preserve_public_codes_and_locations() {
+        let row_width: SqlError = PlannerError::ValuesColumnCountMismatch {
+            row: 2,
+            expected: 2,
+            actual: 1,
+            line: 5,
+            column: 8,
+        }
+        .into();
+        assert_eq!(row_width.code(), "ALOPEX-T011");
+        assert_eq!(row_width.location(), ErrorLocation { line: 5, column: 8 });
+
+        let alias_width: SqlError = PlannerError::TableAliasColumnCountMismatch {
+            alias: "items".into(),
+            declared: 1,
+            actual: 2,
+            line: 6,
+            column: 9,
+        }
+        .into();
+        assert_eq!(alias_width.code(), "ALOPEX-T012");
+        assert_eq!(alias_width.location(), ErrorLocation { line: 6, column: 9 });
     }
 
     #[test]

@@ -54,7 +54,15 @@ pub enum StatementKind {
 
     // DML
     Select(Select),
+    Values(Values),
     Insert(Insert),
     Update(Update),
     Delete(Delete),
+}
+
+impl StatementKind {
+    /// Returns whether this statement produces a query result without mutating data.
+    pub const fn is_query(&self) -> bool {
+        matches!(self, Self::Select(_) | Self::Values(_))
+    }
 }

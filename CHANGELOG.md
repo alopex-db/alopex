@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- SQL `VALUES` works as a top-level query, derived table, CTE body, and set
+  operand, with table/column aliases, `ORDER BY`/`LIMIT`, common-type
+  inference, and exact-row coverage on Rust, CLI, Embedded, and Python.
 - SQL windows support frame-aware `FIRST_VALUE`, `LAST_VALUE`, and
   `NTH_VALUE`, plus peer-aware `PERCENT_RANK` and `CUME_DIST` and deterministic
   `NTILE` bucket allocation across Rust, CLI, Embedded, and Python surfaces.
@@ -16,10 +19,18 @@ All notable changes to this project will be documented in this file.
   peer-group path as its implicit form, avoiding a size-dependent resource
   failure for semantically identical queries.
 
+### Changed
+
+- The Nim parser wire contract is `0.7.0`. `QueryBody` now distinguishes
+  `Select` and `Values`; pre-VALUES contract `0.6.0` producers are rejected
+  before decode. This remains internal metadata of the unified Alopex v0.8.8
+  release, not a separate parser release lane.
+
 ### Release verification
 
-- Python and Rust v0.8 demos verify all six functions with exact frame, peer,
-  NULL, bucket, rank, and cumulative-distribution results.
+- Python and Rust v0.8 demos verify `VALUES` query composition and all six
+  window functions with exact frame, peer, NULL, bucket, rank, and
+  cumulative-distribution results.
 
 ## [0.8.7] — 2026-08-18
 

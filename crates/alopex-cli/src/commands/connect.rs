@@ -4,7 +4,7 @@
 
 use std::io::{self, BufRead, Read, Write};
 
-use alopex_sql::{AlopexDialect, Parser, StatementKind};
+use alopex_sql::{AlopexDialect, Parser};
 use reqwest::blocking::Client;
 use reqwest::Url;
 use serde::Deserialize;
@@ -121,8 +121,8 @@ fn run_sql(
     quiet: bool,
 ) -> Result<()> {
     let formatter = create_formatter(output);
-    let is_select = is_select_sql(sql)?;
-    let streaming = is_select && formatter.supports_streaming();
+    let is_query = is_query_sql(sql)?;
+    let streaming = is_query && formatter.supports_streaming();
 
     let mut request = client.post(url).json(&serde_json::json!({
         "sql": sql,
@@ -325,13 +325,12 @@ fn parse_error_response(response: reqwest::blocking::Response) -> CliError {
     CliError::InvalidArgument(format!("Server error: HTTP {} - {}", status, text))
 }
 
-fn is_select_sql(sql: &str) -> Result<bool> {
+fn is_query_sql(sql: &str) -> Result<bool> {
     let dialect = AlopexDialect;
     let statements =
         Parser::parse_sql(&dialect, sql).map_err(|e| CliError::Parse(format!("{e}")))?;
     Ok(statements.len() == 1
-        && matches!(
-            statements.first().map(|s| &s.kind),
-            Some(StatementKind::Select(_))
-        ))
+        && statements
+            .first()
+            .is_some_and(|statement| statement.kind.is_query()))
 }

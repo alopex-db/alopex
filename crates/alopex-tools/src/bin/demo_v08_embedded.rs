@@ -633,9 +633,16 @@ fn scenario_local_sql_matrix() -> DemoResult {
                 vec![SqlValue::Integer(5), SqlValue::BigInt(1)],
             ],
         ),
+        (
+            "SELECT id, label FROM (VALUES (2, 'b'), (1, 'a')) AS v(id, label) ORDER BY id",
+            vec![
+                vec![SqlValue::Integer(1), SqlValue::Text("a".into())],
+                vec![SqlValue::Integer(2), SqlValue::Text("b".into())],
+            ],
+        ),
     ];
     require(
-        v08_matrix.len() == 20,
+        v08_matrix.len() == 21,
         "v0.8.x SQL success-check count changed",
     )?;
     for (sql, expected) in &v08_matrix {
@@ -656,7 +663,7 @@ fn scenario_local_sql_matrix() -> DemoResult {
         expect_sql_error(&db, sql, expected)?;
     }
     require(
-        v08_matrix.len() + rejected_v08.len() == 22,
+        v08_matrix.len() + rejected_v08.len() == 23,
         "v0.8.x SQL check count changed",
     )?;
     require(

@@ -25,6 +25,33 @@ pub struct Select {
     pub span: Span,
 }
 
+/// A VALUES query body with the same set/order/limit tail as SELECT.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Values {
+    #[serde(default)]
+    pub with: Option<WithClause>,
+    pub rows: Vec<Vec<Expr>>,
+    #[serde(default)]
+    pub set_operations: Vec<SetOperation>,
+    #[serde(default)]
+    pub order_by: Vec<OrderByExpr>,
+    #[serde(default)]
+    pub limit: Option<Expr>,
+    #[serde(default)]
+    pub offset: Option<Expr>,
+    #[serde(default)]
+    pub span: Span,
+}
+
+/// A relational query body accepted by nested query positions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
+#[allow(clippy::large_enum_variant)]
+pub enum QueryBody {
+    Select(Select),
+    Values(Values),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamedWindow {
     pub name: String,
@@ -44,7 +71,7 @@ pub enum SetOperator {
 pub struct SetOperation {
     pub operator: SetOperator,
     pub all: bool,
-    pub right: Box<Select>,
+    pub right: Box<QueryBody>,
     #[serde(default)]
     pub span: Span,
 }
@@ -61,7 +88,7 @@ pub struct CommonTableExpr {
     pub name: String,
     #[serde(default)]
     pub columns: Vec<String>,
-    pub query: Box<super::Statement>,
+    pub query: Box<QueryBody>,
     pub span: Span,
 }
 
@@ -104,8 +131,10 @@ pub enum FromItem {
         span: Span,
     },
     Derived {
-        subquery: Box<super::Statement>,
+        subquery: Box<QueryBody>,
         alias: Option<String>,
+        #[serde(default)]
+        columns: Vec<String>,
         span: Span,
     },
 }
@@ -141,6 +170,7 @@ pub struct Insert {
 pub enum InsertSource {
     Values { values: Vec<Vec<Expr>> },
     Select { select: Box<Select> },
+    Query { query: Box<QueryBody> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +198,21 @@ pub struct Delete {
 impl Spanned for Select {
     fn span(&self) -> Span {
         self.span
+    }
+}
+
+impl Spanned for Values {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Spanned for QueryBody {
+    fn span(&self) -> Span {
+        match self {
+            QueryBody::Select(select) => select.span,
+            QueryBody::Values(values) => values.span,
+        }
     }
 }
 

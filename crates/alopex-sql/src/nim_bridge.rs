@@ -1,5 +1,5 @@
 use crate::ast::ddl::CreateContinuousAggregate;
-use crate::ast::dml::{FromItem, Select, SelectItem, SetOperation, SetOperator};
+use crate::ast::dml::{FromItem, QueryBody, Select, SelectItem, SetOperation, SetOperator, Values};
 use crate::ast::expr::{Expr, ExprKind};
 use crate::ast::{Location, Span, Statement, StatementKind};
 use crate::error::{ParserError, Result};
@@ -357,21 +357,19 @@ fn parse_set_operation_statement(
 
     let mut branches = branch_ranges
         .into_iter()
-        .map(|(start, end)| parse_select_fragment(&sql[start..end]))
+        .map(|(start, end)| parse_query_body_fragment(&sql[start..end]))
         .collect::<Result<Vec<_>>>()?;
     let final_branch = branches.last_mut().ok_or_else(|| {
-        set_operation_parser_error("at least one SELECT query", "empty set-operation chain")
+        set_operation_parser_error("at least one query body", "empty set-operation chain")
     })?;
-    let order_by = std::mem::take(&mut final_branch.order_by);
-    let limit = final_branch.limit.take();
-    let offset = final_branch.offset.take();
+    let (order_by, limit, offset) = take_query_tail(final_branch);
 
     let mut terms = Vec::new();
     let mut outer_operations = Vec::new();
     let mut current = branches.remove(0);
     for (operation, right) in operations.into_iter().zip(branches) {
         if operation.operator == SetOperator::Intersect {
-            current.set_operations.push(SetOperation {
+            query_set_operations_mut(&mut current).push(SetOperation {
                 operator: operation.operator,
                 all: operation.all,
                 right: Box::new(right),
@@ -387,37 +385,90 @@ fn parse_set_operation_statement(
 
     let mut root = terms.remove(0);
     for (operation, right) in outer_operations.into_iter().zip(terms) {
-        root.set_operations.push(SetOperation {
+        query_set_operations_mut(&mut root).push(SetOperation {
             operator: operation.operator,
             all: operation.all,
             right: Box::new(right),
             span: operation.span,
         });
     }
-    root.order_by = order_by;
-    root.limit = limit;
-    root.offset = offset;
-    let span = root.span;
+    set_query_tail(&mut root, order_by, limit, offset);
+    let span = query_body_span(&root);
     Ok(Statement {
-        kind: StatementKind::Select(root),
+        kind: match root {
+            QueryBody::Select(select) => StatementKind::Select(select),
+            QueryBody::Values(values) => StatementKind::Values(values),
+        },
         span,
     })
 }
 
-fn parse_select_fragment(sql: &str) -> Result<Select> {
+fn parse_query_body_fragment(sql: &str) -> Result<QueryBody> {
     let mut statements = parse_sql_via_ffi(sql.trim())?;
     if statements.len() != 1 {
         return Err(set_operation_parser_error(
-            "exactly one SELECT query per set-operation input",
+            "exactly one query body per set-operation input",
             format!("{} statements", statements.len()),
         ));
     }
     match statements.remove(0).kind {
-        StatementKind::Select(select) => Ok(select),
+        StatementKind::Select(select) => Ok(QueryBody::Select(select)),
+        StatementKind::Values(values) => Ok(QueryBody::Values(values)),
         _ => Err(set_operation_parser_error(
-            "SELECT query in set operation",
-            "non-SELECT statement",
+            "SELECT or VALUES query in set operation",
+            "non-query statement",
         )),
+    }
+}
+
+fn query_set_operations_mut(body: &mut QueryBody) -> &mut Vec<SetOperation> {
+    match body {
+        QueryBody::Select(select) => &mut select.set_operations,
+        QueryBody::Values(values) => &mut values.set_operations,
+    }
+}
+
+fn take_query_tail(
+    body: &mut QueryBody,
+) -> (Vec<crate::ast::OrderByExpr>, Option<Expr>, Option<Expr>) {
+    match body {
+        QueryBody::Select(select) => (
+            std::mem::take(&mut select.order_by),
+            select.limit.take(),
+            select.offset.take(),
+        ),
+        QueryBody::Values(values) => (
+            std::mem::take(&mut values.order_by),
+            values.limit.take(),
+            values.offset.take(),
+        ),
+    }
+}
+
+fn set_query_tail(
+    body: &mut QueryBody,
+    order_by: Vec<crate::ast::OrderByExpr>,
+    limit: Option<Expr>,
+    offset: Option<Expr>,
+) {
+    match body {
+        QueryBody::Select(select) => {
+            select.order_by = order_by;
+            select.limit = limit;
+            select.offset = offset;
+        }
+        QueryBody::Values(values) => {
+            values.order_by = order_by;
+            values.limit = limit;
+            values.offset = offset;
+        }
+    }
+}
+
+fn query_body_span(body: &QueryBody) -> Span {
+    match body {
+        QueryBody::Select(select) => select.span,
+        QueryBody::Values(values) => values.span,
     }
 }
 
@@ -912,8 +963,14 @@ fn annotate_natural_joins(statements: &mut [Statement], natural_markers: Vec<boo
     let mut natural_markers = natural_markers.into_iter();
     let mut consumed = 0usize;
     for statement in statements {
-        if let StatementKind::Select(select) = &mut statement.kind {
-            annotate_select_natural_joins(select, &mut natural_markers, &mut consumed);
+        match &mut statement.kind {
+            StatementKind::Select(select) => {
+                annotate_select_natural_joins(select, &mut natural_markers, &mut consumed);
+            }
+            StatementKind::Values(values) => {
+                annotate_values_natural_joins(values, &mut natural_markers, &mut consumed);
+            }
+            _ => {}
         }
     }
 
@@ -935,9 +992,7 @@ fn annotate_select_natural_joins(
 ) {
     if let Some(with) = &mut select.with {
         for cte in &mut with.ctes {
-            if let StatementKind::Select(select) = &mut cte.query.kind {
-                annotate_select_natural_joins(select, natural_markers, consumed);
-            }
+            annotate_query_body_natural_joins(&mut cte.query, natural_markers, consumed);
         }
     }
     for item in &mut select.projection {
@@ -960,7 +1015,7 @@ fn annotate_select_natural_joins(
         annotate_expr_natural_joins(having, natural_markers, consumed);
     }
     for operation in &mut select.set_operations {
-        annotate_select_natural_joins(&mut operation.right, natural_markers, consumed);
+        annotate_query_body_natural_joins(&mut operation.right, natural_markers, consumed);
     }
     for order_by in &mut select.order_by {
         annotate_expr_natural_joins(&mut order_by.expr, natural_markers, consumed);
@@ -970,6 +1025,50 @@ fn annotate_select_natural_joins(
     }
     if let Some(offset) = &mut select.offset {
         annotate_expr_natural_joins(offset, natural_markers, consumed);
+    }
+}
+
+fn annotate_values_natural_joins(
+    values: &mut Values,
+    natural_markers: &mut impl Iterator<Item = bool>,
+    consumed: &mut usize,
+) {
+    if let Some(with) = &mut values.with {
+        for cte in &mut with.ctes {
+            annotate_query_body_natural_joins(&mut cte.query, natural_markers, consumed);
+        }
+    }
+    for row in &mut values.rows {
+        for expr in row {
+            annotate_expr_natural_joins(expr, natural_markers, consumed);
+        }
+    }
+    for operation in &mut values.set_operations {
+        annotate_query_body_natural_joins(&mut operation.right, natural_markers, consumed);
+    }
+    for order_by in &mut values.order_by {
+        annotate_expr_natural_joins(&mut order_by.expr, natural_markers, consumed);
+    }
+    if let Some(limit) = &mut values.limit {
+        annotate_expr_natural_joins(limit, natural_markers, consumed);
+    }
+    if let Some(offset) = &mut values.offset {
+        annotate_expr_natural_joins(offset, natural_markers, consumed);
+    }
+}
+
+fn annotate_query_body_natural_joins(
+    body: &mut QueryBody,
+    natural_markers: &mut impl Iterator<Item = bool>,
+    consumed: &mut usize,
+) {
+    match body {
+        QueryBody::Select(select) => {
+            annotate_select_natural_joins(select, natural_markers, consumed);
+        }
+        QueryBody::Values(values) => {
+            annotate_values_natural_joins(values, natural_markers, consumed);
+        }
     }
 }
 
@@ -993,9 +1092,7 @@ fn annotate_from_natural_joins(
             annotate_from_natural_joins(right, natural_markers, consumed);
         }
         FromItem::Derived { subquery, .. } => {
-            if let StatementKind::Select(select) = &mut subquery.kind {
-                annotate_select_natural_joins(select, natural_markers, consumed);
-            }
+            annotate_query_body_natural_joins(subquery, natural_markers, consumed);
         }
         FromItem::Table { .. } => {}
     }
@@ -1208,7 +1305,7 @@ mod input_preflight_tests {
             .expect_err("sidecar labels cannot make a pre-frame producer compatible");
         let rendered = error.to_string();
 
-        assert!(rendered.contains("linked Nim parser contract 0.6.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.7.0"));
         assert!(rendered.contains("linked Nim parser contract 0.4.0"));
     }
 
@@ -1218,32 +1315,32 @@ mod input_preflight_tests {
             .expect_err("a 0.5.0 producer cannot satisfy the current named-window contract");
         let rendered = error.to_string();
 
-        assert!(rendered.contains("linked Nim parser contract 0.6.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.7.0"));
         assert!(rendered.contains("linked Nim parser contract 0.5.0"));
     }
 
     #[test]
     fn legacy_v040_consumer_rejects_the_current_producer_before_decode() {
         let linked_producer_contract = nim_ffi::parser_contract_version();
-        assert_eq!(linked_producer_contract, "0.6.0");
+        assert_eq!(linked_producer_contract, "0.7.0");
         let error = ensure_parser_contract("0.4.0", &linked_producer_contract)
             .expect_err("legacy consumer must reject a producer with frame semantics");
         let rendered = error.to_string();
 
         assert!(rendered.contains("linked Nim parser contract 0.4.0"));
-        assert!(rendered.contains("linked Nim parser contract 0.6.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.7.0"));
     }
 
     #[test]
     fn legacy_v050_consumer_rejects_a_v060_named_window_producer_before_decode() {
         let linked_producer_contract = nim_ffi::parser_contract_version();
-        assert_eq!(linked_producer_contract, "0.6.0");
+        assert_eq!(linked_producer_contract, "0.7.0");
         let error = ensure_parser_contract("0.5.0", &linked_producer_contract)
             .expect_err("legacy consumer must not ignore QUALIFY or named-window fields");
         let rendered = error.to_string();
 
         assert!(rendered.contains("linked Nim parser contract 0.5.0"));
-        assert!(rendered.contains("linked Nim parser contract 0.6.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.7.0"));
     }
 
     #[test]

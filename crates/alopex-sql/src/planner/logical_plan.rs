@@ -164,6 +164,14 @@ pub enum LogicalPlan {
         projection: Projection,
     },
 
+    /// Inline VALUES rows evaluated once per output row.
+    Values {
+        /// Type-checked expressions for each row.
+        rows: Vec<Vec<TypedExpr>>,
+        /// Common output schema inferred column-by-column across all rows.
+        schema: Vec<crate::catalog::ColumnMetadata>,
+    },
+
     /// Filter operation (WHERE clause).
     ///
     /// Filters rows from the input plan based on a predicate.
@@ -368,6 +376,7 @@ impl LogicalPlan {
         match self {
             LogicalPlan::Pragma { .. } => "PRAGMA",
             LogicalPlan::Scan { .. }
+            | LogicalPlan::Values { .. }
             | LogicalPlan::Filter { .. }
             | LogicalPlan::Project { .. }
             | LogicalPlan::Join { .. }
@@ -524,6 +533,7 @@ impl LogicalPlan {
         match self {
             LogicalPlan::Pragma { .. } => "Pragma",
             LogicalPlan::Scan { .. } => "Scan",
+            LogicalPlan::Values { .. } => "Values",
             LogicalPlan::Filter { .. } => "Filter",
             LogicalPlan::Project { .. } => "Project",
             LogicalPlan::Join { .. } => "Join",
@@ -550,6 +560,7 @@ impl LogicalPlan {
         matches!(
             self,
             LogicalPlan::Scan { .. }
+                | LogicalPlan::Values { .. }
                 | LogicalPlan::Filter { .. }
                 | LogicalPlan::Project { .. }
                 | LogicalPlan::Join { .. }
@@ -595,7 +606,7 @@ impl LogicalPlan {
             | LogicalPlan::Window { input, .. }
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. } => Some(input),
-            LogicalPlan::Join { .. } => None,
+            LogicalPlan::Join { .. } | LogicalPlan::Values { .. } => None,
             LogicalPlan::SetOperation { .. } => None,
             LogicalPlan::RecursiveCte { .. } | LogicalPlan::RecursiveReference { .. } => None,
             _ => None,
@@ -615,6 +626,7 @@ impl LogicalPlan {
             LogicalPlan::CreateIndex { index, .. } => Some(&index.table),
             LogicalPlan::DropIndex { .. } => None,
             LogicalPlan::Pragma { .. } => None,
+            LogicalPlan::Values { .. } => None,
             LogicalPlan::Filter { input, .. }
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }

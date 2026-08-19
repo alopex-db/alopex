@@ -502,6 +502,10 @@ fn validate_plan(
             "set_operation_not_supported_remote",
             "set operations are outside the v0.8 remote-read catalog",
         )),
+        LogicalPlan::Values { .. } => Err(RemoteReadRejection::local_only(
+            "values_local_only",
+            "VALUES relations are evaluated by the local executor",
+        )),
         LogicalPlan::RecursiveCte { .. } | LogicalPlan::RecursiveReference { .. } => {
             Err(RemoteReadRejection::unsupported(
                 "recursive_cte_not_supported_remote",
@@ -800,6 +804,23 @@ mod tests {
             classify(&pragma, &[]),
             RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
                 if code == "pragma_local_only"
+        ));
+    }
+
+    #[test]
+    fn values_relations_remain_local_only() {
+        let plan = LogicalPlan::Values {
+            rows: vec![vec![TypedExpr::literal(
+                Literal::Number("1".to_string()),
+                ResolvedType::Integer,
+                Span::default(),
+            )]],
+            schema: vec![ColumnMetadata::new("column1", ResolvedType::Integer)],
+        };
+        assert!(matches!(
+            classify(&plan, &[]),
+            RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                if code == "values_local_only"
         ));
     }
 

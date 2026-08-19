@@ -2,7 +2,7 @@
 
 use alopex_sql::{
     AlopexDialect, CommonTableExpr, CreateContinuousAggregate, DataType, ExprKind, FromItem,
-    InsertSource, JoinType, Literal, Parser, ParserError, SelectItem, Span, Statement,
+    InsertSource, JoinType, Literal, Parser, ParserError, QueryBody, SelectItem, Span, Statement,
     StatementKind, VectorMetric, WindowFrameBound, WindowFrameUnits, parser_contract_version,
 };
 use serde::{Deserialize, Serialize};
@@ -167,7 +167,7 @@ fn public_nul_guard_and_normal_sql_behavior_are_stable() {
 }
 
 #[test]
-fn cte_column_names_cross_the_nim_messagepack_boundary_compatibly() {
+fn query_body_shape_requires_the_contract_0_7_cutover() {
     let statements = Parser::parse_sql(
         &AlopexDialect,
         "WITH c(identifier, label) AS (SELECT 1, 'one') SELECT identifier FROM c",
@@ -179,15 +179,24 @@ fn cte_column_names_cross_the_nim_messagepack_boundary_compatibly() {
     let cte = &select.with.as_ref().expect("expected WITH clause").ctes[0];
     assert_eq!(cte.columns, vec!["identifier", "label"]);
 
-    let current_payload = rmp_serde::to_vec_named(cte).expect("encode current CTE payload");
-    let legacy: LegacyCommonTableExpr =
-        rmp_serde::from_slice(&current_payload).expect("legacy consumer should ignore columns");
-    assert_eq!(legacy.name, "c");
+    let current_payload = rmp_serde::to_vec_named(cte).expect("encode contract-0.7 CTE payload");
+    rmp_serde::from_slice::<LegacyCommonTableExpr>(&current_payload)
+        .expect_err("a contract-0.6 consumer must reject the direct QueryBody payload");
 
-    let legacy_payload = rmp_serde::to_vec_named(&legacy).expect("encode legacy CTE payload");
-    let current: CommonTableExpr =
-        rmp_serde::from_slice(&legacy_payload).expect("current consumer should default columns");
-    assert!(current.columns.is_empty());
+    let QueryBody::Select(select_body) = cte.query.as_ref() else {
+        panic!("expected SELECT CTE body");
+    };
+    let legacy = LegacyCommonTableExpr {
+        name: cte.name.clone(),
+        query: Box::new(Statement {
+            kind: StatementKind::Select(select_body.clone()),
+            span: cte.span,
+        }),
+        span: cte.span,
+    };
+    let legacy_payload = rmp_serde::to_vec_named(&legacy).expect("encode contract-0.6 CTE payload");
+    rmp_serde::from_slice::<CommonTableExpr>(&legacy_payload)
+        .expect_err("the contract-0.7 consumer must reject a wrapped Statement query");
 }
 
 #[test]
@@ -303,13 +312,13 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.6.0");
+    assert_eq!(parser_contract_version(), "0.7.0");
 }
 
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.6.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.7.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -317,7 +326,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.6.0");
+    assert_eq!(parser_contract_version(), "0.7.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);
@@ -571,12 +580,16 @@ fn join_markers_are_applied_inside_recursive_set_operation_terms() {
         panic!("expected outer SELECT");
     };
     let cte = &outer.with.as_ref().expect("expected WITH clause").ctes[0];
-    let StatementKind::Select(body) = &cte.query.kind else {
+    let QueryBody::Select(body) = cte.query.as_ref() else {
         panic!("expected CTE SELECT");
     };
 
+    let QueryBody::Select(recursive_term) = body.set_operations[0].right.as_ref() else {
+        panic!("expected SELECT recursive term");
+    };
+
     assert!(matches!(
-        &body.set_operations[0].right.from[0],
+        &recursive_term.from[0],
         FromItem::Join {
             join_type: JoinType::Inner,
             natural: false,
@@ -640,6 +653,26 @@ fn parse_multi_row_all_string_insert_without_column_list_from_nim() {
             literal: Literal::String(value)
         } if value == "a"
     ));
+}
+
+#[test]
+fn parse_insert_with_values_query_from_nim() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "INSERT INTO t1 WITH seed(n) AS (VALUES (1)) VALUES (2), (3)",
+    )
+    .expect("INSERT query source ending in VALUES should parse");
+    let StatementKind::Insert(insert) = &statements[0].kind else {
+        panic!("expected Insert, got {:?}", statements[0].kind);
+    };
+    let InsertSource::Query { query } = &insert.source else {
+        panic!("expected Query source");
+    };
+    let QueryBody::Values(values) = query.as_ref() else {
+        panic!("expected VALUES query body");
+    };
+    assert_eq!(values.rows.len(), 2);
+    assert_eq!(values.with.as_ref().expect("WITH clause").ctes.len(), 1);
 }
 
 #[test]

@@ -1237,6 +1237,7 @@ fn classify_statement_schema(
         | alopex_sql::ast::StatementKind::CreateIndex(_)
         | alopex_sql::ast::StatementKind::DropIndex(_) => StatementSchemaClass::SchemaMutation,
         alopex_sql::ast::StatementKind::Select(_)
+        | alopex_sql::ast::StatementKind::Values(_)
         | alopex_sql::ast::StatementKind::Insert(_)
         | alopex_sql::ast::StatementKind::Update(_)
         | alopex_sql::ast::StatementKind::Delete(_)
@@ -1258,9 +1259,7 @@ fn is_write_sql(sql: &str) -> bool {
     let Ok(statements) = alopex_sql::parser::Parser::parse_sql(&AlopexDialect, sql) else {
         return false;
     };
-    statements
-        .iter()
-        .any(|stmt| !matches!(stmt.kind, alopex_sql::ast::StatementKind::Select(_)))
+    statements.iter().any(|stmt| !stmt.kind.is_query())
 }
 
 #[cfg(test)]
@@ -1314,6 +1313,8 @@ mod tests {
         assert!(is_ddl("CREATE TABLE items (id INT PRIMARY KEY);"));
         assert!(is_ddl("DROP TABLE items;"));
         assert!(!is_ddl("SELECT 1;"));
+        assert!(!is_ddl("VALUES (1);"));
+        assert!(!is_write_sql("VALUES (1);"));
         assert!(!is_ddl("INSERT INTO items (id) VALUES (1);"));
     }
 }

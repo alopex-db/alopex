@@ -4,6 +4,8 @@
 ## while the node/field names are aligned with the target Rust AST contract
 ## from the nim-sql-parser-migration design.
 
+import std/strutils
+
 type
   Location* = object
     line*: int
@@ -15,6 +17,7 @@ type
 
   SqlNodeKind* = enum
     nkSelect
+    nkValues
     nkWithClause
     nkCommonTableExpr
     nkCteColumnList
@@ -148,6 +151,7 @@ type
     of nkAlias:
       aliasExpr*: SqlNode
       aliasName*: string
+      aliasColumns*: seq[string]
     of nkColumnDef:
       colName*: string
       colType*: SqlNode
@@ -307,7 +311,10 @@ proc `$`*(node: SqlNode): string =
       result &= ", NATURAL"
     result &= ")"
   of nkAlias:
-    result = "Alias(" & $node.aliasExpr & " AS " & node.aliasName & ")"
+    result = "Alias(" & $node.aliasExpr & " AS " & node.aliasName
+    if node.aliasColumns.len > 0:
+      result &= "(" & node.aliasColumns.join(", ") & ")"
+    result &= ")"
   of nkColumnDef:
     result = "ColDef(" & node.colName & " " & $node.colType & ")"
   of nkSetOperation:
