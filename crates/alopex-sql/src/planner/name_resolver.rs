@@ -301,6 +301,21 @@ impl<'a, C: Catalog + ?Sized> NameResolver<'a, C> {
 
             ExprKind::UnaryOp { operand, .. } => self.resolve_expr_recursive(operand, table),
 
+            ExprKind::TruthPredicate { expr, .. } => self.resolve_expr_recursive(expr, table),
+
+            ExprKind::IsDistinctFrom { left, right, .. } => {
+                self.resolve_expr_recursive(left, table)?;
+                self.resolve_expr_recursive(right, table)?;
+                Ok(())
+            }
+
+            ExprKind::Row { items } => {
+                for item in items {
+                    self.resolve_expr_recursive(item, table)?;
+                }
+                Ok(())
+            }
+
             ExprKind::Case {
                 operand,
                 branches,

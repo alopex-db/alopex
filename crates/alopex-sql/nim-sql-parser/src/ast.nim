@@ -43,6 +43,9 @@ type
     nkColumnRef
     nkBinaryOp
     nkUnaryOp
+    nkRowConstructor
+    nkTruthPredicate
+    nkIsDistinctFrom
     nkCase
     nkCaseWhen
     nkFunctionCall

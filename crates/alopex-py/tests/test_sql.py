@@ -238,6 +238,23 @@ def test_execute_sql_values_query_preserves_exact_rows(db):
     ]
 
 
+def test_execute_sql_standard_predicates_preserve_exact_values(db):
+    rows = db.execute_sql(
+        "SELECT TRUE IS TRUE AS truth_value, "
+        "NULL IS DISTINCT FROM 1 AS distinct_null, "
+        "(1, 2) < (1, 3) AS row_less, "
+        "(1, NULL) = (1, NULL) AS row_unknown"
+    )
+    assert rows == [
+        {
+            "truth_value": True,
+            "distinct_null": True,
+            "row_less": True,
+            "row_unknown": None,
+        }
+    ]
+
+
 def test_execute_sql_grouped_window_composition_preserves_exact_rows(db):
     db.execute_sql(
         "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER)"

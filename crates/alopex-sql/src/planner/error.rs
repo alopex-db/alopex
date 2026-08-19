@@ -180,6 +180,17 @@ pub enum PlannerError {
         column: u64,
     },
 
+    /// ALOPEX-T013: Row operands expose different numbers of fields.
+    #[error(
+        "error[ALOPEX-T013]: row value has {actual} fields but its comparison operand has {expected} at line {line}, column {column}"
+    )]
+    RowArityMismatch {
+        expected: usize,
+        actual: usize,
+        line: u64,
+        column: u64,
+    },
+
     // === Feature Errors (ALOPEX-F*) ===
     /// ALOPEX-F001: Unsupported feature.
     #[error(

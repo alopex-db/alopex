@@ -316,6 +316,15 @@ fn scenario_local_sql_matrix() -> DemoResult {
 
     let v08_matrix = vec![
         (
+            "SELECT TRUE IS TRUE AS truth_value, NULL IS DISTINCT FROM 1 AS distinct_null, (1, 2) < (1, 3) AS row_less, (1, NULL) = (1, NULL) AS row_unknown",
+            vec![vec![
+                SqlValue::Boolean(true),
+                SqlValue::Boolean(true),
+                SqlValue::Boolean(true),
+                SqlValue::Null,
+            ]],
+        ),
+        (
             "SELECT amount AS id FROM sales ORDER BY id",
             vec![
                 vec![SqlValue::Float(50.0)],
@@ -642,7 +651,7 @@ fn scenario_local_sql_matrix() -> DemoResult {
         ),
     ];
     require(
-        v08_matrix.len() == 21,
+        v08_matrix.len() == 22,
         "v0.8.x SQL success-check count changed",
     )?;
     for (sql, expected) in &v08_matrix {
@@ -663,7 +672,7 @@ fn scenario_local_sql_matrix() -> DemoResult {
         expect_sql_error(&db, sql, expected)?;
     }
     require(
-        v08_matrix.len() + rejected_v08.len() == 23,
+        v08_matrix.len() + rejected_v08.len() == 24,
         "v0.8.x SQL check count changed",
     )?;
     require(

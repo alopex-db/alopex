@@ -391,6 +391,18 @@ impl From<PlannerError> for SqlError {
                 location: ErrorLocation { line, column },
                 code: "ALOPEX-T012",
             },
+            PlannerError::RowArityMismatch {
+                expected,
+                actual,
+                line,
+                column,
+            } => Self::Plan {
+                message: format!(
+                    "row value has {actual} fields but its comparison operand has {expected}"
+                ),
+                location: ErrorLocation { line, column },
+                code: "ALOPEX-T013",
+            },
             PlannerError::InvalidPragma { name, reason } => Self::Plan {
                 message: format!("invalid PRAGMA '{name}': {reason}"),
                 location: ErrorLocation::default(),
@@ -579,6 +591,22 @@ mod tests {
         .into();
         assert_eq!(alias_width.code(), "ALOPEX-T012");
         assert_eq!(alias_width.location(), ErrorLocation { line: 6, column: 9 });
+
+        let row_width: SqlError = PlannerError::RowArityMismatch {
+            expected: 2,
+            actual: 3,
+            line: 7,
+            column: 10,
+        }
+        .into();
+        assert_eq!(row_width.code(), "ALOPEX-T013");
+        assert_eq!(
+            row_width.location(),
+            ErrorLocation {
+                line: 7,
+                column: 10
+            }
+        );
     }
 
     #[test]

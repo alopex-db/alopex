@@ -389,6 +389,32 @@ fn sql_integration_values_query_preserves_exact_rows() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_standard_predicates_preserve_exact_values() {
+    let db = Database::new();
+    let result = db
+        .execute_sql(
+            "SELECT TRUE IS TRUE AS truth_value, \
+             NULL IS DISTINCT FROM 1 AS distinct_null, \
+             (1, 2) < (1, 3) AS row_less, \
+             (1, NULL) = (1, NULL) AS row_unknown",
+        )
+        .unwrap();
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![vec![
+            SqlValue::Boolean(true),
+            SqlValue::Boolean(true),
+            SqlValue::Boolean(true),
+            SqlValue::Null,
+        ]]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_grouped_window_composition_preserves_exact_rows() {
     let db = Database::new();
     db.execute_sql(

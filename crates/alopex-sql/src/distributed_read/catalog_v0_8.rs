@@ -351,6 +351,15 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
             failure_outcome: "function_not_in_remote_catalog before transport",
         },
         RemoteReadCoverageEntry {
+            id: "scalar.standard_predicate",
+            public_surface: "truth, distinctness, and row-value predicates",
+            identities: &["truth_predicate", "is_distinct_from", "row_comparison"],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "three-valued evaluation by the local executor",
+            failure_outcome: "standard_predicate_local_only before transport",
+        },
+        RemoteReadCoverageEntry {
             id: "relation.recursive_cte",
             public_surface: "recursive common table expressions",
             identities: &["with_recursive"],
@@ -659,6 +668,13 @@ fn validate_expr(
                 return Ok(());
             }
             let normalized = name.to_ascii_lowercase();
+            if normalized.starts_with("__alopex_truth_") || normalized.starts_with("__alopex_row_")
+            {
+                return Err(RemoteReadRejection::local_only(
+                    "standard_predicate_local_only",
+                    "standard predicates are not in the v0.8 remote-read catalog",
+                ));
+            }
             if REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS.contains(&normalized.as_str()) {
                 return Err(RemoteReadRejection::local_only(
                     "stateful_function_local_only",
@@ -875,6 +891,27 @@ mod tests {
             classify(&vector_plan, &references()),
             RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
                 if code == "vector_sql_local_only"
+        ));
+    }
+
+    #[test]
+    fn standard_predicates_remain_local_only() {
+        let predicate = TypedExpr::function_call(
+            "__alopex_truth_true:0".to_string(),
+            vec![TypedExpr::literal(
+                Literal::Boolean(true),
+                ResolvedType::Boolean,
+                Span::default(),
+            )],
+            false,
+            false,
+            ResolvedType::Boolean,
+            Span::default(),
+        );
+        assert!(matches!(
+            classify(&LogicalPlan::filter(scan(), predicate), &references()),
+            RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                if code == "standard_predicate_local_only"
         ));
     }
 

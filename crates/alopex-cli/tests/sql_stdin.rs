@@ -35,6 +35,10 @@ WINDOW base AS (), ranked AS (base ORDER BY qty DESC, id)
 QUALIFY row_number <= 2
 ORDER BY id;
 VALUES (2, 'b'), (1, 'a') ORDER BY column1;
+SELECT TRUE IS TRUE AS truth_value,
+       NULL IS DISTINCT FROM 1 AS distinct_null,
+       (1, 2) < (1, 3) AS row_less,
+       (1, NULL) = (1, NULL) AS row_unknown;
 "#;
 
     {
@@ -58,7 +62,7 @@ VALUES (2, 'b'), (1, 'a') ORDER BY column1;
         .expect("json output should be an array of result sets");
     assert_eq!(
         sets.len(),
-        9,
+        10,
         "one result set per statement\nstdout:\n{stdout}"
     );
     let select_rows = sets[2].as_array().expect("SELECT result set");
@@ -151,5 +155,16 @@ VALUES (2, 'b'), (1, 'a') ORDER BY column1;
             serde_json::json!({ "column1": 1, "column2": "a" }),
             serde_json::json!({ "column1": 2, "column2": "b" }),
         ]
+    );
+
+    let predicate_rows = sets[9].as_array().expect("predicate result set");
+    assert_eq!(
+        predicate_rows,
+        &[serde_json::json!({
+            "truth_value": true,
+            "distinct_null": true,
+            "row_less": true,
+            "row_unknown": null,
+        })]
     );
 }

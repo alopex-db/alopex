@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- SQL supports `IS [NOT] TRUE/FALSE/UNKNOWN`, null-safe
+  `IS [NOT] DISTINCT FROM`, and row-value equality, ordering, `IN`, and
+  `BETWEEN` with deterministic arity/type diagnostics.
 - SQL `VALUES` works as a top-level query, derived table, CTE body, and set
   operand, with table/column aliases, `ORDER BY`/`LIMIT`, common-type
   inference, and exact-row coverage on Rust, CLI, Embedded, and Python.
@@ -21,10 +24,10 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- The Nim parser wire contract is `0.7.0`. `QueryBody` now distinguishes
-  `Select` and `Values`; pre-VALUES contract `0.6.0` producers are rejected
-  before decode. This remains internal metadata of the unified Alopex v0.8.8
-  release, not a separate parser release lane.
+- The Nim parser wire contract is `0.8.0`. It adds dedicated `Row`,
+  `TruthPredicate`, and `IsDistinctFrom` expression variants; contract `0.7.0`
+  producers are rejected before decode. This remains internal metadata of the
+  unified Alopex v0.8.8 release, not a separate parser release lane.
 
 ### Release verification
 

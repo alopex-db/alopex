@@ -8,8 +8,13 @@ use crate::ast::Span;
 use crate::ast::Statement;
 use crate::ast::ddl::VectorMetric;
 use crate::ast::expr::{
-    BinaryOp, Expr, ExprKind, Literal, PatternMatchKind, Quantifier as AstQuantifier, UnaryOp,
-    WindowFrame, WindowFrameBound, WindowFrameUnits, WindowSpec,
+    BinaryOp, Expr, ExprKind, Literal, PatternMatchKind, Quantifier as AstQuantifier, TruthValue,
+    UnaryOp, WindowFrame, WindowFrameBound, WindowFrameUnits, WindowSpec,
+};
+use crate::ast::expr::{
+    INTERNAL_ROW_BETWEEN, INTERNAL_ROW_DISTINCT, INTERNAL_ROW_EQ, INTERNAL_ROW_GT,
+    INTERNAL_ROW_GTEQ, INTERNAL_ROW_IN, INTERNAL_ROW_LT, INTERNAL_ROW_LTEQ, INTERNAL_ROW_NEQ,
+    INTERNAL_TRUTH_FALSE, INTERNAL_TRUTH_TRUE, INTERNAL_TRUTH_UNKNOWN,
 };
 use crate::catalog::{Catalog, ColumnMetadata, TableMetadata};
 use crate::planner::aggregate_expr::{AggregateExpr, AggregateFunction};
@@ -274,6 +279,38 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             ExprKind::IsNull { expr, negated } => {
                 self.infer_is_null_type_with_scope(expr, *negated, scope, plan_subquery, span)
             }
+
+            ExprKind::Row { .. } => Err(PlannerError::unsupported_feature(
+                "standalone row constructor",
+                "v0.8.8 predicate context",
+                span,
+            )),
+
+            ExprKind::TruthPredicate {
+                expr,
+                value,
+                negated,
+            } => self.infer_truth_predicate_with_scope(
+                expr,
+                *value,
+                *negated,
+                scope,
+                plan_subquery,
+                span,
+            ),
+
+            ExprKind::IsDistinctFrom {
+                left,
+                right,
+                negated,
+            } => self.infer_distinct_predicate_with_scope(
+                left,
+                right,
+                *negated,
+                scope,
+                plan_subquery,
+                span,
+            ),
 
             ExprKind::VectorLiteral { values } => self.infer_vector_literal_type(values, span),
 
@@ -601,6 +638,32 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         plan_subquery: &SubqueryPlanner<'_>,
         span: Span,
     ) -> Result<TypedExpr, PlannerError> {
+        if row_items(left).is_some() || row_items(right).is_some() {
+            let internal = match op {
+                BinaryOp::Eq => INTERNAL_ROW_EQ,
+                BinaryOp::Neq => INTERNAL_ROW_NEQ,
+                BinaryOp::Lt => INTERNAL_ROW_LT,
+                BinaryOp::LtEq => INTERNAL_ROW_LTEQ,
+                BinaryOp::Gt => INTERNAL_ROW_GT,
+                BinaryOp::GtEq => INTERNAL_ROW_GTEQ,
+                _ => {
+                    return Err(PlannerError::invalid_operator(
+                        format!("{op:?}"),
+                        "Row",
+                        span,
+                    ));
+                }
+            };
+            let (mut left, right, width) =
+                self.infer_row_pair_with_scope(left, right, scope, plan_subquery, span)?;
+            left.extend(right);
+            return Ok(internal_predicate(
+                format!("{internal}:{width}"),
+                left,
+                span,
+            ));
+        }
+
         let left_typed = self.infer_type_with_scope(left, scope, plan_subquery)?;
         let right_typed = self.infer_type_with_scope(right, scope, plan_subquery)?;
 
@@ -1330,6 +1393,25 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         plan_subquery: &SubqueryPlanner<'_>,
         span: Span,
     ) -> Result<TypedExpr, PlannerError> {
+        if row_items(expr).is_some() || row_items(low).is_some() || row_items(high).is_some() {
+            let expr_typed = self.infer_row_operand_with_scope(expr, scope, plan_subquery)?;
+            let low_typed = self.infer_row_operand_with_scope(low, scope, plan_subquery)?;
+            let high_typed = self.infer_row_operand_with_scope(high, scope, plan_subquery)?;
+            let width = expr_typed.len();
+            self.check_row_arity(width, low_typed.len(), span)?;
+            self.check_row_arity(width, high_typed.len(), span)?;
+            self.check_row_types(&expr_typed, &low_typed, span)?;
+            self.check_row_types(&expr_typed, &high_typed, span)?;
+            let mut args = expr_typed;
+            args.extend(low_typed);
+            args.extend(high_typed);
+            return Ok(internal_predicate(
+                format!("{INTERNAL_ROW_BETWEEN}:{width}:{}", u8::from(negated)),
+                args,
+                span,
+            ));
+        }
+
         let expr_typed = self.infer_type_with_scope(expr, scope, plan_subquery)?;
         let low_typed = self.infer_type_with_scope(low, scope, plan_subquery)?;
         let high_typed = self.infer_type_with_scope(high, scope, plan_subquery)?;
@@ -1532,6 +1614,22 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         plan_subquery: &SubqueryPlanner<'_>,
         span: Span,
     ) -> Result<TypedExpr, PlannerError> {
+        if row_items(expr).is_some() || list.iter().any(|item| row_items(item).is_some()) {
+            let mut args = self.infer_row_operand_with_scope(expr, scope, plan_subquery)?;
+            let width = args.len();
+            for item in list {
+                let typed = self.infer_row_operand_with_scope(item, scope, plan_subquery)?;
+                self.check_row_arity(width, typed.len(), item.span)?;
+                self.check_row_types(&args[..width], &typed, item.span)?;
+                args.extend(typed);
+            }
+            return Ok(internal_predicate(
+                format!("{INTERNAL_ROW_IN}:{width}:{}", u8::from(negated)),
+                args,
+                span,
+            ));
+        }
+
         let expr_typed = self.infer_type_with_scope(expr, scope, plan_subquery)?;
 
         let typed_list: Vec<TypedExpr> = list
@@ -1556,6 +1654,122 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             resolved_type: ResolvedType::Boolean,
             span,
         })
+    }
+
+    fn infer_truth_predicate_with_scope(
+        &self,
+        expr: &Expr,
+        value: TruthValue,
+        negated: bool,
+        scope: &[ScopedTable],
+        plan_subquery: &SubqueryPlanner<'_>,
+        span: Span,
+    ) -> Result<TypedExpr, PlannerError> {
+        let typed = self.infer_type_with_scope(expr, scope, plan_subquery)?;
+        if !matches!(
+            typed.resolved_type,
+            ResolvedType::Boolean | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Boolean",
+                typed.resolved_type.type_name(),
+                expr.span,
+            ));
+        }
+        let name = match value {
+            TruthValue::True => INTERNAL_TRUTH_TRUE,
+            TruthValue::False => INTERNAL_TRUTH_FALSE,
+            TruthValue::Unknown => INTERNAL_TRUTH_UNKNOWN,
+        };
+        Ok(internal_predicate(
+            format!("{name}:{}", u8::from(negated)),
+            vec![typed],
+            span,
+        ))
+    }
+
+    fn infer_distinct_predicate_with_scope(
+        &self,
+        left: &Expr,
+        right: &Expr,
+        negated: bool,
+        scope: &[ScopedTable],
+        plan_subquery: &SubqueryPlanner<'_>,
+        span: Span,
+    ) -> Result<TypedExpr, PlannerError> {
+        let (mut left, right, width) =
+            self.infer_row_pair_with_scope(left, right, scope, plan_subquery, span)?;
+        left.extend(right);
+        Ok(internal_predicate(
+            format!("{INTERNAL_ROW_DISTINCT}:{width}:{}", u8::from(negated)),
+            left,
+            span,
+        ))
+    }
+
+    fn infer_row_pair_with_scope(
+        &self,
+        left: &Expr,
+        right: &Expr,
+        scope: &[ScopedTable],
+        plan_subquery: &SubqueryPlanner<'_>,
+        span: Span,
+    ) -> Result<(Vec<TypedExpr>, Vec<TypedExpr>, usize), PlannerError> {
+        let left = self.infer_row_operand_with_scope(left, scope, plan_subquery)?;
+        let right = self.infer_row_operand_with_scope(right, scope, plan_subquery)?;
+        let width = left.len();
+        self.check_row_arity(width, right.len(), span)?;
+        self.check_row_types(&left, &right, span)?;
+        Ok((left, right, width))
+    }
+
+    fn infer_row_operand_with_scope(
+        &self,
+        expr: &Expr,
+        scope: &[ScopedTable],
+        plan_subquery: &SubqueryPlanner<'_>,
+    ) -> Result<Vec<TypedExpr>, PlannerError> {
+        match row_items(expr) {
+            Some(items) => items
+                .iter()
+                .map(|item| self.infer_type_with_scope(item, scope, plan_subquery))
+                .collect(),
+            None => Ok(vec![self.infer_type_with_scope(
+                expr,
+                scope,
+                plan_subquery,
+            )?]),
+        }
+    }
+
+    fn check_row_arity(
+        &self,
+        expected: usize,
+        actual: usize,
+        span: Span,
+    ) -> Result<(), PlannerError> {
+        if expected == actual {
+            Ok(())
+        } else {
+            Err(PlannerError::RowArityMismatch {
+                expected,
+                actual,
+                line: span.start.line,
+                column: span.start.column,
+            })
+        }
+    }
+
+    fn check_row_types(
+        &self,
+        left: &[TypedExpr],
+        right: &[TypedExpr],
+        span: Span,
+    ) -> Result<(), PlannerError> {
+        for (left, right) in left.iter().zip(right) {
+            self.check_comparison_op(&left.resolved_type, &right.resolved_type, span)?;
+        }
+        Ok(())
     }
 
     /// Infer the type of an IS NULL expression.
@@ -2704,6 +2918,17 @@ fn single_column_type(schema: &[ColumnMetadata], span: Span) -> Result<ResolvedT
             span,
         )),
     }
+}
+
+fn row_items(expr: &Expr) -> Option<&[Expr]> {
+    match &expr.kind {
+        ExprKind::Row { items } => Some(items),
+        _ => None,
+    }
+}
+
+fn internal_predicate(name: String, args: Vec<TypedExpr>, span: Span) -> TypedExpr {
+    TypedExpr::function_call(name, args, false, false, ResolvedType::Boolean, span)
 }
 
 // Tests are in type_checker/tests.rs

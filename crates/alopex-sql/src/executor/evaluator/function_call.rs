@@ -14,6 +14,9 @@ pub fn evaluate_function_call(
     star: bool,
     ctx: &EvalContext<'_>,
 ) -> Result<SqlValue> {
+    if let Some(result) = super::predicate::evaluate_internal_predicate(name, args, ctx) {
+        return result;
+    }
     if distinct || star {
         return Err(ExecutorError::Evaluation(
             EvaluationError::UnsupportedFunction(format!("{name} with modifiers")),

@@ -436,7 +436,15 @@ proc parsePrimary(p: var Parser): SqlNode =
       result = newNode(nkScalarSubquery, tokenSpan(start))
       result.children.add(subquery)
     else:
-      result = p.parseExpr()
+      let first = p.parseExpr()
+      if p.check(tkComma):
+        result = newNode(nkRowConstructor, tokenSpan(start))
+        result.children.add(first)
+        while p.check(tkComma):
+          discard p.advance()
+          result.children.add(p.parseExpr())
+      else:
+        result = first
       discard p.expect(tkRParen)
   of tkExists:
     result = p.parseExistsExpr(false)
@@ -538,11 +546,12 @@ proc parseInExpr(p: var Parser; left: SqlNode; negated: bool): SqlNode =
     discard p.expect(tkRParen)
   else:
     let list = newNode(nkExprList)
-    if not p.check(tkRParen):
+    if p.check(tkRParen):
+      p.error("IN list must contain at least one expression")
+    list.children.add(p.parseExpr())
+    while p.check(tkComma):
+      discard p.advance()
       list.children.add(p.parseExpr())
-      while p.check(tkComma):
-        discard p.advance()
-        list.children.add(p.parseExpr())
     discard p.expect(tkRParen)
     result = newBinaryOp(if negated: opNotIn else: opIn, left, list)
 
@@ -589,13 +598,29 @@ proc parseComparison(p: var Parser): SqlNode =
 
   if p.check(tkIs):
     discard p.advance()
-    if p.check(tkNot):
+    let negated = p.check(tkNot)
+    if negated:
       discard p.advance()
-      discard p.expect(tkNull)
-      result = newUnaryOp(opIsNotNull, result)
+    if p.check(tkNull):
+      discard p.advance()
+      result = newUnaryOp(if negated: opIsNotNull else: opIsNull, result)
+    elif p.current.kind in {tkTrue, tkFalse} or p.checkContextual("unknown"):
+      let value = p.advance()
+      let predicate = newNode(nkTruthPredicate, tokenSpan(value))
+      predicate.negated = negated
+      predicate.children.add(result)
+      predicate.children.add(newIdent(value.value, tokenSpan(value)))
+      result = predicate
+    elif p.check(tkDistinct):
+      let distinctTok = p.advance()
+      discard p.expect(tkFrom)
+      let predicate = newNode(nkIsDistinctFrom, tokenSpan(distinctTok))
+      predicate.negated = negated
+      predicate.children.add(result)
+      predicate.children.add(p.parseConcat())
+      result = predicate
     else:
       discard p.expect(tkNull)
-      result = newUnaryOp(opIsNull, result)
     return
 
   if p.current.kind in {tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe}:

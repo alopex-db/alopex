@@ -10,7 +10,7 @@ it is not a product artifact. It has two intentionally separate modes:
 
 The nested v08 tool's `--parser-native-smoke` manifest is immutable v0.8.4 /
 contract-0.4.0 evidence for the checked-in historical vendor. Current
-contract-0.7.0 publication smoke is owned by the four-target release workflow;
+contract-0.8.0 publication smoke is owned by the four-target release workflow;
 do not relabel the nested fixture or its archived digests.
 
 The embedded verifier does not claim to exercise distributed-read routing,

@@ -160,8 +160,18 @@ impl NamedWindowResolver {
             }
             ExprKind::UnaryOp { operand, .. }
             | ExprKind::Cast { expr: operand, .. }
-            | ExprKind::IsNull { expr: operand, .. } => {
+            | ExprKind::IsNull { expr: operand, .. }
+            | ExprKind::TruthPredicate { expr: operand, .. } => {
                 **operand = self.resolve_expr(operand)?;
+            }
+            ExprKind::IsDistinctFrom { left, right, .. } => {
+                **left = self.resolve_expr(left)?;
+                **right = self.resolve_expr(right)?;
+            }
+            ExprKind::Row { items } => {
+                for item in items {
+                    *item = self.resolve_expr(item)?;
+                }
             }
             ExprKind::Case {
                 operand,

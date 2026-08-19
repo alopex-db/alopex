@@ -488,6 +488,10 @@ suite "Expressions — IN / NOT IN":
     check expr.binRight.kind == nkExprList
     check expr.binRight.children.len == 3
 
+  test "empty IN list is rejected":
+    expect ParseError:
+      discard parseSql("SELECT * FROM t WHERE id IN ()")
+
 suite "Expressions — IS NULL / IS NOT NULL":
 
   test "IS NULL":
@@ -503,6 +507,51 @@ suite "Expressions — IS NULL / IS NOT NULL":
     let expr = ast.children[^1].children[0]
     check expr.kind == nkUnaryOp
     check expr.unOp == opIsNotNull
+
+  test "truth predicates":
+    let ast = parseSql("SELECT flag IS TRUE, flag IS NOT FALSE, flag IS UNKNOWN FROM t")
+    let columns = ast.children[0]
+    check columns.children.len == 3
+    check columns.children[0].kind == nkTruthPredicate
+    check columns.children[0].children[1].strVal == "TRUE"
+    check columns.children[0].negated == false
+    check columns.children[1].kind == nkTruthPredicate
+    check columns.children[1].children[1].strVal == "FALSE"
+    check columns.children[1].negated == true
+    check columns.children[2].kind == nkTruthPredicate
+    check columns.children[2].children[1].strVal == "UNKNOWN"
+
+  test "UNKNOWN remains contextual outside truth predicates":
+    check parseSql("SELECT unknown FROM t").kind == nkSelect
+    check parseSql(
+      "CREATE INDEX idx ON t (embedding) USING HNSW WITH (unknown = 1)"
+    ).kind == nkCreateIndex
+
+  test "IS DISTINCT FROM and row constructors":
+    let ast = parseSql("SELECT (a, b) IS NOT DISTINCT FROM (c, d) FROM t")
+    let predicate = ast.children[0].children[0]
+    check predicate.kind == nkIsDistinctFrom
+    check predicate.negated == true
+    check predicate.children[0].kind == nkRowConstructor
+    check predicate.children[0].children.len == 2
+    check predicate.children[1].kind == nkRowConstructor
+    check predicate.children[1].children.len == 2
+
+  test "row comparison, IN and BETWEEN retain row boundaries":
+    let ast = parseSql(
+      "SELECT (a, b) < (c, d), (a, b) IN ((1, 2), (3, 4)), " &
+      "(a, b) BETWEEN (1, 2) AND (3, 4) FROM t")
+    let columns = ast.children[0]
+    check columns.children[0].kind == nkBinaryOp
+    check columns.children[0].binLeft.kind == nkRowConstructor
+    check columns.children[0].binRight.kind == nkRowConstructor
+    check columns.children[1].kind == nkBinaryOp
+    check columns.children[1].binOp == opIn
+    check columns.children[1].binRight.children[0].kind == nkRowConstructor
+    check columns.children[2].kind == nkBinaryOp
+    check columns.children[2].binOp == opBetween
+    check columns.children[2].binLeft.kind == nkRowConstructor
+    check columns.children[2].binRight.children[0].kind == nkRowConstructor
 
 suite "Expressions — function calls":
 

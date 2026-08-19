@@ -16,7 +16,8 @@ const parserContractDescriptor = staticRead("../PARSER_CONTRACT_VERSION")
 static:
   doAssert isExactContractDescriptor(parserContractDescriptor, "0.3.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.6.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.7.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.7.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.8.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -712,6 +713,32 @@ proc writeExpr(s: Stream; node: SqlNode) =
       s.pack_type(normalizedUnaryOp(node.unOp))
       s.writeKey("operand")
       s.writeExpr(node.unOperand)
+  of nkRowConstructor:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Row")
+    s.writeKey("items")
+    s.writeExprSeq(node.children)
+  of nkTruthPredicate:
+    s.pack_map(4)
+    s.writeKey("variant")
+    s.pack_type("TruthPredicate")
+    s.writeKey("expr")
+    s.writeExpr(node.children[0])
+    s.writeKey("value")
+    s.pack_type(node.children[1].strVal.toLowerAscii().capitalizeAscii())
+    s.writeKey("negated")
+    s.pack_type(node.negated)
+  of nkIsDistinctFrom:
+    s.pack_map(4)
+    s.writeKey("variant")
+    s.pack_type("IsDistinctFrom")
+    s.writeKey("left")
+    s.writeExpr(node.children[0])
+    s.writeKey("right")
+    s.writeExpr(node.children[1])
+    s.writeKey("negated")
+    s.pack_type(node.negated)
   of nkCase:
     s.pack_map(4)
     s.writeKey("variant")

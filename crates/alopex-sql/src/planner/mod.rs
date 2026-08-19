@@ -192,6 +192,11 @@ fn expr_contains_subquery(expr: &Expr) -> bool {
             expr_contains_subquery(left) || expr_contains_subquery(right)
         }
         ExprKind::UnaryOp { operand, .. } => expr_contains_subquery(operand),
+        ExprKind::TruthPredicate { expr, .. } => expr_contains_subquery(expr),
+        ExprKind::IsDistinctFrom { left, right, .. } => {
+            expr_contains_subquery(left) || expr_contains_subquery(right)
+        }
+        ExprKind::Row { items } => items.iter().any(expr_contains_subquery),
         ExprKind::Case {
             operand,
             branches,
@@ -4247,6 +4252,27 @@ fn substitute_projection_aliases(
             expr: Box::new(recurse(expr)),
             negated: *negated,
         },
+        ExprKind::TruthPredicate {
+            expr,
+            value,
+            negated,
+        } => ExprKind::TruthPredicate {
+            expr: Box::new(recurse(expr)),
+            value: *value,
+            negated: *negated,
+        },
+        ExprKind::IsDistinctFrom {
+            left,
+            right,
+            negated,
+        } => ExprKind::IsDistinctFrom {
+            left: Box::new(recurse(left)),
+            right: Box::new(recurse(right)),
+            negated: *negated,
+        },
+        ExprKind::Row { items } => ExprKind::Row {
+            items: items.iter().map(recurse).collect(),
+        },
         // Qualified column refs, literals, and subquery-bearing expressions are
         // left untouched (see the subquery note above).
         ExprKind::ColumnRef { .. }
@@ -4310,6 +4336,11 @@ fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
             expr_contains_aggregate(left) || expr_contains_aggregate(right)
         }
         ExprKind::UnaryOp { operand, .. } => expr_contains_aggregate(operand),
+        ExprKind::TruthPredicate { expr, .. } => expr_contains_aggregate(expr),
+        ExprKind::IsDistinctFrom { left, right, .. } => {
+            expr_contains_aggregate(left) || expr_contains_aggregate(right)
+        }
+        ExprKind::Row { items } => items.iter().any(expr_contains_aggregate),
         ExprKind::Case {
             operand,
             branches,

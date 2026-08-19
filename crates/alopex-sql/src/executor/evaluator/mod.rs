@@ -16,6 +16,7 @@ mod is_null;
 mod literal;
 pub(crate) mod numeric;
 pub(crate) mod pattern;
+pub(crate) mod predicate;
 pub mod registry;
 pub(crate) mod string;
 mod timestamp;

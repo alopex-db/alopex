@@ -75,9 +75,8 @@ right (qty <= 2):      {2, 4, 5}
 left-only: {3}; right-only: {5}; intersection: {2, 4}
 ```
 
-The Python demo performs exactly 57 assertions: 40 ordered comparisons, 10
-unordered row-multiset comparisons, and 7 expected errors. The Rust EMB-04
-scenario performs 22 v0.8.x checks: 20 exact result checks and two fail-closed
+The Python demo performs exactly 59 result/error checks. The Rust EMB-04
+scenario performs 24 v0.8.x checks: 22 exact result checks and two fail-closed
 checks. The matrix grows cumulatively: CTE column aliases, recursive CTEs,
 positional/value/distribution windows, explicit frames, and grouped-window
 composition are all positive checks; their former unsupported-feature
@@ -148,6 +147,9 @@ happened to run:
 14. `VALUES` is a query body, not only INSERT syntax. Top-level constructors,
     derived tables with positional aliases, CTE bodies, set operations, and
     `ORDER BY`/`LIMIT` preserve exact row order and common column types.
+15. Truth predicates are total Boolean tests, `IS DISTINCT FROM` is null-safe,
+    and row equality/ordering follows SQL three-valued and left-to-right
+    lexicographic rules. Row-width mismatches fail with `ALOPEX-T013`.
 
 Recursive CTEs use the bounded fixed-point contract added for v0.8.7; invalid
 recursive shapes, dependency cycles, and exhausted iteration or memory budgets
@@ -158,3 +160,5 @@ Named-window and `QUALIFY` rules are in
 [`docs/sql-named-window-qualify.md`](../../../docs/sql-named-window-qualify.md).
 The constructor grammar, type rules, errors, and parser-contract migration are
 in [`docs/sql-values-query.md`](../../../docs/sql-values-query.md).
+Standard truth, distinctness, row comparison, and error rules are in
+[`docs/sql-standard-predicates.md`](../../../docs/sql-standard-predicates.md).

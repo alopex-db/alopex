@@ -108,6 +108,16 @@ suite "MessagePack output - roundtrip":
     ]:
       assertMsgpackRoundtrip(sql)
 
+  test "standard predicate and row variants round-trip":
+    for sql in [
+      "SELECT flag IS TRUE, flag IS NOT UNKNOWN FROM flags",
+      "SELECT value IS DISTINCT FROM fallback FROM flags",
+      "SELECT (a, b) = (c, d) FROM pairs",
+      "SELECT (a, b) IN ((1, 2), (3, 4)) FROM pairs",
+      "SELECT (a, b) BETWEEN (1, 2) AND (3, 4) FROM pairs",
+    ]:
+      assertMsgpackRoundtrip(sql)
+
   test "Vector and index DDL round-trip":
     for sql in [
       "CREATE TABLE items (id INT, embedding VECTOR(3, COSINE))",
@@ -118,6 +128,19 @@ suite "MessagePack output - roundtrip":
       assertMsgpackRoundtrip(sql)
 
 suite "MessagePack output - contract shape":
+
+  test "standard predicates preserve dedicated expression variants":
+    let kind = selectKind(
+      "SELECT flag IS NOT UNKNOWN, (a, b) IS DISTINCT FROM (c, d) FROM pairs")
+    let truth = kind["projection"][0]["expr"]["kind"]
+    check truth["variant"].getStr() == "TruthPredicate"
+    check truth["value"].getStr() == "Unknown"
+    check truth["negated"].getBool()
+    let distinctPredicate = kind["projection"][1]["expr"]["kind"]
+    check distinctPredicate["variant"].getStr() == "IsDistinctFrom"
+    check distinctPredicate["left"]["kind"]["variant"].getStr() == "Row"
+    check distinctPredicate["left"]["kind"]["items"].len == 2
+    check distinctPredicate["right"]["kind"]["variant"].getStr() == "Row"
 
   test "CTE emits its optional ordered column name list":
     let kind = selectKind(

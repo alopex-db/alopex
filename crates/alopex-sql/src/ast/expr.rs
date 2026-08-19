@@ -3,6 +3,19 @@ use super::dml::OrderByExpr;
 use super::span::{Span, Spanned};
 use serde::{Deserialize, Serialize};
 
+pub(crate) const INTERNAL_TRUTH_TRUE: &str = "__alopex_truth_true";
+pub(crate) const INTERNAL_TRUTH_FALSE: &str = "__alopex_truth_false";
+pub(crate) const INTERNAL_TRUTH_UNKNOWN: &str = "__alopex_truth_unknown";
+pub(crate) const INTERNAL_ROW_EQ: &str = "__alopex_row_eq";
+pub(crate) const INTERNAL_ROW_NEQ: &str = "__alopex_row_neq";
+pub(crate) const INTERNAL_ROW_LT: &str = "__alopex_row_lt";
+pub(crate) const INTERNAL_ROW_LTEQ: &str = "__alopex_row_lteq";
+pub(crate) const INTERNAL_ROW_GT: &str = "__alopex_row_gt";
+pub(crate) const INTERNAL_ROW_GTEQ: &str = "__alopex_row_gteq";
+pub(crate) const INTERNAL_ROW_DISTINCT: &str = "__alopex_row_distinct";
+pub(crate) const INTERNAL_ROW_BETWEEN: &str = "__alopex_row_between";
+pub(crate) const INTERNAL_ROW_IN: &str = "__alopex_row_in";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Expr {
     pub kind: ExprKind,
@@ -79,6 +92,22 @@ pub enum ExprKind {
     },
     IsNull {
         expr: Box<Expr>,
+        negated: bool,
+    },
+    /// A parenthesized row-value constructor used by row predicates.
+    Row {
+        items: Vec<Expr>,
+    },
+    /// `IS [NOT] TRUE/FALSE/UNKNOWN`.
+    TruthPredicate {
+        expr: Box<Expr>,
+        value: TruthValue,
+        negated: bool,
+    },
+    /// Null-safe scalar or row equality.
+    IsDistinctFrom {
+        left: Box<Expr>,
+        right: Box<Expr>,
         negated: bool,
     },
     VectorLiteral {
@@ -194,6 +223,13 @@ pub enum BinaryOp {
 pub enum UnaryOp {
     Not,
     Minus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TruthValue {
+    True,
+    False,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

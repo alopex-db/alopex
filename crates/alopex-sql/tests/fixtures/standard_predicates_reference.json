@@ -1,0 +1,33 @@
+{
+  "reference_versions": {
+    "duckdb": "1.5.5",
+    "datafusion": "54.0.0",
+    "postgresql": "16.14"
+  },
+  "basis": "Expected rows are pinned to the documented SQL semantics linked below; external engines are not executed by this fixture test.",
+  "source_docs": {
+    "duckdb_comparisons": "https://duckdb.org/docs/stable/sql/expressions/comparison_operators",
+    "datafusion_operators": "https://datafusion.apache.org/user-guide/sql/operators.html",
+    "postgresql_row_comparisons": "https://www.postgresql.org/docs/current/functions-comparisons.html"
+  },
+  "cases": [
+    {
+      "name": "truth_and_null_safe_distinctness",
+      "sql": "SELECT NULL IS UNKNOWN AS is_unknown, NULL IS NOT TRUE AS not_true, NULL IS DISTINCT FROM 1 AS is_distinct, NULL IS NOT DISTINCT FROM NULL AS not_distinct",
+      "columns": ["is_unknown", "not_true", "is_distinct", "not_distinct"],
+      "rows": [[true, true, true, true]]
+    },
+    {
+      "name": "row_equality_and_lexicographic_order",
+      "sql": "SELECT (1, NULL) = (2, NULL) AS definite_false, (1, NULL) = (1, NULL) AS unknown_eq, (1, NULL) < (2, 0) AS decided_first, (1, NULL) < (1, 0) AS unknown_order",
+      "columns": ["definite_false", "unknown_eq", "decided_first", "unknown_order"],
+      "rows": [[false, null, true, null]]
+    },
+    {
+      "name": "row_membership_bounds_and_distinctness",
+      "sql": "SELECT (1, 2) IN ((3, 4), (1, 2)) AS present, (1, NULL) IN ((1, 2), (1, NULL)) AS unknown_membership, (2, 3) BETWEEN (1, 9) AND (3, 0) AS bounded, (1, NULL) IS NOT DISTINCT FROM (1, NULL) AS same",
+      "columns": ["present", "unknown_membership", "bounded", "same"],
+      "rows": [[true, null, true, true]]
+    }
+  ]
+}
