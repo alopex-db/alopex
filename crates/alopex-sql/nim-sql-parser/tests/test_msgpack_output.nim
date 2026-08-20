@@ -254,6 +254,31 @@ suite "MessagePack output - contract shape":
     check kind["limit"]["kind"]["literal"]["value"].getStr() == "1"
     check kind["limit_with_ties"].getBool() == true
 
+  test "SELECT DISTINCT ON emits its key expressions (issue #150)":
+    let kind = selectKind(
+      "SELECT DISTINCT ON (region, amount % 2) region FROM sales " &
+      "ORDER BY region, amount % 2")
+    check kind["distinct"].getBool() == false
+    check kind["distinct_on"].len == 2
+    check kind["distinct_on"][0]["kind"]["variant"].getStr() == "ColumnRef"
+    check kind["distinct_on"][0]["kind"]["column"].getStr() == "region"
+    check kind["distinct_on"][1]["kind"]["variant"].getStr() == "BinaryOp"
+
+  test "SELECT without DISTINCT ON emits an empty distinct_on list":
+    let kind = selectKind("SELECT id FROM t")
+    check kind["distinct_on"].kind == JArray
+    check kind["distinct_on"].len == 0
+
+  test "SELECT DISTINCT keeps distinct true and distinct_on empty":
+    let kind = selectKind("SELECT DISTINCT id FROM t")
+    check kind["distinct"].getBool() == true
+    check kind["distinct_on"].len == 0
+
+  test "DISTINCT ON round-trips":
+    assertMsgpackRoundtrip(
+      "SELECT DISTINCT ON (region) region, amount FROM sales " &
+      "ORDER BY region, amount DESC")
+
   test "CREATE INDEX emits method and WITH options":
     let doc = payloadJson("CREATE INDEX idx_doc_embedding ON documents (embedding) USING HNSW WITH (m = 16, ef_construction = 200)")
     let create = doc.stmtKind()
@@ -366,7 +391,23 @@ suite "MessagePack output - stability":
         "A56C696D6974C0A66F6666736574C0" &
           "AF6C696D69745F776974685F74696573C2"
       )
-    check hexPayload("SELECT 1") == v0100Payload
+    # Contract 0.11.0 (issue #150) inserts distinct_on after distinct.
+    let v0110Payload = v0100Payload
+      .replace("A46B696E648E", "A46B696E648F")
+      .replace(
+        "A864697374696E6374C2AA70726F6A656374696F6E",
+        "A864697374696E6374C2" &
+          "AB64697374696E63745F6F6E90" &
+          "AA70726F6A656374696F6E"
+      )
+    check hexPayload("SELECT 1") == v0110Payload
+
+  test "WITH select declares the exact 16-entry map header":
+    # 15 fixed keys plus `with` exceeds the fixmap range, so the Select map
+    # must switch to map16 (DE0010). A shorter declared count leaves trailing
+    # bytes that the Rust MessagePack preflight rejects (issue #150).
+    let payload = hexPayload("WITH c AS (SELECT 1) SELECT 2")
+    check payload.startsWith("9182A46B696E64DE0010A776617269616E74A653656C656374A477697468")
 
 suite "MessagePack output - staged continuous aggregate contract":
 
@@ -435,6 +476,13 @@ suite "MessagePack output - staged continuous aggregate contract":
       "WITH (retention = '7d', refresh_interval = '1h')"
     )
     checkStagedError(withTiesQuery, "cannot contain FETCH ... WITH TIES")
+
+    let distinctOnQuery = parseSql(
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+      "SELECT DISTINCT ON (host) host FROM m " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    checkStagedError(distinctOnQuery, "cannot contain DISTINCT ON")
 
     var malformedWhere = canonicalContinuousAggregate()
     malformedWhere.children[1].children.add(
@@ -645,6 +693,7 @@ suite "MessagePack output - staged continuous aggregate contract":
     check query["limit"]["kind"]["literal"]["value"].getStr() == "2"
     check query["offset"]["kind"]["literal"]["value"].getStr() == "1"
     check not query.hasKey("limit_with_ties")
+    check not query.hasKey("distinct_on")
 
   test "future helper accepts the existing CAST DECIMAL grammar":
     let statement = parseSql(

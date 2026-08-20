@@ -441,6 +441,86 @@ fn compare_vectors(left: &[f32], right: &[f32]) -> Ordering {
 }
 
 // ============================================================================
+// DistinctOnIterator - SELECT DISTINCT ON deduplication (issue #150)
+// ============================================================================
+
+/// Iterator that implements `SELECT DISTINCT ON (expr, ...)`.
+///
+/// The input is first sorted by the complete effective sort specification the
+/// planner synthesized (ON keys, user ORDER BY tail, and an all-column
+/// tie-breaker; see docs/sql-distinct-on.md D2-D4). Sorting reuses
+/// [`SortIterator`], so spill runs are merged under the same full comparator
+/// and determinism survives external sorting. The iterator then emits only
+/// the first row of each group whose leading `key_count` sort keys compare
+/// equal; NULL keys compare equal to NULL (D5).
+pub struct DistinctOnIterator<I: RowIterator> {
+    input: SortIterator<I>,
+    key_exprs: Vec<SortExpr>,
+    last_keys: Option<Vec<SqlValue>>,
+}
+
+impl<I: RowIterator> DistinctOnIterator<I> {
+    /// Creates a new DISTINCT ON iterator.
+    ///
+    /// `order_by` is the complete effective sort specification whose leading
+    /// `key_count` entries form the distinctness key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if sorting the input fails.
+    pub fn new(
+        input: I,
+        order_by: &[SortExpr],
+        key_count: usize,
+        policy: Option<MemoryPolicy>,
+    ) -> Result<Self> {
+        debug_assert!((1..=order_by.len()).contains(&key_count));
+        let sorted = SortIterator::new_with_policy(input, order_by, policy)?;
+        Ok(Self {
+            input: sorted,
+            key_exprs: order_by[..key_count.min(order_by.len())].to_vec(),
+            last_keys: None,
+        })
+    }
+}
+
+impl<I: RowIterator> RowIterator for DistinctOnIterator<I> {
+    fn next_row(&mut self) -> Option<Result<Row>> {
+        loop {
+            let row = match self.input.next_row()? {
+                Ok(row) => row,
+                Err(err) => return Some(Err(err)),
+            };
+            let mut keys = Vec::with_capacity(self.key_exprs.len());
+            for sort in &self.key_exprs {
+                let ctx = EvalContext::new(&row.values);
+                match crate::executor::evaluator::evaluate(&sort.expr, &ctx) {
+                    Ok(value) => keys.push(value),
+                    Err(err) => return Some(Err(err)),
+                }
+            }
+            let starts_new_group = match &self.last_keys {
+                None => true,
+                Some(previous) => previous.iter().zip(&keys).any(|(left, right)| {
+                    // Direction and NULL placement are irrelevant to key
+                    // equality: equal values stay equal under ASC/DESC and
+                    // (NULL, NULL) compares Equal (D5).
+                    compare_single(left, right, true, false) != Ordering::Equal
+                }),
+            };
+            if starts_new_group {
+                self.last_keys = Some(keys);
+                return Some(Ok(row));
+            }
+        }
+    }
+
+    fn schema(&self) -> &[ColumnMetadata] {
+        self.input.schema()
+    }
+}
+
+// ============================================================================
 // LimitIterator - Applies LIMIT and OFFSET
 // ============================================================================
 

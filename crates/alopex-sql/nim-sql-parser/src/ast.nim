@@ -53,6 +53,7 @@ type
     nkWindowClause
     nkNamedWindow
     nkQualifyClause
+    nkDistinctOnClause
     nkWindowFrame
     nkWindowFrameBound
     nkPartitionByClause

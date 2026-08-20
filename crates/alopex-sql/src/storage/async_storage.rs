@@ -666,6 +666,7 @@ fn is_query_plan(plan: &LogicalPlan) -> bool {
             | LogicalPlan::RecursiveCte { .. }
             | LogicalPlan::RecursiveReference { .. }
             | LogicalPlan::Sort { .. }
+            | LogicalPlan::DistinctOn { .. }
             | LogicalPlan::Limit { .. }
     )
 }

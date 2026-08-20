@@ -666,9 +666,19 @@ fn scenario_local_sql_matrix() -> DemoResult {
              ORDER BY id OFFSET 1 ROW FETCH NEXT 1 + 0 ROWS ONLY",
             vec![vec![SqlValue::Integer(2), SqlValue::Text("b".into())]],
         ),
+        (
+            // The two west rows tie on amount; the deterministic D4
+            // tie-breaker (schema-order columns) elects id 3.
+            "SELECT DISTINCT ON (region) region, id FROM sales ORDER BY region, amount",
+            vec![
+                vec![SqlValue::Text("east".into()), SqlValue::Integer(1)],
+                vec![SqlValue::Text("north".into()), SqlValue::Integer(5)],
+                vec![SqlValue::Text("west".into()), SqlValue::Integer(3)],
+            ],
+        ),
     ];
     require(
-        v08_matrix.len() == 25,
+        v08_matrix.len() == 26,
         "v0.8.x SQL success-check count changed",
     )?;
     for (sql, expected) in &v08_matrix {
@@ -690,12 +700,16 @@ fn scenario_local_sql_matrix() -> DemoResult {
             "FETCH ... WITH TIES requires ORDER BY",
         ),
         ("SELECT 1 LIMIT -1", "LIMIT must not be negative"),
+        (
+            "SELECT DISTINCT ON (region) region FROM sales ORDER BY amount",
+            "ALOPEX-T014",
+        ),
     ];
     for (sql, expected) in rejected_v08 {
         expect_sql_error(&db, sql, expected)?;
     }
     require(
-        v08_matrix.len() + rejected_v08.len() == 30,
+        v08_matrix.len() + rejected_v08.len() == 32,
         "v0.8.x SQL check count changed",
     )?;
     require(

@@ -522,6 +522,61 @@ fn sql_integration_fetch_pagination_and_with_ties_preserve_exact_rows() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_distinct_on_preserves_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE sales (id INTEGER PRIMARY KEY, region TEXT, amount INTEGER); \
+         INSERT INTO sales (id, region, amount) VALUES \
+         (1, 'east', 100), (2, 'east', 50), (3, 'west', 75), \
+         (4, 'west', 75), (5, NULL, 10), (6, NULL, 5);",
+    )
+    .unwrap();
+
+    // T1: one row per region; the NULL group survives as one row (D5) and
+    // sorts NULLS LAST by default.
+    let result = db
+        .execute_sql(
+            "SELECT DISTINCT ON (region) region, amount FROM sales ORDER BY region, amount",
+        )
+        .unwrap();
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Text("east".to_string()), SqlValue::Integer(50)],
+            vec![SqlValue::Text("west".to_string()), SqlValue::Integer(75)],
+            vec![SqlValue::Null, SqlValue::Integer(5)],
+        ]
+    );
+
+    // D4 tie contract: amount ties for the two west rows; the schema-order
+    // tie-breaker elects id 3 deterministically.
+    let tie = db
+        .execute_sql(
+            "SELECT DISTINCT ON (region) id FROM sales WHERE region = 'west' \
+             ORDER BY region, amount",
+        )
+        .unwrap();
+    let ExecutionResult::Query(tie) = tie else {
+        panic!("expected query result");
+    };
+    assert_eq!(tie.rows, vec![vec![SqlValue::Integer(3)]]);
+
+    // T8: a non-matching ORDER BY prefix is rejected (D2, ALOPEX-T014).
+    let error = db
+        .execute_sql("SELECT DISTINCT ON (region) region FROM sales ORDER BY amount")
+        .expect_err("non-matching ORDER BY prefix must fail");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("SELECT DISTINCT ON expressions must match initial ORDER BY expressions"),
+        "{rendered}"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_grouped_window_composition_preserves_exact_rows() {
     let db = Database::new();
     db.execute_sql(

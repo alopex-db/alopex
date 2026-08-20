@@ -191,6 +191,14 @@ pub enum PlannerError {
         column: u64,
     },
 
+    /// ALOPEX-T014: DISTINCT ON keys do not form the initial ORDER BY prefix.
+    /// Message and semantics follow PostgreSQL error 42P10 (D2 in
+    /// docs/sql-distinct-on.md).
+    #[error(
+        "error[ALOPEX-T014]: SELECT DISTINCT ON expressions must match initial ORDER BY expressions at line {line}, column {column}"
+    )]
+    DistinctOnOrderByMismatch { line: u64, column: u64 },
+
     // === Feature Errors (ALOPEX-F*) ===
     /// ALOPEX-F001: Unsupported feature.
     #[error(
@@ -393,6 +401,14 @@ impl PlannerError {
         Self::ColumnValueCountMismatch {
             columns,
             values,
+            line: span.start.line,
+            column: span.start.column,
+        }
+    }
+
+    /// Create a DistinctOnOrderByMismatch error from a span.
+    pub fn distinct_on_order_by_mismatch(span: Span) -> Self {
+        Self::DistinctOnOrderByMismatch {
             line: span.start.line,
             column: span.start.column,
         }

@@ -304,6 +304,49 @@ def test_execute_sql_fetch_pagination_and_with_ties(db):
     assert "WITH TIES requires ORDER BY" in str(captured.value)
 
 
+def test_execute_sql_distinct_on_preserves_exact_rows(db):
+    db.execute_sql(
+        "CREATE TABLE sales (id INTEGER PRIMARY KEY, region TEXT, amount INTEGER)"
+    )
+    db.execute_sql(
+        "INSERT INTO sales (id, region, amount) VALUES "
+        "(1, 'east', 100), (2, 'east', 50), (3, 'west', 75), "
+        "(4, 'west', 75), (5, NULL, 10), (6, NULL, 5)"
+    )
+
+    rows = db.execute_sql(
+        "SELECT DISTINCT ON (region) region, amount FROM sales "
+        "ORDER BY region, amount"
+    )
+    assert rows == [
+        {"region": "east", "amount": 50},
+        {"region": "west", "amount": 75},
+        {"region": None, "amount": 5},
+    ]
+
+    # D4 tie contract: the two west rows tie on amount; the schema-order
+    # tie-breaker deterministically elects id 3.
+    tie = db.execute_sql(
+        "SELECT DISTINCT ON (region) id FROM sales WHERE region = 'west' "
+        "ORDER BY region, amount"
+    )
+    assert [row["id"] for row in tie] == [3]
+
+
+def test_execute_sql_distinct_on_order_by_mismatch_raises(db):
+    db.execute_sql(
+        "CREATE TABLE sales (id INTEGER PRIMARY KEY, region TEXT, amount INTEGER)"
+    )
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT DISTINCT ON (region) region FROM sales ORDER BY amount")
+    rendered = str(captured.value)
+    assert (
+        "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
+        in rendered
+    )
+    assert "ALOPEX-T014" in rendered
+
+
 def test_execute_sql_grouped_window_composition_preserves_exact_rows(db):
     db.execute_sql(
         "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER)"

@@ -268,6 +268,30 @@ pub enum LogicalPlan {
         order_by: Vec<SortExpr>,
     },
 
+    /// SELECT DISTINCT ON (expr, ...) deduplication (issue #150).
+    ///
+    /// Sorts the input by the complete effective sort specification and emits
+    /// only the first row of each group of rows whose leading `key_count`
+    /// sort keys compare equal (NULL keys compare equal to NULL, D5).
+    ///
+    /// Invariants established by the planner (docs/sql-distinct-on.md):
+    /// - `order_by[..key_count]` covers every deduplicated DISTINCT ON key
+    ///   (the user's matching ORDER BY prefix plus implicit ASC NULLS LAST
+    ///   keys, D2/D3).
+    /// - `order_by[key_count..]` carries the user's ORDER BY tail followed by
+    ///   every input column as an ASC NULLS LAST tie-breaker, so the surviving
+    ///   row of each group never depends on physical input order (D4).
+    /// - The node emits rows already ordered by the effective specification,
+    ///   so no additional Sort node is planned above it (D8).
+    DistinctOn {
+        /// Input plan to deduplicate.
+        input: Box<LogicalPlan>,
+        /// Number of leading `order_by` entries that form the distinctness key.
+        key_count: usize,
+        /// Complete effective sort specification (keys, tail, tie-breakers).
+        order_by: Vec<SortExpr>,
+    },
+
     /// Limit operation (LIMIT/OFFSET/FETCH clause).
     ///
     /// Limits the number of rows from the input plan. `limit` and `offset`
@@ -394,6 +418,7 @@ impl LogicalPlan {
             | LogicalPlan::RecursiveCte { .. }
             | LogicalPlan::RecursiveReference { .. }
             | LogicalPlan::Sort { .. }
+            | LogicalPlan::DistinctOn { .. }
             | LogicalPlan::Limit { .. } => "SELECT",
             LogicalPlan::Insert { .. } => "INSERT",
             LogicalPlan::InsertSelect { .. } => "INSERT",
@@ -465,6 +490,15 @@ impl LogicalPlan {
     pub fn sort(input: LogicalPlan, order_by: Vec<SortExpr>) -> Self {
         LogicalPlan::Sort {
             input: Box::new(input),
+            order_by,
+        }
+    }
+
+    /// Creates a new DistinctOn plan.
+    pub fn distinct_on(input: LogicalPlan, key_count: usize, order_by: Vec<SortExpr>) -> Self {
+        LogicalPlan::DistinctOn {
+            input: Box::new(input),
+            key_count,
             order_by,
         }
     }
@@ -552,6 +586,7 @@ impl LogicalPlan {
             LogicalPlan::RecursiveCte { .. } => "RecursiveCte",
             LogicalPlan::RecursiveReference { .. } => "RecursiveReference",
             LogicalPlan::Sort { .. } => "Sort",
+            LogicalPlan::DistinctOn { .. } => "DistinctOn",
             LogicalPlan::Limit { .. } => "Limit",
             LogicalPlan::Insert { .. } => "Insert",
             LogicalPlan::InsertSelect { .. } => "InsertSelect",
@@ -579,6 +614,7 @@ impl LogicalPlan {
                 | LogicalPlan::RecursiveCte { .. }
                 | LogicalPlan::RecursiveReference { .. }
                 | LogicalPlan::Sort { .. }
+                | LogicalPlan::DistinctOn { .. }
                 | LogicalPlan::Limit { .. }
         )
     }
@@ -614,6 +650,7 @@ impl LogicalPlan {
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Window { input, .. }
             | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::DistinctOn { input, .. }
             | LogicalPlan::Limit { input, .. } => Some(input),
             LogicalPlan::Join { .. } | LogicalPlan::Values { .. } => None,
             LogicalPlan::SetOperation { .. } => None,
@@ -641,6 +678,7 @@ impl LogicalPlan {
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Window { input, .. }
             | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::DistinctOn { input, .. }
             | LogicalPlan::Limit { input, .. } => input.table_name(),
             LogicalPlan::Join { .. } => None,
             LogicalPlan::SetOperation { left, right, .. } => left
@@ -672,6 +710,7 @@ impl LogicalPlan {
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Window { input, .. }
             | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::DistinctOn { input, .. }
             | LogicalPlan::Limit { input, .. } => input.contains_join(),
             _ => false,
         }
@@ -685,6 +724,7 @@ impl LogicalPlan {
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::DistinctOn { input, .. }
             | LogicalPlan::Limit { input, .. } => input.contains_set_operation(),
             LogicalPlan::Join { left, right, .. } => {
                 left.contains_set_operation() || right.contains_set_operation()

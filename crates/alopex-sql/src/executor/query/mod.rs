@@ -24,7 +24,9 @@ pub mod subquery;
 pub mod window;
 
 pub use columnar_scan::{ColumnarScanIterator, create_columnar_scan_iterator};
-pub use iterator::{FilterIterator, LimitIterator, RowIterator, ScanIterator, SortIterator};
+pub use iterator::{
+    DistinctOnIterator, FilterIterator, LimitIterator, RowIterator, ScanIterator, SortIterator,
+};
 pub use project::{project_row_values, projected_columns};
 pub use scan::{
     create_fenced_range_scan_iterator, create_scan_iterator, execute_fenced_range_scan,
@@ -72,6 +74,7 @@ fn plan_contains_recursive_cte(plan: &LogicalPlan) -> bool {
         | LogicalPlan::Aggregate { input, .. }
         | LogicalPlan::Window { input, .. }
         | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::DistinctOn { input, .. }
         | LogicalPlan::Limit { input, .. } => plan_contains_recursive_cte(input),
         LogicalPlan::Join { left, right, .. } | LogicalPlan::SetOperation { left, right, .. } => {
             plan_contains_recursive_cte(left) || plan_contains_recursive_cte(right)
@@ -812,6 +815,17 @@ fn build_iterator_pipeline_with_outer<
             };
             Ok((Box::new(sort_iter), projection, schema))
         }
+        LogicalPlan::DistinctOn {
+            input,
+            key_count,
+            order_by,
+        } => {
+            let (input_iter, projection, schema) =
+                build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
+            let distinct_iter =
+                DistinctOnIterator::new(input_iter, &order_by, key_count, memory.cloned())?;
+            Ok((Box::new(distinct_iter), projection, schema))
+        }
         LogicalPlan::Limit {
             input,
             limit,
@@ -1251,6 +1265,17 @@ fn build_streaming_pipeline_inner<
                 SortIterator::new(input_iter, &order_by)?
             };
             Ok((Box::new(sort_iter), projection, schema))
+        }
+        LogicalPlan::DistinctOn {
+            input,
+            key_count,
+            order_by,
+        } => {
+            let (input_iter, projection, schema) =
+                build_streaming_pipeline_with_policy(txn, catalog, *input, memory)?;
+            let distinct_iter =
+                DistinctOnIterator::new(input_iter, &order_by, key_count, memory.cloned())?;
+            Ok((Box::new(distinct_iter), projection, schema))
         }
         LogicalPlan::Limit {
             input,

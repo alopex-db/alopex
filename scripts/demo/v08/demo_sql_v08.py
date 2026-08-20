@@ -131,6 +131,17 @@ def main() -> int:
                 "ORDER BY id OFFSET 1 ROW FETCH NEXT 1 + 1 ROWS ONLY",
                 [{"id": 2}, {"id": 3}],
             ),
+            (
+                # The two west rows tie on amount; the deterministic D4
+                # tie-breaker (schema-order columns) elects id 3.
+                "SELECT DISTINCT ON (region) region, id FROM sales "
+                "ORDER BY region, amount",
+                [
+                    {"region": "east", "id": 1},
+                    {"region": "north", "id": 5},
+                    {"region": "west", "id": 3},
+                ],
+            ),
             ("SELECT SUM(n) AS total FROM metrics", [{"total": 5}]),
             (
                 "SELECT id, n * 2.0 AS doubled FROM metrics ORDER BY doubled",
@@ -587,6 +598,10 @@ def main() -> int:
                 "FETCH ... WITH TIES requires ORDER BY",
             ),
             ("SELECT 1 LIMIT -1", "LIMIT must not be negative"),
+            (
+                "SELECT DISTINCT ON (region) region FROM sales ORDER BY amount",
+                "ALOPEX-T014",
+            ),
         ]
 
         completed = 0
@@ -600,12 +615,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 65:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 65")
+        if completed != 67:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 67")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 65 checks passed")
+    print("v0.8 SQL correctness demo completed: 67 checks passed")
     return 0
 
 

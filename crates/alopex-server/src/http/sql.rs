@@ -1274,6 +1274,7 @@ mod tests {
                 query: alopex_sql::ast::Select {
                     with: None,
                     distinct: false,
+                    distinct_on: vec![],
                     set_operations: vec![],
                     projection: vec![alopex_sql::ast::SelectItem::Wildcard {
                         span: alopex_sql::ast::Span::default(),

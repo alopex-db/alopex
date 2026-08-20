@@ -41,6 +41,7 @@ fn dml_nodes_carry_spans() {
     let select = Select {
         with: None,
         distinct: false,
+        distinct_on: vec![],
         projection: vec![SelectItem::Wildcard { span: span(1, 1) }],
         from: vec![FromItem::Table {
             name: "t".into(),

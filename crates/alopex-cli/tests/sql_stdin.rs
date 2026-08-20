@@ -44,6 +44,7 @@ SELECT TRY_CAST('42' AS INTEGER) AS parsed,
        TRY_CAST([1.0, 2.0] AS VECTOR(3)) AS wrong_dimension;
 VALUES (2), (2), (1) ORDER BY column1 DESC FETCH FIRST 1 ROW WITH TIES;
 SELECT id FROM stdin_test ORDER BY id OFFSET 1 ROW FETCH NEXT 1 + 1 ROWS ONLY;
+SELECT DISTINCT ON (id % 2) id % 2 AS parity, id, qty FROM stdin_test ORDER BY parity, qty, id;
 "#;
 
     {
@@ -67,7 +68,7 @@ SELECT id FROM stdin_test ORDER BY id OFFSET 1 ROW FETCH NEXT 1 + 1 ROWS ONLY;
         .expect("json output should be an array of result sets");
     assert_eq!(
         sets.len(),
-        13,
+        14,
         "one result set per statement\nstdout:\n{stdout}"
     );
     let select_rows = sets[2].as_array().expect("SELECT result set");
@@ -200,6 +201,15 @@ SELECT id FROM stdin_test ORDER BY id OFFSET 1 ROW FETCH NEXT 1 + 1 ROWS ONLY;
             serde_json::json!({ "id": 3 }),
         ]
     );
+
+    let distinct_on_rows = sets[13].as_array().expect("DISTINCT ON result set");
+    assert_eq!(
+        distinct_on_rows,
+        &[
+            serde_json::json!({ "parity": 0, "id": 2, "qty": 1 }),
+            serde_json::json!({ "parity": 1, "id": 1, "qty": 3 }),
+        ]
+    );
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -260,4 +270,36 @@ fn with_ties_without_order_by_and_bind_parameters_report_stable_errors() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(expected), "`{sql}` stderr:\n{stderr}");
     }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn distinct_on_order_by_mismatch_reports_stable_error() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(["--in-memory", "--output", "json", "sql"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn alopex");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(
+            b"CREATE TABLE t (a INTEGER, b INTEGER); \
+              SELECT DISTINCT ON (a) a FROM t ORDER BY b;",
+        )
+        .expect("write stdin");
+
+    let output = child.wait_with_output().expect("wait");
+    assert!(
+        !output.status.success(),
+        "DISTINCT ON prefix mismatch must fail the CLI"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("SELECT DISTINCT ON expressions must match initial ORDER BY expressions"),
+        "stderr:\n{stderr}"
+    );
 }

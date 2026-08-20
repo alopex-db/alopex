@@ -339,6 +339,12 @@ pub(crate) fn plan_contains_subquery(plan: &LogicalPlan) -> bool {
             order_by.iter().any(|sort| contains_subquery(&sort.expr))
                 || plan_contains_subquery(input)
         }
+        LogicalPlan::DistinctOn {
+            input, order_by, ..
+        } => {
+            order_by.iter().any(|sort| contains_subquery(&sort.expr))
+                || plan_contains_subquery(input)
+        }
         LogicalPlan::Limit { input, .. } => plan_contains_subquery(input),
         // DML/DDL plans are never executed through the query pipelines.
         _ => false,

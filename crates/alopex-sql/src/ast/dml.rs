@@ -7,6 +7,11 @@ pub struct Select {
     #[serde(default)]
     pub with: Option<WithClause>,
     pub distinct: bool,
+    /// SELECT DISTINCT ON (expr, ...) key expressions in source order.
+    /// Empty when the clause is absent (issue #150, contract 0.11.0).
+    /// Mutually exclusive with `distinct` by grammar.
+    #[serde(default)]
+    pub distinct_on: Vec<Expr>,
     pub projection: Vec<SelectItem>,
     pub from: Vec<FromItem>,
     pub selection: Option<Expr>,

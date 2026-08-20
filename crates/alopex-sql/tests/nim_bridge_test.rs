@@ -312,7 +312,71 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.10.0");
+    assert_eq!(parser_contract_version(), "0.11.0");
+}
+
+#[test]
+fn distinct_on_crosses_the_nim_messagepack_boundary() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT DISTINCT ON (region) region FROM sales ORDER BY region",
+    )
+    .expect("DISTINCT ON should deserialize from Nim MessagePack");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    assert_eq!(select.distinct_on.len(), 1);
+    assert!(!select.distinct);
+    assert!(matches!(
+        select.distinct_on[0].kind,
+        ExprKind::ColumnRef { ref column, .. } if column == "region"
+    ));
+
+    let plain = Parser::parse_sql(&AlopexDialect, "SELECT DISTINCT region FROM sales")
+        .expect("plain DISTINCT parses");
+    let StatementKind::Select(plain_select) = &plain[0].kind else {
+        panic!("expected SELECT");
+    };
+    assert!(plain_select.distinct);
+    assert!(plain_select.distinct_on.is_empty());
+}
+
+#[test]
+fn pre_distinct_on_payload_without_the_key_defaults_to_empty() {
+    // A contract-0.10.0 payload has no distinct_on key; serde(default) must
+    // decode it as an empty key list (one-way migration evidence only).
+    let value = json!([{
+        "kind": {
+            "variant": "Select",
+            "distinct": false,
+            "projection": [{
+                "variant": "Expr",
+                "expr": {
+                    "kind": {"variant": "Literal", "literal": {"variant": "Number", "value": "1"}},
+                    "span": wire_span(1, 8, 1, 8),
+                },
+                "alias": null,
+                "span": wire_span(1, 8, 1, 8),
+            }],
+            "from": [],
+            "selection": null,
+            "group_by": null,
+            "having": null,
+            "order_by": [],
+            "limit": null,
+            "offset": null,
+            "span": wire_span(1, 1, 1, 8),
+        },
+        "span": wire_span(1, 1, 1, 8),
+    }]);
+    let payload = rmp_serde::to_vec_named(&value).expect("encode legacy payload");
+    let statements: Vec<Statement> =
+        rmp_serde::from_slice(&payload).expect("current Rust AST must decode the legacy payload");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    assert!(select.distinct_on.is_empty());
+    assert!(!select.limit_with_ties);
 }
 
 #[test]
@@ -350,7 +414,7 @@ fn top_level_set_operation_preserves_fetch_with_ties() {
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.10.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.11.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -358,7 +422,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.10.0");
+    assert_eq!(parser_contract_version(), "0.11.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);

@@ -23,6 +23,7 @@ fn select_from(name: &str) -> Statement {
         kind: StatementKind::Select(Select {
             with: None,
             distinct: false,
+            distinct_on: vec![],
             projection: vec![SelectItem::Wildcard {
                 span: Span::empty(),
             }],
@@ -114,6 +115,7 @@ fn join_plan_extracts_both_table_references() {
         kind: StatementKind::Select(Select {
             with: None,
             distinct: false,
+            distinct_on: vec![],
             projection: vec![SelectItem::Wildcard {
                 span: Span::empty(),
             }],

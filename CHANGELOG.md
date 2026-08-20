@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- SQL supports PostgreSQL-style `SELECT DISTINCT ON (expr, ...)`: one row per
+  key group with the PostgreSQL `ORDER BY` prefix contract (42P10-equivalent
+  `ALOPEX-T014` on mismatch), NULL keys grouped as equal, select-list aliases
+  in keys, and a documented determinism extension — remaining ties resolve by
+  every input column in schema order, so results never depend on physical row
+  order. Covered on Rust, CLI, Embedded, and Python surfaces; v1 rejects
+  combining it with `DISTINCT`, `GROUP BY`/aggregates/`HAVING`, window
+  functions/`QUALIFY`, and trailing set operations (docs/sql-distinct-on.md).
 - SQL supports standard pagination: `OFFSET n [ROW|ROWS]` without `LIMIT`,
   `FETCH {FIRST|NEXT} [count] {ROW|ROWS} {ONLY|WITH TIES}` with PostgreSQL
   peer semantics for `WITH TIES`, constant-expression and NULL/`ALL` counts
@@ -42,8 +50,14 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- The Nim parser wire contract is `0.10.0`. It adds the always-written
-  `limit_with_ties` field to `Select`/`Values` and detaches `OFFSET` from
+- The Nim parser wire contract is `0.11.0`. It adds the always-written
+  `distinct_on` expression list to `Select` (empty when the clause is absent);
+  contract `0.10.0` producers are rejected before decode. The byte-frozen
+  staged continuous-aggregate payload is unchanged and rejects `DISTINCT ON`
+  before staging. This remains internal metadata of the unified Alopex v0.8.8
+  release, not a separate parser release lane.
+- The Nim parser wire contract `0.10.0` added the always-written
+  `limit_with_ties` field to `Select`/`Values` and detached `OFFSET` from
   `LIMIT` on the wire; contract `0.9.0` producers are rejected before decode.
   The byte-frozen staged continuous-aggregate payload is unchanged and rejects
   `WITH TIES` before staging. This remains internal metadata of the unified
@@ -58,6 +72,8 @@ All notable changes to this project will be documented in this file.
 - Python and Rust v0.8 demos verify `TRY_CAST`, `VALUES` query composition, and all six
   window functions with exact frame, peer, NULL, bucket, rank, and
   cumulative-distribution results.
+- Python and Rust v0.8 demos verify `DISTINCT ON` deterministic tie
+  resolution and the `ALOPEX-T014` ORDER BY prefix rejection.
 
 ## [0.8.7] — 2026-08-18
 

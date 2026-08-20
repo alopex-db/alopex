@@ -378,6 +378,15 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
             failure_outcome: "fetch_with_ties_local_only before transport",
         },
         RemoteReadCoverageEntry {
+            id: "relation.distinct_on",
+            public_surface: "SELECT DISTINCT ON deterministic first-row deduplication",
+            identities: &["distinct_on"],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "deterministic per-key first-row evaluation by the local executor",
+            failure_outcome: "distinct_on_local_only before transport",
+        },
+        RemoteReadCoverageEntry {
             id: "relation.recursive_cte",
             public_surface: "recursive common table expressions",
             identities: &["with_recursive"],
@@ -604,6 +613,10 @@ fn validate_plan(
             analysis.operators.offset |= offset.is_some();
             validate_plan(input, analysis)
         }
+        LogicalPlan::DistinctOn { .. } => Err(RemoteReadRejection::local_only(
+            "distinct_on_local_only",
+            "SELECT DISTINCT ON is not in the v0.8 remote-read catalog",
+        )),
     }
 }
 

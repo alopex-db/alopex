@@ -636,6 +636,40 @@ suite "DML — SELECT":
     check ast.children[0].kind == nkIdentifier
     check ast.children[0].strVal == "DISTINCT"
 
+  test "SELECT DISTINCT ON keeps its key expressions (issue #150)":
+    let ast = parseSql(
+      "SELECT DISTINCT ON (a, b % 2) a FROM t ORDER BY a, b % 2")
+    check ast.kind == nkSelect
+    check ast.children[0].kind == nkDistinctOnClause
+    check ast.children[0].children.len == 2
+    check ast.children[0].children[0].kind == nkIdentifier
+    check ast.children[0].children[0].strVal == "a"
+    check ast.children[0].children[1].kind == nkBinaryOp
+    # The select list follows the DISTINCT ON clause.
+    check ast.children[1].kind == nkExprList
+
+  test "SELECT DISTINCT ON with a single key":
+    let ast = parseSql("SELECT DISTINCT ON (region) region FROM sales")
+    check ast.children[0].kind == nkDistinctOnClause
+    check ast.children[0].children.len == 1
+
+  test "SELECT DISTINCT without ON keeps the legacy marker":
+    let ast = parseSql("SELECT DISTINCT on_hand FROM stock")
+    check ast.children[0].kind == nkIdentifier
+    check ast.children[0].strVal == "DISTINCT"
+
+  test "DISTINCT ON requires parentheses":
+    expect ParseError:
+      discard parseSql("SELECT DISTINCT ON region FROM sales")
+
+  test "DISTINCT ON rejects an empty key list":
+    expect ParseError:
+      discard parseSql("SELECT DISTINCT ON () region FROM sales")
+
+  test "DISTINCT ON rejects a missing closing parenthesis":
+    expect ParseError:
+      discard parseSql("SELECT DISTINCT ON (region region FROM sales")
+
   test "SELECT with WHERE":
     let ast = parseSql("SELECT * FROM users WHERE id = 1")
     check ast.kind == nkSelect

@@ -19,7 +19,8 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.7.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.8.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.9.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.10.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.10.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.11.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -855,6 +856,7 @@ proc writeExpr(s: Stream; node: SqlNode) =
 proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
   var withNode: SqlNode = nil
   var distinctFlag = false
+  var distinctOnNode: SqlNode = nil
   var projectionNode: SqlNode = nil
   var fromNode: SqlNode = nil
   var selectionNode: SqlNode = nil
@@ -874,6 +876,8 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
     of nkIdentifier:
       if child.strVal == "DISTINCT":
         distinctFlag = true
+    of nkDistinctOnClause:
+      distinctOnNode = child
     of nkExprList:
       if projectionNode == nil:
         projectionNode = child
@@ -907,6 +911,15 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
     s.writeWithClause(withNode)
   s.writeKey("distinct")
   s.pack_type(distinctFlag)
+  # The staged continuous-aggregate encoder intentionally remains byte-for-byte
+  # compatible with its historical payload; distinct_on belongs to the current
+  # public Select contract only (contract 0.11.0, issue #150).
+  if includeWith:
+    s.writeKey("distinct_on")
+    if distinctOnNode == nil:
+      s.pack_array(0)
+    else:
+      s.writeExprSeq(distinctOnNode.children)
   s.writeKey("projection")
   if projectionNode == nil:
     s.pack_array(0)
@@ -986,13 +999,13 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
     s.pack_type(limitNode != nil and limitNode.limitWithTies)
 
 proc writeSelectKind(s: Stream; node: SqlNode) =
-  # 固定 14 キー(variant/distinct/projection/from/selection/group_by/
-  # having/windows/qualify/set_operations/order_by/limit/offset/
-  # limit_with_ties)に、WITH 句があれば with を加えて 15 になる。
-  var fieldCount = 14
+  # 固定 15 キー(variant/distinct/distinct_on/projection/from/selection/
+  # group_by/having/windows/qualify/set_operations/order_by/limit/offset/
+  # limit_with_ties)に、WITH 句があれば with を加えて 16 になる。
+  var fieldCount = 15
   for child in node.children:
     if child.kind == nkWithClause:
-      fieldCount = 15
+      fieldCount = 16
       break
   s.pack_map(fieldCount)
   s.writeSelectFields(node)
@@ -1645,6 +1658,11 @@ proc validateContinuousAggregateV040(statement: SqlNode) =
     of nkQualifyClause:
       stagedValidationError(
         "staged continuous aggregate query cannot contain QUALIFY"
+      )
+    of nkDistinctOnClause:
+      # DISTINCT ON has no representation in the staged 12-field payload.
+      stagedValidationError(
+        "staged continuous aggregate query cannot contain DISTINCT ON"
       )
     of nkLimitClause:
       # Plain LIMIT/FETCH ... ONLY desugars onto the frozen "limit" key;

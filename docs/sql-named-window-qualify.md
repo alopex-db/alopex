@@ -1,7 +1,7 @@
 # Named WINDOW and QUALIFY
 
 Named window definitions and post-window filtering are part of the unified
-Alopex v0.8.x SQL surface. The parser contract is `0.10.0`; there is no separate
+Alopex v0.8.x SQL surface. The parser contract is `0.11.0`; there is no separate
 SQL-parser version or release lane.
 
 ## Current contract
@@ -94,7 +94,7 @@ the task; they never replace tagged release assets.
 | Layer | Required evidence |
 | --- | --- |
 | Parser | direct reference, inheritance, forward reference, multiple definitions |
-| Wire | `windows`, `qualify`, and `base` round-trip with current contract `0.10.0` |
+| Wire | `windows`, `qualify`, and `base` round-trip with current contract `0.11.0` |
 | Planner | undefined/duplicate/cycle/override errors and exact stage order |
 | Executor | alias filtering, QUALIFY-only window, grouped/HAVING/DISTINCT composition |
 | Public surfaces | Rust, CLI, Embedded, Python, and both v0.8 demos compare exact rows |

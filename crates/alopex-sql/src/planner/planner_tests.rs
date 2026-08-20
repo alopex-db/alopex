@@ -77,6 +77,7 @@ fn continuous_aggregate_statement() -> Statement {
             query: Select {
                 with: None,
                 distinct: false,
+                distinct_on: vec![],
                 projection: vec![SelectItem::Wildcard { span: span() }],
                 from: vec![],
                 selection: None,
@@ -531,6 +532,7 @@ fn test_plan_select_wildcard() {
     let select = Select {
         with: None,
         distinct: false,
+        distinct_on: vec![],
         projection: vec![SelectItem::Wildcard { span: span() }],
         from: vec![FromItem::Table {
             name: "users".to_string(),
@@ -573,6 +575,7 @@ fn test_plan_select_columns() {
     let select = Select {
         with: None,
         distinct: false,
+        distinct_on: vec![],
         projection: vec![
             SelectItem::Expr {
                 expr: col_ref(None, "id"),
@@ -627,6 +630,7 @@ fn test_plan_select_with_where() {
     let select = Select {
         with: None,
         distinct: false,
+        distinct_on: vec![],
         projection: vec![SelectItem::Wildcard { span: span() }],
         from: vec![FromItem::Table {
             name: "users".to_string(),
@@ -665,6 +669,7 @@ fn test_plan_select_with_order_by() {
     let select = Select {
         with: None,
         distinct: false,
+        distinct_on: vec![],
         projection: vec![SelectItem::Wildcard { span: span() }],
         from: vec![FromItem::Table {
             name: "users".to_string(),
@@ -720,6 +725,7 @@ fn test_plan_select_with_limit() {
     let select = Select {
         with: None,
         distinct: false,
+        distinct_on: vec![],
         projection: vec![SelectItem::Wildcard { span: span() }],
         from: vec![FromItem::Table {
             name: "users".to_string(),
@@ -767,6 +773,7 @@ fn test_plan_select_combined() {
     let select = Select {
         with: None,
         distinct: false,
+        distinct_on: vec![],
         projection: vec![SelectItem::Wildcard { span: span() }],
         from: vec![FromItem::Table {
             name: "users".to_string(),
@@ -819,6 +826,7 @@ fn test_plan_select_table_not_found() {
     let select = Select {
         with: None,
         distinct: false,
+        distinct_on: vec![],
         projection: vec![SelectItem::Wildcard { span: span() }],
         from: vec![FromItem::Table {
             name: "nonexistent".to_string(),
@@ -1195,4 +1203,168 @@ fn test_case_promotion_cast_remains_visible_to_aggregate_walkers() {
         .collect_aggregates_from_typed_expr(&promoted, &mut aggregates, &mut aggregate_map)
         .unwrap();
     assert_eq!(aggregates.len(), 1);
+}
+
+// ============================================================
+// DISTINCT ON Tests (issue #150)
+// ============================================================
+
+fn distinct_on_select(
+    keys: Vec<Expr>,
+    order_by: Vec<OrderByExpr>,
+    limit: Option<Expr>,
+) -> Statement {
+    stmt(StatementKind::Select(Select {
+        with: None,
+        distinct: false,
+        distinct_on: keys,
+        projection: vec![
+            SelectItem::Expr {
+                expr: col_ref(None, "name"),
+                alias: None,
+                span: span(),
+            },
+            SelectItem::Expr {
+                expr: col_ref(None, "age"),
+                alias: None,
+                span: span(),
+            },
+        ],
+        from: vec![FromItem::Table {
+            name: "users".to_string(),
+            alias: None,
+            span: span(),
+        }],
+        selection: None,
+        group_by: None,
+        having: None,
+        windows: vec![],
+        qualify: None,
+        set_operations: vec![],
+        order_by,
+        limit,
+        offset: None,
+        limit_with_ties: false,
+        span: span(),
+    }))
+}
+
+fn order_by_expr(expr: Expr, asc: Option<bool>) -> OrderByExpr {
+    OrderByExpr {
+        expr,
+        asc,
+        nulls_first: None,
+        span: span(),
+    }
+}
+
+/// T20: the plan is DistinctOn over Scan with no extra Sort, and the sort
+/// specification ends in non-duplicated all-column tie-breakers (D4/D8).
+#[test]
+fn test_plan_distinct_on_shape_and_tie_breakers() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+    let statement = distinct_on_select(
+        vec![col_ref(None, "name")],
+        vec![
+            order_by_expr(col_ref(None, "name"), None),
+            order_by_expr(col_ref(None, "age"), None),
+        ],
+        None,
+    );
+
+    let plan = planner.plan(&statement).expect("DISTINCT ON should plan");
+    let LogicalPlan::DistinctOn {
+        input,
+        key_count,
+        order_by,
+    } = plan
+    else {
+        panic!("expected DistinctOn at the top, got {}", plan.name());
+    };
+    assert_eq!(key_count, 1);
+    assert!(matches!(*input, LogicalPlan::Scan { .. }));
+
+    // Effective spec: name (key), age (tail), then id and email tie-breakers
+    // in schema order — every users column exactly once at the top level.
+    assert_eq!(order_by.len(), 4);
+    let columns: Vec<(String, usize)> = order_by
+        .iter()
+        .map(|sort| match &sort.expr.kind {
+            TypedExprKind::ColumnRef {
+                column,
+                column_index,
+                ..
+            } => (column.clone(), *column_index),
+            other => panic!("expected ColumnRef sort keys, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        columns,
+        vec![
+            ("name".to_string(), 1),
+            ("age".to_string(), 2),
+            ("id".to_string(), 0),
+            ("email".to_string(), 3),
+        ]
+    );
+    let mut indexes: Vec<usize> = columns.iter().map(|(_, index)| *index).collect();
+    indexes.sort_unstable();
+    indexes.dedup();
+    assert_eq!(indexes.len(), 4, "tie-breakers must not duplicate columns");
+    for sort in &order_by[key_count..] {
+        assert!(sort.asc, "tie-breakers are ASC");
+        assert!(!sort.nulls_first, "tie-breakers are NULLS LAST");
+    }
+}
+
+/// D2: an ORDER BY that starts with a non-key expression is rejected, and a
+/// LIMIT applies above the DistinctOn node (D8).
+#[test]
+fn test_plan_distinct_on_prefix_error_and_limit_position() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+
+    let mismatch = distinct_on_select(
+        vec![col_ref(None, "name")],
+        vec![order_by_expr(col_ref(None, "age"), None)],
+        None,
+    );
+    let error = planner
+        .plan(&mismatch)
+        .expect_err("non-matching prefix must fail");
+    assert!(matches!(
+        error,
+        PlannerError::DistinctOnOrderByMismatch { .. }
+    ));
+
+    let limited = distinct_on_select(
+        vec![col_ref(None, "name")],
+        vec![order_by_expr(col_ref(None, "name"), None)],
+        Some(int_lit(1)),
+    );
+    let plan = planner
+        .plan(&limited)
+        .expect("LIMIT over DISTINCT ON plans");
+    let LogicalPlan::Limit { input, ties, .. } = plan else {
+        panic!("expected Limit above DistinctOn, got {}", plan.name());
+    };
+    assert!(ties.is_none());
+    assert!(matches!(*input, LogicalPlan::DistinctOn { .. }));
+}
+
+/// D10: a hand-built AST carrying both DISTINCT and DISTINCT ON is rejected.
+#[test]
+fn test_plan_distinct_on_rejects_combined_distinct_flag() {
+    let catalog = create_test_catalog();
+    let planner = Planner::new(&catalog);
+    let mut statement = distinct_on_select(vec![col_ref(None, "name")], vec![], None);
+    let StatementKind::Select(select) = &mut statement.kind else {
+        unreachable!();
+    };
+    select.distinct = true;
+    let error = planner
+        .plan(&statement)
+        .expect_err("DISTINCT plus DISTINCT ON must fail");
+    assert!(matches!(error, PlannerError::InvalidExpression { .. }));
 }

@@ -728,6 +728,14 @@ impl TableReferenceExtractor {
                     self.extract_typed_expr(&sort_expr.expr, diagnostics, references);
                 }
             }
+            LogicalPlan::DistinctOn {
+                input, order_by, ..
+            } => {
+                self.extract_plan(input, root_access, scan_source, diagnostics, references);
+                for sort_expr in order_by {
+                    self.extract_typed_expr(&sort_expr.expr, diagnostics, references);
+                }
+            }
             LogicalPlan::Limit { input, .. } => {
                 self.extract_plan(input, root_access, scan_source, diagnostics, references);
             }
@@ -1834,6 +1842,16 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let stmt = &resolved_stmt;
         let ctes = self.plan_ctes(stmt, enclosing_ctes)?;
         if !stmt.set_operations.is_empty() {
+            // D7: the trailing ORDER BY belongs to the whole set operation,
+            // so the DISTINCT ON prefix contract has no owner here. A nested
+            // operand SELECT with its own DISTINCT ON remains supported.
+            if !stmt.distinct_on.is_empty() {
+                return Err(PlannerError::unsupported_feature(
+                    "DISTINCT ON combined with UNION, INTERSECT, or EXCEPT",
+                    "a future version",
+                    stmt.span,
+                ));
+            }
             let mut left_select = stmt.clone();
             left_select.with = None;
             left_select.set_operations.clear();
@@ -1876,6 +1894,47 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
         let distinct_only =
             stmt.distinct && !has_group_by && !has_aggregate && stmt.having.is_none();
+
+        let has_distinct_on = !stmt.distinct_on.is_empty();
+        if has_distinct_on {
+            // D10: the grammar cannot produce both, so a hand-built AST with
+            // both set is a defect of the producer, not a user error.
+            if stmt.distinct {
+                return Err(PlannerError::invalid_expression(
+                    "DISTINCT and DISTINCT ON cannot be combined".to_string(),
+                ));
+            }
+            // D6: DISTINCT ON keys are scalar sort keys.
+            for key in &stmt.distinct_on {
+                if expr_contains_aggregate(key) || expr_contains_window(key) {
+                    return Err(PlannerError::invalid_expression(
+                        "DISTINCT ON expressions cannot contain aggregate or window functions"
+                            .to_string(),
+                    ));
+                }
+                if expr_contains_subquery(key) {
+                    return Err(PlannerError::invalid_expression(
+                        "DISTINCT ON expressions cannot contain subqueries".to_string(),
+                    ));
+                }
+            }
+            // D7: v1 rejects combinations whose deduplication order is not
+            // covered by the DistinctOn sort contract.
+            if has_group_by || has_aggregate || stmt.having.is_some() {
+                return Err(PlannerError::unsupported_feature(
+                    "DISTINCT ON with GROUP BY, aggregate functions, or HAVING",
+                    "a future version",
+                    stmt.span,
+                ));
+            }
+            if has_window || stmt.qualify.is_some() {
+                return Err(PlannerError::unsupported_feature(
+                    "DISTINCT ON with window functions or QUALIFY",
+                    "a future version",
+                    stmt.span,
+                ));
+            }
+        }
 
         if stmt.having.as_ref().is_some_and(expr_contains_window) {
             return Err(PlannerError::invalid_expression(
@@ -2169,7 +2228,36 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
 
         // Non-aggregate path: ORDER BY + LIMIT/OFFSET
-        if !stmt.order_by.is_empty() {
+        if has_distinct_on {
+            // D2/D3/D4: type the deduplicated ON keys and the user ORDER BY,
+            // verify the prefix contract, and synthesize the complete
+            // deterministic sort specification. The DistinctOn node emits
+            // rows already ordered by that specification, so no separate
+            // Sort node is planned (D8). LIMIT/OFFSET applies after
+            // deduplication.
+            let mut key_exprs: Vec<TypedExpr> = Vec::new();
+            let mut key_signatures = HashSet::new();
+            for key in &stmt.distinct_on {
+                let source = substitute_projection_aliases(key, &projection_aliases);
+                let typed = self.infer_expr_with_scope(&source, &expr_scope, &ctes)?;
+                if key_signatures.insert(distinct_on_expr_signature(&typed)) {
+                    key_exprs.push(typed);
+                }
+            }
+            let user_order_by = self.build_sort_exprs_with_scope(
+                &stmt.order_by,
+                &expr_scope,
+                &projection_aliases,
+                &ctes,
+            )?;
+            let (key_count, order_by) =
+                build_distinct_on_sort_spec(key_exprs, user_order_by, &base_schema, stmt.span)?;
+            plan = LogicalPlan::DistinctOn {
+                input: Box::new(plan),
+                key_count,
+                order_by,
+            };
+        } else if !stmt.order_by.is_empty() {
             let order_by = self.build_sort_exprs_with_scope(
                 &stmt.order_by,
                 &expr_scope,
@@ -5006,6 +5094,154 @@ fn is_aggregate_function(name: &str) -> bool {
 
 fn expr_key(expr: &TypedExpr) -> String {
     format!("{:?}", expr.kind)
+}
+
+/// Structural signature for DISTINCT ON key matching (D2).
+///
+/// `expr_key` embeds the source spans of nested sub-expressions, so the same
+/// compound expression written once in the ON list and once in ORDER BY would
+/// never compare equal. This signature erases every rendered
+/// `span: Span { .. }` segment first. The eraser only rewrites segments that
+/// match the exact derived-Debug shape (digits and fixed punctuation), so a
+/// string literal that happens to contain the marker text is left untouched
+/// and still compares consistently on both sides.
+fn distinct_on_expr_signature(expr: &TypedExpr) -> String {
+    const MARKER: &str = "span: Span { start: Location { line: ";
+    let rendered = format!("{:?}", expr.kind);
+    let mut result = String::with_capacity(rendered.len());
+    let mut rest = rendered.as_str();
+    while let Some(position) = rest.find(MARKER) {
+        let after = &rest[position + MARKER.len()..];
+        match debug_span_tail_length(after) {
+            Some(consumed) => {
+                result.push_str(&rest[..position]);
+                result.push_str("span: _");
+                rest = &after[consumed..];
+            }
+            None => {
+                let keep = position + MARKER.len();
+                result.push_str(&rest[..keep]);
+                rest = &rest[keep..];
+            }
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
+/// Length of `<digits>, column: <digits> }, end: Location { line: <digits>,
+/// column: <digits> } }` at the start of `input`, or `None` when the text does
+/// not match that exact derived-Debug shape.
+fn debug_span_tail_length(input: &str) -> Option<usize> {
+    fn digits(input: &str, offset: &mut usize) -> bool {
+        let start = *offset;
+        while input
+            .as_bytes()
+            .get(*offset)
+            .is_some_and(u8::is_ascii_digit)
+        {
+            *offset += 1;
+        }
+        *offset > start
+    }
+    fn literal(input: &str, offset: &mut usize, expected: &str) -> bool {
+        if input[*offset..].starts_with(expected) {
+            *offset += expected.len();
+            true
+        } else {
+            false
+        }
+    }
+    let mut offset = 0;
+    (digits(input, &mut offset)
+        && literal(input, &mut offset, ", column: ")
+        && digits(input, &mut offset)
+        && literal(input, &mut offset, " }, end: Location { line: ")
+        && digits(input, &mut offset)
+        && literal(input, &mut offset, ", column: ")
+        && digits(input, &mut offset)
+        && literal(input, &mut offset, " } }"))
+    .then_some(offset)
+}
+
+/// Verify the DISTINCT ON / ORDER BY prefix contract (D2) and synthesize the
+/// complete deterministic sort specification for [`LogicalPlan::DistinctOn`].
+///
+/// Returns `(key_count, order_by)` where the leading `key_count` entries cover
+/// every deduplicated ON key: the user's matching ORDER BY prefix (any
+/// permutation, keeping the user's direction), then any keys the user ORDER BY
+/// did not reach as implicit ASC NULLS LAST (D3). The user's non-key tail
+/// follows, and every input column is appended in schema order as an ASC NULLS
+/// LAST tie-breaker (D4) so the surviving row of each key group never depends
+/// on the physical input order.
+fn build_distinct_on_sort_spec(
+    key_exprs: Vec<TypedExpr>,
+    user_order_by: Vec<SortExpr>,
+    base_schema: &[ColumnMetadata],
+    fallback_span: crate::ast::Span,
+) -> Result<(usize, Vec<SortExpr>), PlannerError> {
+    let key_signatures: Vec<String> = key_exprs.iter().map(distinct_on_expr_signature).collect();
+    let mut consumed = vec![false; key_exprs.len()];
+    let mut prefix: Vec<SortExpr> = Vec::new();
+    let mut tail: Vec<SortExpr> = Vec::new();
+    let mut prefix_ended = false;
+    for sort in user_order_by {
+        let signature = distinct_on_expr_signature(&sort.expr);
+        if let Some(index) = key_signatures
+            .iter()
+            .position(|candidate| candidate == &signature)
+        {
+            if prefix_ended {
+                // D2: an ON key reappears after a non-key ORDER BY item
+                // already ended the prefix (PostgreSQL 42P10).
+                return Err(PlannerError::distinct_on_order_by_mismatch(sort.expr.span));
+            }
+            consumed[index] = true;
+            prefix.push(sort);
+        } else {
+            prefix_ended = true;
+            tail.push(sort);
+        }
+    }
+    let mut implicit: Vec<SortExpr> = Vec::new();
+    for (index, key) in key_exprs.into_iter().enumerate() {
+        if consumed[index] {
+            continue;
+        }
+        if prefix_ended {
+            // D2: with non-key tail items present, an ON key the prefix never
+            // reached leaves the deduplication order ambiguous.
+            return Err(PlannerError::distinct_on_order_by_mismatch(key.span));
+        }
+        implicit.push(SortExpr::new(key, true, false));
+    }
+    let key_count = prefix.len() + implicit.len();
+    let mut order_by = prefix;
+    order_by.append(&mut implicit);
+    order_by.append(&mut tail);
+    let mut seen_columns: HashSet<usize> = order_by
+        .iter()
+        .filter_map(|sort| match &sort.expr.kind {
+            TypedExprKind::ColumnRef { column_index, .. } => Some(*column_index),
+            _ => None,
+        })
+        .collect();
+    for (index, column) in base_schema.iter().enumerate() {
+        if seen_columns.insert(index) {
+            order_by.push(SortExpr::new(
+                TypedExpr::column_ref(
+                    String::new(),
+                    column.name.clone(),
+                    index,
+                    column.data_type.clone(),
+                    fallback_span,
+                ),
+                true,
+                false,
+            ));
+        }
+    }
+    Ok((key_count, order_by))
 }
 
 fn aggregate_signature(

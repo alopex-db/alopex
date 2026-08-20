@@ -57,6 +57,17 @@ PostgreSQL 準拠)。count は定数式を plan 時に畳み込み、`LIMIT NULL
 は無制限、負値はエラー。詳細は
 [docs/sql-fetch-pagination.md](../../docs/sql-fetch-pagination.md)。
 
+## DISTINCT ON
+
+```sql
+SELECT DISTINCT ON (region) region, amount FROM sales ORDER BY region, amount;
+```
+
+キー群ごとに先頭 1 行を返す(PostgreSQL 準拠の ORDER BY prefix 制約、42P10 相当
+は `ALOPEX-T014`)。ORDER BY で決まらない同順位は全入力列の schema 順比較で
+決定的に解決するため、結果は物理挿入順に依存しない。詳細は
+[docs/sql-distinct-on.md](../../docs/sql-distinct-on.md)。
+
 ## Supported Aggregate Functions
 
 - `COUNT(*)`

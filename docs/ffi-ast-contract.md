@@ -6,7 +6,7 @@ Nim parser boundary.
 
 ## Contract Overview
 
-- Current contract version: `0.10.0`, returned by `alopex_parser_version()`.
+- Current contract version: `0.11.0`, returned by `alopex_parser_version()`.
 - Alopex v0.8.4 is the first release whose public producer emits the
   `CreateContinuousAggregate` variant. The variant is owned by Skulk; Alopex
   transports and validates it but does not execute the statement.
@@ -16,7 +16,7 @@ Nim parser boundary.
   buffers that the caller releases with `alopex_free_buffer`.
 - A non-zero parse error is returned as `prkError`; no Nim exception crosses
   the C ABI boundary.
-- Contract `0.10.0` is compatibility metadata inside the Alopex release; it is
+- Contract `0.11.0` is compatibility metadata inside the Alopex release; it is
   not an independent parser feature or release lane.
 
 ## Encoding Rules
@@ -35,13 +35,13 @@ Nim parser boundary.
 ### Version and Compatibility Boundary
 
 The linked Nim shared library, the Rust crate, and the staged payload must all
-report exactly `0.10.0`. A mismatch is rejected before MessagePack decoding;
+report exactly `0.11.0`. A mismatch is rejected before MessagePack decoding;
 callers must not attempt to interpret a payload produced by another contract.
 The v0.8.2 and v0.8.3 releases remain immutable historical `0.3.0` releases:
 they do not emit `CreateContinuousAggregate` and must continue to be consumed
 by a `0.3.0` binding. Alopex v0.8.4-v0.8.6 remain historical `0.4.0`
 releases, and v0.8.7 remains the historical `0.5.0` release. This document
-describes the current `0.10.0` surface and does not retroactively change them.
+describes the current `0.11.0` surface and does not retroactively change them.
 
 ### Input, Payload, and Resource Bounds
 
@@ -90,7 +90,7 @@ from invalid user SQL.
 
 | Variant | Fields |
 | --- | --- |
-| `Select` | `with: WithClause?`, `distinct: bool`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [Expr]?`, `having: Expr?`, `windows: [NamedWindow]`, `qualify: Expr?`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool` |
+| `Select` | `with: WithClause?`, `distinct: bool`, `distinct_on: [Expr]`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [Expr]?`, `having: Expr?`, `windows: [NamedWindow]`, `qualify: Expr?`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool` |
 | `Values` | `with: WithClause?`, `rows: [[Expr]]`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool`, `span: Span` |
 | `Insert` | `table: string`, `columns: [string]?`, `source: InsertSource`, `span: Span` |
 | `Update` | `table: string`, `assignments: [Assignment]`, `selection: Expr?`, `span: Span` |
@@ -253,8 +253,10 @@ historical 11-field Select shape. Its validator therefore rejects top-level
 their semantics. The validator also rejects `FETCH ... WITH TIES` (contract
 `0.10.0`) before encoding because the frozen payload has no
 `limit_with_ties` key; a plain `FETCH ... ONLY` or `OFFSET n ROWS` desugars
-onto the frozen `limit`/`offset` keys. Ordinary public `SELECT` payloads
-carry the full `0.10.0` fields above.
+onto the frozen `limit`/`offset` keys. The validator likewise rejects
+`DISTINCT ON` (contract `0.11.0`) because the frozen payload has no
+`distinct_on` key. Ordinary public `SELECT` payloads carry the full `0.11.0`
+fields above.
 
 Contract `0.7.0` introduces `StatementKind::Values` and the tagged `QueryBody`
 shape for CTE, derived-table, and set-operation positions. A `0.6.0` consumer
@@ -292,6 +294,16 @@ exported-version gate. The staged continuous-aggregate payload stays frozen
 and rejects `WITH TIES` before encoding. See
 [`sql-fetch-pagination.md`](sql-fetch-pagination.md) for grammar, desugaring,
 and execution semantics.
+
+Contract `0.11.0` adds the `distinct_on: [Expr]` field to `Select` (always
+written, empty when the clause is absent, placed after `distinct`). It carries
+the `SELECT DISTINCT ON (expr, ...)` key expressions; `distinct` stays `false`
+when `distinct_on` is non-empty because the grammar keeps the two forms
+mutually exclusive. A `0.10.0` consumer would silently return duplicate rows,
+so producer and consumer must match at the exported-version gate. The staged
+continuous-aggregate payload stays frozen and rejects `DISTINCT ON` before
+encoding. See [`sql-distinct-on.md`](sql-distinct-on.md) for the ORDER BY
+prefix contract, determinism guarantee, and execution semantics.
 
 ## DDL Types
 

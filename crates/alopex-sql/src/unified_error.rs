@@ -403,6 +403,12 @@ impl From<PlannerError> for SqlError {
                 location: ErrorLocation { line, column },
                 code: "ALOPEX-T013",
             },
+            PlannerError::DistinctOnOrderByMismatch { line, column } => Self::Plan {
+                message: "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
+                    .to_string(),
+                location: ErrorLocation { line, column },
+                code: "ALOPEX-T014",
+            },
             PlannerError::InvalidPragma { name, reason } => Self::Plan {
                 message: format!("invalid PRAGMA '{name}': {reason}"),
                 location: ErrorLocation::default(),

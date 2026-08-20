@@ -830,8 +830,25 @@ proc parseSelectCore(p: var Parser): SqlNode =
   result = newNode(nkSelect, tokenSpan(start))
 
   if p.check(tkDistinct):
-    discard p.advance()
-    result.children.add(newIdent("DISTINCT"))
+    let distinctTok = p.advance()
+    if p.check(tkOn):
+      # SELECT DISTINCT ON (expr [, ...]) — PostgreSQL/DuckDB form
+      # (issue #150). Parentheses are mandatory and the key list must
+      # contain at least one expression.
+      discard p.advance()
+      discard p.expect(tkLParen)
+      if p.check(tkRParen):
+        p.error("expected expression in DISTINCT ON list")
+      let clause = newNode(nkDistinctOnClause, tokenSpan(distinctTok))
+      clause.children.add(p.parseExpr())
+      while p.check(tkComma):
+        discard p.advance()
+        clause.children.add(p.parseExpr())
+      let closing = p.expect(tkRParen)
+      clause.span = spanThrough(tokenSpan(distinctTok), tokenSpan(closing))
+      result.children.add(clause)
+    else:
+      result.children.add(newIdent("DISTINCT"))
 
   let selectList = newNode(nkExprList)
   selectList.children = p.parseSelectList()
