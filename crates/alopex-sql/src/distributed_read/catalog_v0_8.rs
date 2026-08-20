@@ -387,6 +387,24 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
             failure_outcome: "distinct_on_local_only before transport",
         },
         RemoteReadCoverageEntry {
+            id: "scalar.aggregate_filter",
+            public_surface: "aggregate FILTER (WHERE ...) per-aggregate row filtering",
+            identities: &["aggregate_filter"],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "per-aggregate predicate filtering by the local executor",
+            failure_outcome: "aggregate_filter_local_only before transport",
+        },
+        RemoteReadCoverageEntry {
+            id: "scalar.ordered_aggregate",
+            public_surface: "aggregate-local ORDER BY and WITHIN GROUP ordered-set aggregates",
+            identities: &["aggregate_order_by", "within_group", "percentile_disc"],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "ordered aggregate evaluation by the local executor",
+            failure_outcome: "ordered_aggregate_local_only before transport",
+        },
+        RemoteReadCoverageEntry {
             id: "relation.recursive_cte",
             public_surface: "recursive common table expressions",
             identities: &["with_recursive"],
@@ -576,7 +594,24 @@ fn validate_plan(
                 validate_expr(group_key, false, analysis)?;
             }
             for aggregate in aggregates {
-                let aggregate_name = remote_aggregate(&aggregate.function);
+                if aggregate.filter.is_some() {
+                    return Err(RemoteReadRejection::local_only(
+                        "aggregate_filter_local_only",
+                        "aggregate FILTER (WHERE ...) is not in the v0.8 remote-read catalog",
+                    ));
+                }
+                let Some(aggregate_name) = remote_aggregate(&aggregate.function) else {
+                    return Err(RemoteReadRejection::local_only(
+                        "ordered_aggregate_local_only",
+                        "ordered-set aggregates are not in the v0.8 remote-read catalog",
+                    ));
+                };
+                if !aggregate.order_by.is_empty() {
+                    return Err(RemoteReadRejection::local_only(
+                        "ordered_aggregate_local_only",
+                        "aggregate-local ORDER BY is not in the v0.8 remote-read catalog",
+                    ));
+                }
                 analysis.operators.aggregate_distinct |= aggregate.distinct;
                 if let Some(argument) = &aggregate.arg {
                     validate_expr(argument, false, analysis)?;
@@ -745,16 +780,20 @@ fn validate_expr(
     }
 }
 
-fn remote_aggregate(function: &AggregateFunction) -> RemoteAggregate {
+/// Aggregate identities admitted to the closed v0.8 catalog. Ordered-set
+/// aggregates (PERCENTILE_DISC, issue #148) return `None` and classify as
+/// `ordered_aggregate_local_only`.
+fn remote_aggregate(function: &AggregateFunction) -> Option<RemoteAggregate> {
     match function {
-        AggregateFunction::Count => RemoteAggregate::Count,
-        AggregateFunction::Sum => RemoteAggregate::Sum,
-        AggregateFunction::Total => RemoteAggregate::Total,
-        AggregateFunction::Avg => RemoteAggregate::Avg,
-        AggregateFunction::Min => RemoteAggregate::Min,
-        AggregateFunction::Max => RemoteAggregate::Max,
-        AggregateFunction::GroupConcat { .. } => RemoteAggregate::GroupConcat,
-        AggregateFunction::StringAgg { .. } => RemoteAggregate::StringAgg,
+        AggregateFunction::Count => Some(RemoteAggregate::Count),
+        AggregateFunction::Sum => Some(RemoteAggregate::Sum),
+        AggregateFunction::Total => Some(RemoteAggregate::Total),
+        AggregateFunction::Avg => Some(RemoteAggregate::Avg),
+        AggregateFunction::Min => Some(RemoteAggregate::Min),
+        AggregateFunction::Max => Some(RemoteAggregate::Max),
+        AggregateFunction::GroupConcat { .. } => Some(RemoteAggregate::GroupConcat),
+        AggregateFunction::StringAgg { .. } => Some(RemoteAggregate::StringAgg),
+        AggregateFunction::PercentileDisc { .. } => None,
     }
 }
 
@@ -1041,6 +1080,8 @@ mod tests {
             arg: Some(column()),
             distinct: true,
             result_type: ResolvedType::Text,
+            filter: None,
+            order_by: Vec::new(),
         };
         let plan = LogicalPlan::aggregate(
             scan(),

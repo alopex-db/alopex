@@ -208,8 +208,22 @@ fn expr_contains_subquery(expr: &Expr) -> bool {
                 })
                 || else_expr.as_deref().is_some_and(expr_contains_subquery)
         }
-        ExprKind::FunctionCall { args, over, .. } => {
+        ExprKind::FunctionCall {
+            args,
+            order_by,
+            within_group,
+            filter,
+            over,
+            ..
+        } => {
             args.iter().any(expr_contains_subquery)
+                || order_by
+                    .iter()
+                    .any(|order| expr_contains_subquery(&order.expr))
+                || within_group
+                    .iter()
+                    .any(|order| expr_contains_subquery(&order.expr))
+                || filter.as_deref().is_some_and(expr_contains_subquery)
                 || over.as_ref().is_some_and(|window| {
                     window.partition_by.iter().any(expr_contains_subquery)
                         || window
@@ -873,9 +887,20 @@ impl TableReferenceExtractor {
                     self.extract_typed_expr(else_expr, diagnostics, references);
                 }
             }
-            TypedExprKind::FunctionCall { args, .. } => {
+            TypedExprKind::FunctionCall {
+                args,
+                filter,
+                order_by,
+                ..
+            } => {
                 for arg in args {
                     self.extract_typed_expr(arg, diagnostics, references);
+                }
+                if let Some(filter) = filter {
+                    self.extract_typed_expr(filter, diagnostics, references);
+                }
+                for sort in order_by {
+                    self.extract_typed_expr(&sort.expr, diagnostics, references);
                 }
             }
             TypedExprKind::Between {
@@ -3344,6 +3369,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 args,
                 distinct,
                 star,
+                filter,
+                order_by,
                 over: None,
             } if is_aggregate_function(name) => {
                 if args.iter().any(typed_expr_contains_window) {
@@ -3358,8 +3385,42 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         ));
                     }
                 }
-                let (agg, signature) =
-                    self.build_aggregate_expr_from_typed(expr, name, args, *distinct, *star)?;
+                // The type checker rejects aggregates and window functions in
+                // FILTER / aggregate ORDER BY; keep a defensive re-check so a
+                // future construction path cannot smuggle them through.
+                if let Some(filter) = filter {
+                    if typed_expr_contains_aggregate(filter) {
+                        return Err(PlannerError::invalid_expression(
+                            "aggregate functions are not allowed in FILTER".to_string(),
+                        ));
+                    }
+                    if typed_expr_contains_window(filter) {
+                        return Err(PlannerError::invalid_expression(
+                            "window functions are not allowed in FILTER".to_string(),
+                        ));
+                    }
+                }
+                for sort in order_by {
+                    if typed_expr_contains_aggregate(&sort.expr) {
+                        return Err(PlannerError::invalid_expression(
+                            "aggregate functions are not allowed in aggregate ORDER BY".to_string(),
+                        ));
+                    }
+                    if typed_expr_contains_window(&sort.expr) {
+                        return Err(PlannerError::invalid_expression(
+                            "window functions are not allowed in aggregate ORDER BY".to_string(),
+                        ));
+                    }
+                }
+                let (agg, signature) = self.build_aggregate_expr_from_typed(
+                    expr,
+                    name,
+                    args,
+                    *distinct,
+                    *star,
+                    filter.as_deref(),
+                    order_by,
+                )?;
                 aggregate_map.entry(signature).or_insert_with(|| {
                     aggregates.push(agg);
                     aggregates.len() - 1
@@ -3467,8 +3528,18 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 args,
                 distinct,
                 star,
+                filter,
+                order_by,
                 over: Some(over),
             } => {
+                if filter.is_some() || !order_by.is_empty() {
+                    // The type checker rejects these combinations (D2); this
+                    // guard keeps the window planner from silently ignoring a
+                    // filter if a future path forgets that validation.
+                    return Err(PlannerError::invalid_expression(
+                        "FILTER and aggregate ORDER BY cannot be combined with OVER".to_string(),
+                    ));
+                }
                 if args.iter().any(typed_expr_contains_window)
                     || over.partition_by.iter().any(typed_expr_contains_window)
                     || over
@@ -3503,8 +3574,15 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         nth: args[1].clone(),
                     }),
                     "sum" | "count" | "avg" | "min" | "max" => {
-                        let (aggregate, _) = self
-                            .build_aggregate_expr_from_typed(expr, name, args, *distinct, *star)?;
+                        let (aggregate, _) = self.build_aggregate_expr_from_typed(
+                            expr,
+                            name,
+                            args,
+                            *distinct,
+                            *star,
+                            None,
+                            &[],
+                        )?;
                         WindowFunction::Aggregate(aggregate)
                     }
                     "lag" | "lead" => {
@@ -3583,6 +3661,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_aggregate_expr_from_typed(
         &self,
         expr: &TypedExpr,
@@ -3590,13 +3669,35 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         args: &[TypedExpr],
         distinct: bool,
         star: bool,
+        filter: Option<&TypedExpr>,
+        order_by: &[SortExpr],
     ) -> Result<(AggregateExpr, AggregateSignature), PlannerError> {
         let lower = name.to_lowercase();
+        let filter_owned = filter.cloned();
+        // D3: order-insensitive aggregates validate their ORDER BY (names and
+        // types) and then discard it — the result is order-independent, so
+        // the sort cost is avoided and the signature matches the unordered
+        // spelling. Order-sensitive aggregates keep the ordering.
+        let retained_order_by: Vec<SortExpr> = if is_order_sensitive_aggregate(&lower) {
+            order_by.to_vec()
+        } else {
+            Vec::new()
+        };
         match lower.as_str() {
             "count" => {
                 if star {
-                    let agg = AggregateExpr::count_star();
-                    let signature = aggregate_signature(name, distinct, star, None, None, expr);
+                    let mut agg = AggregateExpr::count_star();
+                    agg.filter = filter_owned;
+                    let signature = aggregate_signature(
+                        name,
+                        distinct,
+                        star,
+                        None,
+                        None,
+                        expr,
+                        filter,
+                        &retained_order_by,
+                    );
                     return Ok((agg, signature));
                 }
                 if args.len() != 1 {
@@ -3611,9 +3712,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     arg: Some(args[0].clone()),
                     distinct,
                     result_type: ResolvedType::BigInt,
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
-                let signature =
-                    aggregate_signature(name, distinct, star, Some(&args[0]), None, expr);
+                let signature = aggregate_signature(
+                    name,
+                    distinct,
+                    star,
+                    Some(&args[0]),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
                 Ok((agg, signature))
             }
             "sum" => {
@@ -3625,8 +3736,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     result_type: crate::planner::aggregate_expr::sum_result_type(
                         &arg.resolved_type,
                     ),
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
-                let signature = aggregate_signature(name, distinct, star, Some(arg), None, expr);
+                let signature = aggregate_signature(
+                    name,
+                    distinct,
+                    star,
+                    Some(arg),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
                 Ok((agg, signature))
             }
             "total" => {
@@ -3636,8 +3758,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     arg: Some(arg.clone()),
                     distinct: false,
                     result_type: ResolvedType::Double,
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
-                let signature = aggregate_signature(name, false, star, Some(arg), None, expr);
+                let signature = aggregate_signature(
+                    name,
+                    false,
+                    star,
+                    Some(arg),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
                 Ok((agg, signature))
             }
             "avg" => {
@@ -3647,8 +3780,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     arg: Some(arg.clone()),
                     distinct,
                     result_type: ResolvedType::Double,
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
-                let signature = aggregate_signature(name, distinct, star, Some(arg), None, expr);
+                let signature = aggregate_signature(
+                    name,
+                    distinct,
+                    star,
+                    Some(arg),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
                 Ok((agg, signature))
             }
             "min" => {
@@ -3658,8 +3802,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     arg: Some(arg.clone()),
                     distinct,
                     result_type: arg.resolved_type.clone(),
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
-                let signature = aggregate_signature(name, distinct, star, Some(arg), None, expr);
+                let signature = aggregate_signature(
+                    name,
+                    distinct,
+                    star,
+                    Some(arg),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
                 Ok((agg, signature))
             }
             "max" => {
@@ -3669,8 +3824,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     arg: Some(arg.clone()),
                     distinct,
                     result_type: arg.resolved_type.clone(),
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
-                let signature = aggregate_signature(name, distinct, star, Some(arg), None, expr);
+                let signature = aggregate_signature(
+                    name,
+                    distinct,
+                    star,
+                    Some(arg),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
                 Ok((agg, signature))
             }
             "group_concat" => {
@@ -3697,6 +3863,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     arg: Some(arg.clone()),
                     distinct,
                     result_type: ResolvedType::Text,
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
                 let signature = aggregate_signature(
                     name,
@@ -3708,6 +3876,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         _ => None,
                     },
                     expr,
+                    filter,
+                    &retained_order_by,
                 );
                 Ok((agg, signature))
             }
@@ -3733,6 +3903,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     arg: Some(arg.clone()),
                     distinct,
                     result_type: ResolvedType::Text,
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
                 let signature = aggregate_signature(
                     name,
@@ -3744,6 +3916,48 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         _ => None,
                     },
                     expr,
+                    filter,
+                    &retained_order_by,
+                );
+                Ok((agg, signature))
+            }
+            "percentile_disc" => {
+                if args.len() != 1 {
+                    return Err(PlannerError::type_mismatch(
+                        "1 argument",
+                        format!("{} arguments", args.len()),
+                        expr.span,
+                    ));
+                }
+                let fraction = type_checker::percentile_fraction(&args[0])?;
+                if retained_order_by.len() != 1 {
+                    return Err(PlannerError::invalid_expression(
+                        "PERCENTILE_DISC requires WITHIN GROUP (ORDER BY ...) with exactly \
+                         one sort expression"
+                            .to_string(),
+                    ));
+                }
+                let sort = &retained_order_by[0];
+                let agg = AggregateExpr {
+                    function: AggregateFunction::PercentileDisc { fraction },
+                    arg: Some(sort.expr.clone()),
+                    distinct: false,
+                    result_type: sort.expr.resolved_type.clone(),
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
+                };
+                // The fraction rides the separator slot; the sort value's
+                // identity lives in the order key (see AggregateSignature).
+                let fraction_key = format!("{fraction:?}");
+                let signature = aggregate_signature(
+                    name,
+                    false,
+                    star,
+                    None,
+                    Some(&fraction_key),
+                    expr,
+                    filter,
+                    &retained_order_by,
                 );
                 Ok((agg, signature))
             }
@@ -3754,7 +3968,6 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             )),
         }
     }
-
     fn require_single_aggregate_arg<'b>(
         &self,
         args: &'b [TypedExpr],
@@ -4246,6 +4459,13 @@ struct AggregateSignature {
     star: bool,
     arg_key: Option<String>,
     separator: Option<String>,
+    /// FILTER (WHERE ...) identity: aggregates that differ only in their
+    /// filter are distinct physical aggregates (issue #148, D10).
+    filter_key: Option<String>,
+    /// Aggregate-local ordering identity; populated only for order-sensitive
+    /// aggregates so a discarded ORDER BY (D3) still deduplicates with the
+    /// unordered spelling.
+    order_key: Option<String>,
 }
 
 /// Collect the SELECT-list aliases that ORDER BY / HAVING may reference.
@@ -4327,12 +4547,36 @@ fn substitute_projection_aliases(
             args,
             distinct,
             star,
+            order_by,
+            within_group,
+            filter,
             over,
         } => ExprKind::FunctionCall {
             name: name.clone(),
             args: args.iter().map(recurse).collect(),
             distinct: *distinct,
             star: *star,
+            order_by: order_by
+                .iter()
+                .map(|order| OrderByExpr {
+                    expr: recurse(&order.expr),
+                    asc: order.asc,
+                    nulls_first: order.nulls_first,
+                    span: order.span,
+                })
+                .collect(),
+            within_group: within_group
+                .iter()
+                .map(|order| OrderByExpr {
+                    expr: recurse(&order.expr),
+                    asc: order.asc,
+                    nulls_first: order.nulls_first,
+                    span: order.span,
+                })
+                .collect(),
+            filter: filter
+                .as_deref()
+                .map(|predicate| Box::new(recurse(predicate))),
             over: over.as_ref().map(|window| crate::ast::expr::WindowSpec {
                 base: window.base.clone(),
                 partition_by: window.partition_by.iter().map(recurse).collect(),
@@ -4475,12 +4719,25 @@ fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
 
     match &expr.kind {
         ExprKind::FunctionCall {
-            name, args, over, ..
+            name,
+            args,
+            order_by,
+            within_group,
+            filter,
+            over,
+            ..
         } => {
             if over.is_none() && is_aggregate_function(name) {
                 return true;
             }
             args.iter().any(expr_contains_aggregate)
+                || order_by
+                    .iter()
+                    .any(|sort| expr_contains_aggregate(&sort.expr))
+                || within_group
+                    .iter()
+                    .any(|sort| expr_contains_aggregate(&sort.expr))
+                || filter.as_deref().is_some_and(expr_contains_aggregate)
                 || over.as_ref().is_some_and(|window| {
                     window.partition_by.iter().any(expr_contains_aggregate)
                         || window
@@ -4546,12 +4803,21 @@ fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
 fn typed_expr_contains_aggregate(expr: &TypedExpr) -> bool {
     match &expr.kind {
         TypedExprKind::FunctionCall {
-            name, args, over, ..
+            name,
+            args,
+            filter,
+            order_by,
+            over,
+            ..
         } => {
             if over.is_none() && is_aggregate_function(name) {
                 return true;
             }
             args.iter().any(typed_expr_contains_aggregate)
+                || filter.as_deref().is_some_and(typed_expr_contains_aggregate)
+                || order_by
+                    .iter()
+                    .any(|sort| typed_expr_contains_aggregate(&sort.expr))
                 || over.as_ref().is_some_and(|window| {
                     window
                         .partition_by
@@ -4629,8 +4895,21 @@ fn select_contains_window(stmt: &Select) -> bool {
 
 fn expr_contains_window(expr: &crate::ast::expr::Expr) -> bool {
     match &expr.kind {
-        crate::ast::expr::ExprKind::FunctionCall { args, over, .. } => {
-            over.is_some() || args.iter().any(expr_contains_window)
+        crate::ast::expr::ExprKind::FunctionCall {
+            args,
+            order_by,
+            within_group,
+            filter,
+            over,
+            ..
+        } => {
+            over.is_some()
+                || args.iter().any(expr_contains_window)
+                || order_by.iter().any(|sort| expr_contains_window(&sort.expr))
+                || within_group
+                    .iter()
+                    .any(|sort| expr_contains_window(&sort.expr))
+                || filter.as_deref().is_some_and(expr_contains_window)
         }
         crate::ast::expr::ExprKind::BinaryOp { left, right, .. } => {
             expr_contains_window(left) || expr_contains_window(right)
@@ -4661,8 +4940,19 @@ fn expr_contains_window(expr: &crate::ast::expr::Expr) -> bool {
 
 fn typed_expr_contains_window(expr: &TypedExpr) -> bool {
     match &expr.kind {
-        TypedExprKind::FunctionCall { args, over, .. } => {
-            over.is_some() || args.iter().any(typed_expr_contains_window)
+        TypedExprKind::FunctionCall {
+            args,
+            filter,
+            order_by,
+            over,
+            ..
+        } => {
+            over.is_some()
+                || args.iter().any(typed_expr_contains_window)
+                || filter.as_deref().is_some_and(typed_expr_contains_window)
+                || order_by
+                    .iter()
+                    .any(|sort| typed_expr_contains_window(&sort.expr))
         }
         TypedExprKind::BinaryOp { left, right, .. } => {
             typed_expr_contains_window(left) || typed_expr_contains_window(right)
@@ -4749,6 +5039,8 @@ fn rewrite_expr_for_windows(
             args,
             distinct,
             star,
+            filter,
+            order_by,
             over,
         } => {
             if over.is_some() {
@@ -4761,6 +5053,17 @@ fn rewrite_expr_for_windows(
                 args: args.iter().map(rewrite).collect::<Result<Vec<_>, _>>()?,
                 distinct: *distinct,
                 star: *star,
+                filter: filter.as_deref().map(rewrite).transpose()?.map(Box::new),
+                order_by: order_by
+                    .iter()
+                    .map(|sort| {
+                        Ok(SortExpr::new(
+                            rewrite(&sort.expr)?,
+                            sort.asc,
+                            sort.nulls_first,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, PlannerError>>()?,
                 over: None,
             }
         }
@@ -4964,6 +5267,8 @@ fn merged_scoped_column_expr(
             args,
             distinct: false,
             star: false,
+            filter: None,
+            order_by: Vec::new(),
             over: None,
         },
         resolved_type: found.ty.clone(),
@@ -5088,7 +5393,15 @@ fn install_base_projection(plan: &mut LogicalPlan, projection: &Projection) {
 fn is_aggregate_function(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "count" | "sum" | "total" | "avg" | "min" | "max" | "group_concat" | "string_agg"
+        "count"
+            | "sum"
+            | "total"
+            | "avg"
+            | "min"
+            | "max"
+            | "group_concat"
+            | "string_agg"
+            | "percentile_disc"
     )
 }
 
@@ -5244,6 +5557,28 @@ fn build_distinct_on_sort_spec(
     Ok((key_count, order_by))
 }
 
+/// Ordering changes the result only for these aggregates (issue #148, D3).
+fn is_order_sensitive_aggregate(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "group_concat" | "string_agg" | "percentile_disc"
+    )
+}
+
+fn sort_exprs_key(order_by: &[SortExpr]) -> Option<String> {
+    if order_by.is_empty() {
+        return None;
+    }
+    Some(
+        order_by
+            .iter()
+            .map(|sort| format!("{}|{}|{}", expr_key(&sort.expr), sort.asc, sort.nulls_first))
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn aggregate_signature(
     name: &str,
     distinct: bool,
@@ -5251,6 +5586,8 @@ fn aggregate_signature(
     arg: Option<&TypedExpr>,
     separator: Option<&String>,
     _expr: &TypedExpr,
+    filter: Option<&TypedExpr>,
+    order_by: &[SortExpr],
 ) -> AggregateSignature {
     AggregateSignature {
         name: name.to_ascii_lowercase(),
@@ -5258,6 +5595,8 @@ fn aggregate_signature(
         star,
         arg_key: arg.map(expr_key),
         separator: separator.cloned(),
+        filter_key: filter.map(expr_key),
+        order_key: sort_exprs_key(order_by),
     }
 }
 
@@ -5296,6 +5635,12 @@ fn build_aggregate_map(aggregates: &[AggregateExpr]) -> HashMap<AggregateSignatu
                 false,
                 agg.arg.as_ref(),
             ),
+            AggregateFunction::PercentileDisc { fraction } => (
+                "percentile_disc".to_string(),
+                Some(format!("{fraction:?}")),
+                false,
+                None,
+            ),
         };
         let signature = AggregateSignature {
             name,
@@ -5303,6 +5648,8 @@ fn build_aggregate_map(aggregates: &[AggregateExpr]) -> HashMap<AggregateSignatu
             star,
             arg_key: arg.map(expr_key),
             separator,
+            filter_key: agg.filter.as_ref().map(expr_key),
+            order_key: sort_exprs_key(&agg.order_by),
         };
         map.insert(signature, idx);
     }
@@ -5331,6 +5678,7 @@ fn build_aggregate_schema(
             AggregateFunction::Max => format!("max_{idx}"),
             AggregateFunction::GroupConcat { .. } => format!("group_concat_{idx}"),
             AggregateFunction::StringAgg { .. } => format!("string_agg_{idx}"),
+            AggregateFunction::PercentileDisc { .. } => format!("percentile_disc_{idx}"),
         };
         schema.push(ColumnMetadata::new(name, agg.result_type.clone()));
     }
@@ -5360,8 +5708,11 @@ fn rewrite_expr_with_maps(
             args,
             distinct,
             star,
+            filter,
+            order_by,
             over: None,
         } if is_aggregate_function(name) => {
+            let is_percentile = name.eq_ignore_ascii_case("percentile_disc");
             let separator = if name.eq_ignore_ascii_case("group_concat") && args.len() == 2 {
                 if let TypedExprKind::Literal(Literal::String(value)) = &args[1].kind {
                     Some(value.clone())
@@ -5378,6 +5729,11 @@ fn rewrite_expr_with_maps(
                         "STRING_AGG separator must be a string literal".to_string(),
                     ));
                 }
+            } else if is_percentile && args.len() == 1 {
+                Some(format!(
+                    "{:?}",
+                    type_checker::percentile_fraction(&args[0])?
+                ))
             } else {
                 None
             };
@@ -5385,8 +5741,18 @@ fn rewrite_expr_with_maps(
                 name: name.to_ascii_lowercase(),
                 distinct: *distinct,
                 star: *star,
-                arg_key: args.first().map(expr_key),
+                arg_key: if is_percentile {
+                    None
+                } else {
+                    args.first().map(expr_key)
+                },
                 separator,
+                filter_key: filter.as_deref().map(expr_key),
+                order_key: if is_order_sensitive_aggregate(name) {
+                    sort_exprs_key(order_by)
+                } else {
+                    None
+                },
             };
             let idx = aggregate_map.get(&signature).ok_or_else(|| {
                 PlannerError::invalid_expression(
@@ -5406,11 +5772,21 @@ fn rewrite_expr_with_maps(
             args,
             distinct,
             star,
+            filter,
+            order_by,
             over,
         } => {
             if over.is_none() && (*distinct || *star) {
                 return Err(PlannerError::invalid_expression(
                     "DISTINCT/STAR modifiers are only supported for aggregates".to_string(),
+                ));
+            }
+            if filter.is_some() || !order_by.is_empty() {
+                // Non-aggregate calls never carry these clauses (rejected by
+                // the type checker), so reaching here means the aggregate
+                // above did not match the plan.
+                return Err(PlannerError::invalid_expression(
+                    "aggregate in expression is not part of plan".to_string(),
                 ));
             }
             let mut rewritten_args = Vec::with_capacity(args.len());
@@ -5461,6 +5837,8 @@ fn rewrite_expr_with_maps(
                     args: rewritten_args,
                     distinct: *distinct,
                     star: *star,
+                    filter: None,
+                    order_by: Vec::new(),
                     over,
                 },
                 resolved_type: expr.resolved_type.clone(),

@@ -20,7 +20,8 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.8.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.9.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.10.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.11.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.11.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.12.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -755,18 +756,33 @@ proc writeExpr(s: Stream; node: SqlNode) =
     s.writeKey("else_expr")
     s.writeExprOpt(node.caseElse)
   of nkFunctionCall:
-    s.pack_map(6)
+    # Trailing clause nodes are appended by the parser after the argument
+    # expressions in the fixed order [ORDER BY, WITHIN GROUP, FILTER, OVER].
+    var windowNode: SqlNode = nil
+    var orderByNode: SqlNode = nil
+    var withinGroupNode: SqlNode = nil
+    var filterNode: SqlNode = nil
+    var argEnd = node.children.len
+    while argEnd > 1:
+      case node.children[argEnd - 1].kind
+      of nkWindowSpec: windowNode = node.children[argEnd - 1]
+      of nkAggFilterClause: filterNode = node.children[argEnd - 1]
+      of nkWithinGroupClause: withinGroupNode = node.children[argEnd - 1]
+      of nkOrderByClause: orderByNode = node.children[argEnd - 1]
+      else: break
+      dec argEnd
+    # Contract 0.12.0 (issue #148): the three aggregate-clause keys are
+    # written together whenever any clause is present. Clause-free calls keep
+    # the historical 6-key map so the byte-frozen staged continuous-aggregate
+    # payload is untouched; the Rust reader takes the absent keys as defaults.
+    let hasAggregateClauses =
+      orderByNode != nil or withinGroupNode != nil or filterNode != nil
+    s.pack_map(if hasAggregateClauses: 9 else: 6)
     s.writeKey("variant")
     s.pack_type("FunctionCall")
     s.writeKey("name")
     s.pack_type(node.children[0].firstIdent())
     s.writeKey("args")
-    let windowNode =
-      if node.children.len > 1 and node.children[^1].kind == nkWindowSpec:
-        node.children[^1]
-      else:
-        nil
-    let argEnd = node.children.len - (if windowNode == nil: 0 else: 1)
     var argCount = argEnd - 1
     if node.funcStar:
       argCount = 0
@@ -778,6 +794,26 @@ proc writeExpr(s: Stream; node: SqlNode) =
     s.pack_type(node.funcDistinct)
     s.writeKey("star")
     s.pack_type(node.funcStar)
+    if hasAggregateClauses:
+      s.writeKey("order_by")
+      if orderByNode == nil:
+        s.pack_array(0)
+      else:
+        s.pack_array(orderByNode.children.len)
+        for item in orderByNode.children:
+          s.writeOrderByExpr(item)
+      s.writeKey("within_group")
+      if withinGroupNode == nil:
+        s.pack_array(0)
+      else:
+        s.pack_array(withinGroupNode.children.len)
+        for item in withinGroupNode.children:
+          s.writeOrderByExpr(item)
+      s.writeKey("filter")
+      if filterNode == nil:
+        s.writeNil()
+      else:
+        s.writeExpr(filterNode.children[0])
     s.writeKey("over")
     if windowNode == nil:
       s.writeNil()
@@ -1486,9 +1522,20 @@ proc validateStagedWriterShape(node: SqlNode) =
     if node.children.len < 1:
       stagedValidationError("function call must have at least 1 child")
     elif node.children.len > 1:
-      for i in 1 ..< (node.children.len - 1):
-        if node.children[i].kind == nkWindowSpec:
-          stagedValidationError("window specification must be the last function-call child")
+      for i in 1 ..< node.children.len:
+        case node.children[i].kind
+        of nkAggFilterClause, nkWithinGroupClause, nkOrderByClause:
+          # These clauses have no representation in the byte-frozen staged
+          # 6-key FunctionCall payload (issue #148).
+          stagedValidationError(
+            "staged continuous aggregate query cannot contain aggregate " &
+            "FILTER, WITHIN GROUP, or aggregate ORDER BY")
+        of nkWindowSpec:
+          if i != node.children.len - 1:
+            stagedValidationError(
+              "window specification must be the last function-call child")
+        else:
+          discard
   of nkWindowSpec:
     var sawBase = false
     var sawPartitionBy = false

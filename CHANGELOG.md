@@ -6,6 +6,24 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- SQL aggregates support `FILTER (WHERE predicate)` on every aggregate
+  (predicate rows that are not TRUE are excluded before `DISTINCT`),
+  aggregate-local `ORDER BY` for `GROUP_CONCAT`/`STRING_AGG` (validated then
+  discarded on order-insensitive aggregates), and the first ordered-set
+  aggregate `PERCENTILE_DISC(fraction) WITHIN GROUP (ORDER BY expr)` with
+  PostgreSQL selection semantics. `HAVING` recognizes filtered/ordered
+  aggregates, aggregates differing only in FILTER/ORDER BY occupy distinct
+  slots, ordered aggregates force single-threaded execution, and the v0.8
+  remote-read catalog classifies the new forms local-only
+  (`aggregate_filter_local_only`/`ordered_aggregate_local_only`). Combining
+  the clauses with `OVER` is a stable planner error. Covered on Rust, CLI,
+  Embedded, and Python surfaces (docs/sql-aggregate-filter-within-group.md).
+  Breaking note: `filter`/`within` remain valid identifiers, but an implicit
+  alias named `filter` directly followed by `(`, or `within` directly
+  followed by `GROUP`, now parses as a clause — write `AS filter`/`AS within`
+  instead. Parser FFI contract bumped 0.11.0 → 0.12.0: the `FunctionCall`
+  wire map gains `order_by`/`within_group`/`filter` keys when any aggregate
+  clause is present and keeps its historical 6-key shape otherwise.
 - SQL supports PostgreSQL-style `SELECT DISTINCT ON (expr, ...)`: one row per
   key group with the PostgreSQL `ORDER BY` prefix contract (42P10-equivalent
   `ALOPEX-T014` on mismatch), NULL keys grouped as equal, select-list aliases

@@ -60,12 +60,22 @@ pub fn evaluate(expr: &TypedExpr, ctx: &EvalContext<'_>) -> Result<SqlValue> {
             args,
             distinct,
             star,
+            filter,
+            order_by,
             over,
         } => {
             if over.is_some() {
                 return Err(ExecutorError::InvalidOperation {
                     operation: "evaluate window function as scalar expression".into(),
                     reason: "window expressions must be evaluated by the Window operator".into(),
+                });
+            }
+            if filter.is_some() || !order_by.is_empty() {
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "evaluate aggregate clause as scalar expression".into(),
+                    reason: "FILTER and aggregate ORDER BY must be evaluated by the \
+                             Aggregate operator"
+                        .into(),
                 });
             }
             function_call::evaluate_function_call(name, args, *distinct, *star, ctx)

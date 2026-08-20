@@ -676,9 +676,23 @@ fn scenario_local_sql_matrix() -> DemoResult {
                 vec![SqlValue::Text("west".into()), SqlValue::Integer(3)],
             ],
         ),
+        (
+            // Aggregate FILTER + ordered GROUP_CONCAT + ordered-set aggregate
+            // (issue #148): the filter excludes qty <= 1 before counting, the
+            // concat orders by amount DESC with id ASC tie-break, and
+            // PERCENTILE_DISC picks the discrete median of qty.
+            "SELECT COUNT(*) FILTER (WHERE qty > 1), \
+             GROUP_CONCAT(region ORDER BY amount DESC, id ASC), \
+             PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY qty) FROM sales",
+            vec![vec![
+                SqlValue::BigInt(3),
+                SqlValue::Text("east,west,west,east,north".into()),
+                SqlValue::Integer(2),
+            ]],
+        ),
     ];
     require(
-        v08_matrix.len() == 26,
+        v08_matrix.len() == 27,
         "v0.8.x SQL success-check count changed",
     )?;
     for (sql, expected) in &v08_matrix {
@@ -704,12 +718,16 @@ fn scenario_local_sql_matrix() -> DemoResult {
             "SELECT DISTINCT ON (region) region FROM sales ORDER BY amount",
             "ALOPEX-T014",
         ),
+        (
+            "SELECT SUM(amount) WITHIN GROUP (ORDER BY amount) FROM sales",
+            "WITHIN GROUP is only valid for ordered-set aggregate functions",
+        ),
     ];
     for (sql, expected) in rejected_v08 {
         expect_sql_error(&db, sql, expected)?;
     }
     require(
-        v08_matrix.len() + rejected_v08.len() == 32,
+        v08_matrix.len() + rejected_v08.len() == 34,
         "v0.8.x SQL check count changed",
     )?;
     require(

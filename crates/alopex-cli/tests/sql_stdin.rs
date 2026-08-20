@@ -45,6 +45,11 @@ SELECT TRY_CAST('42' AS INTEGER) AS parsed,
 VALUES (2), (2), (1) ORDER BY column1 DESC FETCH FIRST 1 ROW WITH TIES;
 SELECT id FROM stdin_test ORDER BY id OFFSET 1 ROW FETCH NEXT 1 + 1 ROWS ONLY;
 SELECT DISTINCT ON (id % 2) id % 2 AS parity, id, qty FROM stdin_test ORDER BY parity, qty, id;
+SELECT COUNT(*) FILTER (WHERE qty > 2) AS heavy,
+       SUM(qty) FILTER (WHERE FALSE) AS none,
+       GROUP_CONCAT(CAST(id AS TEXT) ORDER BY qty DESC) AS by_qty,
+       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY qty) AS median
+FROM stdin_test;
 "#;
 
     {
@@ -68,7 +73,7 @@ SELECT DISTINCT ON (id % 2) id % 2 AS parity, id, qty FROM stdin_test ORDER BY p
         .expect("json output should be an array of result sets");
     assert_eq!(
         sets.len(),
-        14,
+        15,
         "one result set per statement\nstdout:\n{stdout}"
     );
     let select_rows = sets[2].as_array().expect("SELECT result set");
@@ -210,6 +215,19 @@ SELECT DISTINCT ON (id % 2) id % 2 AS parity, id, qty FROM stdin_test ORDER BY p
             serde_json::json!({ "parity": 1, "id": 1, "qty": 3 }),
         ]
     );
+
+    let aggregate_clause_rows = sets[14]
+        .as_array()
+        .expect("aggregate FILTER / WITHIN GROUP result set");
+    assert_eq!(
+        aggregate_clause_rows,
+        &[serde_json::json!({
+            "heavy": 2,
+            "none": null,
+            "by_qty": "3,1,2",
+            "median": 3,
+        })]
+    );
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -302,4 +320,44 @@ fn distinct_on_order_by_mismatch_reports_stable_error() {
         stderr.contains("SELECT DISTINCT ON expressions must match initial ORDER BY expressions"),
         "stderr:\n{stderr}"
     );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn aggregate_clause_misuse_reports_stable_errors() {
+    for (sql, expected) in [
+        (
+            "CREATE TABLE t (v INTEGER); SELECT SUM(v) WITHIN GROUP (ORDER BY v) FROM t;",
+            "WITHIN GROUP is only valid for ordered-set aggregate functions",
+        ),
+        (
+            "CREATE TABLE t (v INTEGER); SELECT PERCENTILE_DISC(0.5) FROM t;",
+            "WITHIN GROUP (ORDER BY ...) is required for PERCENTILE_DISC",
+        ),
+        (
+            "CREATE TABLE t (v INTEGER); SELECT ABS(v) FILTER (WHERE v > 0) FROM t;",
+            "FILTER (WHERE ...) is only valid for aggregate functions",
+        ),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_alopex"))
+            .args(["--in-memory", "--output", "json", "sql"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn alopex");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(sql.as_bytes())
+            .expect("write stdin");
+
+        let output = child.wait_with_output().expect("wait");
+        assert!(!output.status.success(), "`{sql}` must fail the CLI");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("ALOPEX-T007"), "`{sql}` stderr:\n{stderr}");
+        assert!(stderr.contains(expected), "`{sql}` stderr:\n{stderr}");
+        assert!(!stderr.contains("TypedExpr"), "`{sql}` stderr:\n{stderr}");
+    }
 }

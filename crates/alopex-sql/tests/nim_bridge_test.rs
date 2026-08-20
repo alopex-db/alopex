@@ -312,7 +312,7 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.11.0");
+    assert_eq!(parser_contract_version(), "0.12.0");
 }
 
 #[test]
@@ -414,7 +414,7 @@ fn top_level_set_operation_preserves_fetch_with_ties() {
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.11.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.12.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -422,7 +422,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.11.0");
+    assert_eq!(parser_contract_version(), "0.12.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);
@@ -787,4 +787,94 @@ fn parse_derived_and_quantified_subqueries_from_nim() {
         select.selection.as_ref().map(|expr| &expr.kind),
         Some(ExprKind::Quantified { .. })
     ));
+}
+
+#[test]
+fn aggregate_filter_and_within_group_cross_the_nim_messagepack_boundary() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT COUNT(*) FILTER (WHERE v > 10), \
+         STRING_AGG(name, ',' ORDER BY v DESC), \
+         PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v) FROM t",
+    )
+    .expect("issue #148 clauses should deserialize from Nim MessagePack");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    let call = |index: usize| match &select.projection[index] {
+        SelectItem::Expr { expr, .. } => &expr.kind,
+        other => panic!("expected expression projection, got {other:?}"),
+    };
+
+    let ExprKind::FunctionCall {
+        star,
+        filter,
+        order_by,
+        within_group,
+        ..
+    } = call(0)
+    else {
+        panic!("expected FunctionCall");
+    };
+    assert!(*star);
+    assert!(filter.is_some());
+    assert!(order_by.is_empty());
+    assert!(within_group.is_empty());
+
+    let ExprKind::FunctionCall {
+        args,
+        filter,
+        order_by,
+        within_group,
+        ..
+    } = call(1)
+    else {
+        panic!("expected FunctionCall");
+    };
+    assert_eq!(args.len(), 2);
+    assert!(filter.is_none());
+    assert_eq!(order_by.len(), 1);
+    assert_eq!(order_by[0].asc, Some(false));
+    assert!(within_group.is_empty());
+
+    let ExprKind::FunctionCall {
+        name,
+        args,
+        within_group,
+        order_by,
+        ..
+    } = call(2)
+    else {
+        panic!("expected FunctionCall");
+    };
+    assert!(name.eq_ignore_ascii_case("percentile_disc"));
+    assert_eq!(args.len(), 1);
+    assert!(order_by.is_empty());
+    assert_eq!(within_group.len(), 1);
+}
+
+#[test]
+fn clause_free_function_calls_still_decode_without_the_new_keys() {
+    // The Nim writer keeps the historical 6-key FunctionCall map when no
+    // aggregate clause is present; serde defaults must fill the new fields.
+    let statements = Parser::parse_sql(&AlopexDialect, "SELECT COUNT(*) FROM t")
+        .expect("clause-free calls stay decodable");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    let SelectItem::Expr { expr, .. } = &select.projection[0] else {
+        panic!("expected expression projection");
+    };
+    let ExprKind::FunctionCall {
+        filter,
+        order_by,
+        within_group,
+        ..
+    } = &expr.kind
+    else {
+        panic!("expected FunctionCall");
+    };
+    assert!(filter.is_none());
+    assert!(order_by.is_empty());
+    assert!(within_group.is_empty());
 }

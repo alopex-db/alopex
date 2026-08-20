@@ -19,6 +19,8 @@ This matrix is generated from the closed `RemoteReadCatalogV0_8` contract. A `lo
 | `scalar.try_cast` | TRY_CAST safe conversion | `local_only` | local execution profile | NULL-on-conversion-failure evaluation by the local executor | `try_cast_local_only` before transport |
 | `pagination.fetch_with_ties` | FETCH ... WITH TIES peer-preserving row limits | `local_only` | local execution profile | peer-preserving limit evaluation by the local executor | `fetch_with_ties_local_only` before transport |
 | `relation.distinct_on` | SELECT DISTINCT ON deterministic first-row deduplication | `local_only` | local execution profile | deterministic per-key first-row evaluation by the local executor | `distinct_on_local_only` before transport |
+| `scalar.aggregate_filter` | Aggregate FILTER (WHERE ...) per-aggregate row filtering | `local_only` | local execution profile | per-aggregate predicate filtering by the local executor | `aggregate_filter_local_only` before transport |
+| `scalar.ordered_aggregate` | Aggregate-local ORDER BY and WITHIN GROUP ordered-set aggregates (PERCENTILE_DISC) | `local_only` | local execution profile | ordered aggregate evaluation by the local executor | `ordered_aggregate_local_only` before transport |
 | `relation.recursive_cte` | Recursive common table expressions | `pre_execution_rejection` | Local execution profile | Bounded local fixed-point evaluation | `recursive_cte_not_supported_remote` |
 | `transaction.multi_statement` | Existing Transaction API workflow | `local_only` | Local transaction workflow | v0.7.4 local transaction behavior | Explicit pre-execution classification |
 

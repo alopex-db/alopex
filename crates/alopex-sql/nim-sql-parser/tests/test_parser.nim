@@ -1599,3 +1599,77 @@ suite "FETCH pagination (issue #152)":
     let ast = parseSql(
       "SELECT 1 UNION ALL SELECT 2 ORDER BY 1 DESC FETCH FIRST 1 ROW WITH TIES")
     check ast.findClause(nkLimitClause).limitWithTies == true
+
+suite "Aggregate FILTER / WITHIN GROUP / ORDER BY (issue #148)":
+
+  test "FILTER (WHERE ...) attaches an nkAggFilterClause":
+    let ast = parseSql("SELECT COUNT(*) FILTER (WHERE v > 10) FROM t")
+    let call = ast.children[0].children[0]
+    check call.kind == nkFunctionCall
+    check call.funcStar == true
+    check call.children[^1].kind == nkAggFilterClause
+    check call.children[^1].children.len == 1
+    check call.children[^1].children[0].kind == nkBinaryOp
+
+  test "FILTER combines with DISTINCT arguments and OVER stays last":
+    let ast = parseSql(
+      "SELECT SUM(DISTINCT v) FILTER (WHERE v > 0) OVER () FROM t")
+    let call = ast.children[0].children[0]
+    check call.funcDistinct == true
+    check call.children[^2].kind == nkAggFilterClause
+    check call.children[^1].kind == nkWindowSpec
+
+  test "aggregate-local ORDER BY attaches an nkOrderByClause child":
+    let ast = parseSql(
+      "SELECT STRING_AGG(name, ',' ORDER BY v DESC, name ASC) FROM t")
+    let call = ast.children[0].children[0]
+    check call.kind == nkFunctionCall
+    check call.children.len == 4
+    let orderBy = call.children[^1]
+    check orderBy.kind == nkOrderByClause
+    check orderBy.children.len == 2
+    check orderBy.children[0].orderAsc == 0
+    check orderBy.children[1].orderAsc == 1
+
+  test "WITHIN GROUP attaches an nkWithinGroupClause child":
+    let ast = parseSql(
+      "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v) FROM t")
+    let call = ast.children[0].children[0]
+    check call.kind == nkFunctionCall
+    check call.children.len == 3
+    let within = call.children[^1]
+    check within.kind == nkWithinGroupClause
+    check within.children.len == 1
+
+  test "WITHIN GROUP followed by FILTER keeps clause order":
+    let ast = parseSql(
+      "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v) " &
+      "FILTER (WHERE g = 'a') FROM t")
+    let call = ast.children[0].children[0]
+    check call.children[^2].kind == nkWithinGroupClause
+    check call.children[^1].kind == nkAggFilterClause
+
+  test "filter and within stay usable as implicit aliases":
+    let aliased = parseSql("SELECT COUNT(*) filter FROM t")
+    check aliased.children[0].children[0].kind == nkAlias
+    check aliased.children[0].children[0].aliasName == "filter"
+
+    let explicit = parseSql("SELECT COUNT(*) AS filter FROM t")
+    check explicit.children[0].children[0].aliasName == "filter"
+
+    let within = parseSql("SELECT COUNT(*) within FROM t")
+    check within.children[0].children[0].aliasName == "within"
+
+  test "FILTER without WHERE is a parse error":
+    check parseErrorMessage("SELECT COUNT(*) FILTER (v > 10) FROM t").contains(
+      "expected tkWhere")
+
+  test "WITHIN GROUP without ORDER BY is a parse error":
+    check parseErrorMessage(
+      "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (v) FROM t").contains(
+      "expected tkOrder")
+
+  test "argument ORDER BY cannot combine with WITHIN GROUP":
+    check parseErrorMessage(
+      "SELECT PERCENTILE_DISC(0.5 ORDER BY v) WITHIN GROUP (ORDER BY v) FROM t"
+    ).contains("cannot combine an aggregate ORDER BY argument with WITHIN GROUP")

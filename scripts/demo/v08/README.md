@@ -75,9 +75,9 @@ right (qty <= 2):      {2, 4, 5}
 left-only: {3}; right-only: {5}; intersection: {2, 4}
 ```
 
-The Python demo performs exactly 61 result/error checks. The Rust EMB-04
-scenario performs 26 v0.8.x checks: 23 exact result checks and three fail-closed
-checks. The matrix grows cumulatively: CTE column aliases, recursive CTEs,
+The Python demo performs exactly 69 result/error checks. The Rust EMB-04
+scenario performs 34 v0.8.x checks: 27 exact result checks and seven
+fail-closed checks. The matrix grows cumulatively: CTE column aliases, recursive CTEs,
 positional/value/distribution windows, explicit frames, and grouped-window
 composition are all positive checks; their former unsupported-feature
 rejections are gone while the inherited set-operation, CASE, CTE-shadowing,

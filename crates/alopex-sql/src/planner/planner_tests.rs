@@ -1179,6 +1179,8 @@ fn test_case_promotion_cast_remains_visible_to_aggregate_walkers() {
             }],
             distinct: false,
             star: false,
+            filter: None,
+            order_by: Vec::new(),
             over: None,
         },
         resolved_type: ResolvedType::BigInt,

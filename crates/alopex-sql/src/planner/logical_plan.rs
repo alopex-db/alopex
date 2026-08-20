@@ -68,6 +68,9 @@ pub enum WindowFunction {
 
 /// Value selected from the current row's effective window frame.
 #[derive(Debug, Clone)]
+// `TypedExpr` grew with the issue #148 aggregate clauses; every variant holds
+// at least one TypedExpr, so boxing `nth` alone buys nothing structural.
+#[allow(clippy::large_enum_variant)]
 pub enum ValueWindowFunction {
     FirstValue(TypedExpr),
     LastValue(TypedExpr),

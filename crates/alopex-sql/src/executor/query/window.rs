@@ -415,6 +415,17 @@ fn evaluate_partition(
             evaluate_ntile(argument, partition, output, memory)?;
         }
         WindowFunction::Aggregate(aggregate) => {
+            if aggregate.filter.is_some() || !aggregate.order_by.is_empty() {
+                // The planner rejects FILTER / aggregate ORDER BY with OVER
+                // (issue #148, D2); this guard keeps the window executor from
+                // silently ignoring them if that validation ever regresses.
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "window aggregate".into(),
+                    reason: "FILTER and aggregate ORDER BY are not supported in window \
+                             aggregate calls"
+                        .into(),
+                });
+            }
             if let Some(frame) = &window.frame
                 && !is_default_ordered_frame(frame)
             {

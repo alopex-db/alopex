@@ -347,6 +347,45 @@ def test_execute_sql_distinct_on_order_by_mismatch_raises(db):
     assert "ALOPEX-T014" in rendered
 
 
+def test_execute_sql_aggregate_filter_and_percentile_disc(db):
+    db.execute_sql(
+        "CREATE TABLE metrics (id INTEGER PRIMARY KEY, g TEXT, v INTEGER, name TEXT)"
+    )
+    db.execute_sql(
+        "INSERT INTO metrics VALUES "
+        "(1, 'a', 5, 'x'), (2, 'a', 20, 'y'), (3, 'a', NULL, 'z'), "
+        "(4, 'b', 30, 'w'), (5, 'b', NULL, NULL), (6, 'b', 20, 'y')"
+    )
+
+    rows = db.execute_sql(
+        "SELECT g, COUNT(*) FILTER (WHERE v > 10) AS big, "
+        "STRING_AGG(name, ',' ORDER BY v DESC, name ASC) AS names, "
+        "PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v) AS median "
+        "FROM metrics GROUP BY g ORDER BY g"
+    )
+    assert rows == [
+        {"g": "a", "big": 1, "names": "y,x,z", "median": 5},
+        {"g": "b", "big": 2, "names": "w,y", "median": 20},
+    ]
+
+    empty = db.execute_sql(
+        "SELECT SUM(v) FILTER (WHERE FALSE) AS none, "
+        "COUNT(*) FILTER (WHERE FALSE) AS zero FROM metrics"
+    )
+    assert empty == [{"none": None, "zero": 0}]
+
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT SUM(v) WITHIN GROUP (ORDER BY v) FROM metrics")
+    rendered = str(captured.value)
+    assert "ALOPEX-T007" in rendered
+    assert "WITHIN GROUP is only valid for ordered-set aggregate functions" in rendered
+    assert "TypedExpr" not in rendered
+
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT PERCENTILE_DISC(2.0) WITHIN GROUP (ORDER BY v) FROM metrics")
+    assert "PERCENTILE_DISC fraction must be between 0 and 1" in str(captured.value)
+
+
 def test_execute_sql_grouped_window_composition_preserves_exact_rows(db):
     db.execute_sql(
         "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER)"

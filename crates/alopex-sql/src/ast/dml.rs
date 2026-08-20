@@ -108,6 +108,10 @@ pub const LITERAL_TABLE: &str = "__literal__";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "variant")]
+// `Expr` grew with the issue #148 aggregate clauses; almost every SelectItem
+// is the Expr variant, so boxing it would add a pointless allocation to the
+// hot projection path.
+#[allow(clippy::large_enum_variant)]
 pub enum SelectItem {
     Wildcard {
         span: Span,

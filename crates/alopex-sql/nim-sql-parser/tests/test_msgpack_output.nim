@@ -784,3 +784,73 @@ suite "MessagePack output - staged continuous aggregate contract":
     check kind["projection"][0]["expr"]["kind"]["over"]["base"].getStr() ==
       "ranked"
     check kind["qualify"]["kind"]["variant"].getStr() == "BinaryOp"
+
+suite "MessagePack output - aggregate FILTER / WITHIN GROUP (issue #148)":
+
+  test "clause-free FunctionCall keeps the historical 6-key map":
+    let kind = selectKind("SELECT COUNT(*) FROM t")
+    let call = kind["projection"][0]["expr"]["kind"]
+    check call["variant"].getStr() == "FunctionCall"
+    check not call.hasKey("order_by")
+    check not call.hasKey("within_group")
+    check not call.hasKey("filter")
+    check call.hasKey("over")
+
+  test "FILTER emits the 9-key FunctionCall map":
+    let kind = selectKind("SELECT COUNT(*) FILTER (WHERE v > 10) FROM t")
+    let call = kind["projection"][0]["expr"]["kind"]
+    check call["variant"].getStr() == "FunctionCall"
+    check call["star"].getBool() == true
+    check call["order_by"].len == 0
+    check call["within_group"].len == 0
+    check call["filter"]["kind"]["variant"].getStr() == "BinaryOp"
+    check call["over"].kind == JNull
+
+  test "aggregate-local ORDER BY emits order_by items with direction":
+    let kind = selectKind(
+      "SELECT STRING_AGG(name, ',' ORDER BY v DESC, name ASC) FROM t")
+    let call = kind["projection"][0]["expr"]["kind"]
+    check call["args"].len == 2
+    check call["order_by"].len == 2
+    check call["order_by"][0]["asc"].getBool() == false
+    check call["order_by"][1]["asc"].getBool() == true
+    check call["within_group"].len == 0
+    check call["filter"].kind == JNull
+
+  test "WITHIN GROUP emits within_group and keeps args":
+    let kind = selectKind(
+      "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v DESC) " &
+      "FILTER (WHERE g = 'a') FROM t")
+    let call = kind["projection"][0]["expr"]["kind"]
+    check call["args"].len == 1
+    check call["within_group"].len == 1
+    check call["within_group"][0]["asc"].getBool() == false
+    check call["order_by"].len == 0
+    check call["filter"]["kind"]["variant"].getStr() == "BinaryOp"
+
+  test "aggregate clause forms round-trip":
+    for sql in [
+      "SELECT COUNT(*) FILTER (WHERE v > 10) FROM t",
+      "SELECT SUM(v) FILTER (WHERE g = 'a') FROM t GROUP BY g",
+      "SELECT STRING_AGG(name, ',' ORDER BY v DESC, name ASC) FROM t",
+      "SELECT GROUP_CONCAT(name ORDER BY name NULLS FIRST) FROM t",
+      "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v) FROM t",
+      "SELECT PERCENTILE_DISC(0.25) WITHIN GROUP (ORDER BY v DESC) " &
+        "FILTER (WHERE v > 0) FROM t GROUP BY g",
+    ]:
+      assertMsgpackRoundtrip(sql)
+
+  test "staged continuous aggregate rejects the new aggregate clauses":
+    let filterQuery = parseSql(
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+      "SELECT COUNT(*) FILTER (WHERE v > 0) FROM m " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    checkStagedError(filterQuery, "cannot contain aggregate")
+
+    let orderedQuery = parseSql(
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+      "SELECT GROUP_CONCAT(host ORDER BY host) FROM m " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    checkStagedError(orderedQuery, "cannot contain aggregate")

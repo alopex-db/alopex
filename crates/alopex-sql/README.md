@@ -79,6 +79,21 @@ SELECT DISTINCT ON (region) region, amount FROM sales ORDER BY region, amount;
 - `MIN(column)` / `MAX(column)` (comparable types)
 - `GROUP_CONCAT(column)` / `GROUP_CONCAT(column, separator)`
 - `STRING_AGG(column, separator)`
+- `PERCENTILE_DISC(fraction) WITHIN GROUP (ORDER BY expr)` (ordered-set)
+
+## Aggregate FILTER / ordered aggregates / WITHIN GROUP
+
+```sql
+SELECT g, COUNT(*) FILTER (WHERE v > 10) FROM t GROUP BY g;
+SELECT STRING_AGG(name, ',' ORDER BY v DESC, name ASC) FROM t;
+SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v) FROM t;
+```
+
+`FILTER` は述語が TRUE の行だけを(DISTINCT より前に)集約へ渡す。集約内
+`ORDER BY` は順序鋭敏な `GROUP_CONCAT`/`STRING_AGG` の連結順を決め、順序不感な
+集約では検証後に破棄される。`PERCENTILE_DISC` は PostgreSQL 準拠の離散選択
+(空グループは NULL、NULL ソート値は除外)。`OVER` との併用は明示エラー。詳細は
+[docs/sql-aggregate-filter-within-group.md](../../docs/sql-aggregate-filter-within-group.md)。
 
 ## Recursive CTE
 

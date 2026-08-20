@@ -1,4 +1,4 @@
-use crate::planner::typed_expr::TypedExpr;
+use crate::planner::typed_expr::{SortExpr, TypedExpr};
 use crate::planner::types::ResolvedType;
 
 /// Supported aggregate function types.
@@ -10,8 +10,19 @@ pub enum AggregateFunction {
     Avg,
     Min,
     Max,
-    GroupConcat { separator: Option<String> },
-    StringAgg { separator: Option<String> },
+    GroupConcat {
+        separator: Option<String>,
+    },
+    StringAgg {
+        separator: Option<String>,
+    },
+    /// Ordered-set aggregate `PERCENTILE_DISC(fraction) WITHIN GROUP
+    /// (ORDER BY ...)` (issue #148). `fraction` is validated by the planner to
+    /// be a literal in `[0, 1]`. Issue #154 (PERCENTILE_CONT / MODE) extends
+    /// this enum with sibling variants reusing the same ordered-input path.
+    PercentileDisc {
+        fraction: f64,
+    },
 }
 
 /// Aggregate expression definition.
@@ -21,6 +32,14 @@ pub struct AggregateExpr {
     pub arg: Option<TypedExpr>,
     pub distinct: bool,
     pub result_type: ResolvedType,
+    /// `FILTER (WHERE predicate)`: rows where the predicate is not TRUE are
+    /// skipped before the accumulator (and any DISTINCT set) sees them.
+    pub filter: Option<TypedExpr>,
+    /// Aggregate-local ordering. Non-empty only for order-sensitive
+    /// aggregates (GROUP_CONCAT / STRING_AGG / ordered-set aggregates); the
+    /// planner discards validated ORDER BY on order-insensitive aggregates
+    /// (D3 in docs/sql-aggregate-filter-within-group.md).
+    pub order_by: Vec<SortExpr>,
 }
 
 impl AggregateExpr {
@@ -30,6 +49,8 @@ impl AggregateExpr {
             arg: None,
             distinct: false,
             result_type: ResolvedType::BigInt,
+            filter: None,
+            order_by: Vec::new(),
         }
     }
 
@@ -39,6 +60,8 @@ impl AggregateExpr {
             arg: Some(arg),
             distinct,
             result_type: ResolvedType::BigInt,
+            filter: None,
+            order_by: Vec::new(),
         }
     }
 
@@ -49,6 +72,8 @@ impl AggregateExpr {
             arg: Some(arg),
             distinct: false,
             result_type,
+            filter: None,
+            order_by: Vec::new(),
         }
     }
 
@@ -58,6 +83,8 @@ impl AggregateExpr {
             arg: Some(arg),
             distinct: false,
             result_type: ResolvedType::Double,
+            filter: None,
+            order_by: Vec::new(),
         }
     }
 
@@ -67,6 +94,8 @@ impl AggregateExpr {
             arg: Some(arg),
             distinct: false,
             result_type: ResolvedType::Double,
+            filter: None,
+            order_by: Vec::new(),
         }
     }
 
@@ -77,6 +106,8 @@ impl AggregateExpr {
             arg: Some(arg),
             distinct: false,
             result_type,
+            filter: None,
+            order_by: Vec::new(),
         }
     }
 
@@ -87,6 +118,8 @@ impl AggregateExpr {
             arg: Some(arg),
             distinct: false,
             result_type,
+            filter: None,
+            order_by: Vec::new(),
         }
     }
 }

@@ -142,6 +142,21 @@ def main() -> int:
                     {"region": "west", "id": 3},
                 ],
             ),
+            (
+                # Aggregate FILTER + ordered GROUP_CONCAT + PERCENTILE_DISC
+                # (issue #148).
+                "SELECT COUNT(*) FILTER (WHERE qty > 1) AS heavy, "
+                "GROUP_CONCAT(region ORDER BY amount DESC, id ASC) AS by_amount, "
+                "PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY qty) AS median_qty "
+                "FROM sales",
+                [
+                    {
+                        "heavy": 3,
+                        "by_amount": "east,west,west,east,north",
+                        "median_qty": 2,
+                    }
+                ],
+            ),
             ("SELECT SUM(n) AS total FROM metrics", [{"total": 5}]),
             (
                 "SELECT id, n * 2.0 AS doubled FROM metrics ORDER BY doubled",
@@ -602,6 +617,10 @@ def main() -> int:
                 "SELECT DISTINCT ON (region) region FROM sales ORDER BY amount",
                 "ALOPEX-T014",
             ),
+            (
+                "SELECT SUM(amount) WITHIN GROUP (ORDER BY amount) FROM sales",
+                "WITHIN GROUP is only valid for ordered-set aggregate functions",
+            ),
         ]
 
         completed = 0
@@ -615,12 +634,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 67:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 67")
+        if completed != 69:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 69")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 67 checks passed")
+    print("v0.8 SQL correctness demo completed: 69 checks passed")
     return 0
 
 

@@ -69,6 +69,13 @@ proc check(p: Parser, kind: TokenKind): bool =
 proc checkContextual(p: Parser; value: string): bool =
   p.current.kind == tkIdent and p.current.value.cmpIgnoreCase(value) == 0
 
+proc peekNext(p: Parser): TokenKind =
+  ## One-token lookahead. The lexer is a value object, so advancing a copy
+  ## never disturbs the live token stream. The input string is copied with
+  ## the lexer, so call this only after a cheap contextual-keyword check.
+  var lookahead = p.lex
+  lookahead.nextToken().kind
+
 proc expectContextual(p: var Parser; value: string): Token =
   if not p.checkContextual(value):
     p.error("expected " & value)
@@ -285,6 +292,40 @@ proc parseOptionalOver(p: var Parser; functionCall: SqlNode) =
   if p.check(tkOver):
     functionCall.children.add(p.parseWindowSpec())
 
+proc parseAggregateTail(p: var Parser; functionCall: SqlNode) =
+  ## Shared post-`)` tail of every function call:
+  ## [WITHIN GROUP (ORDER BY ...)] [FILTER (WHERE expr)] [OVER ...].
+  ## FILTER and WITHIN are contextual identifiers (issue #148): they start a
+  ## clause only when followed by `(` / GROUP, so `SELECT count(x) filter`
+  ## still parses as an implicit alias.
+  if p.checkContextual("within") and p.peekNext() == tkGroup:
+    discard p.advance()
+    discard p.expect(tkGroup)
+    discard p.expect(tkLParen)
+    let orderTok = p.expect(tkOrder)
+    discard p.expect(tkBy)
+    let clause = newNode(nkWithinGroupClause, tokenSpan(orderTok))
+    clause.children.add(p.parseOrderByItem())
+    while p.check(tkComma):
+      discard p.advance()
+      clause.children.add(p.parseOrderByItem())
+    let closeTok = p.expect(tkRParen)
+    clause.span = spanThrough(tokenSpan(orderTok), tokenSpan(closeTok))
+    for child in functionCall.children:
+      if child.kind == nkOrderByClause:
+        p.error("cannot combine an aggregate ORDER BY argument with WITHIN GROUP")
+    functionCall.children.add(clause)
+  if p.checkContextual("filter") and p.peekNext() == tkLParen:
+    let filterTok = p.advance()
+    discard p.expect(tkLParen)
+    discard p.expect(tkWhere)
+    let clause = newNode(nkAggFilterClause, tokenSpan(filterTok))
+    clause.children.add(p.parseExpr())
+    let closeTok = p.expect(tkRParen)
+    clause.span = spanThrough(tokenSpan(filterTok), tokenSpan(closeTok))
+    functionCall.children.add(clause)
+  p.parseOptionalOver(functionCall)
+
 proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
   p.enterNesting()
   defer: p.leaveNesting()
@@ -304,13 +345,13 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
         discard p.advance()
         result.children.add(p.parseExpr())
       discard p.expect(tkRParen)
-      p.parseOptionalOver(result)
+      p.parseAggregateTail(result)
       return
     while p.check(tkComma):
       discard p.advance()
       result.children.add(p.parseExpr())
     discard p.expect(tkRParen)
-    p.parseOptionalOver(result)
+    p.parseAggregateTail(result)
     return
   if nameTok.value.toLowerAscii() == "position" and not p.check(tkRParen):
     let searched = p.parseConcat()
@@ -320,14 +361,14 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
       result.children.add(source)
       result.children.add(searched)
       discard p.expect(tkRParen)
-      p.parseOptionalOver(result)
+      p.parseAggregateTail(result)
       return
     result.children.add(searched)
     while p.check(tkComma):
       discard p.advance()
       result.children.add(p.parseExpr())
     discard p.expect(tkRParen)
-    p.parseOptionalOver(result)
+    p.parseAggregateTail(result)
     return
   if nameTok.value.toLowerAscii() == "trim" and not p.check(tkRParen):
     result.children.add(p.parseExpr())
@@ -335,13 +376,13 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
       discard p.advance()
       result.children.add(p.parseExpr())
       discard p.expect(tkRParen)
-      p.parseOptionalOver(result)
+      p.parseAggregateTail(result)
       return
     while p.check(tkComma):
       discard p.advance()
       result.children.add(p.parseExpr())
     discard p.expect(tkRParen)
-    p.parseOptionalOver(result)
+    p.parseAggregateTail(result)
     return
   if not p.check(tkRParen):
     if p.check(tkStar):
@@ -355,8 +396,18 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
       while p.check(tkComma):
         discard p.advance()
         result.children.add(p.parseExpr())
+      if p.check(tkOrder):
+        # Aggregate-local ordering: agg(expr [, ...] ORDER BY key [, ...]).
+        let orderTok = p.advance()
+        discard p.expect(tkBy)
+        let orderBy = newNode(nkOrderByClause, tokenSpan(orderTok))
+        orderBy.children.add(p.parseOrderByItem())
+        while p.check(tkComma):
+          discard p.advance()
+          orderBy.children.add(p.parseOrderByItem())
+        result.children.add(orderBy)
   discard p.expect(tkRParen)
-  p.parseOptionalOver(result)
+  p.parseAggregateTail(result)
 
 proc parseCastBody(p: var Parser; tok: Token; kind: SqlNodeKind): SqlNode =
   p.enterNesting()

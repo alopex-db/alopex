@@ -55,6 +55,10 @@ whole partition.
 - A valid start position after the end position is an empty frame. `COUNT`
   returns zero; the other supported aggregates and all value functions return
   NULL.
+- Aggregate `FILTER (WHERE ...)`, aggregate-local `ORDER BY`, and
+  `WITHIN GROUP` are grouped-aggregation clauses (issue #148); combining any
+  of them with `OVER` is a stable planner error. See
+  [`sql-aggregate-filter-within-group.md`](sql-aggregate-filter-within-group.md).
 - `FIRST_VALUE` and `LAST_VALUE` evaluate their value expression at the first
   or last row of the effective frame. `NTH_VALUE` is one-based, evaluates its
   index against the current row, and returns NULL when the frame has fewer than

@@ -54,6 +54,8 @@ type
     nkNamedWindow
     nkQualifyClause
     nkDistinctOnClause
+    nkAggFilterClause    ## aggregate FILTER (WHERE predicate); child[0] = predicate
+    nkWithinGroupClause  ## WITHIN GROUP (ORDER BY ...); children = order items
     nkWindowFrame
     nkWindowFrameBound
     nkPartitionByClause

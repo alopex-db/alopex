@@ -833,3 +833,56 @@ fn sql_integration_execute_sql_multi_error_rolls_back_whole_batch() {
         "table t should not exist after rollback"
     );
 }
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn sql_integration_aggregate_filter_and_percentile_disc_return_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE metrics (id INTEGER PRIMARY KEY, g TEXT, v INTEGER, name TEXT); \
+         INSERT INTO metrics VALUES \
+         (1, 'a', 5, 'x'), (2, 'a', 20, 'y'), (3, 'a', NULL, 'z'), \
+         (4, 'b', 30, 'w'), (5, 'b', NULL, NULL), (6, 'b', 20, 'y');",
+    )
+    .unwrap();
+
+    let result = db
+        .execute_sql(
+            "SELECT g, COUNT(*) FILTER (WHERE v > 10), \
+             STRING_AGG(name, ',' ORDER BY v DESC, name ASC), \
+             PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v) \
+             FROM metrics GROUP BY g ORDER BY g",
+        )
+        .unwrap();
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![
+                SqlValue::Text("a".into()),
+                SqlValue::BigInt(1),
+                SqlValue::Text("y,x,z".into()),
+                SqlValue::Integer(5),
+            ],
+            vec![
+                SqlValue::Text("b".into()),
+                SqlValue::BigInt(2),
+                SqlValue::Text("w,y".into()),
+                SqlValue::Integer(20),
+            ],
+        ]
+    );
+
+    let error = db
+        .execute_sql("SELECT SUM(v) WITHIN GROUP (ORDER BY v) FROM metrics")
+        .expect_err("WITHIN GROUP on a plain aggregate must fail");
+    let rendered = error.to_string();
+    assert!(rendered.contains("ALOPEX-T007"), "{rendered}");
+    assert!(
+        rendered.contains("WITHIN GROUP is only valid for ordered-set aggregate functions"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("TypedExpr"), "{rendered}");
+}
