@@ -160,6 +160,9 @@ task staticlib, "Build static library for Rust consumers":
     when defined(windows):
       " --cc:vcc"
     else:
-      ""
+      # cdylib consumers (the Python extension module) link this archive into a
+      # shared object, so objects must be position independent with a TLS model
+      # usable from dlopen'd libraries.
+      " --passC:-fPIC"
   exec "nim c -d:release --app:staticlib --mm:orc --opt:speed" & compilerFlag &
     " -o:" & outName & " src/alopex_sql_parser.nim"
