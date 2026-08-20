@@ -44,6 +44,19 @@ SELECT category, COUNT(*) FROM products GROUP BY category HAVING COUNT(*) > 10;
 SELECT category, COUNT(*) FROM products GROUP BY category ORDER BY COUNT(*) DESC;
 ```
 
+## Pagination (LIMIT / OFFSET / FETCH)
+
+```sql
+SELECT id FROM t ORDER BY id LIMIT 10 OFFSET 20;
+SELECT id FROM t ORDER BY id OFFSET 2 ROWS FETCH NEXT 2 ROWS ONLY;
+SELECT id, score FROM t ORDER BY score FETCH FIRST 2 ROWS WITH TIES;
+```
+
+`WITH TIES` は境界行と ORDER BY キーが等しい peer 行を追加で返す(ORDER BY 必須、
+PostgreSQL 準拠)。count は定数式を plan 時に畳み込み、`LIMIT NULL` / `LIMIT ALL`
+は無制限、負値はエラー。詳細は
+[docs/sql-fetch-pagination.md](../../docs/sql-fetch-pagination.md)。
+
 ## Supported Aggregate Functions
 
 - `COUNT(*)`

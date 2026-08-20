@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- SQL supports standard pagination: `OFFSET n [ROW|ROWS]` without `LIMIT`,
+  `FETCH {FIRST|NEXT} [count] {ROW|ROWS} {ONLY|WITH TIES}` with PostgreSQL
+  peer semantics for `WITH TIES`, constant-expression and NULL/`ALL` counts
+  folded at plan time, and negative/typed-count rejection across Rust, CLI,
+  Embedded, and Python surfaces. A `?` bind placeholder now fails with a
+  dedicated "bind parameters are not yet supported" parse error (prepared
+  statements are tracked by issue #166) instead of a column-not-found.
 - SQL supports `TRY_CAST`, returning NULL only for conversion failures while
   preserving source-expression errors; CAST and TRY_CAST share bounded
   numeric, text, boolean, timestamp, BLOB, and vector conversion rules.
@@ -35,7 +42,13 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- The Nim parser wire contract is `0.9.0`. It adds a dedicated `TryCast`
+- The Nim parser wire contract is `0.10.0`. It adds the always-written
+  `limit_with_ties` field to `Select`/`Values` and detaches `OFFSET` from
+  `LIMIT` on the wire; contract `0.9.0` producers are rejected before decode.
+  The byte-frozen staged continuous-aggregate payload is unchanged and rejects
+  `WITH TIES` before staging. This remains internal metadata of the unified
+  Alopex v0.8.8 release, not a separate parser release lane.
+- The Nim parser wire contract `0.9.0` added a dedicated `TryCast`
   expression variant; contract `0.8.0` producers are rejected before decode.
   This remains internal metadata of the unified Alopex v0.8.8 release, not a
   separate parser release lane.

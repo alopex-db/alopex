@@ -657,9 +657,18 @@ fn scenario_local_sql_matrix() -> DemoResult {
                 SqlValue::Null,
             ]],
         ),
+        (
+            "VALUES (2), (2), (1) ORDER BY column1 DESC FETCH FIRST 1 ROW WITH TIES",
+            vec![vec![SqlValue::Integer(2)], vec![SqlValue::Integer(2)]],
+        ),
+        (
+            "SELECT id, label FROM (VALUES (2, 'b'), (1, 'a'), (3, 'c')) AS v(id, label) \
+             ORDER BY id OFFSET 1 ROW FETCH NEXT 1 + 0 ROWS ONLY",
+            vec![vec![SqlValue::Integer(2), SqlValue::Text("b".into())]],
+        ),
     ];
     require(
-        v08_matrix.len() == 23,
+        v08_matrix.len() == 25,
         "v0.8.x SQL success-check count changed",
     )?;
     for (sql, expected) in &v08_matrix {
@@ -676,12 +685,17 @@ fn scenario_local_sql_matrix() -> DemoResult {
             "ALOPEX-C003",
         ),
         ("SELECT CAST('bad' AS INTEGER)", "ALOPEX-E004"),
+        (
+            "SELECT 1 FETCH FIRST 1 ROW WITH TIES",
+            "FETCH ... WITH TIES requires ORDER BY",
+        ),
+        ("SELECT 1 LIMIT -1", "LIMIT must not be negative"),
     ];
     for (sql, expected) in rejected_v08 {
         expect_sql_error(&db, sql, expected)?;
     }
     require(
-        v08_matrix.len() + rejected_v08.len() == 26,
+        v08_matrix.len() + rejected_v08.len() == 30,
         "v0.8.x SQL check count changed",
     )?;
     require(

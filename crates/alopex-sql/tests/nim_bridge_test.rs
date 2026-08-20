@@ -312,13 +312,45 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.9.0");
+    assert_eq!(parser_contract_version(), "0.10.0");
+}
+
+#[test]
+fn top_level_set_operation_preserves_fetch_with_ties() {
+    // The set-operation batch splitter re-assembles the query tail; dropping
+    // limit_with_ties here would silently downgrade WITH TIES to ONLY.
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT a FROM t UNION SELECT b FROM u ORDER BY a FETCH FIRST 1 ROW WITH TIES",
+    )
+    .expect("set operation with FETCH tail parses");
+    let [statement] = statements.as_slice() else {
+        panic!("expected one statement, got {statements:?}");
+    };
+    let StatementKind::Select(select) = &statement.kind else {
+        panic!("expected SELECT, got {statement:?}");
+    };
+    assert_eq!(select.set_operations.len(), 1);
+    assert_eq!(select.order_by.len(), 1);
+    assert!(select.limit.is_some());
+    assert!(select.limit_with_ties);
+
+    let plain = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT a FROM t UNION SELECT b FROM u ORDER BY a FETCH FIRST 1 ROW ONLY",
+    )
+    .expect("plain FETCH tail parses");
+    let StatementKind::Select(plain_select) = &plain[0].kind else {
+        panic!("expected SELECT, got {plain:?}");
+    };
+    assert!(plain_select.limit.is_some());
+    assert!(!plain_select.limit_with_ties);
 }
 
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.9.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.10.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -326,7 +358,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.9.0");
+    assert_eq!(parser_contract_version(), "0.10.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);

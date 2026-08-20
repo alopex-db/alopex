@@ -69,6 +69,7 @@ type
     nkGroupByClause
     nkHavingClause
     nkLimitClause
+    nkOffsetClause
     nkSetOperation
     nkJoin
     nkUsingClause
@@ -123,6 +124,7 @@ type
     negated*: bool
     natural*: bool
     recursive*: bool
+    limitWithTies*: bool    ## nkLimitClause: FETCH ... WITH TIES (issue #152)
     orderAsc*: int          ## -1 = omitted, 0 = DESC, 1 = ASC
     nullsFirst*: int        ## -1 = omitted, 0 = LAST, 1 = FIRST
     quantifier*: QuantifierKind
@@ -334,6 +336,8 @@ proc `$`*(node: SqlNode): string =
     result &= ")"
   else:
     result = $node.kind & "("
+    if node.kind == nkLimitClause and node.limitWithTies:
+      result &= "WITH TIES, "
     for i, child in node.children:
       if i > 0:
         result &= ", "

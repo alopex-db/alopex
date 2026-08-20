@@ -712,14 +712,20 @@ suite "DML — SELECT":
   test "SELECT with LIMIT and OFFSET":
     let ast = parseSql("SELECT * FROM users LIMIT 10 OFFSET 20")
     check ast.kind == nkSelect
-    var found = false
+    var foundLimit = false
+    var foundOffset = false
     for child in ast.children:
       if child.kind == nkLimitClause:
-        found = true
-        check child.children.len == 2
+        foundLimit = true
+        check child.children.len == 1
         check child.children[0].intVal == 10
-        check child.children[1].intVal == 20
-    check found
+        check child.limitWithTies == false
+      elif child.kind == nkOffsetClause:
+        foundOffset = true
+        check child.children.len == 1
+        check child.children[0].intVal == 20
+    check foundLimit
+    check foundOffset
 
   test "SELECT with multiple columns":
     let ast = parseSql("SELECT id, name, email FROM users")
@@ -1450,3 +1456,112 @@ suite "Roadmap — ordering, multi statements, spans":
     check ast.children[0].children[0].span.start.line == 1
     check ast.children[1].span.start.line == 1
     check ast.children[2].children[0].span.start.line == 1
+
+# ---------------------------------------------------------------------------
+# FETCH FIRST/NEXT, OFFSET n ROWS, WITH TIES, bind-parameter token (issue #152)
+# ---------------------------------------------------------------------------
+
+proc findClause(ast: SqlNode; kind: SqlNodeKind): SqlNode =
+  for child in ast.children:
+    if child.kind == kind:
+      return child
+  nil
+
+suite "FETCH pagination (issue #152)":
+
+  test "OFFSET n ROWS followed by FETCH NEXT n ROWS ONLY":
+    let ast = parseSql("SELECT id FROM t OFFSET 2 ROWS FETCH NEXT 3 ROWS ONLY")
+    check ast.kind == nkSelect
+    let offsetNode = ast.findClause(nkOffsetClause)
+    check offsetNode != nil
+    check offsetNode.children[0].kind == nkIntLit
+    check offsetNode.children[0].intVal == 2
+    let limitNode = ast.findClause(nkLimitClause)
+    check limitNode != nil
+    check limitNode.children[0].intVal == 3
+    check limitNode.limitWithTies == false
+
+  test "FETCH NEXT ROW ONLY synthesizes count 1":
+    let ast = parseSql("SELECT id FROM t FETCH NEXT ROW ONLY")
+    let limitNode = ast.findClause(nkLimitClause)
+    check limitNode != nil
+    check limitNode.children[0].kind == nkIntLit
+    check limitNode.children[0].intVal == 1
+    check limitNode.limitWithTies == false
+
+  test "FETCH FIRST 2 ROWS WITH TIES sets the ties flag":
+    let ast = parseSql(
+      "SELECT id FROM t ORDER BY id FETCH FIRST 2 ROWS WITH TIES")
+    let limitNode = ast.findClause(nkLimitClause)
+    check limitNode != nil
+    check limitNode.children[0].intVal == 2
+    check limitNode.limitWithTies == true
+
+  test "OFFSET without LIMIT and OFFSET before LIMIT are accepted":
+    let bare = parseSql("SELECT id FROM t OFFSET 4")
+    check bare.findClause(nkOffsetClause) != nil
+    check bare.findClause(nkLimitClause) == nil
+
+    let swapped = parseSql("SELECT id FROM t OFFSET 4 LIMIT 2")
+    check swapped.findClause(nkOffsetClause).children[0].intVal == 4
+    check swapped.findClause(nkLimitClause).children[0].intVal == 2
+
+  test "LIMIT ALL parses as no limit":
+    let ast = parseSql("SELECT id FROM t LIMIT ALL OFFSET 1")
+    check ast.findClause(nkLimitClause) == nil
+    check ast.findClause(nkOffsetClause).children[0].intVal == 1
+
+  test "FETCH count accepts constant expressions":
+    let ast = parseSql("SELECT id FROM t FETCH FIRST 1 + 1 ROWS ONLY")
+    let limitNode = ast.findClause(nkLimitClause)
+    check limitNode.children[0].kind == nkBinaryOp
+
+  test "duplicate limit-setting clauses are rejected":
+    check parseErrorMessage(
+      "SELECT 1 LIMIT 1 FETCH FIRST 1 ROWS ONLY").contains(
+      "multiple LIMIT clauses")
+    check parseErrorMessage("SELECT 1 LIMIT 1 LIMIT 2").contains(
+      "multiple LIMIT clauses")
+    check parseErrorMessage("SELECT 1 OFFSET 1 OFFSET 2").contains(
+      "multiple OFFSET clauses")
+
+  test "FETCH grammar errors are explicit":
+    check parseErrorMessage("SELECT 1 FETCH 1 ROWS ONLY").contains(
+      "expected FIRST or NEXT after FETCH")
+    check parseErrorMessage("SELECT 1 FETCH FIRST 1 ROWS").contains(
+      "expected ONLY or WITH TIES")
+    check parseErrorMessage("SELECT 1 FETCH FIRST 1 ROWS WITH 2").contains(
+      "expected TIES after WITH")
+    check parseErrorMessage(
+      "SELECT 1 FETCH FIRST 10 PERCENT ROWS ONLY").contains(
+      "FETCH ... PERCENT is not supported")
+
+  test "bind parameter placeholder reports a dedicated error":
+    let message = parseErrorMessage("SELECT ? FROM t")
+    check message.contains("bind parameters are not yet supported")
+    check parseErrorMessage("SELECT id FROM t LIMIT ?").contains(
+      "bind parameters are not yet supported")
+
+  test "fetch keywords stay usable as expression identifiers":
+    let ast = parseSql("SELECT fetch, next, ties, only, row FROM t")
+    let items = ast.children[0]
+    check items.kind == nkExprList
+    check items.children.len == 5
+    for i, expected in ["fetch", "next", "ties", "only", "row"]:
+      check items.children[i].kind == nkIdentifier
+      check items.children[i].strVal == expected
+
+  test "window frame CURRENT ROW still parses with the ROW keyword":
+    let ast = parseSql(
+      "SELECT SUM(v) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t")
+    check ast.kind == nkSelect
+
+  test "VALUES tail accepts FETCH":
+    let ast = parseSql("VALUES (1), (2), (3) ORDER BY 1 DESC FETCH FIRST 2 ROWS ONLY")
+    check ast.kind == nkValues
+    check ast.findClause(nkLimitClause).children[0].intVal == 2
+
+  test "set-operation tail keeps WITH TIES":
+    let ast = parseSql(
+      "SELECT 1 UNION ALL SELECT 2 ORDER BY 1 DESC FETCH FIRST 1 ROW WITH TIES")
+    check ast.findClause(nkLimitClause).limitWithTies == true

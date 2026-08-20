@@ -122,6 +122,15 @@ def main() -> int:
                 "SELECT id, label FROM (VALUES (2, 'b'), (1, 'a')) AS v(id, label) ORDER BY id",
                 [{"id": 1, "label": "a"}, {"id": 2, "label": "b"}],
             ),
+            (
+                "VALUES (2), (2), (1) ORDER BY column1 DESC FETCH FIRST 1 ROW WITH TIES",
+                [{"column1": 2}, {"column1": 2}],
+            ),
+            (
+                "SELECT id FROM (VALUES (1), (2), (3)) AS v(id) "
+                "ORDER BY id OFFSET 1 ROW FETCH NEXT 1 + 1 ROWS ONLY",
+                [{"id": 2}, {"id": 3}],
+            ),
             ("SELECT SUM(n) AS total FROM metrics", [{"total": 5}]),
             (
                 "SELECT id, n * 2.0 AS doubled FROM metrics ORDER BY doubled",
@@ -573,6 +582,11 @@ def main() -> int:
             ("SELECT id FROM sales UNION SELECT region FROM sales", "type mismatch"),
             ("WITH defined AS (SELECT 1 AS id) SELECT id FROM missing", "missing"),
             ("SELECT CAST('bad' AS INTEGER)", "ALOPEX-E004"),
+            (
+                "SELECT 1 FETCH FIRST 1 ROW WITH TIES",
+                "FETCH ... WITH TIES requires ORDER BY",
+            ),
+            ("SELECT 1 LIMIT -1", "LIMIT must not be negative"),
         ]
 
         completed = 0
@@ -586,12 +600,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 61:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 61")
+        if completed != 65:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 65")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 61 checks passed")
+    print("v0.8 SQL correctness demo completed: 65 checks passed")
     return 0
 
 

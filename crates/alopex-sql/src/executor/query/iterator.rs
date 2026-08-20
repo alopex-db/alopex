@@ -449,6 +449,11 @@ fn compare_vectors(left: &[f32], right: &[f32]) -> Ordering {
 /// This iterator skips the first `offset` rows and yields at most `limit` rows.
 /// It provides early termination - once the limit is reached, no more rows
 /// are requested from the input.
+///
+/// With `tie_keys` (FETCH ... WITH TIES, issue #152) the iterator keeps
+/// yielding rows past the limit while their ORDER BY sort key compares equal
+/// to the final counted row's key. Rows discarded by OFFSET never revive,
+/// even when they are peers of the boundary row.
 pub struct LimitIterator<I: RowIterator> {
     input: I,
     limit: Option<u64>,
@@ -457,28 +462,89 @@ pub struct LimitIterator<I: RowIterator> {
     skipped: u64,
     /// Number of rows yielded so far (for LIMIT).
     yielded: u64,
+    /// Sort keys copied from the Sort node beneath the Limit (WITH TIES).
+    tie_keys: Vec<SortExpr>,
+    /// Sort-key values of the most recently yielded row (WITH TIES).
+    boundary: Option<Vec<SqlValue>>,
+    /// Set once a non-peer row ends the tie scan.
+    done: bool,
 }
 
 impl<I: RowIterator> LimitIterator<I> {
     /// Creates a new limit iterator with the given LIMIT and OFFSET.
     pub fn new(input: I, limit: Option<u64>, offset: Option<u64>) -> Self {
+        Self::with_ties(input, limit, offset, Vec::new())
+    }
+
+    /// Creates a limit iterator that keeps boundary peers (FETCH ... WITH TIES).
+    ///
+    /// `tie_keys` must be the sort expressions of the input ordering; an empty
+    /// vector degrades to plain LIMIT/OFFSET semantics.
+    pub fn with_ties(
+        input: I,
+        limit: Option<u64>,
+        offset: Option<u64>,
+        tie_keys: Vec<SortExpr>,
+    ) -> Self {
         Self {
             input,
             limit,
             offset: offset.unwrap_or(0),
             skipped: 0,
             yielded: 0,
+            tie_keys,
+            boundary: None,
+            done: false,
         }
+    }
+
+    fn row_keys(&self, row: &Row) -> Result<Vec<SqlValue>> {
+        let ctx = EvalContext::new(&row.values);
+        self.tie_keys
+            .iter()
+            .map(|sort| crate::executor::evaluator::evaluate(&sort.expr, &ctx))
+            .collect()
     }
 }
 
 impl<I: RowIterator> RowIterator for LimitIterator<I> {
     fn next_row(&mut self) -> Option<Result<Row>> {
+        if self.done {
+            return None;
+        }
+
         // Check if limit already reached
         if let Some(limit) = self.limit
             && self.yielded >= limit
         {
-            return None;
+            if self.tie_keys.is_empty() {
+                return None;
+            }
+            // WITH TIES: keep yielding while the sort key equals the final
+            // counted row's key. LIMIT 0 (no boundary) yields nothing.
+            let Some(boundary) = self.boundary.clone() else {
+                self.done = true;
+                return None;
+            };
+            return match self.input.next_row() {
+                Some(Ok(row)) => {
+                    let keys = match self.row_keys(&row) {
+                        Ok(keys) => keys,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    if compare_key_values(&keys, &boundary, &self.tie_keys) == Ordering::Equal {
+                        Some(Ok(row))
+                    } else {
+                        self.done = true;
+                        None
+                    }
+                }
+                Some(Err(error)) => Some(Err(error)),
+                None => {
+                    self.done = true;
+                    None
+                }
+            };
         }
 
         loop {
@@ -497,6 +563,12 @@ impl<I: RowIterator> RowIterator for LimitIterator<I> {
                         return None;
                     }
 
+                    if !self.tie_keys.is_empty() {
+                        match self.row_keys(&row) {
+                            Ok(keys) => self.boundary = Some(keys),
+                            Err(error) => return Some(Err(error)),
+                        }
+                    }
                     self.yielded += 1;
                     return Some(Ok(row));
                 }
@@ -735,6 +807,91 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].row_id, 4);
         assert_eq!(results[1].row_id, 5);
+    }
+
+    fn score_sort_key() -> SortExpr {
+        use crate::planner::typed_expr::{TypedExpr, TypedExprKind};
+        SortExpr {
+            expr: TypedExpr {
+                kind: TypedExprKind::ColumnRef {
+                    table: "test".into(),
+                    column: "id".into(),
+                    column_index: 0,
+                },
+                resolved_type: ResolvedType::Integer,
+                span: Span::default(),
+            },
+            asc: true,
+            nulls_first: false,
+        }
+    }
+
+    #[test]
+    fn limit_iterator_with_ties_keeps_boundary_peers() {
+        // Keys: 10, 20, 20, 20, 30 — limit 2 keeps 10, 20 plus both 20 peers.
+        let rows = vec![
+            Row::new(1, vec![SqlValue::Integer(10)]),
+            Row::new(2, vec![SqlValue::Integer(20)]),
+            Row::new(3, vec![SqlValue::Integer(20)]),
+            Row::new(4, vec![SqlValue::Integer(20)]),
+            Row::new(5, vec![SqlValue::Integer(30)]),
+        ];
+        let schema = vec![ColumnMetadata::new("id", ResolvedType::Integer)];
+        let input = VecIterator::new(rows, schema);
+        let mut limit = LimitIterator::with_ties(input, Some(2), None, vec![score_sort_key()]);
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = limit.next_row() {
+            results.push(row.row_id);
+        }
+        assert_eq!(results, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn limit_iterator_with_ties_stops_on_the_first_non_peer() {
+        let rows = vec![
+            Row::new(1, vec![SqlValue::Integer(10)]),
+            Row::new(2, vec![SqlValue::Integer(20)]),
+            Row::new(3, vec![SqlValue::Integer(30)]),
+        ];
+        let schema = vec![ColumnMetadata::new("id", ResolvedType::Integer)];
+        let input = VecIterator::new(rows, schema);
+        let mut limit = LimitIterator::with_ties(input, Some(2), None, vec![score_sort_key()]);
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = limit.next_row() {
+            results.push(row.row_id);
+        }
+        assert_eq!(results, vec![1, 2]);
+        // The iterator is fused after the tie scan ends.
+        assert!(limit.next_row().is_none());
+    }
+
+    #[test]
+    fn limit_iterator_with_ties_null_keys_are_peers() {
+        let rows = vec![
+            Row::new(1, vec![SqlValue::Null]),
+            Row::new(2, vec![SqlValue::Null]),
+            Row::new(3, vec![SqlValue::Integer(1)]),
+        ];
+        let schema = vec![ColumnMetadata::new("id", ResolvedType::Integer)];
+        let input = VecIterator::new(rows, schema);
+        let mut limit = LimitIterator::with_ties(input, Some(1), None, vec![score_sort_key()]);
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = limit.next_row() {
+            results.push(row.row_id);
+        }
+        assert_eq!(results, vec![1, 2]);
+    }
+
+    #[test]
+    fn limit_iterator_with_ties_zero_limit_yields_nothing() {
+        let rows = sample_rows();
+        let schema = sample_schema();
+        let input = VecIterator::new(rows, schema);
+        let mut limit = LimitIterator::with_ties(input, Some(0), None, vec![score_sort_key()]);
+        assert!(limit.next_row().is_none());
     }
 
     #[test]

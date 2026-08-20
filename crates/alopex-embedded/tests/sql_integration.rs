@@ -446,6 +446,82 @@ fn sql_integration_try_cast_preserves_values_and_cast_errors() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_fetch_pagination_and_with_ties_preserve_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE pages (id INTEGER PRIMARY KEY, score INTEGER); \
+         INSERT INTO pages (id, score) VALUES \
+         (1, 10), (2, 20), (3, 20), (4, 20), (5, 30), (6, NULL);",
+    )
+    .unwrap();
+
+    let fetched = db
+        .execute_sql("SELECT id FROM pages ORDER BY id OFFSET 2 ROWS FETCH NEXT 2 ROWS ONLY")
+        .unwrap();
+    let ExecutionResult::Query(fetched) = fetched else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        fetched.rows,
+        vec![vec![SqlValue::Integer(3)], vec![SqlValue::Integer(4)]]
+    );
+
+    let ties = db
+        .execute_sql("SELECT id FROM pages ORDER BY score FETCH FIRST 2 ROWS WITH TIES")
+        .unwrap();
+    let ExecutionResult::Query(ties) = ties else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        ties.rows,
+        vec![
+            vec![SqlValue::Integer(1)],
+            vec![SqlValue::Integer(2)],
+            vec![SqlValue::Integer(3)],
+            vec![SqlValue::Integer(4)],
+        ]
+    );
+
+    let expression = db
+        .execute_sql("SELECT id FROM pages ORDER BY id LIMIT 1 + 1")
+        .unwrap();
+    let ExecutionResult::Query(expression) = expression else {
+        panic!("expected query result");
+    };
+    assert_eq!(expression.rows.len(), 2);
+
+    let missing_order = db
+        .execute_sql("SELECT id FROM pages FETCH FIRST 2 ROWS WITH TIES")
+        .expect_err("WITH TIES requires ORDER BY");
+    assert!(
+        missing_order
+            .to_string()
+            .contains("FETCH ... WITH TIES requires ORDER BY"),
+        "{missing_order}"
+    );
+
+    let negative = db
+        .execute_sql("SELECT id FROM pages LIMIT -1")
+        .expect_err("negative LIMIT must fail");
+    assert!(
+        negative.to_string().contains("LIMIT must not be negative"),
+        "{negative}"
+    );
+
+    // Streaming SQL rejects WITH TIES (ordered pagination is not streamable).
+    let stream_error = alopex_embedded::OwnedSqlStreamPlan::preflight(
+        &db,
+        "SELECT id FROM pages ORDER BY id FETCH FIRST 1 ROW WITH TIES",
+    )
+    .expect_err("WITH TIES streaming must be rejected");
+    assert_eq!(
+        stream_error.sql_error_code(),
+        Some("unsupported_streaming_sql")
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_grouped_window_composition_preserves_exact_rows() {
     let db = Database::new();
     db.execute_sql(

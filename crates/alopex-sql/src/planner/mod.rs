@@ -1506,9 +1506,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 cte.span,
             ));
         }
-        if !body.order_by.is_empty() || body.limit.is_some() || body.offset.is_some() {
+        if !body.order_by.is_empty()
+            || body.limit.is_some()
+            || body.offset.is_some()
+            || body.limit_with_ties
+        {
             return Err(PlannerError::unsupported_feature(
-                "ORDER BY, LIMIT, or OFFSET inside a recursive common table expression",
+                "ORDER BY, LIMIT, OFFSET, or FETCH inside a recursive common table expression",
                 "a future version",
                 body.span,
             ));
@@ -1661,7 +1665,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             &stmt.order_by,
             &stmt.limit,
             &stmt.offset,
-            stmt.span,
+            stmt.limit_with_ties,
             outer_scope,
             &ctes,
         )
@@ -1769,7 +1773,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         order_by: &[OrderByExpr],
         limit: &Option<Expr>,
         offset: &Option<Expr>,
-        span: crate::ast::Span,
+        limit_with_ties: bool,
         outer_scope: &[ScopedTable],
         ctes: &CtePlans,
     ) -> Result<PlannedRelation, PlannerError> {
@@ -1816,13 +1820,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 order_by,
             };
         }
-        if limit.is_some() || offset.is_some() {
-            relation.plan = LogicalPlan::Limit {
-                input: Box::new(relation.plan),
-                limit: self.extract_limit_value(limit, span)?,
-                offset: self.extract_limit_value(offset, span)?,
-            };
-        }
+        relation.plan = self.apply_pagination(relation.plan, limit, offset, limit_with_ties)?;
         Ok(relation)
     }
 
@@ -1842,6 +1840,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             left_select.order_by.clear();
             left_select.limit = None;
             left_select.offset = None;
+            left_select.limit_with_ties = false;
             let relation = self.plan_select_relation(&left_select, outer_scope, &ctes)?;
 
             return self.apply_set_operations_and_tail(
@@ -1850,7 +1849,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 &stmt.order_by,
                 &stmt.limit,
                 &stmt.offset,
-                stmt.span,
+                stmt.limit_with_ties,
                 outer_scope,
                 &ctes,
             );
@@ -2157,15 +2156,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 };
             }
 
-            if stmt.limit.is_some() || stmt.offset.is_some() {
-                let limit = self.extract_limit_value(&stmt.limit, stmt.span)?;
-                let offset = self.extract_limit_value(&stmt.offset, stmt.span)?;
-                plan = LogicalPlan::Limit {
-                    input: Box::new(plan),
-                    limit,
-                    offset,
-                };
-            }
+            plan = self.apply_pagination(plan, &stmt.limit, &stmt.offset, stmt.limit_with_ties)?;
 
             return Ok(PlannedRelation {
                 plan,
@@ -2191,15 +2182,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             };
         }
 
-        if stmt.limit.is_some() || stmt.offset.is_some() {
-            let limit = self.extract_limit_value(&stmt.limit, stmt.span)?;
-            let offset = self.extract_limit_value(&stmt.offset, stmt.span)?;
-            plan = LogicalPlan::Limit {
-                input: Box::new(plan),
-                limit,
-                offset,
-            };
-        }
+        plan = self.apply_pagination(plan, &stmt.limit, &stmt.offset, stmt.limit_with_ties)?;
 
         let output_schema = projection_schema(&final_projection, &relation.schema);
         if needs_project_boundary {
@@ -2526,13 +2509,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 order_by: projected_order_by,
             };
         }
-        if stmt.limit.is_some() || stmt.offset.is_some() {
-            plan = LogicalPlan::Limit {
-                input: Box::new(plan),
-                limit: self.extract_limit_value(&stmt.limit, stmt.span)?,
-                offset: self.extract_limit_value(&stmt.offset, stmt.span)?,
-            };
-        }
+        plan = self.apply_pagination(plan, &stmt.limit, &stmt.offset, stmt.limit_with_ties)?;
         if has_hidden_order_keys {
             plan = LogicalPlan::Project {
                 input: Box::new(plan),
@@ -3737,34 +3714,117 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         rewrite_expr_with_maps(expr, &group_key_map, &aggregate_map, output_names)
     }
 
-    /// Extract a numeric value from a LIMIT or OFFSET expression.
+    /// Resolve a LIMIT/OFFSET/FETCH count expression to a concrete value.
     ///
-    /// Currently only supports literal integer values.
-    fn extract_limit_value(
+    /// The expression must be a constant scalar of an integer type
+    /// (issue #152, D4/D5): literals, arithmetic, CAST, CASE, and
+    /// deterministic scalar functions over constants are accepted and
+    /// const-folded at plan time; column references, subqueries, and
+    /// aggregate/window functions are rejected. NULL means "no limit"
+    /// (`LIMIT NULL` / `FETCH FIRST NULL ROWS`) or "no offset"
+    /// (`OFFSET NULL`), matching PostgreSQL (D6). Negative values are
+    /// rejected (D7).
+    fn resolve_pagination_count(
         &self,
         expr: &Option<crate::ast::expr::Expr>,
-        stmt_span: crate::ast::Span,
+        clause: &str,
     ) -> Result<Option<u64>, PlannerError> {
-        match expr {
-            None => Ok(None),
-            Some(e) => {
-                // For now, only support literal integers
-                if let crate::ast::expr::ExprKind::Literal {
-                    literal: Literal::Number(s),
-                } = &e.kind
-                {
-                    s.parse::<u64>().map(Some).map_err(|_| {
-                        PlannerError::type_mismatch("unsigned integer", s.clone(), e.span)
-                    })
-                } else {
-                    Err(PlannerError::unsupported_feature(
-                        "non-literal LIMIT/OFFSET",
-                        "v0.3.0+",
-                        stmt_span,
-                    ))
-                }
+        let Some(expr) = expr else {
+            return Ok(None);
+        };
+        if expr_contains_subquery(expr) {
+            return Err(PlannerError::unsupported_feature(
+                format!("subquery in {clause}"),
+                "a future version",
+                expr.span,
+            ));
+        }
+        // Empty scope: any column reference fails name resolution here.
+        let typed = self
+            .type_checker
+            .infer_type_with_scope(expr, &[], &|stmt, _outer| {
+                Err(PlannerError::unsupported_feature(
+                    format!("subquery in {clause}"),
+                    "a future version",
+                    stmt.span(),
+                ))
+            })?;
+        if typed_expr_contains_aggregate(&typed) {
+            return Err(PlannerError::invalid_expression(format!(
+                "aggregate functions are not allowed in {clause}"
+            )));
+        }
+        if typed_expr_contains_window(&typed) {
+            return Err(PlannerError::invalid_expression(format!(
+                "window functions are not allowed in {clause}"
+            )));
+        }
+        match typed.resolved_type {
+            ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Null => {}
+            ref other => {
+                return Err(PlannerError::type_mismatch(
+                    "BIGINT",
+                    other.type_name().to_string(),
+                    expr.span,
+                ));
             }
         }
+        // Constant-fold with an empty row context; the plan carries the
+        // concrete value, so distributed execution never re-evaluates it.
+        let context = crate::executor::evaluator::EvalContext::new(&[]);
+        let value = crate::executor::evaluator::evaluate(&typed, &context).map_err(|error| {
+            PlannerError::invalid_expression(format!("{clause} expression is invalid: {error}"))
+        })?;
+        let count = match value {
+            crate::storage::SqlValue::Null => return Ok(None),
+            crate::storage::SqlValue::Integer(value) => i64::from(value),
+            crate::storage::SqlValue::BigInt(value) => value,
+            other => {
+                return Err(PlannerError::type_mismatch(
+                    "BIGINT",
+                    format!("{other:?}"),
+                    expr.span,
+                ));
+            }
+        };
+        if count < 0 {
+            return Err(PlannerError::invalid_expression(format!(
+                "{clause} must not be negative"
+            )));
+        }
+        Ok(Some(count as u64))
+    }
+
+    /// Apply the LIMIT/OFFSET/FETCH tail to a plan (issue #152).
+    ///
+    /// WITH TIES copies the sort keys from the `Sort` node directly beneath
+    /// the Limit; without ORDER BY it is rejected (D3, PostgreSQL 42P20).
+    fn apply_pagination(
+        &self,
+        plan: LogicalPlan,
+        limit: &Option<Expr>,
+        offset: &Option<Expr>,
+        with_ties: bool,
+    ) -> Result<LogicalPlan, PlannerError> {
+        if limit.is_none() && offset.is_none() && !with_ties {
+            return Ok(plan);
+        }
+        let ties = if with_ties {
+            let LogicalPlan::Sort { order_by, .. } = &plan else {
+                return Err(PlannerError::invalid_expression(
+                    "FETCH ... WITH TIES requires ORDER BY".to_string(),
+                ));
+            };
+            Some(order_by.clone())
+        } else {
+            None
+        };
+        Ok(LogicalPlan::Limit {
+            input: Box::new(plan),
+            limit: self.resolve_pagination_count(limit, "LIMIT")?,
+            offset: self.resolve_pagination_count(offset, "OFFSET")?,
+            ties,
+        })
     }
 
     /// Plan an INSERT statement.

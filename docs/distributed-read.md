@@ -17,6 +17,7 @@ This matrix is generated from the closed `RemoteReadCatalogV0_8` contract. A `lo
 | `relation.compound_window` | Compound and window forms | `pre_execution_rejection` | Future catalog version | Not a v0.8 remote-read form | `function_not_in_remote_catalog` |
 | `scalar.standard_predicate` | truth, distinctness, and row-value predicates | `local_only` | local execution profile | three-valued evaluation by the local executor | `standard_predicate_local_only` before transport |
 | `scalar.try_cast` | TRY_CAST safe conversion | `local_only` | local execution profile | NULL-on-conversion-failure evaluation by the local executor | `try_cast_local_only` before transport |
+| `pagination.fetch_with_ties` | FETCH ... WITH TIES peer-preserving row limits | `local_only` | local execution profile | peer-preserving limit evaluation by the local executor | `fetch_with_ties_local_only` before transport |
 | `relation.recursive_cte` | Recursive common table expressions | `pre_execution_rejection` | Local execution profile | Bounded local fixed-point evaluation | `recursive_cte_not_supported_remote` |
 | `transaction.multi_statement` | Existing Transaction API workflow | `local_only` | Local transaction workflow | v0.7.4 local transaction behavior | Explicit pre-execution classification |
 

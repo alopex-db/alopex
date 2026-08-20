@@ -369,6 +369,15 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
             failure_outcome: "try_cast_local_only before transport",
         },
         RemoteReadCoverageEntry {
+            id: "pagination.fetch_with_ties",
+            public_surface: "FETCH ... WITH TIES peer-preserving row limits",
+            identities: &["fetch_with_ties"],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "peer-preserving limit evaluation by the local executor",
+            failure_outcome: "fetch_with_ties_local_only before transport",
+        },
+        RemoteReadCoverageEntry {
             id: "relation.recursive_cte",
             public_surface: "recursive common table expressions",
             identities: &["with_recursive"],
@@ -583,7 +592,14 @@ fn validate_plan(
             input,
             limit,
             offset,
+            ties,
         } => {
+            if ties.is_some() {
+                return Err(RemoteReadRejection::local_only(
+                    "fetch_with_ties_local_only",
+                    "FETCH ... WITH TIES is not in the v0.8 remote-read catalog",
+                ));
+            }
             analysis.operators.limit |= limit.is_some();
             analysis.operators.offset |= offset.is_some();
             validate_plan(input, analysis)
@@ -944,6 +960,45 @@ mod tests {
             RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
                 if code == "try_cast_local_only"
         ));
+    }
+
+    #[test]
+    fn fetch_with_ties_remains_local_only() {
+        let sorted = LogicalPlan::sort(scan(), vec![SortExpr::asc(column())]);
+        let ties = if let LogicalPlan::Sort { order_by, .. } = &sorted {
+            Some(order_by.clone())
+        } else {
+            unreachable!("sort constructed above")
+        };
+        let plan = LogicalPlan::Limit {
+            input: Box::new(sorted),
+            limit: Some(2),
+            offset: None,
+            ties,
+        };
+        assert!(matches!(
+            classify(&plan, &references()),
+            RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                if code == "fetch_with_ties_local_only"
+        ));
+
+        // Plain FETCH ... ONLY desugars to limit/offset and stays remote-supported.
+        let desugared = LogicalPlan::limit(
+            LogicalPlan::sort(scan(), vec![SortExpr::asc(column())]),
+            Some(2),
+            Some(1),
+        );
+        assert!(matches!(
+            classify(&desugared, &references()),
+            RemoteReadClassification::Supported(_)
+        ));
+
+        assert!(
+            coverage_entries()
+                .iter()
+                .any(|entry| entry.id == "pagination.fetch_with_ties"
+                    && matches!(entry.remote_status, RemoteReadCoverageStatus::LocalOnly))
+        );
     }
 
     #[test]

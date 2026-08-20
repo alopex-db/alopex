@@ -273,6 +273,37 @@ def test_execute_sql_try_cast_preserves_values_and_cast_errors(db):
     assert "TypedExpr" not in rendered
 
 
+def test_execute_sql_fetch_pagination_and_with_ties(db):
+    db.execute_sql("CREATE TABLE pages (id INTEGER PRIMARY KEY, score INTEGER)")
+    db.execute_sql(
+        "INSERT INTO pages (id, score) VALUES "
+        "(1, 10), (2, 20), (3, 20), (4, 20), (5, 30), (6, NULL)"
+    )
+
+    ties = db.execute_sql(
+        "SELECT id FROM pages ORDER BY score FETCH FIRST 2 ROWS WITH TIES"
+    )
+    assert [row["id"] for row in ties] == [1, 2, 3, 4]
+
+    fetched = db.execute_sql(
+        "SELECT id FROM pages ORDER BY id OFFSET 2 ROWS FETCH NEXT 2 ROWS ONLY"
+    )
+    assert [row["id"] for row in fetched] == [3, 4]
+
+    # `?` placeholders keep working through the documented params substitution
+    # (true bind parameters are tracked by issue #166).
+    limited = db.execute_sql("SELECT id FROM pages ORDER BY id LIMIT ?", [2])
+    assert [row["id"] for row in limited] == [1, 2]
+
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT id FROM pages LIMIT -1")
+    assert "LIMIT must not be negative" in str(captured.value)
+
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT id FROM pages FETCH FIRST 2 ROWS WITH TIES")
+    assert "WITH TIES requires ORDER BY" in str(captured.value)
+
+
 def test_execute_sql_grouped_window_composition_preserves_exact_rows(db):
     db.execute_sql(
         "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER)"

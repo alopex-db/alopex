@@ -1287,6 +1287,7 @@ mod tests {
                     order_by: vec![],
                     limit: None,
                     offset: None,
+                    limit_with_ties: false,
                     span: alopex_sql::ast::Span::default(),
                 },
                 options: vec![],

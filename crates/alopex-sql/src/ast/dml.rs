@@ -21,6 +21,10 @@ pub struct Select {
     pub order_by: Vec<OrderByExpr>,
     pub limit: Option<Expr>,
     pub offset: Option<Expr>,
+    /// FETCH ... WITH TIES: the limit keeps every peer of the final row
+    /// under the ORDER BY sort key (issue #152, contract 0.10.0).
+    #[serde(default)]
+    pub limit_with_ties: bool,
     #[serde(default)]
     pub span: Span,
 }
@@ -39,6 +43,9 @@ pub struct Values {
     pub limit: Option<Expr>,
     #[serde(default)]
     pub offset: Option<Expr>,
+    /// FETCH ... WITH TIES on a VALUES tail (issue #152, contract 0.10.0).
+    #[serde(default)]
+    pub limit_with_ties: bool,
     #[serde(default)]
     pub span: Span,
 }

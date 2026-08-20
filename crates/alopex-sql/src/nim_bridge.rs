@@ -141,6 +141,9 @@ pub(crate) mod continuous_aggregate_select_wire {
             order_by: wire.order_by,
             limit: wire.limit,
             offset: wire.offset,
+            // The staged wire payload is frozen and cannot carry WITH TIES;
+            // the Nim staging validator rejects it before encoding.
+            limit_with_ties: false,
             span: wire.span,
         })
     }
@@ -362,7 +365,7 @@ fn parse_set_operation_statement(
     let final_branch = branches.last_mut().ok_or_else(|| {
         set_operation_parser_error("at least one query body", "empty set-operation chain")
     })?;
-    let (order_by, limit, offset) = take_query_tail(final_branch);
+    let tail = take_query_tail(final_branch);
 
     let mut terms = Vec::new();
     let mut outer_operations = Vec::new();
@@ -392,7 +395,7 @@ fn parse_set_operation_statement(
             span: operation.span,
         });
     }
-    set_query_tail(&mut root, order_by, limit, offset);
+    set_query_tail(&mut root, tail);
     let span = query_body_span(&root);
     Ok(Statement {
         kind: match root {
@@ -428,39 +431,44 @@ fn query_set_operations_mut(body: &mut QueryBody) -> &mut Vec<SetOperation> {
     }
 }
 
-fn take_query_tail(
-    body: &mut QueryBody,
-) -> (Vec<crate::ast::OrderByExpr>, Option<Expr>, Option<Expr>) {
+type QueryTail = (
+    Vec<crate::ast::OrderByExpr>,
+    Option<Expr>,
+    Option<Expr>,
+    bool,
+);
+
+fn take_query_tail(body: &mut QueryBody) -> QueryTail {
     match body {
         QueryBody::Select(select) => (
             std::mem::take(&mut select.order_by),
             select.limit.take(),
             select.offset.take(),
+            std::mem::take(&mut select.limit_with_ties),
         ),
         QueryBody::Values(values) => (
             std::mem::take(&mut values.order_by),
             values.limit.take(),
             values.offset.take(),
+            std::mem::take(&mut values.limit_with_ties),
         ),
     }
 }
 
-fn set_query_tail(
-    body: &mut QueryBody,
-    order_by: Vec<crate::ast::OrderByExpr>,
-    limit: Option<Expr>,
-    offset: Option<Expr>,
-) {
+fn set_query_tail(body: &mut QueryBody, tail: QueryTail) {
+    let (order_by, limit, offset, limit_with_ties) = tail;
     match body {
         QueryBody::Select(select) => {
             select.order_by = order_by;
             select.limit = limit;
             select.offset = offset;
+            select.limit_with_ties = limit_with_ties;
         }
         QueryBody::Values(values) => {
             values.order_by = order_by;
             values.limit = limit;
             values.offset = offset;
+            values.limit_with_ties = limit_with_ties;
         }
     }
 }
@@ -1317,7 +1325,7 @@ mod input_preflight_tests {
             .expect_err("sidecar labels cannot make a pre-frame producer compatible");
         let rendered = error.to_string();
 
-        assert!(rendered.contains("linked Nim parser contract 0.9.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.10.0"));
         assert!(rendered.contains("linked Nim parser contract 0.4.0"));
     }
 
@@ -1327,32 +1335,32 @@ mod input_preflight_tests {
             .expect_err("a 0.5.0 producer cannot satisfy the current named-window contract");
         let rendered = error.to_string();
 
-        assert!(rendered.contains("linked Nim parser contract 0.9.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.10.0"));
         assert!(rendered.contains("linked Nim parser contract 0.5.0"));
     }
 
     #[test]
     fn legacy_v040_consumer_rejects_the_current_producer_before_decode() {
         let linked_producer_contract = nim_ffi::parser_contract_version();
-        assert_eq!(linked_producer_contract, "0.9.0");
+        assert_eq!(linked_producer_contract, "0.10.0");
         let error = ensure_parser_contract("0.4.0", &linked_producer_contract)
             .expect_err("legacy consumer must reject a producer with frame semantics");
         let rendered = error.to_string();
 
         assert!(rendered.contains("linked Nim parser contract 0.4.0"));
-        assert!(rendered.contains("linked Nim parser contract 0.9.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.10.0"));
     }
 
     #[test]
     fn legacy_v050_consumer_rejects_a_v060_named_window_producer_before_decode() {
         let linked_producer_contract = nim_ffi::parser_contract_version();
-        assert_eq!(linked_producer_contract, "0.9.0");
+        assert_eq!(linked_producer_contract, "0.10.0");
         let error = ensure_parser_contract("0.5.0", &linked_producer_contract)
             .expect_err("legacy consumer must not ignore QUALIFY or named-window fields");
         let rendered = error.to_string();
 
         assert!(rendered.contains("linked Nim parser contract 0.5.0"));
-        assert!(rendered.contains("linked Nim parser contract 0.9.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.10.0"));
     }
 
     #[test]

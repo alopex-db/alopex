@@ -70,10 +70,13 @@ pub fn detect_knn_pattern(plan: &LogicalPlan) -> Option<KnnPattern> {
 
 fn extract_limit(plan: &LogicalPlan) -> Option<(&LogicalPlan, u64)> {
     match plan {
+        // WITH TIES (ties: Some) must never take the index shortcut: the
+        // exact peer set of the boundary row requires the full sort.
         LogicalPlan::Limit {
             input,
             limit: Some(k),
             offset,
+            ties: None,
         } if offset.unwrap_or(0) == 0 => Some((input.as_ref(), *k)),
         _ => None,
     }
@@ -196,6 +199,7 @@ mod tests {
             input: Box::new(sort),
             limit: Some(2),
             offset,
+            ties: None,
         }
     }
 
@@ -236,5 +240,33 @@ mod tests {
     fn reject_unknown_metric() {
         let plan = build_plan(false, "unknown", None);
         assert!(detect_knn_pattern(&plan).is_none());
+    }
+
+    #[test]
+    fn reject_with_ties_limit() {
+        // FETCH ... WITH TIES needs the exact peer set of the boundary row,
+        // so the KNN index shortcut must not fire (issue #152, D14).
+        let plan = build_plan(false, "cosine", None);
+        let LogicalPlan::Limit {
+            input,
+            limit,
+            offset,
+            ..
+        } = plan
+        else {
+            panic!("expected Limit plan");
+        };
+        let ties = if let LogicalPlan::Sort { order_by, .. } = input.as_ref() {
+            Some(order_by.clone())
+        } else {
+            panic!("expected Sort input");
+        };
+        let with_ties = LogicalPlan::Limit {
+            input,
+            limit,
+            offset,
+            ties,
+        };
+        assert!(detect_knn_pattern(&with_ties).is_none());
     }
 }

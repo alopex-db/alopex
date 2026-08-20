@@ -191,8 +191,8 @@ if not isinstance(distributions, list) or not distributions or any(
 parser = data.get("parser")
 if not isinstance(parser, dict):
     fail("parser public surface is missing")
-if parser.get("contract") != "0.9.0":
-    fail("parser contract must be 0.9.0")
+if parser.get("contract") != "0.10.0":
+    fail("parser contract must be 0.10.0")
 for field in ("manifest_sha256", "envelope_sha256"):
     if not isinstance(parser.get(field), str) or not sha64.fullmatch(parser[field]):
         fail(f"parser {field} is missing or invalid")
@@ -559,8 +559,8 @@ run_step "v${ALOPEX_VERSION} SQL scalar/PRAGMA 動作保証" \
     "crates.io/PyPI から取得した v${ALOPEX_VERSION} の CLI で、ハッシュ・UUID・エンコード・文字列関数と PRAGMA の公開利用経路を確認する。ソースの cargo build は行わず、インストール済みの alopex CLI だけを実行する。" \
     -- run_in_container bash -c 'ALOPEX_CLI=alopex bash scripts/demo/v074/demo_sql_v074.sh'
 
-run_step "v${ALOPEX_VERSION} v0.8 SQL correctness incl. TRY_CAST, standard predicates, frames, named WINDOW, and QUALIFY (demo_sql_v08.py)" \
-    "PyPI 公開版で、v0.8 系の TRY_CAST/CAST failure contract、truth/distinctness/row-value predicate、TIMESTAMP 書込み、数値型昇格、SUM(INTEGER)、IN/BETWEEN、異種数値 JOIN、重複 range-variable 拒否を実行し、値とエラー型を確認する。" \
+run_step "v${ALOPEX_VERSION} v0.8 SQL correctness incl. FETCH/WITH TIES pagination, TRY_CAST, standard predicates, frames, named WINDOW, and QUALIFY (demo_sql_v08.py)" \
+    "PyPI 公開版で、v0.8 系の FETCH FIRST/OFFSET/WITH TIES pagination、TRY_CAST/CAST failure contract、truth/distinctness/row-value predicate、TIMESTAMP 書込み、数値型昇格、SUM(INTEGER)、IN/BETWEEN、異種数値 JOIN、重複 range-variable 拒否を実行し、値とエラー型を確認する。" \
     -- run_in_container python3 scripts/demo/v08/demo_sql_v08.py
 
 run_step "v${ALOPEX_VERSION} 組み込み API サーフェス (demo_api_surfaces.py)" \

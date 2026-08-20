@@ -1,0 +1,48 @@
+{
+  "reference_versions": {
+    "postgresql": "16.14",
+    "duckdb": "1.5.5"
+  },
+  "basis": "Expected rows are pinned to the documented SQL semantics linked below; external engines are not executed by this fixture test. WITH TIES cases follow PostgreSQL 16 (DuckDB 1.5.5 does not implement WITH TIES); plain LIMIT/OFFSET/FETCH cases agree between both engines. Setup: CREATE TABLE t (id INTEGER PRIMARY KEY, score INTEGER); INSERT INTO t VALUES (1,10),(2,20),(3,20),(4,20),(5,30),(6,NULL).",
+  "source_docs": {
+    "postgresql_select_limit": "https://www.postgresql.org/docs/16/sql-select.html#SQL-LIMIT",
+    "duckdb_limit": "https://duckdb.org/docs/stable/sql/query_syntax/limit"
+  },
+  "cases": [
+    {
+      "name": "offset_rows_then_fetch_next_only",
+      "sql": "SELECT id FROM t ORDER BY id OFFSET 2 ROWS FETCH NEXT 2 ROWS ONLY",
+      "rows": [[3], [4]]
+    },
+    {
+      "name": "with_ties_keeps_boundary_peers",
+      "sql": "SELECT id, score FROM t ORDER BY score FETCH FIRST 2 ROWS WITH TIES",
+      "rows": [[1, 10], [2, 20], [3, 20], [4, 20]]
+    },
+    {
+      "name": "with_ties_multi_key_breaks_the_tie",
+      "sql": "SELECT id, score FROM t ORDER BY score DESC NULLS LAST, id ASC FETCH FIRST 2 ROWS WITH TIES",
+      "rows": [[5, 30], [2, 20]]
+    },
+    {
+      "name": "with_ties_null_boundary_is_its_own_peer_group",
+      "sql": "SELECT id FROM t ORDER BY score NULLS FIRST FETCH FIRST 1 ROW WITH TIES",
+      "rows": [[6]]
+    },
+    {
+      "name": "with_ties_after_offset_does_not_revive_discarded_rows",
+      "sql": "SELECT id FROM t ORDER BY score OFFSET 2 ROWS FETCH FIRST 1 ROW WITH TIES",
+      "rows": [[3], [4]]
+    },
+    {
+      "name": "limit_null_and_offset_null_mean_no_bound",
+      "sql": "SELECT id FROM t ORDER BY id LIMIT NULL OFFSET NULL",
+      "rows": [[1], [2], [3], [4], [5], [6]]
+    },
+    {
+      "name": "constant_expression_counts_fold_at_plan_time",
+      "sql": "SELECT id FROM t ORDER BY id LIMIT 1 + 1 OFFSET 10 / 2",
+      "rows": [[6]]
+    }
+  ]
+}

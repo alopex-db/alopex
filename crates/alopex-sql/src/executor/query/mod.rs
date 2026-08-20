@@ -816,10 +816,14 @@ fn build_iterator_pipeline_with_outer<
             input,
             limit,
             offset,
+            ties,
         } => {
             let (input_iter, projection, schema) =
                 build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
-            let limit_iter = LimitIterator::new(input_iter, limit, offset);
+            let limit_iter = match ties {
+                Some(tie_keys) => LimitIterator::with_ties(input_iter, limit, offset, tie_keys),
+                None => LimitIterator::new(input_iter, limit, offset),
+            };
             Ok((Box::new(limit_iter), projection, schema))
         }
         other => Err(ExecutorError::UnsupportedOperation(format!(
@@ -1252,10 +1256,14 @@ fn build_streaming_pipeline_inner<
             input,
             limit,
             offset,
+            ties,
         } => {
             let (input_iter, projection, schema) =
                 build_streaming_pipeline_with_policy(txn, catalog, *input, memory)?;
-            let limit_iter = LimitIterator::new(input_iter, limit, offset);
+            let limit_iter = match ties {
+                Some(tie_keys) => LimitIterator::with_ties(input_iter, limit, offset, tie_keys),
+                None => LimitIterator::new(input_iter, limit, offset),
+            };
             Ok((Box::new(limit_iter), projection, schema))
         }
         other => Err(ExecutorError::UnsupportedOperation(format!(

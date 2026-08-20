@@ -83,9 +83,11 @@ proc expectIdent(p: var Parser; context = "identifier"): Token =
   result = p.advance()
 
 proc expectExprIdent(p: var Parser; context = "identifier"): Token =
-  ## FIRST/LAST/time are reserved by ORDER BY and type grammar, but SQL-TS
+  ## FIRST/LAST/time are reserved by ORDER BY and type grammar, and
+  ## FETCH/NEXT/TIES/ONLY/ROW by FETCH pagination (issue #152), but SQL-TS
   ## also uses them as ordinary function/column identifiers.
-  if p.current.kind notin {tkIdent, tkFirst, tkLast, tkTime}:
+  if p.current.kind notin {tkIdent, tkFirst, tkLast, tkTime,
+                           tkFetch, tkNext, tkTies, tkOnly, tkRow}:
     p.error("expected " & context)
   result = p.advance()
 
@@ -177,7 +179,9 @@ proc parseWindowFrameBound(p: var Parser): SqlNode =
       p.error("expected PRECEDING or FOLLOWING after UNBOUNDED")
   elif p.checkContextual("current"):
     discard p.advance()
-    let endTok = p.expectContextual("row")
+    if not p.check(tkRow):
+      p.error("expected row")
+    let endTok = p.advance()
     result = SqlNode(kind: nkWindowFrameBound,
       frameBoundKind: wfbCurrentRow, frameOffset: 0,
       span: Span(start: tokenSpan(startTok).start, `end`: tokenSpan(endTok).`end`),
@@ -468,7 +472,10 @@ proc parsePrimary(p: var Parser): SqlNode =
     defer: p.leaveNesting()
     let tok = p.advance()
     result = newUnaryOp(opNeg, p.parsePrimary(), tokenSpan(tok))
-  of tkIdent, tkFirst, tkLast, tkTime:
+  of tkQuestion:
+    p.error("bind parameters are not yet supported; pass literal values " &
+      "instead (prepared statements are tracked by issue #166)")
+  of tkIdent, tkFirst, tkLast, tkTime, tkFetch, tkNext, tkTies, tkOnly, tkRow:
     let tok = p.advance()
     if tok.value.cmpIgnoreCase("try_cast") == 0 and p.check(tkLParen):
       result = p.parseCastBody(tok, nkTryCast)
@@ -923,6 +930,75 @@ proc parseIntersectTerm(p: var Parser): SqlNode =
       setOp: soIntersect, setAll: all, setRight: right,
       span: tokenSpan(operatorToken), orderAsc: -1, nullsFirst: -1))
 
+proc parseFetchCount(p: var Parser): SqlNode =
+  ## FETCH { FIRST | NEXT } [count] { ROW | ROWS }: the count may be omitted
+  ## and defaults to 1 (SQL standard, PostgreSQL, DuckDB).
+  if p.current.kind in {tkRow, tkRows}:
+    newIntLit(1, p.currentSpan())
+  else:
+    p.parseExpr()
+
+proc parseLimitOffsetFetch(p: var Parser; target: SqlNode) =
+  ## Query tail pagination (issue #152):
+  ##   LIMIT (ALL | expr) / OFFSET expr [ROW | ROWS] /
+  ##   FETCH (FIRST | NEXT) [expr] (ROW | ROWS) (ONLY | WITH TIES)
+  ## Clauses may appear in any order, but at most one limit-setting clause
+  ## (LIMIT or FETCH) and one OFFSET are accepted (PostgreSQL semantics).
+  var limitNode: SqlNode = nil
+  var offsetNode: SqlNode = nil
+  var sawLimitAll = false
+  while p.current.kind in {tkLimit, tkOffset, tkFetch}:
+    case p.current.kind
+    of tkLimit:
+      if limitNode != nil or sawLimitAll:
+        p.error("multiple LIMIT clauses are not allowed")
+      discard p.advance()
+      if p.check(tkAll):
+        # LIMIT ALL means no limit; no nkLimitClause node is produced.
+        discard p.advance()
+        sawLimitAll = true
+      else:
+        limitNode = newNode(nkLimitClause)
+        limitNode.children.add(p.parseExpr())
+    of tkOffset:
+      if offsetNode != nil:
+        p.error("multiple OFFSET clauses are not allowed")
+      discard p.advance()
+      offsetNode = newNode(nkOffsetClause)
+      offsetNode.children.add(p.parseExpr())
+      if p.current.kind in {tkRow, tkRows}:
+        discard p.advance()
+    of tkFetch:
+      if limitNode != nil or sawLimitAll:
+        p.error("multiple LIMIT clauses are not allowed")
+      discard p.advance()
+      if p.current.kind notin {tkFirst, tkNext}:
+        p.error("expected FIRST or NEXT after FETCH")
+      discard p.advance()
+      limitNode = newNode(nkLimitClause)
+      limitNode.children.add(p.parseFetchCount())
+      if p.checkContextual("percent"):
+        p.error("FETCH ... PERCENT is not supported")
+      if p.current.kind notin {tkRow, tkRows}:
+        p.error("expected ROW or ROWS after FETCH count")
+      discard p.advance()
+      if p.check(tkOnly):
+        discard p.advance()
+      elif p.check(tkWith):
+        discard p.advance()
+        if not p.check(tkTies):
+          p.error("expected TIES after WITH in FETCH clause")
+        discard p.advance()
+        limitNode.limitWithTies = true
+      else:
+        p.error("expected ONLY or WITH TIES in FETCH clause")
+    else:
+      discard
+  if limitNode != nil:
+    target.children.add(limitNode)
+  if offsetNode != nil:
+    target.children.add(offsetNode)
+
 proc parseSelectStmt(p: var Parser): SqlNode =
   result = p.parseIntersectTerm()
 
@@ -949,14 +1025,7 @@ proc parseSelectStmt(p: var Parser): SqlNode =
       orderBy.children.add(p.parseOrderByItem())
     result.children.add(orderBy)
 
-  if p.check(tkLimit):
-    discard p.advance()
-    let limitNode = newNode(nkLimitClause)
-    limitNode.children.add(p.parseExpr())
-    if p.check(tkOffset):
-      discard p.advance()
-      limitNode.children.add(p.parseExpr())
-    result.children.add(limitNode)
+  p.parseLimitOffsetFetch(result)
 
 proc parseWithQueryStmt(p: var Parser): SqlNode =
   let start = p.expect(tkWith)

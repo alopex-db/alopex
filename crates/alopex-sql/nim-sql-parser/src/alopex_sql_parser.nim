@@ -18,7 +18,8 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.6.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.7.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.8.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.9.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.9.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.10.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -863,6 +864,7 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
   var qualifyNode: SqlNode = nil
   var orderByNode: SqlNode = nil
   var limitNode: SqlNode = nil
+  var offsetNode: SqlNode = nil
   var setOperations: seq[SqlNode] = @[]
 
   for child in node.children:
@@ -891,6 +893,8 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
       orderByNode = child
     of nkLimitClause:
       limitNode = child
+    of nkOffsetClause:
+      offsetNode = child
     of nkSetOperation:
       setOperations.add(child)
     else:
@@ -970,19 +974,25 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
   else:
     s.writeNil()
   s.writeKey("offset")
-  if limitNode != nil and limitNode.children.len > 1:
-    s.writeExpr(limitNode.children[1])
+  if offsetNode != nil and offsetNode.children.len > 0:
+    s.writeExpr(offsetNode.children[0])
   else:
     s.writeNil()
+  # The staged continuous-aggregate encoder intentionally remains byte-for-byte
+  # compatible with its historical payload; limit_with_ties belongs to the
+  # current public Select contract only (contract 0.10.0, issue #152).
+  if includeWith:
+    s.writeKey("limit_with_ties")
+    s.pack_type(limitNode != nil and limitNode.limitWithTies)
 
 proc writeSelectKind(s: Stream; node: SqlNode) =
-  # 固定 13 キー(variant/distinct/projection/from/selection/group_by/
-  # having/windows/qualify/set_operations/order_by/limit/offset)に、WITH 句が
-  # あれば with を加えて 14 になる。
-  var fieldCount = 13
+  # 固定 14 キー(variant/distinct/projection/from/selection/group_by/
+  # having/windows/qualify/set_operations/order_by/limit/offset/
+  # limit_with_ties)に、WITH 句があれば with を加えて 15 になる。
+  var fieldCount = 14
   for child in node.children:
     if child.kind == nkWithClause:
-      fieldCount = 14
+      fieldCount = 15
       break
   s.pack_map(fieldCount)
   s.writeSelectFields(node)
@@ -991,6 +1001,7 @@ proc writeValuesKind(s: Stream; node: SqlNode) =
   var withNode: SqlNode = nil
   var orderByNode: SqlNode = nil
   var limitNode: SqlNode = nil
+  var offsetNode: SqlNode = nil
   var rows: seq[SqlNode] = @[]
   var setOperations: seq[SqlNode] = @[]
 
@@ -1006,10 +1017,12 @@ proc writeValuesKind(s: Stream; node: SqlNode) =
       orderByNode = child
     of nkLimitClause:
       limitNode = child
+    of nkOffsetClause:
+      offsetNode = child
     else:
       discard
 
-  s.pack_map(if withNode == nil: 7 else: 8)
+  s.pack_map(if withNode == nil: 8 else: 9)
   s.writeKey("variant")
   s.pack_type("Values")
   if withNode != nil:
@@ -1044,10 +1057,12 @@ proc writeValuesKind(s: Stream; node: SqlNode) =
   else:
     s.writeNil()
   s.writeKey("offset")
-  if limitNode != nil and limitNode.children.len > 1:
-    s.writeExpr(limitNode.children[1])
+  if offsetNode != nil and offsetNode.children.len > 0:
+    s.writeExpr(offsetNode.children[0])
   else:
     s.writeNil()
+  s.writeKey("limit_with_ties")
+  s.pack_type(limitNode != nil and limitNode.limitWithTies)
   s.writeKey("span")
   s.writeSpan(node.span)
 
@@ -1631,6 +1646,13 @@ proc validateContinuousAggregateV040(statement: SqlNode) =
       stagedValidationError(
         "staged continuous aggregate query cannot contain QUALIFY"
       )
+    of nkLimitClause:
+      # Plain LIMIT/FETCH ... ONLY desugars onto the frozen "limit" key;
+      # WITH TIES has no representation in the staged 12-field payload.
+      if child.limitWithTies:
+        stagedValidationError(
+          "staged continuous aggregate query cannot contain FETCH ... WITH TIES"
+        )
     else:
       discard
   if optionsNode.kind != nkWithOptions:

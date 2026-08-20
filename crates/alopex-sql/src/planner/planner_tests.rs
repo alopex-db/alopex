@@ -88,6 +88,7 @@ fn continuous_aggregate_statement() -> Statement {
                 order_by: vec![],
                 limit: None,
                 offset: None,
+                limit_with_ties: false,
                 span: span(),
             },
             options: vec![],
@@ -545,6 +546,7 @@ fn test_plan_select_wildcard() {
         order_by: vec![],
         limit: None,
         offset: None,
+        limit_with_ties: false,
         span: span(),
     };
 
@@ -597,6 +599,7 @@ fn test_plan_select_columns() {
         order_by: vec![],
         limit: None,
         offset: None,
+        limit_with_ties: false,
         span: span(),
     };
 
@@ -639,6 +642,7 @@ fn test_plan_select_with_where() {
         order_by: vec![],
         limit: None,
         offset: None,
+        limit_with_ties: false,
         span: span(),
     };
 
@@ -689,6 +693,7 @@ fn test_plan_select_with_order_by() {
         ],
         limit: None,
         offset: None,
+        limit_with_ties: false,
         span: span(),
     };
 
@@ -730,6 +735,7 @@ fn test_plan_select_with_limit() {
         order_by: vec![],
         limit: Some(int_lit(10)),
         offset: Some(int_lit(5)),
+        limit_with_ties: false,
         span: span(),
     };
 
@@ -740,11 +746,13 @@ fn test_plan_select_with_limit() {
         input,
         limit,
         offset,
+        ties,
     } = result.unwrap()
     {
         assert!(matches!(*input, LogicalPlan::Scan { .. }));
         assert_eq!(limit, Some(10));
         assert_eq!(offset, Some(5));
+        assert!(ties.is_none());
     } else {
         panic!("Expected Limit plan");
     }
@@ -779,6 +787,7 @@ fn test_plan_select_combined() {
         }],
         limit: Some(int_lit(10)),
         offset: None,
+        limit_with_ties: false,
         span: span(),
     };
 
@@ -825,6 +834,7 @@ fn test_plan_select_table_not_found() {
         order_by: vec![],
         limit: None,
         offset: None,
+        limit_with_ties: false,
         span: span(),
     };
 

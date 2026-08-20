@@ -19,6 +19,7 @@ type
     tkOrder, tkBy, tkAsc, tkDesc, tkNulls, tkFirst, tkLast
     tkOver, tkPartition, tkWindow, tkQualify, tkRows, tkRange
     tkGroup, tkHaving, tkLimit, tkOffset
+    tkFetch, tkNext, tkTies, tkOnly, tkRow
     tkLike, tkILike, tkGlob, tkSimilar, tkTo, tkFor, tkIn, tkBetween, tkIs, tkExists, tkAny, tkSome
     tkDistinct, tkAll, tkUnion, tkIntersect, tkExcept
     tkCast, tkCase, tkWhen, tkThen, tkElse, tkEnd, tkNow
@@ -34,6 +35,7 @@ type
     tkLParen, tkRParen, tkLBracket, tkRBracket
     tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe
     tkPlus, tkMinus, tkSlash, tkPercent, tkPipePipe
+    tkQuestion
     # Special
     tkEof
 
@@ -71,6 +73,7 @@ const Keywords = {
   "qualify": tkQualify,
   "rows": tkRows, "range": tkRange,
   "group": tkGroup, "having": tkHaving, "limit": tkLimit, "offset": tkOffset,
+  "fetch": tkFetch, "next": tkNext, "ties": tkTies, "only": tkOnly, "row": tkRow,
   "like": tkLike, "ilike": tkILike, "glob": tkGlob, "similar": tkSimilar, "to": tkTo, "for": tkFor,
   "in": tkIn, "between": tkBetween, "is": tkIs,
   "exists": tkExists, "any": tkAny, "some": tkSome,
@@ -240,6 +243,9 @@ proc nextToken*(lex: var Lexer): Token =
   of '%':
     discard lex.advance()
     return lex.makeToken(tkPercent, "%", startLine, startCol)
+  of '?':
+    discard lex.advance()
+    return lex.makeToken(tkQuestion, "?", startLine, startCol)
   of '|':
     discard lex.advance()
     if lex.peek() == '|':

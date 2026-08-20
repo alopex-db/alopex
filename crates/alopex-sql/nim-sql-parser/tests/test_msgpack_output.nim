@@ -229,6 +229,31 @@ suite "MessagePack output - contract shape":
       let create = payloadJson(sql).stmtKind()
       check create["columns"][0]["data_type"]["variant"].getStr() == "Float"
 
+  test "SELECT emits limit_with_ties and a detached OFFSET (issue #152)":
+    let kind = selectKind(
+      "SELECT id FROM t ORDER BY id OFFSET 2 ROWS FETCH FIRST 3 ROWS WITH TIES")
+    check kind["limit"]["kind"]["literal"]["value"].getStr() == "3"
+    check kind["offset"]["kind"]["literal"]["value"].getStr() == "2"
+    check kind["limit_with_ties"].getBool() == true
+
+  test "OFFSET without LIMIT emits nil limit and false limit_with_ties":
+    let kind = selectKind("SELECT id FROM t OFFSET 4")
+    check kind["limit"].kind == JNull
+    check kind["offset"]["kind"]["literal"]["value"].getStr() == "4"
+    check kind["limit_with_ties"].getBool() == false
+
+  test "FETCH ... ONLY desugars onto the limit key":
+    let kind = selectKind("SELECT id FROM t FETCH NEXT ROW ONLY")
+    check kind["limit"]["kind"]["literal"]["value"].getStr() == "1"
+    check kind["limit_with_ties"].getBool() == false
+
+  test "VALUES tail emits limit_with_ties":
+    let kind = payloadJson(
+      "VALUES (1), (2) ORDER BY 1 FETCH FIRST 1 ROW WITH TIES").stmtKind()
+    check kind["variant"].getStr() == "Values"
+    check kind["limit"]["kind"]["literal"]["value"].getStr() == "1"
+    check kind["limit_with_ties"].getBool() == true
+
   test "CREATE INDEX emits method and WITH options":
     let doc = payloadJson("CREATE INDEX idx_doc_embedding ON documents (embedding) USING HNSW WITH (m = 16, ef_construction = 200)")
     let create = doc.stmtKind()
@@ -333,7 +358,15 @@ suite "MessagePack output - stability":
         "A6686176696E67C0A777696E646F777390A77175616C696679C0" &
           "AE7365745F6F7065726174696F6E73"
       )
-    check hexPayload("SELECT 1") == v060Payload
+    # Contract 0.10.0 (issue #152) appends limit_with_ties after offset.
+    let v0100Payload = v060Payload
+      .replace("A46B696E648D", "A46B696E648E")
+      .replace(
+        "A56C696D6974C0A66F6666736574C0",
+        "A56C696D6974C0A66F6666736574C0" &
+          "AF6C696D69745F776974685F74696573C2"
+      )
+    check hexPayload("SELECT 1") == v0100Payload
 
 suite "MessagePack output - staged continuous aggregate contract":
 
@@ -395,6 +428,13 @@ suite "MessagePack output - staged continuous aggregate contract":
       "WITH (retention = '7d', refresh_interval = '1h')"
     )
     checkStagedError(qualifyQuery, "cannot contain QUALIFY")
+
+    let withTiesQuery = parseSql(
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+      "SELECT 1 FROM m ORDER BY 1 FETCH FIRST 1 ROW WITH TIES " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    checkStagedError(withTiesQuery, "cannot contain FETCH ... WITH TIES")
 
     var malformedWhere = canonicalContinuousAggregate()
     malformedWhere.children[1].children.add(
@@ -591,6 +631,20 @@ suite "MessagePack output - staged continuous aggregate contract":
     check query["having"].kind != JNull
     check query["order_by"].len == 1
     check query["limit"].kind != JNull
+
+  test "staged payload keeps FETCH ... ONLY on the frozen limit/offset keys":
+    let statement = parseSql(
+      "CREATE CONTINUOUS AGGREGATE hourly AS " &
+      "SELECT host FROM samples ORDER BY host OFFSET 1 ROW " &
+      "FETCH FIRST 2 ROWS ONLY " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    let query = toJsonNode(
+      encodeContinuousAggregateV040ToMsgPack(statement)
+    )["kind"]["query"]
+    check query["limit"]["kind"]["literal"]["value"].getStr() == "2"
+    check query["offset"]["kind"]["literal"]["value"].getStr() == "1"
+    check not query.hasKey("limit_with_ties")
 
   test "future helper accepts the existing CAST DECIMAL grammar":
     let statement = parseSql(

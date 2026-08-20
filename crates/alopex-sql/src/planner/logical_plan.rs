@@ -40,6 +40,7 @@
 //!     input: Box::new(sort),
 //!     limit: Some(10),
 //!     offset: None,
+//!     ties: None,
 //! };
 //! ```
 
@@ -267,9 +268,11 @@ pub enum LogicalPlan {
         order_by: Vec<SortExpr>,
     },
 
-    /// Limit operation (LIMIT/OFFSET clause).
+    /// Limit operation (LIMIT/OFFSET/FETCH clause).
     ///
-    /// Limits the number of rows from the input plan.
+    /// Limits the number of rows from the input plan. `limit` and `offset`
+    /// are concrete values resolved at plan time, so the node can be carried
+    /// by the distributed plan contract without re-evaluating expressions.
     Limit {
         /// Input plan to limit.
         input: Box<LogicalPlan>,
@@ -277,6 +280,11 @@ pub enum LogicalPlan {
         limit: Option<u64>,
         /// Number of rows to skip.
         offset: Option<u64>,
+        /// FETCH ... WITH TIES: after `limit` rows, keep emitting rows whose
+        /// ORDER BY sort key equals the final emitted row's key (peer rows).
+        /// The keys are a copy of the `Sort` node directly beneath this
+        /// Limit; `None` means plain ONLY/LIMIT semantics.
+        ties: Option<Vec<SortExpr>>,
     },
 
     // === DML Plans ===
@@ -461,12 +469,13 @@ impl LogicalPlan {
         }
     }
 
-    /// Creates a new Limit plan.
+    /// Creates a new Limit plan (plain ONLY/LIMIT semantics, no ties).
     pub fn limit(input: LogicalPlan, limit: Option<u64>, offset: Option<u64>) -> Self {
         LogicalPlan::Limit {
             input: Box::new(input),
             limit,
             offset,
+            ties: None,
         }
     }
 

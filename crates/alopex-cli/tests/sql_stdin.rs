@@ -42,6 +42,8 @@ SELECT TRUE IS TRUE AS truth_value,
 SELECT TRY_CAST('42' AS INTEGER) AS parsed,
        TRY_CAST('bad' AS INTEGER) AS rejected,
        TRY_CAST([1.0, 2.0] AS VECTOR(3)) AS wrong_dimension;
+VALUES (2), (2), (1) ORDER BY column1 DESC FETCH FIRST 1 ROW WITH TIES;
+SELECT id FROM stdin_test ORDER BY id OFFSET 1 ROW FETCH NEXT 1 + 1 ROWS ONLY;
 "#;
 
     {
@@ -65,7 +67,7 @@ SELECT TRY_CAST('42' AS INTEGER) AS parsed,
         .expect("json output should be an array of result sets");
     assert_eq!(
         sets.len(),
-        11,
+        13,
         "one result set per statement\nstdout:\n{stdout}"
     );
     let select_rows = sets[2].as_array().expect("SELECT result set");
@@ -180,6 +182,24 @@ SELECT TRY_CAST('42' AS INTEGER) AS parsed,
             "wrong_dimension": null,
         })]
     );
+
+    let with_ties_rows = sets[11].as_array().expect("WITH TIES result set");
+    assert_eq!(
+        with_ties_rows,
+        &[
+            serde_json::json!({ "column1": 2 }),
+            serde_json::json!({ "column1": 2 }),
+        ]
+    );
+
+    let fetch_rows = sets[12].as_array().expect("OFFSET/FETCH result set");
+    assert_eq!(
+        fetch_rows,
+        &[
+            serde_json::json!({ "id": 2 }),
+            serde_json::json!({ "id": 3 }),
+        ]
+    );
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -209,4 +229,35 @@ fn cast_failure_reports_stable_public_error() {
     );
     assert!(!stderr.contains("TypedExpr"), "stderr:\n{stderr}");
     assert!(!stderr.contains("MessagePack"), "stderr:\n{stderr}");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn with_ties_without_order_by_and_bind_parameters_report_stable_errors() {
+    for (sql, expected) in [
+        (
+            "SELECT 1 FETCH FIRST 1 ROW WITH TIES;",
+            "FETCH ... WITH TIES requires ORDER BY",
+        ),
+        ("SELECT 1 LIMIT ?;", "bind parameters are not yet supported"),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_alopex"))
+            .args(["--in-memory", "--output", "json", "sql"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn alopex");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(sql.as_bytes())
+            .expect("write stdin");
+
+        let output = child.wait_with_output().expect("wait");
+        assert!(!output.status.success(), "`{sql}` must fail the CLI");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "`{sql}` stderr:\n{stderr}");
+    }
 }
