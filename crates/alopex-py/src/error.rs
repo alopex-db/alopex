@@ -26,6 +26,18 @@ create_exception!(crate::error, PyAlopexError, PyException);
 ///
 /// `ALOPEX-P` is already used by the SQL parser, so Python binding-specific
 /// envelope codes use `ALOPEX-PY###` to avoid collisions across crates.
+///
+/// The `ALOPEX-PY2##` block belongs to the pure-Python server client
+/// (`python/alopex/remote.py`); it is registered here so both surfaces publish
+/// one code registry (`alopex.ALOPEX_ERROR_CODES`).
+///
+/// The trailing screaming-snake-case entries are the server's own stable codes,
+/// transcribed from `crates/alopex-server/src/error.rs::ServerError::error_code`
+/// and `crates/alopex-server/src/http/mod.rs::queue_overflow_response`. The
+/// client forwards them verbatim so an identical failure reports an identical
+/// `code` on both surfaces. `alopex-py` must not depend on `alopex-server`
+/// (that would pull axum/tokio/hyper into the abi3 wheel), so this list is
+/// synchronized by hand; update it whenever `ServerError` gains a variant.
 pub const ERROR_CODES: &[&str] = &[
     "ALOPEX-PY001",
     "ALOPEX-PY002",
@@ -61,6 +73,27 @@ pub const ERROR_CODES: &[&str] = &[
     "ALOPEX-PY102",
     "ALOPEX-PY103",
     "ALOPEX-PY104",
+    // Server client (python/alopex/remote.py) — client-side failures only.
+    "ALOPEX-PY201",
+    "ALOPEX-PY202",
+    "ALOPEX-PY203",
+    "ALOPEX-PY204",
+    "ALOPEX-PY205",
+    // Server codes forwarded verbatim by the server client.
+    "INVALID_CONFIG",
+    "INVALID_REQUEST",
+    "UNAUTHORIZED",
+    "NOT_FOUND",
+    "CONFLICT",
+    "PAYLOAD_TOO_LARGE",
+    "QUERY_TIMEOUT",
+    "SESSION_EXPIRED",
+    "FUTURE_DISTRIBUTED_EXECUTION_REQUIRED",
+    "CAPABILITY_UNAVAILABLE",
+    "NOT_IMPLEMENTED",
+    "RESTORE_INTEGRITY_MISMATCH",
+    "INTERNAL",
+    "SERVER_BACKPRESSURE",
     "ALOPEX-PY999",
 ];
 

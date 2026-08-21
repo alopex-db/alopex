@@ -55,6 +55,27 @@ EXPECTED_ERROR_CODES = {
     "ALOPEX-PY102",
     "ALOPEX-PY103",
     "ALOPEX-PY104",
+    # サーバークライアント固有（python/alopex/remote.py）
+    "ALOPEX-PY201",
+    "ALOPEX-PY202",
+    "ALOPEX-PY203",
+    "ALOPEX-PY204",
+    "ALOPEX-PY205",
+    # サーバーがそのまま返す安定コード（crates/alopex-server/src/error.rs）
+    "INVALID_CONFIG",
+    "INVALID_REQUEST",
+    "UNAUTHORIZED",
+    "NOT_FOUND",
+    "CONFLICT",
+    "PAYLOAD_TOO_LARGE",
+    "QUERY_TIMEOUT",
+    "SESSION_EXPIRED",
+    "FUTURE_DISTRIBUTED_EXECUTION_REQUIRED",
+    "CAPABILITY_UNAVAILABLE",
+    "NOT_IMPLEMENTED",
+    "RESTORE_INTEGRITY_MISMATCH",
+    "INTERNAL",
+    "SERVER_BACKPRESSURE",
     "ALOPEX-PY999",
 }
 
@@ -104,6 +125,15 @@ def _assert_dataframe_contract(df, expected):
 
 def test_known_python_error_codes_are_stable():
     assert set(alopex.ALOPEX_ERROR_CODES) == EXPECTED_ERROR_CODES
+
+
+def test_server_client_codes_are_declared_in_the_rust_registry():
+    """Rust 側 ERROR_CODES と Python 側 remote.py の定数の drift を検出する。"""
+    from alopex.remote import CLIENT_ERROR_CODES, ERROR_CLOSED
+
+    registry = set(alopex.ALOPEX_ERROR_CODES)
+    for code in (*CLIENT_ERROR_CODES, ERROR_CLOSED):
+        assert code in registry, code
 
 
 def test_catalog_not_found_error_contract(unique_name):
