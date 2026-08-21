@@ -4,7 +4,7 @@
     "datafusion": "54.0.0",
     "postgresql": "16.14"
   },
-  "basis": "Expected rows are pinned to the documented SQL:2003 T612 aggregate FILTER and ordered-set aggregate semantics linked below; external engines are not executed by this fixture test. DataFusion 54 supports FILTER and ordered STRING_AGG but not PERCENTILE_DISC WITHIN GROUP; the percentile rows are pinned to PostgreSQL 16 / DuckDB 1.5.5.",
+  "basis": "Expected rows are pinned to the documented SQL:2003 T612 aggregate FILTER and ordered-set aggregate semantics linked below; external engines are not executed by this fixture test. DataFusion 54 supports FILTER and ordered STRING_AGG but not PERCENTILE_DISC WITHIN GROUP; the percentile rows are pinned to PostgreSQL 16 / DuckDB 1.5.5. Cases that order over a nullable key spell NULLS FIRST/LAST out, because the listed engines disagree on the default: Alopex and DuckDB use ASC/DESC NULLS LAST, PostgreSQL 16 and DataFusion 54 use ASC NULLS LAST / DESC NULLS FIRST.",
   "source_docs": {
     "postgresql_aggregates": "https://www.postgresql.org/docs/current/functions-aggregate.html",
     "postgresql_syntax": "https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-AGGREGATES",
@@ -30,8 +30,9 @@
     },
     {
       "name": "ordered_string_agg_with_tie_break",
-      "sql": "SELECT g, STRING_AGG(name, ',' ORDER BY v DESC, name ASC) FROM t GROUP BY g ORDER BY g",
-      "rows": [["a", "y,x,z"], ["b", "w,y"]]
+      "sql": "SELECT g, STRING_AGG(name, ',' ORDER BY v DESC NULLS LAST, name ASC) FROM t GROUP BY g ORDER BY g",
+      "rows": [["a", "y,x,z"], ["b", "w,y"]],
+      "notes": "NULLS LAST is written explicitly so every listed engine agrees. Alopex and DuckDB default DESC to NULLS LAST (docs/sql-aggregate-filter-within-group.md), while PostgreSQL 16 and DataFusion 54 default DESC to NULLS FIRST and would otherwise return \"z,y,x\" for group 'a'."
     },
     {
       "name": "percentile_disc_discrete_selection",

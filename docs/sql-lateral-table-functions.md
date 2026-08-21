@@ -145,6 +145,25 @@ named `lateral` keeps working.
   subquery predicates over columnar storage, which previously reached the
   in-scan evaluator. The regression test drives a `LATERAL` join whose right
   side filters a columnar table.
+- **D16 — Every operator that evaluates expressions honours the outer row.**
+  D9 makes the outer row addressable at `inner width + outer index`, but only
+  the `Filter` and projection paths were given it. Aggregate (group keys,
+  aggregate arguments, aggregate `FILTER` predicates and aggregate-local
+  `ORDER BY`), Sort, DistinctOn, `LIMIT ... WITH TIES` and Window build their
+  own `EvalContext` straight from the input row, so a correlated reference in
+  any of those positions indexed past the row and escaped as an internal
+  `ALOPEX-E999 invalid column reference` — an arbitrary-looking failing subset
+  next to `WHERE`, which worked. The correlated pipeline now widens each such
+  operator's input once with the outer row and narrows the row-preserving
+  operators' output back, so the whole correlated surface — `LATERAL` and
+  plain correlated subqueries alike — follows one rule instead of an operator
+  allowlist. Window results stay in place because the outer values are removed
+  from the middle of the row, after the input columns and before the appended
+  window columns. `HAVING` is the one position still closed to an outer
+  reference: it is evaluated over the aggregate's *output* row, a different
+  index space, and the planner already rejects it up front with the stable
+  `ALOPEX-T007` "column in HAVING must be in GROUP BY or be aggregated"
+  instead of letting an internal error escape.
 
 ## Errors
 

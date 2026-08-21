@@ -800,8 +800,20 @@ fn build_iterator_pipeline_with_outer<
             projection,
             grouping_sets,
         } => {
-            let (input_iter, _projection, _schema) =
+            let (input_iter, _projection, input_schema) =
                 build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
+            // A correlated group key, aggregate argument, aggregate FILTER
+            // predicate or aggregate-local ORDER BY key addresses the outer
+            // row past the input width, so widen the input once (D16). The
+            // aggregate output is the group-key/aggregate schema, so no
+            // narrowing is needed afterwards.
+            let input_iter: Box<dyn RowIterator> = match outer {
+                Some(outer_row) => {
+                    let rows = widen_rows_with_outer(input_iter, outer_row)?;
+                    Box::new(iterator::VecIterator::new(rows, input_schema))
+                }
+                None => input_iter,
+            };
             let mut schema = aggregate::build_aggregate_schema(&group_keys, &aggregates);
             if grouping_sets.is_some() {
                 schema.push(crate::catalog::ColumnMetadata::new(
@@ -881,8 +893,41 @@ fn build_iterator_pipeline_with_outer<
             Ok((Box::new(iter), projection, schema))
         }
         LogicalPlan::Window { input, windows } => {
-            let (input_iter, _projection, _schema) =
+            let (input_iter, _projection, input_schema) =
                 build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
+            // A correlated PARTITION BY / ORDER BY key addresses the outer row
+            // past the input width (D16). The window iterator appends its
+            // results after the whole input row, so the outer values are cut
+            // back out of the middle and the declared schema stays
+            // `input columns + window columns`.
+            if let Some(outer_row) = outer {
+                let inner_width = input_schema.len();
+                let outer_width = outer_row.len();
+                let mut wide_schema = input_schema.clone();
+                wide_schema.extend((0..outer_width).map(|index| {
+                    crate::catalog::ColumnMetadata::new(
+                        format!("__outer_{index}"),
+                        crate::planner::ResolvedType::Text,
+                    )
+                }));
+                let rows = widen_rows_with_outer(input_iter, outer_row)?;
+                let wide_iter = iterator::VecIterator::new(rows, wide_schema.clone());
+                let window_iter = window::WindowIterator::new(wide_iter, windows, memory)?;
+                let mut schema = input_schema;
+                schema.extend_from_slice(&window_iter.schema()[wide_schema.len()..]);
+                let rows = drain_rows(Box::new(window_iter))?
+                    .into_iter()
+                    .map(|mut row| {
+                        let end = (inner_width + outer_width).min(row.values.len());
+                        row.values.drain(inner_width.min(end)..end);
+                        row
+                    })
+                    .collect::<Vec<_>>();
+                let projection =
+                    Projection::All(schema.iter().map(|column| column.name.clone()).collect());
+                let iter = iterator::VecIterator::new(rows, schema.clone());
+                return Ok((Box::new(iter), projection, schema));
+            }
             let iter = window::WindowIterator::new(input_iter, windows, memory)?;
             let schema = iter.schema().to_vec();
             let projection =
@@ -928,6 +973,22 @@ fn build_iterator_pipeline_with_outer<
         LogicalPlan::Sort { input, order_by } => {
             let (input_iter, projection, schema) =
                 build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
+            // A correlated sort key addresses the outer row past the input
+            // width, so sort over widened rows and narrow the output back to
+            // the operator's own width (D16).
+            if let Some(outer_row) = outer {
+                let rows = widen_rows_with_outer(input_iter, outer_row)?;
+                let wide_iter = iterator::VecIterator::new(rows, schema.clone());
+                let sort_iter = if let Some(policy) = memory {
+                    SortIterator::new_with_policy(wide_iter, &order_by, Some(policy.clone()))?
+                } else {
+                    SortIterator::new(wide_iter, &order_by)?
+                };
+                let rows =
+                    narrow_rows_from_outer(drain_rows(Box::new(sort_iter))?, outer_row.len());
+                let iter = iterator::VecIterator::new(rows, schema.clone());
+                return Ok((Box::new(iter), projection, schema));
+            }
             let sort_iter = if let Some(policy) = memory {
                 SortIterator::new_with_policy(input_iter, &order_by, Some(policy.clone()))?
             } else {
@@ -942,6 +1003,16 @@ fn build_iterator_pipeline_with_outer<
         } => {
             let (input_iter, projection, schema) =
                 build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
+            if let Some(outer_row) = outer {
+                let rows = widen_rows_with_outer(input_iter, outer_row)?;
+                let wide_iter = iterator::VecIterator::new(rows, schema.clone());
+                let distinct_iter =
+                    DistinctOnIterator::new(wide_iter, &order_by, key_count, memory.cloned())?;
+                let rows =
+                    narrow_rows_from_outer(drain_rows(Box::new(distinct_iter))?, outer_row.len());
+                let iter = iterator::VecIterator::new(rows, schema.clone());
+                return Ok((Box::new(iter), projection, schema));
+            }
             let distinct_iter =
                 DistinctOnIterator::new(input_iter, &order_by, key_count, memory.cloned())?;
             Ok((Box::new(distinct_iter), projection, schema))
@@ -954,6 +1025,18 @@ fn build_iterator_pipeline_with_outer<
         } => {
             let (input_iter, projection, schema) =
                 build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
+            // Only WITH TIES evaluates expressions here, so a plain
+            // LIMIT/OFFSET needs no widening even when correlated (D16).
+            if let (Some(outer_row), Some(tie_keys)) = (outer, ties.as_ref()) {
+                let rows = widen_rows_with_outer(input_iter, outer_row)?;
+                let wide_iter = iterator::VecIterator::new(rows, schema.clone());
+                let limit_iter =
+                    LimitIterator::with_ties(wide_iter, limit, offset, tie_keys.clone());
+                let rows =
+                    narrow_rows_from_outer(drain_rows(Box::new(limit_iter))?, outer_row.len());
+                let iter = iterator::VecIterator::new(rows, schema.clone());
+                return Ok((Box::new(iter), projection, schema));
+            }
             let limit_iter = match ties {
                 Some(tie_keys) => LimitIterator::with_ties(input_iter, limit, offset, tie_keys),
                 None => LimitIterator::new(input_iter, limit, offset),
@@ -1563,6 +1646,48 @@ fn combine_outer_for_eval(row: &Row, outer: Option<&Row>) -> Row {
     values.extend(row.values.clone());
     values.extend(outer.values.clone());
     Row::new(row.row_id, values)
+}
+
+/// Materialize an operator's input with the outer row appended to every row.
+///
+/// The planner addresses a correlated reference as `inner_width + outer_index`
+/// (the `combine_outer_for_eval` convention shared with correlated
+/// subqueries). Operators that build their own `EvalContext` straight from
+/// `row.values` — Aggregate (group keys, aggregate arguments, `FILTER`
+/// predicates and aggregate-local `ORDER BY`), Sort, DistinctOn and
+/// `LIMIT ... WITH TIES` — would otherwise index past the row and fail with an
+/// internal `invalid column reference` (issue #151, D16). Widening the input
+/// once makes every one of those indexes resolve without teaching each
+/// operator about correlation.
+fn widen_rows_with_outer(mut input: Box<dyn RowIterator>, outer: &Row) -> Result<Vec<Row>> {
+    let mut rows = Vec::new();
+    while let Some(result) = input.next_row() {
+        rows.push(combine_outer_for_eval(&result?, Some(outer)));
+    }
+    Ok(rows)
+}
+
+/// Undo [`widen_rows_with_outer`] on an operator's output rows.
+///
+/// Row-preserving operators (Sort, DistinctOn, Limit) emit the widened rows
+/// themselves, so the trailing outer values are dropped again before the rows
+/// leave the operator and the declared schema keeps matching the row width.
+fn narrow_rows_from_outer(rows: Vec<Row>, outer_width: usize) -> Vec<Row> {
+    rows.into_iter()
+        .map(|mut row| {
+            let keep = row.values.len().saturating_sub(outer_width);
+            row.values.truncate(keep);
+            row
+        })
+        .collect()
+}
+
+fn drain_rows(mut input: Box<dyn RowIterator>) -> Result<Vec<Row>> {
+    let mut rows = Vec::new();
+    while let Some(result) = input.next_row() {
+        rows.push(result?);
+    }
+    Ok(rows)
 }
 
 fn execute_project_with_subqueries<

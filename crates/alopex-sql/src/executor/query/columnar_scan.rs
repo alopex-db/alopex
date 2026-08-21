@@ -962,9 +962,35 @@ fn collect_column_indices(expr: &TypedExpr, acc: &mut BTreeSet<usize>) {
             }
         }
         TypedExprKind::IsNull { expr, .. } => collect_column_indices(expr, acc),
-        TypedExprKind::FunctionCall { args, .. } => {
+        TypedExprKind::FunctionCall {
+            args,
+            filter,
+            order_by,
+            over,
+            ..
+        } => {
             for arg in args {
                 collect_column_indices(arg, acc);
+            }
+            // A columnar scan materializes exactly the columns collected here
+            // and fills every other column with NULL, so an aggregate FILTER
+            // predicate (issue #148), an aggregate-local ORDER BY key, or a
+            // window partition/order key that names a column appearing
+            // nowhere else in the projection must be collected too. Missing
+            // one is silent: the operator reads NULL instead of the value.
+            if let Some(filter) = filter {
+                collect_column_indices(filter, acc);
+            }
+            for sort in order_by {
+                collect_column_indices(&sort.expr, acc);
+            }
+            if let Some(over) = over {
+                for partition in &over.partition_by {
+                    collect_column_indices(partition, acc);
+                }
+                for sort in &over.order_by {
+                    collect_column_indices(&sort.expr, acc);
+                }
             }
         }
         _ => {}

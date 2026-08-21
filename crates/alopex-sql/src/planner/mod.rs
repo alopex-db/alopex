@@ -2321,6 +2321,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
 
         // Non-aggregate path: ORDER BY + LIMIT/OFFSET
+        let mut distinct_on_tie_keys: Option<Vec<SortExpr>> = None;
         if has_distinct_on {
             // D2/D3/D4: type the deduplicated ON keys and the user ORDER BY,
             // verify the prefix contract, and synthesize the complete
@@ -2343,8 +2344,17 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 &projection_aliases,
                 &ctes,
             )?;
+            // D13: `build_distinct_on_sort_spec` places the user's ORDER BY
+            // items first, so the leading `user_order_by_len` entries of the
+            // effective specification are exactly that ORDER BY. WITH TIES
+            // must read its peer groups from those entries alone: the
+            // synthesized implicit ON keys and the all-column tie-breaker
+            // tail make every surviving row unique, which would silently
+            // degrade WITH TIES to a plain LIMIT.
+            let user_order_by_len = user_order_by.len();
             let (key_count, order_by) =
                 build_distinct_on_sort_spec(key_exprs, user_order_by, &base_schema, stmt.span)?;
+            distinct_on_tie_keys = Some(order_by[..user_order_by_len.min(order_by.len())].to_vec());
             plan = LogicalPlan::DistinctOn {
                 input: Box::new(plan),
                 key_count,
@@ -2363,7 +2373,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             };
         }
 
-        plan = self.apply_pagination(plan, &stmt.limit, &stmt.offset, stmt.limit_with_ties)?;
+        plan = self.apply_pagination_with_tie_keys(
+            plan,
+            &stmt.limit,
+            &stmt.offset,
+            stmt.limit_with_ties,
+            distinct_on_tie_keys.as_deref(),
+        )?;
 
         let output_schema = projection_schema(&final_projection, &relation.schema);
         if needs_project_boundary {
@@ -4519,16 +4535,41 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         offset: &Option<Expr>,
         with_ties: bool,
     ) -> Result<LogicalPlan, PlannerError> {
+        self.apply_pagination_with_tie_keys(plan, limit, offset, with_ties, None)
+    }
+
+    /// Apply the pagination tail with an explicit WITH TIES peer specification.
+    ///
+    /// `tie_keys` is `None` for every ordinary query block, where the peer
+    /// specification is the `Sort` node directly beneath the Limit. The
+    /// DISTINCT ON path plans no `Sort` node of its own (sql-distinct-on.md
+    /// D8), so it supplies the user's ORDER BY explicitly (D13); an empty
+    /// slice there means the query has no ORDER BY and WITH TIES is rejected.
+    fn apply_pagination_with_tie_keys(
+        &self,
+        plan: LogicalPlan,
+        limit: &Option<Expr>,
+        offset: &Option<Expr>,
+        with_ties: bool,
+        tie_keys: Option<&[SortExpr]>,
+    ) -> Result<LogicalPlan, PlannerError> {
         if limit.is_none() && offset.is_none() && !with_ties {
             return Ok(plan);
         }
         let ties = if with_ties {
-            let LogicalPlan::Sort { order_by, .. } = &plan else {
+            let keys = match tie_keys {
+                Some(keys) => keys.to_vec(),
+                None => match &plan {
+                    LogicalPlan::Sort { order_by, .. } => order_by.clone(),
+                    _ => Vec::new(),
+                },
+            };
+            if keys.is_empty() {
                 return Err(PlannerError::invalid_expression(
                     "FETCH ... WITH TIES requires ORDER BY".to_string(),
                 ));
-            };
-            Some(order_by.clone())
+            }
+            Some(keys)
         } else {
             None
         };
@@ -6018,6 +6059,12 @@ fn debug_span_tail_length(input: &str) -> Option<usize> {
 /// follows, and every input column is appended in schema order as an ASC NULLS
 /// LAST tie-breaker (D4) so the surviving row of each key group never depends
 /// on the physical input order.
+///
+/// Invariant relied on by `FETCH ... WITH TIES` (D13): the leading
+/// `user_order_by.len()` entries of the returned specification are exactly the
+/// user's ORDER BY, in the user's order. Implicit ON keys are only synthesized
+/// when the user ORDER BY has no non-key tail (a tail plus an unreached key is
+/// a D2 error), so the two groups can never interleave.
 fn build_distinct_on_sort_spec(
     key_exprs: Vec<TypedExpr>,
     user_order_by: Vec<SortExpr>,

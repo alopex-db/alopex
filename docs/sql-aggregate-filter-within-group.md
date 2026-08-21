@@ -127,6 +127,15 @@ The pinned row-level fixture lives in
   `filter: Expr|nil`) whenever any clause is present. The Rust reader takes
   absent keys as defaults (`#[serde(default)]`), and the staged
   continuous-aggregate validator rejects the new clauses before encoding.
+- **D13** — Columnar projection pushdown covers the whole `FunctionCall`. A
+  columnar scan materializes exactly the columns the pushed projection names
+  and fills every other column with `NULL`, and the planner installs the
+  SELECT projection into the `Scan` node even for aggregate queries. A column
+  that appears only inside a `FILTER` predicate, an aggregate-local
+  `ORDER BY`, or an `OVER (...)` partition/order key is therefore collected
+  alongside the arguments; missing one was silent, not an error
+  (`SUM(v) FILTER (WHERE flag > 0)` returned `NULL` because `flag` read as
+  `NULL` in every row).
 
 ## Public error surface
 

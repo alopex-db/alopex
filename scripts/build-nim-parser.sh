@@ -512,7 +512,14 @@ EOF
     msgpack_source_arg="$(to_native_path "${msgpack_resolved}")"
     static_output_build_arg="$(to_native_path "${STATIC_OUTPUT}")"
     static_flags=()
-    static_cc_flags=()
+    # The static archive is linked into cdylib consumers (the Python
+    # extension module), so its objects must be position independent with a
+    # TLS model usable from a dlopen'd library. Without this the Linux
+    # archive carries R_X86_64_TPOFF32 relocations and `maturin build` fails
+    # with "relocation ... cannot be used when making a shared object". This
+    # mirrors the `staticlib` nimble task, which the --backend docker path
+    # uses; the host path must produce byte-comparable inputs (issue #179).
+    static_cc_flags=(--passC:-fPIC)
     case "${HOST_TARGET}" in
       x86_64-unknown-linux-gnu)
         static_flags+=(--passL:-s)
@@ -527,7 +534,9 @@ EOF
           --passL:-s
           --passL:-Wl,--no-insert-timestamp
         )
-        static_cc_flags+=(--cc:vcc)
+        # MSVC has no -fPIC (all code is position independent there) and
+        # rejects the flag, so the Windows branch replaces it outright.
+        static_cc_flags=(--cc:vcc)
         ;;
     esac
     "${NIM_BIN}" c -d:release --app:lib --mm:orc --opt:speed \
@@ -620,6 +629,32 @@ validate_docker_target() {
   fi
 }
 
+# Fail closed when a Linux static archive is not position independent.
+#
+# The archive is linked into the Python extension module, a cdylib. A non-PIC
+# build carries R_X86_64_TPOFF32 TLS relocations that the linker refuses in a
+# shared object, and the failure only surfaces in the wheel job — long after
+# the release assets were staged. Both backends run this check, so the host
+# and nimble/docker paths cannot silently diverge again (issue #179).
+assert_static_archive_is_pic() {
+  local effective_target
+  effective_target="${TARGET:-${HOST_TARGET}}"
+  case "${effective_target}" in
+    *-linux-gnu|*-linux-musl) ;;
+    *) return 0 ;;
+  esac
+  command -v readelf >/dev/null 2>&1 || {
+    echo "readelf not found; skipping the position-independence check for ${STATIC_OUTPUT}" >&2
+    return 0
+  }
+  if readelf --relocs -- "${STATIC_OUTPUT}" 2>/dev/null | grep -q "R_X86_64_TPOFF32"; then
+    echo "static parser archive is not position independent: ${STATIC_OUTPUT}" >&2
+    echo "it carries R_X86_64_TPOFF32 relocations and cannot link into a cdylib" >&2
+    echo "build it with --passC:-fPIC" >&2
+    exit 1
+  fi
+}
+
 write_identity_sidecars() (
   local output_dir
   local output_name
@@ -686,6 +721,7 @@ fi
 
 [[ -f "${OUTPUT}" ]] || { echo "Nim parser output not found: ${OUTPUT}" >&2; exit 1; }
 [[ -f "${STATIC_OUTPUT}" ]] || { echo "Nim parser static output not found: ${STATIC_OUTPUT}" >&2; exit 1; }
+assert_static_archive_is_pic
 write_identity_sidecars
 echo "Built ${OUTPUT}"
 echo "Built ${STATIC_OUTPUT}"

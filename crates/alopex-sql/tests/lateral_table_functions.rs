@@ -523,3 +523,163 @@ fn a_lateral_join_is_a_distinct_plan_node_that_pins_its_right_schema() {
     }
     assert_eq!(correlated_index(&right), Some(3));
 }
+
+// === D16: correlated references in operators that build their own context ===
+
+/// Fixture for the operators that evaluate expressions over their input rows.
+///
+/// `w` is three columns wide, so an outer reference from a correlated side
+/// resolves at index `3 + <position in the outer row>`.
+fn with_scores() -> Harness {
+    let mut harness = Harness::new();
+    harness
+        .run(
+            "CREATE TABLE w (id INT PRIMARY KEY, g TEXT, v INT); \
+             INSERT INTO w VALUES (1, 'a', 5), (2, 'a', 20), (3, 'b', 20)",
+        )
+        .expect("create score dataset");
+    harness
+}
+
+// An aggregate FILTER that references the outer row used to escape as an
+// internal ALOPEX-E999 "invalid column reference" from the Aggregate operator,
+// while the same reference in WHERE worked.
+#[test]
+fn a_lateral_aggregate_filter_can_reference_the_outer_row() {
+    let mut harness = with_scores();
+    let result = harness.query(
+        "SELECT w.id, l.c FROM w CROSS JOIN LATERAL \
+         (SELECT COUNT(*) FILTER (WHERE z.v > w.v) AS c FROM w AS z) AS l ORDER BY w.id",
+    );
+
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![int(1), SqlValue::BigInt(2)],
+            vec![int(2), SqlValue::BigInt(0)],
+            vec![int(3), SqlValue::BigInt(0)],
+        ]
+    );
+}
+
+// Aggregate-local ORDER BY keys are evaluated by the same operator.
+#[test]
+fn a_lateral_ordered_aggregate_can_reference_the_outer_row() {
+    let mut harness = with_scores();
+    let result = harness.query(
+        "SELECT w.id, l.s FROM w CROSS JOIN LATERAL \
+         (SELECT GROUP_CONCAT(z.g ORDER BY ABS(z.v - w.v), z.id) AS s FROM w AS z) AS l \
+         ORDER BY w.id",
+    );
+
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![int(1), SqlValue::Text("a,a,b".into())],
+            vec![int(2), SqlValue::Text("a,b,a".into())],
+            vec![int(3), SqlValue::Text("a,b,a".into())],
+        ]
+    );
+}
+
+// Plain ORDER BY inside the correlated side is evaluated by the Sort operator.
+#[test]
+fn a_lateral_order_by_can_reference_the_outer_row() {
+    let mut harness = with_scores();
+    let result = harness.query(
+        "SELECT w.id, l.v FROM w CROSS JOIN LATERAL \
+         (SELECT z.v FROM w AS z ORDER BY ABS(z.v - w.v), z.id LIMIT 1) AS l ORDER BY w.id",
+    );
+
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![int(1), int(5)],
+            vec![int(2), int(20)],
+            vec![int(3), int(20)],
+        ]
+    );
+}
+
+// DISTINCT ON sorts and deduplicates in one operator, and FETCH ... WITH TIES
+// evaluates its peer keys in the Limit operator.
+#[test]
+fn a_lateral_distinct_on_and_with_ties_can_reference_the_outer_row() {
+    let mut harness = with_scores();
+    let distinct_on = harness.query(
+        "SELECT w.id, l.v FROM w CROSS JOIN LATERAL \
+         (SELECT DISTINCT ON (z.g) z.v FROM w AS z ORDER BY z.g, ABS(z.v - w.v), z.id) AS l \
+         ORDER BY w.id, l.v",
+    );
+    assert_eq!(
+        distinct_on.rows,
+        vec![
+            vec![int(1), int(5)],
+            vec![int(1), int(20)],
+            vec![int(2), int(20)],
+            vec![int(2), int(20)],
+            vec![int(3), int(20)],
+            vec![int(3), int(20)],
+        ]
+    );
+
+    let with_ties = harness.query(
+        "SELECT w.id, l.v FROM w CROSS JOIN LATERAL \
+         (SELECT z.v FROM w AS z ORDER BY ABS(z.v - w.v) FETCH FIRST 1 ROW WITH TIES) AS l \
+         ORDER BY w.id, l.v",
+    );
+    assert_eq!(
+        with_ties.rows,
+        vec![
+            vec![int(1), int(5)],
+            vec![int(2), int(20)],
+            vec![int(2), int(20)],
+            vec![int(3), int(20)],
+            vec![int(3), int(20)],
+        ]
+    );
+}
+
+// A window ORDER BY key reaching the outer row must not shift the window
+// results: the outer values are cut back out from the middle of the row.
+#[test]
+fn a_lateral_window_order_by_can_reference_the_outer_row() {
+    let mut harness = with_scores();
+    let result = harness.query(
+        "SELECT w.id, l.r, l.v FROM w CROSS JOIN LATERAL \
+         (SELECT ROW_NUMBER() OVER (ORDER BY ABS(z.v - w.v), z.id) AS r, z.v FROM w AS z) AS l \
+         ORDER BY w.id, l.r",
+    );
+
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![int(1), SqlValue::BigInt(1), int(5)],
+            vec![int(1), SqlValue::BigInt(2), int(20)],
+            vec![int(1), SqlValue::BigInt(3), int(20)],
+            vec![int(2), SqlValue::BigInt(1), int(20)],
+            vec![int(2), SqlValue::BigInt(2), int(20)],
+            vec![int(2), SqlValue::BigInt(3), int(5)],
+            vec![int(3), SqlValue::BigInt(1), int(20)],
+            vec![int(3), SqlValue::BigInt(2), int(20)],
+            vec![int(3), SqlValue::BigInt(3), int(5)],
+        ]
+    );
+}
+
+// The same gap in a plain correlated scalar subquery (no LATERAL).
+#[test]
+fn a_correlated_scalar_subquery_aggregate_can_reference_the_outer_row() {
+    let mut harness = with_scores();
+    let result =
+        harness.query("SELECT w.id, (SELECT SUM(z.v + w.v) FROM w AS z) AS s FROM w ORDER BY w.id");
+
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![int(1), SqlValue::BigInt(60)],
+            vec![int(2), SqlValue::BigInt(105)],
+            vec![int(3), SqlValue::BigInt(105)],
+        ]
+    );
+}

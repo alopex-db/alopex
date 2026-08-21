@@ -1706,6 +1706,51 @@ suite "FETCH pagination (issue #152)":
       "SELECT 1 UNION ALL SELECT 2 ORDER BY 1 DESC FETCH FIRST 1 ROW WITH TIES")
     check ast.findClause(nkLimitClause).limitWithTies == true
 
+  test "fetch keywords stay usable in DDL and DML identifier positions":
+    # D16: FETCH/NEXT/TIES/ONLY/ROW are lexer keywords, but every position
+    # where the grammar *requires* an identifier still accepts them, so an
+    # existing schema using these names keeps parsing.
+    for name in ["fetch", "next", "ties", "only", "row"]:
+      let created = parseSql("CREATE TABLE t (id INTEGER, " & name & " INTEGER)")
+      check created.kind == nkCreateTable
+      var columnNames: seq[string] = @[]
+      for child in created.children:
+        if child.kind == nkColumnDef:
+          columnNames.add(child.colName)
+      check columnNames == @["id", name]
+      check parseSql("CREATE TABLE " & name & " (id INTEGER)").kind ==
+        nkCreateTable
+      check parseSql("INSERT INTO t (" & name & ") VALUES (1)").kind == nkInsert
+      check parseSql("INSERT INTO " & name & " VALUES (1)").kind == nkInsert
+      check parseSql("UPDATE t SET " & name & " = 1").kind == nkUpdate
+      check parseSql("UPDATE " & name & " SET id = 1").kind == nkUpdate
+      check parseSql("DELETE FROM " & name).kind == nkDelete
+      check parseSql("SELECT id FROM " & name).kind == nkSelect
+      check parseSql("SELECT id FROM t AS " & name).kind == nkSelect
+      check parseSql("SELECT id FROM t AS x(" & name & ")").kind == nkSelect
+      check parseSql(
+        "SELECT a." & name & " FROM a JOIN b USING (" & name & ")").kind ==
+        nkSelect
+      check parseSql(
+        "WITH " & name & " (" & name & ") AS (SELECT 1) SELECT * FROM " &
+        name).kind == nkSelect
+      check parseSql("CREATE INDEX " & name & " ON t (id)").kind ==
+        nkCreateIndex
+
+  test "an implicit alias keeps working for every keyword but FETCH":
+    # `FETCH` starts the pagination tail in that position, so it stays
+    # reserved there; the other four cannot begin a clause (D16).
+    for name in ["next", "ties", "only", "row"]:
+      let ast = parseSql("SELECT v " & name & " FROM t")
+      check ast.children[0].children[0].kind == nkAlias
+      check ast.children[0].children[0].aliasName == name
+      check parseSql("SELECT * FROM t " & name).kind == nkSelect
+    let explicitFetch = parseSql("SELECT v AS fetch FROM t AS fetch")
+    check explicitFetch.children[0].children[0].aliasName == "fetch"
+    # An implicit `fetch` alias is still the pagination tail, not an alias.
+    check parseSql("SELECT 1 FETCH FIRST 1 ROW ONLY").findClause(
+      nkLimitClause).children[0].intVal == 1
+
 suite "Aggregate FILTER / WITHIN GROUP / ORDER BY (issue #148)":
 
   test "FILTER (WHERE ...) attaches an nkAggFilterClause":

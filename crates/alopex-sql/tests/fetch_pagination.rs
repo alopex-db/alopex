@@ -1,6 +1,6 @@
 //! FETCH FIRST/NEXT, OFFSET n ROWS, WITH TIES, and expression pagination
 //! (issue #152, v0.8.8). Semantics follow PostgreSQL 16; grammar decisions
-//! are documented in docs/sql-fetch-pagination.md (D1..D14).
+//! are documented in docs/sql-fetch-pagination.md (D1..D16).
 
 use std::sync::{Arc, RwLock};
 
@@ -371,4 +371,62 @@ fn postgresql_and_duckdb_reference_fixture_matches_exact_rows() {
             case["name"]
         );
     }
+}
+
+// D16: the five pagination keywords stay usable as identifiers end to end.
+// Reserving them in the lexer broke DDL/DML on any existing schema that used
+// `row`, `next`, `only`, `ties` or `fetch` as a table or column name.
+#[test]
+fn pagination_keywords_remain_usable_as_identifiers() {
+    let mut harness = Harness::new();
+    harness.query_ok(
+        "CREATE TABLE row (id INTEGER PRIMARY KEY, next INTEGER, only INTEGER, \
+         ties INTEGER, fetch INTEGER);",
+    );
+    harness.query_ok("INSERT INTO row (id, next, only, ties, fetch) VALUES (1, 2, 3, 4, 5);");
+    harness.query_ok("UPDATE row SET next = 9 WHERE id = 1;");
+
+    let result =
+        harness.query("SELECT r.next, r.only, r.ties, r.fetch FROM row AS r ORDER BY r.next");
+    assert_eq!(
+        result.rows,
+        vec![vec![
+            SqlValue::Integer(9),
+            SqlValue::Integer(3),
+            SqlValue::Integer(4),
+            SqlValue::Integer(5),
+        ]]
+    );
+
+    // An explicit alias works for all five; an implicit one for all but
+    // `fetch`, which starts the pagination tail in that position.
+    let aliased = harness.query("SELECT id AS fetch, id row FROM row");
+    assert_eq!(
+        aliased
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["fetch", "row"]
+    );
+}
+
+// D7: a literal beyond the i64 range never reaches the planner; only a
+// constant *expression* produces the planner's bounded diagnostic.
+#[test]
+fn an_out_of_range_literal_count_is_a_parse_error_not_a_planner_error() {
+    let mut harness = Harness::with_scores();
+
+    let literal = harness.error("SELECT id FROM t ORDER BY id LIMIT 9223372036854775808");
+    assert!(literal.contains("outside of valid range"), "{literal}");
+    assert!(
+        !literal.contains("LIMIT expression is invalid"),
+        "{literal}"
+    );
+
+    let expression = harness.error("SELECT id FROM t ORDER BY id LIMIT 9223372036854775807 + 1");
+    assert!(
+        expression.contains("LIMIT expression is invalid"),
+        "{expression}"
+    );
 }

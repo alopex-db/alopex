@@ -74,9 +74,14 @@ depends on it.
   `LIMIT ALL` is accepted and produces no limit.
 - **D7**: Negative counts fail at plan time with `LIMIT must not be negative`
   / `OFFSET must not be negative` (PostgreSQL; SQLite's negative-means-
-  unlimited is deliberately not followed). Values that do not fit in a
-  non-negative 64-bit range (for example `LIMIT 9223372036854775808`) fail
-  with a bounded `LIMIT expression is invalid: ...` diagnostic.
+  unlimited is deliberately not followed). A constant *expression* that
+  overflows the non-negative 64-bit range (for example
+  `LIMIT 9223372036854775807 + 1`) fails at plan time with a bounded
+  `LIMIT expression is invalid: ...` diagnostic. A bare *literal* beyond the
+  i64 range (`LIMIT 9223372036854775808`) never reaches the planner: the Nim
+  lexer rejects it as `ALOPEX-P001` / `Parsed integer outside of valid range`,
+  and that parse error currently reports line 0, column 0 rather than the
+  literal's span.
 - **D8**: The `?` placeholder is a lexer token that fails in expression
   position with `bind parameters are not yet supported; pass literal values
   instead (prepared statements are tracked by issue #166)` instead of the
@@ -109,6 +114,21 @@ depends on it.
   peer set requires the full sort), and embedded streaming rejects WITH TIES
   (`FETCH ... WITH TIES is not streamable`; ordered pagination was already not
   streamable).
+- **D15**: `FETCH ... WITH TIES` composes with `SELECT DISTINCT ON`. The
+  DISTINCT ON node emits no `Sort` of its own (sql-distinct-on.md D8), so the
+  planner hands the peer specification to the Limit explicitly; see
+  sql-distinct-on.md D13 for why only the user's ORDER BY may be used.
+- **D16**: `FETCH`, `NEXT`, `TIES`, `ONLY` and `ROW` are lexer keywords, but
+  they stay legal identifiers in every position where the grammar *requires* a
+  name and no clause can begin: expression and column references, `CREATE
+  TABLE` column names, `INSERT`/CTE/relation-alias column lists, `UPDATE SET`
+  targets, table, index, window and CTE names, `USING` columns, constraint
+  columns, and an explicit `AS <name>` alias. An *implicit* (bare) alias may
+  still be named `next`, `ties`, `only` or `row`, but not `fetch`: in that
+  position `FETCH` starts the pagination tail. This is the only identifier
+  regression from the clause and it follows the `filter`/`within` precedent
+  (sql-aggregate-filter-within-group.md); PostgreSQL likewise treats `ROW` as
+  a `col_name_keyword` and `NEXT`/`TIES` as unreserved.
 
 ## Reference behavior
 

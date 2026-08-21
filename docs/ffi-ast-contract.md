@@ -264,8 +264,13 @@ onto the frozen `limit`/`offset` keys. The validator likewise rejects
 `DISTINCT ON` (contract `0.11.0`) because the frozen payload has no
 `distinct_on` key. It also rejects aggregate `FILTER`, `WITHIN GROUP`, and
 aggregate-local `ORDER BY` (contract `0.12.0`) because the frozen 6-key
-`FunctionCall` map cannot express them. Ordinary public `SELECT` payloads
-carry the full `0.12.0` fields above.
+`FunctionCall` map cannot express them, `ROLLUP`/`CUBE`/`GROUPING SETS`
+(contract `0.13.0`) because the frozen `group_by` keeps its `[Expr]` shape,
+and a table alias column list (contract `0.14.0`) because the frozen `Table`
+map has no `columns` key. Ordinary public `SELECT` payloads carry the full
+`0.14.0` fields described below, including `Select.group_by: [GroupByItem]`
+(`0.13.0`) and the widened `FromItem` (`0.14.0`); both are mandatory,
+always-written parts of the current wire.
 
 Contract `0.7.0` introduces `StatementKind::Values` and the tagged `QueryBody`
 shape for CTE, derived-table, and set-operation positions. A `0.6.0` consumer

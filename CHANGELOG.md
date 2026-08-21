@@ -75,7 +75,9 @@ All notable changes to this project will be documented in this file.
   `ALOPEX-T014` on mismatch), NULL keys grouped as equal, select-list aliases
   in keys, and a documented determinism extension — remaining ties resolve by
   every input column in schema order, so results never depend on physical row
-  order. Covered on Rust, CLI, Embedded, and Python surfaces; v1 rejects
+  order. `LIMIT`/`OFFSET`/`FETCH` — including `FETCH ... WITH TIES`, whose
+  peer groups come from the user's `ORDER BY` — apply after deduplication.
+  Covered on Rust, CLI, Embedded, and Python surfaces; v1 rejects
   combining it with `DISTINCT`, `GROUP BY`/aggregates/`HAVING`, window
   functions/`QUALIFY`, and trailing set operations (docs/sql-distinct-on.md).
 - SQL supports standard pagination: `OFFSET n [ROW|ROWS]` without `LIMIT`,
@@ -85,6 +87,13 @@ All notable changes to this project will be documented in this file.
   Embedded, and Python surfaces. A `?` bind placeholder now fails with a
   dedicated "bind parameters are not yet supported" parse error (prepared
   statements are tracked by issue #166) instead of a column-not-found.
+  Breaking note: `FETCH`, `NEXT`, `TIES`, `ONLY` and `ROW` became lexer
+  keywords. They remain valid identifiers wherever the grammar requires a
+  name — expressions, `CREATE TABLE` column names, `INSERT`/CTE/alias column
+  lists, `UPDATE SET` targets, table/index/window/CTE names, `USING` columns
+  and `AS <name>` aliases — but an implicit alias named `fetch` now starts the
+  pagination tail, so write `AS fetch` instead (`next`/`ties`/`only`/`row`
+  still work as implicit aliases).
 - SQL supports `TRY_CAST`, returning NULL only for conversion failures while
   preserving source-expression errors; CAST and TRY_CAST share bounded
   numeric, text, boolean, timestamp, BLOB, and vector conversion rules.
@@ -111,10 +120,50 @@ All notable changes to this project will be documented in this file.
 - An explicit default RANGE frame for a value window uses the same linear
   peer-group path as its implicit form, avoiding a size-dependent resource
   failure for semantically identical queries.
+- A correlated reference from a `LATERAL` item or a correlated subquery works
+  in every operator, not only `WHERE` and the projection: aggregate `FILTER`
+  predicates, aggregate-local `ORDER BY`, group keys, plain `ORDER BY`,
+  `DISTINCT ON`, `FETCH ... WITH TIES` peer keys and window
+  `PARTITION BY`/`ORDER BY` used to escape as an internal `ALOPEX-E999`
+  "invalid column reference".
+- Columnar projection pushdown collects the columns an aggregate `FILTER`
+  predicate, an aggregate-local `ORDER BY`, or an `OVER (...)` partition/order
+  key reads. They were previously materialized as `NULL`, so
+  `SUM(v) FILTER (WHERE flag > 0)` silently returned `NULL` on a columnar
+  table.
+- `scripts/build-nim-parser.sh --backend host` — the path the release workflow
+  uses for all four parser archives — compiles the static archive with
+  `-fPIC`, matching the `staticlib` nimble task. The published Linux archive
+  otherwise carried `R_X86_64_TPOFF32` relocations and could not be linked
+  into the Python extension module. The script now fails closed when a Linux
+  archive still carries them.
 
 ### Changed
 
-- The Nim parser wire contract is `0.11.0`. It adds the always-written
+- The Nim parser wire contract is `0.14.0`. It widens `FromItem` for LATERAL,
+  FROM-clause table functions, and relation alias column lists: `Table` gains
+  `columns` (always written, empty when absent), `Derived` gains `lateral`,
+  and a new `Function` variant carries
+  `{name, args, alias, columns, lateral}`. Contract `0.13.0` producers are
+  rejected before decode. The byte-frozen staged continuous-aggregate payload
+  is unchanged and rejects LATERAL, FROM table functions, and a table alias
+  column list before staging. This remains internal metadata of the unified
+  Alopex v0.8.8 release, not a separate parser release lane.
+- The Nim parser wire contract `0.13.0` changed `Select.group_by` from
+  `[Expr]?` to tagged `[GroupByItem]?` values
+  (`Expr`/`Rollup`/`Cube`/`GroupingSets`); contract `0.12.0` producers are
+  rejected before decode. The byte-frozen staged continuous-aggregate payload
+  keeps its `[Expr]` shape and rejects `ROLLUP`/`CUBE`/`GROUPING SETS` before
+  staging. This remains internal metadata of the unified Alopex v0.8.8
+  release, not a separate parser release lane.
+- The Nim parser wire contract `0.12.0` added `order_by`, `within_group`, and
+  `filter` keys to the `FunctionCall` map when any aggregate clause is present
+  (the historical 6-key shape is kept otherwise); contract `0.11.0` producers
+  are rejected before decode. The byte-frozen staged continuous-aggregate
+  payload is unchanged and rejects aggregate `FILTER`, `WITHIN GROUP`, and
+  aggregate-local `ORDER BY` before staging. This remains internal metadata of
+  the unified Alopex v0.8.8 release, not a separate parser release lane.
+- The Nim parser wire contract `0.11.0` added the always-written
   `distinct_on` expression list to `Select` (empty when the clause is absent);
   contract `0.10.0` producers are rejected before decode. The byte-frozen
   staged continuous-aggregate payload is unchanged and rejects `DISTINCT ON`

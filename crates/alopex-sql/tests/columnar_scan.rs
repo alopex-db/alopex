@@ -184,3 +184,90 @@ fn a_lateral_correlated_predicate_is_not_fused_into_a_columnar_scan() {
         ]
     );
 }
+
+fn create_scores_table(
+    executor: &mut Executor<MemoryKV, MemoryCatalog>,
+    catalog: &Arc<RwLock<MemoryCatalog>>,
+) {
+    let stmt = Parser::parse_sql(
+        &AlopexDialect,
+        "CREATE TABLE cc (id INT PRIMARY KEY, v INT, flag INT, nm TEXT) \
+         WITH (storage='columnar', row_group_size=1000);",
+    )
+    .unwrap()
+    .pop()
+    .unwrap();
+    let plan = {
+        let guard = catalog.read().unwrap();
+        Planner::new(&*guard).plan(&stmt).unwrap()
+    };
+    executor.execute(plan).unwrap();
+}
+
+fn write_scores_csv(path: &Path) {
+    let mut f = File::create(path).unwrap();
+    writeln!(f, "id,v,flag,nm").unwrap();
+    writeln!(f, "1,10,1,alpha").unwrap();
+    writeln!(f, "2,20,0,beta").unwrap();
+    writeln!(f, "3,30,1,gamma").unwrap();
+}
+
+/// A columnar scan materialises exactly the columns the pushed projection
+/// names and fills every other column with NULL, so a column that appears only
+/// inside an aggregate `FILTER` predicate or an aggregate-local `ORDER BY` must
+/// be collected too. Before the fix `flag` was NULL in every row, the filter
+/// accepted nothing, and `SUM(v) FILTER (WHERE flag > 0)` returned NULL
+/// instead of 40.
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn columnar_projection_pushdown_covers_aggregate_filter_and_order_by() {
+    let store = Arc::new(MemoryKV::new());
+    let bridge = TxnBridge::new(store.clone());
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(store.clone(), catalog.clone());
+    create_scores_table(&mut executor, &catalog);
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    write_scores_csv(file.path());
+    {
+        let guard = catalog.read().unwrap();
+        let mut txn = bridge.begin_write().unwrap();
+        execute_copy(
+            &mut txn,
+            &*guard,
+            "cc",
+            file.path().to_str().unwrap(),
+            FileFormat::Csv,
+            CopyOptions { header: true },
+            &CopySecurityConfig::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let mut run = |sql: &str| {
+        let statement = Parser::parse_sql(&AlopexDialect, sql)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let plan = {
+            let guard = catalog.read().unwrap();
+            Planner::new(&*guard).plan(&statement).unwrap()
+        };
+        match executor.execute(plan).unwrap() {
+            alopex_sql::executor::ExecutionResult::Query(result) => result.rows,
+            other => panic!("expected a query result, got {other:?}"),
+        }
+    };
+
+    assert_eq!(
+        run("SELECT SUM(v) FILTER (WHERE flag > 0) FROM cc"),
+        vec![vec![alopex_sql::storage::SqlValue::BigInt(40)]]
+    );
+    assert_eq!(
+        run("SELECT GROUP_CONCAT(nm ORDER BY v DESC) FROM cc"),
+        vec![vec![alopex_sql::storage::SqlValue::Text(
+            "gamma,beta,alpha".into()
+        )]]
+    );
+}

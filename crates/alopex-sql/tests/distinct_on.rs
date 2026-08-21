@@ -1,7 +1,7 @@
 //! SELECT DISTINCT ON (expr, ...) deterministic first-row deduplication
 //! (issue #150, v0.8.8). Semantics follow PostgreSQL 16 with an Alopex
 //! determinism extension; decisions are documented in
-//! docs/sql-distinct-on.md (D1..D12).
+//! docs/sql-distinct-on.md (D1..D13).
 
 use std::sync::{Arc, RwLock};
 
@@ -379,6 +379,58 @@ fn distinct_on_as_a_set_operation_operand() {
         "SELECT 'x' UNION ALL SELECT DISTINCT ON (region) region FROM sales WHERE region = 'east'",
     );
     assert_eq!(result.rows.len(), 2);
+}
+
+// D13: DISTINCT ON plans no Sort node of its own, so WITH TIES has to read its
+// peer specification from the user ORDER BY the DistinctOn node carries. It
+// used to be rejected with the factually wrong "requires ORDER BY".
+#[test]
+fn distinct_on_supports_fetch_with_ties() {
+    let mut harness = Harness::with_sales();
+    let result = harness.query(
+        "SELECT DISTINCT ON (region) region, amount FROM sales \
+         ORDER BY region, amount FETCH FIRST 1 ROW WITH TIES",
+    );
+    // 'east'/50, 'west'/75 and NULL/5 survive deduplication; no two of them
+    // tie on (region, amount), so WITH TIES keeps exactly the first row.
+    assert_eq!(result.rows, vec![vec![text("east"), integer(50)]]);
+}
+
+// D13: the peer specification must be the *user* ORDER BY only. The effective
+// specification also carries implicit ON keys and an all-column tie-breaker
+// tail, which make every surviving row unique — using those would silently
+// degrade WITH TIES to a plain LIMIT.
+#[test]
+fn distinct_on_with_ties_uses_only_the_user_order_by() {
+    let mut harness = Harness::with_sales();
+    // The ON keys (region, amount) exceed the user ORDER BY (region), so
+    // `amount` becomes an implicit key (D3). Deduplication leaves
+    // ('east', 50), ('east', 100) and ('west', 75); the two 'east' rows are
+    // peers under the user ORDER BY, so WITH TIES keeps both.
+    let result = harness.query(
+        "SELECT DISTINCT ON (region, amount) region, amount FROM sales \
+         WHERE region IS NOT NULL ORDER BY region FETCH FIRST 1 ROW WITH TIES",
+    );
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![text("east"), integer(50)],
+            vec![text("east"), integer(100)]
+        ]
+    );
+}
+
+// D3/D13: WITH TIES without any ORDER BY is still the PostgreSQL 42P20 error,
+// and the message is now accurate for DISTINCT ON too.
+#[test]
+fn distinct_on_with_ties_without_order_by_is_rejected() {
+    let mut harness = Harness::with_sales();
+    let error =
+        harness.error("SELECT DISTINCT ON (region) region FROM sales FETCH FIRST 1 ROW WITH TIES");
+    assert!(
+        error.contains("FETCH ... WITH TIES requires ORDER BY"),
+        "{error}"
+    );
 }
 
 // Reference fixture pinned to PostgreSQL/DuckDB semantics.

@@ -118,6 +118,15 @@ LIMIT/OFFSET apply above it, i.e. after deduplication.
   uses the next planner type-error code `ALOPEX-T014` (the implementation plan
   suggested an `ALOPEX-P*` code, but `P` codes are parse errors; planner
   errors use the `T`/`F` series).
+- **D13 — `FETCH ... WITH TIES` peer keys.** DISTINCT ON plans no `Sort` node
+  (D8), so the Limit cannot read its peer specification from one. The planner
+  hands it the *user's* ORDER BY instead — the leading `ORDER BY` items of the
+  effective specification, which `build_distinct_on_sort_spec` always places
+  first. The implicit ON keys and the all-column tie-breaker tail (D3/D4) are
+  deliberately excluded: they make every surviving row unique, which would
+  silently degrade `WITH TIES` to a plain `LIMIT`. `WITH TIES` with no ORDER
+  BY at all stays the PostgreSQL 42P20 error `FETCH ... WITH TIES requires
+  ORDER BY`. Matches PostgreSQL 16.
 
 ## Cost note and future work
 

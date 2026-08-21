@@ -27,6 +27,17 @@ const
                 tkTimestamp, tkDate, tkTime, tkVector}
   OptionValueTokens = {tkIdent, tkString, tkInteger, tkFloat, tkHnsw, tkBtree,
                        tkCosine, tkL2, tkInner, tkText, tkBoolean, tkBool}
+  # FETCH pagination (issue #152) reserves FETCH/NEXT/TIES/ONLY/ROW in the
+  # lexer, but they stay legal identifiers wherever an identifier is
+  # *mandatory* and no clause can start (issue #152 D16). Every `expectIdent`
+  # call site is such a position: a table/column/alias/index/window/CTE name
+  # the grammar requires, so accepting these tokens cannot make a parse
+  # ambiguous.
+  PaginationIdentTokens = {tkFetch, tkNext, tkTies, tkOnly, tkRow}
+  # An *implicit* (bare) alias is optional, so the token must not be able to
+  # start the clause that follows. `FETCH` starts the pagination tail there
+  # and therefore stays reserved; the other four cannot begin any clause.
+  ImplicitAliasTokens = {tkIdent, tkNext, tkTies, tkOnly, tkRow}
 
 proc initParser*(input: string): Parser =
   result.lex = initLexer(input)
@@ -100,7 +111,11 @@ proc spanThrough(first, last: Span): Span =
   Span(start: first.start, `end`: last.`end`)
 
 proc expectIdent(p: var Parser; context = "identifier"): Token =
-  if p.current.kind != tkIdent:
+  ## A mandatory identifier position. FETCH/NEXT/TIES/ONLY/ROW are lexer
+  ## keywords for the FETCH pagination tail (issue #152) but remain legal
+  ## names here, so `CREATE TABLE t (row INTEGER)`, `INSERT INTO t (next)`,
+  ## `UPDATE t SET only = 1` and `... AS ties` keep parsing (issue #152 D16).
+  if p.current.kind notin {tkIdent} + PaginationIdentTokens:
     p.error("expected " & context)
   result = p.advance()
 
@@ -108,8 +123,8 @@ proc expectExprIdent(p: var Parser; context = "identifier"): Token =
   ## FIRST/LAST/time are reserved by ORDER BY and type grammar, and
   ## FETCH/NEXT/TIES/ONLY/ROW by FETCH pagination (issue #152), but SQL-TS
   ## also uses them as ordinary function/column identifiers.
-  if p.current.kind notin {tkIdent, tkFirst, tkLast, tkTime,
-                           tkFetch, tkNext, tkTies, tkOnly, tkRow}:
+  if p.current.kind notin {tkIdent, tkFirst, tkLast, tkTime} +
+                          PaginationIdentTokens:
     p.error("expected " & context)
   result = p.advance()
 
@@ -253,7 +268,10 @@ proc parseWindowFrame(p: var Parser): SqlNode =
     orderAsc: -1, nullsFirst: -1)
 
 proc parseWindowSpecContents(p: var Parser; window: SqlNode) =
-  if p.check(tkIdent):
+  # A base window name, if present, is an identifier; the pagination keywords
+  # stay usable as window names so `WINDOW row AS (...)` and `OVER (row ...)`
+  # agree with the widened `expectIdent` (issue #152 D16).
+  if p.current.kind in {tkIdent} + PaginationIdentTokens:
     let base = p.advance()
     window.children.add(newIdent(base.value, tokenSpan(base)))
 
@@ -292,7 +310,7 @@ proc parseWindowSpec(p: var Parser): SqlNode =
   p.enterNesting()
   defer: p.leaveNesting()
   let overTok = p.expect(tkOver)
-  if p.check(tkIdent):
+  if p.current.kind in {tkIdent} + PaginationIdentTokens:
     let base = p.advance()
     result = newNode(nkWindowSpec,
       Span(start: tokenSpan(overTok).start, `end`: tokenSpan(base).`end`))
@@ -750,7 +768,7 @@ proc parseSelectItem(p: var Parser): SqlNode =
     discard p.advance()
     let alias = p.expectExprIdent("alias")
     result = makeAlias(result, alias.value, tokenSpan(alias))
-  elif p.check(tkIdent):
+  elif p.current.kind in ImplicitAliasTokens:
     let alias = p.advance()
     result = makeAlias(result, alias.value, tokenSpan(alias))
 
@@ -768,7 +786,8 @@ proc parseOptionalAlias(p: var Parser; item: SqlNode): SqlNode =
     discard p.advance()
     aliasToken = p.expectIdent("alias")
     hasAlias = true
-  elif p.check(tkIdent) and p.current.kind notin ClauseTerminators:
+  elif p.current.kind in ImplicitAliasTokens and
+      p.current.kind notin ClauseTerminators:
     aliasToken = p.advance()
     hasAlias = true
 
