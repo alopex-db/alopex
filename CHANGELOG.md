@@ -10,7 +10,7 @@ All notable changes to this project will be documented in this file.
   `alopex.connect(target)` selects the surface from the target alone:
   `http(s)://host:port` returns the new `alopex.RemoteDatabase`, while
   `:memory:`, `file:///path`, and bare paths open the embedded `Database`.
-  `RemoteDatabase.execute_sql(sql, params)` returns exactly what the embedded
+  `RemoteDatabase.execute_sql(sql, params)` returns what the embedded
   `Database` returns for the same statement — `list[dict]` in column order for
   SELECT, `int` for DML, `None` for DDL — by normalizing the server's
   `columns`/`rows` (`SqlValue` in serde's externally tagged form) in one place;
@@ -36,7 +36,17 @@ All notable changes to this project will be documented in this file.
   `.correlation_id` and `.http_status`. Known asymmetry: the server's routing
   pre-pass flattens parse/catalog/type-check codes to `ALOPEX-E999` on the wire
   (documented as D20 in `docs/python-server-client.md`, same on the CLI's HTTP
-  path). See `docs/python-server-client.md` and `docs/server-guide.md`.
+  path), and a short list of statement-level value divergences — `PRAGMA`,
+  `clear_cache()`, and a bare `;` — is pinned by a test and listed under
+  "Known value divergences" (D24). Dropping a `RemoteTransaction` or calling
+  `RemoteDatabase.close()` mid-transaction rolls the server session back
+  instead of leaving it committable until the `session_ttl` sweep (D21);
+  `RemoteTransaction.status` reports the embedded `stream_effect` value
+  (`"committable"` while active) (D22); blank SQL returns `None` without a
+  request like the embedded surface (D23); an explicit `:0` port and a `bool`
+  `timeout` are rejected with `ALOPEX-PY205` instead of being read as port 80
+  and a 1-second deadline. See `docs/python-server-client.md` and
+  `docs/server-guide.md`.
 - SQL `GROUP BY` supports `GROUPING SETS`, `ROLLUP`, `CUBE`, the empty
   grouping set `()`, and the `GROUPING`/`GROUPING_ID` functions (issue #149).
   Ordinary keys cross-product with the modifiers, duplicate sets emit

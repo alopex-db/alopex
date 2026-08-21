@@ -223,10 +223,13 @@ db.close()
 ```
 
 `alopex.connect("/path/db")` and `alopex.connect(":memory:")` open the embedded
-engine instead, and both surfaces return the same values for the same
-statement. Stream, HNSW, and KV APIs raise `NotImplementedError` with a reason
-over the server client. See `docs/python-server-client.md` for the full option,
-error-code, and boundary reference.
+engine instead, and both surfaces return the same values for the same statement
+apart from a short list of server-side engine gaps (`PRAGMA`, `clear_cache()`,
+a bare `;`) enumerated under "Known value divergences" in
+`docs/python-server-client.md`. Stream, HNSW, and KV APIs raise
+`NotImplementedError` with a reason over the server client. See
+`docs/python-server-client.md` for the full option, error-code, and boundary
+reference.
 
 ## CLI access
 

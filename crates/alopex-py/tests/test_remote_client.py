@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import socket
 import threading
@@ -301,7 +302,9 @@ def test_session_id_is_attached_inside_a_transaction(stub):
         txn = db.begin()
         stub.body = {"columns": [], "rows": [], "affected_rows": 1}
         assert txn.execute_sql("INSERT INTO t VALUES (1)") == 1
-    assert stub.requests[-1]["body"]["session_id"] == "sess-9"
+        assert stub.requests[-1]["body"]["session_id"] == "sess-9"
+    # 未完了のまま close すると D21 のロールバックが最後のリクエストになる。
+    assert stub.requests[-1]["path"] == "/session/sess-9/rollback"
 
 
 def test_placeholder_expansion_reuses_the_embedded_binder(stub):
@@ -450,7 +453,19 @@ def test_plaintext_http_to_a_non_loopback_host_is_refused():
 
 
 @pytest.mark.parametrize(
-    "url", ["", "   ", "ftp://host/db", "/var/lib/alopex", "http://", "https://"]
+    "url",
+    [
+        "",
+        "   ",
+        "ftp://host/db",
+        "/var/lib/alopex",
+        "http://",
+        "https://",
+        # 明示的な :0 は「ポート指定なし」ではない。`parts.port or default` は 0 が
+        # falsy なので黙って 80/443 に差し替えていた（回帰）。
+        "http://127.0.0.1:0",
+        "https://alopex.example.com:0",
+    ],
 )
 def test_invalid_server_urls_are_rejected(url):
     with pytest.raises(ValueError) as raised:
@@ -458,7 +473,25 @@ def test_invalid_server_urls_are_rejected(url):
     assert raised.value.code == "ALOPEX-PY205"
 
 
-@pytest.mark.parametrize("kwargs", [{"timeout": 0}, {"timeout": -1}, {"retries": -1}])
+def test_default_ports_still_apply_when_the_url_names_none():
+    assert RemoteDatabase("https://alopex.example.com")._transport._target.port == 443
+    assert RemoteDatabase("http://127.0.0.1")._transport._target.port == 80
+    assert RemoteDatabase("http://127.0.0.1:8080")._transport._target.port == 8080
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"timeout": 0},
+        {"timeout": -1},
+        # isinstance(True, int) が True なので、フラグの取り違えが 1 秒の
+        # デッドラインとして通っていた（回帰）。retries は元から bool を弾く。
+        {"timeout": True},
+        {"timeout": False},
+        {"retries": -1},
+        {"retries": True},
+    ],
+)
 def test_invalid_client_options_are_rejected(kwargs):
     with pytest.raises(ValueError) as raised:
         RemoteDatabase("http://127.0.0.1:8080", **kwargs)
@@ -508,6 +541,145 @@ def test_transaction_context_manager_rolls_back_when_incomplete(stub):
             txn.execute_sql("INSERT INTO t VALUES (1)")
         assert txn.status["state"] == "rolled_back"
     assert stub.requests[-1]["path"].endswith("/rollback")
+
+
+def test_close_rolls_back_every_still_active_session(stub):
+    """D21: close() が生きているセッションを必ず終わらせる（回帰）。
+
+    修正前は close() が接続を落とすだけで、放置された書き込みトランザクション
+    がサーバー側に残り、session id を知っていれば後から commit できた。
+    """
+    stub.body = {"session_id": "sess-leak", "expires_at": None}
+    db = RemoteDatabase(stub.url)
+    txn = db.begin()
+    stub.body = {"columns": [], "rows": [], "affected_rows": 1}
+    txn.execute_sql("INSERT INTO t VALUES (1)")
+
+    db.close()
+
+    rollbacks = [r for r in stub.requests if r["path"].endswith("/rollback")]
+    assert [r["path"] for r in rollbacks] == ["/session/sess-leak/rollback"]
+    assert txn.status["state"] == "rolled_back"
+    with pytest.raises(AlopexError) as raised:
+        txn.commit()
+    assert raised.value.code == "ALOPEX-PY999"
+
+    # 二度目の close は追加のロールバックを出さない（冪等）。
+    db.close()
+    assert len([r for r in stub.requests if r["path"].endswith("/rollback")]) == 1
+
+
+def test_dropping_a_transaction_rolls_it_back(stub):
+    """D21: ファイナライザが PyTransaction::drop と同じ後始末をする（回帰）。"""
+    stub.body = {"session_id": "sess-gc", "expires_at": None}
+    db = RemoteDatabase(stub.url)
+    txn = db.begin()
+    stub.body = {"columns": [], "rows": [], "affected_rows": 1}
+    txn.execute_sql("INSERT INTO t VALUES (1)")
+
+    del txn
+    gc.collect()
+
+    assert stub.requests[-1]["path"] == "/session/sess-gc/rollback"
+    # 回収済みなので close() が二重にロールバックすることはない。
+    db.close()
+    assert len([r for r in stub.requests if r["path"].endswith("/rollback")]) == 1
+
+
+def test_finalizer_does_not_raise_when_the_session_is_unreachable(stub):
+    """後始末経路は例外を出さない（サーバーが落ちていても）。"""
+    stub.body = {"session_id": "sess-dead", "expires_at": None}
+    db = RemoteDatabase(stub.url)
+    txn = db.begin()
+    stub.status = 500
+    stub.raw_body = "boom"
+    db.close()  # ロールバックが 500 で失敗しても close は成功する
+    assert txn.status["state"] == "rolled_back"
+
+
+def test_cleanup_never_re_enters_an_exchange_in_flight(stub):
+    """D21: ファイナライザが実行中のやり取りに割り込まない。
+
+    `_HttpTransport._lock` は RLock なので、同じスレッドでリクエスト中に
+    `__del__` が走ると同一コネクション上で 2 つのやり取りが混ざる。混ざる
+    代わりに保留し、close() で流し切る。
+    """
+    stub.body = {"session_id": "sess-busy", "expires_at": None}
+    db = RemoteDatabase(stub.url)
+    txn = db.begin()
+    stub.body = {"columns": [], "rows": [], "affected_rows": None}
+
+    db._transport._in_flight = True
+    try:
+        txn._rollback_quietly()
+        assert db._pending_rollbacks == ["sess-busy"]
+        assert not [r for r in stub.requests if r["path"].endswith("/rollback")]
+    finally:
+        db._transport._in_flight = False
+
+    db.close()
+    assert stub.requests[-1]["path"] == "/session/sess-busy/rollback"
+    assert db._pending_rollbacks == []
+
+
+def test_committed_transaction_is_not_rolled_back_by_close(stub):
+    stub.body = {"session_id": "sess-done", "expires_at": None}
+    db = RemoteDatabase(stub.url)
+    txn = db.begin()
+    stub.body = {"columns": [], "rows": [], "affected_rows": None}
+    txn.commit()
+    db.close()
+    assert not [r for r in stub.requests if r["path"].endswith("/rollback")]
+
+
+def test_transaction_status_matches_the_embedded_surface(stub):
+    """D22: stream_effect は組み込みと同じ値を返す（回帰）。"""
+    embedded = Database.new()
+    embedded_txn = embedded.begin()
+    try:
+        stub.body = {"session_id": "sess-status", "expires_at": None}
+        with RemoteDatabase(stub.url) as db:
+            remote_txn = db.begin()
+            assert remote_txn.status == embedded_txn.status
+            assert remote_txn.status == {
+                "state": "active",
+                "stream_effect": "committable",
+            }
+            stub.body = {"columns": [], "rows": [], "affected_rows": None}
+            remote_txn.rollback()
+            embedded_txn.rollback()
+            assert remote_txn.status == embedded_txn.status
+            assert remote_txn.status["stream_effect"] == "closed"
+    finally:
+        embedded.close()
+
+
+@pytest.mark.parametrize("sql", ["", "   ", "\n\t "])
+def test_blank_sql_matches_the_embedded_none_without_a_request(stub, sql):
+    """D23: 空文の戻り値を両面で揃える（回帰）。
+
+    修正前はサーバーの INVALID_REQUEST（"sql must not be empty"）が上がって
+    いた。空白のみの文はリクエストを出さずに組み込みと同じ None を返す。
+    """
+    embedded = Database.new()
+    try:
+        with RemoteDatabase(stub.url) as db:
+            assert db.execute_sql(sql) is None
+            txn_body = {"session_id": "sess-blank", "expires_at": None}
+            stub.body = txn_body
+            txn = db.begin()
+            stub.body = {"columns": [], "rows": [], "affected_rows": None}
+            assert txn.execute_sql(sql) is None
+        assert embedded.execute_sql(sql) is None
+        assert not [r for r in stub.requests if r["path"] == "/sql"]
+    finally:
+        embedded.close()
+
+
+def test_blank_sql_still_reports_binder_errors(stub):
+    with RemoteDatabase(stub.url) as db:
+        with pytest.raises(ValueError):
+            db.execute_sql("   ", [1])
 
 
 def test_session_begin_without_session_id_is_a_protocol_error(stub):

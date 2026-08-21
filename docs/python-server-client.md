@@ -27,6 +27,10 @@ for db in (embedded, remote):
 | `s3://bucket/prefix` | `NotImplementedError` (`ALOPEX-PY204`) |
 | anything else | `ValueError` (`ALOPEX-PY205`) |
 
+A URL with no port gets 80 or 443 from its scheme. An explicit `:0` is a
+`ValueError` (`ALOPEX-PY205`), not "no port": a port templated from an unset
+config value must not silently redirect the client to port 80.
+
 A URL path becomes the API prefix, so `http://host:8080/api/v1` posts to
 `/api/v1/sql` and `/api/v1/session/...`.
 
@@ -36,8 +40,9 @@ embedded targets accept only `thread_mode`.
 
 ## Return values
 
-`RemoteDatabase.execute_sql` returns exactly what `Database.execute_sql`
-returns for the same statement:
+`RemoteDatabase.execute_sql` returns what `Database.execute_sql` returns for the
+same statement, except for the statements listed under
+[Known value divergences](#known-value-divergences):
 
 | Statement | Return |
 | --- | --- |
@@ -50,6 +55,27 @@ value in serde's externally tagged `SqlValue` form (`"Null"`, `{"BigInt": 6}`,
 `{"Blob": [1, 2]}`, ...). The client normalizes them in one place, matching the
 embedded conversion value for value: `Blob` becomes `bytes`, `Vector` becomes
 `list[float]`, `Timestamp` stays epoch microseconds as `int`.
+
+### Known value divergences
+
+Running the same statement on both surfaces against a live `alopex-server`
+leaves these behind. Every one of them is a gap in the server's own SQL engine,
+not in the client's conversion — the raw wire body already carries the
+divergent value — so they are listed rather than papered over (D24).
+`test_known_value_divergences_are_pinned` asserts each one still diverges, so a
+server-side fix fails the test instead of silently changing the contract.
+
+| Statement | Embedded | Server client |
+| --- | --- | --- |
+| `PRAGMA <name> = <value>` (e.g. `PRAGMA cache_size = 16`) | `None` | `AlopexError` `ALOPEX-E999` (`unsupported query plan: Pragma`) |
+| `PRAGMA <name>` (e.g. `PRAGMA io_stats`) | `[{'io_stats': None}]` | `AlopexError` `ALOPEX-E999` |
+| `SELECT clear_cache() AS cleared` | `[{'clear_cache': 0}]` | `[{'cleared': None}]` — the server sends `columns:[{name:"cleared"}], rows:[["Null"]]` |
+| `;` (a statement-less but non-blank string) | `None` | `AlopexError` `ALOPEX-E999` (`empty SQL`) |
+
+Blank SQL (`""`, whitespace only) is **not** on this list: the client returns
+`None` for it without a request, matching the embedded surface (D23). Only `;`
+still diverges, because deciding that would mean parsing SQL on the client,
+which D2 exists to prevent.
 
 ## Not available over the server client
 
@@ -77,6 +103,18 @@ context manager and rolls back on an incomplete exit, like the embedded
 (300 seconds by default); the expiry surfaces as `AlopexError` with the server's
 `SESSION_EXPIRED` code, which the embedded transaction never raises.
 
+A session is *not* left to that expiry when the client loses interest in it
+(D21). Dropping a `RemoteTransaction` rolls it back from its finalizer, and
+`RemoteDatabase.close()` rolls back every session it opened that is still
+active, before the socket goes away. Both mirror `PyTransaction::drop` on the
+embedded side. Without them an abandoned write transaction stayed committable
+by anyone holding the session id for up to twice the `session_ttl`, since the
+server caps no session count and sweeps only on a TTL interval.
+
+`RemoteTransaction.status` reports the same keys **and** the same values as the
+embedded `Transaction.status`: an active session is `{"state": "active",
+"stream_effect": "committable"}` (D22).
+
 ## Errors
 
 Server error codes are forwarded verbatim onto `AlopexError.code`. Remote errors
@@ -102,7 +140,7 @@ the server's **routing pre-pass** currently do not — see D20 below.
 | Option | Default | Notes |
 | --- | --- | --- |
 | `api_key` | `None` | Sent as `x-api-key`; `Authorization: Bearer` works through `headers` |
-| `timeout` | `60.0` | Twice the server's `query_timeout` default so the server's classified `QUERY_TIMEOUT` wins |
+| `timeout` | `60.0` | Twice the server's `query_timeout` default so the server's classified `QUERY_TIMEOUT` wins. Must be a finite positive number; `bool` is refused, so a misplaced flag is not read as a 1-second deadline |
 | `sql_path` | `<prefix>/sql` | `/api/sql/query` is the same handler |
 | `api_prefix` | from the URL path | |
 | `headers` | `None` | Extra request headers |
@@ -180,6 +218,33 @@ The constructor opens no socket, so building a client never blocks.
   the `SqlError` instead of flattening it, then re-verify the parity corpus
   (`scripts/parity/runner/normalize.py` extracts the first `ALOPEX-[A-Z]###` from
   the message, so the message change matters there).
+- **D21** — The client ends every session it opened. `RemoteTransaction` has a
+  finalizer and `RemoteDatabase.close()` rolls back the still-active sessions it
+  handed out, because a server session outlives the Python object that
+  represents it; the embedded `PyTransaction::drop` rolls back on drop and the
+  server client had no equivalent, so an exception between `begin()` and the
+  `with` block left a committable write transaction behind. Both paths are
+  best-effort: an unreachable session moves to `rolled_back` locally and the
+  cleanup never raises, since a `close()` that threw would be worse than the
+  leak it repairs.
+- **D22** — `status["stream_effect"]` is derived from the session state instead
+  of hard-coded. An active server session is the remote form of the embedded
+  `Open`/`Committable` status and reports `"committable"`; a finished one
+  reports `"closed"`. The two surfaces publish the same dict, so code branching
+  on it cannot take a different path just because of the connection target.
+- **D23** — Blank SQL (empty or whitespace only) returns `None` without a
+  request, matching `Database.execute_sql`. The server answers
+  `INVALID_REQUEST` (`sql must not be empty`), which made the last chunk of a
+  split migration file work embedded and fail remotely. Parameter binding still
+  runs first, so a bad parameter list raises before the short circuit. A
+  statement-less but non-blank string such as `;` is left alone: deciding it
+  would mean parsing SQL on the client, which D2 exists to prevent.
+- **D24** — Statement-level value divergences that survive on a live server are
+  documented in "Known value divergences" above rather than repaired on the
+  client. All of them are server-side engine gaps (`PRAGMA` has no query plan;
+  `clear_cache()` comes back as a NULL column), verified against the raw wire
+  body, and a client-side workaround would hide the gap instead of closing it.
+  D20 covers error *codes* only and does not reach these.
 
 ## Testing
 
@@ -188,7 +253,9 @@ The constructor opens no socket, so building a client never blocks.
 - `crates/alopex-py/tests/test_connect_target.py` — target routing and protocol
   conformance.
 - `crates/alopex-py/tests/test_remote_e2e.py` — marked `requires_server`; runs
-  one SQL script on both surfaces and compares the whole result list.
+  one SQL script on both surfaces and compares the whole result list, asserts a
+  session cannot be committed after the client that opened it went away (D21),
+  and pins the known value divergences (D24).
 
 ```bash
 cargo build -p alopex-server

@@ -8,6 +8,7 @@ skip され、`ALOPEX_REQUIRE_SERVER_E2E=1` の CI では fail する（conftest
 from __future__ import annotations
 
 import datetime as _dt
+import gc
 import uuid
 
 import pytest
@@ -234,7 +235,15 @@ def test_remote_transaction_commit_and_rollback(alopex_server):
         remote.execute_sql(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
 
         txn = remote.begin()
-        assert txn.status == {"state": "active", "stream_effect": "closed"}
+        # D22: 組み込みの active な Transaction と同じ値になる。
+        embedded = Database.new()
+        try:
+            embedded_txn = embedded.begin(TxnMode.READ_WRITE)
+            assert txn.status == embedded_txn.status
+            embedded_txn.rollback()
+        finally:
+            embedded.close()
+        assert txn.status == {"state": "active", "stream_effect": "committable"}
         txn.execute_sql(f"INSERT INTO {table} (id) VALUES (1)")
         txn.rollback()
         assert txn.status["state"] == "rolled_back"
@@ -262,6 +271,89 @@ def test_remote_transaction_commit_and_rollback(alopex_server):
         assert remote.begin(TxnMode.READ_WRITE).session_id
     finally:
         remote.close()
+
+
+def test_closing_mid_transaction_kills_the_server_session(alopex_server):
+    """D21 の回帰: close() 後に session が commit 可能なまま残ってはいけない。
+
+    修正前は `db.close()` が接続を落とすだけだったので、session id を知って
+    いれば後から `/session/<id>/commit` が通り、書きかけの行が可視になった
+    （組み込みの `PyTransaction::drop` は即 rollback する）。
+    """
+    table = _table_name()
+    remote = RemoteDatabase(alopex_server.http_base)
+    remote.execute_sql(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
+
+    txn = remote.begin()
+    session_id = txn.session_id
+    txn.execute_sql(f"INSERT INTO {table} (id) VALUES (1)")
+    remote.close()
+
+    probe = RemoteDatabase(alopex_server.http_base)
+    try:
+        with pytest.raises(AlopexError):
+            probe._session_action(session_id, "commit")
+        assert probe.execute_sql(f"SELECT id FROM {table}") == []
+
+        # ハンドルを捨てただけの場合もファイナライザが同じ後始末をする。
+        gc_txn = probe.begin()
+        gc_session = gc_txn.session_id
+        gc_txn.execute_sql(f"INSERT INTO {table} (id) VALUES (2)")
+        del gc_txn
+        gc.collect()
+        with pytest.raises(AlopexError):
+            probe._session_action(gc_session, "commit")
+        assert probe.execute_sql(f"SELECT id FROM {table}") == []
+    finally:
+        probe.close()
+
+
+@pytest.mark.parametrize("sql", ["", "   ", "\n\t "])
+def test_blank_sql_returns_none_on_both_surfaces(alopex_server, sql):
+    """D23 の回帰: 空文はサーバーの INVALID_REQUEST ではなく None を返す。"""
+    embedded = Database.new()
+    remote = RemoteDatabase(alopex_server.http_base)
+    try:
+        assert remote.execute_sql(sql) == embedded.execute_sql(sql)
+        assert remote.execute_sql(sql) is None
+    finally:
+        remote.close()
+        embedded.close()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "PRAGMA cache_size = 16",
+        "PRAGMA io_stats",
+        "SELECT clear_cache() AS cleared",
+        ";",
+    ],
+)
+def test_known_value_divergences_are_pinned(alopex_server, sql):
+    """docs/python-server-client.md「既知の値の差異」を固定する。
+
+    どれもサーバー側のエンジンの穴で、クライアントの変換の穴ではない
+    （D24）。サーバー側が直ったらこのテストが落ちて、ドキュメントの
+    リストを消す番だと分かる。
+    """
+
+    def outcome(surface):
+        try:
+            return ("value", surface.execute_sql(sql))
+        except AlopexError as exc:
+            return ("error", exc.code)
+
+    embedded = Database.new()
+    remote = RemoteDatabase(alopex_server.http_base)
+    try:
+        assert outcome(remote) != outcome(embedded), (
+            f"{sql!r} no longer diverges; drop it from the known-divergence "
+            "list in docs/python-server-client.md"
+        )
+    finally:
+        remote.close()
+        embedded.close()
 
 
 def test_connect_switches_surface_by_target(alopex_server, tmp_path):

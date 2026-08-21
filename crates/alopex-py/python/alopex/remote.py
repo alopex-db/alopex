@@ -32,6 +32,14 @@ D19 ``Float`` (f32) values are re-narrowed through IEEE-754 binary32 before bein
     widened to a Python float.  serde_json writes the shortest text that
     round-trips as f32, so narrowing recovers the exact f32 the server held and
     the widened result matches the embedded ``f64::from(f32)`` bit for bit.
+D21 A session outlives its Python handle unless the client ends it, so
+    ``RemoteTransaction`` gets a finalizer and ``RemoteDatabase.close()`` rolls
+    back every still-active session it opened — the remote form of
+    ``PyTransaction::drop``.
+D22 ``status["stream_effect"]`` reports the embedded value for the equivalent
+    session state (``"committable"`` while active) instead of a constant.
+D23 Blank SQL returns ``None`` without a request, matching the embedded
+    surface, which returns ``None`` rather than raising.
 """
 
 from __future__ import annotations
@@ -42,6 +50,7 @@ import socket
 import struct
 import threading
 import time
+import weakref
 from http import client as _http_client
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from urllib.parse import unquote, urlsplit
@@ -419,9 +428,20 @@ class _Target:
         self.scheme = parts.scheme
         self.host = parts.hostname
         try:
-            self.port = parts.port or (443 if parts.scheme == "https" else 80)
+            explicit_port = parts.port
         except ValueError as exc:
             raise _invalid_target(f"server URL has an invalid port: {url!r}") from exc
+        # `parts.port or default` used to swallow an explicit `:0`, because 0 is
+        # falsy: the client then silently connected to 80/443 instead of the
+        # endpoint the URL named. A port templated from an unset config value is
+        # exactly how that happens, so reject it like any other unusable target.
+        if explicit_port == 0:
+            raise _invalid_target(f"server URL has an invalid port: {url!r}")
+        self.port = (
+            explicit_port
+            if explicit_port is not None
+            else (443 if parts.scheme == "https" else 80)
+        )
         if self.scheme == "http" and not insecure and not _is_loopback(self.host):
             # Same posture as the CLI's validate_base_url: https is required off
             # loopback unless the caller opts out explicitly (D16).
@@ -480,6 +500,12 @@ class _HttpTransport:
         self._lock = threading.RLock()
         self._conn: Optional[_http_client.HTTPConnection] = None
         self._last_used = 0.0
+        self._in_flight = False
+
+    @property
+    def in_flight(self) -> bool:
+        """Whether an exchange is between its request and its response."""
+        return self._in_flight
 
     # -- connection lifecycle ------------------------------------------------
 
@@ -547,7 +573,15 @@ class _HttpTransport:
         if not self._keep_alive:
             headers["Connection"] = "close"
         with self._lock:
-            return self._send(method, path, body, headers, effective)
+            # `_lock` is reentrant, so it alone would not stop a finalizer that
+            # fired on this thread mid-exchange from interleaving a second
+            # request on the same connection. `in_flight` is what the cleanup
+            # path in RemoteDatabase checks before it sends anything (D21).
+            self._in_flight = True
+            try:
+                return self._send(method, path, body, headers, effective)
+            finally:
+                self._in_flight = False
 
     def _send(
         self,
@@ -642,9 +676,13 @@ class RemoteTransaction:
 
     @property
     def status(self) -> Dict[str, str]:
-        # Key set matches the embedded PyTransaction.status. A server session
-        # owns no local stream, so stream_effect is always "closed".
-        return {"state": self._state, "stream_effect": "closed"}
+        # Keys *and* values match the embedded PyTransaction.status (D22): an
+        # active server session is the remote form of the embedded
+        # Open/Committable session status, which reports "committable".
+        return {
+            "state": self._state,
+            "stream_effect": "committable" if self._state == "active" else "closed",
+        }
 
     def execute_sql(
         self,
@@ -675,6 +713,29 @@ class RemoteTransaction:
         if self._state == "active":
             self.rollback()
         return False
+
+    def __del__(self) -> None:
+        # Mirror PyTransaction::drop (crates/alopex-py/src/embedded/transaction.rs):
+        # an abandoned handle must not leave a committable write transaction on
+        # the server for a whole session_ttl sweep (D21).
+        try:
+            self._rollback_quietly()
+        except Exception:  # pragma: no cover - finalizers must never raise
+            pass
+
+    def _rollback_quietly(self) -> None:
+        """Best-effort rollback for finalization and :meth:`RemoteDatabase.close`.
+
+        Never raises: the session may already be unreachable (closed handle,
+        dead server, expired lease), and a cleanup path that raised would be
+        worse than the leak it repairs. The state moves to ``rolled_back``
+        either way, exactly like the embedded drop, so the handle cannot be
+        used again.
+        """
+        if self._state != "active":
+            return
+        self._state = "rolled_back"
+        self._database._end_session_quietly(self._session_id)
 
     def _ensure_active(self) -> None:
         if self._state != "active":
@@ -758,7 +819,13 @@ class RemoteDatabase:
         keep_alive: bool = True,
         idle_reconnect_seconds: Optional[float] = DEFAULT_IDLE_RECONNECT_SECONDS,
     ) -> None:
-        if not isinstance(timeout, (int, float)) or not 0 < float(timeout) < float("inf"):
+        # `isinstance(True, int)` is True, so a flag passed by mistake used to be
+        # accepted as a 1-second deadline. `retries` already excludes bool below.
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not 0 < float(timeout) < float("inf")
+        ):
             raise _invalid_target("timeout must be a finite positive number of seconds")
         if not isinstance(retries, int) or isinstance(retries, bool) or retries < 0:
             raise _invalid_target("retries must be a non-negative integer")
@@ -778,6 +845,11 @@ class RemoteDatabase:
         )
         self._closed = False
         self._last_routing_diagnostics: List[Any] = []
+        # Weak, so an abandoned transaction is still collectable and its own
+        # finalizer still runs; close() only needs the ones still alive (D21).
+        self._transactions: "weakref.WeakSet[RemoteTransaction]" = weakref.WeakSet()
+        # Sessions whose rollback could not be sent yet (see _end_session_quietly).
+        self._pending_rollbacks: List[str] = []
 
     # -- construction --------------------------------------------------------
 
@@ -843,9 +915,11 @@ class RemoteDatabase:
                 f"/session/begin returned no session_id: {str(body)[:200]!r}"
             )
         expires_at = body.get("expires_at")
-        return RemoteTransaction(
+        txn = RemoteTransaction(
             self, session_id, expires_at if isinstance(expires_at, str) else None
         )
+        self._transactions.add(txn)
+        return txn
 
     def cluster_status(self) -> Dict[str, Any]:
         """Return the server's ``ClusterStatusSnapshot``.
@@ -868,7 +942,22 @@ class RemoteDatabase:
         return cluster
 
     def close(self) -> None:
-        """Release the connection. Idempotent, like the embedded ``close()``."""
+        """Release the connection. Idempotent, like the embedded ``close()``.
+
+        Every session opened through :meth:`begin` that is still active is
+        rolled back first (D21). Dropping the handle without this leaves a
+        committable write transaction on the server until the ``session_ttl``
+        sweep reaches it — up to twice the TTL — and anyone who knows the
+        session id can still commit it.
+        """
+        if not self._closed:
+            # Roll back before flipping _closed: _session_action goes through
+            # _ensure_open.
+            for txn in list(self._transactions):
+                txn._rollback_quietly()
+            self._drain_pending_rollbacks()
+        self._transactions.clear()
+        del self._pending_rollbacks[:]
         self._closed = True
         self._transport.close()
 
@@ -896,6 +985,13 @@ class RemoteDatabase:
         self._ensure_open()
         # The embedded binder is the single source of truth for `?` (D2).
         bound = _bind_sql_params(sql, params)
+        if not bound.strip():
+            # `Database.execute_sql("")` returns None; the server answers
+            # INVALID_REQUEST ("sql must not be empty"). Blank input is decided
+            # on the client so the last chunk of a split migration file behaves
+            # the same on both surfaces (D23). Binding runs first, so a bad
+            # parameter list still raises before the short circuit.
+            return None
         body = self._request_json(
             "POST",
             self._sql_path,
@@ -919,6 +1015,35 @@ class RemoteDatabase:
             None,
             context=f"session {action}",
         )
+
+    def _end_session_quietly(self, session_id: str) -> None:
+        """Roll back ``session_id`` on a cleanup path, never raising (D21).
+
+        A finalizer can fire on any thread and at any allocation, including one
+        inside an exchange this client is already running. The transport lock is
+        reentrant, so sending now would interleave two requests on one
+        connection; park the session instead and drain it in :meth:`close`.
+        """
+        if self._closed:
+            return
+        if self._transport.in_flight:
+            self._pending_rollbacks.append(session_id)
+            return
+        self._drain_pending_rollbacks()
+        self._try_rollback(session_id)
+
+    def _drain_pending_rollbacks(self) -> None:
+        while self._pending_rollbacks:
+            self._try_rollback(self._pending_rollbacks.pop(0))
+
+    def _try_rollback(self, session_id: str) -> None:
+        try:
+            self._session_action(session_id, "rollback")
+        except Exception:
+            # Unreachable session: a dead server, an expired lease, or a closed
+            # handle. The server's session_ttl sweep is the only remedy left and
+            # a cleanup path that raised would be worse than the leak.
+            pass
 
     def _request_json(
         self,
