@@ -1,0 +1,165 @@
+{
+  "schema": "alopex-issue-196-responsibility-graph-v1",
+  "owners": [
+    {
+      "id": "current-quality",
+      "responsibility": "Fast formatting, lint, and compile-quality feedback for the current tree"
+    },
+    {
+      "id": "current-implementation",
+      "responsibility": "Behavior of the current implementation and its active feature combinations"
+    },
+    {
+      "id": "historical-compatibility",
+      "responsibility": "Explicit persisted-data and API compatibility contracts from supported historical releases"
+    },
+    {
+      "id": "delivery-contract",
+      "responsibility": "Release artifacts and public surfaces that are delivered to users"
+    },
+    {
+      "id": "exhaustive-performance",
+      "responsibility": "Expensive performance and exhaustive checks that are not merge-gate feedback"
+    }
+  ],
+  "inventory": {
+    "sources": [
+      ".github/workflows/ci.yml",
+      "scripts/release/v06_gate.sh",
+      "scripts/release/v07_gate.sh",
+      "crates/alopex-tools/v08/verify-v08-surfaces.sh"
+    ],
+    "source_build_boundaries": {
+      ".github/workflows/ci.yml": "workflow-job-specific-target",
+      "scripts/release/v06_gate.sh": "nested-release-default-target",
+      "scripts/release/v07_gate.sh": "nested-release-default-target",
+      "crates/alopex-tools/v08/verify-v08-surfaces.sh": "target/alopex-tools-v08-surfaces"
+    },
+    "ownership_rules": [
+      {
+        "owner": "historical-compatibility",
+        "command_regex": "(open_compat_recovery|txn_snapshot_isolation_v06|format_compatibility|v07_compatibility)"
+      },
+      {
+        "owner": "exhaustive-performance",
+        "command_regex": "(lane_perf|stability_bench|embedded_compaction_latency)"
+      },
+      {
+        "owner": "current-quality",
+        "verbs": [
+          "fmt",
+          "clippy",
+          "check"
+        ]
+      },
+      {
+        "owner": "delivery-contract",
+        "source_regex": "crates/alopex-tools/v08/verify-v08-surfaces\\.sh"
+      },
+      {
+        "owner": "delivery-contract",
+        "command_regex": "cargo (build .*--release|clean )"
+      },
+      {
+        "owner": "current-implementation",
+        "default": true
+      }
+    ]
+  },
+  "current_graph": {
+    "description": "Observed main-branch orchestration; edges mean invokes or contains after the CI job starts.",
+    "edges": [
+      {
+        "from": "v08-release-gate",
+        "to": "v07-gate",
+        "evidence": ".github/workflows/ci.yml -> scripts/release/v07_gate.sh"
+      },
+      {
+        "from": "v07-gate",
+        "to": "v06-gate",
+        "evidence": "scripts/release/v07_gate.sh -> scripts/release/v06_gate.sh"
+      },
+      {
+        "from": "v08-release-gate",
+        "to": "v08-surface-verifier",
+        "evidence": ".github/workflows/ci.yml -> crates/alopex-tools/v08/verify-v08-surfaces.sh"
+      }
+    ]
+  },
+  "target_graph": {
+    "description": "Each verification responsibility has one owner; the final gate joins owner statuses only.",
+    "final_gate_needs": [
+      "current-quality",
+      "current-implementation",
+      "historical-compatibility",
+      "delivery-contract",
+      "exhaustive-performance"
+    ],
+    "final_gate_commands": []
+  },
+  "invariants": [
+    "one-owner-per-observed-signature",
+    "no-version-gate-invokes-another-version-gate",
+    "final-gate-is-status-only",
+    "expensive-and-performance-work-is-not-a-merge-gate-responsibility",
+    "target-and-cache-lifecycle-is-explicit-per-owner"
+  ],
+  "measurement": {
+    "samples": 3,
+    "probe": [
+      "cargo",
+      "test",
+      "-p",
+      "alopex-dataframe",
+      "--tests",
+      "--features",
+      "lane_ci",
+      "--locked",
+      "--timings"
+    ],
+    "environment": {
+      "CARGO_INCREMENTAL": "0",
+      "CARGO_PROFILE_DEV_DEBUG": "0",
+      "CARGO_PROFILE_TEST_DEBUG": "0",
+      "CARGO_NET_OFFLINE": "true"
+    },
+    "graphs": [
+      {
+        "id": "nested-version-topology",
+        "steps": [
+          {
+            "id": "v07-current-implementation-copy",
+            "owner": "current-implementation",
+            "target_slot": "v07-default-boundary"
+          },
+          {
+            "id": "v08-current-implementation-copy",
+            "owner": "current-implementation",
+            "target_slot": "v08-separate-boundary"
+          }
+        ]
+      },
+      {
+        "id": "responsibility-topology",
+        "steps": [
+          {
+            "id": "current-implementation-owner",
+            "owner": "current-implementation",
+            "target_slot": "current-implementation"
+          }
+        ]
+      }
+    ]
+  },
+  "experiment_workflow": {
+    "final_gate_job": "experiment-success",
+    "final_gate_needs": [
+      "isolation-contract",
+      "responsibility-contract",
+      "build-signature-inventory",
+      "current-implementation-ab",
+      "historical-compatibility",
+      "delivery-contract"
+    ]
+  }
+}

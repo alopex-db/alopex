@@ -1,0 +1,121 @@
+name: Issue 196 local responsibility experiment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ISSUE196_RUNTIME_DIR: /experiment
+  CARGO_HOME: /experiment/cargo-home
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_NET_OFFLINE: "true"
+  CARGO_TERM_COLOR: always
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  isolation-contract:
+    name: Experiment isolation contract
+    runs-on: issue-196-rust
+    steps:
+      - name: Prove existing CI, tests, and source are unchanged
+        run: >-
+          python3 scripts/issue196_experiment/verify_isolation.py
+          --workflow-only
+
+  responsibility-contract:
+    name: Responsibility graph contract
+    needs: [isolation-contract]
+    runs-on: issue-196-rust
+    steps:
+      - name: Check ownership and A/B topology invariants
+        run: >-
+          python3 -m unittest
+          scripts.issue196_experiment.tests.test_responsibility_graph
+          -v
+
+  build-signature-inventory:
+    name: Existing build-signature inventory
+    needs: [isolation-contract]
+    runs-on: issue-196-rust
+    steps:
+      - name: Assign every observed Cargo signature to one responsibility owner
+        run: >-
+          python3 scripts/issue196_experiment/inventory_build_signatures.py
+          --root .
+          --manifest scripts/issue196_experiment/responsibility_graph.json
+          --output /experiment/inventory.json
+
+  current-implementation-ab:
+    name: Current implementation graph A/B owner
+    needs:
+      - responsibility-contract
+      - build-signature-inventory
+    runs-on: issue-196-rust
+    steps:
+      - name: Measure nested and responsibility topologies cold and warm three times
+        run: >-
+          python3 scripts/issue196_experiment/run_ab_measurement.py
+          --root .
+          --runtime /experiment
+          --manifest scripts/issue196_experiment/responsibility_graph.json
+          --output /experiment/ab-results.json
+
+  historical-compatibility:
+    name: Historical compatibility owner
+    needs: [isolation-contract]
+    runs-on: issue-196-rust
+    steps:
+      - name: Run the existing historical release contract independently
+        run: >-
+          python3 scripts/issue196_experiment/record_command.py
+          --owner historical-compatibility
+          --output /experiment/results/historical-compatibility.json
+          -- python3 -m unittest scripts.release.tests.test_release_contract
+
+  delivery-contract:
+    name: Delivery contract owner
+    needs: [isolation-contract]
+    runs-on: issue-196-rust
+    steps:
+      - name: Run the existing CI delivery contract independently
+        run: >-
+          python3 scripts/issue196_experiment/record_command.py
+          --owner delivery-contract
+          --output /experiment/results/delivery-contract.json
+          -- python3 -m unittest scripts.release.tests.test_ci_workflow_contracts
+
+  experiment-success:
+    name: Issue 196 experiment success
+    needs:
+      - isolation-contract
+      - responsibility-contract
+      - build-signature-inventory
+      - current-implementation-ab
+      - historical-compatibility
+      - delivery-contract
+    if: always()
+    runs-on: issue-196-rust
+    steps:
+      - name: Join owner statuses without rerunning verification
+        run: |
+          [[ "${{ needs.isolation-contract.result }}" == "success" ]]
+          [[ "${{ needs.responsibility-contract.result }}" == "success" ]]
+          [[ "${{ needs.build-signature-inventory.result }}" == "success" ]]
+          [[ "${{ needs.current-implementation-ab.result }}" == "success" ]]
+          [[ "${{ needs.historical-compatibility.result }}" == "success" ]]
+          [[ "${{ needs.delivery-contract.result }}" == "success" ]]
+
+  experiment-metrics:
+    name: Experiment metrics
+    needs: [experiment-success]
+    if: always()
+    runs-on: issue-196-rust
+    steps:
+      - name: Summarize responsibility evidence and isolated bytes
+        run: >-
+          python3 scripts/issue196_experiment/summarize_results.py
+          --runtime /experiment
