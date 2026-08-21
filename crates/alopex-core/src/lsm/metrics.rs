@@ -14,6 +14,10 @@ pub struct LsmMetrics {
     sstable_read_bytes: AtomicU64,
     compaction_bytes_written: AtomicU64,
     compaction_duration_ms: AtomicU64,
+    converge_count: AtomicU64,
+    converge_bytes_written: AtomicU64,
+    converge_duration_ms: AtomicU64,
+    rehydrate_bytes_read: AtomicU64,
 }
 
 impl LsmMetrics {
@@ -53,6 +57,21 @@ impl LsmMetrics {
         self.compaction_duration_ms.fetch_add(ms, Ordering::Relaxed);
     }
 
+    /// `.alopex` コンテナへの収束を 1 回記録する。
+    pub fn record_converge(&self, bytes_written: u64, duration_ms: u64) {
+        self.converge_count.fetch_add(1, Ordering::Relaxed);
+        self.converge_bytes_written
+            .fetch_add(bytes_written, Ordering::Relaxed);
+        self.converge_duration_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
+    }
+
+    /// コンテナから読み出したバイト数を加算する。
+    pub fn add_rehydrate_bytes_read(&self, bytes: u64) {
+        self.rehydrate_bytes_read
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
     /// 現在値のスナップショットを返す。
     pub fn counters_snapshot(&self) -> LsmMetricsCountersSnapshot {
         LsmMetricsCountersSnapshot {
@@ -63,6 +82,10 @@ impl LsmMetrics {
             sstable_read_bytes: self.sstable_read_bytes.load(Ordering::Relaxed),
             compaction_bytes_written: self.compaction_bytes_written.load(Ordering::Relaxed),
             compaction_duration_ms: self.compaction_duration_ms.load(Ordering::Relaxed),
+            converge_count: self.converge_count.load(Ordering::Relaxed),
+            converge_bytes_written: self.converge_bytes_written.load(Ordering::Relaxed),
+            converge_duration_ms: self.converge_duration_ms.load(Ordering::Relaxed),
+            rehydrate_bytes_read: self.rehydrate_bytes_read.load(Ordering::Relaxed),
         }
     }
 }
@@ -84,6 +107,14 @@ pub struct LsmMetricsCountersSnapshot {
     pub compaction_bytes_written: u64,
     /// Compaction 所要時間（合計 ms）。
     pub compaction_duration_ms: u64,
+    /// `.alopex` コンテナへ収束した回数。
+    pub converge_count: u64,
+    /// 収束で書き出した合計バイト数。
+    pub converge_bytes_written: u64,
+    /// 収束の合計所要時間（ms）。
+    pub converge_duration_ms: u64,
+    /// コンテナから復元した合計バイト数。
+    pub rehydrate_bytes_read: u64,
 }
 
 /// メトリクススナップショット（設計書 §11.1 に対応）。
@@ -109,6 +140,14 @@ pub struct LsmMetricsSnapshot {
     pub compaction_bytes_written: u64,
     /// Compaction 所要時間（合計 ms）。
     pub compaction_duration_ms: u64,
+    /// `.alopex` コンテナへ収束した回数。
+    pub converge_count: u64,
+    /// 収束で書き出した合計バイト数。
+    pub converge_bytes_written: u64,
+    /// 収束の合計所要時間（ms）。
+    pub converge_duration_ms: u64,
+    /// コンテナから復元した合計バイト数。
+    pub rehydrate_bytes_read: u64,
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

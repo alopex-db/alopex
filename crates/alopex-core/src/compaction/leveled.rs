@@ -43,6 +43,14 @@ pub struct KeyRange {
 }
 
 impl KeyRange {
+    /// Returns true if `key` falls inside this inclusive range.
+    ///
+    /// Point lookups use this to skip SSTables that provably cannot hold the key
+    /// before paying for [`crate::lsm::sstable::SSTableReader::open`].
+    pub fn contains(&self, key: &[u8]) -> bool {
+        key >= self.first_key.as_slice() && key <= self.last_key.as_slice()
+    }
+
     /// Returns true if the ranges overlap.
     pub fn overlaps(&self, other: &KeyRange) -> bool {
         !(self.last_key < other.first_key || other.last_key < self.first_key)

@@ -53,6 +53,14 @@ const FOOTER_SIZE: usize = 48;
 const FLAG_BLOOM_PRESENT: u16 = 1 << 0;
 const FLAG_COMPRESSION_MASK: u16 = 0b11 << 1;
 
+/// On-disk SSTable format version written by this build.
+///
+/// Recorded in the `.alopex` container manifest so a restored sidecar can be
+/// matched against the SSTable reader that will consume it.
+pub fn sstable_format_version() -> u16 {
+    SST_VERSION
+}
+
 fn crc32(bytes: &[u8]) -> u32 {
     crc32fast::hash(bytes)
 }

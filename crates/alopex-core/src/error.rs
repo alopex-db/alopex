@@ -179,6 +179,10 @@ pub enum Error {
     #[error("columnar error: {0}")]
     Columnar(#[from] ColumnarError),
 
+    /// The unified `.alopex` container format rejected a read or write.
+    #[error("container format error: {0}")]
+    ContainerFormat(#[from] crate::storage::format::FormatError),
+
     /// An S3 operation failed.
     #[error("S3 error: {0}")]
     S3(String),

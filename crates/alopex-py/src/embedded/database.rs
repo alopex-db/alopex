@@ -399,6 +399,16 @@ impl PyDatabase {
             self.control.reopen_after_close_failure()?;
             return Err(err);
         }
+        drop(guard);
+        // Converge into the single `.alopex` file before releasing the handle, so a
+        // convergence failure surfaces as a Python exception instead of being
+        // swallowed by the best-effort `Drop` path.
+        if let Some(db) = self.inner.as_ref() {
+            if let Err(err) = db.close() {
+                self.control.reopen_after_close_failure()?;
+                return Err(error::embedded_err(err));
+            }
+        }
         self.inner = None;
         self.control.finish_close()?;
         Ok(())
