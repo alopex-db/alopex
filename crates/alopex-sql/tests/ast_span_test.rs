@@ -46,6 +46,7 @@ fn dml_nodes_carry_spans() {
         from: vec![FromItem::Table {
             name: "t".into(),
             alias: None,
+            columns: Vec::new(),
             span: span(1, 10),
         }],
         selection: None,

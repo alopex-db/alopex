@@ -138,6 +138,46 @@ impl Default for RecursiveCteLimits {
     }
 }
 
+/// FROM-clause table functions Alopex can plan (issue #151).
+///
+/// The registry is closed: a name outside this set is a planning error rather
+/// than a call into an open function namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableFunctionKind {
+    /// `UNNEST(vector)` — one row per element.
+    Unnest,
+    /// `GENERATE_SERIES(...)` — reserved for issue #157; planning rejects it.
+    GenerateSeries,
+}
+
+impl TableFunctionKind {
+    /// Resolve a FROM-clause function name, case-insensitively.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "UNNEST" => Some(Self::Unnest),
+            "GENERATE_SERIES" => Some(Self::GenerateSeries),
+            _ => None,
+        }
+    }
+
+    /// Canonical uppercase spelling used in messages and plan output.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Unnest => "UNNEST",
+            Self::GenerateSeries => "GENERATE_SERIES",
+        }
+    }
+
+    /// Default relation name when the item carries no alias (PostgreSQL uses
+    /// the lowercase function name).
+    pub fn default_relation_name(self) -> &'static str {
+        match self {
+            Self::Unnest => "unnest",
+            Self::GenerateSeries => "generate_series",
+        }
+    }
+}
+
 /// Logical query plan representation.
 ///
 /// This enum represents all possible logical operations that can be performed.
@@ -210,6 +250,36 @@ pub enum LogicalPlan {
         condition: Option<TypedExpr>,
         /// Optional USING columns.
         using: Option<Vec<String>>,
+    },
+
+    /// LATERAL join (issue #151).
+    ///
+    /// The right input is a correlated relation: it is planned against the left
+    /// row and re-executed once per left row, so it cannot be reordered with or
+    /// hoisted above the left side the way [`LogicalPlan::Join`] can.
+    LateralJoin {
+        /// Left input, executed once.
+        left: Box<LogicalPlan>,
+        /// Correlated right input, executed once per left row with the left
+        /// row supplied as the outer row.
+        right: Box<LogicalPlan>,
+        /// `Inner`, `Left`, or `Cross`; RIGHT and FULL are rejected in planning.
+        join_type: JoinType,
+        /// Optional ON condition over the concatenated (left, right) row.
+        condition: Option<TypedExpr>,
+        /// Output schema of the right input, kept so a LEFT join can pad even
+        /// when the left input is empty.
+        right_schema: Vec<crate::catalog::ColumnMetadata>,
+    },
+
+    /// FROM-clause table function (issue #151).
+    TableFunction {
+        /// Which function this node evaluates.
+        function: TableFunctionKind,
+        /// Argument expressions, evaluated against the outer row.
+        args: Vec<TypedExpr>,
+        /// Output schema.
+        schema: Vec<crate::catalog::ColumnMetadata>,
     },
 
     /// Aggregate operation (GROUP BY / aggregation).
@@ -424,6 +494,8 @@ impl LogicalPlan {
             | LogicalPlan::Filter { .. }
             | LogicalPlan::Project { .. }
             | LogicalPlan::Join { .. }
+            | LogicalPlan::LateralJoin { .. }
+            | LogicalPlan::TableFunction { .. }
             | LogicalPlan::Aggregate { .. }
             | LogicalPlan::Window { .. }
             | LogicalPlan::SetOperation { .. }
@@ -593,6 +665,8 @@ impl LogicalPlan {
             LogicalPlan::Filter { .. } => "Filter",
             LogicalPlan::Project { .. } => "Project",
             LogicalPlan::Join { .. } => "Join",
+            LogicalPlan::LateralJoin { .. } => "LateralJoin",
+            LogicalPlan::TableFunction { .. } => "TableFunction",
             LogicalPlan::Aggregate { .. } => "Aggregate",
             LogicalPlan::Window { .. } => "Window",
             LogicalPlan::SetOperation { .. } => "SetOperation",
@@ -621,6 +695,8 @@ impl LogicalPlan {
                 | LogicalPlan::Filter { .. }
                 | LogicalPlan::Project { .. }
                 | LogicalPlan::Join { .. }
+                | LogicalPlan::LateralJoin { .. }
+                | LogicalPlan::TableFunction { .. }
                 | LogicalPlan::Aggregate { .. }
                 | LogicalPlan::Window { .. }
                 | LogicalPlan::SetOperation { .. }
@@ -665,7 +741,10 @@ impl LogicalPlan {
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::DistinctOn { input, .. }
             | LogicalPlan::Limit { input, .. } => Some(input),
-            LogicalPlan::Join { .. } | LogicalPlan::Values { .. } => None,
+            LogicalPlan::Join { .. }
+            | LogicalPlan::LateralJoin { .. }
+            | LogicalPlan::TableFunction { .. }
+            | LogicalPlan::Values { .. } => None,
             LogicalPlan::SetOperation { .. } => None,
             LogicalPlan::RecursiveCte { .. } | LogicalPlan::RecursiveReference { .. } => None,
             _ => None,
@@ -693,7 +772,9 @@ impl LogicalPlan {
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::DistinctOn { input, .. }
             | LogicalPlan::Limit { input, .. } => input.table_name(),
-            LogicalPlan::Join { .. } => None,
+            LogicalPlan::Join { .. }
+            | LogicalPlan::LateralJoin { .. }
+            | LogicalPlan::TableFunction { .. } => None,
             LogicalPlan::SetOperation { left, right, .. } => left
                 .table_name()
                 .filter(|name| right.table_name() == Some(*name)),
@@ -709,7 +790,7 @@ impl LogicalPlan {
     /// opened rather than trying to infer it from a table name.
     pub fn contains_join(&self) -> bool {
         match self {
-            LogicalPlan::Join { .. } => true,
+            LogicalPlan::Join { .. } | LogicalPlan::LateralJoin { .. } => true,
             LogicalPlan::SetOperation { left, right, .. } => {
                 left.contains_join() || right.contains_join()
             }
@@ -739,7 +820,8 @@ impl LogicalPlan {
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::DistinctOn { input, .. }
             | LogicalPlan::Limit { input, .. } => input.contains_set_operation(),
-            LogicalPlan::Join { left, right, .. } => {
+            LogicalPlan::Join { left, right, .. }
+            | LogicalPlan::LateralJoin { left, right, .. } => {
                 left.contains_set_operation() || right.contains_set_operation()
             }
             _ => false,

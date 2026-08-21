@@ -27,7 +27,7 @@ pub use error::PlannerError;
 pub use knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
 pub use logical_plan::{
     JoinType, LogicalPlan, OffsetWindowFunction, RecursiveCteLimits, SetOperator,
-    ValueWindowFunction, WindowExpr, WindowFunction,
+    TableFunctionKind, ValueWindowFunction, WindowExpr, WindowFunction,
 };
 pub use name_resolver::{NameResolver, ResolvedColumn};
 pub use type_checker::{ScopedTable, TypeChecker};
@@ -80,7 +80,7 @@ fn direct_from_reference_count(items: &[FromItem], name: &str) -> usize {
                 direct_from_item_reference_count(left, name)
                     + direct_from_item_reference_count(right, name)
             }
-            FromItem::Derived { .. } => 0,
+            FromItem::Derived { .. } | FromItem::Function { .. } => 0,
         })
         .sum()
 }
@@ -94,7 +94,7 @@ fn direct_from_item_reference_count(item: &FromItem, name: &str) -> usize {
             direct_from_item_reference_count(left, name)
                 + direct_from_item_reference_count(right, name)
         }
-        FromItem::Derived { .. } => 0,
+        FromItem::Derived { .. } | FromItem::Function { .. } => 0,
     }
 }
 
@@ -108,6 +108,10 @@ fn select_table_reference_count(select: &Select, name: &str) -> usize {
                 from_item_count(left, name) + from_item_count(right, name)
             }
             FromItem::Derived { subquery, .. } => query_body_table_reference_count(subquery, name),
+            // A table-function argument is an expression; expression-level
+            // subqueries are outside this FROM-shape count, exactly as they
+            // are for WHERE and the projection.
+            FromItem::Function { .. } => 0,
         }
     }
 
@@ -266,7 +270,9 @@ fn expr_contains_subquery(expr: &Expr) -> bool {
 fn from_item_contains_subquery(item: &FromItem) -> bool {
     match item {
         FromItem::Table { .. } => false,
-        FromItem::Derived { .. } => true,
+        // A table function is a correlated relation source, so it is treated
+        // as a subquery boundary wherever one is rejected (issue #151).
+        FromItem::Derived { .. } | FromItem::Function { .. } => true,
         FromItem::Join {
             left,
             right,
@@ -635,6 +641,12 @@ impl TableReferenceExtractor {
                 right,
                 condition,
                 ..
+            }
+            | LogicalPlan::LateralJoin {
+                left,
+                right,
+                condition,
+                ..
             } => {
                 self.extract_plan(
                     left,
@@ -652,6 +664,11 @@ impl TableReferenceExtractor {
                 );
                 if let Some(condition) = condition {
                     self.extract_typed_expr(condition, diagnostics, references);
+                }
+            }
+            LogicalPlan::TableFunction { args, .. } => {
+                for arg in args {
+                    self.extract_typed_expr(arg, diagnostics, references);
                 }
             }
             LogicalPlan::Aggregate {
@@ -2766,20 +2783,36 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     )],
                 })
             }
-            [single] => self.plan_from_item(single, 0, outer_scope, ctes),
+            [single] => self.plan_from_item(single, 0, outer_scope, outer_scope, ctes),
             [first, rest @ ..] => {
-                let mut relation = self.plan_from_item(first, 0, outer_scope, ctes)?;
+                let mut relation = self.plan_from_item(first, 0, outer_scope, outer_scope, ctes)?;
                 for item in rest {
+                    // Comma-separated items are an implicit cross join, so a
+                    // later item may be LATERAL over everything to its left.
+                    let left_width = relation.schema.len();
+                    let lateral_scope =
+                        lateral_outer_scope(&relation.scope, 0, left_width, outer_scope);
                     let right =
-                        self.plan_from_item(item, relation.schema.len(), outer_scope, ctes)?;
-                    relation = self.combine_join_relation(
-                        relation,
-                        right,
-                        JoinType::Cross,
-                        None,
-                        None,
-                        select_span,
-                    )?;
+                        self.plan_from_item(item, left_width, outer_scope, &lateral_scope, ctes)?;
+                    relation = if from_item_is_lateral(item) {
+                        self.combine_lateral_join_relation(
+                            relation,
+                            right,
+                            JoinType::Cross,
+                            None,
+                            None,
+                            select_span,
+                        )?
+                    } else {
+                        self.combine_join_relation(
+                            relation,
+                            right,
+                            JoinType::Cross,
+                            None,
+                            None,
+                            select_span,
+                        )?
+                    };
                 }
                 Ok(relation)
             }
@@ -2791,10 +2824,16 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         item: &FromItem,
         start_index: usize,
         outer_scope: &[ScopedTable],
+        lateral_scope: &[ScopedTable],
         ctes: &CtePlans,
     ) -> Result<PlannedRelation, PlannerError> {
         match item {
-            FromItem::Table { name, alias, span } => {
+            FromItem::Table {
+                name,
+                alias,
+                columns,
+                span,
+            } => {
                 if let Some(cte) = ctes.get(name) {
                     let mut relation = cte.clone();
                     relation.plan = LogicalPlan::Project {
@@ -2803,11 +2842,10 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                             relation.schema.iter().map(|col| col.name.clone()).collect(),
                         ),
                     };
+                    let relation_name = alias.clone().unwrap_or_else(|| name.clone());
+                    apply_alias_columns(&relation_name, columns, &mut relation.schema, *span)?;
                     relation.scope = vec![ScopedTable::new(
-                        TableMetadata::new(
-                            alias.clone().unwrap_or_else(|| name.clone()),
-                            relation.schema.clone(),
-                        ),
+                        TableMetadata::new(relation_name, relation.schema.clone()),
                         start_index,
                     )];
                     return Ok(relation);
@@ -2817,18 +2855,39 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 if let Some(alias) = alias {
                     scope_table.name = alias.clone();
                 }
-                let schema = table.columns.clone();
+                let mut schema = table.columns.clone();
+                // The physical scan keeps the stored column names; only the
+                // relation the query sees is renamed (issue #151, D8).
+                let projection =
+                    Projection::All(schema.iter().map(|col| col.name.clone()).collect());
+                apply_alias_columns(&scope_table.name, columns, &mut schema, *span)?;
+                scope_table.columns = schema.clone();
                 Ok(PlannedRelation {
                     plan: LogicalPlan::Scan {
                         table: name.clone(),
-                        projection: Projection::All(
-                            schema.iter().map(|col| col.name.clone()).collect(),
-                        ),
+                        projection,
                     },
                     schema,
                     scope: vec![ScopedTable::new(scope_table, start_index)],
                 })
             }
+            FromItem::Function {
+                name,
+                args,
+                alias,
+                columns,
+                span,
+                ..
+            } => self.plan_table_function(
+                name,
+                args,
+                alias.as_deref(),
+                columns,
+                *span,
+                start_index,
+                lateral_scope,
+                ctes,
+            ),
             FromItem::Join {
                 left,
                 right,
@@ -2838,11 +2897,38 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 natural,
                 span,
             } => {
-                let left_relation = self.plan_from_item(left, start_index, outer_scope, ctes)?;
+                let right_lateral = from_item_is_lateral(right);
+                if right_lateral {
+                    // PostgreSQL rejects the same shape: a correlated relation
+                    // cannot be the null-supplying side of the join (D3).
+                    let unsupported = match join_type {
+                        crate::ast::dml::JoinType::Right => Some("RIGHT"),
+                        crate::ast::dml::JoinType::Full => Some("FULL"),
+                        _ => None,
+                    };
+                    if let Some(kind) = unsupported {
+                        return Err(PlannerError::lateral_join_type_unsupported(kind, *span));
+                    }
+                }
+                let left_relation =
+                    self.plan_from_item(left, start_index, outer_scope, lateral_scope, ctes)?;
+                // A LATERAL right side is planned against the left row, which
+                // is the row the executor supplies as its outer row. An
+                // ordinary right side never reads this scope, so the rebase is
+                // only paid where it is used.
+                let right_lateral_scope = right_lateral.then(|| {
+                    lateral_outer_scope(
+                        &left_relation.scope,
+                        start_index,
+                        left_relation.schema.len(),
+                        outer_scope,
+                    )
+                });
                 let right_relation = self.plan_from_item(
                     right,
                     start_index + left_relation.schema.len(),
                     outer_scope,
+                    right_lateral_scope.as_deref().unwrap_or(lateral_scope),
                     ctes,
                 )?;
                 let expr_scope = left_relation
@@ -2881,28 +2967,40 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         *span,
                     )?
                 };
-                self.combine_join_relation(
-                    left_relation,
-                    right_relation,
-                    map_join_type(*join_type),
-                    typed_condition,
-                    using,
-                    *span,
-                )
+                if right_lateral {
+                    self.combine_lateral_join_relation(
+                        left_relation,
+                        right_relation,
+                        map_join_type(*join_type),
+                        typed_condition,
+                        using.as_deref(),
+                        *span,
+                    )
+                } else {
+                    self.combine_join_relation(
+                        left_relation,
+                        right_relation,
+                        map_join_type(*join_type),
+                        typed_condition,
+                        using,
+                        *span,
+                    )
+                }
             }
             FromItem::Derived {
                 subquery,
                 alias,
                 columns,
+                lateral,
                 span,
             } => {
                 // A derived table is evaluated independently of the query it
                 // sits in, so nothing from the enclosing scopes is visible
-                // inside it. Only LATERAL lifts that restriction, and Alopex
-                // does not accept LATERAL yet. Passing `outer_scope` through
-                // here would resolve an outer name into a correlated reference
-                // the user never wrote, so the scope stops at this boundary.
-                let mut relation = self.plan_query_body_relation(subquery, &[], ctes)?;
+                // inside it (D4). LATERAL is what lifts that restriction:
+                // passing the scope through unconditionally would resolve an
+                // outer name into a correlated reference the user never wrote.
+                let visible: &[ScopedTable] = if *lateral { lateral_scope } else { &[] };
+                let mut relation = self.plan_query_body_relation(subquery, visible, ctes)?;
                 let alias = alias.clone().ok_or_else(|| {
                     PlannerError::invalid_expression("derived table requires an alias".to_string())
                 })?;
@@ -2915,27 +3013,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     input: Box::new(relation.plan),
                     projection: Projection::All(source_names),
                 };
-                if !columns.is_empty() {
-                    if columns.len() != relation.schema.len() {
-                        return Err(PlannerError::table_alias_column_count_mismatch(
-                            &alias,
-                            columns.len(),
-                            relation.schema.len(),
-                            *span,
-                        ));
-                    }
-                    let mut names = HashSet::new();
-                    for name in columns {
-                        if !names.insert(name) {
-                            return Err(PlannerError::invalid_expression(format!(
-                                "derived table alias '{alias}' declares column '{name}' more than once"
-                            )));
-                        }
-                    }
-                    for (column, alias) in relation.schema.iter_mut().zip(columns) {
-                        column.name.clone_from(alias);
-                    }
-                }
+                apply_alias_columns(&alias, columns, &mut relation.schema, *span)?;
                 relation.scope = vec![ScopedTable::new(
                     TableMetadata::new(alias, relation.schema.clone()),
                     start_index,
@@ -2943,6 +3021,106 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 Ok(relation)
             }
         }
+    }
+
+    /// Plan a FROM-clause table function (issue #151).
+    ///
+    /// Arguments are typed against `lateral_scope`, which addresses the row the
+    /// executor supplies as the outer row: the preceding FROM items followed by
+    /// the enclosing query's own outer row. That holds whether or not LATERAL
+    /// was written, because table-function arguments are implicitly lateral
+    /// (D2).
+    #[allow(clippy::too_many_arguments)]
+    fn plan_table_function(
+        &self,
+        name: &str,
+        args: &[Expr],
+        alias: Option<&str>,
+        columns: &[String],
+        span: crate::ast::Span,
+        start_index: usize,
+        lateral_scope: &[ScopedTable],
+        ctes: &CtePlans,
+    ) -> Result<PlannedRelation, PlannerError> {
+        let Some(function) = TableFunctionKind::from_name(name) else {
+            return Err(PlannerError::unknown_table_function(name, span));
+        };
+        if function == TableFunctionKind::GenerateSeries {
+            return Err(PlannerError::unsupported_feature(
+                "table function GENERATE_SERIES",
+                "a future version (issue #157)",
+                span,
+            ));
+        }
+
+        if args.len() != 1 {
+            return Err(PlannerError::invalid_expression(format!(
+                "table function UNNEST takes exactly 1 argument, found {}",
+                args.len()
+            )));
+        }
+        let typed_arg = self.infer_expr_with_scope(&args[0], lateral_scope, ctes)?;
+        if !matches!(
+            typed_arg.resolved_type,
+            ResolvedType::Vector { .. } | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "VECTOR",
+                typed_arg.resolved_type.to_string(),
+                args[0].span,
+            ));
+        }
+
+        // A VECTOR holds f32 elements, so the single output column is FLOAT
+        // and is named after the function, as PostgreSQL names it (D6/D7).
+        let mut schema = vec![ColumnMetadata::new(
+            function.default_relation_name(),
+            ResolvedType::Float,
+        )];
+        let relation_name = alias
+            .map(str::to_string)
+            .unwrap_or_else(|| function.default_relation_name().to_string());
+        apply_alias_columns(&relation_name, columns, &mut schema, span)?;
+
+        Ok(PlannedRelation {
+            plan: LogicalPlan::TableFunction {
+                function,
+                args: vec![typed_arg],
+                schema: schema.clone(),
+            },
+            schema: schema.clone(),
+            scope: vec![ScopedTable::new(
+                TableMetadata::new(relation_name, schema),
+                start_index,
+            )],
+        })
+    }
+
+    fn combine_lateral_join_relation(
+        &self,
+        left: PlannedRelation,
+        right: PlannedRelation,
+        join_type: JoinType,
+        condition: Option<TypedExpr>,
+        using: Option<&[String]>,
+        _span: crate::ast::Span,
+    ) -> Result<PlannedRelation, PlannerError> {
+        // USING/NATURAL merges the common columns the same way it does for an
+        // ordinary join; only the execution strategy differs. The merged
+        // equality already lives in `condition`, so the node itself does not
+        // carry the column list.
+        let (schema, scope) = combine_join_shape(&left, &right, using);
+        Ok(PlannedRelation {
+            plan: LogicalPlan::LateralJoin {
+                left: Box::new(left.plan),
+                right: Box::new(right.plan),
+                join_type,
+                condition,
+                right_schema: right.schema,
+            },
+            schema,
+            scope,
+        })
     }
 
     fn combine_join_relation(
@@ -2954,35 +3132,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         using: Option<Vec<String>>,
         _span: crate::ast::Span,
     ) -> Result<PlannedRelation, PlannerError> {
-        let mut schema = left.schema.clone();
-        schema.extend(right.schema.clone());
-        let mut scope = left.scope.clone();
-        let mut right_scope = right.scope.clone();
-        if let Some(columns) = &using {
-            // The right-hand copy of a common column stops being an unqualified
-            // candidate, and the surviving left-hand column records where its
-            // partner lives so that an unqualified reference can merge the two.
-            for column in columns {
-                let right_index = right_scope.iter().find_map(|table| {
-                    table
-                        .table
-                        .get_column_index(column)
-                        .map(|index| table.start_index + index)
-                });
-                let Some(right_index) = right_index else {
-                    continue;
-                };
-                for table in &mut scope {
-                    if table.table.get_column_index(column).is_some() {
-                        table.merge_column_with(column, right_index);
-                    }
-                }
-            }
-            for table in &mut right_scope {
-                table.hide_unqualified_columns(columns);
-            }
-        }
-        scope.extend(right_scope);
+        let (schema, scope) = combine_join_shape(&left, &right, using.as_deref());
         Ok(PlannedRelation {
             plan: LogicalPlan::Join {
                 left: Box::new(left.plan),
@@ -5609,6 +5759,125 @@ fn visible_wildcard_columns(schema: &[ColumnMetadata], scope: &[ScopedTable]) ->
         })
         .map(|(_, column)| column.name.clone())
         .collect()
+}
+
+/// Output schema and name scope of a join over `left` and `right`.
+///
+/// Shared by the plain and LATERAL join builders so both expose the same
+/// USING/NATURAL column merging.
+fn combine_join_shape(
+    left: &PlannedRelation,
+    right: &PlannedRelation,
+    using: Option<&[String]>,
+) -> (Vec<ColumnMetadata>, Vec<ScopedTable>) {
+    let mut schema = left.schema.clone();
+    schema.extend(right.schema.clone());
+    let mut scope = left.scope.clone();
+    let mut right_scope = right.scope.clone();
+    if let Some(columns) = using {
+        // The right-hand copy of a common column stops being an unqualified
+        // candidate, and the surviving left-hand column records where its
+        // partner lives so that an unqualified reference can merge the two.
+        for column in columns {
+            let right_index = right_scope.iter().find_map(|table| {
+                table
+                    .table
+                    .get_column_index(column)
+                    .map(|index| table.start_index + index)
+            });
+            let Some(right_index) = right_index else {
+                continue;
+            };
+            for table in &mut scope {
+                if table.table.get_column_index(column).is_some() {
+                    table.merge_column_with(column, right_index);
+                }
+            }
+        }
+        for table in &mut right_scope {
+            table.hide_unqualified_columns(columns);
+        }
+    }
+    scope.extend(right_scope);
+    (schema, scope)
+}
+
+/// Whether this FROM item is evaluated once per row of everything to its left.
+///
+/// An explicit `LATERAL` marks a derived table; a table function is implicitly
+/// lateral because its arguments may reference the preceding items (D2).
+fn from_item_is_lateral(item: &FromItem) -> bool {
+    match item {
+        FromItem::Derived { lateral, .. } => *lateral,
+        FromItem::Function { .. } => true,
+        FromItem::Table { .. } | FromItem::Join { .. } => false,
+    }
+}
+
+/// Scope a LATERAL item sees, addressed against the outer row the executor
+/// builds for it: the left join row followed by the enclosing outer row.
+///
+/// `base` is the output offset the left relation was planned at, so its scope
+/// is rebased to 0; the enclosing scope shifts past the left row. Neither side
+/// changes `scope_level` here, because planning the lateral relation applies
+/// [`offset_scope`] once and that is the single level it is nested by.
+fn lateral_outer_scope(
+    left_scope: &[ScopedTable],
+    base: usize,
+    left_width: usize,
+    outer_scope: &[ScopedTable],
+) -> Vec<ScopedTable> {
+    debug_assert!(
+        left_scope.iter().all(|table| table.start_index >= base),
+        "a FROM item's left sibling scope must start at the join's own base"
+    );
+    left_scope
+        .iter()
+        .cloned()
+        .map(|mut table| {
+            table.start_index -= base;
+            table
+        })
+        .chain(outer_scope.iter().cloned().map(|mut table| {
+            table.start_index += left_width;
+            table
+        }))
+        .collect()
+}
+
+/// Apply a relation alias column-name list to `schema` in place.
+///
+/// Exact arity is required for every relation kind, and a repeated name is
+/// rejected (issue #151, D8).
+fn apply_alias_columns(
+    alias: &str,
+    columns: &[String],
+    schema: &mut [ColumnMetadata],
+    span: crate::ast::Span,
+) -> Result<(), PlannerError> {
+    if columns.is_empty() {
+        return Ok(());
+    }
+    if columns.len() != schema.len() {
+        return Err(PlannerError::table_alias_column_count_mismatch(
+            alias,
+            columns.len(),
+            schema.len(),
+            span,
+        ));
+    }
+    let mut names = HashSet::new();
+    for name in columns {
+        if !names.insert(name) {
+            return Err(PlannerError::invalid_expression(format!(
+                "relation alias '{alias}' declares column '{name}' more than once"
+            )));
+        }
+    }
+    for (column, name) in schema.iter_mut().zip(columns) {
+        column.name.clone_from(name);
+    }
+    Ok(())
 }
 
 fn offset_scope(scope: &[ScopedTable], offset: usize) -> Vec<ScopedTable> {

@@ -30,6 +30,7 @@ fn select_from(name: &str) -> Statement {
             from: vec![FromItem::Table {
                 name: name.to_string(),
                 alias: None,
+                columns: Vec::new(),
                 span: Span::empty(),
             }],
             selection: None,
@@ -123,11 +124,13 @@ fn join_plan_extracts_both_table_references() {
                 left: Box::new(FromItem::Table {
                     name: "users".to_string(),
                     alias: None,
+                    columns: Vec::new(),
                     span: Span::empty(),
                 }),
                 right: Box::new(FromItem::Table {
                     name: "orders".to_string(),
                     alias: None,
+                    columns: Vec::new(),
                     span: Span::empty(),
                 }),
                 join_type: JoinType::Inner,

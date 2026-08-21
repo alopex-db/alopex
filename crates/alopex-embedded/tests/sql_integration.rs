@@ -603,6 +603,104 @@ fn sql_integration_grouping_sets_preserve_exact_rows() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_lateral_and_table_functions_preserve_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE lat_parent (id INTEGER PRIMARY KEY, emb VECTOR(2)); \
+         CREATE TABLE lat_child (id INTEGER PRIMARY KEY, parent_id INTEGER, val INTEGER); \
+         INSERT INTO lat_parent VALUES (1, [1.0, 2.0]), (2, [3.0, 4.0]); \
+         INSERT INTO lat_child VALUES (10, 1, 100), (11, 1, 200);",
+    )
+    .unwrap();
+
+    // A table-function argument sees the preceding FROM item without LATERAL
+    // being written (issue #151, D2).
+    let ExecutionResult::Query(unnested) = db
+        .execute_sql(
+            "SELECT p.id, u.unnest FROM lat_parent AS p, UNNEST(p.emb) AS u \
+             ORDER BY p.id, u.unnest",
+        )
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        unnested.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Float(1.0)],
+            vec![SqlValue::Integer(1), SqlValue::Float(2.0)],
+            vec![SqlValue::Integer(2), SqlValue::Float(3.0)],
+            vec![SqlValue::Integer(2), SqlValue::Float(4.0)],
+        ]
+    );
+
+    // LEFT JOIN LATERAL keeps a left row that the correlated side does not
+    // match, padded with NULLs (D10).
+    let ExecutionResult::Query(padded) = db
+        .execute_sql(
+            "SELECT p.id, l.mx FROM lat_parent AS p LEFT JOIN LATERAL \
+             (SELECT MAX(c.val) AS mx FROM lat_child AS c WHERE c.parent_id = p.id) AS l \
+             ON TRUE ORDER BY p.id",
+        )
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        padded.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(200)],
+            vec![SqlValue::Integer(2), SqlValue::Null],
+        ]
+    );
+
+    // A relation alias column list renames a base table (D8).
+    let ExecutionResult::Query(renamed) = db
+        .execute_sql("SELECT r.a FROM lat_child AS r(a, b, c) WHERE r.a = 10")
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+    assert_eq!(renamed.rows, vec![vec![SqlValue::Integer(10)]]);
+    assert_eq!(renamed.columns[0].name, "a");
+
+    let err = db
+        .execute_sql("SELECT * FROM lat_child AS r(a, b)")
+        .unwrap_err();
+    assert_eq!(err.sql_error_code(), Some("ALOPEX-T012"));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn sql_integration_readonly_txn_allows_lateral_and_table_functions() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE lat_ro (id INTEGER PRIMARY KEY, emb VECTOR(2)); \
+         INSERT INTO lat_ro VALUES (1, [1.0, 2.0]);",
+    )
+    .unwrap();
+
+    let mut ro = db.begin(TxnMode::ReadOnly).unwrap();
+    let ExecutionResult::Query(result) = ro
+        .execute_sql(
+            "SELECT t.id, u.unnest FROM lat_ro AS t CROSS JOIN LATERAL \
+             (SELECT * FROM UNNEST(t.emb)) AS u ORDER BY u.unnest",
+        )
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Float(1.0)],
+            vec![SqlValue::Integer(1), SqlValue::Float(2.0)],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_distinct_on_preserves_exact_rows() {
     let db = Database::new();
     db.execute_sql(

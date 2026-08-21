@@ -6,6 +6,32 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- SQL `FROM` supports `LATERAL` derived tables, table functions, and relation
+  alias column lists (issue #151). `CROSS JOIN LATERAL`, `[INNER] JOIN
+  LATERAL … ON`, `LEFT [OUTER] JOIN LATERAL … ON`, and comma-separated
+  `LATERAL` items evaluate the correlated right side once per left row, with a
+  `LEFT JOIN LATERAL` padding unmatched left rows; `RIGHT`/`FULL JOIN LATERAL`
+  is a stable planner error (`ALOPEX-T015`). A derived table without `LATERAL`
+  still cannot see the enclosing FROM items. `UNNEST(vector)` is the first
+  FROM-clause table function — one `FLOAT` column named `unnest`, zero rows for
+  `NULL` or an empty vector — and its argument may reference the preceding FROM
+  items without writing `LATERAL`; `GENERATE_SERIES` is reserved and reports
+  issue #157, any other name is `ALOPEX-C007`. `AS t(c1, …, cn)` now applies to
+  base tables, CTE references, derived tables, and table functions with exact
+  arity (`ALOPEX-T012`) and no repeated names. Columnar filter fusion no longer
+  applies to a correlated predicate: the `Filter` operator evaluates it over a
+  columnar scan widened to the local columns it reads, which keeps the
+  correlation boundary intact and also fixes subquery predicates over columnar
+  storage. The v0.8 remote-read catalog rejects lateral joins before transport
+  (`lateral_join_not_supported_remote`) and classifies table functions
+  local-only (`table_function_not_supported_remote`). Covered on Rust, CLI,
+  Embedded, and Python surfaces (docs/sql-lateral-table-functions.md). Parser
+  FFI contract bumped 0.13.0 → 0.14.0: `FromItem.Table` gains `columns`,
+  `FromItem.Derived` gains `lateral`, and a new `FromItem.Function` variant
+  carries `{name, args, alias, columns, lateral}`, while the staged
+  continuous-aggregate payload keeps its frozen FROM-item maps. `LATERAL`
+  stays a contextual identifier, so a relation named `lateral` keeps working.
+
 - SQL `GROUP BY` supports `GROUPING SETS`, `ROLLUP`, `CUBE`, the empty
   grouping set `()`, and the `GROUPING`/`GROUPING_ID` functions (issue #149).
   Ordinary keys cross-product with the modifiers, duplicate sets emit

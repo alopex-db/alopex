@@ -83,6 +83,14 @@ proc peekNextIsContextual(p: Parser; value: string): bool =
   let tok = lookahead.nextToken()
   tok.kind == tkIdent and tok.value.cmpIgnoreCase(value) == 0
 
+proc peekSecond(p: Parser): TokenKind =
+  ## Two-token lookahead. LATERAL stays a contextual keyword (issue #151), so
+  ## telling `FROM lateral (SELECT ...)` from a relation named `lateral` needs
+  ## the token past the parenthesis. Same copy-the-lexer discipline as peekNext.
+  var lookahead = p.lex
+  discard lookahead.nextToken()
+  lookahead.nextToken().kind
+
 proc expectContextual(p: var Parser; value: string): Token =
   if not p.checkContextual(value):
     p.error("expected " & value)
@@ -773,11 +781,39 @@ proc parseOptionalAlias(p: var Parser; item: SqlNode): SqlNode =
         discard p.advance()
         columns.add(p.expectIdent("table alias column name").value)
       discard p.expect(tkRParen)
-    if columns.len > 0 and item.kind != nkFromDerived:
-      p.error("column aliases are currently supported only for derived tables")
+    # Issue #151: a column-name list is accepted for every relation a FROM item
+    # can produce - base tables and table functions as well as derived tables.
+    if columns.len > 0 and item.kind notin {nkFromDerived, nkFromFunction, nkIdentifier}:
+      p.error("column aliases are only supported for FROM-clause relations")
     result = makeAlias(item, aliasToken.value, tokenSpan(aliasToken), columns)
 
+proc parseTableFunction(p: var Parser; name: Token; lateral: bool): SqlNode =
+  ## `name(arg, ...)` in FROM position (issue #151). children[0] is the function
+  ## name; the remaining children are the argument expressions.
+  p.enterNesting()
+  defer: p.leaveNesting()
+  discard p.expect(tkLParen)
+  result = newNode(nkFromFunction, tokenSpan(name))
+  result.lateral = lateral
+  result.children.add(newIdent(name.value, tokenSpan(name)))
+  if not p.check(tkRParen):
+    result.children.add(p.parseExpr())
+    while p.check(tkComma):
+      discard p.advance()
+      result.children.add(p.parseExpr())
+  discard p.expect(tkRParen)
+
 proc parseFromItem(p: var Parser): SqlNode =
+  # LATERAL is contextual: it only introduces a FROM item when a subquery or a
+  # table function follows, so a relation named `lateral` keeps working.
+  var lateral = false
+  if p.checkContextual("lateral"):
+    let next = p.peekNext()
+    if (next == tkLParen and p.peekSecond() in {tkSelect, tkValues, tkWith}) or
+        (next == tkIdent and p.peekSecond() == tkLParen):
+      discard p.advance()
+      lateral = true
+
   if p.check(tkLParen):
     p.enterNesting()
     defer: p.leaveNesting()
@@ -786,13 +822,17 @@ proc parseFromItem(p: var Parser): SqlNode =
       let subquery = p.parseQueryStmt()
       discard p.expect(tkRParen)
       result = newNode(nkFromDerived, tokenSpan(start))
+      result.lateral = lateral
       result.children.add(subquery)
       result = p.parseOptionalAlias(result)
     else:
       p.error("expected SELECT, VALUES, or WITH in FROM derived table")
   else:
     let name = p.expectIdent("table name")
-    result = newIdent(name.value, tokenSpan(name))
+    if p.check(tkLParen):
+      result = p.parseTableFunction(name, lateral)
+    else:
+      result = newIdent(name.value, tokenSpan(name))
     result = p.parseOptionalAlias(result)
 
 proc parseUsingClause(p: var Parser): seq[string] =

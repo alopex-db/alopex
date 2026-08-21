@@ -83,6 +83,28 @@ subtotal 行の placeholder NULL と実データ NULL はどちらも SQL NULL �
 は 4096、union キー数は 63 が上限。詳細は
 [docs/sql-grouping-sets.md](../../docs/sql-grouping-sets.md)。
 
+## LATERAL / table functions / relation alias column lists
+
+```sql
+SELECT p.id, top.val
+FROM parent AS p
+CROSS JOIN LATERAL (SELECT c.val FROM child AS c
+                    WHERE c.parent_id = p.id ORDER BY c.val DESC LIMIT 1) AS top;
+SELECT p.id, u.unnest FROM parent AS p, UNNEST(p.emb) AS u;
+SELECT r.a, r.b FROM child AS r(a, b, c);
+```
+
+`LATERAL` 派生表は左側の FROM item を参照でき、左行ごとに再評価される
+(`CROSS JOIN LATERAL` / `[INNER] JOIN LATERAL ... ON` /
+`LEFT [OUTER] JOIN LATERAL ... ON`。`RIGHT`/`FULL` は `ALOPEX-T015`)。
+`LATERAL` を書かない派生表は従来どおり外側 FROM を参照できない。FROM 句の
+table function は `UNNEST(VECTOR)` のみで、`LATERAL` なしでも左側を参照する
+(implicit lateral)。`GENERATE_SERIES` は issue #157 用の予約枠。
+`AS t(c1, ..., cn)` は base table / CTE 参照 / 派生表 / table function すべてで
+使え、列数完全一致(`ALOPEX-T012`)を要求する。`LATERAL` は文脈キーワードなの
+で `lateral` という名前の関係は引き続き使える。詳細は
+[docs/sql-lateral-table-functions.md](../../docs/sql-lateral-table-functions.md)。
+
 ## Supported Aggregate Functions
 
 - `COUNT(*)`

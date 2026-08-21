@@ -22,7 +22,8 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.10.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.11.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.13.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.14.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -192,7 +193,7 @@ proc normalizedIndexMethod(name: string): string =
 
 proc writeStatement(s: Stream; node: SqlNode)
 proc writeExpr(s: Stream; node: SqlNode)
-proc writeFromItem(s: Stream; node: SqlNode)
+proc writeFromItem(s: Stream; node: SqlNode; publicWire = true)
 proc writeDataType(s: Stream; node: SqlNode)
 proc writeSelectKind(s: Stream; node: SqlNode)
 proc writeQueryBody(s: Stream; node: SqlNode)
@@ -554,67 +555,111 @@ proc writeDataType(s: Stream; node: SqlNode) =
     s.writeKey("variant")
     s.pack_type(variant)
 
-proc writeFromItem(s: Stream; node: SqlNode) =
+proc writeTableFromItem(s: Stream; name: string; alias: SqlNode;
+                        columns: seq[string]; span: Span; publicWire: bool) =
+  # Contract 0.14.0 (issue #151): the public Table variant carries the alias
+  # column-name list. The staged continuous-aggregate encoder intentionally
+  # remains byte-for-byte compatible with its historical 4-key payload.
+  s.pack_map(if publicWire: 5 else: 4)
+  s.writeKey("variant")
+  s.pack_type("Table")
+  s.writeKey("name")
+  s.pack_type(name)
+  s.writeKey("alias")
+  if alias == nil:
+    s.writeNil()
+  else:
+    s.pack_type(alias.aliasName)
+  if publicWire:
+    s.writeKey("columns")
+    s.pack_array(columns.len)
+    for column in columns:
+      s.pack_type(column)
+  s.writeKey("span")
+  s.writeSpan(span)
+
+proc writeDerivedFromItem(s: Stream; derived: SqlNode; alias: SqlNode;
+                          columns: seq[string]; span: Span; publicWire: bool) =
+  # Contract 0.14.0 (issue #151): the public Derived variant carries `lateral`.
+  # The staged encoder keeps its historical 5-key payload; the parser rejects
+  # LATERAL inside CREATE CONTINUOUS AGGREGATE before encoding.
+  s.pack_map(if publicWire: 6 else: 5)
+  s.writeKey("variant")
+  s.pack_type("Derived")
+  s.writeKey("subquery")
+  s.writeQueryBody(derived.children[0])
+  s.writeKey("alias")
+  if alias == nil:
+    s.writeNil()
+  else:
+    s.pack_type(alias.aliasName)
+  s.writeKey("columns")
+  s.pack_array(columns.len)
+  for column in columns:
+    s.pack_type(column)
+  if publicWire:
+    s.writeKey("lateral")
+    s.pack_type(derived.lateral)
+  s.writeKey("span")
+  s.writeSpan(span)
+
+proc writeFunctionFromItem(s: Stream; function: SqlNode; alias: SqlNode;
+                           columns: seq[string]; span: Span) =
+  # Contract 0.14.0 (issue #151). Only the public wire carries this variant;
+  # the staged continuous-aggregate validator rejects it before encoding.
+  s.pack_map(7)
+  s.writeKey("variant")
+  s.pack_type("Function")
+  s.writeKey("name")
+  s.pack_type(function.children[0].firstIdent())
+  s.writeKey("args")
+  s.pack_array(max(function.children.len - 1, 0))
+  for i in 1 ..< function.children.len:
+    s.writeExpr(function.children[i])
+  s.writeKey("alias")
+  if alias == nil:
+    s.writeNil()
+  else:
+    s.pack_type(alias.aliasName)
+  s.writeKey("columns")
+  s.pack_array(columns.len)
+  for column in columns:
+    s.pack_type(column)
+  s.writeKey("lateral")
+  s.pack_type(function.lateral)
+  s.writeKey("span")
+  s.writeSpan(span)
+
+proc writeFromItem(s: Stream; node: SqlNode; publicWire = true) =
   if node == nil:
     s.writeNil()
     return
 
   case node.kind
   of nkAlias:
-    if node.aliasExpr.kind == nkFromDerived:
-      s.pack_map(5)
-      s.writeKey("variant")
-      s.pack_type("Derived")
-      s.writeKey("subquery")
-      s.writeQueryBody(node.aliasExpr.children[0])
-      s.writeKey("alias")
-      s.pack_type(node.aliasName)
-      s.writeKey("columns")
-      s.pack_array(node.aliasColumns.len)
-      for column in node.aliasColumns:
-        s.pack_type(column)
-      s.writeKey("span")
-      s.writeSpan(node.span)
+    case node.aliasExpr.kind
+    of nkFromDerived:
+      s.writeDerivedFromItem(node.aliasExpr, node, node.aliasColumns, node.span,
+                             publicWire)
+    of nkFromFunction:
+      s.writeFunctionFromItem(node.aliasExpr, node, node.aliasColumns, node.span)
     else:
-      s.pack_map(4)
-      s.writeKey("variant")
-      s.pack_type("Table")
-      s.writeKey("name")
-      s.pack_type(node.aliasExpr.firstIdent())
-      s.writeKey("alias")
-      s.pack_type(node.aliasName)
-      s.writeKey("span")
-      s.writeSpan(node.span)
+      s.writeTableFromItem(node.aliasExpr.firstIdent(), node, node.aliasColumns,
+                           node.span, publicWire)
   of nkIdentifier:
-    s.pack_map(4)
-    s.writeKey("variant")
-    s.pack_type("Table")
-    s.writeKey("name")
-    s.pack_type(node.strVal)
-    s.writeKey("alias")
-    s.writeNil()
-    s.writeKey("span")
-    s.writeSpan(node.span)
+    s.writeTableFromItem(node.strVal, nil, @[], node.span, publicWire)
   of nkFromDerived:
-    s.pack_map(5)
-    s.writeKey("variant")
-    s.pack_type("Derived")
-    s.writeKey("subquery")
-    s.writeQueryBody(node.children[0])
-    s.writeKey("alias")
-    s.writeNil()
-    s.writeKey("columns")
-    s.pack_array(0)
-    s.writeKey("span")
-    s.writeSpan(node.span)
+    s.writeDerivedFromItem(node, nil, @[], node.span, publicWire)
+  of nkFromFunction:
+    s.writeFunctionFromItem(node, nil, @[], node.span)
   of nkJoin, nkFromJoin:
     s.pack_map(7)
     s.writeKey("variant")
     s.pack_type("Join")
     s.writeKey("left")
-    s.writeFromItem(node.joinLeft)
+    s.writeFromItem(node.joinLeft, publicWire)
     s.writeKey("right")
-    s.writeFromItem(node.joinRight)
+    s.writeFromItem(node.joinRight, publicWire)
     s.writeKey("join_type")
     s.pack_type(normalizedJoinKind(node.joinKind))
     s.writeKey("condition")
@@ -624,15 +669,7 @@ proc writeFromItem(s: Stream; node: SqlNode) =
     s.writeKey("span")
     s.writeSpan(node.span)
   else:
-    s.pack_map(4)
-    s.writeKey("variant")
-    s.pack_type("Table")
-    s.writeKey("name")
-    s.pack_type(node.firstIdent())
-    s.writeKey("alias")
-    s.writeNil()
-    s.writeKey("span")
-    s.writeSpan(node.span)
+    s.writeTableFromItem(node.firstIdent(), nil, @[], node.span, publicWire)
 
 proc writeExpr(s: Stream; node: SqlNode) =
   if node == nil:
@@ -1001,7 +1038,9 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
   else:
     s.pack_array(fromNode.children.len)
     for item in fromNode.children:
-      s.writeFromItem(item)
+      # `includeWith` marks the public encoder; the staged continuous-aggregate
+      # encoder keeps the historical FROM-item payload (contract 0.14.0).
+      s.writeFromItem(item, includeWith)
   s.writeKey("selection")
   s.writeExprOpt(selectionNode)
   s.writeKey("group_by")
@@ -1634,6 +1673,26 @@ proc validateStagedWriterShape(node: SqlNode) =
       stagedValidationError("CASE branch must contain WHEN and THEN expressions")
   of nkScalarSubquery, nkExists, nkFromDerived:
     requireChildren(1, "subquery")
+    # LATERAL has no representation in the frozen staged FROM-item payload
+    # (issue #151, contract 0.14.0).
+    if node.kind == nkFromDerived and node.lateral:
+      stagedValidationError(
+        "staged continuous aggregate query cannot contain LATERAL"
+      )
+  of nkFromFunction:
+    # FROM-clause table functions have no representation in the frozen staged
+    # payload (issue #151, contract 0.14.0).
+    stagedValidationError(
+      "staged continuous aggregate query cannot contain a FROM table function"
+    )
+  of nkAlias:
+    # A relation alias column-name list is only carried by the public Table
+    # variant; the staged Table payload has no `columns` key (issue #151).
+    if node.aliasColumns.len > 0 and node.aliasExpr != nil and
+        node.aliasExpr.kind == nkIdentifier:
+      stagedValidationError(
+        "staged continuous aggregate query cannot contain a table alias column list"
+      )
   of nkInSubquery:
     requireChildren(2, "IN subquery")
   of nkQuantified:

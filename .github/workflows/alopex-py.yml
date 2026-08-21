@@ -151,7 +151,7 @@ jobs:
           fi
           test -f "$library"
           cp "$library" crates/alopex-py/python/alopex/native/
-          printf '0.13.0\n' > crates/alopex-py/python/alopex/native/CONTRACT_VERSION
+          printf '0.14.0\n' > crates/alopex-py/python/alopex/native/CONTRACT_VERSION
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$library" | sed "s#${NIM_SQL_PARSER_DIR}/##" > crates/alopex-py/python/alopex/native/SHA256SUMS
           else

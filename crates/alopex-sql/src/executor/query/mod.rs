@@ -76,9 +76,39 @@ fn plan_contains_recursive_cte(plan: &LogicalPlan) -> bool {
         | LogicalPlan::Sort { input, .. }
         | LogicalPlan::DistinctOn { input, .. }
         | LogicalPlan::Limit { input, .. } => plan_contains_recursive_cte(input),
-        LogicalPlan::Join { left, right, .. } | LogicalPlan::SetOperation { left, right, .. } => {
+        LogicalPlan::Join { left, right, .. }
+        | LogicalPlan::LateralJoin { left, right, .. }
+        | LogicalPlan::SetOperation { left, right, .. } => {
             plan_contains_recursive_cte(left) || plan_contains_recursive_cte(right)
         }
+        _ => false,
+    }
+}
+
+/// Whether the plan holds a LATERAL join or a table function.
+///
+/// Both are evaluated per outer row through the materializing path, which owns
+/// the transaction while it re-executes the correlated side. The streaming
+/// pipeline borrows the transaction exclusively and cannot do that, so plans
+/// containing either are routed the same way subquery plans are.
+fn plan_contains_lateral(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::LateralJoin { .. } | LogicalPlan::TableFunction { .. } => true,
+        LogicalPlan::Filter { input, .. }
+        | LogicalPlan::Project { input, .. }
+        | LogicalPlan::Aggregate { input, .. }
+        | LogicalPlan::Window { input, .. }
+        | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::DistinctOn { input, .. }
+        | LogicalPlan::Limit { input, .. } => plan_contains_lateral(input),
+        LogicalPlan::Join { left, right, .. } | LogicalPlan::SetOperation { left, right, .. } => {
+            plan_contains_lateral(left) || plan_contains_lateral(right)
+        }
+        LogicalPlan::RecursiveCte {
+            anchor,
+            recursive_term,
+            ..
+        } => plan_contains_lateral(anchor) || plan_contains_lateral(recursive_term),
         _ => false,
     }
 }
@@ -231,7 +261,10 @@ pub fn execute_query_streaming_with_policy<
     // iterators borrow exclusively. Execute through the materializing path
     // (the same one used by `execute_query`) so results are identical to the
     // non-streaming API instead of failing or silently dropping rows.
-    if subquery::plan_contains_subquery(&plan) || plan_contains_recursive_cte(&plan) {
+    if subquery::plan_contains_subquery(&plan)
+        || plan_contains_recursive_cte(&plan)
+        || plan_contains_lateral(&plan)
+    {
         let result = execute_query_result_with_outer_and_policy(txn, catalog, plan, None, memory)?;
         let (iter, projection, schema) = materialize_query_result(result);
         return Ok(QueryRowIterator::new(iter, projection, schema));
@@ -595,15 +628,45 @@ fn build_iterator_pipeline_with_outer<
                 && let Some(table_meta) = catalog.get_table(table)
                 && table_meta.storage_options.storage_type == StorageType::Columnar
             {
-                let columnar_scan = columnar_scan::build_columnar_scan_for_filter(
-                    table_meta,
-                    projection.clone(),
-                    &predicate,
-                );
-                let rows = columnar_scan::execute_columnar_scan(txn, table_meta, &columnar_scan)?;
+                // Columnar filter fusion evaluates the predicate inside the
+                // scan, which resolves every column index against the scanned
+                // table. A correlated predicate also carries outer-row indexes
+                // past that width, and a subquery predicate needs transaction
+                // access the scan does not have, so both are evaluated here
+                // over a scan widened to the local columns they read
+                // (issue #151, D15).
+                let evaluated_here = outer.is_some() || subquery::contains_subquery(&predicate);
+                let projection = projection.clone();
                 let schema = table_meta.columns.clone();
-                let iter = iterator::VecIterator::new(rows, schema.clone());
-                return Ok((Box::new(iter), projection.clone(), schema));
+                let columnar_scan = if evaluated_here {
+                    columnar_scan::build_columnar_scan_for_external_filter(
+                        table_meta,
+                        projection.clone(),
+                        &predicate,
+                    )
+                } else {
+                    columnar_scan::build_columnar_scan_for_filter(
+                        table_meta,
+                        projection.clone(),
+                        &predicate,
+                    )
+                };
+                let rows = columnar_scan::execute_columnar_scan(txn, table_meta, &columnar_scan)?;
+                if !evaluated_here {
+                    let iter = iterator::VecIterator::new(rows, schema.clone());
+                    return Ok((Box::new(iter), projection, schema));
+                }
+                let mut kept = Vec::new();
+                for row in rows {
+                    let eval_row = combine_outer_for_eval(&row, outer);
+                    if let SqlValue::Boolean(true) = subquery::evaluate_expr_with_subqueries(
+                        txn, catalog, &predicate, &eval_row,
+                    )? {
+                        kept.push(row);
+                    }
+                }
+                let iter = iterator::VecIterator::new(kept, schema.clone());
+                return Ok((Box::new(iter), projection, schema));
             }
             let (mut input_iter, projection, schema) =
                 build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
@@ -683,6 +746,49 @@ fn build_iterator_pipeline_with_outer<
             let mut schema = left_schema;
             schema.extend(right_schema);
             let projection = Projection::All(schema.iter().map(|col| col.name.clone()).collect());
+            let iter = iterator::VecIterator::new(rows, schema.clone());
+            Ok((Box::new(iter), projection, schema))
+        }
+        LogicalPlan::LateralJoin {
+            left,
+            right,
+            join_type,
+            condition,
+            right_schema,
+        } => {
+            let (mut left_iter, _left_projection, left_schema) =
+                build_iterator_pipeline_with_outer(txn, catalog, *left, memory, outer, context)?;
+            let mut left_rows = Vec::new();
+            while let Some(result) = left_iter.next_row() {
+                left_rows.push(result?);
+            }
+            drop(left_iter);
+            let rows = execute_lateral_join(
+                txn,
+                catalog,
+                left_rows,
+                &right,
+                join_type,
+                condition.as_ref(),
+                right_schema.len(),
+                outer,
+                memory,
+                context,
+            )?;
+            let mut schema = left_schema;
+            schema.extend(right_schema);
+            let projection = Projection::All(schema.iter().map(|col| col.name.clone()).collect());
+            let iter = iterator::VecIterator::new(rows, schema.clone());
+            Ok((Box::new(iter), projection, schema))
+        }
+        LogicalPlan::TableFunction {
+            function,
+            args,
+            schema,
+        } => {
+            let rows = execute_table_function(txn, catalog, function, &args, outer)?;
+            let projection =
+                Projection::All(schema.iter().map(|column| column.name.clone()).collect());
             let iter = iterator::VecIterator::new(rows, schema.clone());
             Ok((Box::new(iter), projection, schema))
         }
@@ -910,7 +1016,10 @@ pub fn build_streaming_pipeline_with_policy<
     // (the same one used by `execute_query`) so results are identical to the
     // non-streaming API instead of failing or silently dropping rows
     // (GitHub issues #23 / #24).
-    if subquery::plan_contains_subquery(&plan) || plan_contains_recursive_cte(&plan) {
+    if subquery::plan_contains_subquery(&plan)
+        || plan_contains_recursive_cte(&plan)
+        || plan_contains_lateral(&plan)
+    {
         let result = execute_query_result_with_outer_and_policy(txn, catalog, plan, None, memory)?;
         return Ok(materialize_query_result(result));
     }
@@ -1320,6 +1429,123 @@ fn build_streaming_pipeline_inner<
         other => Err(ExecutorError::UnsupportedOperation(format!(
             "unsupported query plan: {other:?}"
         ))),
+    }
+}
+
+/// Run a LATERAL join by re-executing the correlated right side per left row.
+///
+/// The right plan is correlated, so it cannot be materialized once and joined:
+/// each left row is supplied as the outer row and the right side is executed
+/// again. `right_width` comes from the planned right schema so a LEFT join can
+/// pad even when the right side produced nothing.
+#[allow(clippy::too_many_arguments)]
+fn execute_lateral_join<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    catalog: &C,
+    left_rows: Vec<Row>,
+    right: &LogicalPlan,
+    join_type: crate::planner::JoinType,
+    condition: Option<&crate::planner::typed_expr::TypedExpr>,
+    right_width: usize,
+    outer: Option<&Row>,
+    memory: Option<&MemoryPolicy>,
+    context: &QueryExecutionContext,
+) -> Result<Vec<Row>> {
+    use crate::planner::JoinType;
+
+    let mut rows = Vec::new();
+    let mut row_id = 0u64;
+    for left_row in left_rows {
+        // The correlated side reads the left row through the outer-row
+        // convention shared with correlated subqueries.
+        let eval_outer = combine_outer_for_eval(&left_row, outer);
+        let right_result = execute_query_result_with_context(
+            txn,
+            catalog,
+            right.clone(),
+            Some(&eval_outer),
+            memory,
+            context,
+        )?;
+        let mut matched = false;
+        for right_values in right_result.rows {
+            let mut values = left_row.values.clone();
+            values.extend(right_values);
+            let combined = Row::new(row_id, values);
+            if let Some(condition) = condition {
+                let eval_row = combine_outer_for_eval(&combined, outer);
+                let keep =
+                    subquery::evaluate_expr_with_subqueries(txn, catalog, condition, &eval_row)?;
+                if !matches!(keep, SqlValue::Boolean(true)) {
+                    continue;
+                }
+            }
+            matched = true;
+            rows.push(combined);
+            row_id += 1;
+        }
+        if !matched && matches!(join_type, JoinType::Left) {
+            let mut values = left_row.values.clone();
+            values.extend(std::iter::repeat_n(SqlValue::Null, right_width));
+            rows.push(Row::new(row_id, values));
+            row_id += 1;
+        }
+    }
+    Ok(rows)
+}
+
+/// Evaluate a FROM-clause table function.
+///
+/// Arguments are evaluated against the outer row alone: the node has no input
+/// of its own, so its expression indexes address the outer row directly.
+fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    catalog: &C,
+    function: crate::planner::TableFunctionKind,
+    args: &[crate::planner::typed_expr::TypedExpr],
+    outer: Option<&Row>,
+) -> Result<Vec<Row>> {
+    use crate::planner::TableFunctionKind;
+
+    let empty = Row::new(0, Vec::new());
+    let eval_row = combine_outer_for_eval(&empty, outer);
+    let mut values = Vec::with_capacity(args.len());
+    for arg in args {
+        values.push(subquery::evaluate_expr_with_subqueries(
+            txn, catalog, arg, &eval_row,
+        )?);
+    }
+
+    match function {
+        TableFunctionKind::Unnest => {
+            let Some(argument) = values.into_iter().next() else {
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "UNNEST".into(),
+                    reason: "UNNEST requires exactly one argument".into(),
+                });
+            };
+            match argument {
+                // A NULL argument yields no rows, as it does in PostgreSQL.
+                SqlValue::Null => Ok(Vec::new()),
+                SqlValue::Vector(elements) => Ok(elements
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, element)| Row::new(index as u64, vec![SqlValue::Float(element)]))
+                    .collect()),
+                other => Err(ExecutorError::InvalidOperation {
+                    operation: "UNNEST".into(),
+                    reason: format!(
+                        "UNNEST requires a VECTOR argument, found {}",
+                        other.type_name()
+                    ),
+                }),
+            }
+        }
+        // Planning rejects GENERATE_SERIES (issue #157); this arm keeps the
+        // executor total if a hand-built plan reaches it.
+        TableFunctionKind::GenerateSeries => Err(ExecutorError::UnsupportedOperation(
+            "table function GENERATE_SERIES".into(),
+        )),
     }
 }
 

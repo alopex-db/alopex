@@ -57,6 +57,16 @@ pub enum PlannerError {
     #[error("error[ALOPEX-C006]: index '{name}' not found")]
     IndexNotFound { name: String },
 
+    /// ALOPEX-C007: FROM-clause table function not in the closed registry.
+    #[error(
+        "error[ALOPEX-C007]: table function '{name}' does not exist at line {line}, column {column}"
+    )]
+    UnknownTableFunction {
+        name: String,
+        line: u64,
+        column: u64,
+    },
+
     // === Type Errors (ALOPEX-T*) ===
     /// ALOPEX-T001: Type mismatch.
     #[error(
@@ -168,9 +178,11 @@ pub enum PlannerError {
         column: u64,
     },
 
-    /// ALOPEX-T012: A derived-table alias list does not match its query width.
+    /// ALOPEX-T012: A relation alias column list does not match the relation
+    /// width. Covers derived tables, base tables, and table functions
+    /// (issue #151).
     #[error(
-        "error[ALOPEX-T012]: derived table alias '{alias}' declares {declared} column names but its query returns {actual} columns at line {line}, column {column}"
+        "error[ALOPEX-T012]: relation alias '{alias}' declares {declared} column names but the relation has {actual} columns at line {line}, column {column}"
     )]
     TableAliasColumnCountMismatch {
         alias: String,
@@ -199,6 +211,18 @@ pub enum PlannerError {
     )]
     DistinctOnOrderByMismatch { line: u64, column: u64 },
 
+    /// ALOPEX-T015: RIGHT or FULL JOIN with a LATERAL right side (issue #151).
+    /// PostgreSQL rejects the same shape: the correlated side cannot be the
+    /// null-supplying side of the join.
+    #[error(
+        "error[ALOPEX-T015]: {join_type} JOIN cannot have a LATERAL right side at line {line}, column {column}"
+    )]
+    LateralJoinTypeUnsupported {
+        join_type: String,
+        line: u64,
+        column: u64,
+    },
+
     // === Feature Errors (ALOPEX-F*) ===
     /// ALOPEX-F001: Unsupported feature.
     #[error(
@@ -225,6 +249,24 @@ impl PlannerError {
     /// Create a TableAlreadyExists error.
     pub fn table_already_exists(name: impl Into<String>) -> Self {
         Self::TableAlreadyExists { name: name.into() }
+    }
+
+    /// Create an UnknownTableFunction error from a span.
+    pub fn unknown_table_function(name: impl Into<String>, span: Span) -> Self {
+        Self::UnknownTableFunction {
+            name: name.into(),
+            line: span.start.line,
+            column: span.start.column,
+        }
+    }
+
+    /// Create a LateralJoinTypeUnsupported error from a span.
+    pub fn lateral_join_type_unsupported(join_type: impl Into<String>, span: Span) -> Self {
+        Self::LateralJoinTypeUnsupported {
+            join_type: join_type.into(),
+            line: span.start.line,
+            column: span.start.column,
+        }
     }
 
     /// Create a ColumnNotFound error from a span.

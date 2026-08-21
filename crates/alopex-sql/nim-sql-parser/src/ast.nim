@@ -66,6 +66,7 @@ type
     nkFromTable
     nkFromJoin
     nkFromDerived
+    nkFromFunction  ## FROM-clause table function; children[0] = name, rest = args
     nkWhereClause
     nkOrderByClause
     nkOrderByExpr
@@ -130,6 +131,7 @@ type
     funcStar*: bool
     negated*: bool
     natural*: bool
+    lateral*: bool          ## nkFromDerived/nkFromFunction: LATERAL (issue #151)
     recursive*: bool
     limitWithTies*: bool    ## nkLimitClause: FETCH ... WITH TIES (issue #152)
     orderAsc*: int          ## -1 = omitted, 0 = DESC, 1 = ASC
@@ -345,6 +347,8 @@ proc `$`*(node: SqlNode): string =
     result = $node.kind & "("
     if node.kind == nkLimitClause and node.limitWithTies:
       result &= "WITH TIES, "
+    if node.kind in {nkFromDerived, nkFromFunction} and node.lateral:
+      result &= "LATERAL, "
     for i, child in node.children:
       if i > 0:
         result &= ", "

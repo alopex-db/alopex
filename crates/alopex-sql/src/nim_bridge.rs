@@ -1134,6 +1134,13 @@ fn annotate_from_natural_joins(
         FromItem::Derived { subquery, .. } => {
             annotate_query_body_natural_joins(subquery, natural_markers, consumed);
         }
+        FromItem::Function { args, .. } => {
+            // Arguments are ordinary expressions and may hold subqueries, so
+            // they consume markers in the parser's emission order.
+            for arg in args {
+                annotate_expr_natural_joins(arg, natural_markers, consumed);
+            }
+        }
         FromItem::Table { .. } => {}
     }
 }
@@ -1372,7 +1379,7 @@ mod input_preflight_tests {
             .expect_err("sidecar labels cannot make a pre-frame producer compatible");
         let rendered = error.to_string();
 
-        assert!(rendered.contains("linked Nim parser contract 0.13.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.14.0"));
         assert!(rendered.contains("linked Nim parser contract 0.4.0"));
     }
 
@@ -1382,32 +1389,32 @@ mod input_preflight_tests {
             .expect_err("a 0.5.0 producer cannot satisfy the current named-window contract");
         let rendered = error.to_string();
 
-        assert!(rendered.contains("linked Nim parser contract 0.13.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.14.0"));
         assert!(rendered.contains("linked Nim parser contract 0.5.0"));
     }
 
     #[test]
     fn legacy_v040_consumer_rejects_the_current_producer_before_decode() {
         let linked_producer_contract = nim_ffi::parser_contract_version();
-        assert_eq!(linked_producer_contract, "0.13.0");
+        assert_eq!(linked_producer_contract, "0.14.0");
         let error = ensure_parser_contract("0.4.0", &linked_producer_contract)
             .expect_err("legacy consumer must reject a producer with frame semantics");
         let rendered = error.to_string();
 
         assert!(rendered.contains("linked Nim parser contract 0.4.0"));
-        assert!(rendered.contains("linked Nim parser contract 0.13.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.14.0"));
     }
 
     #[test]
     fn legacy_v050_consumer_rejects_a_v060_named_window_producer_before_decode() {
         let linked_producer_contract = nim_ffi::parser_contract_version();
-        assert_eq!(linked_producer_contract, "0.13.0");
+        assert_eq!(linked_producer_contract, "0.14.0");
         let error = ensure_parser_contract("0.5.0", &linked_producer_contract)
             .expect_err("legacy consumer must not ignore QUALIFY or named-window fields");
         let rendered = error.to_string();
 
         assert!(rendered.contains("linked Nim parser contract 0.5.0"));
-        assert!(rendered.contains("linked Nim parser contract 0.13.0"));
+        assert!(rendered.contains("linked Nim parser contract 0.14.0"));
     }
 
     #[test]

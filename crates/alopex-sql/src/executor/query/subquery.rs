@@ -306,11 +306,18 @@ pub(crate) fn plan_contains_subquery(plan: &LogicalPlan) -> bool {
             right,
             condition,
             ..
+        }
+        | LogicalPlan::LateralJoin {
+            left,
+            right,
+            condition,
+            ..
         } => {
             condition.as_ref().is_some_and(contains_subquery)
                 || plan_contains_subquery(left)
                 || plan_contains_subquery(right)
         }
+        LogicalPlan::TableFunction { args, .. } => args.iter().any(contains_subquery),
         LogicalPlan::Aggregate {
             input,
             group_keys,

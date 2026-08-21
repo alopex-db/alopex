@@ -897,3 +897,111 @@ suite "MessagePack output - aggregate FILTER / WITHIN GROUP (issue #148)":
       "WITH (retention = '7d', refresh_interval = '1h')"
     )
     checkStagedError(orderedQuery, "cannot contain aggregate")
+
+suite "LATERAL and table functions (issue #151, contract 0.14.0)":
+
+  test "the Table variant carries the alias column list":
+    let item = selectKind("SELECT * FROM o AS p(a, b)")["from"][0]
+    check item["variant"].getStr() == "Table"
+    check item["name"].getStr() == "o"
+    check item["alias"].getStr() == "p"
+    check item["columns"].len == 2
+    check item["columns"][0].getStr() == "a"
+    check item["columns"][1].getStr() == "b"
+
+  test "a plain table keeps an empty column list":
+    let item = selectKind("SELECT * FROM o")["from"][0]
+    check item["variant"].getStr() == "Table"
+    check item["alias"].kind == JNull
+    check item["columns"].len == 0
+
+  test "the Derived variant carries the lateral flag":
+    let plain = selectKind("SELECT * FROM (SELECT 1) AS d")["from"][0]
+    check plain["variant"].getStr() == "Derived"
+    check plain["lateral"].getBool() == false
+
+    let join = selectKind(
+      "SELECT * FROM t CROSS JOIN LATERAL (SELECT t.id AS x) AS l")["from"][0]
+    check join["variant"].getStr() == "Join"
+    check join["join_type"].getStr() == "Cross"
+    check join["right"]["variant"].getStr() == "Derived"
+    check join["right"]["lateral"].getBool()
+
+  test "the Function variant carries name, args, alias, columns, and lateral":
+    let item = selectKind("SELECT * FROM UNNEST(t.v) AS u(x)")["from"][0]
+    check item["variant"].getStr() == "Function"
+    check item["name"].getStr() == "UNNEST"
+    check item["args"].len == 1
+    check item["args"][0]["kind"]["variant"].getStr() == "ColumnRef"
+    check item["alias"].getStr() == "u"
+    check item["columns"].len == 1
+    check item["columns"][0].getStr() == "x"
+    check item["lateral"].getBool() == false
+
+    let lateral = selectKind(
+      "SELECT * FROM t, LATERAL GENERATE_SERIES(1, t.n)")["from"][0]
+    check lateral["right"]["variant"].getStr() == "Function"
+    check lateral["right"]["name"].getStr() == "GENERATE_SERIES"
+    check lateral["right"]["args"].len == 2
+    check lateral["right"]["alias"].kind == JNull
+    check lateral["right"]["lateral"].getBool()
+
+  test "LATERAL and table-function forms round-trip":
+    for sql in [
+      "SELECT * FROM UNNEST([1.0, 2.0]) AS u",
+      "SELECT * FROM UNNEST([1.0]) AS u(x)",
+      "SELECT * FROM t, UNNEST(t.v) AS u",
+      "SELECT * FROM t CROSS JOIN LATERAL (SELECT t.id AS x) AS l",
+      "SELECT * FROM t LEFT JOIN LATERAL (SELECT t.id AS x) AS l ON TRUE",
+      "SELECT * FROM o AS p(a, b)",
+    ]:
+      assertMsgpackRoundtrip(sql)
+
+  test "staged continuous aggregate rejects the new FROM forms":
+    # LATERAL and table functions cannot reach the encoder: the single-source
+    # rule already rejects them while parsing.
+    for sql in [
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+        "SELECT 1 FROM m CROSS JOIN LATERAL (SELECT m.id AS x) AS l " &
+        "WITH (retention = '7d', refresh_interval = '1h')",
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+        "SELECT 1 FROM UNNEST(m.v) AS u " &
+        "WITH (retention = '7d', refresh_interval = '1h')",
+    ]:
+      var message = ""
+      try:
+        discard parseSql(sql)
+      except ParseError as error:
+        message = error.msg
+      check message.contains("requires one source measurement")
+
+    # An alias column list does parse as a single measurement, so the staged
+    # validator is what keeps the frozen 4-key Table payload intact.
+    let aliasQuery = parseSql(
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+      "SELECT 1 FROM m AS p(a) " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    checkStagedError(aliasQuery, "cannot contain a table alias column list")
+
+  test "staged validation rejects hand-built LATERAL and table-function trees":
+    proc fromClause(statement: SqlNode): SqlNode =
+      for child in statement.children[1].children:
+        if child.kind == nkFromClause:
+          return child
+      nil
+
+    let lateralQuery = canonicalContinuousAggregate()
+    let lateralFrom = lateralQuery.fromClause()
+    let derived = newNode(nkFromDerived, lateralFrom.children[0].span)
+    derived.lateral = true
+    derived.children.add(parseSql("SELECT 1"))
+    lateralFrom.children[0] = derived
+    checkStagedError(lateralQuery, "cannot contain LATERAL")
+
+    let functionQuery = canonicalContinuousAggregate()
+    let functionFrom = functionQuery.fromClause()
+    let function = newNode(nkFromFunction, functionFrom.children[0].span)
+    function.children.add(newIdent("UNNEST", functionFrom.children[0].span))
+    functionFrom.children[0] = function
+    checkStagedError(functionQuery, "cannot contain a FROM table function")

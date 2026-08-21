@@ -52,6 +52,10 @@ SELECT COUNT(*) FILTER (WHERE qty > 2) AS heavy,
 FROM stdin_test;
 SELECT qty, COUNT(*) AS c, GROUPING(qty) AS g FROM stdin_test
 GROUP BY ROLLUP(qty) ORDER BY g, qty NULLS FIRST;
+SELECT t.id, top.qty AS top_qty FROM stdin_test AS t(id, qty) CROSS JOIN LATERAL
+(SELECT s.qty FROM stdin_test AS s WHERE s.qty <= t.qty ORDER BY s.qty DESC LIMIT 1) AS top
+ORDER BY t.id;
+SELECT u.unnest FROM UNNEST([1.0, 2.0]) AS u ORDER BY u.unnest;
 "#;
 
     {
@@ -75,7 +79,7 @@ GROUP BY ROLLUP(qty) ORDER BY g, qty NULLS FIRST;
         .expect("json output should be an array of result sets");
     assert_eq!(
         sets.len(),
-        16,
+        18,
         "one result set per statement\nstdout:\n{stdout}"
     );
     let select_rows = sets[2].as_array().expect("SELECT result set");
@@ -239,6 +243,26 @@ GROUP BY ROLLUP(qty) ORDER BY g, qty NULLS FIRST;
             serde_json::json!({ "qty": 3, "c": 1, "g": 0 }),
             serde_json::json!({ "qty": 5, "c": 1, "g": 0 }),
             serde_json::json!({ "qty": null, "c": 3, "g": 1 }),
+        ]
+    );
+
+    // CROSS JOIN LATERAL over an alias-renamed base table (issue #151).
+    let lateral_rows = sets[16].as_array().expect("LATERAL result set");
+    assert_eq!(
+        lateral_rows,
+        &[
+            serde_json::json!({ "id": 1, "top_qty": 3 }),
+            serde_json::json!({ "id": 2, "top_qty": 1 }),
+            serde_json::json!({ "id": 3, "top_qty": 5 }),
+        ]
+    );
+
+    let unnest_rows = sets[17].as_array().expect("UNNEST result set");
+    assert_eq!(
+        unnest_rows,
+        &[
+            serde_json::json!({ "unnest": 1.0 }),
+            serde_json::json!({ "unnest": 2.0 }),
         ]
     );
 }

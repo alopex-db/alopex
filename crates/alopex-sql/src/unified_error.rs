@@ -386,7 +386,7 @@ impl From<PlannerError> for SqlError {
                 column,
             } => Self::Plan {
                 message: format!(
-                    "derived table alias '{alias}' declares {declared} column names but its query returns {actual} columns"
+                    "relation alias '{alias}' declares {declared} column names but the relation has {actual} columns"
                 ),
                 location: ErrorLocation { line, column },
                 code: "ALOPEX-T012",
@@ -402,6 +402,20 @@ impl From<PlannerError> for SqlError {
                 ),
                 location: ErrorLocation { line, column },
                 code: "ALOPEX-T013",
+            },
+            PlannerError::UnknownTableFunction { name, line, column } => Self::Plan {
+                message: format!("table function '{name}' does not exist"),
+                location: ErrorLocation { line, column },
+                code: "ALOPEX-C007",
+            },
+            PlannerError::LateralJoinTypeUnsupported {
+                join_type,
+                line,
+                column,
+            } => Self::Plan {
+                message: format!("{join_type} JOIN cannot have a LATERAL right side"),
+                location: ErrorLocation { line, column },
+                code: "ALOPEX-T015",
             },
             PlannerError::DistinctOnOrderByMismatch { line, column } => Self::Plan {
                 message: "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"

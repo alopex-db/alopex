@@ -189,6 +189,8 @@ impl<S: KVStore, C: Catalog> Executor<S, C> {
             | LogicalPlan::Filter { .. }
             | LogicalPlan::Project { .. }
             | LogicalPlan::Join { .. }
+            | LogicalPlan::LateralJoin { .. }
+            | LogicalPlan::TableFunction { .. }
             | LogicalPlan::Aggregate { .. }
             | LogicalPlan::Window { .. }
             | LogicalPlan::SetOperation { .. }
@@ -326,6 +328,8 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
                     | LogicalPlan::Filter { .. }
                     | LogicalPlan::Project { .. }
                     | LogicalPlan::Join { .. }
+                    | LogicalPlan::LateralJoin { .. }
+                    | LogicalPlan::TableFunction { .. }
                     | LogicalPlan::Aggregate { .. }
                     | LogicalPlan::Window { .. }
                     | LogicalPlan::SetOperation { .. }
@@ -426,6 +430,8 @@ impl<S: KVStore> Executor<S, PersistentCatalog<S>> {
             | LogicalPlan::Filter { .. }
             | LogicalPlan::Project { .. }
             | LogicalPlan::Join { .. }
+            | LogicalPlan::LateralJoin { .. }
+            | LogicalPlan::TableFunction { .. }
             | LogicalPlan::Aggregate { .. }
             | LogicalPlan::Window { .. }
             | LogicalPlan::SetOperation { .. }

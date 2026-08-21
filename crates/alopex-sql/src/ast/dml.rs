@@ -175,6 +175,9 @@ pub enum FromItem {
     Table {
         name: String,
         alias: Option<String>,
+        /// Relation alias column-name list (`AS t(c1, c2)`), contract 0.14.0.
+        #[serde(default)]
+        columns: Vec<String>,
         span: Span,
     },
     Join {
@@ -192,6 +195,23 @@ pub enum FromItem {
         alias: Option<String>,
         #[serde(default)]
         columns: Vec<String>,
+        /// `LATERAL (subquery)`: the enclosing FROM items are in scope
+        /// (issue #151, contract 0.14.0).
+        #[serde(default)]
+        lateral: bool,
+        span: Span,
+    },
+    /// FROM-clause table function such as `UNNEST(v)` (issue #151).
+    Function {
+        name: String,
+        args: Vec<Expr>,
+        alias: Option<String>,
+        #[serde(default)]
+        columns: Vec<String>,
+        /// Explicit `LATERAL` keyword. Table-function arguments see the
+        /// preceding FROM items either way (implicit LATERAL).
+        #[serde(default)]
+        lateral: bool,
         span: Span,
     },
 }
@@ -293,7 +313,8 @@ impl Spanned for FromItem {
         match self {
             FromItem::Table { span, .. }
             | FromItem::Join { span, .. }
-            | FromItem::Derived { span, .. } => *span,
+            | FromItem::Derived { span, .. }
+            | FromItem::Function { span, .. } => *span,
         }
     }
 }

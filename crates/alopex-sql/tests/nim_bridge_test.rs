@@ -312,7 +312,7 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.13.0");
+    assert_eq!(parser_contract_version(), "0.14.0");
 }
 
 #[test]
@@ -454,7 +454,7 @@ fn top_level_set_operation_preserves_fetch_with_ties() {
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.13.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.14.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -462,7 +462,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.13.0");
+    assert_eq!(parser_contract_version(), "0.14.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);
@@ -809,6 +809,78 @@ fn parse_insert_with_values_query_from_nim() {
     };
     assert_eq!(values.rows.len(), 2);
     assert_eq!(values.with.as_ref().expect("WITH clause").ctes.len(), 1);
+}
+
+#[test]
+fn parse_lateral_table_function_and_alias_columns_from_nim() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT * FROM sales AS p(a, b) CROSS JOIN LATERAL (SELECT p.a AS x) AS l",
+    )
+    .expect("Nim parser should parse LATERAL");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected Select");
+    };
+    let FromItem::Join { left, right, .. } = &select.from[0] else {
+        panic!("expected a join");
+    };
+    let FromItem::Table {
+        name,
+        alias,
+        columns,
+        ..
+    } = left.as_ref()
+    else {
+        panic!("expected a base table on the left");
+    };
+    assert_eq!(name, "sales");
+    assert_eq!(alias.as_deref(), Some("p"));
+    assert_eq!(columns, &["a".to_string(), "b".to_string()]);
+    assert!(matches!(
+        right.as_ref(),
+        FromItem::Derived { lateral: true, alias: Some(alias), .. } if alias == "l"
+    ));
+
+    let functions = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT * FROM d, LATERAL UNNEST(d.emb) AS u(component)",
+    )
+    .expect("Nim parser should parse a table function");
+    let StatementKind::Select(select) = &functions[0].kind else {
+        panic!("expected Select");
+    };
+    let FromItem::Join { right, .. } = &select.from[0] else {
+        panic!("expected a join");
+    };
+    let FromItem::Function {
+        name,
+        args,
+        alias,
+        columns,
+        lateral,
+        ..
+    } = right.as_ref()
+    else {
+        panic!("expected a table function");
+    };
+    // The bridge folds bare identifiers to lowercase before parsing, exactly
+    // as PostgreSQL does; the planner resolves the name case-insensitively.
+    assert_eq!(name, "unnest");
+    assert_eq!(args.len(), 1);
+    assert_eq!(alias.as_deref(), Some("u"));
+    assert_eq!(columns, &["component".to_string()]);
+    assert!(lateral);
+
+    // A plain table and a plain derived table keep the absent-clause defaults.
+    let plain = Parser::parse_sql(&AlopexDialect, "SELECT * FROM sales")
+        .expect("Nim parser should parse a plain table");
+    let StatementKind::Select(select) = &plain[0].kind else {
+        panic!("expected Select");
+    };
+    assert!(matches!(
+        &select.from[0],
+        FromItem::Table { columns, alias: None, .. } if columns.is_empty()
+    ));
 }
 
 #[test]

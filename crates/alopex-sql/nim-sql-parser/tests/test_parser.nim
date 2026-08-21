@@ -1779,3 +1779,92 @@ suite "Aggregate FILTER / WITHIN GROUP / ORDER BY (issue #148)":
     check parseErrorMessage(
       "SELECT PERCENTILE_DISC(0.5 ORDER BY v) WITHIN GROUP (ORDER BY v) FROM t"
     ).contains("cannot combine an aggregate ORDER BY argument with WITHIN GROUP")
+
+# ---------------------------------------------------------------------------
+# LATERAL, table functions, and relation alias column lists (issue #151)
+# ---------------------------------------------------------------------------
+
+suite "LATERAL and table functions":
+
+  proc firstFromItem(sql: string): SqlNode =
+    parseSql(sql).children.filterIt(it.kind == nkFromClause)[0].children[0]
+
+  test "a FROM-clause table function keeps its name and arguments":
+    let item = firstFromItem("SELECT * FROM UNNEST(d.emb) AS u")
+    check item.kind == nkAlias
+    check item.aliasName == "u"
+    check item.aliasExpr.kind == nkFromFunction
+    check item.aliasExpr.lateral == false
+    check item.aliasExpr.children[0].strVal == "UNNEST"
+    check item.aliasExpr.children.len == 2
+    check item.aliasExpr.children[1].kind == nkColumnRef
+
+  test "a table function accepts zero and several arguments":
+    let none = firstFromItem("SELECT * FROM gen()")
+    check none.kind == nkFromFunction
+    check none.children.len == 1
+
+    let many = firstFromItem("SELECT * FROM generate_series(1, 3, 1)")
+    check many.kind == nkFromFunction
+    check many.children.len == 4
+
+  test "LATERAL marks a derived table":
+    let item = firstFromItem(
+      "SELECT * FROM t CROSS JOIN LATERAL (SELECT t.id AS x) AS l")
+    check item.kind == nkJoin
+    check item.joinKind == jkCross
+    check item.joinRight.kind == nkAlias
+    check item.joinRight.aliasExpr.kind == nkFromDerived
+    check item.joinRight.aliasExpr.lateral
+
+  test "LEFT JOIN LATERAL keeps its join kind and condition":
+    let item = firstFromItem(
+      "SELECT * FROM t LEFT JOIN LATERAL (SELECT t.id AS x) AS l ON TRUE")
+    check item.joinKind == jkLeft
+    check item.joinRight.aliasExpr.lateral
+    check item.joinCond != nil
+
+  test "LATERAL marks a table function":
+    let item = firstFromItem("SELECT * FROM t, LATERAL UNNEST(t.v) AS u")
+    check item.joinRight.aliasExpr.kind == nkFromFunction
+    check item.joinRight.aliasExpr.lateral
+
+  test "a table function without LATERAL is not marked":
+    let item = firstFromItem("SELECT * FROM t, UNNEST(t.v) AS u")
+    check item.joinRight.aliasExpr.kind == nkFromFunction
+    check item.joinRight.aliasExpr.lateral == false
+
+  test "lateral stays usable as a relation name":
+    let plain = firstFromItem("SELECT * FROM lateral")
+    check plain.kind == nkIdentifier
+    check plain.strVal == "lateral"
+
+    let aliased = firstFromItem("SELECT * FROM lateral l")
+    check aliased.kind == nkAlias
+    check aliased.aliasExpr.kind == nkIdentifier
+    check aliased.aliasExpr.strVal == "lateral"
+    check aliased.aliasName == "l"
+
+    let called = firstFromItem("SELECT * FROM lateral(1)")
+    check called.kind == nkFromFunction
+    check called.lateral == false
+    check called.children[0].strVal == "lateral"
+
+  test "a base table accepts an alias column list":
+    let item = firstFromItem("SELECT * FROM o AS p(a, b)")
+    check item.kind == nkAlias
+    check item.aliasExpr.kind == nkIdentifier
+    check item.aliasName == "p"
+    check item.aliasColumns == @["a", "b"]
+
+  test "a table function accepts an alias column list":
+    let item = firstFromItem("SELECT * FROM UNNEST([1.0]) AS t(x)")
+    check item.kind == nkAlias
+    check item.aliasExpr.kind == nkFromFunction
+    check item.aliasColumns == @["x"]
+
+  test "an alias column list still requires an alias name":
+    check "expected alias" in parseErrorMessage("SELECT * FROM o AS (a, b)")
+
+  test "a table function requires a closing parenthesis":
+    check "expected tkRParen" in parseErrorMessage("SELECT * FROM UNNEST(1")

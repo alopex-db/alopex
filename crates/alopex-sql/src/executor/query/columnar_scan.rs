@@ -874,6 +874,32 @@ pub fn build_columnar_scan_for_filter(
     )
 }
 
+/// Columnar scan that materializes the projection plus every *local* column the
+/// predicate reads, leaving predicate evaluation to the caller.
+///
+/// Filter fusion resolves each column index against the scanned table, so it
+/// cannot be used for a predicate the scan is unable to evaluate on its own:
+/// a correlated predicate also carries outer-row indexes past the table width,
+/// and a predicate holding a subquery needs transaction access. Indexes at or
+/// past the table width are dropped here rather than widening the scan - that
+/// is the correlation boundary (issue #151, D15).
+pub fn build_columnar_scan_for_external_filter(
+    table_meta: &TableMetadata,
+    projection: Projection,
+    predicate: &TypedExpr,
+) -> ColumnarScan {
+    let mut projected_columns = projection_to_columns(&projection, table_meta);
+    let mut predicate_indices = BTreeSet::new();
+    collect_column_indices(predicate, &mut predicate_indices);
+    for idx in predicate_indices {
+        if idx < table_meta.columns.len() && !projected_columns.contains(&idx) {
+            projected_columns.push(idx);
+        }
+    }
+    projected_columns.sort_unstable();
+    ColumnarScan::new(table_meta.table_id, projected_columns, None, None)
+}
+
 /// Projection だけを指定して ColumnarScan を構築する。
 pub fn build_columnar_scan(table_meta: &TableMetadata, projection: &Projection) -> ColumnarScan {
     let projected_columns = projection_to_columns(projection, table_meta);

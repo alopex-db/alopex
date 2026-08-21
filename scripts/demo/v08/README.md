@@ -157,6 +157,11 @@ happened to run:
     Placeholder NULLs in subtotal rows print as `None`/`SqlValue::Null` like
     real data NULLs; only `GROUPING`/`GROUPING_ID` (BIGINT bitmask, leftmost
     argument = most significant bit) distinguishes the two.
+18. `FROM` accepts `LATERAL` derived tables, the `UNNEST(vector)` table
+    function, and `AS t(c1, ...)` alias column lists (issue #151). The
+    correlated side runs once per left row, `LEFT JOIN LATERAL` pads an
+    unmatched left row, and a table function reads the preceding FROM item
+    without the `LATERAL` keyword.
 
 Recursive CTEs use the bounded fixed-point contract added for v0.8.7; invalid
 recursive shapes, dependency cycles, and exhausted iteration or memory budgets
@@ -173,3 +178,6 @@ Conversion rules and parser-asset migration are in
 [`docs/sql-try-cast.md`](../../../docs/sql-try-cast.md).
 Grouping-set grammar, the `GROUPING` bit order, and resource bounds are in
 [`docs/sql-grouping-sets.md`](../../../docs/sql-grouping-sets.md).
+LATERAL scope rules, the table-function registry, and alias column-list arity
+are in
+[`docs/sql-lateral-table-functions.md`](../../../docs/sql-lateral-table-functions.md).

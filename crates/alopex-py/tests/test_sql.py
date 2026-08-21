@@ -392,6 +392,54 @@ def test_execute_sql_grouping_sets_distinguish_placeholder_nulls(db):
     assert "GROUPING is only allowed in grouped queries" in str(captured.value)
 
 
+def test_execute_sql_lateral_join_and_table_function(db):
+    db.execute_sql(
+        "CREATE TABLE lat_parent (id INTEGER PRIMARY KEY, emb VECTOR(2))"
+    )
+    db.execute_sql(
+        "CREATE TABLE lat_child (id INTEGER PRIMARY KEY, parent_id INTEGER, "
+        "val INTEGER)"
+    )
+    db.execute_sql("INSERT INTO lat_parent VALUES (1, [1.0, 2.0]), (2, [3.0, 4.0])")
+    db.execute_sql("INSERT INTO lat_child VALUES (10, 1, 100), (11, 1, 200)")
+
+    # A table-function argument sees the preceding FROM item even without the
+    # LATERAL keyword (issue #151, D2).
+    rows = db.execute_sql(
+        "SELECT p.id, u.unnest FROM lat_parent AS p, UNNEST(p.emb) AS u "
+        "ORDER BY p.id, u.unnest"
+    )
+    assert rows == [
+        {"id": 1, "unnest": 1.0},
+        {"id": 1, "unnest": 2.0},
+        {"id": 2, "unnest": 3.0},
+        {"id": 2, "unnest": 4.0},
+    ]
+
+    # LEFT JOIN LATERAL keeps the unmatched left row as None (D10).
+    padded = db.execute_sql(
+        "SELECT p.id, l.mx FROM lat_parent AS p LEFT JOIN LATERAL "
+        "(SELECT MAX(c.val) AS mx FROM lat_child AS c WHERE c.parent_id = p.id) AS l "
+        "ON TRUE ORDER BY p.id"
+    )
+    assert padded == [{"id": 1, "mx": 200}, {"id": 2, "mx": None}]
+
+    # A relation alias column list renames a base table and requires exact
+    # arity (D8).
+    renamed = db.execute_sql(
+        "SELECT r.a, r.c FROM lat_child AS r(a, b, c) ORDER BY r.a"
+    )
+    assert renamed == [{"a": 10, "c": 100}, {"a": 11, "c": 200}]
+
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT * FROM lat_child AS r(a, b)")
+    assert "ALOPEX-T012" in str(captured.value)
+
+    with pytest.raises(AlopexError) as unknown:
+        db.execute_sql("SELECT * FROM frobnicate(1) AS f")
+    assert "frobnicate" in str(unknown.value)
+
+
 def test_execute_sql_aggregate_filter_and_percentile_disc(db):
     db.execute_sql(
         "CREATE TABLE metrics (id INTEGER PRIMARY KEY, g TEXT, v INTEGER, name TEXT)"

@@ -414,6 +414,24 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
             failure_outcome: "grouping_sets_local_only before transport",
         },
         RemoteReadCoverageEntry {
+            id: "relation.lateral_join",
+            public_surface: "LATERAL joins over a correlated relation",
+            identities: &["lateral", "cross_join_lateral", "left_join_lateral"],
+            remote_status: PreExecutionRejection,
+            prerequisite: "local execution profile",
+            normal_outcome: "per-left-row correlated evaluation by the local executor",
+            failure_outcome: "lateral_join_not_supported_remote before transport",
+        },
+        RemoteReadCoverageEntry {
+            id: "relation.table_function",
+            public_surface: "FROM-clause table functions",
+            identities: &["unnest", "generate_series"],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "row generation by the local executor",
+            failure_outcome: "table_function_not_supported_remote before transport",
+        },
+        RemoteReadCoverageEntry {
             id: "relation.recursive_cte",
             public_surface: "recursive common table expressions",
             identities: &["with_recursive"],
@@ -556,6 +574,14 @@ fn validate_plan(
         LogicalPlan::Join { .. } => Err(RemoteReadRejection::unsupported(
             "join_not_supported_remote",
             "JOIN is outside the v0.8 remote-read catalog",
+        )),
+        LogicalPlan::LateralJoin { .. } => Err(RemoteReadRejection::unsupported(
+            "lateral_join_not_supported_remote",
+            "LATERAL joins are outside the v0.8 remote-read catalog",
+        )),
+        LogicalPlan::TableFunction { .. } => Err(RemoteReadRejection::local_only(
+            "table_function_not_supported_remote",
+            "FROM-clause table functions are evaluated by the local executor",
         )),
         LogicalPlan::Window { .. } => Err(RemoteReadRejection::unsupported(
             "window_not_supported_remote",

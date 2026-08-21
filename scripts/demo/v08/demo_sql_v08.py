@@ -170,6 +170,27 @@ def main() -> int:
                     {"region": None, "total_qty": 11, "g": 1},
                 ],
             ),
+            (
+                # LATERAL (issue #151): the correlated subquery runs once per
+                # left row and takes that region's largest sale.
+                "SELECT r.region, top.id AS top_id FROM "
+                "(SELECT DISTINCT ON (region) region FROM sales ORDER BY region) AS r "
+                "CROSS JOIN LATERAL (SELECT s.id FROM sales AS s "
+                "WHERE s.region = r.region ORDER BY s.amount DESC, s.id LIMIT 1) AS top "
+                "ORDER BY r.region",
+                [
+                    {"region": "east", "top_id": 2},
+                    {"region": "north", "top_id": 5},
+                    {"region": "west", "top_id": 3},
+                ],
+            ),
+            (
+                # A relation alias column list renames a base table, and the
+                # column names come back through the Python surface (D8).
+                "SELECT p.ident, p.label FROM sales AS p(ident, label, amount, qty, bonus) "
+                "WHERE p.ident = 1",
+                [{"ident": 1, "label": "east"}],
+            ),
             ("SELECT SUM(n) AS total FROM metrics", [{"total": 5}]),
             (
                 "SELECT id, n * 2.0 AS doubled FROM metrics ORDER BY doubled",
@@ -647,12 +668,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 69:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 69")
+        if completed != 72:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 72")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 69 checks passed")
+    print("v0.8 SQL correctness demo completed: 72 checks passed")
     return 0
 
 

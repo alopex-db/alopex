@@ -537,6 +537,7 @@ fn test_plan_select_wildcard() {
         from: vec![FromItem::Table {
             name: "users".to_string(),
             alias: None,
+            columns: Vec::new(),
             span: span(),
         }],
         selection: None,
@@ -591,6 +592,7 @@ fn test_plan_select_columns() {
         from: vec![FromItem::Table {
             name: "users".to_string(),
             alias: None,
+            columns: Vec::new(),
             span: span(),
         }],
         selection: None,
@@ -635,6 +637,7 @@ fn test_plan_select_with_where() {
         from: vec![FromItem::Table {
             name: "users".to_string(),
             alias: None,
+            columns: Vec::new(),
             span: span(),
         }],
         selection: Some(binary_op(col_ref(None, "age"), BinaryOp::Gt, int_lit(18))),
@@ -674,6 +677,7 @@ fn test_plan_select_with_order_by() {
         from: vec![FromItem::Table {
             name: "users".to_string(),
             alias: None,
+            columns: Vec::new(),
             span: span(),
         }],
         selection: None,
@@ -730,6 +734,7 @@ fn test_plan_select_with_limit() {
         from: vec![FromItem::Table {
             name: "users".to_string(),
             alias: None,
+            columns: Vec::new(),
             span: span(),
         }],
         selection: None,
@@ -778,6 +783,7 @@ fn test_plan_select_combined() {
         from: vec![FromItem::Table {
             name: "users".to_string(),
             alias: None,
+            columns: Vec::new(),
             span: span(),
         }],
         selection: Some(binary_op(col_ref(None, "age"), BinaryOp::Gt, int_lit(18))),
@@ -831,6 +837,7 @@ fn test_plan_select_table_not_found() {
         from: vec![FromItem::Table {
             name: "nonexistent".to_string(),
             alias: None,
+            columns: Vec::new(),
             span: span(),
         }],
         selection: None,
@@ -1235,6 +1242,7 @@ fn distinct_on_select(
         from: vec![FromItem::Table {
             name: "users".to_string(),
             alias: None,
+            columns: Vec::new(),
             span: span(),
         }],
         selection: None,

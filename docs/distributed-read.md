@@ -22,6 +22,8 @@ This matrix is generated from the closed `RemoteReadCatalogV0_8` contract. A `lo
 | `scalar.aggregate_filter` | Aggregate FILTER (WHERE ...) per-aggregate row filtering | `local_only` | local execution profile | per-aggregate predicate filtering by the local executor | `aggregate_filter_local_only` before transport |
 | `scalar.ordered_aggregate` | Aggregate-local ORDER BY and WITHIN GROUP ordered-set aggregates (PERCENTILE_DISC) | `local_only` | local execution profile | ordered aggregate evaluation by the local executor | `ordered_aggregate_local_only` before transport |
 | `aggregate.grouping_sets` | GROUPING SETS / ROLLUP / CUBE multi-set aggregation and GROUPING/GROUPING_ID | `local_only` | local execution profile | single-pass multi-set aggregation by the local executor | `grouping_sets_local_only` before transport |
+| `relation.lateral_join` | LATERAL joins over a correlated relation | `pre_execution_rejection` | Local execution profile | Per-left-row correlated evaluation by the local executor | `lateral_join_not_supported_remote` before transport |
+| `relation.table_function` | FROM-clause table functions (UNNEST) | `local_only` | Local execution profile | Row generation by the local executor | `table_function_not_supported_remote` before transport |
 | `relation.recursive_cte` | Recursive common table expressions | `pre_execution_rejection` | Local execution profile | Bounded local fixed-point evaluation | `recursive_cte_not_supported_remote` |
 | `transaction.multi_statement` | Existing Transaction API workflow | `local_only` | Local transaction workflow | v0.7.4 local transaction behavior | Explicit pre-execution classification |
 
