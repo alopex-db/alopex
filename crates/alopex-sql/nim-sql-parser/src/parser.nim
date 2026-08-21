@@ -76,6 +76,13 @@ proc peekNext(p: Parser): TokenKind =
   var lookahead = p.lex
   lookahead.nextToken().kind
 
+proc peekNextIsContextual(p: Parser; value: string): bool =
+  ## One-token lookahead for a contextual keyword (issue #149: the SETS in
+  ## GROUPING SETS). Same copy-the-lexer discipline as peekNext.
+  var lookahead = p.lex
+  let tok = lookahead.nextToken()
+  tok.kind == tkIdent and tok.value.cmpIgnoreCase(value) == 0
+
 proc expectContextual(p: var Parser; value: string): Token =
   if not p.checkContextual(value):
     p.error("expected " & value)
@@ -876,6 +883,88 @@ proc parseOrderByItem(p: var Parser): SqlNode =
     else:
       p.error("expected FIRST or LAST after NULLS")
 
+proc parseRollupOrCube(p: var Parser; kind: SqlNodeKind): SqlNode =
+  ## ROLLUP(e1, ..., en) or CUBE(e1, ..., en) inside GROUP BY (issue #149).
+  ## The caller has verified the contextual keyword and the `(` lookahead.
+  let start = p.advance()
+  discard p.expect(tkLParen)
+  result = newNode(kind, tokenSpan(start))
+  if p.check(tkRParen):
+    p.error("expected expression in " & start.value.toUpperAscii() & " list")
+  result.children.add(p.parseExpr())
+  while p.check(tkComma):
+    discard p.advance()
+    result.children.add(p.parseExpr())
+  let closing = p.expect(tkRParen)
+  result.span = spanThrough(tokenSpan(start), tokenSpan(closing))
+
+proc parseGroupingSetElement(p: var Parser): SqlNode =
+  ## One element of GROUPING SETS: `()` | expr | `(e1, ..., en)`.
+  ## D1: nested ROLLUP/CUBE/GROUPING SETS is a syntax error in v1.
+  if (p.checkContextual("rollup") or p.checkContextual("cube")) and
+      p.peekNext() == tkLParen:
+    p.error("ROLLUP and CUBE cannot be nested inside GROUPING SETS")
+  if p.checkContextual("grouping") and p.peekNextIsContextual("sets"):
+    p.error("GROUPING SETS cannot be nested inside GROUPING SETS")
+  result = newNode(nkGroupingSet, p.currentSpan())
+  if p.check(tkLParen):
+    let open = p.advance()
+    if p.check(tkRParen):
+      let closing = p.advance()
+      result.span = spanThrough(tokenSpan(open), tokenSpan(closing))
+      return
+    result.children.add(p.parseExpr())
+    while p.check(tkComma):
+      discard p.advance()
+      result.children.add(p.parseExpr())
+    let closing = p.expect(tkRParen)
+    result.span = spanThrough(tokenSpan(open), tokenSpan(closing))
+  else:
+    let expr = p.parseExpr()
+    result.children.add(expr)
+    result.span = expr.span
+
+proc parseGroupByItem(p: var Parser): SqlNode =
+  ## GROUP BY item := expr | ROLLUP(...) | CUBE(...) | GROUPING SETS (...)
+  ## | `()` (issue #149, D1). ROLLUP/CUBE/GROUPING stay contextual: a bare
+  ## identifier with those names still parses as an ordinary expression.
+  if p.checkContextual("rollup") and p.peekNext() == tkLParen:
+    result = p.parseRollupOrCube(nkRollup)
+  elif p.checkContextual("cube") and p.peekNext() == tkLParen:
+    result = p.parseRollupOrCube(nkCube)
+  elif p.checkContextual("grouping") and p.peekNextIsContextual("sets"):
+    let start = p.advance()          # GROUPING
+    discard p.advance()              # SETS
+    discard p.expect(tkLParen)
+    result = newNode(nkGroupingSets, tokenSpan(start))
+    if p.check(tkRParen):
+      p.error("expected at least one grouping set in GROUPING SETS")
+    result.children.add(p.parseGroupingSetElement())
+    while p.check(tkComma):
+      discard p.advance()
+      result.children.add(p.parseGroupingSetElement())
+    let closing = p.expect(tkRParen)
+    result.span = spanThrough(tokenSpan(start), tokenSpan(closing))
+  elif p.check(tkLParen) and p.peekNext() == tkRParen:
+    # GROUP BY () — the single empty grouping set.
+    let open = p.advance()
+    let closing = p.advance()
+    result = newNode(nkGroupingSets,
+                     spanThrough(tokenSpan(open), tokenSpan(closing)))
+    result.children.add(newNode(nkGroupingSet, result.span))
+  else:
+    result = p.parseExpr()
+
+proc groupByContainsGroupingSetModifier(query: SqlNode): bool =
+  ## Whether a parsed SELECT carries ROLLUP/CUBE/GROUPING SETS in GROUP BY.
+  ## Used to keep the staged continuous-aggregate wire byte-compatible.
+  for child in query.children:
+    if child.kind == nkGroupByClause:
+      for item in child.children:
+        if item.kind in {nkRollup, nkCube, nkGroupingSets}:
+          return true
+  false
+
 proc parseSelectCore(p: var Parser): SqlNode =
   let start = p.expect(tkSelect)
   result = newNode(nkSelect, tokenSpan(start))
@@ -919,10 +1008,10 @@ proc parseSelectCore(p: var Parser): SqlNode =
     discard p.advance()
     discard p.expect(tkBy)
     let groupBy = newNode(nkGroupByClause)
-    groupBy.children.add(p.parseExpr())
+    groupBy.children.add(p.parseGroupByItem())
     while p.check(tkComma):
       discard p.advance()
-      groupBy.children.add(p.parseExpr())
+      groupBy.children.add(p.parseGroupByItem())
     result.children.add(groupBy)
 
   if p.check(tkHaving):
@@ -1372,6 +1461,11 @@ proc parseCreateContinuousAggregateAfterCreate(
   query.span = spanThrough(query.span, tokenSpan(p.previous))
   if not query.isSingleMeasurementSelect():
     p.error("continuous aggregate query requires one source measurement")
+  # The staged continuous-aggregate wire stays byte-compatible with its
+  # historical [Expr] group_by payload (issue #149, D10), so grouping-set
+  # modifiers are rejected before they can reach the encoder.
+  if query.groupByContainsGroupingSetModifier():
+    p.error("continuous aggregate queries do not support GROUPING SETS, ROLLUP, or CUBE")
   if not p.check(tkWith):
     p.error("expected WITH options after continuous aggregate SELECT")
   let options = p.parseContinuousAggregateOptions()

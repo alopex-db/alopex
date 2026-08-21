@@ -279,6 +279,49 @@ suite "MessagePack output - contract shape":
       "SELECT DISTINCT ON (region) region, amount FROM sales " &
       "ORDER BY region, amount DESC")
 
+  test "plain GROUP BY emits Expr grouping items (issue #149)":
+    let kind = selectKind("SELECT region FROM sales GROUP BY region, product")
+    check kind["group_by"].len == 2
+    check kind["group_by"][0]["variant"].getStr() == "Expr"
+    check kind["group_by"][0]["expr"]["kind"]["variant"].getStr() == "ColumnRef"
+    check kind["group_by"][0]["expr"]["kind"]["column"].getStr() == "region"
+
+  test "GROUP BY ROLLUP emits a Rollup grouping item (issue #149)":
+    let kind = selectKind(
+      "SELECT region FROM sales GROUP BY ROLLUP(region, product)")
+    check kind["group_by"].len == 1
+    check kind["group_by"][0]["variant"].getStr() == "Rollup"
+    check kind["group_by"][0]["exprs"].len == 2
+    check kind["group_by"][0]["exprs"][0]["kind"]["column"].getStr() == "region"
+
+  test "GROUP BY CUBE emits a Cube grouping item (issue #149)":
+    let kind = selectKind("SELECT region FROM sales GROUP BY CUBE(region, product)")
+    check kind["group_by"][0]["variant"].getStr() == "Cube"
+    check kind["group_by"][0]["exprs"].len == 2
+
+  test "GROUPING SETS emits nested expression lists (issue #149)":
+    let kind = selectKind(
+      "SELECT region FROM sales GROUP BY " &
+      "GROUPING SETS ((region, product), (region), ())")
+    check kind["group_by"][0]["variant"].getStr() == "GroupingSets"
+    check kind["group_by"][0]["sets"].len == 3
+    check kind["group_by"][0]["sets"][0].len == 2
+    check kind["group_by"][0]["sets"][1].len == 1
+    check kind["group_by"][0]["sets"][2].len == 0
+
+  test "mixed GROUP BY keeps item order (issue #149)":
+    let kind = selectKind(
+      "SELECT region FROM sales GROUP BY region, ROLLUP(product)")
+    check kind["group_by"].len == 2
+    check kind["group_by"][0]["variant"].getStr() == "Expr"
+    check kind["group_by"][1]["variant"].getStr() == "Rollup"
+
+  test "grouping-set modifiers round-trip":
+    assertMsgpackRoundtrip(
+      "SELECT region, product, SUM(amount), GROUPING(region, product) " &
+      "FROM sales GROUP BY CUBE(region, product) " &
+      "HAVING GROUPING(region) = 0 ORDER BY region")
+
   test "CREATE INDEX emits method and WITH options":
     let doc = payloadJson("CREATE INDEX idx_doc_embedding ON documents (embedding) USING HNSW WITH (m = 16, ef_construction = 200)")
     let create = doc.stmtKind()

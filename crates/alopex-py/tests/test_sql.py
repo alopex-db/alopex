@@ -347,6 +347,51 @@ def test_execute_sql_distinct_on_order_by_mismatch_raises(db):
     assert "ALOPEX-T014" in rendered
 
 
+def test_execute_sql_grouping_sets_distinguish_placeholder_nulls(db):
+    db.execute_sql(
+        "CREATE TABLE gs_sales (id INTEGER PRIMARY KEY, region TEXT, "
+        "product TEXT, amount INTEGER)"
+    )
+    db.execute_sql(
+        "INSERT INTO gs_sales VALUES "
+        "(1, 'east', 'a', 10), (2, 'east', 'b', 20), "
+        "(3, 'west', 'a', 30), (4, NULL, 'b', 40)"
+    )
+
+    # The real NULL region maps to Python None with GROUPING(region) == 0;
+    # the ROLLUP grand-total placeholder is also None but carries g == 1
+    # (issue #149, D7).
+    rows = db.execute_sql(
+        "SELECT region, SUM(amount) AS total, GROUPING(region) AS g "
+        "FROM gs_sales GROUP BY ROLLUP(region) ORDER BY g, region NULLS FIRST"
+    )
+    assert rows == [
+        {"region": None, "total": 40, "g": 0},
+        {"region": "east", "total": 30, "g": 0},
+        {"region": "west", "total": 30, "g": 0},
+        {"region": None, "total": 100, "g": 1},
+    ]
+
+    sets = db.execute_sql(
+        "SELECT region, product, COUNT(*) AS c, "
+        "GROUPING(region, product) AS gid FROM gs_sales "
+        "GROUP BY GROUPING SETS ((region), (product), ()) "
+        "ORDER BY gid, region NULLS FIRST, product NULLS FIRST"
+    )
+    assert sets == [
+        {"region": None, "product": None, "c": 1, "gid": 1},
+        {"region": "east", "product": None, "c": 2, "gid": 1},
+        {"region": "west", "product": None, "c": 1, "gid": 1},
+        {"region": None, "product": "a", "c": 2, "gid": 2},
+        {"region": None, "product": "b", "c": 2, "gid": 2},
+        {"region": None, "product": None, "c": 4, "gid": 3},
+    ]
+
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT GROUPING(region) FROM gs_sales")
+    assert "GROUPING is only allowed in grouped queries" in str(captured.value)
+
+
 def test_execute_sql_aggregate_filter_and_percentile_disc(db):
     db.execute_sql(
         "CREATE TABLE metrics (id INTEGER PRIMARY KEY, g TEXT, v INTEGER, name TEXT)"

@@ -690,9 +690,34 @@ fn scenario_local_sql_matrix() -> DemoResult {
                 SqlValue::Integer(2),
             ]],
         ),
+        (
+            // GROUPING SETS / ROLLUP (issue #149): the grand-total row prints
+            // region as NULL but GROUPING(region) = 1 distinguishes it from
+            // any real NULL group (D7).
+            "SELECT region, SUM(qty), GROUPING(region) FROM sales \
+             GROUP BY ROLLUP(region) ORDER BY GROUPING(region), region",
+            vec![
+                vec![
+                    SqlValue::Text("east".into()),
+                    SqlValue::BigInt(4),
+                    SqlValue::BigInt(0),
+                ],
+                vec![
+                    SqlValue::Text("north".into()),
+                    SqlValue::BigInt(0),
+                    SqlValue::BigInt(0),
+                ],
+                vec![
+                    SqlValue::Text("west".into()),
+                    SqlValue::BigInt(7),
+                    SqlValue::BigInt(0),
+                ],
+                vec![SqlValue::Null, SqlValue::BigInt(11), SqlValue::BigInt(1)],
+            ],
+        ),
     ];
     require(
-        v08_matrix.len() == 27,
+        v08_matrix.len() == 28,
         "v0.8.x SQL success-check count changed",
     )?;
     for (sql, expected) in &v08_matrix {

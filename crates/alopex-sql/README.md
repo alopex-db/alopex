@@ -68,6 +68,21 @@ SELECT DISTINCT ON (region) region, amount FROM sales ORDER BY region, amount;
 決定的に解決するため、結果は物理挿入順に依存しない。詳細は
 [docs/sql-distinct-on.md](../../docs/sql-distinct-on.md)。
 
+## GROUPING SETS / ROLLUP / CUBE
+
+```sql
+SELECT region, product, SUM(amount), GROUPING(region, product)
+FROM sales GROUP BY CUBE(region, product);
+SELECT region, COUNT(*) FROM sales GROUP BY GROUPING SETS ((region), ());
+```
+
+単一パスのハッシュ集約で複数 grouping set を同時評価する(PostgreSQL 準拠)。
+subtotal 行の placeholder NULL と実データ NULL はどちらも SQL NULL で出力され、
+区別は `GROUPING`/`GROUPING_ID`(BIGINT ビットマスク、左端引数が最上位ビット)
+のみで行う。通常キーとの混在はクロス積、重複 set は重複行を出力。展開後 set 数
+は 4096、union キー数は 63 が上限。詳細は
+[docs/sql-grouping-sets.md](../../docs/sql-grouping-sets.md)。
+
 ## Supported Aggregate Functions
 
 - `COUNT(*)`

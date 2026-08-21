@@ -522,6 +522,87 @@ fn sql_integration_fetch_pagination_and_with_ties_preserve_exact_rows() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_grouping_sets_preserve_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE gs_sales (id INTEGER PRIMARY KEY, region TEXT, product TEXT, \
+         amount INTEGER); \
+         INSERT INTO gs_sales VALUES (1, 'east', 'a', 10), (2, 'east', 'b', 20), \
+         (3, 'west', 'a', 30), (4, NULL, 'b', 40);",
+    )
+    .unwrap();
+
+    // ROLLUP adds the grand-total row; GROUPING separates the real NULL
+    // region (g = 0) from the placeholder NULL (g = 1) (issue #149, D7).
+    let result = db
+        .execute_sql(
+            "SELECT region, SUM(amount) AS total, GROUPING(region) AS g FROM gs_sales \
+             GROUP BY ROLLUP(region) ORDER BY g, region NULLS FIRST",
+        )
+        .unwrap();
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Null, SqlValue::BigInt(40), SqlValue::BigInt(0)],
+            vec![
+                SqlValue::Text("east".to_string()),
+                SqlValue::BigInt(30),
+                SqlValue::BigInt(0),
+            ],
+            vec![
+                SqlValue::Text("west".to_string()),
+                SqlValue::BigInt(30),
+                SqlValue::BigInt(0),
+            ],
+            vec![SqlValue::Null, SqlValue::BigInt(100), SqlValue::BigInt(1)],
+        ]
+    );
+
+    // GROUPING SETS with the empty set keeps DuckDB/PostgreSQL row shape.
+    let sets = db
+        .execute_sql(
+            "SELECT region, product, COUNT(*) AS c FROM gs_sales \
+             GROUP BY GROUPING SETS ((region), (product), ()) \
+             ORDER BY GROUPING(region, product), region NULLS FIRST, product NULLS FIRST",
+        )
+        .unwrap();
+    let ExecutionResult::Query(sets) = sets else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        sets.rows,
+        vec![
+            vec![SqlValue::Null, SqlValue::Null, SqlValue::BigInt(1)],
+            vec![
+                SqlValue::Text("east".to_string()),
+                SqlValue::Null,
+                SqlValue::BigInt(2),
+            ],
+            vec![
+                SqlValue::Text("west".to_string()),
+                SqlValue::Null,
+                SqlValue::BigInt(1),
+            ],
+            vec![
+                SqlValue::Null,
+                SqlValue::Text("a".to_string()),
+                SqlValue::BigInt(2),
+            ],
+            vec![
+                SqlValue::Null,
+                SqlValue::Text("b".to_string()),
+                SqlValue::BigInt(2),
+            ],
+            vec![SqlValue::Null, SqlValue::Null, SqlValue::BigInt(4)],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_distinct_on_preserves_exact_rows() {
     let db = Database::new();
     db.execute_sql(

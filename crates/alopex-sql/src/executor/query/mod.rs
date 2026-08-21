@@ -692,11 +692,22 @@ fn build_iterator_pipeline_with_outer<
             aggregates,
             having,
             projection,
+            grouping_sets,
         } => {
             let (input_iter, _projection, _schema) =
                 build_iterator_pipeline_with_outer(txn, catalog, *input, memory, outer, context)?;
-            let schema = aggregate::build_aggregate_schema(&group_keys, &aggregates);
-            if let Some(policy) = memory
+            let mut schema = aggregate::build_aggregate_schema(&group_keys, &aggregates);
+            if grouping_sets.is_some() {
+                schema.push(crate::catalog::ColumnMetadata::new(
+                    crate::planner::GROUPING_ID_COLUMN,
+                    crate::planner::ResolvedType::BigInt,
+                ));
+            }
+            // GROUPING SETS runs single-pass on AggregateIterator only
+            // (issue #149, D9): spill/streaming and parallel execution are
+            // mask-unaware and stay on the grouping_sets == None path.
+            if grouping_sets.is_none()
+                && let Some(policy) = memory
                 && policy.spill_directory().is_some()
             {
                 if group_keys.is_empty() {
@@ -733,7 +744,9 @@ fn build_iterator_pipeline_with_outer<
             let parallelism = std::thread::available_parallelism()
                 .map(usize::from)
                 .unwrap_or(1);
-            if !aggregate::should_use_single_for_parallel(parallelism, &aggregates) {
+            if grouping_sets.is_none()
+                && !aggregate::should_use_single_for_parallel(parallelism, &aggregates)
+            {
                 let rows = aggregate::execute_parallel_aggregate_rows_with_policy(
                     input_iter,
                     group_keys,
@@ -754,7 +767,8 @@ fn build_iterator_pipeline_with_outer<
                 aggregates,
                 having,
                 schema.clone(),
-            );
+            )
+            .with_grouping_sets(grouping_sets);
             if let Some(policy) = memory {
                 iter = iter.with_memory_policy(Some(policy.clone()));
             }
@@ -1179,11 +1193,20 @@ fn build_streaming_pipeline_inner<
             aggregates,
             having,
             projection,
+            grouping_sets,
         } => {
             let (input_iter, _projection, _schema) =
                 build_streaming_pipeline_with_policy(txn, catalog, *input, memory)?;
-            let schema = aggregate::build_aggregate_schema(&group_keys, &aggregates);
-            if let Some(policy) = memory
+            let mut schema = aggregate::build_aggregate_schema(&group_keys, &aggregates);
+            if grouping_sets.is_some() {
+                schema.push(crate::catalog::ColumnMetadata::new(
+                    crate::planner::GROUPING_ID_COLUMN,
+                    crate::planner::ResolvedType::BigInt,
+                ));
+            }
+            // Same single-pass gate as the materialized pipeline (D9).
+            if grouping_sets.is_none()
+                && let Some(policy) = memory
                 && policy.spill_directory().is_some()
             {
                 if group_keys.is_empty() {
@@ -1220,7 +1243,9 @@ fn build_streaming_pipeline_inner<
             let parallelism = std::thread::available_parallelism()
                 .map(usize::from)
                 .unwrap_or(1);
-            if !aggregate::should_use_single_for_parallel(parallelism, &aggregates) {
+            if grouping_sets.is_none()
+                && !aggregate::should_use_single_for_parallel(parallelism, &aggregates)
+            {
                 let rows = aggregate::execute_parallel_aggregate_rows_with_policy(
                     input_iter,
                     group_keys,
@@ -1241,7 +1266,8 @@ fn build_streaming_pipeline_inner<
                 aggregates,
                 having,
                 schema.clone(),
-            );
+            )
+            .with_grouping_sets(grouping_sets);
             if let Some(policy) = memory {
                 iter = iter.with_memory_policy(Some(policy.clone()));
             }

@@ -20,6 +20,7 @@
     {"id":"relation.distinct_on","remote_status":"local_only","prerequisite":"local execution profile","normal_outcome":"deterministic per-key first-row evaluation by the local executor","failure_outcome":"distinct_on_local_only"},
     {"id":"scalar.aggregate_filter","remote_status":"local_only","prerequisite":"local execution profile","normal_outcome":"per-aggregate predicate filtering by the local executor","failure_outcome":"aggregate_filter_local_only"},
     {"id":"scalar.ordered_aggregate","remote_status":"local_only","prerequisite":"local execution profile","normal_outcome":"ordered aggregate evaluation by the local executor","failure_outcome":"ordered_aggregate_local_only"},
+    {"id":"aggregate.grouping_sets","remote_status":"local_only","prerequisite":"local execution profile","normal_outcome":"single-pass multi-set aggregation by the local executor","failure_outcome":"grouping_sets_local_only"},
     {"id":"relation.recursive_cte","remote_status":"pre_execution_rejection","prerequisite":"local execution profile","normal_outcome":"bounded local fixed-point evaluation","failure_outcome":"recursive_cte_not_supported_remote"},
     {"id":"transaction.multi_statement","remote_status":"local_only","prerequisite":"local transaction workflow","normal_outcome":"v0.7.4 local transaction behavior","failure_outcome":"explicit pre-execution classification"}
   ]

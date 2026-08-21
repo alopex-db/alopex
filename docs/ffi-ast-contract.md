@@ -6,7 +6,7 @@ Nim parser boundary.
 
 ## Contract Overview
 
-- Current contract version: `0.12.0`, returned by `alopex_parser_version()`.
+- Current contract version: `0.13.0`, returned by `alopex_parser_version()`.
 - Alopex v0.8.4 is the first release whose public producer emits the
   `CreateContinuousAggregate` variant. The variant is owned by Skulk; Alopex
   transports and validates it but does not execute the statement.
@@ -16,7 +16,7 @@ Nim parser boundary.
   buffers that the caller releases with `alopex_free_buffer`.
 - A non-zero parse error is returned as `prkError`; no Nim exception crosses
   the C ABI boundary.
-- Contract `0.12.0` is compatibility metadata inside the Alopex release; it is
+- Contract `0.13.0` is compatibility metadata inside the Alopex release; it is
   not an independent parser feature or release lane.
 
 ## Encoding Rules
@@ -35,13 +35,13 @@ Nim parser boundary.
 ### Version and Compatibility Boundary
 
 The linked Nim shared library, the Rust crate, and the staged payload must all
-report exactly `0.12.0`. A mismatch is rejected before MessagePack decoding;
+report exactly `0.13.0`. A mismatch is rejected before MessagePack decoding;
 callers must not attempt to interpret a payload produced by another contract.
 The v0.8.2 and v0.8.3 releases remain immutable historical `0.3.0` releases:
 they do not emit `CreateContinuousAggregate` and must continue to be consumed
 by a `0.3.0` binding. Alopex v0.8.4-v0.8.6 remain historical `0.4.0`
 releases, and v0.8.7 remains the historical `0.5.0` release. This document
-describes the current `0.12.0` surface and does not retroactively change them.
+describes the current `0.13.0` surface and does not retroactively change them.
 
 ### Input, Payload, and Resource Bounds
 
@@ -90,7 +90,7 @@ from invalid user SQL.
 
 | Variant | Fields |
 | --- | --- |
-| `Select` | `with: WithClause?`, `distinct: bool`, `distinct_on: [Expr]`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [Expr]?`, `having: Expr?`, `windows: [NamedWindow]`, `qualify: Expr?`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool` |
+| `Select` | `with: WithClause?`, `distinct: bool`, `distinct_on: [Expr]`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [GroupByItem]?`, `having: Expr?`, `windows: [NamedWindow]`, `qualify: Expr?`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool` |
 | `Values` | `with: WithClause?`, `rows: [[Expr]]`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool`, `span: Span` |
 | `Insert` | `table: string`, `columns: [string]?`, `source: InsertSource`, `span: Span` |
 | `Update` | `table: string`, `assignments: [Assignment]`, `selection: Expr?`, `span: Span` |
@@ -320,6 +320,28 @@ exported-version gate. The staged continuous-aggregate validator rejects the
 new clauses before encoding. See
 [`sql-aggregate-filter-within-group.md`](sql-aggregate-filter-within-group.md)
 for grammar, semantics, and the decision log.
+
+Contract `0.13.0` changes `Select.group_by` from `[Expr]?` to
+`[GroupByItem]?` (issue #149):
+
+`GroupByItem` variants:
+
+| Variant | Fields |
+| --- | --- |
+| `Expr` | `expr: Expr` |
+| `Rollup` | `exprs: [Expr]` |
+| `Cube` | `exprs: [Expr]` |
+| `GroupingSets` | `sets: [[Expr]]` |
+
+An ordinary `GROUP BY a, b` becomes two `Expr` items, so the item order and
+expression payloads are unchanged apart from the added variant tagging. A
+`0.12.0` consumer cannot decode the tagged items, so producer and consumer
+must match at the exported-version gate. `GROUP BY ()` encodes as one
+`GroupingSets` item with a single empty set. The staged continuous-aggregate
+payload keeps its frozen `[Expr]` shape; the parser rejects ROLLUP/CUBE/
+GROUPING SETS inside continuous aggregates before encoding. See
+[`sql-grouping-sets.md`](sql-grouping-sets.md) for grammar, semantics, and the
+decision log.
 
 ## DDL Types
 

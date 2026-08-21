@@ -40,8 +40,9 @@ use crate::ast::ddl::{
     ColumnConstraint, ColumnDef, CreateIndex, CreateTable, DropIndex, DropTable,
 };
 use crate::ast::dml::{
-    Delete, FromItem, Insert, InsertSource, LITERAL_TABLE, OrderByExpr, QueryBody, Select,
-    SelectItem, SetOperation as AstSetOperation, SetOperator as AstSetOperator, Update, Values,
+    Delete, FromItem, GroupByItem, Insert, InsertSource, LITERAL_TABLE, OrderByExpr, QueryBody,
+    Select, SelectItem, SetOperation as AstSetOperation, SetOperator as AstSetOperator, Update,
+    Values,
 };
 use crate::ast::expr::{Expr, ExprKind, Literal};
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
@@ -288,10 +289,12 @@ fn select_contains_subquery(select: &Select) -> bool {
             .selection
             .as_ref()
             .is_some_and(expr_contains_subquery)
-        || select
-            .group_by
-            .as_ref()
-            .is_some_and(|group| group.iter().any(expr_contains_subquery))
+        || select.group_by.as_ref().is_some_and(|group| {
+            group
+                .iter()
+                .flat_map(GroupByItem::exprs)
+                .any(expr_contains_subquery)
+        })
         || select.having.as_ref().is_some_and(expr_contains_subquery)
         || select
             .set_operations
@@ -657,6 +660,7 @@ impl TableReferenceExtractor {
                 aggregates,
                 having,
                 projection,
+                grouping_sets: _,
             } => {
                 self.extract_plan(input, root_access, scan_source, diagnostics, references);
                 for expr in group_keys {
@@ -1966,14 +1970,46 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 "HAVING cannot contain window functions".to_string(),
             ));
         }
-        if stmt
-            .group_by
-            .as_ref()
-            .is_some_and(|items| items.iter().any(expr_contains_window))
-        {
+        if stmt.group_by.as_ref().is_some_and(|items| {
+            items
+                .iter()
+                .flat_map(GroupByItem::exprs)
+                .any(expr_contains_window)
+        }) {
             return Err(PlannerError::invalid_expression(
                 "GROUP BY cannot contain window functions".to_string(),
             ));
+        }
+        // D5: GROUPING/GROUPING_ID are meaningful only over aggregate output.
+        if stmt.group_by.as_ref().is_some_and(|items| {
+            items
+                .iter()
+                .flat_map(GroupByItem::exprs)
+                .any(expr_contains_grouping)
+        }) {
+            return Err(PlannerError::invalid_expression(
+                "GROUPING is not allowed in GROUP BY".to_string(),
+            ));
+        }
+        if stmt.selection.as_ref().is_some_and(expr_contains_grouping) {
+            return Err(PlannerError::invalid_expression(
+                "GROUPING is not allowed in WHERE".to_string(),
+            ));
+        }
+        if !(has_group_by || has_aggregate || stmt.having.is_some()) {
+            let grouping_present = stmt.projection.iter().any(|item| match item {
+                SelectItem::Expr { expr, .. } => expr_contains_grouping(expr),
+                SelectItem::Wildcard { .. } | SelectItem::QualifiedWildcard { .. } => false,
+            }) || stmt
+                .order_by
+                .iter()
+                .any(|order| expr_contains_grouping(&order.expr))
+                || stmt.qualify.as_ref().is_some_and(expr_contains_grouping);
+            if grouping_present {
+                return Err(PlannerError::invalid_expression(
+                    "GROUPING is only allowed in grouped queries".to_string(),
+                ));
+            }
         }
 
         // SELECT-list aliases are visible to HAVING, QUALIFY, and ORDER BY.
@@ -2131,7 +2167,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 ));
             }
 
-            let (group_keys, projected) = if distinct_only {
+            let (group_keys, grouping_sets, projected) = if distinct_only {
                 let projected = self.build_projected_columns_for_distinct_with_scope(
                     &stmt.projection,
                     &relation.schema,
@@ -2139,15 +2175,15 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     &ctes,
                 )?;
                 let group_keys = projected.iter().map(|col| col.expr.clone()).collect();
-                (group_keys, projected)
+                (group_keys, None, projected)
             } else {
-                let group_keys = self.build_group_keys_with_scope(stmt, &expr_scope, &ctes)?;
+                let expanded = self.expand_group_by_items(stmt, &expr_scope, &ctes)?;
                 let projected = self.build_projected_columns_for_aggregate_with_scope(
                     &stmt.projection,
                     &expr_scope,
                     &ctes,
                 )?;
-                (group_keys, projected)
+                (expanded.group_keys, expanded.grouping_sets, projected)
             };
             let mut aggregates = Vec::new();
             let mut agg_map = HashMap::new();
@@ -2190,14 +2226,26 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     .validate_having_expr(having, &group_keys, &aggregates)?;
             }
 
-            let output_schema = build_aggregate_schema(&group_keys, &aggregates);
+            let mut output_schema = build_aggregate_schema(&group_keys, &aggregates);
+            // GROUPING rewrites resolve indexes against the key+aggregate
+            // names only; the trailing __grouping_id column is appended to
+            // the schema afterwards so the group-key arithmetic inside
+            // rewrite_expr_with_maps stays exact (issue #149).
             let output_names: Vec<String> = output_schema.iter().map(|c| c.name.clone()).collect();
+            let grouping_rewrite = GroupingRewrite::new(&group_keys, &aggregates, &grouping_sets);
+            if grouping_sets.is_some() {
+                output_schema.push(ColumnMetadata::new(
+                    GROUPING_ID_COLUMN,
+                    ResolvedType::BigInt,
+                ));
+            }
 
             let projection = self.build_aggregate_projection(
                 projected,
                 &group_keys,
                 &aggregates,
                 &output_names,
+                Some(&grouping_rewrite),
             )?;
 
             let having = if let Some(having) = having_typed {
@@ -2206,6 +2254,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     &group_keys,
                     &aggregates,
                     &output_names,
+                    Some(&grouping_rewrite),
                 )?)
             } else {
                 None
@@ -2219,6 +2268,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         &group_keys,
                         &aggregates,
                         &output_names,
+                        Some(&grouping_rewrite),
                     )?;
                     Ok(SortExpr::new(rewritten, expr.asc, expr.nulls_first))
                 })
@@ -2231,6 +2281,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 aggregates,
                 having,
                 projection,
+                grouping_sets,
             };
 
             if !order_by.is_empty() {
@@ -2328,7 +2379,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         projection_aliases: &HashMap<String, crate::ast::expr::Expr>,
         mut plan: LogicalPlan,
     ) -> Result<PlannedRelation, PlannerError> {
-        let group_keys = self.build_group_keys_with_scope(stmt, expr_scope, ctes)?;
+        let expanded = self.expand_group_by_items(stmt, expr_scope, ctes)?;
+        let group_keys = expanded.group_keys;
+        let grouping_sets = expanded.grouping_sets;
         let projected = self.build_projected_columns_for_aggregate_with_scope(
             &stmt.projection,
             expr_scope,
@@ -2398,17 +2451,41 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 .validate_having_expr(having, &group_keys, &aggregates)?;
         }
 
-        let aggregate_schema = build_aggregate_schema(&group_keys, &aggregates);
+        let mut aggregate_schema = build_aggregate_schema(&group_keys, &aggregates);
+        // GROUPING rewrites resolve indexes against key+aggregate names only;
+        // the __grouping_id column joins the schema afterwards (issue #149).
+        let rewrite_names = aggregate_schema
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let grouping_rewrite = GroupingRewrite::new(&group_keys, &aggregates, &grouping_sets);
+        if grouping_sets.is_some() {
+            aggregate_schema.push(ColumnMetadata::new(
+                GROUPING_ID_COLUMN,
+                ResolvedType::BigInt,
+            ));
+        }
         let aggregate_names = aggregate_schema
             .iter()
             .map(|column| column.name.clone())
             .collect::<Vec<_>>();
-        let projection =
-            self.build_aggregate_projection(projected, &group_keys, &aggregates, &aggregate_names)?;
+        let projection = self.build_aggregate_projection(
+            projected,
+            &group_keys,
+            &aggregates,
+            &rewrite_names,
+            Some(&grouping_rewrite),
+        )?;
         let having = having_typed
             .as_ref()
             .map(|expr| {
-                self.rewrite_expr_for_aggregate(expr, &group_keys, &aggregates, &aggregate_names)
+                self.rewrite_expr_for_aggregate(
+                    expr,
+                    &group_keys,
+                    &aggregates,
+                    &rewrite_names,
+                    Some(&grouping_rewrite),
+                )
             })
             .transpose()?;
         let outer_order_by = outer_order_by
@@ -2419,7 +2496,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         &sort.expr,
                         &group_keys,
                         &aggregates,
-                        &aggregate_names,
+                        &rewrite_names,
+                        Some(&grouping_rewrite),
                     )?,
                     sort.asc,
                     sort.nulls_first,
@@ -2429,7 +2507,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let qualify = qualify_typed
             .as_ref()
             .map(|expr| {
-                self.rewrite_expr_for_aggregate(expr, &group_keys, &aggregates, &aggregate_names)
+                self.rewrite_expr_for_aggregate(
+                    expr,
+                    &group_keys,
+                    &aggregates,
+                    &rewrite_names,
+                    Some(&grouping_rewrite),
+                )
             })
             .transpose()?;
 
@@ -2439,6 +2523,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             aggregates,
             having,
             projection: Projection::All(aggregate_names),
+            grouping_sets,
         };
 
         let mut windows = Vec::new();
@@ -2614,6 +2699,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         .map(|column| column.name.clone())
                         .collect(),
                 ),
+                grouping_sets: None,
             };
         }
         if !projected_order_by.is_empty() {
@@ -3168,7 +3254,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }) || stmt
             .group_by
             .as_ref()
-            .map(|items| items.iter().any(expr_contains_aggregate))
+            .map(|items| {
+                items
+                    .iter()
+                    .flat_map(GroupByItem::exprs)
+                    .any(expr_contains_aggregate)
+            })
             .unwrap_or(false)
             || stmt
                 .having
@@ -3194,7 +3285,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     ) -> Result<Vec<TypedExpr>, PlannerError> {
         let mut keys = Vec::new();
         if let Some(items) = &stmt.group_by {
-            for expr in items {
+            for expr in items.iter().flat_map(GroupByItem::exprs) {
                 let typed = self.type_checker.infer_type(expr, table)?;
                 if typed_expr_contains_aggregate(&typed) {
                     return Err(PlannerError::invalid_expression(
@@ -3212,30 +3303,183 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         Ok(keys)
     }
 
-    fn build_group_keys_with_scope(
+    /// Type one grouping key with the shared GROUP BY constraints.
+    fn type_group_key_with_scope(
+        &self,
+        expr: &Expr,
+        scope: &[ScopedTable],
+        ctes: &CtePlans,
+    ) -> Result<TypedExpr, PlannerError> {
+        let typed = self.infer_expr_with_scope(expr, scope, ctes)?;
+        if typed_expr_contains_aggregate(&typed) {
+            return Err(PlannerError::invalid_expression(
+                "GROUP BY cannot contain aggregate functions".to_string(),
+            ));
+        }
+        if !matches!(typed.kind, TypedExprKind::ColumnRef { .. }) {
+            return Err(PlannerError::invalid_expression(
+                "GROUP BY expressions must be column references".to_string(),
+            ));
+        }
+        Ok(typed)
+    }
+
+    /// Expand GROUP BY items into a flat key list plus grouping-set masks.
+    ///
+    /// Without ROLLUP/CUBE/GROUPING SETS the result is the pre-existing key
+    /// list with `grouping_sets: None`, keeping the legacy single-set plan
+    /// byte-for-byte identical (issue #149, D12). With modifiers, keys are
+    /// unioned by expression identity in first-appearance order and every
+    /// item contributes a set list that is combined by cross product (D2).
+    fn expand_group_by_items(
         &self,
         stmt: &Select,
         scope: &[ScopedTable],
         ctes: &CtePlans,
-    ) -> Result<Vec<TypedExpr>, PlannerError> {
-        let mut keys = Vec::new();
-        if let Some(items) = &stmt.group_by {
-            for expr in items {
-                let typed = self.infer_expr_with_scope(expr, scope, ctes)?;
-                if typed_expr_contains_aggregate(&typed) {
-                    return Err(PlannerError::invalid_expression(
-                        "GROUP BY cannot contain aggregate functions".to_string(),
-                    ));
+    ) -> Result<ExpandedGroupBy, PlannerError> {
+        let Some(items) = &stmt.group_by else {
+            return Ok(ExpandedGroupBy {
+                group_keys: Vec::new(),
+                grouping_sets: None,
+            });
+        };
+
+        if items
+            .iter()
+            .all(|item| matches!(item, GroupByItem::Expr { .. }))
+        {
+            // Legacy path: no dedup, no masks (D12).
+            let mut keys = Vec::new();
+            for item in items {
+                if let GroupByItem::Expr { expr } = item {
+                    keys.push(self.type_group_key_with_scope(expr, scope, ctes)?);
                 }
-                if !matches!(typed.kind, TypedExprKind::ColumnRef { .. }) {
-                    return Err(PlannerError::invalid_expression(
-                        "GROUP BY expressions must be column references".to_string(),
-                    ));
-                }
-                keys.push(typed);
             }
+            return Ok(ExpandedGroupBy {
+                group_keys: keys,
+                grouping_sets: None,
+            });
         }
-        Ok(keys)
+
+        let mut keys: Vec<TypedExpr> = Vec::new();
+        let mut key_index: HashMap<String, usize> = HashMap::new();
+        let mut add_key = |planner: &Self, expr: &Expr| -> Result<usize, PlannerError> {
+            let typed = planner.type_group_key_with_scope(expr, scope, ctes)?;
+            let signature = expr_key(&typed);
+            if let Some(&index) = key_index.get(&signature) {
+                return Ok(index);
+            }
+            let index = keys.len();
+            keys.push(typed);
+            key_index.insert(signature, index);
+            Ok(index)
+        };
+
+        // Cross product of per-item set lists (D2); each set is a list of
+        // union-key indexes.
+        let mut sets: Vec<Vec<usize>> = vec![Vec::new()];
+        for item in items {
+            let item_sets: Vec<Vec<usize>> = match item {
+                GroupByItem::Expr { expr } => vec![vec![add_key(self, expr)?]],
+                GroupByItem::Rollup { exprs } => {
+                    if exprs.is_empty() {
+                        return Err(PlannerError::invalid_expression(
+                            "ROLLUP requires at least one expression".to_string(),
+                        ));
+                    }
+                    let indexes = exprs
+                        .iter()
+                        .map(|expr| add_key(self, expr))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    (0..=indexes.len())
+                        .rev()
+                        .map(|len| indexes[..len].to_vec())
+                        .collect()
+                }
+                GroupByItem::Cube { exprs } => {
+                    if exprs.is_empty() {
+                        return Err(PlannerError::invalid_expression(
+                            "CUBE requires at least one expression".to_string(),
+                        ));
+                    }
+                    if exprs.len() > MAX_CUBE_COLUMNS {
+                        return Err(PlannerError::invalid_expression(format!(
+                            "too many grouping sets (max {MAX_GROUPING_SETS})"
+                        )));
+                    }
+                    let indexes = exprs
+                        .iter()
+                        .map(|expr| add_key(self, expr))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let n = indexes.len();
+                    (0..(1usize << n))
+                        .rev()
+                        .map(|included| {
+                            indexes
+                                .iter()
+                                .enumerate()
+                                .filter(|(position, _)| (included >> (n - 1 - position)) & 1 == 1)
+                                .map(|(_, &index)| index)
+                                .collect()
+                        })
+                        .collect()
+                }
+                GroupByItem::GroupingSets { sets: listed } => {
+                    if listed.is_empty() {
+                        return Err(PlannerError::invalid_expression(
+                            "GROUPING SETS requires at least one grouping set".to_string(),
+                        ));
+                    }
+                    listed
+                        .iter()
+                        .map(|set| {
+                            set.iter()
+                                .map(|expr| add_key(self, expr))
+                                .collect::<Result<Vec<_>, _>>()
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                }
+            };
+
+            let mut combined = Vec::with_capacity(sets.len().saturating_mul(item_sets.len()));
+            for base in &sets {
+                for item_set in &item_sets {
+                    if combined.len() >= MAX_GROUPING_SETS {
+                        return Err(PlannerError::invalid_expression(format!(
+                            "too many grouping sets (max {MAX_GROUPING_SETS})"
+                        )));
+                    }
+                    let mut set = base.clone();
+                    set.extend(item_set.iter().copied());
+                    combined.push(set);
+                }
+            }
+            sets = combined;
+        }
+
+        if keys.len() > MAX_GROUPING_KEYS {
+            return Err(PlannerError::invalid_expression(format!(
+                "too many grouping columns (max {MAX_GROUPING_KEYS})"
+            )));
+        }
+
+        let key_count = keys.len();
+        let full_mask = grouping_full_mask(key_count);
+        let masks = sets
+            .iter()
+            .map(|set| {
+                let mut mask = full_mask;
+                for &index in set {
+                    mask &= !(1u64 << (key_count - 1 - index));
+                }
+                mask
+            })
+            .collect();
+
+        Ok(ExpandedGroupBy {
+            group_keys: keys,
+            grouping_sets: Some(masks),
+        })
     }
 
     #[allow(dead_code)]
@@ -3989,11 +4233,17 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         group_keys: &[TypedExpr],
         aggregates: &[AggregateExpr],
         output_names: &[String],
+        grouping: Option<&GroupingRewrite>,
     ) -> Result<Projection, PlannerError> {
         let mut columns = Vec::new();
         for col in projected {
-            let rewritten =
-                self.rewrite_expr_for_aggregate(&col.expr, group_keys, aggregates, output_names)?;
+            let rewritten = self.rewrite_expr_for_aggregate(
+                &col.expr,
+                group_keys,
+                aggregates,
+                output_names,
+                grouping,
+            )?;
             columns.push(ProjectedColumn {
                 expr: rewritten,
                 alias: col.alias,
@@ -4002,17 +4252,29 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         Ok(Projection::Columns(columns))
     }
 
+    /// Rewrite an aggregate-context expression onto the aggregate output.
+    ///
+    /// `output_names` must name the group keys and aggregates only, never a
+    /// trailing `__grouping_id` column: `rewrite_expr_with_maps` derives the
+    /// group-key count from `output_names.len() - aggregate_map.len()`.
+    /// GROUPING/GROUPING_ID calls are lowered onto `__grouping_id` first via
+    /// the `grouping` context (issue #149, D4/D5).
     fn rewrite_expr_for_aggregate(
         &self,
         expr: &TypedExpr,
         group_keys: &[TypedExpr],
         aggregates: &[AggregateExpr],
         output_names: &[String],
+        grouping: Option<&GroupingRewrite>,
     ) -> Result<TypedExpr, PlannerError> {
         let group_key_map = build_group_key_map(group_keys);
         let aggregate_map = build_aggregate_map(aggregates);
 
-        rewrite_expr_with_maps(expr, &group_key_map, &aggregate_map, output_names)
+        let expr = match grouping {
+            Some(context) => rewrite_grouping_calls(expr, context)?,
+            None => expr.clone(),
+        };
+        rewrite_expr_with_maps(&expr, &group_key_map, &aggregate_map, output_names)
     }
 
     /// Resolve a LIMIT/OFFSET/FETCH count expression to a concrete value.
@@ -5656,6 +5918,529 @@ fn build_aggregate_map(aggregates: &[AggregateExpr]) -> HashMap<AggregateSignatu
     map
 }
 
+/// Hidden aggregate output column carrying the grouping-set mask (issue #149).
+pub(crate) const GROUPING_ID_COLUMN: &str = "__grouping_id";
+/// PostgreSQL-compatible bound on expanded grouping sets (D6).
+const MAX_GROUPING_SETS: usize = 4096;
+/// CUBE with more than 12 columns always exceeds `MAX_GROUPING_SETS`.
+const MAX_CUBE_COLUMNS: usize = 12;
+/// The grouping-id mask is a BIGINT, so 63 keys/arguments at most (D4).
+const MAX_GROUPING_KEYS: usize = 63;
+
+/// GROUP BY expansion result (issue #149).
+struct ExpandedGroupBy {
+    group_keys: Vec<TypedExpr>,
+    grouping_sets: Option<Vec<u64>>,
+}
+
+fn grouping_full_mask(key_count: usize) -> u64 {
+    if key_count == 0 {
+        0
+    } else {
+        (1u64 << key_count) - 1
+    }
+}
+
+fn is_grouping_function(name: &str) -> bool {
+    name.eq_ignore_ascii_case("grouping") || name.eq_ignore_ascii_case("grouping_id")
+}
+
+/// Context for lowering GROUPING/GROUPING_ID onto `__grouping_id` (D4/D5).
+struct GroupingRewrite {
+    /// Group-key expression identity -> union key position.
+    key_index: HashMap<String, usize>,
+    key_count: usize,
+    /// Output position of `__grouping_id` (after keys and aggregates).
+    gid_index: usize,
+    /// Whether the plan actually carries grouping sets; a plain GROUP BY
+    /// still accepts GROUPING but every call folds to constant 0.
+    sets_present: bool,
+}
+
+impl GroupingRewrite {
+    fn new(
+        group_keys: &[TypedExpr],
+        aggregates: &[AggregateExpr],
+        grouping_sets: &Option<Vec<u64>>,
+    ) -> Self {
+        let key_index = group_keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| (expr_key(key), index))
+            .collect();
+        Self {
+            key_index,
+            key_count: group_keys.len(),
+            gid_index: group_keys.len() + aggregates.len(),
+            sets_present: grouping_sets.is_some(),
+        }
+    }
+}
+
+/// AST-level detection of GROUPING/GROUPING_ID calls (D5 placement rules).
+fn expr_contains_grouping(expr: &crate::ast::expr::Expr) -> bool {
+    use crate::ast::expr::ExprKind;
+
+    match &expr.kind {
+        ExprKind::FunctionCall {
+            name,
+            args,
+            order_by,
+            within_group,
+            filter,
+            over,
+            ..
+        } => {
+            is_grouping_function(name)
+                || args.iter().any(expr_contains_grouping)
+                || order_by
+                    .iter()
+                    .any(|sort| expr_contains_grouping(&sort.expr))
+                || within_group
+                    .iter()
+                    .any(|sort| expr_contains_grouping(&sort.expr))
+                || filter.as_deref().is_some_and(expr_contains_grouping)
+                || over.as_ref().is_some_and(|window| {
+                    window.partition_by.iter().any(expr_contains_grouping)
+                        || window
+                            .order_by
+                            .iter()
+                            .any(|sort| expr_contains_grouping(&sort.expr))
+                })
+        }
+        ExprKind::BinaryOp { left, right, .. } => {
+            expr_contains_grouping(left) || expr_contains_grouping(right)
+        }
+        ExprKind::UnaryOp { operand, .. } => expr_contains_grouping(operand),
+        ExprKind::TruthPredicate { expr, .. } => expr_contains_grouping(expr),
+        ExprKind::IsDistinctFrom { left, right, .. } => {
+            expr_contains_grouping(left) || expr_contains_grouping(right)
+        }
+        ExprKind::Row { items } => items.iter().any(expr_contains_grouping),
+        ExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            operand.as_deref().is_some_and(expr_contains_grouping)
+                || branches.iter().any(|branch| {
+                    expr_contains_grouping(&branch.when) || expr_contains_grouping(&branch.then)
+                })
+                || else_expr.as_deref().is_some_and(expr_contains_grouping)
+        }
+        ExprKind::Cast { expr, .. } | ExprKind::TryCast { expr, .. } => {
+            expr_contains_grouping(expr)
+        }
+        ExprKind::Between {
+            expr, low, high, ..
+        } => {
+            expr_contains_grouping(expr)
+                || expr_contains_grouping(low)
+                || expr_contains_grouping(high)
+        }
+        ExprKind::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_grouping(expr)
+                || expr_contains_grouping(pattern)
+                || escape.as_deref().is_some_and(expr_contains_grouping)
+        }
+        ExprKind::InList { expr, list, .. } => {
+            expr_contains_grouping(expr) || list.iter().any(expr_contains_grouping)
+        }
+        ExprKind::IsNull { expr, .. } => expr_contains_grouping(expr),
+        ExprKind::ScalarSubquery { .. }
+        | ExprKind::InSubquery { .. }
+        | ExprKind::Exists { .. }
+        | ExprKind::Quantified { .. }
+        | ExprKind::Literal { .. }
+        | ExprKind::VectorLiteral { .. }
+        | ExprKind::ColumnRef { .. } => false,
+    }
+}
+
+fn typed_expr_contains_grouping(expr: &TypedExpr) -> bool {
+    match &expr.kind {
+        TypedExprKind::FunctionCall {
+            name,
+            args,
+            filter,
+            order_by,
+            over,
+            ..
+        } => {
+            is_grouping_function(name)
+                || args.iter().any(typed_expr_contains_grouping)
+                || filter.as_deref().is_some_and(typed_expr_contains_grouping)
+                || order_by
+                    .iter()
+                    .any(|sort| typed_expr_contains_grouping(&sort.expr))
+                || over.as_ref().is_some_and(|window| {
+                    window.partition_by.iter().any(typed_expr_contains_grouping)
+                        || window
+                            .order_by
+                            .iter()
+                            .any(|sort| typed_expr_contains_grouping(&sort.expr))
+                })
+        }
+        TypedExprKind::BinaryOp { left, right, .. } => {
+            typed_expr_contains_grouping(left) || typed_expr_contains_grouping(right)
+        }
+        TypedExprKind::UnaryOp { operand, .. } => typed_expr_contains_grouping(operand),
+        TypedExprKind::Cast { expr, .. } | TypedExprKind::TryCast { expr, .. } => {
+            typed_expr_contains_grouping(expr)
+        }
+        TypedExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            operand.as_deref().is_some_and(typed_expr_contains_grouping)
+                || branches.iter().any(|branch| {
+                    typed_expr_contains_grouping(&branch.when)
+                        || typed_expr_contains_grouping(&branch.then)
+                })
+                || else_expr
+                    .as_deref()
+                    .is_some_and(typed_expr_contains_grouping)
+        }
+        TypedExprKind::Between {
+            expr, low, high, ..
+        } => {
+            typed_expr_contains_grouping(expr)
+                || typed_expr_contains_grouping(low)
+                || typed_expr_contains_grouping(high)
+        }
+        TypedExprKind::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            typed_expr_contains_grouping(expr)
+                || typed_expr_contains_grouping(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|inner| typed_expr_contains_grouping(inner))
+        }
+        TypedExprKind::InList { expr, list, .. } => {
+            typed_expr_contains_grouping(expr) || list.iter().any(typed_expr_contains_grouping)
+        }
+        TypedExprKind::IsNull { expr, .. } => typed_expr_contains_grouping(expr),
+        TypedExprKind::InSubquery { expr, .. } => typed_expr_contains_grouping(expr),
+        TypedExprKind::Quantified { expr, .. } => typed_expr_contains_grouping(expr),
+        TypedExprKind::Literal(_)
+        | TypedExprKind::VectorLiteral(_)
+        | TypedExprKind::ColumnRef { .. }
+        | TypedExprKind::ScalarSubquery(_)
+        | TypedExprKind::Exists { .. } => false,
+    }
+}
+
+fn bigint_literal(value: u64, span: crate::ast::Span) -> TypedExpr {
+    TypedExpr {
+        kind: TypedExprKind::Literal(Literal::Number(value.to_string())),
+        resolved_type: ResolvedType::BigInt,
+        span,
+    }
+}
+
+fn bigint_binary_op(
+    left: TypedExpr,
+    op: crate::ast::expr::BinaryOp,
+    right: TypedExpr,
+    span: crate::ast::Span,
+) -> TypedExpr {
+    TypedExpr {
+        kind: TypedExprKind::BinaryOp {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        },
+        resolved_type: ResolvedType::BigInt,
+        span,
+    }
+}
+
+/// Lower a `GROUPING(e1, ..., en)` call to integer arithmetic over the
+/// hidden `__grouping_id` output column (D4).
+///
+/// Argument `j` (0-based, leftmost = most significant result bit) whose key
+/// occupies union position `i` contributes
+/// `((__grouping_id / 2^(K-1-i)) % 2) * 2^(n-1-j)`; the divisor is a power
+/// of two, so no division by zero is possible at runtime.
+fn lower_grouping_call(
+    args: &[TypedExpr],
+    context: &GroupingRewrite,
+    span: crate::ast::Span,
+) -> Result<TypedExpr, PlannerError> {
+    use crate::ast::expr::BinaryOp as AstBinaryOp;
+
+    if args.is_empty() {
+        return Err(PlannerError::invalid_expression(
+            "GROUPING requires at least one argument".to_string(),
+        ));
+    }
+    if args.len() > MAX_GROUPING_KEYS {
+        return Err(PlannerError::invalid_expression(format!(
+            "GROUPING accepts at most {MAX_GROUPING_KEYS} arguments"
+        )));
+    }
+    let mut key_positions = Vec::with_capacity(args.len());
+    for arg in args {
+        let Some(&position) = context.key_index.get(&expr_key(arg)) else {
+            return Err(PlannerError::invalid_expression(
+                "arguments to GROUPING must be grouping expressions of the query".to_string(),
+            ));
+        };
+        key_positions.push(position);
+    }
+
+    if !context.sets_present {
+        // Plain GROUP BY has exactly one grouping set: every key is present.
+        return Ok(bigint_literal(0, span));
+    }
+
+    let argument_count = key_positions.len();
+    let mut sum: Option<TypedExpr> = None;
+    for (argument, key_position) in key_positions.into_iter().enumerate() {
+        let gid_ref = TypedExpr::column_ref(
+            "__agg__".to_string(),
+            GROUPING_ID_COLUMN.to_string(),
+            context.gid_index,
+            ResolvedType::BigInt,
+            span,
+        );
+        let excluded_shift = (context.key_count - 1 - key_position) as u32;
+        let bit = bigint_binary_op(
+            bigint_binary_op(
+                gid_ref,
+                AstBinaryOp::Div,
+                bigint_literal(1u64 << excluded_shift, span),
+                span,
+            ),
+            AstBinaryOp::Mod,
+            bigint_literal(2, span),
+            span,
+        );
+        let weight = 1u64 << (argument_count - 1 - argument);
+        let term = if weight == 1 {
+            bit
+        } else {
+            bigint_binary_op(bit, AstBinaryOp::Mul, bigint_literal(weight, span), span)
+        };
+        sum = Some(match sum {
+            None => term,
+            Some(current) => bigint_binary_op(current, AstBinaryOp::Add, term, span),
+        });
+    }
+    Ok(sum.expect("GROUPING argument list is non-empty"))
+}
+
+/// Pre-pass over aggregate-context expressions: replace GROUPING calls and
+/// validate their placement before `rewrite_expr_with_maps` runs (D5).
+///
+/// Aggregate calls are returned unchanged (their signature must keep matching
+/// the collected plan aggregates), but GROUPING inside their arguments is a
+/// planning error because aggregate arguments evaluate against input rows.
+fn rewrite_grouping_calls(
+    expr: &TypedExpr,
+    context: &GroupingRewrite,
+) -> Result<TypedExpr, PlannerError> {
+    let rebuild = |inner: &TypedExpr| rewrite_grouping_calls(inner, context);
+    let rebuild_box = |inner: &TypedExpr| -> Result<Box<TypedExpr>, PlannerError> {
+        Ok(Box::new(rewrite_grouping_calls(inner, context)?))
+    };
+    let kind = match &expr.kind {
+        TypedExprKind::FunctionCall {
+            name,
+            args,
+            distinct,
+            star,
+            filter,
+            order_by,
+            over,
+        } => {
+            if is_grouping_function(name) {
+                if over.is_some() {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUPING cannot be used as a window function".to_string(),
+                    ));
+                }
+                return lower_grouping_call(args, context, expr.span);
+            }
+            if over.is_none() && is_aggregate_function(name) {
+                if args.iter().any(typed_expr_contains_grouping)
+                    || filter.as_deref().is_some_and(typed_expr_contains_grouping)
+                    || order_by
+                        .iter()
+                        .any(|sort| typed_expr_contains_grouping(&sort.expr))
+                {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUPING cannot appear inside aggregate function arguments".to_string(),
+                    ));
+                }
+                return Ok(expr.clone());
+            }
+            TypedExprKind::FunctionCall {
+                name: name.clone(),
+                args: args.iter().map(rebuild).collect::<Result<Vec<_>, _>>()?,
+                distinct: *distinct,
+                star: *star,
+                filter: filter.as_deref().map(rebuild_box).transpose()?,
+                order_by: order_by
+                    .iter()
+                    .map(|sort| {
+                        Ok(SortExpr::new(
+                            rebuild(&sort.expr)?,
+                            sort.asc,
+                            sort.nulls_first,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, PlannerError>>()?,
+                over: over
+                    .as_ref()
+                    .map(|window| {
+                        Ok(typed_expr::TypedWindowSpec {
+                            partition_by: window
+                                .partition_by
+                                .iter()
+                                .map(rebuild)
+                                .collect::<Result<Vec<_>, _>>()?,
+                            order_by: window
+                                .order_by
+                                .iter()
+                                .map(|sort| {
+                                    Ok(SortExpr::new(
+                                        rebuild(&sort.expr)?,
+                                        sort.asc,
+                                        sort.nulls_first,
+                                    ))
+                                })
+                                .collect::<Result<Vec<_>, PlannerError>>()?,
+                            frame: window.frame.clone(),
+                        })
+                    })
+                    .transpose()
+                    .map_err(|error: PlannerError| error)?,
+            }
+        }
+        TypedExprKind::BinaryOp { left, op, right } => TypedExprKind::BinaryOp {
+            left: rebuild_box(left)?,
+            op: *op,
+            right: rebuild_box(right)?,
+        },
+        TypedExprKind::UnaryOp { op, operand } => TypedExprKind::UnaryOp {
+            op: *op,
+            operand: rebuild_box(operand)?,
+        },
+        TypedExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => TypedExprKind::Case {
+            operand: operand.as_deref().map(rebuild_box).transpose()?,
+            branches: branches
+                .iter()
+                .map(|branch| {
+                    Ok(TypedCaseWhen {
+                        when: rebuild(&branch.when)?,
+                        then: rebuild(&branch.then)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, PlannerError>>()?,
+            else_expr: else_expr.as_deref().map(rebuild_box).transpose()?,
+        },
+        TypedExprKind::Cast {
+            expr: inner,
+            target_type,
+        } => TypedExprKind::Cast {
+            expr: rebuild_box(inner)?,
+            target_type: target_type.clone(),
+        },
+        TypedExprKind::TryCast {
+            expr: inner,
+            target_type,
+        } => TypedExprKind::TryCast {
+            expr: rebuild_box(inner)?,
+            target_type: target_type.clone(),
+        },
+        TypedExprKind::Between {
+            expr: inner,
+            low,
+            high,
+            negated,
+        } => TypedExprKind::Between {
+            expr: rebuild_box(inner)?,
+            low: rebuild_box(low)?,
+            high: rebuild_box(high)?,
+            negated: *negated,
+        },
+        TypedExprKind::Like {
+            expr: inner,
+            pattern,
+            escape,
+            negated,
+            kind,
+        } => TypedExprKind::Like {
+            expr: rebuild_box(inner)?,
+            pattern: rebuild_box(pattern)?,
+            escape: escape.as_deref().map(rebuild_box).transpose()?,
+            negated: *negated,
+            kind: *kind,
+        },
+        TypedExprKind::InList {
+            expr: inner,
+            list,
+            negated,
+        } => TypedExprKind::InList {
+            expr: rebuild_box(inner)?,
+            list: list.iter().map(rebuild).collect::<Result<Vec<_>, _>>()?,
+            negated: *negated,
+        },
+        TypedExprKind::IsNull {
+            expr: inner,
+            negated,
+        } => TypedExprKind::IsNull {
+            expr: rebuild_box(inner)?,
+            negated: *negated,
+        },
+        TypedExprKind::InSubquery {
+            expr: inner,
+            subquery,
+            negated,
+        } => TypedExprKind::InSubquery {
+            expr: rebuild_box(inner)?,
+            subquery: subquery.clone(),
+            negated: *negated,
+        },
+        TypedExprKind::Quantified {
+            expr: inner,
+            op,
+            quantifier,
+            subquery,
+        } => TypedExprKind::Quantified {
+            expr: rebuild_box(inner)?,
+            op: *op,
+            quantifier: *quantifier,
+            subquery: subquery.clone(),
+        },
+        TypedExprKind::Literal(_)
+        | TypedExprKind::VectorLiteral(_)
+        | TypedExprKind::ColumnRef { .. }
+        | TypedExprKind::ScalarSubquery(_)
+        | TypedExprKind::Exists { .. } => return Ok(expr.clone()),
+    };
+    Ok(TypedExpr {
+        kind,
+        resolved_type: expr.resolved_type.clone(),
+        span: expr.span,
+    })
+}
+
 fn build_aggregate_schema(
     group_keys: &[TypedExpr],
     aggregates: &[AggregateExpr],
@@ -6008,6 +6793,9 @@ fn rewrite_expr_with_maps(
             })
         }
         TypedExprKind::Literal(_) | TypedExprKind::VectorLiteral(_) => Ok(expr.clone()),
+        // References the GROUPING pre-pass already resolved onto the
+        // aggregate output (the hidden __grouping_id column) pass through.
+        TypedExprKind::ColumnRef { table, .. } if table == "__agg__" => Ok(expr.clone()),
         TypedExprKind::ColumnRef { .. } => Err(PlannerError::invalid_expression(
             "column reference must appear in GROUP BY or be aggregated".to_string(),
         )),

@@ -14,7 +14,7 @@ from verify_wheel_contents import EXPECTED_DLL, verify
 def _metadata_files(library: bytes = b"dll") -> dict[str, bytes]:
     digest = hashlib.sha256(library).hexdigest()
     return {
-        "alopex/native/CONTRACT_VERSION": b"0.12.0\n",
+        "alopex/native/CONTRACT_VERSION": b"0.13.0\n",
         "alopex/native/SHA256SUMS": f"{digest}  alopex_sql_parser.dll\n".encode(),
         EXPECTED_DLL: library,
     }
@@ -68,7 +68,7 @@ def test_windows_wheel_checks_archive_and_internal_digests(tmp_path: Path) -> No
         require_dll=True,
         expected_archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
         expected_library_sha256=hashlib.sha256(b"reviewed-dll").hexdigest(),
-        expected_contract_version="0.12.0",
+        expected_contract_version="0.13.0",
         expected_loader_path=EXPECTED_DLL,
     )
 
@@ -96,7 +96,7 @@ def test_verifier_rejects_contract_or_internal_digest_mismatch(tmp_path: Path) -
         for name, content in files.items():
             handle.writestr(name, content)
     try:
-        verify(archive, require_dll=True, expected_contract_version="0.12.0")
+        verify(archive, require_dll=True, expected_contract_version="0.13.0")
     except AssertionError as error:
         assert "contract" in str(error).lower()
     else:

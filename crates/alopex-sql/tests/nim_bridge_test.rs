@@ -312,7 +312,7 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.12.0");
+    assert_eq!(parser_contract_version(), "0.13.0");
 }
 
 #[test]
@@ -339,6 +339,46 @@ fn distinct_on_crosses_the_nim_messagepack_boundary() {
     };
     assert!(plain_select.distinct);
     assert!(plain_select.distinct_on.is_empty());
+}
+
+#[test]
+fn group_by_items_cross_the_nim_messagepack_boundary() {
+    use alopex_sql::GroupByItem;
+
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT region FROM sales \
+         GROUP BY region, ROLLUP(product), CUBE(amount), GROUPING SETS ((region), ())",
+    )
+    .expect("grouping-set items should deserialize from Nim MessagePack");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    let group_by = select.group_by.as_ref().expect("GROUP BY items");
+    assert_eq!(group_by.len(), 4);
+    assert!(matches!(
+        &group_by[0],
+        GroupByItem::Expr { expr } if matches!(
+            &expr.kind,
+            ExprKind::ColumnRef { column, .. } if column == "region"
+        )
+    ));
+    assert!(matches!(&group_by[1], GroupByItem::Rollup { exprs } if exprs.len() == 1));
+    assert!(matches!(&group_by[2], GroupByItem::Cube { exprs } if exprs.len() == 1));
+    let GroupByItem::GroupingSets { sets } = &group_by[3] else {
+        panic!("expected GROUPING SETS item, got {:?}", group_by[3]);
+    };
+    assert_eq!(sets.len(), 2);
+    assert_eq!(sets[0].len(), 1);
+    assert!(sets[1].is_empty());
+
+    let plain = Parser::parse_sql(&AlopexDialect, "SELECT region FROM sales GROUP BY region")
+        .expect("plain GROUP BY parses");
+    let StatementKind::Select(plain_select) = &plain[0].kind else {
+        panic!("expected SELECT");
+    };
+    let plain_items = plain_select.group_by.as_ref().expect("GROUP BY items");
+    assert!(matches!(&plain_items[0], GroupByItem::Expr { .. }));
 }
 
 #[test]
@@ -414,7 +454,7 @@ fn top_level_set_operation_preserves_fetch_with_ties() {
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.12.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.13.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -422,7 +462,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.12.0");
+    assert_eq!(parser_contract_version(), "0.13.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);

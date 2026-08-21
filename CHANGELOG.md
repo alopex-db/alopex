@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- SQL `GROUP BY` supports `GROUPING SETS`, `ROLLUP`, `CUBE`, the empty
+  grouping set `()`, and the `GROUPING`/`GROUPING_ID` functions (issue #149).
+  Ordinary keys cross-product with the modifiers, duplicate sets emit
+  duplicate rows (PostgreSQL semantics), and placeholder NULLs are
+  distinguished from data NULLs only through `GROUPING` (BIGINT bitmask,
+  leftmost argument = most significant bit, at most 63 arguments).
+  `HAVING`/`ORDER BY`/window functions compose over a hidden `__grouping_id`
+  aggregate column. Expansion is bounded at 4096 grouping sets and 63 union
+  keys with stable planner errors; execution is single-pass and
+  single-threaded (parallel/spill aggregation bypassed) with the existing
+  1,000,000-group limit applied across all sets, and the v0.8 remote-read
+  catalog classifies the forms local-only (`grouping_sets_local_only`).
+  Covered on Rust, CLI, Embedded, and Python surfaces
+  (docs/sql-grouping-sets.md). Parser FFI contract bumped 0.12.0 → 0.13.0:
+  `Select.group_by` now carries tagged `GroupByItem` values
+  (`Expr`/`Rollup`/`Cube`/`GroupingSets`) instead of bare expressions, while
+  the staged continuous-aggregate payload keeps its frozen `[Expr]` shape and
+  rejects the modifiers. `ROLLUP`/`CUBE`/`GROUPING`/`SETS` stay contextual
+  identifiers.
+
 - SQL aggregates support `FILTER (WHERE predicate)` on every aggregate
   (predicate rows that are not TRUE are excluded before `DISTINCT`),
   aggregate-local `ORDER BY` for `GROUP_CONCAT`/`STRING_AGG` (validated then

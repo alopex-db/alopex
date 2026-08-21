@@ -317,6 +317,7 @@ pub(crate) fn plan_contains_subquery(plan: &LogicalPlan) -> bool {
             aggregates,
             having,
             projection,
+            grouping_sets: _,
         } => {
             group_keys.iter().any(contains_subquery)
                 || aggregates

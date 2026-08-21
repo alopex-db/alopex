@@ -670,6 +670,112 @@ suite "DML — SELECT":
     expect ParseError:
       discard parseSql("SELECT DISTINCT ON (region region FROM sales")
 
+  test "GROUP BY ROLLUP keeps its expressions (issue #149)":
+    let ast = parseSql("SELECT region, SUM(amount) FROM sales GROUP BY ROLLUP(region, product)")
+    var groupBy: SqlNode = nil
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupBy = child
+    check groupBy != nil
+    check groupBy.children.len == 1
+    check groupBy.children[0].kind == nkRollup
+    check groupBy.children[0].children.len == 2
+    check groupBy.children[0].children[0].strVal == "region"
+
+  test "GROUP BY CUBE keeps its expressions (issue #149)":
+    let ast = parseSql("SELECT region FROM sales GROUP BY CUBE(region, product)")
+    var groupBy: SqlNode = nil
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupBy = child
+    check groupBy != nil
+    check groupBy.children[0].kind == nkCube
+    check groupBy.children[0].children.len == 2
+
+  test "GROUP BY GROUPING SETS keeps each set including the empty set":
+    let ast = parseSql(
+      "SELECT region FROM sales GROUP BY GROUPING SETS ((region, product), (region), ())")
+    var groupBy: SqlNode = nil
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupBy = child
+    check groupBy != nil
+    check groupBy.children[0].kind == nkGroupingSets
+    check groupBy.children[0].children.len == 3
+    check groupBy.children[0].children[0].kind == nkGroupingSet
+    check groupBy.children[0].children[0].children.len == 2
+    check groupBy.children[0].children[1].children.len == 1
+    check groupBy.children[0].children[2].children.len == 0
+
+  test "GROUPING SETS accepts a bare expression element":
+    let ast = parseSql("SELECT region FROM sales GROUP BY GROUPING SETS (region, product)")
+    var groupBy: SqlNode = nil
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupBy = child
+    check groupBy.children[0].kind == nkGroupingSets
+    check groupBy.children[0].children.len == 2
+    check groupBy.children[0].children[0].children.len == 1
+
+  test "GROUP BY () is a single empty grouping set":
+    let ast = parseSql("SELECT COUNT(*) FROM sales GROUP BY ()")
+    var groupBy: SqlNode = nil
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupBy = child
+    check groupBy.children[0].kind == nkGroupingSets
+    check groupBy.children[0].children.len == 1
+    check groupBy.children[0].children[0].children.len == 0
+
+  test "ordinary GROUP BY items mix with ROLLUP":
+    let ast = parseSql("SELECT region FROM sales GROUP BY region, ROLLUP(product)")
+    var groupBy: SqlNode = nil
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupBy = child
+    check groupBy.children.len == 2
+    check groupBy.children[0].kind == nkIdentifier
+    check groupBy.children[1].kind == nkRollup
+
+  test "rollup, cube, and grouping remain usable as plain identifiers":
+    let ast = parseSql("SELECT rollup, cube FROM t GROUP BY rollup, cube, grouping")
+    var groupBy: SqlNode = nil
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupBy = child
+    check groupBy.children.len == 3
+    check groupBy.children[0].kind == nkIdentifier
+    check groupBy.children[1].kind == nkIdentifier
+    check groupBy.children[2].kind == nkIdentifier
+
+  test "GROUPING(expr) in the select list stays a plain function call":
+    let ast = parseSql("SELECT region, GROUPING(region) FROM sales GROUP BY ROLLUP(region)")
+    check ast.kind == nkSelect
+
+  test "ROLLUP and CUBE reject empty argument lists":
+    expect ParseError:
+      discard parseSql("SELECT 1 FROM t GROUP BY ROLLUP()")
+    expect ParseError:
+      discard parseSql("SELECT 1 FROM t GROUP BY CUBE()")
+
+  test "GROUPING SETS rejects an empty set list":
+    expect ParseError:
+      discard parseSql("SELECT 1 FROM t GROUP BY GROUPING SETS ()")
+
+  test "GROUPING SETS rejects nested ROLLUP, CUBE, and GROUPING SETS":
+    expect ParseError:
+      discard parseSql("SELECT 1 FROM t GROUP BY GROUPING SETS (ROLLUP(a))")
+    expect ParseError:
+      discard parseSql("SELECT 1 FROM t GROUP BY GROUPING SETS (CUBE(a))")
+    expect ParseError:
+      discard parseSql("SELECT 1 FROM t GROUP BY GROUPING SETS (GROUPING SETS (a))")
+
+  test "continuous aggregate queries reject grouping-set modifiers":
+    expect ParseError:
+      discard parseSql(
+        "CREATE CONTINUOUS AGGREGATE c AS SELECT SUM(v) FROM m " &
+        "GROUP BY ROLLUP(host) WITH (retention = '7d', refresh_interval = '1h')")
+
   test "SELECT with WHERE":
     let ast = parseSql("SELECT * FROM users WHERE id = 1")
     check ast.kind == nkSelect

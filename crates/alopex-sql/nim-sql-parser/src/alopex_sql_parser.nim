@@ -21,7 +21,8 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.9.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.10.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.11.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.12.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.13.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -247,6 +248,37 @@ proc writeExprSeq(s: Stream; nodes: seq[SqlNode]) =
   s.pack_array(nodes.len)
   for child in nodes:
     s.writeExpr(child)
+
+proc writeGroupByItem(s: Stream; node: SqlNode) =
+  ## Contract 0.13.0 (issue #149): group_by carries tagged GroupByItem values
+  ## instead of bare expressions on the public Select wire.
+  case node.kind
+  of nkRollup:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Rollup")
+    s.writeKey("exprs")
+    s.writeExprSeq(node.children)
+  of nkCube:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Cube")
+    s.writeKey("exprs")
+    s.writeExprSeq(node.children)
+  of nkGroupingSets:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("GroupingSets")
+    s.writeKey("sets")
+    s.pack_array(node.children.len)
+    for groupingSet in node.children:
+      s.writeExprSeq(groupingSet.children)
+  else:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Expr")
+    s.writeKey("expr")
+    s.writeExpr(node)
 
 proc writeCaseBranch(s: Stream; node: SqlNode) =
   s.pack_map(2)
@@ -975,7 +1007,15 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
   s.writeKey("group_by")
   if groupByNode == nil:
     s.writeNil()
+  elif includeWith:
+    # Contract 0.13.0 (issue #149): tagged GroupByItem values.
+    s.pack_array(groupByNode.children.len)
+    for item in groupByNode.children:
+      s.writeGroupByItem(item)
   else:
+    # The staged continuous-aggregate encoder intentionally remains
+    # byte-for-byte compatible with its historical [Expr] payload; the parser
+    # rejects grouping-set modifiers inside continuous aggregates (D10).
     s.writeExprSeq(groupByNode.children)
   s.writeKey("having")
   s.writeExprOpt(havingNode)

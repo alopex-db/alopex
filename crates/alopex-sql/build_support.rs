@@ -9,7 +9,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 pub(crate) const REQUIRED_ALOPEX_VERSION: &str = "0.8.7";
-pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.12.0";
+pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.13.0";
 pub(crate) const VENDOR_MANIFEST_SHA256: &str =
     "db70742bea017a4d2683ad0d17f602b25dbcdfa7f512e3c283fbb9f7fcce298d";
 const VENDOR_MANIFEST_SCHEMA: &str = "alopex-parser-vendor-manifest-v2";
@@ -828,7 +828,7 @@ mod tests {
             false,
             VENDOR_MANIFEST_SHA256,
         )
-        .expect_err("the immutable pre-frame vendor must not satisfy contract 0.12.0")
+        .expect_err("the immutable pre-frame vendor must not satisfy contract 0.13.0")
         .to_string();
 
         assert!(message.contains("invalid parser vendor manifest"));
@@ -997,6 +997,25 @@ mod tests {
             &fixture.manifest_sha256(),
         )
         .expect_err("contract 0.11.0 must not load as the aggregate-FILTER producer")
+        .to_string();
+        assert!(message.contains("contract sidecar"));
+    }
+
+    #[test]
+    fn local_source_mode_rejects_pre_grouping_sets_contract_0_12_sidecar() {
+        let fixture = Fixture::with_contract(false, "0.12.0");
+        let explicit = fixture.explicit_dir(LINUX_TARGET);
+        fs::write(explicit.join("CONTRACT_VERSION"), b"0.12.0\n")
+            .expect("restore pre-grouping-sets sidecar");
+
+        let message = resolve_native_library_with_options(
+            &fixture.crate_root,
+            LINUX_TARGET,
+            Some(explicit.as_os_str()),
+            true,
+            &fixture.manifest_sha256(),
+        )
+        .expect_err("contract 0.12.0 must not load as the grouping-sets producer")
         .to_string();
         assert!(message.contains("contract sidecar"));
     }

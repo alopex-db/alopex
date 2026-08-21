@@ -153,6 +153,10 @@ happened to run:
 16. `TRY_CAST` returns NULL for invalid text, overflow, invalid UTF-8, and
     vector-dimension failures. Ordinary CAST keeps a stable `ALOPEX-E004`
     error, and source-expression errors are never hidden.
+17. `GROUP BY` accepts `ROLLUP`, `CUBE`, and `GROUPING SETS` (issue #149).
+    Placeholder NULLs in subtotal rows print as `None`/`SqlValue::Null` like
+    real data NULLs; only `GROUPING`/`GROUPING_ID` (BIGINT bitmask, leftmost
+    argument = most significant bit) distinguishes the two.
 
 Recursive CTEs use the bounded fixed-point contract added for v0.8.7; invalid
 recursive shapes, dependency cycles, and exhausted iteration or memory budgets
@@ -167,3 +171,5 @@ Standard truth, distinctness, row comparison, and error rules are in
 [`docs/sql-standard-predicates.md`](../../../docs/sql-standard-predicates.md).
 Conversion rules and parser-asset migration are in
 [`docs/sql-try-cast.md`](../../../docs/sql-try-cast.md).
+Grouping-set grammar, the `GROUPING` bit order, and resource bounds are in
+[`docs/sql-grouping-sets.md`](../../../docs/sql-grouping-sets.md).

@@ -405,6 +405,15 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
             failure_outcome: "ordered_aggregate_local_only before transport",
         },
         RemoteReadCoverageEntry {
+            id: "aggregate.grouping_sets",
+            public_surface: "GROUPING SETS / ROLLUP / CUBE multi-set aggregation",
+            identities: &["rollup", "cube", "grouping_sets", "grouping", "grouping_id"],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "single-pass multi-set aggregation by the local executor",
+            failure_outcome: "grouping_sets_local_only before transport",
+        },
+        RemoteReadCoverageEntry {
             id: "relation.recursive_cte",
             public_surface: "recursive common table expressions",
             identities: &["with_recursive"],
@@ -587,7 +596,14 @@ fn validate_plan(
             aggregates,
             having,
             projection,
+            grouping_sets,
         } => {
+            if grouping_sets.is_some() {
+                return Err(RemoteReadRejection::local_only(
+                    "grouping_sets_local_only",
+                    "GROUPING SETS/ROLLUP/CUBE aggregation is not in the v0.8 remote-read catalog",
+                ));
+            }
             analysis.operators.group_by = !group_keys.is_empty();
             analysis.operators.having = having.is_some();
             for group_key in group_keys {
@@ -1011,6 +1027,23 @@ mod tests {
             classify(&LogicalPlan::filter(scan(), expression), &references()),
             RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
                 if code == "try_cast_local_only"
+        ));
+    }
+
+    #[test]
+    fn grouping_sets_remain_local_only() {
+        let plan = LogicalPlan::Aggregate {
+            input: Box::new(scan()),
+            group_keys: vec![column()],
+            aggregates: Vec::new(),
+            having: None,
+            projection: Projection::All(vec!["value".to_string()]),
+            grouping_sets: Some(vec![0b0, 0b1]),
+        };
+        assert!(matches!(
+            classify(&plan, &references()),
+            RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                if code == "grouping_sets_local_only"
         ));
     }
 

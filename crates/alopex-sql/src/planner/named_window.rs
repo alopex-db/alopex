@@ -21,8 +21,10 @@ pub(super) fn resolve_named_windows(stmt: &Select) -> Result<Select, PlannerErro
         *selection = resolver.resolve_expr(selection)?;
     }
     if let Some(group_by) = &mut resolved.group_by {
-        for expr in group_by {
-            *expr = resolver.resolve_expr(expr)?;
+        for item in group_by {
+            for expr in item.exprs_mut() {
+                *expr = resolver.resolve_expr(expr)?;
+            }
         }
     }
     if let Some(having) = &mut resolved.having {

@@ -50,6 +50,8 @@ SELECT COUNT(*) FILTER (WHERE qty > 2) AS heavy,
        GROUP_CONCAT(CAST(id AS TEXT) ORDER BY qty DESC) AS by_qty,
        PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY qty) AS median
 FROM stdin_test;
+SELECT qty, COUNT(*) AS c, GROUPING(qty) AS g FROM stdin_test
+GROUP BY ROLLUP(qty) ORDER BY g, qty NULLS FIRST;
 "#;
 
     {
@@ -73,7 +75,7 @@ FROM stdin_test;
         .expect("json output should be an array of result sets");
     assert_eq!(
         sets.len(),
-        15,
+        16,
         "one result set per statement\nstdout:\n{stdout}"
     );
     let select_rows = sets[2].as_array().expect("SELECT result set");
@@ -227,6 +229,17 @@ FROM stdin_test;
             "by_qty": "3,1,2",
             "median": 3,
         })]
+    );
+
+    let rollup_rows = sets[15].as_array().expect("ROLLUP result set");
+    assert_eq!(
+        rollup_rows,
+        &[
+            serde_json::json!({ "qty": 1, "c": 1, "g": 0 }),
+            serde_json::json!({ "qty": 3, "c": 1, "g": 0 }),
+            serde_json::json!({ "qty": 5, "c": 1, "g": 0 }),
+            serde_json::json!({ "qty": null, "c": 3, "g": 1 }),
+        ]
     );
 }
 

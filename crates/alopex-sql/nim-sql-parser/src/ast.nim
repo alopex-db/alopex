@@ -70,6 +70,10 @@ type
     nkOrderByClause
     nkOrderByExpr
     nkGroupByClause
+    nkRollup        ## GROUP BY ROLLUP(e1, ..., en); children = expressions
+    nkCube          ## GROUP BY CUBE(e1, ..., en); children = expressions
+    nkGroupingSets  ## GROUP BY GROUPING SETS (...); children = nkGroupingSet
+    nkGroupingSet   ## one grouping set; children = expressions (may be empty)
     nkHavingClause
     nkLimitClause
     nkOffsetClause

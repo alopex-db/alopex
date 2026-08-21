@@ -15,7 +15,7 @@ pub struct Select {
     pub projection: Vec<SelectItem>,
     pub from: Vec<FromItem>,
     pub selection: Option<Expr>,
-    pub group_by: Option<Vec<Expr>>,
+    pub group_by: Option<Vec<GroupByItem>>,
     pub having: Option<Expr>,
     #[serde(default)]
     pub windows: Vec<NamedWindow>,
@@ -32,6 +32,47 @@ pub struct Select {
     pub limit_with_ties: bool,
     #[serde(default)]
     pub span: Span,
+}
+
+/// One item of a GROUP BY list (issue #149, contract 0.13.0).
+///
+/// `GROUP BY a, ROLLUP(b, c)` is `[Expr(a), Rollup([b, c])]`; the planner
+/// expands the items into grouping sets by cross product (D2). `GROUP BY ()`
+/// arrives as one `GroupingSets` item holding a single empty set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "variant")]
+#[allow(clippy::large_enum_variant)]
+pub enum GroupByItem {
+    Expr { expr: Expr },
+    Rollup { exprs: Vec<Expr> },
+    Cube { exprs: Vec<Expr> },
+    GroupingSets { sets: Vec<Vec<Expr>> },
+}
+
+impl GroupByItem {
+    /// Iterate every expression contained in this item, in source order.
+    pub fn exprs(&self) -> Box<dyn Iterator<Item = &Expr> + '_> {
+        match self {
+            GroupByItem::Expr { expr } => Box::new(std::iter::once(expr)),
+            GroupByItem::Rollup { exprs } | GroupByItem::Cube { exprs } => Box::new(exprs.iter()),
+            GroupByItem::GroupingSets { sets } => Box::new(sets.iter().flatten()),
+        }
+    }
+
+    /// Mutably iterate every expression contained in this item.
+    ///
+    /// Span normalization, natural-join annotation, and named-window
+    /// resolution all walk this iterator so that expressions inside
+    /// ROLLUP/CUBE/GROUPING SETS receive the same treatment as plain keys.
+    pub fn exprs_mut(&mut self) -> Box<dyn Iterator<Item = &mut Expr> + '_> {
+        match self {
+            GroupByItem::Expr { expr } => Box::new(std::iter::once(expr)),
+            GroupByItem::Rollup { exprs } | GroupByItem::Cube { exprs } => {
+                Box::new(exprs.iter_mut())
+            }
+            GroupByItem::GroupingSets { sets } => Box::new(sets.iter_mut().flatten()),
+        }
+    }
 }
 
 /// A VALUES query body with the same set/order/limit tail as SELECT.

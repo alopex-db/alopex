@@ -1270,6 +1270,9 @@ pub enum AggregateMode {
 struct AggregateGroup {
     key_values: Vec<SqlValue>,
     accumulators: Vec<Box<dyn Accumulator>>,
+    /// Grouping-set mask emitted as the trailing `__grouping_id` output
+    /// column; `None` outside grouping-sets mode (issue #149).
+    grouping_id: Option<i64>,
 }
 
 /// Iterator that performs hash-based aggregation over input rows.
@@ -1286,6 +1289,10 @@ pub struct AggregateIterator<'a> {
     group_limit: usize,
     memory_tracker: Option<MemoryTracker>,
     shared_group_counter: Option<Arc<AtomicUsize>>,
+    /// Expanded grouping-set masks over `group_keys` (issue #149, D9).
+    /// Key 0 owns the most significant of the low `group_keys.len()` bits;
+    /// a 1 bit excludes the key from the set (NULL placeholder output).
+    grouping_sets: Option<Vec<u64>>,
 }
 
 impl<'a> AggregateIterator<'a> {
@@ -1310,12 +1317,25 @@ impl<'a> AggregateIterator<'a> {
             group_limit: DEFAULT_GROUP_LIMIT,
             memory_tracker: None,
             shared_group_counter: None,
+            grouping_sets: None,
         }
     }
 
     /// Override the maximum number of groups allowed during aggregation.
     pub fn with_group_limit(mut self, limit: usize) -> Self {
         self.group_limit = limit;
+        self
+    }
+
+    /// Enable single-pass GROUPING SETS aggregation (issue #149, D9).
+    ///
+    /// Each input row accumulates once per set under a set-id-prefixed key;
+    /// the output rows gain a trailing `__grouping_id` BIGINT value and the
+    /// group limit applies to the group total across every set (D6). Only
+    /// `AggregateMode::Single` supports grouping sets — the planner keeps
+    /// parallel/spill/streaming execution on the `None` path.
+    pub fn with_grouping_sets(mut self, grouping_sets: Option<Vec<u64>>) -> Self {
+        self.grouping_sets = grouping_sets;
         self
     }
 
@@ -1369,44 +1389,71 @@ impl<'a> AggregateIterator<'a> {
                 }
             };
 
-            if !table.contains_key(&key_bytes) {
-                self.reserve_group_slot(table.len())?;
-                if let Some(tracker) = &mut self.memory_tracker {
-                    tracker
-                        .add_values(&key_values)
-                        .map_err(map_core_memory_error)?;
-                    tracker
-                        .add_bytes(
-                            self.aggregates.len() as u64 * AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES,
-                        )
-                        .map_err(map_core_memory_error)?;
-                }
-                let accumulators = self
-                    .aggregates
-                    .iter()
-                    .map(|agg| {
-                        let mut aggregate = agg.clone();
-                        aggregate.distinct =
-                            matches!(self.mode, AggregateMode::Single) && agg.distinct;
-                        create_accumulator_for_aggregate(&aggregate)
-                    })
-                    .collect::<Vec<_>>();
-                table.insert(
-                    key_bytes.clone(),
-                    AggregateGroup {
-                        key_values: key_values.clone(),
-                        accumulators,
-                    },
-                );
-            }
+            // Grouping-sets mode accumulates every row once per set under a
+            // set-id-prefixed key (issue #149, D3/D7): the prefix keeps
+            // duplicate sets and per-set real-NULL groups distinct while the
+            // masked key values become the NULL placeholder outputs.
+            let variants: Vec<(Vec<SqlValue>, GroupKeyBytes, Option<i64>)> =
+                if let Some(sets) = &self.grouping_sets {
+                    let key_count = self.group_keys.len();
+                    let mut variants = Vec::with_capacity(sets.len());
+                    for (set_id, mask) in sets.iter().enumerate() {
+                        let mut masked = key_values.clone();
+                        for (position, value) in masked.iter_mut().enumerate() {
+                            if (mask >> (key_count - 1 - position)) & 1 == 1 {
+                                *value = SqlValue::Null;
+                            }
+                        }
+                        let mut bytes = Vec::with_capacity(4 + key_bytes.len());
+                        bytes.extend_from_slice(&(set_id as u32).to_le_bytes());
+                        bytes.extend_from_slice(&encode_group_key(&masked)?);
+                        variants.push((masked, bytes, Some(*mask as i64)));
+                    }
+                    variants
+                } else {
+                    vec![(key_values, key_bytes, None)]
+                };
 
-            if let Some(group) = table.get_mut(&key_bytes) {
-                match self.mode {
-                    AggregateMode::Final => {
-                        let mut offset = self.group_keys.len();
-                        for (idx, agg) in self.aggregates.iter().enumerate() {
-                            let arity = aggregate_state_types(agg).len();
-                            let state = row.values.get(offset..offset + arity).ok_or_else(|| {
+            for (key_values, key_bytes, grouping_id) in variants {
+                if !table.contains_key(&key_bytes) {
+                    self.reserve_group_slot(table.len())?;
+                    if let Some(tracker) = &mut self.memory_tracker {
+                        tracker
+                            .add_values(&key_values)
+                            .map_err(map_core_memory_error)?;
+                        tracker
+                            .add_bytes(
+                                self.aggregates.len() as u64 * AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES,
+                            )
+                            .map_err(map_core_memory_error)?;
+                    }
+                    let accumulators = self
+                        .aggregates
+                        .iter()
+                        .map(|agg| {
+                            let mut aggregate = agg.clone();
+                            aggregate.distinct =
+                                matches!(self.mode, AggregateMode::Single) && agg.distinct;
+                            create_accumulator_for_aggregate(&aggregate)
+                        })
+                        .collect::<Vec<_>>();
+                    table.insert(
+                        key_bytes.clone(),
+                        AggregateGroup {
+                            key_values: key_values.clone(),
+                            accumulators,
+                            grouping_id,
+                        },
+                    );
+                }
+
+                if let Some(group) = table.get_mut(&key_bytes) {
+                    match self.mode {
+                        AggregateMode::Final => {
+                            let mut offset = self.group_keys.len();
+                            for (idx, agg) in self.aggregates.iter().enumerate() {
+                                let arity = aggregate_state_types(agg).len();
+                                let state = row.values.get(offset..offset + arity).ok_or_else(|| {
                                 invalid_aggregate_state(
                                     "aggregate",
                                     format!(
@@ -1414,52 +1461,53 @@ impl<'a> AggregateIterator<'a> {
                                     ),
                                 )
                             })?;
-                            group.accumulators[idx].merge(state)?;
-                            offset += arity;
-                        }
-                        if offset != row.values.len() {
-                            return Err(invalid_aggregate_state(
-                                "aggregate",
-                                format!(
-                                    "partial state row has {} trailing value(s)",
-                                    row.values.len() - offset
-                                ),
-                            ));
-                        }
-                    }
-                    AggregateMode::Partial | AggregateMode::Single => {
-                        let ctx = EvalContext::new(&row.values);
-                        for (idx, agg) in self.aggregates.iter().enumerate() {
-                            // FILTER applies per input row before the
-                            // accumulator (and before DISTINCT), in Partial
-                            // and Single mode alike (issue #148, D1).
-                            if !aggregate_filter_accepts(agg, &ctx)? {
-                                continue;
+                                group.accumulators[idx].merge(state)?;
+                                offset += arity;
                             }
-                            let value = match &agg.arg {
-                                None => None,
-                                Some(expr) => {
-                                    Some(crate::executor::evaluator::evaluate(expr, &ctx)?)
+                            if offset != row.values.len() {
+                                return Err(invalid_aggregate_state(
+                                    "aggregate",
+                                    format!(
+                                        "partial state row has {} trailing value(s)",
+                                        row.values.len() - offset
+                                    ),
+                                ));
+                            }
+                        }
+                        AggregateMode::Partial | AggregateMode::Single => {
+                            let ctx = EvalContext::new(&row.values);
+                            for (idx, agg) in self.aggregates.iter().enumerate() {
+                                // FILTER applies per input row before the
+                                // accumulator (and before DISTINCT), in Partial
+                                // and Single mode alike (issue #148, D1).
+                                if !aggregate_filter_accepts(agg, &ctx)? {
+                                    continue;
                                 }
-                            };
-                            if let Some(tracker) = &mut self.memory_tracker
-                                && matches!(
-                                    agg.function,
-                                    AggregateFunction::GroupConcat { .. }
-                                        | AggregateFunction::StringAgg { .. }
-                                        | AggregateFunction::PercentileDisc { .. }
-                                )
-                                && let Some(value_ref) = value.as_ref()
-                            {
-                                tracker
-                                    .add_value(value_ref)
-                                    .map_err(map_core_memory_error)?;
-                            }
-                            if agg.order_by.is_empty() {
-                                group.accumulators[idx].update(value)?;
-                            } else {
-                                let keys = evaluate_sort_keys(agg, &ctx)?;
-                                group.accumulators[idx].update_ordered(value, &keys)?;
+                                let value = match &agg.arg {
+                                    None => None,
+                                    Some(expr) => {
+                                        Some(crate::executor::evaluator::evaluate(expr, &ctx)?)
+                                    }
+                                };
+                                if let Some(tracker) = &mut self.memory_tracker
+                                    && matches!(
+                                        agg.function,
+                                        AggregateFunction::GroupConcat { .. }
+                                            | AggregateFunction::StringAgg { .. }
+                                            | AggregateFunction::PercentileDisc { .. }
+                                    )
+                                    && let Some(value_ref) = value.as_ref()
+                                {
+                                    tracker
+                                        .add_value(value_ref)
+                                        .map_err(map_core_memory_error)?;
+                                }
+                                if agg.order_by.is_empty() {
+                                    group.accumulators[idx].update(value)?;
+                                } else {
+                                    let keys = evaluate_sort_keys(agg, &ctx)?;
+                                    group.accumulators[idx].update_ordered(value, &keys)?;
+                                }
                             }
                         }
                     }
@@ -1467,7 +1515,53 @@ impl<'a> AggregateIterator<'a> {
             }
         }
 
-        if table.is_empty() && self.group_keys.is_empty() {
+        if let Some(sets) = self.grouping_sets.clone() {
+            // Sets that group over no key (their mask covers every key)
+            // still emit exactly one row when the input is empty, matching
+            // the global-aggregation contract below.
+            let key_count = self.group_keys.len();
+            let full_mask = if key_count == 0 {
+                0
+            } else {
+                (1u64 << key_count) - 1
+            };
+            if table.is_empty() {
+                for (set_id, mask) in sets.iter().enumerate() {
+                    if *mask != full_mask {
+                        continue;
+                    }
+                    if let Some(tracker) = &mut self.memory_tracker {
+                        tracker
+                            .add_bytes(
+                                self.aggregates.len() as u64 * AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES,
+                            )
+                            .map_err(map_core_memory_error)?;
+                    }
+                    let accumulators = self
+                        .aggregates
+                        .iter()
+                        .map(|agg| {
+                            let mut aggregate = agg.clone();
+                            aggregate.distinct =
+                                matches!(self.mode, AggregateMode::Single) && agg.distinct;
+                            create_accumulator_for_aggregate(&aggregate)
+                        })
+                        .collect::<Vec<_>>();
+                    let key_values = vec![SqlValue::Null; key_count];
+                    let mut bytes = Vec::with_capacity(4);
+                    bytes.extend_from_slice(&(set_id as u32).to_le_bytes());
+                    bytes.extend_from_slice(&encode_group_key(&key_values)?);
+                    table.insert(
+                        bytes,
+                        AggregateGroup {
+                            key_values,
+                            accumulators,
+                            grouping_id: Some(*mask as i64),
+                        },
+                    );
+                }
+            }
+        } else if table.is_empty() && self.group_keys.is_empty() {
             if let Some(tracker) = &mut self.memory_tracker {
                 tracker
                     .add_bytes(self.aggregates.len() as u64 * AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES)
@@ -1487,19 +1581,25 @@ impl<'a> AggregateIterator<'a> {
                 AggregateGroup {
                     key_values: Vec::new(),
                     accumulators,
+                    grouping_id: None,
                 },
             );
         }
 
         let mut rows = Vec::with_capacity(table.len());
         for group in table.values() {
-            let mut values = Vec::with_capacity(self.group_keys.len() + self.aggregates.len());
+            let mut values = Vec::with_capacity(self.group_keys.len() + self.aggregates.len() + 1);
             values.extend(group.key_values.iter().cloned());
             for acc in &group.accumulators {
                 match self.mode {
                     AggregateMode::Partial => values.extend(acc.state()?),
                     AggregateMode::Final | AggregateMode::Single => values.push(acc.finalize()?),
                 }
+            }
+            // The hidden __grouping_id column joins the row before HAVING so
+            // GROUPING() predicates evaluate against it (issue #149, D11).
+            if let Some(grouping_id) = group.grouping_id {
+                values.push(SqlValue::BigInt(grouping_id));
             }
             let row = Row::new(next_row_id, values);
             next_row_id += 1;
@@ -2480,6 +2580,68 @@ mod tests {
     fn sort_rows(mut rows: Vec<Vec<SqlValue>>) -> Vec<Vec<SqlValue>> {
         rows.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
         rows
+    }
+
+    #[test]
+    fn grouping_sets_accumulate_each_row_once_per_set() {
+        let category = column_expr(0, "category", ResolvedType::Text);
+        let group_keys = vec![category];
+        let aggregates = vec![AggregateExpr::count_star()];
+        let input = VecIterator::new(sample_aggregate_rows(), sample_aggregate_schema());
+        let mut schema = build_aggregate_schema(&group_keys, &aggregates);
+        schema.push(ColumnMetadata::new("__grouping_id", ResolvedType::BigInt));
+        // Mask 0b0 keeps the category key; mask 0b1 is the grand total.
+        let mut iter =
+            AggregateIterator::new(Box::new(input), group_keys, aggregates, None, schema)
+                .with_grouping_sets(Some(vec![0b0, 0b1]));
+        let rows = sort_rows(
+            collect_iterator_rows(&mut iter)
+                .unwrap()
+                .into_iter()
+                .map(|row| row.values)
+                .collect(),
+        );
+
+        assert_eq!(
+            rows,
+            sort_rows(vec![
+                vec![
+                    SqlValue::Text("book".into()),
+                    SqlValue::BigInt(3),
+                    SqlValue::BigInt(0),
+                ],
+                vec![
+                    SqlValue::Text("game".into()),
+                    SqlValue::BigInt(1),
+                    SqlValue::BigInt(0),
+                ],
+                vec![
+                    SqlValue::Text("toy".into()),
+                    SqlValue::BigInt(1),
+                    SqlValue::BigInt(0),
+                ],
+                vec![SqlValue::Null, SqlValue::BigInt(5), SqlValue::BigInt(1)],
+            ])
+        );
+    }
+
+    #[test]
+    fn grouping_sets_group_limit_applies_across_all_sets() {
+        let category = column_expr(0, "category", ResolvedType::Text);
+        let group_keys = vec![category];
+        let aggregates = vec![AggregateExpr::count_star()];
+        let input = VecIterator::new(sample_aggregate_rows(), sample_aggregate_schema());
+        let mut schema = build_aggregate_schema(&group_keys, &aggregates);
+        schema.push(ColumnMetadata::new("__grouping_id", ResolvedType::BigInt));
+        // Three category groups plus the grand total = 4 groups; a limit of
+        // 3 must fail even though each single set stays within the limit
+        // (issue #149, D6).
+        let mut iter =
+            AggregateIterator::new(Box::new(input), group_keys, aggregates, None, schema)
+                .with_grouping_sets(Some(vec![0b0, 0b1]))
+                .with_group_limit(3);
+        let error = collect_iterator_rows(&mut iter).unwrap_err();
+        assert!(matches!(error, ExecutorError::ResourceExhausted { .. }));
     }
 
     #[test]

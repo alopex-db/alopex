@@ -226,6 +226,15 @@ pub enum LogicalPlan {
         having: Option<TypedExpr>,
         /// Projection to apply after aggregation.
         projection: Projection,
+        /// Expanded GROUPING SETS masks over `group_keys` (issue #149).
+        ///
+        /// `None` keeps the pre-grouping-sets single-set behavior. Each mask
+        /// covers `group_keys` with key 0 at the most significant of the low
+        /// `group_keys.len()` bits; a 1 bit marks the key as excluded from
+        /// that grouping set (NULL placeholder in the output). When present,
+        /// the aggregate output schema gains a trailing `__grouping_id`
+        /// BIGINT column carrying the mask of the producing set.
+        grouping_sets: Option<Vec<u64>>,
     },
 
     /// Window operation preserving every input row and appending one result
@@ -472,7 +481,7 @@ impl LogicalPlan {
         }
     }
 
-    /// Creates a new Aggregate plan.
+    /// Creates a new Aggregate plan without grouping sets.
     pub fn aggregate(
         input: LogicalPlan,
         group_keys: Vec<TypedExpr>,
@@ -486,6 +495,7 @@ impl LogicalPlan {
             aggregates,
             having,
             projection,
+            grouping_sets: None,
         }
     }
 

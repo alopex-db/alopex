@@ -157,6 +157,19 @@ def main() -> int:
                     }
                 ],
             ),
+            (
+                # GROUPING SETS / ROLLUP (issue #149): the grand-total row
+                # prints region as None while GROUPING(region) = 1 keeps it
+                # distinct from any real NULL group (D7).
+                "SELECT region, SUM(qty) AS total_qty, GROUPING(region) AS g "
+                "FROM sales GROUP BY ROLLUP(region) ORDER BY g, region",
+                [
+                    {"region": "east", "total_qty": 4, "g": 0},
+                    {"region": "north", "total_qty": 0, "g": 0},
+                    {"region": "west", "total_qty": 7, "g": 0},
+                    {"region": None, "total_qty": 11, "g": 1},
+                ],
+            ),
             ("SELECT SUM(n) AS total FROM metrics", [{"total": 5}]),
             (
                 "SELECT id, n * 2.0 AS doubled FROM metrics ORDER BY doubled",

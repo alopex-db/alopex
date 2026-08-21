@@ -2121,6 +2121,28 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             "max" => self.check_min_max(args, distinct, star, span),
             "group_concat" => self.check_group_concat(args, distinct, star, span),
             "string_agg" => self.check_string_agg(args, distinct, star, span),
+            // GROUPING/GROUPING_ID distinguish grouping-set placeholder NULLs
+            // from data NULLs (issue #149, D4). Placement and argument
+            // validation happen in the planner; the result is a BIGINT
+            // bitmask, so at most 63 arguments are accepted.
+            "grouping" | "grouping_id" => {
+                if distinct || star {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUPING does not support DISTINCT or *".to_string(),
+                    ));
+                }
+                if args.is_empty() {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUPING requires at least one argument".to_string(),
+                    ));
+                }
+                if args.len() > 63 {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUPING accepts at most 63 arguments".to_string(),
+                    ));
+                }
+                Ok(ResolvedType::BigInt)
+            }
             _ => {
                 let Some(signature) = crate::scalar::signature(&lower_name) else {
                     return Err(PlannerError::unsupported_feature(
@@ -2180,6 +2202,28 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                             "column in HAVING must be in GROUP BY or be aggregated".to_string(),
                         ))
                     }
+                }
+                TypedExprKind::FunctionCall { name, args, .. }
+                    if name.eq_ignore_ascii_case("grouping")
+                        || name.eq_ignore_ascii_case("grouping_id") =>
+                {
+                    // GROUPING in HAVING is valid when every argument is a
+                    // grouping expression (issue #149, D5); the planner
+                    // rewrites the call onto __grouping_id afterwards.
+                    for arg in args {
+                        match &arg.kind {
+                            TypedExprKind::ColumnRef { column_index, .. }
+                                if group_key_indices.contains(column_index) => {}
+                            _ => {
+                                return Err(PlannerError::invalid_expression(
+                                    "arguments to GROUPING must be grouping expressions \
+                                     of the query"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    Ok(())
                 }
                 TypedExprKind::FunctionCall {
                     name,
