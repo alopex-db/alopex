@@ -8,12 +8,68 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use alopex_core::storage::format::{
     AlopexFileReader, AlopexFileWriter, FileFlags, FileReader, FileSource, FileVersion, SectionType,
 };
 use alopex_embedded::{Database, TxnMode};
 use tempfile::tempdir;
+
+const CRASH_CHILD_PATH_ENV: &str = "ALOPEX_CONVERGENCE_CRASH_CHILD_PATH";
+const CRASH_CHILD_ACTION_ENV: &str = "ALOPEX_CONVERGENCE_CRASH_CHILD_ACTION";
+const CRASH_EXIT_CODE: i32 = 86;
+
+fn stage_crash_in_child(container: &Path, action: &str) {
+    let output = Command::new(std::env::current_exe().expect("test binary path"))
+        .args([
+            "child_stage_crash_state",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(CRASH_CHILD_PATH_ENV, container)
+        .env(CRASH_CHILD_ACTION_ENV, action)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run crash-staging child");
+    assert_eq!(
+        output.status.code(),
+        Some(CRASH_EXIT_CODE),
+        "crash-staging child failed unexpectedly:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "spawned as a child process by crash-recovery scenarios"]
+fn child_stage_crash_state() {
+    let container =
+        PathBuf::from(std::env::var_os(CRASH_CHILD_PATH_ENV).expect("crash child database path"));
+    let action = std::env::var(CRASH_CHILD_ACTION_ENV).expect("crash child action");
+    let (count, flush) = match action.as_str() {
+        "wal-only" => (120, false),
+        "flushed-sidecar" => (80, true),
+        "legacy-sidecar" => (40, false),
+        other => panic!("unknown crash child action: {other}"),
+    };
+
+    let db = Database::open(&container).expect("child opens database");
+    let mut txn = db.begin(TxnMode::ReadWrite).expect("child begins rw");
+    for index in 0..count {
+        txn.put(&key(index), &value(index)).expect("child put");
+    }
+    txn.commit().expect("child commit");
+    if flush {
+        db.flush().expect("child flushes container");
+    }
+
+    // `process::exit` does not run Rust destructors. The OS still closes the
+    // lock descriptor, exactly matching an abruptly terminated process without
+    // exposing a production API that can unlock a live database.
+    std::process::exit(CRASH_EXIT_CODE);
+}
 
 fn key(index: u32) -> Vec<u8> {
     format!("k-{index:06}").into_bytes()
@@ -261,16 +317,7 @@ fn crash_before_converge_recovers_from_the_sidecar() {
     let source = tempdir().expect("source dir");
     let container = source.path().join("crash.alopex");
 
-    {
-        let db = Database::open(&container).expect("open db");
-        let mut txn = db.begin(TxnMode::ReadWrite).expect("begin rw");
-        for index in 0..120u32 {
-            txn.put(&key(index), &value(index)).expect("put");
-        }
-        txn.commit().expect("commit");
-        // Skip every converge hook, exactly like a power loss would.
-        std::mem::forget(db);
-    }
+    stage_crash_in_child(&container, "wal-only");
 
     assert!(
         sidecar_of(&container).join("lsm.wal").exists(),
@@ -293,17 +340,7 @@ fn crash_during_sidecar_prune_falls_back_to_the_container() {
     let source = tempdir().expect("source dir");
     let container = source.path().join("prune.alopex");
 
-    {
-        let db = Database::open(&container).expect("open db");
-        let mut txn = db.begin(TxnMode::ReadWrite).expect("begin rw");
-        for index in 0..80u32 {
-            txn.put(&key(index), &value(index)).expect("put");
-        }
-        txn.commit().expect("commit");
-        db.flush().expect("flush converges but keeps the sidecar");
-        // Skip the drop-time prune so the half-pruned state can be staged by hand.
-        std::mem::forget(db);
-    }
+    stage_crash_in_child(&container, "flushed-sidecar");
 
     // Simulate a crash after the WAL was unlinked but before the sidecar dir went away.
     let sidecar = sidecar_of(&container);
@@ -468,15 +505,7 @@ fn legacy_zero_byte_marker_is_promoted_on_close() {
     let sidecar = sidecar_of(&container);
 
     // v0.8.6 layout: real data in the sidecar, a 0-byte marker next to it.
-    {
-        let db = Database::open(&container).expect("open db");
-        let mut txn = db.begin(TxnMode::ReadWrite).expect("begin rw");
-        for index in 0..40u32 {
-            txn.put(&key(index), &value(index)).expect("put");
-        }
-        txn.commit().expect("commit");
-        std::mem::forget(db);
-    }
+    stage_crash_in_child(&container, "legacy-sidecar");
     assert!(sidecar.join("lsm.wal").exists());
     fs::write(&container, b"").expect("write zero-byte marker");
 

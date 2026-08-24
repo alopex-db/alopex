@@ -241,7 +241,11 @@ fn clear_data_dir(dir: &Path) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name();
-        if name == ".lifecycle" {
+        // 裁定 D15: restore runs *inside* the server that holds this directory's
+        // lock. Deleting the lock file here would unlink the inode we hold, so
+        // a second process could create a fresh one at the same path and lock
+        // it — two live writers, which is issue #181 all over again.
+        if name == ".lifecycle" || alopex_core::lsm::is_lock_file(Path::new(&name)) {
             continue;
         }
         let path = entry.path();
@@ -284,7 +288,8 @@ fn dir_size_bytes(dir: &Path) -> Result<u64> {
     let mut size = 0u64;
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        if entry.file_name() == ".lifecycle" {
+        let name = entry.file_name();
+        if name == ".lifecycle" || alopex_core::lsm::is_lock_file(Path::new(&name)) {
             continue;
         }
         let path = entry.path();
@@ -309,4 +314,33 @@ fn now_ms() -> u64 {
 struct RestoreRecord {
     state: OperationState,
     metadata: Option<RestoreMetadata>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_data_dir_preserves_lifecycle_and_lock_files() {
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        fs::create_dir_all(data_dir.path().join(".lifecycle/restore")).expect("lifecycle");
+        fs::create_dir_all(data_dir.path().join("sst")).expect("sst dir");
+        fs::write(data_dir.path().join(".alopex.lock"), b"pid=1").expect("plain lock");
+        fs::write(data_dir.path().join("mydb.alopex.lock"), b"pid=1").expect("sidecar lock");
+        fs::write(data_dir.path().join("lsm.wal"), b"wal").expect("wal");
+        fs::write(data_dir.path().join("sst/1.sst"), b"sst").expect("sst");
+
+        assert_eq!(
+            dir_size_bytes(data_dir.path()).expect("size data directory"),
+            6,
+            "restore metadata must count canonical data, not local lock artifacts"
+        );
+        clear_data_dir(data_dir.path()).expect("clear data directory");
+
+        assert!(data_dir.path().join(".lifecycle").exists());
+        assert!(data_dir.path().join(".alopex.lock").exists());
+        assert!(data_dir.path().join("mydb.alopex.lock").exists());
+        assert!(!data_dir.path().join("lsm.wal").exists());
+        assert!(!data_dir.path().join("sst").exists());
+    }
 }

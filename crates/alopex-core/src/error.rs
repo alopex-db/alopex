@@ -118,6 +118,32 @@ pub enum Error {
     #[error("path exists: {0}")]
     PathExists(PathBuf),
 
+    /// The data directory is already open somewhere else (issue #181).
+    ///
+    /// Alopex's storage engine has exactly one writer per data directory: the
+    /// WAL is a fixed-length ring addressed from an in-memory offset and
+    /// SSTable ids come from a process-local counter, so a second writer
+    /// overwrites the first one's bytes. Opening therefore takes an OS-level
+    /// exclusive lock, and this is what a caller that lost the race sees.
+    ///
+    /// The message deliberately contains the stable, greppable phrase
+    /// `already open by another process`; tests and user-facing tooling match
+    /// on that substring rather than on the whole rendering, which varies with
+    /// the holder diagnostics (unavailable on Windows — see 裁定 D10).
+    #[error(
+        "data directory {path} is already open by another process ({holder}); \
+         an Alopex database can only be opened by one process at a time — \
+         share it through alopex-server instead (lock file: {lock_path})"
+    )]
+    AlreadyOpen {
+        /// The data directory that could not be opened.
+        path: PathBuf,
+        /// The lock file guarding it.
+        lock_path: PathBuf,
+        /// Best-effort description of the current holder, or `unknown`.
+        holder: String,
+    },
+
     /// An index configuration parameter is invalid.
     #[error("invalid parameter {param}: {reason}")]
     InvalidParameter {

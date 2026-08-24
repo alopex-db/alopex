@@ -9,6 +9,7 @@ pub mod buffer_pool;
 pub mod checkpoint;
 pub mod container;
 pub mod free_space;
+mod lock;
 pub mod memtable;
 pub mod metrics;
 pub mod sstable;
@@ -28,6 +29,7 @@ use crate::kv::{KVStore, KVTransaction};
 use crate::lsm::buffer_pool::{BufferPool, BufferPoolConfig};
 use crate::lsm::checkpoint::{load_checkpoint_meta, save_checkpoint_meta, CheckpointMeta};
 pub use crate::lsm::container::{ConvergePolicy, ConvergeResult};
+pub use crate::lsm::lock::{is_lock_file, LOCK_FILE_NAME};
 use crate::lsm::memtable::{ImmutableMemTable, MemTable, MemTableConfig, MemTableEntry};
 use crate::lsm::metrics::{LsmMetrics, LsmMetricsSnapshot};
 use crate::lsm::sstable::{
@@ -478,6 +480,13 @@ pub struct LsmKV {
     container_current: AtomicBool,
     /// `close()` 済みか（多重 close と Drop 時の二重収束を防ぐ）。
     closed: AtomicBool,
+    /// データディレクトリの排他ロック（issue #181）。
+    ///
+    /// **必ず最後のフィールドに置くこと。** Rust はフィールドを宣言順に破棄し、
+    /// `Drop::drop` 本体はそのすべてより前に走る。converge と `prune_sidecar` は
+    /// その本体の中で実行されるので、ここに置くことで「サイドカーを消し終えるまで
+    /// ロックが効いている」ことが型レベルで保証される（裁定 D6）。
+    _open_lock: lock::DirectoryLock,
 }
 
 impl LsmKV {
@@ -497,13 +506,33 @@ impl LsmKV {
     /// 設定付きで LsmKV を開く。
     ///
     /// 既存 WAL がある場合は WAL をリプレイして MemTable を復元する（クラッシュリカバリ）。
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AlreadyOpen`] when another handle — in this process or any
+    /// other — already holds this data directory (issue #181). The lock is taken
+    /// **before** anything else happens, in particular before the container
+    /// rehydrate path, which `remove_dir_all`s and rewrites the sidecar (裁定 D5).
     pub fn open_with_config(
         path: impl AsRef<Path>,
         config: LsmKVConfig,
     ) -> Result<(Self, RecoveryResult)> {
         let data_dir = path.as_ref().to_path_buf();
         let metrics = Arc::new(LsmMetrics::default());
-        let container_path = Self::restore_from_container(&data_dir, &config, &metrics)?;
+
+        // WASM has no container writer, so it must keep `container_path` at None
+        // exactly as `restore_from_container` used to return it there.
+        #[cfg(not(target_arch = "wasm32"))]
+        let container_path = container::container_path_for(&data_dir, &config.converge);
+        #[cfg(target_arch = "wasm32")]
+        let container_path: Option<PathBuf> = None;
+
+        // Single-process enforcement comes first: everything below this line,
+        // starting with the rehydrate, is destructive.
+        let open_lock =
+            lock::acquire(&data_dir, &lock::lock_path_for(&data_dir, &config.converge))?;
+
+        Self::restore_from_container(&data_dir, container_path.as_deref(), &config, &metrics)?;
 
         fs::create_dir_all(&data_dir)?;
         let wal_path = data_dir.join(container::SIDECAR_WAL_FILE);
@@ -615,6 +644,7 @@ impl LsmKV {
             sst_dir,
             wal_path,
             config,
+            _open_lock: open_lock,
         };
         store.refresh_memtable_size_metrics();
         Ok((store, recovery))
@@ -627,23 +657,29 @@ impl LsmKV {
     /// The rule is one line (裁定 D7): **`X.alopex.d/lsm.wal` exists ⇒ the sidecar
     /// wins**. A container is consulted only when no live sidecar is present, so
     /// crash recovery behaves exactly as it did before this file existed.
+    ///
+    /// The caller resolves `container_path` and, crucially, takes the data
+    /// directory lock before calling this: `discard_dead_sidecar` and
+    /// `rehydrate` below destroy and rebuild the working directory, which two
+    /// concurrent openers must never do to each other (裁定 D5).
     #[cfg(not(target_arch = "wasm32"))]
     fn restore_from_container(
         data_dir: &Path,
+        container_path: Option<&Path>,
         config: &LsmKVConfig,
         metrics: &LsmMetrics,
-    ) -> Result<Option<PathBuf>> {
-        let Some(container_path) = container::container_path_for(data_dir, &config.converge) else {
-            return Ok(None);
+    ) -> Result<()> {
+        let Some(container_path) = container_path else {
+            return Ok(());
         };
         if container::sidecar_is_live(data_dir) {
             // Two-file steady state while running: the sidecar is authoritative.
-            return Ok(Some(container_path));
+            return Ok(());
         }
-        if container::is_legacy_marker(&container_path) {
+        if container::is_legacy_marker(container_path) {
             // Either no container at all, or the v0.8.6 zero-byte marker. Both mean
             // "there is nothing to restore"; fall through to the normal open path.
-            return Ok(Some(container_path));
+            return Ok(());
         }
         if data_dir.exists() {
             // A sidecar without a WAL is the debris of an interrupted prune. The
@@ -651,7 +687,7 @@ impl LsmKV {
             container::discard_dead_sidecar(data_dir);
         }
         fs::create_dir_all(data_dir)?;
-        let outcome = container::rehydrate(&container_path, data_dir, &config.wal)?;
+        let outcome = container::rehydrate(container_path, data_dir, &config.wal)?;
         metrics.add_rehydrate_bytes_read(outcome.bytes_read);
         info!(
             container = ?container_path,
@@ -660,17 +696,18 @@ impl LsmKV {
             bytes_read = outcome.bytes_read,
             "Rehydrated a sidecar working directory from a single .alopex container"
         );
-        Ok(Some(container_path))
+        Ok(())
     }
 
     /// WASM has no container writer, so nothing ever converges there.
     #[cfg(target_arch = "wasm32")]
     fn restore_from_container(
         _data_dir: &Path,
+        _container_path: Option<&Path>,
         _config: &LsmKVConfig,
         _metrics: &LsmMetrics,
-    ) -> Result<Option<PathBuf>> {
-        Ok(None)
+    ) -> Result<()> {
+        Ok(())
     }
 
     /// The `.alopex` container this store converges into, if any.
@@ -901,6 +938,11 @@ impl LsmKV {
     /// The sidecar is intentionally *not* pruned here (裁定 D8): live cursors and
     /// `get_visible_at` reopen `sst/<id>.sst` on demand, so deleting the working
     /// directory behind a usable handle would break reads. Pruning happens on drop.
+    ///
+    /// For the same reason the data-directory lock is **not** released here
+    /// (裁定 D6): this store stays writable after `close()`, so handing the
+    /// directory to another process now would recreate exactly the two-writer
+    /// corruption of issue #181. Drop the handle to release the lock.
     pub fn close(&self) -> Result<()> {
         if self.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
@@ -2040,6 +2082,9 @@ mod kv_store {
             dirty: AtomicBool::new(false),
             container_current: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            // Hand-built stores are single-instance test fixtures that never
+            // race anybody, so they skip the lock entirely.
+            _open_lock: lock::DirectoryLock::disabled(),
         }
     }
 
@@ -2076,6 +2121,9 @@ mod kv_store {
             dirty: AtomicBool::new(false),
             container_current: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            // Hand-built stores are single-instance test fixtures that never
+            // race anybody, so they skip the lock entirely.
+            _open_lock: lock::DirectoryLock::disabled(),
         }
     }
 
@@ -2218,6 +2266,9 @@ mod txn {
             dirty: AtomicBool::new(false),
             container_current: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            // Hand-built stores are single-instance test fixtures that never
+            // race anybody, so they skip the lock entirely.
+            _open_lock: lock::DirectoryLock::disabled(),
         }
     }
 
@@ -2521,6 +2572,11 @@ mod recovery_tests {
         tx.put(b"after".to_vec(), b"2".to_vec()).unwrap();
         tx.commit_self().unwrap();
 
+        // Shadowing the binding below would keep the first handle alive to the
+        // end of the scope, which is not a reopen at all — it is two live
+        // writers on one directory (issue #181). Release it first.
+        drop(store);
+
         let (store, recovery) = LsmKV::open_with_config(dir.path(), test_config()).expect("reopen");
         assert!(recovery.checkpoint_lsn.is_some());
         assert_eq!(recovery.entries_recovered, 1);
@@ -2536,6 +2592,10 @@ mod recovery_tests {
         let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
         tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
         tx.commit_self().unwrap();
+
+        // See `recovery_uses_checkpoint_lsn_when_present`: shadowing does not
+        // drop, so the first handle has to be released explicitly.
+        drop(store);
 
         let (store, recovery) = LsmKV::open_with_config(dir.path(), test_config()).expect("reopen");
         assert!(recovery.checkpoint_lsn.is_none());

@@ -87,5 +87,5 @@ X.alopex.d/lsm.wal が存在する → サイドカーが正（現行どおり W
 
 - **converge / rehydrate は O(N)**。converge は生きている SSTable の全バイトをコンテナへコピーし、rehydrate は逆方向に展開する。10 GB の DB では close も open も 10 GB のシーケンシャル I/O になり、converge 中は一時的にディスク使用量が 2 倍になる。`converge_count` / `converge_bytes_written` / `converge_duration_ms` / `rehydrate_bytes_read` メトリクスで可視化し、1 GiB 超の収束は `warn!` を出す。解消は D13(A)。
 - **`Database::flush()` のコスト特性が変わった**。「MemTable の freeze」だけだったものが「freeze + SSTable 書き出し + converge」になる。Python の `db.flush()` にも波及する。
-- **多重オープン防止のロックファイルはまだない**。同一 DB を 2 プロセスで開くと、片方の Drop-prune がもう片方の生きているサイドカーを消しうる。これは今も WAL の二重書きで壊れる状況だが、prune で被害が広がる。D13(D) で対処する。
+- **多重オープンはロックで拒否される**（D13(D) 解消済み / issue #181）。データディレクトリを開くとき `X.alopex.lock`（サイドカー形状）または `<data_dir>/.alopex.lock`（素のディレクトリ）に OS 排他ロックを取り、二重オープンは `Error::AlreadyOpen` で失敗する。ロックはサイドカーの**外**に置くため、`prune_sidecar()` の `remove_dir_all` と寿命が衝突しない。詳細と裁定は [docs/single-process-lock.md](single-process-lock.md)。
 - **WASM では収束しない**。`storage::format::writer` が native 専用のため、WASM ターゲットではポリシー型だけを共有し `converge()` は MemTable の SSTable 化のみを行う。

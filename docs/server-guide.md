@@ -38,6 +38,30 @@ Environment variables can override settings using the `ALOPEX__` prefix (double 
 | `audit_log_enabled` | bool | `true` | Enable audit logs |
 | `audit_log_output` | object | `{ type = "stdout" }` | Audit log output (`stdout` or `file`) |
 
+### `data_dir` は 1 プロセスだけが開ける
+
+An Alopex data directory can be opened by **exactly one process at a time**.
+サーバーは起動時に `<data_dir>/.alopex.lock` へ OS 排他ロックを取り、
+同じディレクトリを開こうとした 2 つ目のプロセス（別のサーバー、CLI の `--data-dir`、
+組み込みの `Database::open`）は `already open by another process` を含むエラーで失敗する。
+
+```bash
+# サーバーが ./data を所有している間は、これは失敗する
+alopex --data-dir ./data sql "SELECT 1"
+```
+
+同じデータベースを複数のプロセスやマシンから使いたいときは、
+**サーバーを 1 つだけ立てて HTTP / gRPC で接続する**。
+
+```bash
+alopex --profile prod sql "SELECT * FROM users"
+curl -X POST http://127.0.0.1:8080/v1/sql -d '{"sql":"SELECT 1"}'
+```
+
+ロックは OS が保持するため、サーバーが `SIGKILL` やクラッシュで落ちても残らない
+（次回起動はそのまま成功する）。制限と設計裁定は
+[docs/single-process-lock.md](single-process-lock.md) を参照。
+
 Example `alopex.toml`:
 
 ```toml

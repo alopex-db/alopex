@@ -80,3 +80,24 @@ def test_close_converges_disk_db_into_a_single_alopex_file(tmp_path):
         for index in range(200):
             assert txn.get(f"k-{index:04}".encode()) == f"v-{index:04}".encode()
     restored.close()
+
+
+def test_second_open_of_one_database_is_rejected(tmp_path):
+    """One data directory, one holder — issue #181."""
+    container = tmp_path / "locked.alopex"
+
+    db = Database.open(str(container))
+    try:
+        with pytest.raises(AlopexError) as excinfo:
+            Database.open(str(container))
+        assert "already open by another process" in str(excinfo.value)
+    finally:
+        db.close()
+
+
+def test_in_memory_databases_are_not_locked():
+    """In-memory databases have no path, so #181 locking never applies."""
+    first = Database.open_in_memory()
+    second = Database.open_in_memory()
+    first.close()
+    second.close()

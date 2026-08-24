@@ -74,6 +74,26 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Opening one data directory from two places is now rejected instead of
+  silently corrupting it (issue #181). Two processes sharing a `data_dir` each
+  kept their own WAL ring offset and their own SSTable id counter, so they
+  overwrote each other's WAL bytes and each other's `sst/<id>.sst`, and each
+  one's drop-time prune could delete the other's live sidecar — all with no
+  error or warning. `LsmKV::open_with_config` now takes an OS-level exclusive
+  lock (`flock` on Unix, `LockFileEx` on Windows) before it touches anything,
+  including before the container rehydrate path, and fails with
+  `Error::AlreadyOpen` — rendered with the stable string `already open by
+  another process` — when someone already holds it. The lock is released only
+  when the handle is dropped (not by `close()`, which leaves the store
+  writable), and because it is an OS lock the kernel releases it on any
+  abnormal exit, so a `SIGKILL`ed process leaves nothing stale behind. The lock
+  file is `X.alopex.lock` beside the container for the sidecar shape and
+  `<data_dir>/.alopex.lock` for a plain directory; it is excluded from backup,
+  restore, and S3 sync. To share one database across processes, run
+  `alopex-server` and connect over HTTP/gRPC. In-memory databases are
+  unaffected (docs/single-process-lock.md).
+  **Breaking**: pointing `alopex --data-dir` at a running server's `data_dir`,
+  or opening one embedded database twice, now returns an error.
 - A disk database opened through an `X.alopex` path now actually converges into
   that single file (issue #178). Previously all data stayed in the
   `X.alopex.d/` sidecar directory and `X.alopex` was either absent or a
