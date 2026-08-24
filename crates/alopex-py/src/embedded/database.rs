@@ -365,7 +365,7 @@ impl PyDatabase {
                 #[cfg(test)]
                 if self
                     .rollback_fail_count
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
                         if count > 0 {
                             Some(count - 1)
                         } else {
