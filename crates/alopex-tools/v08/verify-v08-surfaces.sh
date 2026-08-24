@@ -72,40 +72,31 @@ else
     PYTHON_PACKAGE_DIR="${ROOT}/crates/alopex-py/python"
 fi
 
-run_cargo_test() {
-    echo "[alopex-tools:v0.8] cargo test $*" >&2
-    cargo test --manifest-path "${ROOT}/Cargo.toml" --features lane_ci \
-        --locked --offline "$@"
+METRICS_DIR="${ALOPEX_BUILD_METRICS_DIR:-${ROOT}/artifacts/build-metrics}"
+BUILD_OWNER="${ALOPEX_BUILD_OWNER:-current-implementation-${RUNNER_OS:-local}}"
+
+run_cargo_owner() {
+    local owner="$1"
+    shift
+    echo "[alopex-tools:v0.8] Rust owner ${owner}" >&2
+    "${PYTHON_BIN}" "${ROOT}/scripts/ci/run_with_metrics.py" \
+        --owner "${owner}" \
+        --output "${METRICS_DIR}/${owner}.json" \
+        --target-dir "${CARGO_TARGET_DIR}" \
+        -- cargo test --manifest-path "${ROOT}/Cargo.toml" \
+            --locked --offline --timings "$@"
 }
 
-echo "[alopex-tools:v0.8] distributed-read and cluster transport" >&2
-run_cargo_test -p alopex-server \
-    --test distributed_read_http \
-    --test http_sql_e2e \
-    --test grpc_test
-
-echo "[alopex-tools:v0.8] cluster metadata and SQL catalog internals" >&2
-run_cargo_test -p alopex-cluster --lib --tests
-run_cargo_test -p alopex-sql --lib --tests
-
-echo "[alopex-tools:v0.8] cluster CLI interface" >&2
-run_cargo_test -p alopex-cli --lib commands::server
-run_cargo_test -p alopex-cli \
-    --test server_test \
-    --test profile_test
-run_cargo_test -p alopex-cli \
-    --test admin_actions_e2e_test \
-    --test lifecycle_e2e_test \
-    --test sql_multi_statement \
-    --test streaming_test
-run_cargo_test -p alopex-server --tests
-
-echo "[alopex-tools:v0.8] DataFrame streaming interface" >&2
-run_cargo_test -p alopex-dataframe \
-    --test streaming_contract \
-    --test streaming_differential
-run_cargo_test -p alopex-dataframe --tests
-run_cargo_test -p alopex-py --lib
+case "${ALOPEX_CURRENT_RUST_SUITE:-full}" in
+    full)
+        run_cargo_owner "${BUILD_OWNER}" \
+            --workspace --features lane_ci
+        ;;
+    *)
+        echo "[alopex-tools:v0.8] unknown Rust suite: ${ALOPEX_CURRENT_RUST_SUITE}" >&2
+        exit 2
+        ;;
+esac
 
 echo "[alopex-tools:v0.8] Python local/async/DataFrame interfaces (${PYTHON_BIN})" >&2
 PYTHONPATH="${PYTHON_PACKAGE_DIR}${PYTHONPATH:+${PYTHONPATH_SEPARATOR}${PYTHONPATH}}" \
