@@ -1,6 +1,9 @@
 name: Compatibility
 
 on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 2 * * 1'
   push:
     branches: [main, develop]
     paths-ignore:
@@ -22,8 +25,109 @@ env:
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
 
 jobs:
+  historical-parser:
+    name: Historical parser artifact owner
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
+      NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Setup exact Nim parser toolchain
+        uses: ./.github/actions/setup-nim-parser-toolchain
+      - name: Build and test historical parser owner
+        run: |
+          bash scripts/build-nim-parser.sh --backend host
+          bash scripts/test-nim-parser.sh --backend host
+      - name: Stage verified historical parser artifact
+        run: |
+          stage="${RUNNER_TEMP}/alopex-historical-parser"
+          mkdir -p "$stage"
+          for candidate in \
+            libalopex_sql_parser.so \
+            CONTRACT_VERSION \
+            PARSER_CONTRACT_VERSION \
+            SHA256SUMS; do
+            test -f "${NIM_SQL_PARSER_DIR}/${candidate}"
+            test ! -L "${NIM_SQL_PARSER_DIR}/${candidate}"
+            cp -- "${NIM_SQL_PARSER_DIR}/${candidate}" "$stage/${candidate}"
+          done
+          (cd "$stage" && sha256sum -c SHA256SUMS)
+      - name: Upload historical parser artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-parser-linux
+          path: ${{ runner.temp }}/alopex-historical-parser
+          if-no-files-found: error
+          retention-days: 7
+
+  historical-contract:
+    name: Historical contract (${{ matrix.gate }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: historical-parser
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        gate: [v06, v07]
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/historical-${{ matrix.gate }}
+      NIM_SQL_PARSER_DIR: ${{ github.workspace }}/artifacts/historical-parser
+      NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/artifacts/historical-parser
+      ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: historical-${{ matrix.gate }}
+      - name: Install historical gate dependencies
+        run: python -m pip install --upgrade pip maturin pytest numpy
+      - name: Download historical parser artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: historical-parser-linux
+          path: artifacts/historical-parser
+      - name: Verify historical parser artifact
+        run: |
+          for candidate in \
+            libalopex_sql_parser.so \
+            CONTRACT_VERSION \
+            PARSER_CONTRACT_VERSION \
+            SHA256SUMS; do
+            test -f "${NIM_SQL_PARSER_DIR}/${candidate}"
+            test ! -L "${NIM_SQL_PARSER_DIR}/${candidate}"
+          done
+          (cd "${NIM_SQL_PARSER_DIR}" && sha256sum -c SHA256SUMS)
+      - name: Run independent historical owner with metrics
+        run: |
+          case "${{ matrix.gate }}" in
+            v06) gate_script="scripts/release/v06_gate.sh" ;;
+            v07) gate_script="scripts/release/v07_gate.sh" ;;
+            *) echo "unknown historical gate" >&2; exit 2 ;;
+          esac
+          python scripts/ci/run_with_metrics.py \
+            --owner "historical-${{ matrix.gate }}" \
+            --output "artifacts/build-metrics/historical-${{ matrix.gate }}.json" \
+            --target-dir "${CARGO_TARGET_DIR}" \
+            -- bash "$gate_script"
+      - name: Upload historical build metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metrics-historical-${{ matrix.gate }}
+          path: artifacts/build-metrics/*.json
+          if-no-files-found: error
+          retention-days: 14
+
   native:
     name: Native Compatibility (${{ matrix.target }} | ${{ matrix.compression }})
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ${{ matrix.runner }}
     env:
       ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
@@ -57,19 +161,19 @@ jobs:
           toolchain: stable
 
       - name: Cache cargo registry
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-compat-registry-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo index
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/git
           key: ${{ runner.os }}-compat-git-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache target directory
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: target
           key: ${{ runner.os }}-compat-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
@@ -99,6 +203,7 @@ jobs:
     # A failure here reports what does not build for wasm32 today; it does not
     # hold a release, because nothing is promised on that target yet.
     name: WASM Compatibility (advisory, ${{ matrix.compression }})
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     continue-on-error: true
     strategy:

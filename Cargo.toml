@@ -63,6 +63,7 @@ opt-level = 0
 
 [profile.test]
 opt-level = 1
+debug = "line-tables-only"
 
 [patch.crates-io]
 ratatui-testlib = { path = "vendor/ratatui-testlib" }

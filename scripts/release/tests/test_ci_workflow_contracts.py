@@ -90,8 +90,8 @@ class CiWorkflowContractTests(unittest.TestCase):
     def test_v08_gate_exposes_just_built_parser_dll_on_windows(self) -> None:
         workflow = self.workflow("ci.yml")
         stage_offset = workflow.index("name: Stage just-built parser for v0.8 surfaces")
-        v07_offset = workflow.index("name: Run v0.7 baseline gate (Linux)", stage_offset)
-        windows_path_step = workflow[stage_offset:v07_offset]
+        gate_offset = workflow.index("name: Run v0.8 release gate", stage_offset)
+        windows_path_step = workflow[stage_offset:gate_offset]
         self.assertIn("name: Add Nim library to PATH (Windows)", windows_path_step)
         self.assertIn("if: runner.os == 'Windows'", windows_path_step)
         self.assertIn(

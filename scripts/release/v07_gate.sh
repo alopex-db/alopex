@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# v07_gate.sh - v0.7 release gate aggregator
+# v07_gate.sh - independent v0.7 historical compatibility gate
 
 set -euo pipefail
 
@@ -13,7 +13,6 @@ else
 fi
 V07_GATE_VENV_DIR="${V07_GATE_VENV_DIR:-${TMPDIR:-/tmp}/alopex-v07-gate-venv}"
 V07_GATE_CACHE_DIR="${V07_GATE_CACHE_DIR:-${TMPDIR:-/tmp}/alopex-v07-gate-cache}"
-V07_GATE_RUN_V06="${V07_GATE_RUN_V06:-1}"
 V07_GATE_RUN_MATURIN="${V07_GATE_RUN_MATURIN:-1}"
 
 RED='\033[0;31m'
@@ -85,6 +84,18 @@ require_file_contains() {
     log_success "Workflow contract: ${description}"
 }
 
+require_file_not_contains() {
+    local file="$1"
+    local pattern="$2"
+    local description="$3"
+    if grep -Eq "${pattern}" "${file}"; then
+        log_error "Release workflow contract check failed: ${description}"
+        log_error "Forbidden pattern '${pattern}' found in ${file}"
+        exit 1
+    fi
+    log_success "Workflow contract: ${description}"
+}
+
 configure_environment() {
     export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
     export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
@@ -96,9 +107,6 @@ configure_environment() {
     export LD_LIBRARY_PATH="${NIM_SQL_PARSER_ABS}:${LD_LIBRARY_PATH:-}"
     export DYLD_LIBRARY_PATH="${NIM_SQL_PARSER_ABS}:${DYLD_LIBRARY_PATH:-}"
     export PATH="${NIM_SQL_PARSER_ABS}:${PATH}"
-
-    export V06_GATE_VENV_DIR="${V06_GATE_VENV_DIR:-${V07_GATE_VENV_DIR}}"
-    export V06_GATE_CACHE_DIR="${V06_GATE_CACHE_DIR:-${V07_GATE_CACHE_DIR}/v06}"
 
     log_info "Project root: ${PROJECT_ROOT}"
     log_info "Nim SQL parser dir: ${NIM_SQL_PARSER_ABS}"
@@ -134,8 +142,8 @@ check_release_workflow_contract() {
     local release_workflow="${PROJECT_ROOT}/.github/workflows/release.yml"
     local py_release_workflow="${PROJECT_ROOT}/.github/workflows/alopex-py-release.yml"
 
-    require_file_contains "${ci_workflow}" "scripts/release/v07_gate\\.sh" \
-        "CI invokes the v0.7 release gate"
+    require_file_not_contains "${ci_workflow}" "scripts/release/v07_gate\\.sh" \
+        "normal CI does not nest the historical v0.7 gate"
     require_file_contains "${release_workflow}" "scripts/release/v07_gate\\.sh" \
         "release workflow invokes the v0.7 release gate"
     require_file_contains "${release_workflow}" "tags:[[:space:]]*$" \
@@ -162,31 +170,20 @@ check_release_workflow_contract() {
         "core release dispatches Python with its exact run identity"
 }
 
-verify_release_binary() {
-    local binary="${PROJECT_ROOT}/target/release/alopex"
-    if [[ "${OS:-}" == "Windows_NT" ]]; then
-        binary="${binary}.exe"
-    fi
-    if [[ ! -x "${binary}" ]]; then
-        log_error "Expected release artifact binary is missing or not executable: ${binary}"
-        exit 1
-    fi
-    log_success "Release artifact smoke binary exists: ${binary}"
-}
-
 main() {
     cd "${PROJECT_ROOT}"
 
-    log_info "Alopex v0.7 release gate"
+    log_info "Alopex v0.7 historical compatibility gate"
     configure_environment
-    configure_python_environment
-    require_command cargo
 
     if [[ "${1:-}" == "--workflow-contract-only" ]]; then
         check_release_workflow_contract
         log_success "Alopex v0.7 workflow contract gate passed"
         return
     fi
+
+    configure_python_environment
+    require_command cargo
 
     if [[ "${V07_GATE_RUN_MATURIN}" == "1" ]]; then
         require_command maturin
@@ -196,17 +193,6 @@ main() {
 
     check_release_workflow_contract
 
-    if [[ "${V07_GATE_RUN_V06}" == "1" ]]; then
-        run_step "Baseline: v0.6 release gate" \
-            bash scripts/release/v06_gate.sh
-    else
-        log_warn "Skipping v0.6 baseline gate because V07_GATE_RUN_V06=${V07_GATE_RUN_V06}"
-    fi
-
-    run_step "Formatting: workspace rustfmt" \
-        cargo fmt --all -- --check
-    run_step "Lint: workspace clippy" \
-        cargo clippy --all-targets --all-features --locked -- -D warnings
     run_step "Cluster: metadata, router, and simulated harness tests" \
         cargo test -p alopex-cluster --all-features --locked
     run_step "Embedded: v0.6 compatibility regression tests" \
@@ -227,9 +213,9 @@ main() {
         cargo test -p alopex-py --all-features --locked
 
     if [[ "${V07_GATE_RUN_MATURIN}" == "1" ]]; then
-        run_step_in_dir "Python: maturin develop release build" \
+        run_step_in_dir "Python: maturin develop compatibility build" \
             "${PROJECT_ROOT}/crates/alopex-py" \
-            maturin develop --release
+            maturin develop
         run_step "Python: DataFrame P3 and cluster status tests" \
             python -m pytest \
                 crates/alopex-py/tests/test_compatibility_contract.py \
@@ -239,19 +225,7 @@ main() {
         log_warn "Skipping Python maturin/pytest checks because V07_GATE_RUN_MATURIN=${V07_GATE_RUN_MATURIN}"
     fi
 
-    # The debug-profile artifacts from the test steps above and maturin's
-    # release build are no longer needed once we get here, and CI runners
-    # have limited disk (~14GB). Free the debug target before the release
-    # build as defense in depth against "No space left on device" on the
-    # final compile (the primary fix was unifying reqwest to eliminate a
-    # duplicated hyper/rustls/tokio dependency tree; see CHANGELOG).
-    run_step "Free debug build artifacts before release build" \
-        cargo clean --profile dev
-    run_step "Release artifact: CLI binary smoke build" \
-        cargo build --release -p alopex-cli --locked
-    verify_release_binary
-
-    log_success "Alopex v0.7 release gate passed"
+    log_success "Alopex v0.7 historical compatibility gate passed"
 }
 
 main "$@"

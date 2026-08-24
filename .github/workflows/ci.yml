@@ -100,13 +100,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable, beta]
-        exclude:
-          # Only run beta on Linux to save CI time
+        include:
+          # Stable Linux and Windows are owned by v08-release-gate below.
           - os: macos-latest
-            rust: beta
-          - os: windows-latest
+            rust: stable
+          - os: ubuntu-latest
             rust: beta
     steps:
       - name: Free disk space (Ubuntu)
@@ -196,17 +194,29 @@ jobs:
         run: echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
 
       - name: Run tests
+        shell: bash
         env:
           # テストバイナリ（target/debug/deps 配下）は build.rs の rpath だけでは
           # Nim 共有ライブラリを解決できないため、ライブラリのディレクトリを
           # LD_LIBRARY_PATH に追加して実行時解決する（Linux のみ有効）。
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: cargo test --workspace --features lane_ci
+        run: |
+          python scripts/ci/run_with_metrics.py \
+            --owner "compatibility-${RUNNER_OS}-${{ matrix.rust }}" \
+            --output "artifacts/build-metrics/compatibility-${RUNNER_OS}-${{ matrix.rust }}.json" \
+            --target-dir "${GITHUB_WORKSPACE}/target" \
+            -- cargo test --workspace --features lane_ci --timings
 
-      - name: Run doc tests
-        env:
-          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: cargo test --doc --workspace --features lane_ci
+      - name: Upload compatibility build metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metrics-compatibility-${{ runner.os }}-${{ matrix.rust }}
+          path: |
+            artifacts/build-metrics/*.json
+            target/cargo-timings/*.html
+          if-no-files-found: error
+          retention-days: 14
 
   coverage:
     name: Code Coverage
@@ -427,7 +437,6 @@ jobs:
           echo "PYO3_PYTHON=$VENV_PY" >> "$GITHUB_ENV"
           echo "PYTHON_SYS_EXECUTABLE=$VENV_PY" >> "$GITHUB_ENV"
           echo "ALOPEX_PYTHON=$VENV_PY" >> "$GITHUB_ENV"
-          echo "V07_GATE_VENV_DIR=$VENV_ROOT" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Python deps
@@ -488,21 +497,33 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
-      - name: Run v0.7 baseline gate (Linux)
-        if: runner.os == 'Linux'
-        env:
-          LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: bash scripts/release/v07_gate.sh
-      - name: Build Python extension for v0.8 gate (Windows)
-        if: runner.os == 'Windows'
-        run: maturin develop -m crates/alopex-py/Cargo.toml
+      - name: Build Python extension for v0.8 gate
+        shell: bash
+        run: |
+          python scripts/ci/run_with_metrics.py \
+            --owner "current-python-${RUNNER_OS}" \
+            --output "artifacts/build-metrics/current-python-${RUNNER_OS}.json" \
+            --target-dir "${GITHUB_WORKSPACE}/target" \
+            -- maturin develop -m crates/alopex-py/Cargo.toml
       - name: Run v0.8 release gate
         shell: bash
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          ALOPEX_BUILD_OWNER: current-implementation-${{ runner.os }}
+          ALOPEX_BUILD_METRICS_DIR: ${{ github.workspace }}/artifacts/build-metrics
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
           ALOPEX_NIM_CONTROLLED_FAILURE_OUTCOME: ${{ steps.nim_parser_controlled_failure.outcome }}
         run: bash crates/alopex-tools/v08/verify-v08-surfaces.sh
+      - name: Upload current implementation build metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metrics-current-${{ runner.os }}
+          path: |
+            artifacts/build-metrics/*.json
+            target/cargo-timings/*.html
+          if-no-files-found: error
+          retention-days: 14
 
   ci-success:
     name: CI Success
