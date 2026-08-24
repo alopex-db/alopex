@@ -255,10 +255,8 @@ fn decode_value(tag: u8, bytes: &[u8], cursor: &mut usize) -> Result<SqlValue> {
             let raw = take(total, "truncated Vector payload")?;
 
             let mut values = Vec::with_capacity(len);
-            for chunk in raw.chunks_exact(4) {
-                values.push(f32::from_bits(u32::from_le_bytes(
-                    chunk.try_into().unwrap(),
-                )));
+            for chunk in raw.as_chunks::<4>().0 {
+                values.push(f32::from_bits(u32::from_le_bytes(*chunk)));
             }
             Ok(SqlValue::Vector(values))
         }

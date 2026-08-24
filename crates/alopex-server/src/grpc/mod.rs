@@ -78,6 +78,9 @@ impl Connected for TlsIo {
     }
 }
 
+// tonic/async-trait emits `must_use` on generated async methods whose Future
+// return type already carries the same contract.
+#[allow(clippy::double_must_use)]
 pub mod proto {
     tonic::include_proto!("alopex.v0");
 }

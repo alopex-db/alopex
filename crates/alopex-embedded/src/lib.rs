@@ -1647,8 +1647,8 @@ fn decode_vector_entry(bytes: &[u8]) -> result::Result<DecodedEntry, alopex_core
 
     let mut vector = Vec::with_capacity(dim);
     let vec_bytes = &bytes[header + meta_len..expected_len];
-    for chunk in vec_bytes.chunks_exact(4) {
-        vector.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    for chunk in vec_bytes.as_chunks::<4>().0 {
+        vector.push(f32::from_le_bytes(*chunk));
     }
 
     Ok(DecodedEntry { metric, vector })
@@ -1687,8 +1687,8 @@ fn decode_vector_entry_view(
 
 fn vector_bytes_to_vec(bytes: &[u8]) -> Vec<f32> {
     let mut vector = Vec::with_capacity(bytes.len() / 4);
-    for chunk in bytes.chunks_exact(4) {
-        vector.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    for chunk in bytes.as_chunks::<4>().0 {
+        vector.push(f32::from_le_bytes(*chunk));
     }
     vector
 }
@@ -1821,7 +1821,7 @@ fn score_from_bytes(
     }
 
     // Fallback for unaligned or big-endian targets: decode each f32 from bytes.
-    let mut iter = vector_bytes.chunks_exact(4);
+    let mut iter = vector_bytes.as_chunks::<4>().0.iter();
     let score = match metric {
         Metric::Cosine => {
             if query_norm == 0.0 {
@@ -1830,7 +1830,7 @@ fn score_from_bytes(
                 let mut dot = 0.0;
                 let mut item_norm_sq = 0.0;
                 for (q, chunk) in query.iter().zip(&mut iter) {
-                    let v = f32::from_le_bytes(chunk.try_into().unwrap());
+                    let v = f32::from_le_bytes(*chunk);
                     dot += q * v;
                     item_norm_sq += v * v;
                 }
@@ -1845,7 +1845,7 @@ fn score_from_bytes(
         Metric::L2 => {
             let mut dist_sq = 0.0;
             for (q, chunk) in query.iter().zip(&mut iter) {
-                let v = f32::from_le_bytes(chunk.try_into().unwrap());
+                let v = f32::from_le_bytes(*chunk);
                 let d = q - v;
                 dist_sq += d * d;
             }
@@ -1854,7 +1854,7 @@ fn score_from_bytes(
         Metric::InnerProduct => query
             .iter()
             .zip(&mut iter)
-            .map(|(q, chunk)| q * f32::from_le_bytes(chunk.try_into().unwrap()))
+            .map(|(q, chunk)| q * f32::from_le_bytes(*chunk))
             .sum(),
     };
     Ok(score)
