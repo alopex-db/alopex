@@ -29,8 +29,8 @@ fn memorykv_vector_search_cosine() {
         .into_iter()
         .map(|(k, v)| {
             let mut vec = Vec::with_capacity(v.len() / 4);
-            for chunk in v.chunks_exact(4) {
-                vec.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+            for chunk in v.as_chunks::<4>().0 {
+                vec.push(f32::from_le_bytes(*chunk));
             }
             (k, vec)
         })
@@ -67,8 +67,8 @@ fn memorykv_vector_search_respects_l2_metric() {
         .into_iter()
         .map(|(k, v)| {
             let mut vec = Vec::with_capacity(v.len() / 4);
-            for chunk in v.chunks_exact(4) {
-                vec.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+            for chunk in v.as_chunks::<4>().0 {
+                vec.push(f32::from_le_bytes(*chunk));
             }
             (k, vec)
         })

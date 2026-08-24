@@ -1,3 +1,7 @@
+// PyO3's generated `from_py_object` conversions clone these wrappers even
+// though the public wrappers are intentionally Copy.
+#![allow(clippy::clone_on_copy)]
+
 use pyo3::basic::CompareOp;
 use pyo3::prelude::*;
 
