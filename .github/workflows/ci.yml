@@ -400,8 +400,6 @@ jobs:
         include:
           - os: ubuntu-latest
             rust_suite: full
-          - os: windows-latest
-            rust_suite: windows-smoke
     env:
       PYO3_PYTHON: python
       PYTHON_SYS_EXECUTABLE: python

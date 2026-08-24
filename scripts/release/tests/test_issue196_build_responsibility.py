@@ -16,6 +16,9 @@ class BuildResponsibilityContractTests(unittest.TestCase):
         compatibility_test = workflow.split("  test:\n", 1)[1].split(
             "\n  coverage:", 1
         )[0]
+        build = workflow.split("  build:\n", 1)[1].split(
+            "\n  v08-release-gate:", 1
+        )[0]
         current = workflow.split("  v08-release-gate:\n", 1)[1].split(
             "\n  ci-success:", 1
         )[0]
@@ -26,12 +29,11 @@ class BuildResponsibilityContractTests(unittest.TestCase):
         self.assertNotIn("name: Run doc tests", compatibility_test)
         self.assertIn("scripts/ci/run_with_metrics.py", compatibility_test)
         self.assertIn("Upload compatibility build metrics", compatibility_test)
+        self.assertIn("os: [ubuntu-latest, macos-latest, windows-latest]", build)
         self.assertIn("- os: ubuntu-latest\n            rust_suite: full", current)
-        self.assertIn(
-            "- os: windows-latest\n            rust_suite: windows-smoke", current
-        )
         self.assertIn("rust_suite: full", current)
-        self.assertIn("rust_suite: windows-smoke", current)
+        self.assertNotIn("windows-latest", current)
+        self.assertNotIn("windows-smoke", current)
         self.assertIn(
             "ALOPEX_CURRENT_RUST_SUITE: ${{ matrix.rust_suite }}", current
         )
@@ -52,19 +54,14 @@ class BuildResponsibilityContractTests(unittest.TestCase):
         self.assertIn("scripts/ci/run_with_metrics.py", verifier)
         self.assertIn('case "${ALOPEX_CURRENT_RUST_SUITE:-full}"', verifier)
         full_suite = verifier.split("    full)", 1)[1].split(";;", 1)[0]
-        windows_smoke = verifier.split("windows-smoke)", 1)[1].split(";;", 1)[0]
         self.assertIn("--workspace --features lane_ci", full_suite)
-        self.assertNotIn("--workspace", windows_smoke)
-        for owner in ("cluster-sql", "server", "cli", "dataframe", "py"):
-            self.assertIn(f'"${{BUILD_OWNER}}-{owner}"', windows_smoke)
+        self.assertNotIn("windows-smoke", verifier)
         for duplicate_selector in (
             "--test distributed_read_http",
             "--test streaming_contract",
             "cargo test --doc",
         ):
             self.assertNotIn(duplicate_selector, verifier)
-        self.assertIn("-p alopex-server --tests", windows_smoke)
-        self.assertIn("-p alopex-dataframe --tests", windows_smoke)
 
     def test_historical_gates_are_independent_scheduled_owners(self) -> None:
         compatibility = self.read(".github/workflows/compatibility.yml")

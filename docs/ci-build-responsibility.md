@@ -14,8 +14,9 @@ Owner result JSON is the machine-facing evidence. GitHub Job Summary and uploade
 
 | Owner | Responsibility | Does not own |
 |---|---|---|
-| `test` matrix | macOS stable and Linux beta compatibility | stable Linux/Windows current suite |
-| `v08-release-gate` | stable Linux full workspace; Windows current-surface smoke; Linux/Windows Python surfaces | v0.6/v0.7 historical contracts, full Windows workspace |
+| `test` matrix | macOS stable and Linux beta compatibility | stable Linux current suite, Windows current suite |
+| `build` matrix | cross-platform release compilation, including Windows | workspace test behavior |
+| `v08-release-gate` | stable Linux full workspace and Python surfaces | v0.6/v0.7 historical contracts, Windows workspace |
 | `compatibility: historical-parser` | one exact parser build/test and verified artifact | Cargo package tests |
 | `compatibility: historical-contract` | independent v0.6 and v0.7 scheduled/manual contracts | PR critical path, nested version gates |
 | `compatibility: current-windows-full` | scheduled/manual full Windows workspace compatibility | PR critical path |
@@ -42,9 +43,9 @@ The wrapper exits with the wrapped command's status, so measurement can never co
 
 | Path/artifact | Current role | Target role | Action | Delete when | Proof |
 |---|---|---|---|---|---|
-| `.github/workflows/ci.yml:test` | all stable OS plus Linux beta | complementary macOS stable/Linux beta lanes | shrink | replacement v0.8 owners are required | workflow contract tests |
-| `v08-release-gate` | current suite plus nested v0.7 | stable Linux full owner plus Windows surface-smoke owners | replace | old nested step is absent | workflow contract tests and owner JSON |
-| scheduled full Windows | repeated on every PR | one weekly/manual compatibility owner | move | smoke selectors and scheduled catch-all are both wired | workflow contract tests and owner JSON |
+| `.github/workflows/ci.yml:test` | all stable OS plus Linux beta | complementary macOS stable/Linux beta lanes | shrink | Linux current and Windows responsibilities have explicit owners | workflow contract tests |
+| `v08-release-gate` | current suite plus nested v0.7 | stable Linux full owner | replace | old nested step and duplicate Windows test owner are absent | workflow contract tests and owner JSON |
+| Windows current validation | full workspace repeated on every PR | PR release compilation plus one weekly/manual full workspace owner | move | Windows remains in the build matrix and the scheduled catch-all is wired | workflow contract tests and owner JSON |
 | `scripts/release/v07_gate.sh` | v0.7, nested v0.6, and delivery smoke | independent historical v0.7 behavior | shrink | scheduled owner is wired | workflow contract-only gate |
 | `compatibility.yml` parser build | repeated per historical gate | one checksum-verified artifact producer | replace | both consumers verify the artifact | scheduled/manual workflow |
 | `target/cargo-timings` | local transient output | optional diagnostic artifact | keep | workflow artifact upload completes | Actions artifact inventory |

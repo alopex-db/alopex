@@ -92,27 +92,6 @@ case "${ALOPEX_CURRENT_RUST_SUITE:-full}" in
         run_cargo_owner "${BUILD_OWNER}" \
             --workspace --features lane_ci
         ;;
-    windows-smoke)
-        # Preserve every surface owned by the previous Windows v0.8 gate, but
-        # do not repeat the full cross-platform workspace suite on the PR path.
-        run_cargo_owner "${BUILD_OWNER}-cluster-sql" \
-            -p alopex-cluster -p alopex-sql --lib --tests --features lane_ci
-        run_cargo_owner "${BUILD_OWNER}-server" \
-            -p alopex-server --tests --features lane_ci
-        run_cargo_owner "${BUILD_OWNER}-cli" \
-            -p alopex-cli --lib \
-            --test server_test \
-            --test profile_test \
-            --test admin_actions_e2e_test \
-            --test lifecycle_e2e_test \
-            --test sql_multi_statement \
-            --test streaming_test \
-            --features lane_ci
-        run_cargo_owner "${BUILD_OWNER}-dataframe" \
-            -p alopex-dataframe --tests --features lane_ci
-        run_cargo_owner "${BUILD_OWNER}-py" \
-            -p alopex-py --lib --features lane_ci
-        ;;
     *)
         echo "[alopex-tools:v0.8] unknown Rust suite: ${ALOPEX_CURRENT_RUST_SUITE}" >&2
         exit 2
