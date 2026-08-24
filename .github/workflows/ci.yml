@@ -101,7 +101,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Stable Linux and Windows are owned by v08-release-gate below.
+          # Stable Linux is owned by v08-release-gate. Windows PR compilation
+          # stays in the build matrix; full tests run in scheduled compatibility.
           - os: macos-latest
             rust: stable
           - os: ubuntu-latest
