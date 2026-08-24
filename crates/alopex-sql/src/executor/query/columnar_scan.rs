@@ -1148,8 +1148,10 @@ fn value_from_column(
                 ));
             }
             let floats: Vec<f32> = raw
-                .chunks_exact(4)
-                .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| f32::from_le_bytes(*bytes))
                 .collect();
             Ok(SqlValue::Vector(floats))
         }

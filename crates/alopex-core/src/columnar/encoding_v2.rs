@@ -1052,8 +1052,10 @@ impl Decoder for ByteStreamSplitDecoder {
                     Ok((Column::Float32(values), bitmap))
                 } else {
                     let values: Vec<f32> = raw_bytes
-                        .chunks_exact(4)
-                        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|chunk| f32::from_le_bytes(*chunk))
                         .collect();
                     Ok((Column::Float32(values), bitmap))
                 }
@@ -1077,8 +1079,10 @@ impl Decoder for ByteStreamSplitDecoder {
                     Ok((Column::Float64(values), bitmap))
                 } else {
                     let values: Vec<f64> = raw_bytes
-                        .chunks_exact(8)
-                        .map(|chunk| f64::from_le_bytes(chunk.try_into().unwrap()))
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|chunk| f64::from_le_bytes(*chunk))
                         .collect();
                     Ok((Column::Float64(values), bitmap))
                 }
@@ -1102,8 +1106,10 @@ impl Decoder for ByteStreamSplitDecoder {
                     Ok((Column::Int64(values), bitmap))
                 } else {
                     let values: Vec<i64> = raw_bytes
-                        .chunks_exact(8)
-                        .map(|chunk| i64::from_le_bytes(chunk.try_into().unwrap()))
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|chunk| i64::from_le_bytes(*chunk))
                         .collect();
                     Ok((Column::Int64(values), bitmap))
                 }

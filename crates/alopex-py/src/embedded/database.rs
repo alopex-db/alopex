@@ -36,6 +36,25 @@ impl PyDatabase {
         self.rollback_fail_count.store(1, Ordering::SeqCst);
     }
 
+    #[cfg(test)]
+    fn consume_rollback_failure(&self) -> bool {
+        let mut count = self.rollback_fail_count.load(Ordering::SeqCst);
+        loop {
+            if count == 0 {
+                return false;
+            }
+            match self.rollback_fail_count.compare_exchange_weak(
+                count,
+                count - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => count = observed,
+            }
+        }
+    }
+
     fn from_db(
         db: alopex_embedded::Database,
         mode: alopex_embedded::StorageMode,
@@ -363,17 +382,7 @@ impl PyDatabase {
                     }
                 };
                 #[cfg(test)]
-                if self
-                    .rollback_fail_count
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                        if count > 0 {
-                            Some(count - 1)
-                        } else {
-                            None
-                        }
-                    })
-                    .is_ok()
-                {
+                if self.consume_rollback_failure() {
                     if first_err.is_none() {
                         first_err = Some(error::to_py_err("ロールバック失敗（テスト注入）"));
                     }
