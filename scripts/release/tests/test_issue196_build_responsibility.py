@@ -98,6 +98,11 @@ class BuildResponsibilityContractTests(unittest.TestCase):
         self.assertIn("runs-on: windows-latest", windows_full)
         self.assertIn("cargo test --workspace --features lane_ci", windows_full)
         self.assertIn("scripts/ci/run_with_metrics.py", windows_full)
+        self.assertIn(
+            'echo "VIRTUAL_ENV=$venv_root" >> "$GITHUB_ENV"', windows_full
+        )
+        self.assertIn('"$venv_python" -m pip install "numpy<2"', windows_full)
+        self.assertIn('echo "PYTHONPATH=$python_site" >> "$GITHUB_ENV"', windows_full)
         self.assertNotIn("V07_GATE_RUN_V06", v07)
         self.assertNotIn("scripts/release/v06_gate.sh", v07)
         self.assertNotIn("cargo clean --profile dev", v07)

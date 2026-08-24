@@ -151,9 +151,15 @@ jobs:
           venv_python="$venv_root/Scripts/python.exe"
           test -x "$venv_python"
           echo "$venv_root/Scripts" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$venv_root" >> "$GITHUB_ENV"
           echo "PYO3_PYTHON=$venv_python" >> "$GITHUB_ENV"
           echo "PYTHON_SYS_EXECUTABLE=$venv_python" >> "$GITHUB_ENV"
-          "$venv_python" -m pip install --upgrade pip numpy
+          echo "ALOPEX_PYTHON=$venv_python" >> "$GITHUB_ENV"
+          "$venv_python" -m ensurepip --upgrade
+          "$venv_python" -m pip install --upgrade pip
+          "$venv_python" -m pip install "numpy<2"
+          python_site=$("$venv_python" -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          echo "PYTHONPATH=$python_site" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
