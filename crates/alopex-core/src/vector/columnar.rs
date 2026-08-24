@@ -664,12 +664,8 @@ fn encode_vectors_from_fixed(
                 "vector payload length mismatch".into(),
             ));
         }
-        for bytes in chunk.chunks_exact(4) {
-            floats.push(f32::from_le_bytes(
-                bytes
-                    .try_into()
-                    .map_err(|_| Error::InvalidFormat("vector chunk".into()))?,
-            ));
+        for bytes in chunk.as_chunks::<4>().0 {
+            floats.push(f32::from_le_bytes(*bytes));
         }
     }
 
