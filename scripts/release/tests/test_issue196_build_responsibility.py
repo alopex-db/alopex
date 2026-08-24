@@ -26,7 +26,15 @@ class BuildResponsibilityContractTests(unittest.TestCase):
         self.assertNotIn("name: Run doc tests", compatibility_test)
         self.assertIn("scripts/ci/run_with_metrics.py", compatibility_test)
         self.assertIn("Upload compatibility build metrics", compatibility_test)
-        self.assertIn("os: [ubuntu-latest, windows-latest]", current)
+        self.assertIn("- os: ubuntu-latest\n            rust_suite: full", current)
+        self.assertIn(
+            "- os: windows-latest\n            rust_suite: windows-smoke", current
+        )
+        self.assertIn("rust_suite: full", current)
+        self.assertIn("rust_suite: windows-smoke", current)
+        self.assertIn(
+            "ALOPEX_CURRENT_RUST_SUITE: ${{ matrix.rust_suite }}", current
+        )
         self.assertNotIn("Run v0.7 baseline gate", current)
 
         extension = current.split(
@@ -42,14 +50,21 @@ class BuildResponsibilityContractTests(unittest.TestCase):
         self.assertIn("--workspace", verifier)
         self.assertIn("--timings", verifier)
         self.assertIn("scripts/ci/run_with_metrics.py", verifier)
+        self.assertIn('case "${ALOPEX_CURRENT_RUST_SUITE:-full}"', verifier)
+        full_suite = verifier.split("    full)", 1)[1].split(";;", 1)[0]
+        windows_smoke = verifier.split("windows-smoke)", 1)[1].split(";;", 1)[0]
+        self.assertIn("--workspace --features lane_ci", full_suite)
+        self.assertNotIn("--workspace", windows_smoke)
+        for owner in ("cluster-sql", "server", "cli", "dataframe", "py"):
+            self.assertIn(f'"${{BUILD_OWNER}}-{owner}"', windows_smoke)
         for duplicate_selector in (
             "--test distributed_read_http",
             "--test streaming_contract",
-            "-p alopex-server --tests",
-            "-p alopex-dataframe --tests",
             "cargo test --doc",
         ):
             self.assertNotIn(duplicate_selector, verifier)
+        self.assertIn("-p alopex-server --tests", windows_smoke)
+        self.assertIn("-p alopex-dataframe --tests", windows_smoke)
 
     def test_historical_gates_are_independent_scheduled_owners(self) -> None:
         compatibility = self.read(".github/workflows/compatibility.yml")
@@ -59,6 +74,7 @@ class BuildResponsibilityContractTests(unittest.TestCase):
         self.assertIn("schedule:", compatibility)
         self.assertIn("historical-parser:", compatibility)
         self.assertIn("historical-contract:", compatibility)
+        self.assertIn("current-windows-full:", compatibility)
         self.assertIn("gate: [v06, v07]", compatibility)
         self.assertIn("actions/upload-artifact@v4", compatibility)
         self.assertIn("actions/download-artifact@v4", compatibility)
@@ -74,6 +90,12 @@ class BuildResponsibilityContractTests(unittest.TestCase):
         wasm = compatibility.split("  wasm:\n", 1)[1]
         self.assertIn(regular_event_guard, native)
         self.assertIn(regular_event_guard, wasm)
+        windows_full = compatibility.split("  current-windows-full:\n", 1)[1].split(
+            "\n  native:", 1
+        )[0]
+        self.assertIn("runs-on: windows-latest", windows_full)
+        self.assertIn("cargo test --workspace --features lane_ci", windows_full)
+        self.assertIn("scripts/ci/run_with_metrics.py", windows_full)
         self.assertNotIn("V07_GATE_RUN_V06", v07)
         self.assertNotIn("scripts/release/v06_gate.sh", v07)
         self.assertNotIn("cargo clean --profile dev", v07)

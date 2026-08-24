@@ -125,6 +125,68 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  current-windows-full:
+    name: Full Windows current compatibility
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/current-windows-full
+      RUSTFLAGS: -D warnings
+      ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
+      NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Set up Python venv
+        shell: bash
+        run: |
+          venv_dir="${RUNNER_TEMP}/alopex-current-windows-full-venv"
+          python -m venv "$venv_dir"
+          venv_root=$(VENV_DIR="$venv_dir" python -c "import os; from pathlib import Path; print(Path(os.environ['VENV_DIR']).resolve().as_posix())")
+          venv_python="$venv_root/Scripts/python.exe"
+          test -x "$venv_python"
+          echo "$venv_root/Scripts" >> "$GITHUB_PATH"
+          echo "PYO3_PYTHON=$venv_python" >> "$GITHUB_ENV"
+          echo "PYTHON_SYS_EXECUTABLE=$venv_python" >> "$GITHUB_ENV"
+          "$venv_python" -m pip install --upgrade pip numpy
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: current-windows-full
+      - name: Set up exact Nim parser toolchain
+        uses: ./.github/actions/setup-nim-parser-toolchain
+      - name: Build and test current Windows parser
+        shell: bash
+        run: |
+          bash scripts/build-nim-parser.sh --backend host
+          bash scripts/test-nim-parser.sh --backend host
+      - name: Add parser DLL to PATH
+        shell: bash
+        run: echo "${GITHUB_WORKSPACE}/${NIM_SQL_PARSER_DIR}" >> "$GITHUB_PATH"
+      - name: Run full Windows current owner with metrics
+        shell: bash
+        run: |
+          python scripts/ci/run_with_metrics.py \
+            --owner "current-windows-full" \
+            --output "artifacts/build-metrics/current-windows-full.json" \
+            --target-dir "${CARGO_TARGET_DIR}" \
+            -- cargo test --workspace --features lane_ci --locked --timings
+      - name: Upload full Windows build metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metrics-current-windows-full
+          path: |
+            artifacts/build-metrics/*.json
+            target/current-windows-full/cargo-timings/*.html
+          if-no-files-found: error
+          retention-days: 14
+
   native:
     name: Native Compatibility (${{ matrix.target }} | ${{ matrix.compression }})
     if: github.event_name == 'push' || github.event_name == 'pull_request'

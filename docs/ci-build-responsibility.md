@@ -15,16 +15,17 @@ Owner result JSON is the machine-facing evidence. GitHub Job Summary and uploade
 | Owner | Responsibility | Does not own |
 |---|---|---|
 | `test` matrix | macOS stable and Linux beta compatibility | stable Linux/Windows current suite |
-| `v08-release-gate` | stable Linux/Windows workspace tests, doctests, Python surfaces | v0.6/v0.7 historical contracts |
+| `v08-release-gate` | stable Linux full workspace; Windows current-surface smoke; Linux/Windows Python surfaces | v0.6/v0.7 historical contracts, full Windows workspace |
 | `compatibility: historical-parser` | one exact parser build/test and verified artifact | Cargo package tests |
 | `compatibility: historical-contract` | independent v0.6 and v0.7 scheduled/manual contracts | PR critical path, nested version gates |
+| `compatibility: current-windows-full` | scheduled/manual full Windows workspace compatibility | PR critical path |
 | `coverage` | coverage-instrumented build and tests | reuse as an uninstrumented correctness artifact |
 | `release.yml` | package, sign, publish, and public delivery verdict | repeating implementation tests |
 | `ci-success` | status-only join of required owners | build or test execution |
 
 `cargo test --workspace` already runs workspace library doctests. A second explicit `cargo test --doc --workspace` is therefore forbidden unless Cargo semantics or selectors change and a contract test documents the new gap.
 
-The compatibility workflow has two disjoint trigger paths. Push/pull-request events run only the native and advisory WASM compatibility jobs; schedule/manual events run only the historical parser and v0.6/v0.7 contract jobs. Adding a trigger must preserve that separation so a historical run cannot silently multiply the regular matrix.
+The compatibility workflow has two disjoint trigger paths. Push/pull-request events run only the native and advisory WASM compatibility jobs; schedule/manual events run only the historical parser, v0.6/v0.7 contract jobs, and full Windows current compatibility. Adding a trigger must preserve that separation so a scheduled run cannot silently multiply the regular matrix.
 
 ## Metrics artifact
 
@@ -42,7 +43,8 @@ The wrapper exits with the wrapped command's status, so measurement can never co
 | Path/artifact | Current role | Target role | Action | Delete when | Proof |
 |---|---|---|---|---|---|
 | `.github/workflows/ci.yml:test` | all stable OS plus Linux beta | complementary macOS stable/Linux beta lanes | shrink | replacement v0.8 owners are required | workflow contract tests |
-| `v08-release-gate` | current suite plus nested v0.7 | one stable Linux/Windows current owner | replace | old nested step is absent | workflow contract tests and owner JSON |
+| `v08-release-gate` | current suite plus nested v0.7 | stable Linux full owner plus Windows surface-smoke owners | replace | old nested step is absent | workflow contract tests and owner JSON |
+| scheduled full Windows | repeated on every PR | one weekly/manual compatibility owner | move | smoke selectors and scheduled catch-all are both wired | workflow contract tests and owner JSON |
 | `scripts/release/v07_gate.sh` | v0.7, nested v0.6, and delivery smoke | independent historical v0.7 behavior | shrink | scheduled owner is wired | workflow contract-only gate |
 | `compatibility.yml` parser build | repeated per historical gate | one checksum-verified artifact producer | replace | both consumers verify the artifact | scheduled/manual workflow |
 | `target/cargo-timings` | local transient output | optional diagnostic artifact | keep | workflow artifact upload completes | Actions artifact inventory |
