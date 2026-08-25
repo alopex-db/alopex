@@ -26,7 +26,7 @@ v1.2 Format Migration
        |
        v
 v1.3 Distributed Coordination
-  #187
+  #187, #200
        |
        +----------------------+
        |                      |
@@ -55,9 +55,9 @@ v1.4 と v1.5 は、v1.1〜v1.3 の契約が安定した後であれば、依存
 | SQL 継続 | [v0.10.0](https://github.com/alopex-db/alopex/milestone/15) | 既存の SQL／リリース計画 | 既存の v0.10.0 対象 |
 | 1 | [v1.1-Storage-Foundation](https://github.com/alopex-db/alopex/milestone/16) | 永続化の基礎契約とローカルファイルバックエンド | [#183](https://github.com/alopex-db/alopex/issues/183), [#186](https://github.com/alopex-db/alopex/issues/186) |
 | 2 | [v1.2-Format-Migration](https://github.com/alopex-db/alopex/milestone/17) | 論理フォーマットと物理フォーマットの分離、移行 | [#185](https://github.com/alopex-db/alopex/issues/185), [#188](https://github.com/alopex-db/alopex/issues/188) |
-| 3 | [v1.3-Distributed-Coordination](https://github.com/alopex-db/alopex/milestone/18) | epoch・manifest・chirps による分散協調 | [#187](https://github.com/alopex-db/alopex/issues/187) |
+| 3 | [v1.3-Distributed-Coordination](https://github.com/alopex-db/alopex/milestone/18) | epoch・manifest・chirps による分散協調と共通トランザクション／可視性契約 | [#187](https://github.com/alopex-db/alopex/issues/187), [#200](https://github.com/alopex-db/alopex/issues/200) |
 | 4 | [v1.4-Portable-Backends](https://github.com/alopex-db/alopex/milestone/19) | S3 互換バックエンドとバックエンド抽象化 | [#190](https://github.com/alopex-db/alopex/issues/190), [#191](https://github.com/alopex-db/alopex/issues/191) |
-| 5 | [v1.5-Runtime-Residency](https://github.com/alopex-db/alopex/milestone/20) | embedded・server・cluster のランタイム形態 | [#205](https://github.com/alopex-db/alopex/issues/205)〜[#209](https://github.com/alopex-db/alopex/issues/209) |
+| 5 | [v1.5-Runtime-Residency](https://github.com/alopex-db/alopex/milestone/20) | embedded・server・cluster のランタイム形態とHTTP QUERY API | [#198](https://github.com/alopex-db/alopex/issues/198), [#199](https://github.com/alopex-db/alopex/issues/199), [#205](https://github.com/alopex-db/alopex/issues/205)〜[#209](https://github.com/alopex-db/alopex/issues/209) |
 | 6 | [v1.6-Cluster-Integration](https://github.com/alopex-db/alopex/milestone/21) | Kubernetes 互換を含むクラスタ統合 | [#189](https://github.com/alopex-db/alopex/issues/189) |
 | 最終 | [v2.0](https://github.com/alopex-db/alopex/milestone/14) | 最終受け入れ、互換性確認、リリース判定 | [#184](https://github.com/alopex-db/alopex/issues/184) |
 
@@ -80,6 +80,8 @@ v1.4 と v1.5 は、v1.1〜v1.3 の契約が安定した後であれば、依存
 - manifest、epoch、chirps の責務と整合性が定義されている。
 - 複数プロセス／複数ノードでの可視性、競合、再試行、ロールバック方針が検証されている。
 - ローカルバックエンドに閉じない協調契約になっている。
+- トランザクション、freshness、commit barrier、post-commit read の共通契約が定義され、各 transport に写像できる。
+- 分散環境で commit 完了と後続 read の可視性境界が検証できる。
 
 ### v1.4 — Portable Backends
 
@@ -92,6 +94,8 @@ v1.4 と v1.5 は、v1.1〜v1.3 の契約が安定した後であれば、依存
 - embedded、server、cluster の各実行形態で、ストレージ契約が維持される。
 - プロセス内常駐、サーバー常駐、外部クラスタでの責務分担が明示されている。
 - 各形態の起動、停止、再接続、障害復旧、観測性を検証できる。
+- HTTP QUERY の設計・実装・POST fallback・cache/freshness semantics が確立している（#198, #199）。
+- HTTP 以外の transport でも共通の transaction／freshness 契約（#200）が維持される。
 
 ### v1.6 — Cluster Integration
 
@@ -103,11 +107,12 @@ v1.4 と v1.5 は、v1.1〜v1.3 の契約が安定した後であれば、依存
 
 v2.0 では、少なくとも次の状態を満たしていることを最終受け入れ条件とします。
 
-- v1.1〜v1.6 の実装 Issue が完了し、未解決の設計上のブロッカーがない。
+- v1.1〜v1.6 の実装 Issue と #198〜#200 が完了し、未解決の設計上のブロッカーがない。
 - ローカルファイル、S3 互換、Kubernetes 互換クラスタを含む対象構成の責務と互換性が文書化されている。
 - 論理フォーマット、物理フォーマット、manifest、artifact identity、capability の関係が一貫している。
 - embedded → server → cluster、および filesystem → object storage の移行・切り替え経路が検証されている。
 - epoch／chirps／manifest を含む分散協調で、競合、障害、再試行、ロールバック、混在バージョンを検証できる。
+- transport-independent な transaction／freshness contract と、HTTP QUERY の安全性・cache identity・POST fallback が検証できる。
 - 主要な障害・復旧シナリオのテスト結果と運用手順が残っている。
 - #184 を最終リリース受け入れトラッカーとしてクローズできる。
 
