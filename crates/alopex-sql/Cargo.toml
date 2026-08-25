@@ -47,9 +47,9 @@ sha2 = "0.10"
 uuid.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 alopex-core.workspace = true
-parquet = { version = "52", features = ["arrow"] }
-arrow-array = "52"
-arrow-schema = "52"
+parquet = { version = "53", features = ["arrow"] }
+arrow-array = "53"
+arrow-schema = "53"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 rmp-serde = "1.3"

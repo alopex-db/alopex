@@ -330,6 +330,17 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+      - name: Enforce dependency duplication policy
+        # v2 currently packages cargo-deny 0.20.2. Pin the immutable commit so
+        # dependency policy cannot change underneath an unrelated PR.
+        uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902
+        with:
+          command: check bans
+          arguments: --all-features --locked
+          command-arguments: >-
+            --hide-inclusion-graph
+            --deny unmatched-skip
+            --deny unnecessary-skip
       - uses: dtolnay/rust-toolchain@1.90.0
       - name: Verify ignored rkyv advisory remains unreachable
         shell: bash

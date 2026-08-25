@@ -21,6 +21,7 @@ Owner result JSON is the machine-facing evidence. GitHub Job Summary and uploade
 | `compatibility: historical-contract` | independent v0.6 and v0.7 scheduled/manual contracts | PR critical path, nested version gates |
 | `compatibility: current-windows-full` | scheduled/manual full Windows workspace compatibility | PR critical path |
 | `coverage` | coverage-instrumented build and tests | reuse as an uninstrumented correctness artifact |
+| `security-audit` | blocking duplicate-version policy followed by RustSec advisory audit | compilation or test execution |
 | `release.yml` | package, sign, publish, and public delivery verdict | repeating implementation tests |
 | `ci-success` | status-only join of required owners | build or test execution |
 
