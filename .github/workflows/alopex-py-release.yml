@@ -96,7 +96,7 @@ jobs:
             if gh release download "$CORE_TAG" --repo alopex-db/alopex \
               --pattern "parser-assets-v${ALOPEX_VERSION}.json" \
               --pattern "parser-vendor-manifest-v${ALOPEX_VERSION}.json" \
-              --pattern "alopex-parser-v${ALOPEX_VERSION}-contract-0.9.0-*.tar.gz" \
+              --pattern "alopex-parser-v${ALOPEX_VERSION}-contract-0.14.0-*.tar.gz" \
               --dir .core-parser-assets --clobber; then
               break
             fi
@@ -120,17 +120,21 @@ jobs:
           with tarfile.open(archive, 'r:gz') as handle:
               members = {member.name: handle.extractfile(member).read() for member in handle.getmembers()}
           library = members[asset['library']['path']]
+          static_library = members[asset['static_library']['path']]
           assert hashlib.sha256(library).hexdigest() == asset['library']['sha256']
+          assert hashlib.sha256(static_library).hexdigest() == asset['static_library']['sha256']
           destination = Path('crates/alopex-sql/nim-sql-parser/vendor/x86_64-unknown-linux-gnu')
           destination.mkdir(parents=True, exist_ok=True)
           name = Path(asset['library']['path']).name
+          static_name = Path(asset['static_library']['path']).name
           (destination / name).write_bytes(library)
-          (destination / 'CONTRACT_VERSION').write_bytes(b'0.9.0\n')
-          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
+          (destination / static_name).write_bytes(static_library)
+          (destination / 'CONTRACT_VERSION').write_bytes(b'0.14.0\n')
+          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n{asset['static_library']['sha256']}  {static_name}\n".encode())
           package_native = Path('crates/alopex-py/python/alopex/native')
           package_native.mkdir(parents=True, exist_ok=True)
           (package_native / name).write_bytes(library)
-          (package_native / 'CONTRACT_VERSION').write_bytes(b'0.9.0\n')
+          (package_native / 'CONTRACT_VERSION').write_bytes(b'0.14.0\n')
           (package_native / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           PY
       - name: Checkout exact-SHA release repair tool
@@ -177,7 +181,7 @@ jobs:
           for wheel in dist/*.whl; do
             python scripts/release/verify_wheel_contents.py "$wheel" \
               --expected-library-path alopex/native/libalopex_sql_parser.so \
-              --expected-library-sha256 "$library_sha" --expected-contract-version 0.9.0
+              --expected-library-sha256 "$library_sha" --expected-contract-version 0.14.0
           done
       - name: Exercise Linux wheel vector and streaming APIs
         shell: bash
@@ -236,7 +240,7 @@ jobs:
             if gh release download "${CORE_TAG}" --repo alopex-db/alopex \
               --pattern "parser-assets-v${ALOPEX_VERSION}.json" \
               --pattern "parser-vendor-manifest-v${ALOPEX_VERSION}.json" \
-              --pattern "alopex-parser-v${ALOPEX_VERSION}-contract-0.9.0-*.tar.gz" \
+              --pattern "alopex-parser-v${ALOPEX_VERSION}-contract-0.14.0-*.tar.gz" \
               --dir .core-parser-assets --clobber; then
               break
             fi
@@ -260,17 +264,21 @@ jobs:
           with tarfile.open(root / asset['archive']['filename'], 'r:gz') as handle:
               members = {m.name: handle.extractfile(m).read() for m in handle.getmembers()}
           library = members[asset['library']['path']]
+          static_library = members[asset['static_library']['path']]
           assert hashlib.sha256(library).hexdigest() == asset['library']['sha256']
+          assert hashlib.sha256(static_library).hexdigest() == asset['static_library']['sha256']
           destination = Path('crates/alopex-sql/nim-sql-parser/vendor') / target
           destination.mkdir(parents=True, exist_ok=True)
           name = Path(asset['library']['path']).name
+          static_name = Path(asset['static_library']['path']).name
           (destination / name).write_bytes(library)
-          (destination / 'CONTRACT_VERSION').write_bytes(b'0.9.0\n')
-          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
+          (destination / static_name).write_bytes(static_library)
+          (destination / 'CONTRACT_VERSION').write_bytes(b'0.14.0\n')
+          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n{asset['static_library']['sha256']}  {static_name}\n".encode())
           package_native = Path('crates/alopex-py/python/alopex/native')
           package_native.mkdir(parents=True, exist_ok=True)
           (package_native / name).write_bytes(library)
-          (package_native / 'CONTRACT_VERSION').write_bytes(b'0.9.0\n')
+          (package_native / 'CONTRACT_VERSION').write_bytes(b'0.14.0\n')
           (package_native / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           PY
       - name: Checkout exact-SHA release repair tool
@@ -308,7 +316,7 @@ jobs:
           for wheel in dist/*.whl; do
             python scripts/release/verify_wheel_contents.py "$wheel" \
               --expected-library-path alopex/native/libalopex_sql_parser.dylib \
-              --expected-library-sha256 "$library_sha" --expected-contract-version 0.9.0
+              --expected-library-sha256 "$library_sha" --expected-contract-version 0.14.0
           done
       - name: Exercise macOS wheel vector and streaming APIs
         shell: bash
@@ -354,7 +362,7 @@ jobs:
             if gh release download "${CORE_TAG}" --repo alopex-db/alopex \
               --pattern "parser-assets-v${ALOPEX_VERSION}.json" \
               --pattern "parser-vendor-manifest-v${ALOPEX_VERSION}.json" \
-              --pattern "alopex-parser-v${ALOPEX_VERSION}-contract-0.9.0-*.tar.gz" \
+              --pattern "alopex-parser-v${ALOPEX_VERSION}-contract-0.14.0-*.tar.gz" \
               --dir .core-parser-assets --clobber; then
               break
             fi
@@ -378,16 +386,20 @@ jobs:
           with tarfile.open(root / asset['archive']['filename'], 'r:gz') as handle:
               members = {m.name: handle.extractfile(m).read() for m in handle.getmembers()}
           library = members[asset['library']['path']]
+          static_library = members[asset['static_library']['path']]
           assert hashlib.sha256(library).hexdigest() == asset['library']['sha256']
+          assert hashlib.sha256(static_library).hexdigest() == asset['static_library']['sha256']
           destination = Path('crates/alopex-sql/nim-sql-parser/vendor') / target
           destination.mkdir(parents=True, exist_ok=True)
           name = Path(asset['library']['path']).name
+          static_name = Path(asset['static_library']['path']).name
           (destination / name).write_bytes(library)
-          (destination / 'CONTRACT_VERSION').write_bytes(b'0.9.0\n')
-          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
+          (destination / static_name).write_bytes(static_library)
+          (destination / 'CONTRACT_VERSION').write_bytes(b'0.14.0\n')
+          (destination / 'SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n{asset['static_library']['sha256']}  {static_name}\n".encode())
           Path('crates/alopex-py/python/alopex/native').mkdir(parents=True, exist_ok=True)
           Path('crates/alopex-py/python/alopex/native', name).write_bytes(library)
-          Path('crates/alopex-py/python/alopex/native/CONTRACT_VERSION').write_bytes(b'0.9.0\n')
+          Path('crates/alopex-py/python/alopex/native/CONTRACT_VERSION').write_bytes(b'0.14.0\n')
           Path('crates/alopex-py/python/alopex/native/SHA256SUMS').write_bytes(f"{asset['library']['sha256']}  {name}\n".encode())
           PY
       - name: Checkout exact-SHA release repair tool
@@ -424,7 +436,7 @@ jobs:
           PY
           )"
           python scripts/release/verify_wheel_contents.py "$wheel" --require-nim-dll \
-            --expected-library-sha256 "$library_sha" --expected-contract-version 0.9.0 \
+            --expected-library-sha256 "$library_sha" --expected-contract-version 0.14.0 \
             --expected-loader-path alopex/native/alopex_sql_parser.dll
       - name: Exercise Windows wheel APIs without external DLL overrides
         shell: pwsh

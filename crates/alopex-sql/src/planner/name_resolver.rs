@@ -334,9 +334,24 @@ impl<'a, C: Catalog + ?Sized> NameResolver<'a, C> {
                 Ok(())
             }
 
-            ExprKind::FunctionCall { args, .. } => {
+            ExprKind::FunctionCall {
+                args,
+                order_by,
+                within_group,
+                filter,
+                ..
+            } => {
                 for arg in args {
                     self.resolve_expr_recursive(arg, table)?;
+                }
+                for order in order_by {
+                    self.resolve_expr_recursive(&order.expr, table)?;
+                }
+                for order in within_group {
+                    self.resolve_expr_recursive(&order.expr, table)?;
+                }
+                if let Some(filter) = filter {
+                    self.resolve_expr_recursive(filter, table)?;
                 }
                 Ok(())
             }

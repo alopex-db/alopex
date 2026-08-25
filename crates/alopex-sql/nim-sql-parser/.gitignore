@@ -2,6 +2,8 @@
 *.so
 *.dylib
 *.dll
+/libalopex_sql_parser.a
+/alopex_sql_parser.lib
 /CONTRACT_VERSION
 /SHA256SUMS
 nimcache/

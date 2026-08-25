@@ -483,9 +483,11 @@ jobs:
           case "$RUNNER_OS" in
             Linux)
               parser_library="libalopex_sql_parser.so"
+              parser_static_library="libalopex_sql_parser.a"
               ;;
             Windows)
               parser_library="alopex_sql_parser.dll"
+              parser_static_library="alopex_sql_parser.lib"
               ;;
             *)
               echo "unsupported v0.8 parser gate runner: $RUNNER_OS" >&2
@@ -493,7 +495,7 @@ jobs:
               ;;
           esac
           local_dir="${NIM_SQL_PARSER_DIR}"
-          for candidate in "$parser_library" CONTRACT_VERSION SHA256SUMS; do
+          for candidate in "$parser_library" "$parser_static_library" CONTRACT_VERSION SHA256SUMS; do
             test -f "${local_dir}/${candidate}"
             test ! -L "${local_dir}/${candidate}"
           done

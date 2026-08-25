@@ -76,6 +76,10 @@ pub enum VectorMetric {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "variant")]
+// `Expr` grew with the issue #148 aggregate clauses; boxing `Default.value`
+// would churn every construction/pattern site of a rarely-instantiated
+// variant for no measurable gain.
+#[allow(clippy::large_enum_variant)]
 pub enum ColumnConstraint {
     NotNull { span: Span },
     PrimaryKey { span: Span },

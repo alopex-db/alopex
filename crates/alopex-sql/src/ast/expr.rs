@@ -64,6 +64,15 @@ pub enum ExprKind {
         args: Vec<Expr>,
         distinct: bool,
         star: bool,
+        /// Aggregate-local ordering from `agg(expr ORDER BY ...)` (issue #148).
+        #[serde(default)]
+        order_by: Vec<OrderByExpr>,
+        /// Ordered-set aggregate ordering from `WITHIN GROUP (ORDER BY ...)`.
+        #[serde(default)]
+        within_group: Vec<OrderByExpr>,
+        /// Aggregate row filter from `FILTER (WHERE predicate)`.
+        #[serde(default)]
+        filter: Option<Box<Expr>>,
         #[serde(default)]
         over: Option<WindowSpec>,
     },

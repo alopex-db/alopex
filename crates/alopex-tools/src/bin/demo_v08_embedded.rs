@@ -426,10 +426,7 @@ fn scenario_local_sql_matrix() -> DemoResult {
         ),
         (
             "WITH renamed(identifier, territory) AS (SELECT id, region FROM sales WHERE id = 1) SELECT territory, identifier FROM renamed",
-            vec![vec![
-                SqlValue::Text("east".into()),
-                SqlValue::Integer(1),
-            ]],
+            vec![vec![SqlValue::Text("east".into()), SqlValue::Integer(1)]],
         ),
         (
             "SELECT id FROM sales WHERE amount >= 150 EXCEPT SELECT id FROM sales WHERE qty <= 2 ORDER BY id",
@@ -537,21 +534,13 @@ fn scenario_local_sql_matrix() -> DemoResult {
         (
             "SELECT id, LAG(amount, 1, -1) OVER (PARTITION BY region ORDER BY id) AS previous, LEAD(bonus, 1, -1) OVER (PARTITION BY region ORDER BY id) AS following_bonus FROM sales ORDER BY id",
             vec![
-                vec![
-                    SqlValue::Integer(1),
-                    SqlValue::Double(-1.0),
-                    SqlValue::Null,
-                ],
+                vec![SqlValue::Integer(1), SqlValue::Double(-1.0), SqlValue::Null],
                 vec![
                     SqlValue::Integer(2),
                     SqlValue::Double(100.0),
                     SqlValue::Double(-1.0),
                 ],
-                vec![
-                    SqlValue::Integer(3),
-                    SqlValue::Double(-1.0),
-                    SqlValue::Null,
-                ],
+                vec![SqlValue::Integer(3), SqlValue::Double(-1.0), SqlValue::Null],
                 vec![
                     SqlValue::Integer(4),
                     SqlValue::Double(150.0),
@@ -651,15 +640,92 @@ fn scenario_local_sql_matrix() -> DemoResult {
         ),
         (
             "SELECT TRY_CAST('42' AS INTEGER), TRY_CAST('bad' AS INTEGER), TRY_CAST([1.0, 2.0] AS VECTOR(3))",
+            vec![vec![SqlValue::Integer(42), SqlValue::Null, SqlValue::Null]],
+        ),
+        (
+            "VALUES (2), (2), (1) ORDER BY column1 DESC FETCH FIRST 1 ROW WITH TIES",
+            vec![vec![SqlValue::Integer(2)], vec![SqlValue::Integer(2)]],
+        ),
+        (
+            "SELECT id, label FROM (VALUES (2, 'b'), (1, 'a'), (3, 'c')) AS v(id, label) \
+             ORDER BY id OFFSET 1 ROW FETCH NEXT 1 + 0 ROWS ONLY",
+            vec![vec![SqlValue::Integer(2), SqlValue::Text("b".into())]],
+        ),
+        (
+            // The two west rows tie on amount; the deterministic D4
+            // tie-breaker (schema-order columns) elects id 3.
+            "SELECT DISTINCT ON (region) region, id FROM sales ORDER BY region, amount",
+            vec![
+                vec![SqlValue::Text("east".into()), SqlValue::Integer(1)],
+                vec![SqlValue::Text("north".into()), SqlValue::Integer(5)],
+                vec![SqlValue::Text("west".into()), SqlValue::Integer(3)],
+            ],
+        ),
+        (
+            // Aggregate FILTER + ordered GROUP_CONCAT + ordered-set aggregate
+            // (issue #148): the filter excludes qty <= 1 before counting, the
+            // concat orders by amount DESC with id ASC tie-break, and
+            // PERCENTILE_DISC picks the discrete median of qty.
+            "SELECT COUNT(*) FILTER (WHERE qty > 1), \
+             GROUP_CONCAT(region ORDER BY amount DESC, id ASC), \
+             PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY qty) FROM sales",
             vec![vec![
-                SqlValue::Integer(42),
-                SqlValue::Null,
-                SqlValue::Null,
+                SqlValue::BigInt(3),
+                SqlValue::Text("east,west,west,east,north".into()),
+                SqlValue::Integer(2),
             ]],
+        ),
+        (
+            // GROUPING SETS / ROLLUP (issue #149): the grand-total row prints
+            // region as NULL but GROUPING(region) = 1 distinguishes it from
+            // any real NULL group (D7).
+            "SELECT region, SUM(qty), GROUPING(region) FROM sales \
+             GROUP BY ROLLUP(region) ORDER BY GROUPING(region), region",
+            vec![
+                vec![
+                    SqlValue::Text("east".into()),
+                    SqlValue::BigInt(4),
+                    SqlValue::BigInt(0),
+                ],
+                vec![
+                    SqlValue::Text("north".into()),
+                    SqlValue::BigInt(0),
+                    SqlValue::BigInt(0),
+                ],
+                vec![
+                    SqlValue::Text("west".into()),
+                    SqlValue::BigInt(7),
+                    SqlValue::BigInt(0),
+                ],
+                vec![SqlValue::Null, SqlValue::BigInt(11), SqlValue::BigInt(1)],
+            ],
+        ),
+        (
+            // LATERAL (issue #151): the correlated subquery is evaluated once
+            // per department row.
+            "SELECT d.name, m.total FROM departments AS d CROSS JOIN LATERAL \
+             (SELECT SUM(x.n) AS total FROM metrics AS x WHERE x.dept_id = d.id) AS m \
+             ORDER BY d.id",
+            vec![
+                vec![SqlValue::Text("search".into()), SqlValue::BigInt(5)],
+                vec![SqlValue::Text("storage".into()), SqlValue::BigInt(4)],
+            ],
+        ),
+        (
+            // A table function reads the preceding FROM item without LATERAL
+            // being written (D2), and an alias column list renames its output
+            // (D8).
+            "SELECT m.id, e.component FROM metrics AS m, UNNEST(m.embedding) AS e(component) \
+             WHERE m.id = 1 ORDER BY e.component",
+            vec![
+                vec![SqlValue::Integer(1), SqlValue::Float(0.0)],
+                vec![SqlValue::Integer(1), SqlValue::Float(0.0)],
+                vec![SqlValue::Integer(1), SqlValue::Float(1.0)],
+            ],
         ),
     ];
     require(
-        v08_matrix.len() == 23,
+        v08_matrix.len() == 30,
         "v0.8.x SQL success-check count changed",
     )?;
     for (sql, expected) in &v08_matrix {
@@ -676,12 +742,25 @@ fn scenario_local_sql_matrix() -> DemoResult {
             "ALOPEX-C003",
         ),
         ("SELECT CAST('bad' AS INTEGER)", "ALOPEX-E004"),
+        (
+            "SELECT 1 FETCH FIRST 1 ROW WITH TIES",
+            "FETCH ... WITH TIES requires ORDER BY",
+        ),
+        ("SELECT 1 LIMIT -1", "LIMIT must not be negative"),
+        (
+            "SELECT DISTINCT ON (region) region FROM sales ORDER BY amount",
+            "ALOPEX-T014",
+        ),
+        (
+            "SELECT SUM(amount) WITHIN GROUP (ORDER BY amount) FROM sales",
+            "WITHIN GROUP is only valid for ordered-set aggregate functions",
+        ),
     ];
     for (sql, expected) in rejected_v08 {
         expect_sql_error(&db, sql, expected)?;
     }
     require(
-        v08_matrix.len() + rejected_v08.len() == 26,
+        v08_matrix.len() + rejected_v08.len() == 37,
         "v0.8.x SQL check count changed",
     )?;
     require(

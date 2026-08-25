@@ -18,7 +18,12 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.6.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.7.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.8.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.9.0"),
+      isExactContractDescriptor(parserContractDescriptor, "0.9.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.10.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.11.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
+      isExactContractDescriptor(parserContractDescriptor, "0.14.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -188,7 +193,7 @@ proc normalizedIndexMethod(name: string): string =
 
 proc writeStatement(s: Stream; node: SqlNode)
 proc writeExpr(s: Stream; node: SqlNode)
-proc writeFromItem(s: Stream; node: SqlNode)
+proc writeFromItem(s: Stream; node: SqlNode; publicWire = true)
 proc writeDataType(s: Stream; node: SqlNode)
 proc writeSelectKind(s: Stream; node: SqlNode)
 proc writeQueryBody(s: Stream; node: SqlNode)
@@ -244,6 +249,37 @@ proc writeExprSeq(s: Stream; nodes: seq[SqlNode]) =
   s.pack_array(nodes.len)
   for child in nodes:
     s.writeExpr(child)
+
+proc writeGroupByItem(s: Stream; node: SqlNode) =
+  ## Contract 0.13.0 (issue #149): group_by carries tagged GroupByItem values
+  ## instead of bare expressions on the public Select wire.
+  case node.kind
+  of nkRollup:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Rollup")
+    s.writeKey("exprs")
+    s.writeExprSeq(node.children)
+  of nkCube:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Cube")
+    s.writeKey("exprs")
+    s.writeExprSeq(node.children)
+  of nkGroupingSets:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("GroupingSets")
+    s.writeKey("sets")
+    s.pack_array(node.children.len)
+    for groupingSet in node.children:
+      s.writeExprSeq(groupingSet.children)
+  else:
+    s.pack_map(2)
+    s.writeKey("variant")
+    s.pack_type("Expr")
+    s.writeKey("expr")
+    s.writeExpr(node)
 
 proc writeCaseBranch(s: Stream; node: SqlNode) =
   s.pack_map(2)
@@ -519,67 +555,111 @@ proc writeDataType(s: Stream; node: SqlNode) =
     s.writeKey("variant")
     s.pack_type(variant)
 
-proc writeFromItem(s: Stream; node: SqlNode) =
+proc writeTableFromItem(s: Stream; name: string; alias: SqlNode;
+                        columns: seq[string]; span: Span; publicWire: bool) =
+  # Contract 0.14.0 (issue #151): the public Table variant carries the alias
+  # column-name list. The staged continuous-aggregate encoder intentionally
+  # remains byte-for-byte compatible with its historical 4-key payload.
+  s.pack_map(if publicWire: 5 else: 4)
+  s.writeKey("variant")
+  s.pack_type("Table")
+  s.writeKey("name")
+  s.pack_type(name)
+  s.writeKey("alias")
+  if alias == nil:
+    s.writeNil()
+  else:
+    s.pack_type(alias.aliasName)
+  if publicWire:
+    s.writeKey("columns")
+    s.pack_array(columns.len)
+    for column in columns:
+      s.pack_type(column)
+  s.writeKey("span")
+  s.writeSpan(span)
+
+proc writeDerivedFromItem(s: Stream; derived: SqlNode; alias: SqlNode;
+                          columns: seq[string]; span: Span; publicWire: bool) =
+  # Contract 0.14.0 (issue #151): the public Derived variant carries `lateral`.
+  # The staged encoder keeps its historical 5-key payload; the parser rejects
+  # LATERAL inside CREATE CONTINUOUS AGGREGATE before encoding.
+  s.pack_map(if publicWire: 6 else: 5)
+  s.writeKey("variant")
+  s.pack_type("Derived")
+  s.writeKey("subquery")
+  s.writeQueryBody(derived.children[0])
+  s.writeKey("alias")
+  if alias == nil:
+    s.writeNil()
+  else:
+    s.pack_type(alias.aliasName)
+  s.writeKey("columns")
+  s.pack_array(columns.len)
+  for column in columns:
+    s.pack_type(column)
+  if publicWire:
+    s.writeKey("lateral")
+    s.pack_type(derived.lateral)
+  s.writeKey("span")
+  s.writeSpan(span)
+
+proc writeFunctionFromItem(s: Stream; function: SqlNode; alias: SqlNode;
+                           columns: seq[string]; span: Span) =
+  # Contract 0.14.0 (issue #151). Only the public wire carries this variant;
+  # the staged continuous-aggregate validator rejects it before encoding.
+  s.pack_map(7)
+  s.writeKey("variant")
+  s.pack_type("Function")
+  s.writeKey("name")
+  s.pack_type(function.children[0].firstIdent())
+  s.writeKey("args")
+  s.pack_array(max(function.children.len - 1, 0))
+  for i in 1 ..< function.children.len:
+    s.writeExpr(function.children[i])
+  s.writeKey("alias")
+  if alias == nil:
+    s.writeNil()
+  else:
+    s.pack_type(alias.aliasName)
+  s.writeKey("columns")
+  s.pack_array(columns.len)
+  for column in columns:
+    s.pack_type(column)
+  s.writeKey("lateral")
+  s.pack_type(function.lateral)
+  s.writeKey("span")
+  s.writeSpan(span)
+
+proc writeFromItem(s: Stream; node: SqlNode; publicWire = true) =
   if node == nil:
     s.writeNil()
     return
 
   case node.kind
   of nkAlias:
-    if node.aliasExpr.kind == nkFromDerived:
-      s.pack_map(5)
-      s.writeKey("variant")
-      s.pack_type("Derived")
-      s.writeKey("subquery")
-      s.writeQueryBody(node.aliasExpr.children[0])
-      s.writeKey("alias")
-      s.pack_type(node.aliasName)
-      s.writeKey("columns")
-      s.pack_array(node.aliasColumns.len)
-      for column in node.aliasColumns:
-        s.pack_type(column)
-      s.writeKey("span")
-      s.writeSpan(node.span)
+    case node.aliasExpr.kind
+    of nkFromDerived:
+      s.writeDerivedFromItem(node.aliasExpr, node, node.aliasColumns, node.span,
+                             publicWire)
+    of nkFromFunction:
+      s.writeFunctionFromItem(node.aliasExpr, node, node.aliasColumns, node.span)
     else:
-      s.pack_map(4)
-      s.writeKey("variant")
-      s.pack_type("Table")
-      s.writeKey("name")
-      s.pack_type(node.aliasExpr.firstIdent())
-      s.writeKey("alias")
-      s.pack_type(node.aliasName)
-      s.writeKey("span")
-      s.writeSpan(node.span)
+      s.writeTableFromItem(node.aliasExpr.firstIdent(), node, node.aliasColumns,
+                           node.span, publicWire)
   of nkIdentifier:
-    s.pack_map(4)
-    s.writeKey("variant")
-    s.pack_type("Table")
-    s.writeKey("name")
-    s.pack_type(node.strVal)
-    s.writeKey("alias")
-    s.writeNil()
-    s.writeKey("span")
-    s.writeSpan(node.span)
+    s.writeTableFromItem(node.strVal, nil, @[], node.span, publicWire)
   of nkFromDerived:
-    s.pack_map(5)
-    s.writeKey("variant")
-    s.pack_type("Derived")
-    s.writeKey("subquery")
-    s.writeQueryBody(node.children[0])
-    s.writeKey("alias")
-    s.writeNil()
-    s.writeKey("columns")
-    s.pack_array(0)
-    s.writeKey("span")
-    s.writeSpan(node.span)
+    s.writeDerivedFromItem(node, nil, @[], node.span, publicWire)
+  of nkFromFunction:
+    s.writeFunctionFromItem(node, nil, @[], node.span)
   of nkJoin, nkFromJoin:
     s.pack_map(7)
     s.writeKey("variant")
     s.pack_type("Join")
     s.writeKey("left")
-    s.writeFromItem(node.joinLeft)
+    s.writeFromItem(node.joinLeft, publicWire)
     s.writeKey("right")
-    s.writeFromItem(node.joinRight)
+    s.writeFromItem(node.joinRight, publicWire)
     s.writeKey("join_type")
     s.pack_type(normalizedJoinKind(node.joinKind))
     s.writeKey("condition")
@@ -589,15 +669,7 @@ proc writeFromItem(s: Stream; node: SqlNode) =
     s.writeKey("span")
     s.writeSpan(node.span)
   else:
-    s.pack_map(4)
-    s.writeKey("variant")
-    s.pack_type("Table")
-    s.writeKey("name")
-    s.pack_type(node.firstIdent())
-    s.writeKey("alias")
-    s.writeNil()
-    s.writeKey("span")
-    s.writeSpan(node.span)
+    s.writeTableFromItem(node.firstIdent(), nil, @[], node.span, publicWire)
 
 proc writeExpr(s: Stream; node: SqlNode) =
   if node == nil:
@@ -753,18 +825,33 @@ proc writeExpr(s: Stream; node: SqlNode) =
     s.writeKey("else_expr")
     s.writeExprOpt(node.caseElse)
   of nkFunctionCall:
-    s.pack_map(6)
+    # Trailing clause nodes are appended by the parser after the argument
+    # expressions in the fixed order [ORDER BY, WITHIN GROUP, FILTER, OVER].
+    var windowNode: SqlNode = nil
+    var orderByNode: SqlNode = nil
+    var withinGroupNode: SqlNode = nil
+    var filterNode: SqlNode = nil
+    var argEnd = node.children.len
+    while argEnd > 1:
+      case node.children[argEnd - 1].kind
+      of nkWindowSpec: windowNode = node.children[argEnd - 1]
+      of nkAggFilterClause: filterNode = node.children[argEnd - 1]
+      of nkWithinGroupClause: withinGroupNode = node.children[argEnd - 1]
+      of nkOrderByClause: orderByNode = node.children[argEnd - 1]
+      else: break
+      dec argEnd
+    # Contract 0.12.0 (issue #148): the three aggregate-clause keys are
+    # written together whenever any clause is present. Clause-free calls keep
+    # the historical 6-key map so the byte-frozen staged continuous-aggregate
+    # payload is untouched; the Rust reader takes the absent keys as defaults.
+    let hasAggregateClauses =
+      orderByNode != nil or withinGroupNode != nil or filterNode != nil
+    s.pack_map(if hasAggregateClauses: 9 else: 6)
     s.writeKey("variant")
     s.pack_type("FunctionCall")
     s.writeKey("name")
     s.pack_type(node.children[0].firstIdent())
     s.writeKey("args")
-    let windowNode =
-      if node.children.len > 1 and node.children[^1].kind == nkWindowSpec:
-        node.children[^1]
-      else:
-        nil
-    let argEnd = node.children.len - (if windowNode == nil: 0 else: 1)
     var argCount = argEnd - 1
     if node.funcStar:
       argCount = 0
@@ -776,6 +863,26 @@ proc writeExpr(s: Stream; node: SqlNode) =
     s.pack_type(node.funcDistinct)
     s.writeKey("star")
     s.pack_type(node.funcStar)
+    if hasAggregateClauses:
+      s.writeKey("order_by")
+      if orderByNode == nil:
+        s.pack_array(0)
+      else:
+        s.pack_array(orderByNode.children.len)
+        for item in orderByNode.children:
+          s.writeOrderByExpr(item)
+      s.writeKey("within_group")
+      if withinGroupNode == nil:
+        s.pack_array(0)
+      else:
+        s.pack_array(withinGroupNode.children.len)
+        for item in withinGroupNode.children:
+          s.writeOrderByExpr(item)
+      s.writeKey("filter")
+      if filterNode == nil:
+        s.writeNil()
+      else:
+        s.writeExpr(filterNode.children[0])
     s.writeKey("over")
     if windowNode == nil:
       s.writeNil()
@@ -854,6 +961,7 @@ proc writeExpr(s: Stream; node: SqlNode) =
 proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
   var withNode: SqlNode = nil
   var distinctFlag = false
+  var distinctOnNode: SqlNode = nil
   var projectionNode: SqlNode = nil
   var fromNode: SqlNode = nil
   var selectionNode: SqlNode = nil
@@ -863,6 +971,7 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
   var qualifyNode: SqlNode = nil
   var orderByNode: SqlNode = nil
   var limitNode: SqlNode = nil
+  var offsetNode: SqlNode = nil
   var setOperations: seq[SqlNode] = @[]
 
   for child in node.children:
@@ -872,6 +981,8 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
     of nkIdentifier:
       if child.strVal == "DISTINCT":
         distinctFlag = true
+    of nkDistinctOnClause:
+      distinctOnNode = child
     of nkExprList:
       if projectionNode == nil:
         projectionNode = child
@@ -891,6 +1002,8 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
       orderByNode = child
     of nkLimitClause:
       limitNode = child
+    of nkOffsetClause:
+      offsetNode = child
     of nkSetOperation:
       setOperations.add(child)
     else:
@@ -903,6 +1016,15 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
     s.writeWithClause(withNode)
   s.writeKey("distinct")
   s.pack_type(distinctFlag)
+  # The staged continuous-aggregate encoder intentionally remains byte-for-byte
+  # compatible with its historical payload; distinct_on belongs to the current
+  # public Select contract only (contract 0.11.0, issue #150).
+  if includeWith:
+    s.writeKey("distinct_on")
+    if distinctOnNode == nil:
+      s.pack_array(0)
+    else:
+      s.writeExprSeq(distinctOnNode.children)
   s.writeKey("projection")
   if projectionNode == nil:
     s.pack_array(0)
@@ -916,13 +1038,23 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
   else:
     s.pack_array(fromNode.children.len)
     for item in fromNode.children:
-      s.writeFromItem(item)
+      # `includeWith` marks the public encoder; the staged continuous-aggregate
+      # encoder keeps the historical FROM-item payload (contract 0.14.0).
+      s.writeFromItem(item, includeWith)
   s.writeKey("selection")
   s.writeExprOpt(selectionNode)
   s.writeKey("group_by")
   if groupByNode == nil:
     s.writeNil()
+  elif includeWith:
+    # Contract 0.13.0 (issue #149): tagged GroupByItem values.
+    s.pack_array(groupByNode.children.len)
+    for item in groupByNode.children:
+      s.writeGroupByItem(item)
   else:
+    # The staged continuous-aggregate encoder intentionally remains
+    # byte-for-byte compatible with its historical [Expr] payload; the parser
+    # rejects grouping-set modifiers inside continuous aggregates (D10).
     s.writeExprSeq(groupByNode.children)
   s.writeKey("having")
   s.writeExprOpt(havingNode)
@@ -970,19 +1102,25 @@ proc writeSelectFields(s: Stream; node: SqlNode; includeWith = true) =
   else:
     s.writeNil()
   s.writeKey("offset")
-  if limitNode != nil and limitNode.children.len > 1:
-    s.writeExpr(limitNode.children[1])
+  if offsetNode != nil and offsetNode.children.len > 0:
+    s.writeExpr(offsetNode.children[0])
   else:
     s.writeNil()
+  # The staged continuous-aggregate encoder intentionally remains byte-for-byte
+  # compatible with its historical payload; limit_with_ties belongs to the
+  # current public Select contract only (contract 0.10.0, issue #152).
+  if includeWith:
+    s.writeKey("limit_with_ties")
+    s.pack_type(limitNode != nil and limitNode.limitWithTies)
 
 proc writeSelectKind(s: Stream; node: SqlNode) =
-  # 固定 13 キー(variant/distinct/projection/from/selection/group_by/
-  # having/windows/qualify/set_operations/order_by/limit/offset)に、WITH 句が
-  # あれば with を加えて 14 になる。
-  var fieldCount = 13
+  # 固定 15 キー(variant/distinct/distinct_on/projection/from/selection/
+  # group_by/having/windows/qualify/set_operations/order_by/limit/offset/
+  # limit_with_ties)に、WITH 句があれば with を加えて 16 になる。
+  var fieldCount = 15
   for child in node.children:
     if child.kind == nkWithClause:
-      fieldCount = 14
+      fieldCount = 16
       break
   s.pack_map(fieldCount)
   s.writeSelectFields(node)
@@ -991,6 +1129,7 @@ proc writeValuesKind(s: Stream; node: SqlNode) =
   var withNode: SqlNode = nil
   var orderByNode: SqlNode = nil
   var limitNode: SqlNode = nil
+  var offsetNode: SqlNode = nil
   var rows: seq[SqlNode] = @[]
   var setOperations: seq[SqlNode] = @[]
 
@@ -1006,10 +1145,12 @@ proc writeValuesKind(s: Stream; node: SqlNode) =
       orderByNode = child
     of nkLimitClause:
       limitNode = child
+    of nkOffsetClause:
+      offsetNode = child
     else:
       discard
 
-  s.pack_map(if withNode == nil: 7 else: 8)
+  s.pack_map(if withNode == nil: 8 else: 9)
   s.writeKey("variant")
   s.pack_type("Values")
   if withNode != nil:
@@ -1044,10 +1185,12 @@ proc writeValuesKind(s: Stream; node: SqlNode) =
   else:
     s.writeNil()
   s.writeKey("offset")
-  if limitNode != nil and limitNode.children.len > 1:
-    s.writeExpr(limitNode.children[1])
+  if offsetNode != nil and offsetNode.children.len > 0:
+    s.writeExpr(offsetNode.children[0])
   else:
     s.writeNil()
+  s.writeKey("limit_with_ties")
+  s.pack_type(limitNode != nil and limitNode.limitWithTies)
   s.writeKey("span")
   s.writeSpan(node.span)
 
@@ -1458,9 +1601,20 @@ proc validateStagedWriterShape(node: SqlNode) =
     if node.children.len < 1:
       stagedValidationError("function call must have at least 1 child")
     elif node.children.len > 1:
-      for i in 1 ..< (node.children.len - 1):
-        if node.children[i].kind == nkWindowSpec:
-          stagedValidationError("window specification must be the last function-call child")
+      for i in 1 ..< node.children.len:
+        case node.children[i].kind
+        of nkAggFilterClause, nkWithinGroupClause, nkOrderByClause:
+          # These clauses have no representation in the byte-frozen staged
+          # 6-key FunctionCall payload (issue #148).
+          stagedValidationError(
+            "staged continuous aggregate query cannot contain aggregate " &
+            "FILTER, WITHIN GROUP, or aggregate ORDER BY")
+        of nkWindowSpec:
+          if i != node.children.len - 1:
+            stagedValidationError(
+              "window specification must be the last function-call child")
+        else:
+          discard
   of nkWindowSpec:
     var sawBase = false
     var sawPartitionBy = false
@@ -1519,6 +1673,26 @@ proc validateStagedWriterShape(node: SqlNode) =
       stagedValidationError("CASE branch must contain WHEN and THEN expressions")
   of nkScalarSubquery, nkExists, nkFromDerived:
     requireChildren(1, "subquery")
+    # LATERAL has no representation in the frozen staged FROM-item payload
+    # (issue #151, contract 0.14.0).
+    if node.kind == nkFromDerived and node.lateral:
+      stagedValidationError(
+        "staged continuous aggregate query cannot contain LATERAL"
+      )
+  of nkFromFunction:
+    # FROM-clause table functions have no representation in the frozen staged
+    # payload (issue #151, contract 0.14.0).
+    stagedValidationError(
+      "staged continuous aggregate query cannot contain a FROM table function"
+    )
+  of nkAlias:
+    # A relation alias column-name list is only carried by the public Table
+    # variant; the staged Table payload has no `columns` key (issue #151).
+    if node.aliasColumns.len > 0 and node.aliasExpr != nil and
+        node.aliasExpr.kind == nkIdentifier:
+      stagedValidationError(
+        "staged continuous aggregate query cannot contain a table alias column list"
+      )
   of nkInSubquery:
     requireChildren(2, "IN subquery")
   of nkQuantified:
@@ -1631,6 +1805,18 @@ proc validateContinuousAggregateV040(statement: SqlNode) =
       stagedValidationError(
         "staged continuous aggregate query cannot contain QUALIFY"
       )
+    of nkDistinctOnClause:
+      # DISTINCT ON has no representation in the staged 12-field payload.
+      stagedValidationError(
+        "staged continuous aggregate query cannot contain DISTINCT ON"
+      )
+    of nkLimitClause:
+      # Plain LIMIT/FETCH ... ONLY desugars onto the frozen "limit" key;
+      # WITH TIES has no representation in the staged 12-field payload.
+      if child.limitWithTies:
+        stagedValidationError(
+          "staged continuous aggregate query cannot contain FETCH ... WITH TIES"
+        )
     else:
       discard
   if optionsNode.kind != nkWithOptions:

@@ -661,11 +661,14 @@ fn is_query_plan(plan: &LogicalPlan) -> bool {
             | LogicalPlan::Filter { .. }
             | LogicalPlan::Project { .. }
             | LogicalPlan::Join { .. }
+            | LogicalPlan::LateralJoin { .. }
+            | LogicalPlan::TableFunction { .. }
             | LogicalPlan::Aggregate { .. }
             | LogicalPlan::SetOperation { .. }
             | LogicalPlan::RecursiveCte { .. }
             | LogicalPlan::RecursiveReference { .. }
             | LogicalPlan::Sort { .. }
+            | LogicalPlan::DistinctOn { .. }
             | LogicalPlan::Limit { .. }
     )
 }

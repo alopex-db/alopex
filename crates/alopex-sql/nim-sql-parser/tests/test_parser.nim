@@ -636,6 +636,146 @@ suite "DML — SELECT":
     check ast.children[0].kind == nkIdentifier
     check ast.children[0].strVal == "DISTINCT"
 
+  test "SELECT DISTINCT ON keeps its key expressions (issue #150)":
+    let ast = parseSql(
+      "SELECT DISTINCT ON (a, b % 2) a FROM t ORDER BY a, b % 2")
+    check ast.kind == nkSelect
+    check ast.children[0].kind == nkDistinctOnClause
+    check ast.children[0].children.len == 2
+    check ast.children[0].children[0].kind == nkIdentifier
+    check ast.children[0].children[0].strVal == "a"
+    check ast.children[0].children[1].kind == nkBinaryOp
+    # The select list follows the DISTINCT ON clause.
+    check ast.children[1].kind == nkExprList
+
+  test "SELECT DISTINCT ON with a single key":
+    let ast = parseSql("SELECT DISTINCT ON (region) region FROM sales")
+    check ast.children[0].kind == nkDistinctOnClause
+    check ast.children[0].children.len == 1
+
+  test "SELECT DISTINCT without ON keeps the legacy marker":
+    let ast = parseSql("SELECT DISTINCT on_hand FROM stock")
+    check ast.children[0].kind == nkIdentifier
+    check ast.children[0].strVal == "DISTINCT"
+
+  test "DISTINCT ON requires parentheses":
+    expect ParseError:
+      discard parseSql("SELECT DISTINCT ON region FROM sales")
+
+  test "DISTINCT ON rejects an empty key list":
+    expect ParseError:
+      discard parseSql("SELECT DISTINCT ON () region FROM sales")
+
+  test "DISTINCT ON rejects a missing closing parenthesis":
+    expect ParseError:
+      discard parseSql("SELECT DISTINCT ON (region region FROM sales")
+
+  test "GROUP BY ROLLUP keeps its expressions (issue #149)":
+    let ast = parseSql("SELECT region, SUM(amount) FROM sales GROUP BY ROLLUP(region, product)")
+    var groupBy: SqlNode = nil
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupBy = child
+    check groupBy != nil
+    check groupBy.children.len == 1
+    check groupBy.children[0].kind == nkRollup
+    check groupBy.children[0].children.len == 2
+    check groupBy.children[0].children[0].strVal == "region"
+
+  test "GROUP BY CUBE keeps its expressions (issue #149)":
+    let ast = parseSql("SELECT region FROM sales GROUP BY CUBE(region, product)")
+    var groupBy: SqlNode = nil
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupBy = child
+    check groupBy != nil
+    check groupBy.children[0].kind == nkCube
+    check groupBy.children[0].children.len == 2
+
+  test "GROUP BY GROUPING SETS keeps each set including the empty set":
+    let ast = parseSql(
+      "SELECT region FROM sales GROUP BY GROUPING SETS ((region, product), (region), ())")
+    var groupBy: SqlNode = nil
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupBy = child
+    check groupBy != nil
+    check groupBy.children[0].kind == nkGroupingSets
+    check groupBy.children[0].children.len == 3
+    check groupBy.children[0].children[0].kind == nkGroupingSet
+    check groupBy.children[0].children[0].children.len == 2
+    check groupBy.children[0].children[1].children.len == 1
+    check groupBy.children[0].children[2].children.len == 0
+
+  test "GROUPING SETS accepts a bare expression element":
+    let ast = parseSql("SELECT region FROM sales GROUP BY GROUPING SETS (region, product)")
+    var groupBy: SqlNode = nil
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupBy = child
+    check groupBy.children[0].kind == nkGroupingSets
+    check groupBy.children[0].children.len == 2
+    check groupBy.children[0].children[0].children.len == 1
+
+  test "GROUP BY () is a single empty grouping set":
+    let ast = parseSql("SELECT COUNT(*) FROM sales GROUP BY ()")
+    var groupBy: SqlNode = nil
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupBy = child
+    check groupBy.children[0].kind == nkGroupingSets
+    check groupBy.children[0].children.len == 1
+    check groupBy.children[0].children[0].children.len == 0
+
+  test "ordinary GROUP BY items mix with ROLLUP":
+    let ast = parseSql("SELECT region FROM sales GROUP BY region, ROLLUP(product)")
+    var groupBy: SqlNode = nil
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupBy = child
+    check groupBy.children.len == 2
+    check groupBy.children[0].kind == nkIdentifier
+    check groupBy.children[1].kind == nkRollup
+
+  test "rollup, cube, and grouping remain usable as plain identifiers":
+    let ast = parseSql("SELECT rollup, cube FROM t GROUP BY rollup, cube, grouping")
+    var groupBy: SqlNode = nil
+    for child in ast.children:
+      if child.kind == nkGroupByClause:
+        groupBy = child
+    check groupBy.children.len == 3
+    check groupBy.children[0].kind == nkIdentifier
+    check groupBy.children[1].kind == nkIdentifier
+    check groupBy.children[2].kind == nkIdentifier
+
+  test "GROUPING(expr) in the select list stays a plain function call":
+    let ast = parseSql("SELECT region, GROUPING(region) FROM sales GROUP BY ROLLUP(region)")
+    check ast.kind == nkSelect
+
+  test "ROLLUP and CUBE reject empty argument lists":
+    expect ParseError:
+      discard parseSql("SELECT 1 FROM t GROUP BY ROLLUP()")
+    expect ParseError:
+      discard parseSql("SELECT 1 FROM t GROUP BY CUBE()")
+
+  test "GROUPING SETS rejects an empty set list":
+    expect ParseError:
+      discard parseSql("SELECT 1 FROM t GROUP BY GROUPING SETS ()")
+
+  test "GROUPING SETS rejects nested ROLLUP, CUBE, and GROUPING SETS":
+    expect ParseError:
+      discard parseSql("SELECT 1 FROM t GROUP BY GROUPING SETS (ROLLUP(a))")
+    expect ParseError:
+      discard parseSql("SELECT 1 FROM t GROUP BY GROUPING SETS (CUBE(a))")
+    expect ParseError:
+      discard parseSql("SELECT 1 FROM t GROUP BY GROUPING SETS (GROUPING SETS (a))")
+
+  test "continuous aggregate queries reject grouping-set modifiers":
+    expect ParseError:
+      discard parseSql(
+        "CREATE CONTINUOUS AGGREGATE c AS SELECT SUM(v) FROM m " &
+        "GROUP BY ROLLUP(host) WITH (retention = '7d', refresh_interval = '1h')")
+
   test "SELECT with WHERE":
     let ast = parseSql("SELECT * FROM users WHERE id = 1")
     check ast.kind == nkSelect
@@ -712,14 +852,20 @@ suite "DML — SELECT":
   test "SELECT with LIMIT and OFFSET":
     let ast = parseSql("SELECT * FROM users LIMIT 10 OFFSET 20")
     check ast.kind == nkSelect
-    var found = false
+    var foundLimit = false
+    var foundOffset = false
     for child in ast.children:
       if child.kind == nkLimitClause:
-        found = true
-        check child.children.len == 2
+        foundLimit = true
+        check child.children.len == 1
         check child.children[0].intVal == 10
-        check child.children[1].intVal == 20
-    check found
+        check child.limitWithTies == false
+      elif child.kind == nkOffsetClause:
+        foundOffset = true
+        check child.children.len == 1
+        check child.children[0].intVal == 20
+    check foundLimit
+    check foundOffset
 
   test "SELECT with multiple columns":
     let ast = parseSql("SELECT id, name, email FROM users")
@@ -1450,3 +1596,320 @@ suite "Roadmap — ordering, multi statements, spans":
     check ast.children[0].children[0].span.start.line == 1
     check ast.children[1].span.start.line == 1
     check ast.children[2].children[0].span.start.line == 1
+
+# ---------------------------------------------------------------------------
+# FETCH FIRST/NEXT, OFFSET n ROWS, WITH TIES, bind-parameter token (issue #152)
+# ---------------------------------------------------------------------------
+
+proc findClause(ast: SqlNode; kind: SqlNodeKind): SqlNode =
+  for child in ast.children:
+    if child.kind == kind:
+      return child
+  nil
+
+suite "FETCH pagination (issue #152)":
+
+  test "OFFSET n ROWS followed by FETCH NEXT n ROWS ONLY":
+    let ast = parseSql("SELECT id FROM t OFFSET 2 ROWS FETCH NEXT 3 ROWS ONLY")
+    check ast.kind == nkSelect
+    let offsetNode = ast.findClause(nkOffsetClause)
+    check offsetNode != nil
+    check offsetNode.children[0].kind == nkIntLit
+    check offsetNode.children[0].intVal == 2
+    let limitNode = ast.findClause(nkLimitClause)
+    check limitNode != nil
+    check limitNode.children[0].intVal == 3
+    check limitNode.limitWithTies == false
+
+  test "FETCH NEXT ROW ONLY synthesizes count 1":
+    let ast = parseSql("SELECT id FROM t FETCH NEXT ROW ONLY")
+    let limitNode = ast.findClause(nkLimitClause)
+    check limitNode != nil
+    check limitNode.children[0].kind == nkIntLit
+    check limitNode.children[0].intVal == 1
+    check limitNode.limitWithTies == false
+
+  test "FETCH FIRST 2 ROWS WITH TIES sets the ties flag":
+    let ast = parseSql(
+      "SELECT id FROM t ORDER BY id FETCH FIRST 2 ROWS WITH TIES")
+    let limitNode = ast.findClause(nkLimitClause)
+    check limitNode != nil
+    check limitNode.children[0].intVal == 2
+    check limitNode.limitWithTies == true
+
+  test "OFFSET without LIMIT and OFFSET before LIMIT are accepted":
+    let bare = parseSql("SELECT id FROM t OFFSET 4")
+    check bare.findClause(nkOffsetClause) != nil
+    check bare.findClause(nkLimitClause) == nil
+
+    let swapped = parseSql("SELECT id FROM t OFFSET 4 LIMIT 2")
+    check swapped.findClause(nkOffsetClause).children[0].intVal == 4
+    check swapped.findClause(nkLimitClause).children[0].intVal == 2
+
+  test "LIMIT ALL parses as no limit":
+    let ast = parseSql("SELECT id FROM t LIMIT ALL OFFSET 1")
+    check ast.findClause(nkLimitClause) == nil
+    check ast.findClause(nkOffsetClause).children[0].intVal == 1
+
+  test "FETCH count accepts constant expressions":
+    let ast = parseSql("SELECT id FROM t FETCH FIRST 1 + 1 ROWS ONLY")
+    let limitNode = ast.findClause(nkLimitClause)
+    check limitNode.children[0].kind == nkBinaryOp
+
+  test "duplicate limit-setting clauses are rejected":
+    check parseErrorMessage(
+      "SELECT 1 LIMIT 1 FETCH FIRST 1 ROWS ONLY").contains(
+      "multiple LIMIT clauses")
+    check parseErrorMessage("SELECT 1 LIMIT 1 LIMIT 2").contains(
+      "multiple LIMIT clauses")
+    check parseErrorMessage("SELECT 1 OFFSET 1 OFFSET 2").contains(
+      "multiple OFFSET clauses")
+
+  test "FETCH grammar errors are explicit":
+    check parseErrorMessage("SELECT 1 FETCH 1 ROWS ONLY").contains(
+      "expected FIRST or NEXT after FETCH")
+    check parseErrorMessage("SELECT 1 FETCH FIRST 1 ROWS").contains(
+      "expected ONLY or WITH TIES")
+    check parseErrorMessage("SELECT 1 FETCH FIRST 1 ROWS WITH 2").contains(
+      "expected TIES after WITH")
+    check parseErrorMessage(
+      "SELECT 1 FETCH FIRST 10 PERCENT ROWS ONLY").contains(
+      "FETCH ... PERCENT is not supported")
+
+  test "bind parameter placeholder reports a dedicated error":
+    let message = parseErrorMessage("SELECT ? FROM t")
+    check message.contains("bind parameters are not yet supported")
+    check parseErrorMessage("SELECT id FROM t LIMIT ?").contains(
+      "bind parameters are not yet supported")
+
+  test "fetch keywords stay usable as expression identifiers":
+    let ast = parseSql("SELECT fetch, next, ties, only, row FROM t")
+    let items = ast.children[0]
+    check items.kind == nkExprList
+    check items.children.len == 5
+    for i, expected in ["fetch", "next", "ties", "only", "row"]:
+      check items.children[i].kind == nkIdentifier
+      check items.children[i].strVal == expected
+
+  test "window frame CURRENT ROW still parses with the ROW keyword":
+    let ast = parseSql(
+      "SELECT SUM(v) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t")
+    check ast.kind == nkSelect
+
+  test "VALUES tail accepts FETCH":
+    let ast = parseSql("VALUES (1), (2), (3) ORDER BY 1 DESC FETCH FIRST 2 ROWS ONLY")
+    check ast.kind == nkValues
+    check ast.findClause(nkLimitClause).children[0].intVal == 2
+
+  test "set-operation tail keeps WITH TIES":
+    let ast = parseSql(
+      "SELECT 1 UNION ALL SELECT 2 ORDER BY 1 DESC FETCH FIRST 1 ROW WITH TIES")
+    check ast.findClause(nkLimitClause).limitWithTies == true
+
+  test "fetch keywords stay usable in DDL and DML identifier positions":
+    # D16: FETCH/NEXT/TIES/ONLY/ROW are lexer keywords, but every position
+    # where the grammar *requires* an identifier still accepts them, so an
+    # existing schema using these names keeps parsing.
+    for name in ["fetch", "next", "ties", "only", "row"]:
+      let created = parseSql("CREATE TABLE t (id INTEGER, " & name & " INTEGER)")
+      check created.kind == nkCreateTable
+      var columnNames: seq[string] = @[]
+      for child in created.children:
+        if child.kind == nkColumnDef:
+          columnNames.add(child.colName)
+      check columnNames == @["id", name]
+      check parseSql("CREATE TABLE " & name & " (id INTEGER)").kind ==
+        nkCreateTable
+      check parseSql("INSERT INTO t (" & name & ") VALUES (1)").kind == nkInsert
+      check parseSql("INSERT INTO " & name & " VALUES (1)").kind == nkInsert
+      check parseSql("UPDATE t SET " & name & " = 1").kind == nkUpdate
+      check parseSql("UPDATE " & name & " SET id = 1").kind == nkUpdate
+      check parseSql("DELETE FROM " & name).kind == nkDelete
+      check parseSql("SELECT id FROM " & name).kind == nkSelect
+      check parseSql("SELECT id FROM t AS " & name).kind == nkSelect
+      check parseSql("SELECT id FROM t AS x(" & name & ")").kind == nkSelect
+      check parseSql(
+        "SELECT a." & name & " FROM a JOIN b USING (" & name & ")").kind ==
+        nkSelect
+      check parseSql(
+        "WITH " & name & " (" & name & ") AS (SELECT 1) SELECT * FROM " &
+        name).kind == nkSelect
+      check parseSql("CREATE INDEX " & name & " ON t (id)").kind ==
+        nkCreateIndex
+
+  test "an implicit alias keeps working for every keyword but FETCH":
+    # `FETCH` starts the pagination tail in that position, so it stays
+    # reserved there; the other four cannot begin a clause (D16).
+    for name in ["next", "ties", "only", "row"]:
+      let ast = parseSql("SELECT v " & name & " FROM t")
+      check ast.children[0].children[0].kind == nkAlias
+      check ast.children[0].children[0].aliasName == name
+      check parseSql("SELECT * FROM t " & name).kind == nkSelect
+    let explicitFetch = parseSql("SELECT v AS fetch FROM t AS fetch")
+    check explicitFetch.children[0].children[0].aliasName == "fetch"
+    # An implicit `fetch` alias is still the pagination tail, not an alias.
+    check parseSql("SELECT 1 FETCH FIRST 1 ROW ONLY").findClause(
+      nkLimitClause).children[0].intVal == 1
+
+suite "Aggregate FILTER / WITHIN GROUP / ORDER BY (issue #148)":
+
+  test "FILTER (WHERE ...) attaches an nkAggFilterClause":
+    let ast = parseSql("SELECT COUNT(*) FILTER (WHERE v > 10) FROM t")
+    let call = ast.children[0].children[0]
+    check call.kind == nkFunctionCall
+    check call.funcStar == true
+    check call.children[^1].kind == nkAggFilterClause
+    check call.children[^1].children.len == 1
+    check call.children[^1].children[0].kind == nkBinaryOp
+
+  test "FILTER combines with DISTINCT arguments and OVER stays last":
+    let ast = parseSql(
+      "SELECT SUM(DISTINCT v) FILTER (WHERE v > 0) OVER () FROM t")
+    let call = ast.children[0].children[0]
+    check call.funcDistinct == true
+    check call.children[^2].kind == nkAggFilterClause
+    check call.children[^1].kind == nkWindowSpec
+
+  test "aggregate-local ORDER BY attaches an nkOrderByClause child":
+    let ast = parseSql(
+      "SELECT STRING_AGG(name, ',' ORDER BY v DESC, name ASC) FROM t")
+    let call = ast.children[0].children[0]
+    check call.kind == nkFunctionCall
+    check call.children.len == 4
+    let orderBy = call.children[^1]
+    check orderBy.kind == nkOrderByClause
+    check orderBy.children.len == 2
+    check orderBy.children[0].orderAsc == 0
+    check orderBy.children[1].orderAsc == 1
+
+  test "WITHIN GROUP attaches an nkWithinGroupClause child":
+    let ast = parseSql(
+      "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v) FROM t")
+    let call = ast.children[0].children[0]
+    check call.kind == nkFunctionCall
+    check call.children.len == 3
+    let within = call.children[^1]
+    check within.kind == nkWithinGroupClause
+    check within.children.len == 1
+
+  test "WITHIN GROUP followed by FILTER keeps clause order":
+    let ast = parseSql(
+      "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v) " &
+      "FILTER (WHERE g = 'a') FROM t")
+    let call = ast.children[0].children[0]
+    check call.children[^2].kind == nkWithinGroupClause
+    check call.children[^1].kind == nkAggFilterClause
+
+  test "filter and within stay usable as implicit aliases":
+    let aliased = parseSql("SELECT COUNT(*) filter FROM t")
+    check aliased.children[0].children[0].kind == nkAlias
+    check aliased.children[0].children[0].aliasName == "filter"
+
+    let explicit = parseSql("SELECT COUNT(*) AS filter FROM t")
+    check explicit.children[0].children[0].aliasName == "filter"
+
+    let within = parseSql("SELECT COUNT(*) within FROM t")
+    check within.children[0].children[0].aliasName == "within"
+
+  test "FILTER without WHERE is a parse error":
+    check parseErrorMessage("SELECT COUNT(*) FILTER (v > 10) FROM t").contains(
+      "expected tkWhere")
+
+  test "WITHIN GROUP without ORDER BY is a parse error":
+    check parseErrorMessage(
+      "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (v) FROM t").contains(
+      "expected tkOrder")
+
+  test "argument ORDER BY cannot combine with WITHIN GROUP":
+    check parseErrorMessage(
+      "SELECT PERCENTILE_DISC(0.5 ORDER BY v) WITHIN GROUP (ORDER BY v) FROM t"
+    ).contains("cannot combine an aggregate ORDER BY argument with WITHIN GROUP")
+
+# ---------------------------------------------------------------------------
+# LATERAL, table functions, and relation alias column lists (issue #151)
+# ---------------------------------------------------------------------------
+
+suite "LATERAL and table functions":
+
+  proc firstFromItem(sql: string): SqlNode =
+    parseSql(sql).children.filterIt(it.kind == nkFromClause)[0].children[0]
+
+  test "a FROM-clause table function keeps its name and arguments":
+    let item = firstFromItem("SELECT * FROM UNNEST(d.emb) AS u")
+    check item.kind == nkAlias
+    check item.aliasName == "u"
+    check item.aliasExpr.kind == nkFromFunction
+    check item.aliasExpr.lateral == false
+    check item.aliasExpr.children[0].strVal == "UNNEST"
+    check item.aliasExpr.children.len == 2
+    check item.aliasExpr.children[1].kind == nkColumnRef
+
+  test "a table function accepts zero and several arguments":
+    let none = firstFromItem("SELECT * FROM gen()")
+    check none.kind == nkFromFunction
+    check none.children.len == 1
+
+    let many = firstFromItem("SELECT * FROM generate_series(1, 3, 1)")
+    check many.kind == nkFromFunction
+    check many.children.len == 4
+
+  test "LATERAL marks a derived table":
+    let item = firstFromItem(
+      "SELECT * FROM t CROSS JOIN LATERAL (SELECT t.id AS x) AS l")
+    check item.kind == nkJoin
+    check item.joinKind == jkCross
+    check item.joinRight.kind == nkAlias
+    check item.joinRight.aliasExpr.kind == nkFromDerived
+    check item.joinRight.aliasExpr.lateral
+
+  test "LEFT JOIN LATERAL keeps its join kind and condition":
+    let item = firstFromItem(
+      "SELECT * FROM t LEFT JOIN LATERAL (SELECT t.id AS x) AS l ON TRUE")
+    check item.joinKind == jkLeft
+    check item.joinRight.aliasExpr.lateral
+    check item.joinCond != nil
+
+  test "LATERAL marks a table function":
+    let item = firstFromItem("SELECT * FROM t, LATERAL UNNEST(t.v) AS u")
+    check item.joinRight.aliasExpr.kind == nkFromFunction
+    check item.joinRight.aliasExpr.lateral
+
+  test "a table function without LATERAL is not marked":
+    let item = firstFromItem("SELECT * FROM t, UNNEST(t.v) AS u")
+    check item.joinRight.aliasExpr.kind == nkFromFunction
+    check item.joinRight.aliasExpr.lateral == false
+
+  test "lateral stays usable as a relation name":
+    let plain = firstFromItem("SELECT * FROM lateral")
+    check plain.kind == nkIdentifier
+    check plain.strVal == "lateral"
+
+    let aliased = firstFromItem("SELECT * FROM lateral l")
+    check aliased.kind == nkAlias
+    check aliased.aliasExpr.kind == nkIdentifier
+    check aliased.aliasExpr.strVal == "lateral"
+    check aliased.aliasName == "l"
+
+    let called = firstFromItem("SELECT * FROM lateral(1)")
+    check called.kind == nkFromFunction
+    check called.lateral == false
+    check called.children[0].strVal == "lateral"
+
+  test "a base table accepts an alias column list":
+    let item = firstFromItem("SELECT * FROM o AS p(a, b)")
+    check item.kind == nkAlias
+    check item.aliasExpr.kind == nkIdentifier
+    check item.aliasName == "p"
+    check item.aliasColumns == @["a", "b"]
+
+  test "a table function accepts an alias column list":
+    let item = firstFromItem("SELECT * FROM UNNEST([1.0]) AS t(x)")
+    check item.kind == nkAlias
+    check item.aliasExpr.kind == nkFromFunction
+    check item.aliasColumns == @["x"]
+
+  test "an alias column list still requires an alias name":
+    check "expected alias" in parseErrorMessage("SELECT * FROM o AS (a, b)")
+
+  test "a table function requires a closing parenthesis":
+    check "expected tkRParen" in parseErrorMessage("SELECT * FROM UNNEST(1")

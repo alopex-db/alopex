@@ -21,8 +21,10 @@ pub(super) fn resolve_named_windows(stmt: &Select) -> Result<Select, PlannerErro
         *selection = resolver.resolve_expr(selection)?;
     }
     if let Some(group_by) = &mut resolved.group_by {
-        for expr in group_by {
-            *expr = resolver.resolve_expr(expr)?;
+        for item in group_by {
+            for expr in item.exprs_mut() {
+                *expr = resolver.resolve_expr(expr)?;
+            }
         }
     }
     if let Some(having) = &mut resolved.having {
@@ -190,9 +192,25 @@ impl NamedWindowResolver {
                     **else_expr = self.resolve_expr(else_expr)?;
                 }
             }
-            ExprKind::FunctionCall { args, over, .. } => {
+            ExprKind::FunctionCall {
+                args,
+                order_by,
+                within_group,
+                filter,
+                over,
+                ..
+            } => {
                 for arg in args {
                     *arg = self.resolve_expr(arg)?;
+                }
+                for order in order_by {
+                    order.expr = self.resolve_expr(&order.expr)?;
+                }
+                for order in within_group {
+                    order.expr = self.resolve_expr(&order.expr)?;
+                }
+                if let Some(filter) = filter {
+                    **filter = self.resolve_expr(filter)?;
                 }
                 if let Some(spec) = over {
                     *spec = self.resolve_spec(spec)?;

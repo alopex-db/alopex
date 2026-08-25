@@ -91,6 +91,14 @@ pub fn encode_group_key(values: &[SqlValue]) -> Result<GroupKeyBytes> {
 pub trait Accumulator: Send {
     /// Update the accumulator with a new value (None for COUNT(*) rows).
     fn update(&mut self, value: Option<SqlValue>) -> Result<()>;
+    /// Update with the row's aggregate-local sort key values (issue #148).
+    ///
+    /// Order-insensitive accumulators ignore the keys and defer to
+    /// [`Accumulator::update`]; order-sensitive accumulators buffer
+    /// `(keys, value)` pairs and sort in [`Accumulator::finalize`].
+    fn update_ordered(&mut self, value: Option<SqlValue>, _sort_keys: &[SqlValue]) -> Result<()> {
+        self.update(value)
+    }
     /// Return the serializable partial aggregate state.
     fn state(&self) -> Result<Vec<SqlValue>>;
     /// Merge a partial state produced by an accumulator of the same function.
@@ -664,12 +672,39 @@ impl Accumulator for MinMaxAccumulator {
     }
 }
 
+/// Compare aggregate-local sort keys under per-key `(asc, nulls_first)`
+/// specifications (issue #148).
+fn compare_ordered_keys(left: &[SqlValue], right: &[SqlValue], specs: &[(bool, bool)]) -> Ordering {
+    for (idx, (asc, nulls_first)) in specs.iter().enumerate() {
+        let left_value = left.get(idx).unwrap_or(&SqlValue::Null);
+        let right_value = right.get(idx).unwrap_or(&SqlValue::Null);
+        let cmp = super::iterator::compare_single(left_value, right_value, *asc, *nulls_first);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+    Ordering::Equal
+}
+
+fn estimated_ordered_string_bytes(values: &[(Vec<SqlValue>, String)]) -> u64 {
+    values.iter().fold(0u64, |total, (keys, value)| {
+        let key_bytes: u64 = keys.iter().map(ByteSized::estimated_bytes).sum();
+        total
+            .saturating_add(key_bytes)
+            .saturating_add(u64::try_from(value.capacity()).unwrap_or(u64::MAX))
+    })
+}
+
 /// Accumulator for GROUP_CONCAT.
 #[derive(Debug, Clone)]
 pub struct GroupConcatAccumulator {
     values: Vec<String>,
     separator: String,
     distinct_values: Option<HashSet<Vec<u8>>>,
+    /// Non-empty selects the ordered mode: pairs are buffered and stably
+    /// sorted at finalize (issue #148).
+    sort_specs: Vec<(bool, bool)>,
+    ordered_values: Vec<(Vec<SqlValue>, String)>,
 }
 
 impl GroupConcatAccumulator {
@@ -679,16 +714,28 @@ impl GroupConcatAccumulator {
     }
 
     pub fn with_distinct(separator: String, distinct: bool) -> Self {
+        Self::with_order(separator, distinct, Vec::new())
+    }
+
+    pub fn with_order(separator: String, distinct: bool, sort_specs: Vec<(bool, bool)>) -> Self {
         Self {
             values: Vec::new(),
             separator,
             distinct_values: if distinct { Some(HashSet::new()) } else { None },
+            sort_specs,
+            ordered_values: Vec::new(),
         }
     }
 }
 
 impl Accumulator for GroupConcatAccumulator {
     fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        if !self.sort_specs.is_empty() {
+            return Err(invalid_aggregate_state(
+                "group_concat",
+                "ordered aggregation requires the sort keys of every row",
+            ));
+        }
         let Some(value) = value else {
             return Ok(());
         };
@@ -711,7 +758,46 @@ impl Accumulator for GroupConcatAccumulator {
         }
     }
 
+    fn update_ordered(&mut self, value: Option<SqlValue>, sort_keys: &[SqlValue]) -> Result<()> {
+        if self.sort_specs.is_empty() {
+            return self.update(value);
+        }
+        let Some(value) = value else {
+            return Ok(());
+        };
+        match value {
+            SqlValue::Null => Ok(()),
+            SqlValue::Text(text) => {
+                let value = SqlValue::Text(text.clone());
+                if !distinct_allows(&mut self.distinct_values, &value)? {
+                    return Ok(());
+                }
+                self.ordered_values.push((sort_keys.to_vec(), text));
+                Ok(())
+            }
+            other => Err(ExecutorError::Evaluation(
+                crate::executor::EvaluationError::TypeMismatch {
+                    expected: "Text".into(),
+                    actual: other.type_name().into(),
+                },
+            )),
+        }
+    }
+
     fn finalize(&self) -> Result<SqlValue> {
+        if !self.sort_specs.is_empty() {
+            if self.ordered_values.is_empty() {
+                return Ok(SqlValue::Null);
+            }
+            let mut sorted = self.ordered_values.clone();
+            sorted.sort_by(|left, right| compare_ordered_keys(&left.0, &right.0, &self.sort_specs));
+            let joined = sorted
+                .into_iter()
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>()
+                .join(&self.separator);
+            return Ok(SqlValue::Text(joined));
+        }
         if self.values.is_empty() {
             return Ok(SqlValue::Null);
         }
@@ -719,6 +805,12 @@ impl Accumulator for GroupConcatAccumulator {
     }
 
     fn state(&self) -> Result<Vec<SqlValue>> {
+        if !self.sort_specs.is_empty() {
+            return Err(invalid_aggregate_state(
+                "group_concat",
+                "ordered aggregation cannot produce partial state",
+            ));
+        }
         Ok(vec![
             if self.values.is_empty() {
                 SqlValue::Null
@@ -730,6 +822,12 @@ impl Accumulator for GroupConcatAccumulator {
     }
 
     fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        if !self.sort_specs.is_empty() {
+            return Err(invalid_aggregate_state(
+                "group_concat",
+                "ordered aggregation cannot merge partial state",
+            ));
+        }
         expect_state_arity("group_concat", state, 2)?;
         let separator = state_text("group_concat", &state[1], 1)?;
         if separator != self.separator {
@@ -759,13 +857,13 @@ impl Accumulator for GroupConcatAccumulator {
     }
 
     fn retained_bytes(&self) -> u64 {
-        estimated_distinct_retained_bytes(&self.distinct_values).saturating_add(
-            estimated_string_collection_bytes(
+        estimated_distinct_retained_bytes(&self.distinct_values)
+            .saturating_add(estimated_string_collection_bytes(
                 &self.values,
                 self.values.capacity(),
                 self.separator.capacity(),
-            ),
-        )
+            ))
+            .saturating_add(estimated_ordered_string_bytes(&self.ordered_values))
     }
 }
 
@@ -775,6 +873,9 @@ pub struct StringAggAccumulator {
     values: Vec<String>,
     separator: String,
     distinct_values: Option<HashSet<Vec<u8>>>,
+    /// Non-empty selects the ordered mode (see [`GroupConcatAccumulator`]).
+    sort_specs: Vec<(bool, bool)>,
+    ordered_values: Vec<(Vec<SqlValue>, String)>,
 }
 
 impl StringAggAccumulator {
@@ -784,16 +885,28 @@ impl StringAggAccumulator {
     }
 
     pub fn with_distinct(separator: String, distinct: bool) -> Self {
+        Self::with_order(separator, distinct, Vec::new())
+    }
+
+    pub fn with_order(separator: String, distinct: bool, sort_specs: Vec<(bool, bool)>) -> Self {
         Self {
             values: Vec::new(),
             separator,
             distinct_values: if distinct { Some(HashSet::new()) } else { None },
+            sort_specs,
+            ordered_values: Vec::new(),
         }
     }
 }
 
 impl Accumulator for StringAggAccumulator {
     fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        if !self.sort_specs.is_empty() {
+            return Err(invalid_aggregate_state(
+                "string_agg",
+                "ordered aggregation requires the sort keys of every row",
+            ));
+        }
         let Some(value) = value else {
             return Ok(());
         };
@@ -816,7 +929,46 @@ impl Accumulator for StringAggAccumulator {
         }
     }
 
+    fn update_ordered(&mut self, value: Option<SqlValue>, sort_keys: &[SqlValue]) -> Result<()> {
+        if self.sort_specs.is_empty() {
+            return self.update(value);
+        }
+        let Some(value) = value else {
+            return Ok(());
+        };
+        match value {
+            SqlValue::Null => Ok(()),
+            SqlValue::Text(s) => {
+                let value = SqlValue::Text(s.clone());
+                if !distinct_allows(&mut self.distinct_values, &value)? {
+                    return Ok(());
+                }
+                self.ordered_values.push((sort_keys.to_vec(), s));
+                Ok(())
+            }
+            other => Err(ExecutorError::Evaluation(
+                crate::executor::EvaluationError::TypeMismatch {
+                    expected: "Text".into(),
+                    actual: other.type_name().into(),
+                },
+            )),
+        }
+    }
+
     fn finalize(&self) -> Result<SqlValue> {
+        if !self.sort_specs.is_empty() {
+            if self.ordered_values.is_empty() {
+                return Ok(SqlValue::Null);
+            }
+            let mut sorted = self.ordered_values.clone();
+            sorted.sort_by(|left, right| compare_ordered_keys(&left.0, &right.0, &self.sort_specs));
+            let joined = sorted
+                .into_iter()
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>()
+                .join(&self.separator);
+            return Ok(SqlValue::Text(joined));
+        }
         if self.values.is_empty() {
             return Ok(SqlValue::Null);
         }
@@ -824,6 +976,12 @@ impl Accumulator for StringAggAccumulator {
     }
 
     fn state(&self) -> Result<Vec<SqlValue>> {
+        if !self.sort_specs.is_empty() {
+            return Err(invalid_aggregate_state(
+                "string_agg",
+                "ordered aggregation cannot produce partial state",
+            ));
+        }
         Ok(vec![
             if self.values.is_empty() {
                 SqlValue::Null
@@ -835,6 +993,12 @@ impl Accumulator for StringAggAccumulator {
     }
 
     fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        if !self.sort_specs.is_empty() {
+            return Err(invalid_aggregate_state(
+                "string_agg",
+                "ordered aggregation cannot merge partial state",
+            ));
+        }
         expect_state_arity("string_agg", state, 2)?;
         let separator = state_text("string_agg", &state[1], 1)?;
         if separator != self.separator {
@@ -864,13 +1028,104 @@ impl Accumulator for StringAggAccumulator {
     }
 
     fn retained_bytes(&self) -> u64 {
-        estimated_distinct_retained_bytes(&self.distinct_values).saturating_add(
-            estimated_string_collection_bytes(
+        estimated_distinct_retained_bytes(&self.distinct_values)
+            .saturating_add(estimated_string_collection_bytes(
                 &self.values,
                 self.values.capacity(),
                 self.separator.capacity(),
-            ),
-        )
+            ))
+            .saturating_add(estimated_ordered_string_bytes(&self.ordered_values))
+    }
+}
+
+/// Accumulator for the ordered-set aggregate PERCENTILE_DISC (issue #148).
+///
+/// Buffers `(sort_keys, value)` pairs, sorts them at finalize, and returns the
+/// first value whose cumulative distribution reaches the fraction:
+/// `index = max(ceil(fraction * n) - 1, 0)` — PostgreSQL 16 semantics (D5).
+/// NULL sort values are excluded; an empty group yields NULL. Partial state is
+/// rejected: ordered-set aggregation always runs in Single mode (D11).
+#[derive(Debug, Clone)]
+pub struct PercentileDiscAccumulator {
+    fraction: f64,
+    sort_specs: Vec<(bool, bool)>,
+    values: Vec<(Vec<SqlValue>, SqlValue)>,
+}
+
+impl PercentileDiscAccumulator {
+    pub fn new(fraction: f64, sort_specs: Vec<(bool, bool)>) -> Self {
+        let sort_specs = if sort_specs.is_empty() {
+            vec![(true, false)]
+        } else {
+            sort_specs
+        };
+        Self {
+            fraction,
+            sort_specs,
+            values: Vec::new(),
+        }
+    }
+}
+
+impl Accumulator for PercentileDiscAccumulator {
+    fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        // The sort value is the aggregated value, so it doubles as its own
+        // key when a caller has no separate key row.
+        let keys = match &value {
+            Some(inner) if !inner.is_null() => vec![inner.clone()],
+            _ => return Ok(()),
+        };
+        self.update_ordered(value, &keys)
+    }
+
+    fn update_ordered(&mut self, value: Option<SqlValue>, sort_keys: &[SqlValue]) -> Result<()> {
+        let Some(value) = value else {
+            return Ok(());
+        };
+        if value.is_null() {
+            return Ok(());
+        }
+        self.values.push((sort_keys.to_vec(), value));
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        if self.values.is_empty() {
+            return Ok(SqlValue::Null);
+        }
+        let mut sorted = self.values.clone();
+        sorted.sort_by(|left, right| compare_ordered_keys(&left.0, &right.0, &self.sort_specs));
+        let count = sorted.len();
+        let index = (self.fraction * count as f64).ceil() as usize;
+        let index = index.saturating_sub(1).min(count - 1);
+        Ok(sorted[index].1.clone())
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Err(invalid_aggregate_state(
+            "percentile_disc",
+            "ordered-set aggregation cannot produce partial state",
+        ))
+    }
+
+    fn merge(&mut self, _state: &[SqlValue]) -> Result<()> {
+        Err(invalid_aggregate_state(
+            "percentile_disc",
+            "ordered-set aggregation cannot merge partial state",
+        ))
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+
+    fn retained_bytes(&self) -> u64 {
+        self.values.iter().fold(0u64, |total, (keys, value)| {
+            let key_bytes: u64 = keys.iter().map(ByteSized::estimated_bytes).sum();
+            total
+                .saturating_add(key_bytes)
+                .saturating_add(value.estimated_bytes())
+        })
     }
 }
 
@@ -891,15 +1146,47 @@ pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<d
             let sep = separator.clone().unwrap_or_else(|| ",".to_string());
             Box::new(StringAggAccumulator::with_distinct(sep, distinct))
         }
+        AggregateFunction::PercentileDisc { fraction } => {
+            Box::new(PercentileDiscAccumulator::new(*fraction, Vec::new()))
+        }
     }
 }
 
-/// Create an accumulator using the aggregate expression's resolved result type.
+fn aggregate_sort_specs(aggregate: &AggregateExpr) -> Vec<(bool, bool)> {
+    aggregate
+        .order_by
+        .iter()
+        .map(|sort| (sort.asc, sort.nulls_first))
+        .collect()
+}
+
+/// Create an accumulator using the aggregate expression's resolved result
+/// type and its aggregate-local ordering (issue #148).
 pub fn create_accumulator_for_aggregate(aggregate: &AggregateExpr) -> Box<dyn Accumulator> {
     match &aggregate.function {
         AggregateFunction::Sum => Box::new(SumAccumulator::with_distinct_for_type(
             aggregate.distinct,
             aggregate.result_type.clone(),
+        )),
+        AggregateFunction::GroupConcat { separator } if !aggregate.order_by.is_empty() => {
+            let sep = separator.clone().unwrap_or_else(|| ",".to_string());
+            Box::new(GroupConcatAccumulator::with_order(
+                sep,
+                aggregate.distinct,
+                aggregate_sort_specs(aggregate),
+            ))
+        }
+        AggregateFunction::StringAgg { separator } if !aggregate.order_by.is_empty() => {
+            let sep = separator.clone().unwrap_or_else(|| ",".to_string());
+            Box::new(StringAggAccumulator::with_order(
+                sep,
+                aggregate.distinct,
+                aggregate_sort_specs(aggregate),
+            ))
+        }
+        AggregateFunction::PercentileDisc { fraction } => Box::new(PercentileDiscAccumulator::new(
+            *fraction,
+            aggregate_sort_specs(aggregate),
         )),
         _ => create_accumulator(&aggregate.function, aggregate.distinct),
     }
@@ -908,8 +1195,13 @@ pub fn create_accumulator_for_aggregate(aggregate: &AggregateExpr) -> Box<dyn Ac
 /// Returns whether an aggregate's partial state can be merged without
 /// changing the current local SQL result. Floating-point, DISTINCT, and
 /// order-sensitive aggregates must instead be replayed from ordered inputs.
+/// A FILTER predicate does not affect this proof: it applies per input row
+/// before the accumulator, so it commutes with Partial/Final splitting —
+/// but the distributed catalog still classifies filtered aggregates as
+/// local-only before any state reaches this kernel.
 pub fn exact_partial_aggregate_is_proven(aggregate: &AggregateExpr) -> bool {
     !aggregate.distinct
+        && aggregate.order_by.is_empty()
         && matches!(
             aggregate.function,
             AggregateFunction::Count | AggregateFunction::Min | AggregateFunction::Max
@@ -978,6 +1270,9 @@ pub enum AggregateMode {
 struct AggregateGroup {
     key_values: Vec<SqlValue>,
     accumulators: Vec<Box<dyn Accumulator>>,
+    /// Grouping-set mask emitted as the trailing `__grouping_id` output
+    /// column; `None` outside grouping-sets mode (issue #149).
+    grouping_id: Option<i64>,
 }
 
 /// Iterator that performs hash-based aggregation over input rows.
@@ -994,6 +1289,10 @@ pub struct AggregateIterator<'a> {
     group_limit: usize,
     memory_tracker: Option<MemoryTracker>,
     shared_group_counter: Option<Arc<AtomicUsize>>,
+    /// Expanded grouping-set masks over `group_keys` (issue #149, D9).
+    /// Key 0 owns the most significant of the low `group_keys.len()` bits;
+    /// a 1 bit excludes the key from the set (NULL placeholder output).
+    grouping_sets: Option<Vec<u64>>,
 }
 
 impl<'a> AggregateIterator<'a> {
@@ -1018,12 +1317,25 @@ impl<'a> AggregateIterator<'a> {
             group_limit: DEFAULT_GROUP_LIMIT,
             memory_tracker: None,
             shared_group_counter: None,
+            grouping_sets: None,
         }
     }
 
     /// Override the maximum number of groups allowed during aggregation.
     pub fn with_group_limit(mut self, limit: usize) -> Self {
         self.group_limit = limit;
+        self
+    }
+
+    /// Enable single-pass GROUPING SETS aggregation (issue #149, D9).
+    ///
+    /// Each input row accumulates once per set under a set-id-prefixed key;
+    /// the output rows gain a trailing `__grouping_id` BIGINT value and the
+    /// group limit applies to the group total across every set (D6). Only
+    /// `AggregateMode::Single` supports grouping sets — the planner keeps
+    /// parallel/spill/streaming execution on the `None` path.
+    pub fn with_grouping_sets(mut self, grouping_sets: Option<Vec<u64>>) -> Self {
+        self.grouping_sets = grouping_sets;
         self
     }
 
@@ -1077,44 +1389,71 @@ impl<'a> AggregateIterator<'a> {
                 }
             };
 
-            if !table.contains_key(&key_bytes) {
-                self.reserve_group_slot(table.len())?;
-                if let Some(tracker) = &mut self.memory_tracker {
-                    tracker
-                        .add_values(&key_values)
-                        .map_err(map_core_memory_error)?;
-                    tracker
-                        .add_bytes(
-                            self.aggregates.len() as u64 * AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES,
-                        )
-                        .map_err(map_core_memory_error)?;
-                }
-                let accumulators = self
-                    .aggregates
-                    .iter()
-                    .map(|agg| {
-                        let mut aggregate = agg.clone();
-                        aggregate.distinct =
-                            matches!(self.mode, AggregateMode::Single) && agg.distinct;
-                        create_accumulator_for_aggregate(&aggregate)
-                    })
-                    .collect::<Vec<_>>();
-                table.insert(
-                    key_bytes.clone(),
-                    AggregateGroup {
-                        key_values: key_values.clone(),
-                        accumulators,
-                    },
-                );
-            }
+            // Grouping-sets mode accumulates every row once per set under a
+            // set-id-prefixed key (issue #149, D3/D7): the prefix keeps
+            // duplicate sets and per-set real-NULL groups distinct while the
+            // masked key values become the NULL placeholder outputs.
+            let variants: Vec<(Vec<SqlValue>, GroupKeyBytes, Option<i64>)> =
+                if let Some(sets) = &self.grouping_sets {
+                    let key_count = self.group_keys.len();
+                    let mut variants = Vec::with_capacity(sets.len());
+                    for (set_id, mask) in sets.iter().enumerate() {
+                        let mut masked = key_values.clone();
+                        for (position, value) in masked.iter_mut().enumerate() {
+                            if (mask >> (key_count - 1 - position)) & 1 == 1 {
+                                *value = SqlValue::Null;
+                            }
+                        }
+                        let mut bytes = Vec::with_capacity(4 + key_bytes.len());
+                        bytes.extend_from_slice(&(set_id as u32).to_le_bytes());
+                        bytes.extend_from_slice(&encode_group_key(&masked)?);
+                        variants.push((masked, bytes, Some(*mask as i64)));
+                    }
+                    variants
+                } else {
+                    vec![(key_values, key_bytes, None)]
+                };
 
-            if let Some(group) = table.get_mut(&key_bytes) {
-                match self.mode {
-                    AggregateMode::Final => {
-                        let mut offset = self.group_keys.len();
-                        for (idx, agg) in self.aggregates.iter().enumerate() {
-                            let arity = aggregate_state_types(agg).len();
-                            let state = row.values.get(offset..offset + arity).ok_or_else(|| {
+            for (key_values, key_bytes, grouping_id) in variants {
+                if !table.contains_key(&key_bytes) {
+                    self.reserve_group_slot(table.len())?;
+                    if let Some(tracker) = &mut self.memory_tracker {
+                        tracker
+                            .add_values(&key_values)
+                            .map_err(map_core_memory_error)?;
+                        tracker
+                            .add_bytes(
+                                self.aggregates.len() as u64 * AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES,
+                            )
+                            .map_err(map_core_memory_error)?;
+                    }
+                    let accumulators = self
+                        .aggregates
+                        .iter()
+                        .map(|agg| {
+                            let mut aggregate = agg.clone();
+                            aggregate.distinct =
+                                matches!(self.mode, AggregateMode::Single) && agg.distinct;
+                            create_accumulator_for_aggregate(&aggregate)
+                        })
+                        .collect::<Vec<_>>();
+                    table.insert(
+                        key_bytes.clone(),
+                        AggregateGroup {
+                            key_values: key_values.clone(),
+                            accumulators,
+                            grouping_id,
+                        },
+                    );
+                }
+
+                if let Some(group) = table.get_mut(&key_bytes) {
+                    match self.mode {
+                        AggregateMode::Final => {
+                            let mut offset = self.group_keys.len();
+                            for (idx, agg) in self.aggregates.iter().enumerate() {
+                                let arity = aggregate_state_types(agg).len();
+                                let state = row.values.get(offset..offset + arity).ok_or_else(|| {
                                 invalid_aggregate_state(
                                     "aggregate",
                                     format!(
@@ -1122,48 +1461,107 @@ impl<'a> AggregateIterator<'a> {
                                     ),
                                 )
                             })?;
-                            group.accumulators[idx].merge(state)?;
-                            offset += arity;
-                        }
-                        if offset != row.values.len() {
-                            return Err(invalid_aggregate_state(
-                                "aggregate",
-                                format!(
-                                    "partial state row has {} trailing value(s)",
-                                    row.values.len() - offset
-                                ),
-                            ));
-                        }
-                    }
-                    AggregateMode::Partial | AggregateMode::Single => {
-                        let ctx = EvalContext::new(&row.values);
-                        for (idx, agg) in self.aggregates.iter().enumerate() {
-                            let value = match &agg.arg {
-                                None => None,
-                                Some(expr) => {
-                                    Some(crate::executor::evaluator::evaluate(expr, &ctx)?)
-                                }
-                            };
-                            if let Some(tracker) = &mut self.memory_tracker
-                                && matches!(
-                                    agg.function,
-                                    AggregateFunction::GroupConcat { .. }
-                                        | AggregateFunction::StringAgg { .. }
-                                )
-                                && let Some(value_ref) = value.as_ref()
-                            {
-                                tracker
-                                    .add_value(value_ref)
-                                    .map_err(map_core_memory_error)?;
+                                group.accumulators[idx].merge(state)?;
+                                offset += arity;
                             }
-                            group.accumulators[idx].update(value)?;
+                            if offset != row.values.len() {
+                                return Err(invalid_aggregate_state(
+                                    "aggregate",
+                                    format!(
+                                        "partial state row has {} trailing value(s)",
+                                        row.values.len() - offset
+                                    ),
+                                ));
+                            }
+                        }
+                        AggregateMode::Partial | AggregateMode::Single => {
+                            let ctx = EvalContext::new(&row.values);
+                            for (idx, agg) in self.aggregates.iter().enumerate() {
+                                // FILTER applies per input row before the
+                                // accumulator (and before DISTINCT), in Partial
+                                // and Single mode alike (issue #148, D1).
+                                if !aggregate_filter_accepts(agg, &ctx)? {
+                                    continue;
+                                }
+                                let value = match &agg.arg {
+                                    None => None,
+                                    Some(expr) => {
+                                        Some(crate::executor::evaluator::evaluate(expr, &ctx)?)
+                                    }
+                                };
+                                if let Some(tracker) = &mut self.memory_tracker
+                                    && matches!(
+                                        agg.function,
+                                        AggregateFunction::GroupConcat { .. }
+                                            | AggregateFunction::StringAgg { .. }
+                                            | AggregateFunction::PercentileDisc { .. }
+                                    )
+                                    && let Some(value_ref) = value.as_ref()
+                                {
+                                    tracker
+                                        .add_value(value_ref)
+                                        .map_err(map_core_memory_error)?;
+                                }
+                                if agg.order_by.is_empty() {
+                                    group.accumulators[idx].update(value)?;
+                                } else {
+                                    let keys = evaluate_sort_keys(agg, &ctx)?;
+                                    group.accumulators[idx].update_ordered(value, &keys)?;
+                                }
+                            }
                         }
                     }
                 }
             }
         }
 
-        if table.is_empty() && self.group_keys.is_empty() {
+        if let Some(sets) = self.grouping_sets.clone() {
+            // Sets that group over no key (their mask covers every key)
+            // still emit exactly one row when the input is empty, matching
+            // the global-aggregation contract below.
+            let key_count = self.group_keys.len();
+            let full_mask = if key_count == 0 {
+                0
+            } else {
+                (1u64 << key_count) - 1
+            };
+            if table.is_empty() {
+                for (set_id, mask) in sets.iter().enumerate() {
+                    if *mask != full_mask {
+                        continue;
+                    }
+                    if let Some(tracker) = &mut self.memory_tracker {
+                        tracker
+                            .add_bytes(
+                                self.aggregates.len() as u64 * AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES,
+                            )
+                            .map_err(map_core_memory_error)?;
+                    }
+                    let accumulators = self
+                        .aggregates
+                        .iter()
+                        .map(|agg| {
+                            let mut aggregate = agg.clone();
+                            aggregate.distinct =
+                                matches!(self.mode, AggregateMode::Single) && agg.distinct;
+                            create_accumulator_for_aggregate(&aggregate)
+                        })
+                        .collect::<Vec<_>>();
+                    let key_values = vec![SqlValue::Null; key_count];
+                    let mut bytes = Vec::with_capacity(4);
+                    bytes.extend_from_slice(&(set_id as u32).to_le_bytes());
+                    bytes.extend_from_slice(&encode_group_key(&key_values)?);
+                    table.insert(
+                        bytes,
+                        AggregateGroup {
+                            key_values,
+                            accumulators,
+                            grouping_id: Some(*mask as i64),
+                        },
+                    );
+                }
+            }
+        } else if table.is_empty() && self.group_keys.is_empty() {
             if let Some(tracker) = &mut self.memory_tracker {
                 tracker
                     .add_bytes(self.aggregates.len() as u64 * AGGREGATE_ACCUMULATOR_OVERHEAD_BYTES)
@@ -1183,19 +1581,25 @@ impl<'a> AggregateIterator<'a> {
                 AggregateGroup {
                     key_values: Vec::new(),
                     accumulators,
+                    grouping_id: None,
                 },
             );
         }
 
         let mut rows = Vec::with_capacity(table.len());
         for group in table.values() {
-            let mut values = Vec::with_capacity(self.group_keys.len() + self.aggregates.len());
+            let mut values = Vec::with_capacity(self.group_keys.len() + self.aggregates.len() + 1);
             values.extend(group.key_values.iter().cloned());
             for acc in &group.accumulators {
                 match self.mode {
                     AggregateMode::Partial => values.extend(acc.state()?),
                     AggregateMode::Final | AggregateMode::Single => values.push(acc.finalize()?),
                 }
+            }
+            // The hidden __grouping_id column joins the row before HAVING so
+            // GROUPING() predicates evaluate against it (issue #149, D11).
+            if let Some(grouping_id) = group.grouping_id {
+                values.push(SqlValue::BigInt(grouping_id));
             }
             let row = Row::new(next_row_id, values);
             next_row_id += 1;
@@ -1317,11 +1721,19 @@ impl<'a> StreamingAggregateIterator<'a> {
 
     fn update_accumulators(&mut self, ctx: &EvalContext<'_>) -> Result<()> {
         for (idx, agg) in self.aggregates.iter().enumerate() {
+            if !aggregate_filter_accepts(agg, ctx)? {
+                continue;
+            }
             let value = match &agg.arg {
                 None => None,
                 Some(expr) => Some(crate::executor::evaluator::evaluate(expr, ctx)?),
             };
-            self.accumulators[idx].update(value)?;
+            if agg.order_by.is_empty() {
+                self.accumulators[idx].update(value)?;
+            } else {
+                let keys = evaluate_sort_keys(agg, ctx)?;
+                self.accumulators[idx].update_ordered(value, &keys)?;
+            }
         }
         Ok(())
     }
@@ -1446,7 +1858,36 @@ fn aggregate_state_types(agg: &AggregateExpr) -> Vec<ResolvedType> {
         AggregateFunction::GroupConcat { .. } | AggregateFunction::StringAgg { .. } => {
             vec![ResolvedType::Text, ResolvedType::Text]
         }
+        // Ordered-set aggregation never runs in Partial mode (D11); the
+        // accumulator rejects state()/merge() with invalid_aggregate_state.
+        AggregateFunction::PercentileDisc { .. } => vec![agg.result_type.clone()],
     }
+}
+
+/// Evaluate a FILTER (WHERE ...) predicate for one input row. Only TRUE
+/// admits the row; FALSE and NULL (UNKNOWN) skip it (issue #148, D1).
+fn aggregate_filter_accepts(agg: &AggregateExpr, ctx: &EvalContext<'_>) -> Result<bool> {
+    let Some(filter) = &agg.filter else {
+        return Ok(true);
+    };
+    match crate::executor::evaluator::evaluate(filter, ctx)? {
+        SqlValue::Boolean(true) => Ok(true),
+        SqlValue::Boolean(false) | SqlValue::Null => Ok(false),
+        other => Err(ExecutorError::Evaluation(
+            crate::executor::EvaluationError::TypeMismatch {
+                expected: "Boolean".into(),
+                actual: other.type_name().into(),
+            },
+        )),
+    }
+}
+
+/// Evaluate the aggregate-local sort keys of one input row.
+fn evaluate_sort_keys(agg: &AggregateExpr, ctx: &EvalContext<'_>) -> Result<Vec<SqlValue>> {
+    agg.order_by
+        .iter()
+        .map(|sort| crate::executor::evaluator::evaluate(&sort.expr, ctx))
+        .collect()
 }
 
 /// Build output schema for aggregate results.
@@ -1472,6 +1913,7 @@ pub fn build_aggregate_schema(
             AggregateFunction::Max => format!("max_{idx}"),
             AggregateFunction::GroupConcat { .. } => format!("group_concat_{idx}"),
             AggregateFunction::StringAgg { .. } => format!("string_agg_{idx}"),
+            AggregateFunction::PercentileDisc { .. } => format!("percentile_disc_{idx}"),
         };
         schema.push(ColumnMetadata::new(name, agg.result_type.clone()));
     }
@@ -1503,8 +1945,17 @@ pub fn build_partial_aggregate_schema(
 }
 
 /// Return true when aggregate execution must remain Single for correctness.
+/// FILTER is applied per input row and therefore commutes with Partial/Final
+/// splitting; ordered aggregates (aggregate-local ORDER BY and ordered-set
+/// aggregates such as PERCENTILE_DISC) buffer whole groups and stay Single
+/// (issue #148, D11).
 pub fn should_use_single_for_parallel(parallelism: usize, aggregates: &[AggregateExpr]) -> bool {
-    parallelism <= 1 || aggregates.iter().any(|agg| agg.distinct)
+    parallelism <= 1
+        || aggregates.iter().any(|agg| {
+            agg.distinct
+                || !agg.order_by.is_empty()
+                || matches!(agg.function, AggregateFunction::PercentileDisc { .. })
+        })
 }
 
 fn collect_iterator_rows(iter: &mut dyn RowIterator) -> Result<Vec<Row>> {
@@ -2084,6 +2535,8 @@ mod tests {
                 arg: Some(label),
                 distinct: false,
                 result_type: ResolvedType::Text,
+                filter: None,
+                order_by: Vec::new(),
             },
         ]
     }
@@ -2127,6 +2580,68 @@ mod tests {
     fn sort_rows(mut rows: Vec<Vec<SqlValue>>) -> Vec<Vec<SqlValue>> {
         rows.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
         rows
+    }
+
+    #[test]
+    fn grouping_sets_accumulate_each_row_once_per_set() {
+        let category = column_expr(0, "category", ResolvedType::Text);
+        let group_keys = vec![category];
+        let aggregates = vec![AggregateExpr::count_star()];
+        let input = VecIterator::new(sample_aggregate_rows(), sample_aggregate_schema());
+        let mut schema = build_aggregate_schema(&group_keys, &aggregates);
+        schema.push(ColumnMetadata::new("__grouping_id", ResolvedType::BigInt));
+        // Mask 0b0 keeps the category key; mask 0b1 is the grand total.
+        let mut iter =
+            AggregateIterator::new(Box::new(input), group_keys, aggregates, None, schema)
+                .with_grouping_sets(Some(vec![0b0, 0b1]));
+        let rows = sort_rows(
+            collect_iterator_rows(&mut iter)
+                .unwrap()
+                .into_iter()
+                .map(|row| row.values)
+                .collect(),
+        );
+
+        assert_eq!(
+            rows,
+            sort_rows(vec![
+                vec![
+                    SqlValue::Text("book".into()),
+                    SqlValue::BigInt(3),
+                    SqlValue::BigInt(0),
+                ],
+                vec![
+                    SqlValue::Text("game".into()),
+                    SqlValue::BigInt(1),
+                    SqlValue::BigInt(0),
+                ],
+                vec![
+                    SqlValue::Text("toy".into()),
+                    SqlValue::BigInt(1),
+                    SqlValue::BigInt(0),
+                ],
+                vec![SqlValue::Null, SqlValue::BigInt(5), SqlValue::BigInt(1)],
+            ])
+        );
+    }
+
+    #[test]
+    fn grouping_sets_group_limit_applies_across_all_sets() {
+        let category = column_expr(0, "category", ResolvedType::Text);
+        let group_keys = vec![category];
+        let aggregates = vec![AggregateExpr::count_star()];
+        let input = VecIterator::new(sample_aggregate_rows(), sample_aggregate_schema());
+        let mut schema = build_aggregate_schema(&group_keys, &aggregates);
+        schema.push(ColumnMetadata::new("__grouping_id", ResolvedType::BigInt));
+        // Three category groups plus the grand total = 4 groups; a limit of
+        // 3 must fail even though each single set stays within the limit
+        // (issue #149, D6).
+        let mut iter =
+            AggregateIterator::new(Box::new(input), group_keys, aggregates, None, schema)
+                .with_grouping_sets(Some(vec![0b0, 0b1]))
+                .with_group_limit(3);
+        let error = collect_iterator_rows(&mut iter).unwrap_err();
+        assert!(matches!(error, ExecutorError::ResourceExhausted { .. }));
     }
 
     #[test]
@@ -2309,6 +2824,8 @@ mod tests {
                 arg: Some(label),
                 distinct: true,
                 result_type: ResolvedType::Text,
+                filter: None,
+                order_by: Vec::new(),
             },
         ];
         let output_schema = build_aggregate_schema(&group_keys, &aggregates);
@@ -2795,5 +3312,61 @@ mod tests {
         let first = encode_group_key(&values).unwrap();
         let second = encode_group_key(&values).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn percentile_disc_accumulator_follows_postgres_selection_rule() {
+        // values [1, 2, 2, 3]; index = max(ceil(f * n) - 1, 0)
+        let values = [1i64, 2, 2, 3];
+        for (fraction, expected) in [(0.0, 1i64), (0.25, 1), (0.5, 2), (0.75, 2), (1.0, 3)] {
+            let mut acc = PercentileDiscAccumulator::new(fraction, vec![(true, false)]);
+            for value in values {
+                let value = SqlValue::Integer(value as i32);
+                acc.update_ordered(Some(value.clone()), std::slice::from_ref(&value))
+                    .unwrap();
+            }
+            // NULL sort values are excluded.
+            acc.update_ordered(Some(SqlValue::Null), &[SqlValue::Null])
+                .unwrap();
+            assert_eq!(
+                acc.finalize().unwrap(),
+                SqlValue::Integer(expected as i32),
+                "fraction {fraction}"
+            );
+        }
+
+        let empty = PercentileDiscAccumulator::new(0.5, vec![(true, false)]);
+        assert_eq!(empty.finalize().unwrap(), SqlValue::Null);
+
+        let acc = PercentileDiscAccumulator::new(0.5, vec![(true, false)]);
+        assert!(acc.state().is_err(), "ordered-set partial state is invalid");
+    }
+
+    #[test]
+    fn ordered_string_accumulators_sort_stably_and_reject_partial_state() {
+        let mut acc = StringAggAccumulator::with_order(",".into(), false, vec![(false, false)]);
+        for (key, value) in [(2, "b"), (1, "a"), (3, "c"), (2, "d")] {
+            acc.update_ordered(
+                Some(SqlValue::Text(value.into())),
+                &[SqlValue::Integer(key)],
+            )
+            .unwrap();
+        }
+        // DESC by key; the two key=2 entries keep arrival order (stable sort).
+        assert_eq!(acc.finalize().unwrap(), SqlValue::Text("c,b,d,a".into()));
+        assert!(acc.state().is_err());
+        assert!(acc.merge(&[]).is_err());
+
+        let mut concat = GroupConcatAccumulator::with_order("|".into(), true, vec![(true, false)]);
+        for (key, value) in [(2, "x"), (1, "y"), (3, "x")] {
+            concat
+                .update_ordered(
+                    Some(SqlValue::Text(value.into())),
+                    &[SqlValue::Integer(key)],
+                )
+                .unwrap();
+        }
+        // DISTINCT drops the second "x"; ASC by key -> y,x.
+        assert_eq!(concat.finalize().unwrap(), SqlValue::Text("y|x".into()));
     }
 }

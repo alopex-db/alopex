@@ -55,6 +55,10 @@ whole partition.
 - A valid start position after the end position is an empty frame. `COUNT`
   returns zero; the other supported aggregates and all value functions return
   NULL.
+- Aggregate `FILTER (WHERE ...)`, aggregate-local `ORDER BY`, and
+  `WITHIN GROUP` are grouped-aggregation clauses (issue #148); combining any
+  of them with `OVER` is a stable planner error. See
+  [`sql-aggregate-filter-within-group.md`](sql-aggregate-filter-within-group.md).
 - `FIRST_VALUE` and `LAST_VALUE` evaluate their value expression at the first
   or last row of the effective frame. `NTH_VALUE` is one-based, evaluates its
   index against the current row, and returns NULL when the frame has fewer than
@@ -126,15 +130,15 @@ For each target the library, `CONTRACT_VERSION`, `SHA256SUMS`, and
 `BUILD_IDENTITY.json` feed the parser archive, asset envelope, vendor manifest,
 Python wheel native copy, and release evidence. Historical v0.8.4 contract
 `0.4.0` vendor binaries and sidecars remain unchanged and are rejected by the
-current `0.9.0` requirement. Alopex version, source-tree digest, archive digest,
+current `0.14.0` requirement. Alopex version, source-tree digest, archive digest,
 and library digest must all match. The release verifier runs the Python and
 Rust v0.8 demos with positive aggregate/value ROWS/RANGE and distribution
 result checks, so a stale parser asset fails closed.
 
 The explicit local-development override proves only a regular target library
 and self-consistent `CONTRACT_VERSION`/`SHA256SUMS` sidecars. It cannot prove
-that bytes relabeled as `0.9.0` export that contract. Rust therefore compares
-`alopex_parser_version()` with the compiled `0.9.0` descriptor before payload
+that bytes relabeled as `0.14.0` export that contract. Rust therefore compares
+`alopex_parser_version()` with the compiled `0.14.0` descriptor before payload
 preflight or decode. Only strict four-target release staging proves asset
 identity. The release workflow may use the explicit path to link a target CLI
 after that same job verifies the freshly generated target record and runs its
@@ -145,7 +149,7 @@ manifest through the strict default resolver.
 | Path/artifact | Current role | Target role | Action | Replacement/deletion condition | Proof |
 | --- | --- | --- | --- | --- | --- |
 | `nim-sql-parser/src/` | parser source | frame-capable parser source | keep/extend | never deleted | Nim parser and MessagePack tests |
-| four vendor target directories | immutable historical v0.8.4 / 0.4.0 and v0.8.7 / 0.5.0 assets | regenerated v0.8.8 / contract 0.9.0 binaries | replace only from release staging | only after all target attestations pass; never relabel old bytes | manifest/archive/library SHA checks |
+| four vendor target directories | immutable historical v0.8.4 / 0.4.0 and v0.8.7 / 0.5.0 assets | regenerated v0.8.8 / contract 0.14.0 binaries | replace only from release staging | only after all target attestations pass; never relabel old bytes | manifest/archive/library SHA checks |
 | parser asset envelope and vendor manifest | bind Alopex version to target digests | bind the frame-capable release | replace at release packaging | old manifest is invalid for the new Alopex version | release join verifier |
 | Python native parser copies | wheel runtime parser | same verified target parser | replace during wheel assembly | wheel must not retain the older library digest | wheel-content verifier and Python demo |
 | `demo_sql_v08.py` / embedded demo | human-readable verification | release-blocking frame results | keep/extend | no legacy frame-rejection path remains | release verifier executes both demos |

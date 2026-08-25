@@ -40,6 +40,7 @@
 //!     input: Box::new(sort),
 //!     limit: Some(10),
 //!     offset: None,
+//!     ties: None,
 //! };
 //! ```
 
@@ -67,6 +68,9 @@ pub enum WindowFunction {
 
 /// Value selected from the current row's effective window frame.
 #[derive(Debug, Clone)]
+// `TypedExpr` grew with the issue #148 aggregate clauses; every variant holds
+// at least one TypedExpr, so boxing `nth` alone buys nothing structural.
+#[allow(clippy::large_enum_variant)]
 pub enum ValueWindowFunction {
     FirstValue(TypedExpr),
     LastValue(TypedExpr),
@@ -130,6 +134,46 @@ impl Default for RecursiveCteLimits {
         Self {
             max_iterations: 1_000,
             max_rows: 100_000,
+        }
+    }
+}
+
+/// FROM-clause table functions Alopex can plan (issue #151).
+///
+/// The registry is closed: a name outside this set is a planning error rather
+/// than a call into an open function namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableFunctionKind {
+    /// `UNNEST(vector)` — one row per element.
+    Unnest,
+    /// `GENERATE_SERIES(...)` — reserved for issue #157; planning rejects it.
+    GenerateSeries,
+}
+
+impl TableFunctionKind {
+    /// Resolve a FROM-clause function name, case-insensitively.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "UNNEST" => Some(Self::Unnest),
+            "GENERATE_SERIES" => Some(Self::GenerateSeries),
+            _ => None,
+        }
+    }
+
+    /// Canonical uppercase spelling used in messages and plan output.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Unnest => "UNNEST",
+            Self::GenerateSeries => "GENERATE_SERIES",
+        }
+    }
+
+    /// Default relation name when the item carries no alias (PostgreSQL uses
+    /// the lowercase function name).
+    pub fn default_relation_name(self) -> &'static str {
+        match self {
+            Self::Unnest => "unnest",
+            Self::GenerateSeries => "generate_series",
         }
     }
 }
@@ -208,6 +252,36 @@ pub enum LogicalPlan {
         using: Option<Vec<String>>,
     },
 
+    /// LATERAL join (issue #151).
+    ///
+    /// The right input is a correlated relation: it is planned against the left
+    /// row and re-executed once per left row, so it cannot be reordered with or
+    /// hoisted above the left side the way [`LogicalPlan::Join`] can.
+    LateralJoin {
+        /// Left input, executed once.
+        left: Box<LogicalPlan>,
+        /// Correlated right input, executed once per left row with the left
+        /// row supplied as the outer row.
+        right: Box<LogicalPlan>,
+        /// `Inner`, `Left`, or `Cross`; RIGHT and FULL are rejected in planning.
+        join_type: JoinType,
+        /// Optional ON condition over the concatenated (left, right) row.
+        condition: Option<TypedExpr>,
+        /// Output schema of the right input, kept so a LEFT join can pad even
+        /// when the left input is empty.
+        right_schema: Vec<crate::catalog::ColumnMetadata>,
+    },
+
+    /// FROM-clause table function (issue #151).
+    TableFunction {
+        /// Which function this node evaluates.
+        function: TableFunctionKind,
+        /// Argument expressions, evaluated against the outer row.
+        args: Vec<TypedExpr>,
+        /// Output schema.
+        schema: Vec<crate::catalog::ColumnMetadata>,
+    },
+
     /// Aggregate operation (GROUP BY / aggregation).
     ///
     /// Aggregates rows from the input plan using group keys and aggregate expressions.
@@ -222,6 +296,15 @@ pub enum LogicalPlan {
         having: Option<TypedExpr>,
         /// Projection to apply after aggregation.
         projection: Projection,
+        /// Expanded GROUPING SETS masks over `group_keys` (issue #149).
+        ///
+        /// `None` keeps the pre-grouping-sets single-set behavior. Each mask
+        /// covers `group_keys` with key 0 at the most significant of the low
+        /// `group_keys.len()` bits; a 1 bit marks the key as excluded from
+        /// that grouping set (NULL placeholder in the output). When present,
+        /// the aggregate output schema gains a trailing `__grouping_id`
+        /// BIGINT column carrying the mask of the producing set.
+        grouping_sets: Option<Vec<u64>>,
     },
 
     /// Window operation preserving every input row and appending one result
@@ -267,9 +350,35 @@ pub enum LogicalPlan {
         order_by: Vec<SortExpr>,
     },
 
-    /// Limit operation (LIMIT/OFFSET clause).
+    /// SELECT DISTINCT ON (expr, ...) deduplication (issue #150).
     ///
-    /// Limits the number of rows from the input plan.
+    /// Sorts the input by the complete effective sort specification and emits
+    /// only the first row of each group of rows whose leading `key_count`
+    /// sort keys compare equal (NULL keys compare equal to NULL, D5).
+    ///
+    /// Invariants established by the planner (docs/sql-distinct-on.md):
+    /// - `order_by[..key_count]` covers every deduplicated DISTINCT ON key
+    ///   (the user's matching ORDER BY prefix plus implicit ASC NULLS LAST
+    ///   keys, D2/D3).
+    /// - `order_by[key_count..]` carries the user's ORDER BY tail followed by
+    ///   every input column as an ASC NULLS LAST tie-breaker, so the surviving
+    ///   row of each group never depends on physical input order (D4).
+    /// - The node emits rows already ordered by the effective specification,
+    ///   so no additional Sort node is planned above it (D8).
+    DistinctOn {
+        /// Input plan to deduplicate.
+        input: Box<LogicalPlan>,
+        /// Number of leading `order_by` entries that form the distinctness key.
+        key_count: usize,
+        /// Complete effective sort specification (keys, tail, tie-breakers).
+        order_by: Vec<SortExpr>,
+    },
+
+    /// Limit operation (LIMIT/OFFSET/FETCH clause).
+    ///
+    /// Limits the number of rows from the input plan. `limit` and `offset`
+    /// are concrete values resolved at plan time, so the node can be carried
+    /// by the distributed plan contract without re-evaluating expressions.
     Limit {
         /// Input plan to limit.
         input: Box<LogicalPlan>,
@@ -277,6 +386,11 @@ pub enum LogicalPlan {
         limit: Option<u64>,
         /// Number of rows to skip.
         offset: Option<u64>,
+        /// FETCH ... WITH TIES: after `limit` rows, keep emitting rows whose
+        /// ORDER BY sort key equals the final emitted row's key (peer rows).
+        /// The keys are a copy of the `Sort` node directly beneath this
+        /// Limit; `None` means plain ONLY/LIMIT semantics.
+        ties: Option<Vec<SortExpr>>,
     },
 
     // === DML Plans ===
@@ -380,12 +494,15 @@ impl LogicalPlan {
             | LogicalPlan::Filter { .. }
             | LogicalPlan::Project { .. }
             | LogicalPlan::Join { .. }
+            | LogicalPlan::LateralJoin { .. }
+            | LogicalPlan::TableFunction { .. }
             | LogicalPlan::Aggregate { .. }
             | LogicalPlan::Window { .. }
             | LogicalPlan::SetOperation { .. }
             | LogicalPlan::RecursiveCte { .. }
             | LogicalPlan::RecursiveReference { .. }
             | LogicalPlan::Sort { .. }
+            | LogicalPlan::DistinctOn { .. }
             | LogicalPlan::Limit { .. } => "SELECT",
             LogicalPlan::Insert { .. } => "INSERT",
             LogicalPlan::InsertSelect { .. } => "INSERT",
@@ -436,7 +553,7 @@ impl LogicalPlan {
         }
     }
 
-    /// Creates a new Aggregate plan.
+    /// Creates a new Aggregate plan without grouping sets.
     pub fn aggregate(
         input: LogicalPlan,
         group_keys: Vec<TypedExpr>,
@@ -450,6 +567,7 @@ impl LogicalPlan {
             aggregates,
             having,
             projection,
+            grouping_sets: None,
         }
     }
 
@@ -461,12 +579,22 @@ impl LogicalPlan {
         }
     }
 
-    /// Creates a new Limit plan.
+    /// Creates a new DistinctOn plan.
+    pub fn distinct_on(input: LogicalPlan, key_count: usize, order_by: Vec<SortExpr>) -> Self {
+        LogicalPlan::DistinctOn {
+            input: Box::new(input),
+            key_count,
+            order_by,
+        }
+    }
+
+    /// Creates a new Limit plan (plain ONLY/LIMIT semantics, no ties).
     pub fn limit(input: LogicalPlan, limit: Option<u64>, offset: Option<u64>) -> Self {
         LogicalPlan::Limit {
             input: Box::new(input),
             limit,
             offset,
+            ties: None,
         }
     }
 
@@ -537,12 +665,15 @@ impl LogicalPlan {
             LogicalPlan::Filter { .. } => "Filter",
             LogicalPlan::Project { .. } => "Project",
             LogicalPlan::Join { .. } => "Join",
+            LogicalPlan::LateralJoin { .. } => "LateralJoin",
+            LogicalPlan::TableFunction { .. } => "TableFunction",
             LogicalPlan::Aggregate { .. } => "Aggregate",
             LogicalPlan::Window { .. } => "Window",
             LogicalPlan::SetOperation { .. } => "SetOperation",
             LogicalPlan::RecursiveCte { .. } => "RecursiveCte",
             LogicalPlan::RecursiveReference { .. } => "RecursiveReference",
             LogicalPlan::Sort { .. } => "Sort",
+            LogicalPlan::DistinctOn { .. } => "DistinctOn",
             LogicalPlan::Limit { .. } => "Limit",
             LogicalPlan::Insert { .. } => "Insert",
             LogicalPlan::InsertSelect { .. } => "InsertSelect",
@@ -564,12 +695,15 @@ impl LogicalPlan {
                 | LogicalPlan::Filter { .. }
                 | LogicalPlan::Project { .. }
                 | LogicalPlan::Join { .. }
+                | LogicalPlan::LateralJoin { .. }
+                | LogicalPlan::TableFunction { .. }
                 | LogicalPlan::Aggregate { .. }
                 | LogicalPlan::Window { .. }
                 | LogicalPlan::SetOperation { .. }
                 | LogicalPlan::RecursiveCte { .. }
                 | LogicalPlan::RecursiveReference { .. }
                 | LogicalPlan::Sort { .. }
+                | LogicalPlan::DistinctOn { .. }
                 | LogicalPlan::Limit { .. }
         )
     }
@@ -605,8 +739,12 @@ impl LogicalPlan {
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Window { input, .. }
             | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::DistinctOn { input, .. }
             | LogicalPlan::Limit { input, .. } => Some(input),
-            LogicalPlan::Join { .. } | LogicalPlan::Values { .. } => None,
+            LogicalPlan::Join { .. }
+            | LogicalPlan::LateralJoin { .. }
+            | LogicalPlan::TableFunction { .. }
+            | LogicalPlan::Values { .. } => None,
             LogicalPlan::SetOperation { .. } => None,
             LogicalPlan::RecursiveCte { .. } | LogicalPlan::RecursiveReference { .. } => None,
             _ => None,
@@ -632,8 +770,11 @@ impl LogicalPlan {
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Window { input, .. }
             | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::DistinctOn { input, .. }
             | LogicalPlan::Limit { input, .. } => input.table_name(),
-            LogicalPlan::Join { .. } => None,
+            LogicalPlan::Join { .. }
+            | LogicalPlan::LateralJoin { .. }
+            | LogicalPlan::TableFunction { .. } => None,
             LogicalPlan::SetOperation { left, right, .. } => left
                 .table_name()
                 .filter(|name| right.table_name() == Some(*name)),
@@ -649,7 +790,7 @@ impl LogicalPlan {
     /// opened rather than trying to infer it from a table name.
     pub fn contains_join(&self) -> bool {
         match self {
-            LogicalPlan::Join { .. } => true,
+            LogicalPlan::Join { .. } | LogicalPlan::LateralJoin { .. } => true,
             LogicalPlan::SetOperation { left, right, .. } => {
                 left.contains_join() || right.contains_join()
             }
@@ -663,6 +804,7 @@ impl LogicalPlan {
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Window { input, .. }
             | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::DistinctOn { input, .. }
             | LogicalPlan::Limit { input, .. } => input.contains_join(),
             _ => false,
         }
@@ -676,8 +818,10 @@ impl LogicalPlan {
             | LogicalPlan::Project { input, .. }
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::DistinctOn { input, .. }
             | LogicalPlan::Limit { input, .. } => input.contains_set_operation(),
-            LogicalPlan::Join { left, right, .. } => {
+            LogicalPlan::Join { left, right, .. }
+            | LogicalPlan::LateralJoin { left, right, .. } => {
                 left.contains_set_operation() || right.contains_set_operation()
             }
             _ => false,

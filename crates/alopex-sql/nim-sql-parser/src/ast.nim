@@ -53,6 +53,9 @@ type
     nkWindowClause
     nkNamedWindow
     nkQualifyClause
+    nkDistinctOnClause
+    nkAggFilterClause    ## aggregate FILTER (WHERE predicate); child[0] = predicate
+    nkWithinGroupClause  ## WITHIN GROUP (ORDER BY ...); children = order items
     nkWindowFrame
     nkWindowFrameBound
     nkPartitionByClause
@@ -63,12 +66,18 @@ type
     nkFromTable
     nkFromJoin
     nkFromDerived
+    nkFromFunction  ## FROM-clause table function; children[0] = name, rest = args
     nkWhereClause
     nkOrderByClause
     nkOrderByExpr
     nkGroupByClause
+    nkRollup        ## GROUP BY ROLLUP(e1, ..., en); children = expressions
+    nkCube          ## GROUP BY CUBE(e1, ..., en); children = expressions
+    nkGroupingSets  ## GROUP BY GROUPING SETS (...); children = nkGroupingSet
+    nkGroupingSet   ## one grouping set; children = expressions (may be empty)
     nkHavingClause
     nkLimitClause
+    nkOffsetClause
     nkSetOperation
     nkJoin
     nkUsingClause
@@ -122,7 +131,9 @@ type
     funcStar*: bool
     negated*: bool
     natural*: bool
+    lateral*: bool          ## nkFromDerived/nkFromFunction: LATERAL (issue #151)
     recursive*: bool
+    limitWithTies*: bool    ## nkLimitClause: FETCH ... WITH TIES (issue #152)
     orderAsc*: int          ## -1 = omitted, 0 = DESC, 1 = ASC
     nullsFirst*: int        ## -1 = omitted, 0 = LAST, 1 = FIRST
     quantifier*: QuantifierKind
@@ -334,6 +345,10 @@ proc `$`*(node: SqlNode): string =
     result &= ")"
   else:
     result = $node.kind & "("
+    if node.kind == nkLimitClause and node.limitWithTies:
+      result &= "WITH TIES, "
+    if node.kind in {nkFromDerived, nkFromFunction} and node.lateral:
+      result &= "LATERAL, "
     for i, child in node.children:
       if i > 0:
         result &= ", "

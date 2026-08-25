@@ -136,6 +136,24 @@ cd alopex
 cargo run -p alopex-cli -- --profile prod sql "SELECT * FROM users"
 ```
 
+### crates.io から Embedded を使う
+
+公開版では、アプリケーション側のトップレベル依存を同じpatch版へ固定してください。
+
+```toml
+[dependencies]
+alopex-embedded = "=0.8.7"
+```
+
+`alopex-embedded`が利用するAlopex兄弟crateも同じpatch版へ固定されるため、通常は兄弟crateを個別にpinする必要はありません。既存のlockfileを更新する場合は、例えば次を実行します。
+
+```bash
+cargo update -p alopex-embedded --precise 0.8.7
+cargo generate-lockfile
+```
+
+Rust向けparserは`alopex-sql`に静的同梱されます。実行時に`libalopex_sql_parser.so`などを検索する設定や、利用者crateの`build.rs`でのrpath追加は不要です。
+
 -----
 
 ## 🛣 Roadmap

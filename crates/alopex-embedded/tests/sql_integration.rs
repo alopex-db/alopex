@@ -446,6 +446,316 @@ fn sql_integration_try_cast_preserves_values_and_cast_errors() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_fetch_pagination_and_with_ties_preserve_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE pages (id INTEGER PRIMARY KEY, score INTEGER); \
+         INSERT INTO pages (id, score) VALUES \
+         (1, 10), (2, 20), (3, 20), (4, 20), (5, 30), (6, NULL);",
+    )
+    .unwrap();
+
+    let fetched = db
+        .execute_sql("SELECT id FROM pages ORDER BY id OFFSET 2 ROWS FETCH NEXT 2 ROWS ONLY")
+        .unwrap();
+    let ExecutionResult::Query(fetched) = fetched else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        fetched.rows,
+        vec![vec![SqlValue::Integer(3)], vec![SqlValue::Integer(4)]]
+    );
+
+    let ties = db
+        .execute_sql("SELECT id FROM pages ORDER BY score FETCH FIRST 2 ROWS WITH TIES")
+        .unwrap();
+    let ExecutionResult::Query(ties) = ties else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        ties.rows,
+        vec![
+            vec![SqlValue::Integer(1)],
+            vec![SqlValue::Integer(2)],
+            vec![SqlValue::Integer(3)],
+            vec![SqlValue::Integer(4)],
+        ]
+    );
+
+    let expression = db
+        .execute_sql("SELECT id FROM pages ORDER BY id LIMIT 1 + 1")
+        .unwrap();
+    let ExecutionResult::Query(expression) = expression else {
+        panic!("expected query result");
+    };
+    assert_eq!(expression.rows.len(), 2);
+
+    let missing_order = db
+        .execute_sql("SELECT id FROM pages FETCH FIRST 2 ROWS WITH TIES")
+        .expect_err("WITH TIES requires ORDER BY");
+    assert!(
+        missing_order
+            .to_string()
+            .contains("FETCH ... WITH TIES requires ORDER BY"),
+        "{missing_order}"
+    );
+
+    let negative = db
+        .execute_sql("SELECT id FROM pages LIMIT -1")
+        .expect_err("negative LIMIT must fail");
+    assert!(
+        negative.to_string().contains("LIMIT must not be negative"),
+        "{negative}"
+    );
+
+    // Streaming SQL rejects WITH TIES (ordered pagination is not streamable).
+    let stream_error = alopex_embedded::OwnedSqlStreamPlan::preflight(
+        &db,
+        "SELECT id FROM pages ORDER BY id FETCH FIRST 1 ROW WITH TIES",
+    )
+    .expect_err("WITH TIES streaming must be rejected");
+    assert_eq!(
+        stream_error.sql_error_code(),
+        Some("unsupported_streaming_sql")
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn sql_integration_grouping_sets_preserve_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE gs_sales (id INTEGER PRIMARY KEY, region TEXT, product TEXT, \
+         amount INTEGER); \
+         INSERT INTO gs_sales VALUES (1, 'east', 'a', 10), (2, 'east', 'b', 20), \
+         (3, 'west', 'a', 30), (4, NULL, 'b', 40);",
+    )
+    .unwrap();
+
+    // ROLLUP adds the grand-total row; GROUPING separates the real NULL
+    // region (g = 0) from the placeholder NULL (g = 1) (issue #149, D7).
+    let result = db
+        .execute_sql(
+            "SELECT region, SUM(amount) AS total, GROUPING(region) AS g FROM gs_sales \
+             GROUP BY ROLLUP(region) ORDER BY g, region NULLS FIRST",
+        )
+        .unwrap();
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Null, SqlValue::BigInt(40), SqlValue::BigInt(0)],
+            vec![
+                SqlValue::Text("east".to_string()),
+                SqlValue::BigInt(30),
+                SqlValue::BigInt(0),
+            ],
+            vec![
+                SqlValue::Text("west".to_string()),
+                SqlValue::BigInt(30),
+                SqlValue::BigInt(0),
+            ],
+            vec![SqlValue::Null, SqlValue::BigInt(100), SqlValue::BigInt(1)],
+        ]
+    );
+
+    // GROUPING SETS with the empty set keeps DuckDB/PostgreSQL row shape.
+    let sets = db
+        .execute_sql(
+            "SELECT region, product, COUNT(*) AS c FROM gs_sales \
+             GROUP BY GROUPING SETS ((region), (product), ()) \
+             ORDER BY GROUPING(region, product), region NULLS FIRST, product NULLS FIRST",
+        )
+        .unwrap();
+    let ExecutionResult::Query(sets) = sets else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        sets.rows,
+        vec![
+            vec![SqlValue::Null, SqlValue::Null, SqlValue::BigInt(1)],
+            vec![
+                SqlValue::Text("east".to_string()),
+                SqlValue::Null,
+                SqlValue::BigInt(2),
+            ],
+            vec![
+                SqlValue::Text("west".to_string()),
+                SqlValue::Null,
+                SqlValue::BigInt(1),
+            ],
+            vec![
+                SqlValue::Null,
+                SqlValue::Text("a".to_string()),
+                SqlValue::BigInt(2),
+            ],
+            vec![
+                SqlValue::Null,
+                SqlValue::Text("b".to_string()),
+                SqlValue::BigInt(2),
+            ],
+            vec![SqlValue::Null, SqlValue::Null, SqlValue::BigInt(4)],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn sql_integration_lateral_and_table_functions_preserve_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE lat_parent (id INTEGER PRIMARY KEY, emb VECTOR(2)); \
+         CREATE TABLE lat_child (id INTEGER PRIMARY KEY, parent_id INTEGER, val INTEGER); \
+         INSERT INTO lat_parent VALUES (1, [1.0, 2.0]), (2, [3.0, 4.0]); \
+         INSERT INTO lat_child VALUES (10, 1, 100), (11, 1, 200);",
+    )
+    .unwrap();
+
+    // A table-function argument sees the preceding FROM item without LATERAL
+    // being written (issue #151, D2).
+    let ExecutionResult::Query(unnested) = db
+        .execute_sql(
+            "SELECT p.id, u.unnest FROM lat_parent AS p, UNNEST(p.emb) AS u \
+             ORDER BY p.id, u.unnest",
+        )
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        unnested.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Float(1.0)],
+            vec![SqlValue::Integer(1), SqlValue::Float(2.0)],
+            vec![SqlValue::Integer(2), SqlValue::Float(3.0)],
+            vec![SqlValue::Integer(2), SqlValue::Float(4.0)],
+        ]
+    );
+
+    // LEFT JOIN LATERAL keeps a left row that the correlated side does not
+    // match, padded with NULLs (D10).
+    let ExecutionResult::Query(padded) = db
+        .execute_sql(
+            "SELECT p.id, l.mx FROM lat_parent AS p LEFT JOIN LATERAL \
+             (SELECT MAX(c.val) AS mx FROM lat_child AS c WHERE c.parent_id = p.id) AS l \
+             ON TRUE ORDER BY p.id",
+        )
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        padded.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(200)],
+            vec![SqlValue::Integer(2), SqlValue::Null],
+        ]
+    );
+
+    // A relation alias column list renames a base table (D8).
+    let ExecutionResult::Query(renamed) = db
+        .execute_sql("SELECT r.a FROM lat_child AS r(a, b, c) WHERE r.a = 10")
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+    assert_eq!(renamed.rows, vec![vec![SqlValue::Integer(10)]]);
+    assert_eq!(renamed.columns[0].name, "a");
+
+    let err = db
+        .execute_sql("SELECT * FROM lat_child AS r(a, b)")
+        .unwrap_err();
+    assert_eq!(err.sql_error_code(), Some("ALOPEX-T012"));
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn sql_integration_readonly_txn_allows_lateral_and_table_functions() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE lat_ro (id INTEGER PRIMARY KEY, emb VECTOR(2)); \
+         INSERT INTO lat_ro VALUES (1, [1.0, 2.0]);",
+    )
+    .unwrap();
+
+    let mut ro = db.begin(TxnMode::ReadOnly).unwrap();
+    let ExecutionResult::Query(result) = ro
+        .execute_sql(
+            "SELECT t.id, u.unnest FROM lat_ro AS t CROSS JOIN LATERAL \
+             (SELECT * FROM UNNEST(t.emb)) AS u ORDER BY u.unnest",
+        )
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Float(1.0)],
+            vec![SqlValue::Integer(1), SqlValue::Float(2.0)],
+        ]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn sql_integration_distinct_on_preserves_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE sales (id INTEGER PRIMARY KEY, region TEXT, amount INTEGER); \
+         INSERT INTO sales (id, region, amount) VALUES \
+         (1, 'east', 100), (2, 'east', 50), (3, 'west', 75), \
+         (4, 'west', 75), (5, NULL, 10), (6, NULL, 5);",
+    )
+    .unwrap();
+
+    // T1: one row per region; the NULL group survives as one row (D5) and
+    // sorts NULLS LAST by default.
+    let result = db
+        .execute_sql(
+            "SELECT DISTINCT ON (region) region, amount FROM sales ORDER BY region, amount",
+        )
+        .unwrap();
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![SqlValue::Text("east".to_string()), SqlValue::Integer(50)],
+            vec![SqlValue::Text("west".to_string()), SqlValue::Integer(75)],
+            vec![SqlValue::Null, SqlValue::Integer(5)],
+        ]
+    );
+
+    // D4 tie contract: amount ties for the two west rows; the schema-order
+    // tie-breaker elects id 3 deterministically.
+    let tie = db
+        .execute_sql(
+            "SELECT DISTINCT ON (region) id FROM sales WHERE region = 'west' \
+             ORDER BY region, amount",
+        )
+        .unwrap();
+    let ExecutionResult::Query(tie) = tie else {
+        panic!("expected query result");
+    };
+    assert_eq!(tie.rows, vec![vec![SqlValue::Integer(3)]]);
+
+    // T8: a non-matching ORDER BY prefix is rejected (D2, ALOPEX-T014).
+    let error = db
+        .execute_sql("SELECT DISTINCT ON (region) region FROM sales ORDER BY amount")
+        .expect_err("non-matching ORDER BY prefix must fail");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("SELECT DISTINCT ON expressions must match initial ORDER BY expressions"),
+        "{rendered}"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_grouped_window_composition_preserves_exact_rows() {
     let db = Database::new();
     db.execute_sql(
@@ -701,4 +1011,57 @@ fn sql_integration_execute_sql_multi_error_rolls_back_whole_batch() {
         db.execute_sql("SELECT id FROM t;").is_err(),
         "table t should not exist after rollback"
     );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn sql_integration_aggregate_filter_and_percentile_disc_return_exact_rows() {
+    let db = Database::new();
+    db.execute_sql(
+        "CREATE TABLE metrics (id INTEGER PRIMARY KEY, g TEXT, v INTEGER, name TEXT); \
+         INSERT INTO metrics VALUES \
+         (1, 'a', 5, 'x'), (2, 'a', 20, 'y'), (3, 'a', NULL, 'z'), \
+         (4, 'b', 30, 'w'), (5, 'b', NULL, NULL), (6, 'b', 20, 'y');",
+    )
+    .unwrap();
+
+    let result = db
+        .execute_sql(
+            "SELECT g, COUNT(*) FILTER (WHERE v > 10), \
+             STRING_AGG(name, ',' ORDER BY v DESC, name ASC), \
+             PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v) \
+             FROM metrics GROUP BY g ORDER BY g",
+        )
+        .unwrap();
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![
+            vec![
+                SqlValue::Text("a".into()),
+                SqlValue::BigInt(1),
+                SqlValue::Text("y,x,z".into()),
+                SqlValue::Integer(5),
+            ],
+            vec![
+                SqlValue::Text("b".into()),
+                SqlValue::BigInt(2),
+                SqlValue::Text("w,y".into()),
+                SqlValue::Integer(20),
+            ],
+        ]
+    );
+
+    let error = db
+        .execute_sql("SELECT SUM(v) WITHIN GROUP (ORDER BY v) FROM metrics")
+        .expect_err("WITHIN GROUP on a plain aggregate must fail");
+    let rendered = error.to_string();
+    assert!(rendered.contains("ALOPEX-T007"), "{rendered}");
+    assert!(
+        rendered.contains("WITHIN GROUP is only valid for ordered-set aggregate functions"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("TypedExpr"), "{rendered}");
 }

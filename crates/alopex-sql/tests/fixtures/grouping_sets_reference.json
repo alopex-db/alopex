@@ -1,0 +1,88 @@
+{
+  "verified_with": {
+    "duckdb": "1.5.5",
+    "datafusion": "54.0.0"
+  },
+  "source_docs": {
+    "duckdb_grouping_sets": "https://duckdb.org/docs/stable/sql/query_syntax/grouping_sets",
+    "datafusion_aggregation": "https://datafusion.apache.org/user-guide/sql/select.html",
+    "postgresql_grouping_sets": "https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-GROUPING-SETS"
+  },
+  "setup": "CREATE TABLE sales (id INTEGER PRIMARY KEY, region TEXT, product TEXT, amount INTEGER); INSERT INTO sales VALUES (1, 'east', 'a', 10), (2, 'east', 'b', 20), (3, 'west', 'a', 30), (4, NULL, 'b', 40)",
+  "cases": [
+    {
+      "name": "rollup_with_grouping",
+      "sql": "SELECT region, SUM(amount) AS total, GROUPING(region) AS g FROM sales GROUP BY ROLLUP(region) ORDER BY g, region NULLS FIRST",
+      "columns": ["region", "total", "g"],
+      "rows": [
+        [null, 40, 0],
+        ["east", 30, 0],
+        ["west", 30, 0],
+        [null, 100, 1]
+      ]
+    },
+    {
+      "name": "cube_with_grouping_id",
+      "sql": "SELECT region, product, SUM(amount) AS total, GROUPING(region, product) AS gid FROM sales GROUP BY CUBE(region, product) ORDER BY gid, region NULLS FIRST, product NULLS FIRST",
+      "columns": ["region", "product", "total", "gid"],
+      "rows": [
+        [null, "b", 40, 0],
+        ["east", "a", 10, 0],
+        ["east", "b", 20, 0],
+        ["west", "a", 30, 0],
+        [null, null, 40, 1],
+        ["east", null, 30, 1],
+        ["west", null, 30, 1],
+        [null, "a", 40, 2],
+        [null, "b", 60, 2],
+        [null, null, 100, 3]
+      ]
+    },
+    {
+      "name": "grouping_sets_with_empty_set",
+      "sql": "SELECT region, product, COUNT(*) AS c, GROUPING(region, product) AS gid FROM sales GROUP BY GROUPING SETS ((region), (product), ()) ORDER BY gid, region NULLS FIRST, product NULLS FIRST",
+      "columns": ["region", "product", "c", "gid"],
+      "rows": [
+        [null, null, 1, 1],
+        ["east", null, 2, 1],
+        ["west", null, 1, 1],
+        [null, "a", 2, 2],
+        [null, "b", 2, 2],
+        [null, null, 4, 3]
+      ]
+    },
+    {
+      "name": "plain_group_by_cross_product_with_rollup",
+      "sql": "SELECT region, product, SUM(amount) AS total FROM sales GROUP BY region, ROLLUP(product) ORDER BY region NULLS FIRST, GROUPING(product), product NULLS FIRST",
+      "columns": ["region", "product", "total"],
+      "rows": [
+        [null, "b", 40],
+        [null, null, 40],
+        ["east", "a", 10],
+        ["east", "b", 20],
+        ["east", null, 30],
+        ["west", "a", 30],
+        ["west", null, 30]
+      ]
+    },
+    {
+      "name": "having_keeps_only_grand_total",
+      "sql": "SELECT region, SUM(amount) AS total FROM sales GROUP BY ROLLUP(region) HAVING GROUPING(region) = 1",
+      "columns": ["region", "total"],
+      "rows": [
+        [null, 100]
+      ]
+    },
+    {
+      "name": "grouping_id_alias_matches_grouping",
+      "sql": "SELECT region, product, GROUPING_ID(region, product) AS gid FROM sales GROUP BY GROUPING SETS ((region, product)) ORDER BY region NULLS FIRST, product NULLS FIRST",
+      "columns": ["region", "product", "gid"],
+      "rows": [
+        [null, "b", 0],
+        ["east", "a", 0],
+        ["east", "b", 0],
+        ["west", "a", 0]
+      ]
+    }
+  ]
+}

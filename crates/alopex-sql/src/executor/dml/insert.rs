@@ -224,14 +224,26 @@ fn evaluate_default(
             args,
             distinct,
             star,
+            order_by,
+            within_group,
+            filter,
             over: None,
-        } if name.eq_ignore_ascii_case("now") && args.is_empty() && !distinct && !star => {
+        } if name.eq_ignore_ascii_case("now")
+            && args.is_empty()
+            && !distinct
+            && !star
+            && order_by.is_empty()
+            && within_group.is_empty()
+            && filter.is_none() =>
+        {
             TypedExpr {
                 kind: crate::planner::typed_expr::TypedExprKind::FunctionCall {
                     name: name.clone(),
                     args: Vec::new(),
                     distinct: false,
                     star: false,
+                    filter: None,
+                    order_by: Vec::new(),
                     over: None,
                 },
                 resolved_type: crate::planner::types::ResolvedType::Timestamp,

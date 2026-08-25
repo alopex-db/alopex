@@ -308,8 +308,7 @@ const DEMO_DML: &str = "INSERT INTO docs (id, title, embedding) VALUES \
      (3, 'gamma', [0.0, 1.0, 1.0]), \
      (5, 'echo', [1.0, 0.25, 0.0])";
 
-const DEMO_VECTOR_SQL: &str =
-    "SELECT docs.id, vector_distance(docs.embedding, [1.0, 0.0, 0.0], 'l2') AS dist \
+const DEMO_VECTOR_SQL: &str = "SELECT docs.id, vector_distance(docs.embedding, [1.0, 0.0, 0.0], 'l2') AS dist \
      FROM docs \
      ORDER BY vector_distance(docs.embedding, [1.0, 0.0, 0.0], 'l2') ASC \
      LIMIT 3";
@@ -403,7 +402,9 @@ fn demo_rust_native() -> Result<(), String> {
             .map_err(|e| format!("upsert_to_hnsw 失敗: {e}"))?;
     }
 
-    show_call("txn.search_similar(query=[1.0, 0.0, 0.0], metric=Metric::L2, top_k=3, filter_keys=None)");
+    show_call(
+        "txn.search_similar(query=[1.0, 0.0, 0.0], metric=Metric::L2, top_k=3, filter_keys=None)",
+    );
     let similar = txn
         .search_similar(&[1.0, 0.0, 0.0], Metric::L2, 3, None)
         .map_err(|e| format!("search_similar 失敗: {e}"))?;
@@ -421,7 +422,9 @@ fn demo_rust_native() -> Result<(), String> {
     txn.commit().map_err(|e| format!("commit 失敗: {e}"))?;
     println!("       -> OK");
 
-    show_call("db.search_hnsw(\"idx_docs_embedding\", query=&[1.0, 0.0, 0.0], k=3, ef_search=None)");
+    show_call(
+        "db.search_hnsw(\"idx_docs_embedding\", query=&[1.0, 0.0, 0.0], k=3, ef_search=None)",
+    );
     match db.search_hnsw("idx_docs_embedding", &[1.0, 0.0, 0.0], 3, None) {
         Ok((results, stats)) => {
             for result in &results {
@@ -441,9 +444,7 @@ fn demo_rust_native() -> Result<(), String> {
         Err(e) => println!("       -> ERROR {e}"),
     }
 
-    println!(
-        "  注記: v0.8.5 以降は Python の公開 wheel でも同等の Vector/HNSW API を提供する。"
-    );
+    println!("  注記: v0.8.5 以降は Python の公開 wheel でも同等の Vector/HNSW API を提供する。");
     Ok(())
 }
 
@@ -454,9 +455,7 @@ fn run_demo(mode: &str) -> Result<(), String> {
             demo_rust_native()?;
             Ok(())
         }
-        other => Err(format!(
-            "未知の ALOPEX_DEMO_MODE: {other} (対応: vector)"
-        )),
+        other => Err(format!("未知の ALOPEX_DEMO_MODE: {other} (対応: vector)")),
     }
 }
 

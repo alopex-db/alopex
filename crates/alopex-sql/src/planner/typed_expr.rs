@@ -107,6 +107,11 @@ pub enum TypedExprKind {
         distinct: bool,
         /// STAR modifier for COUNT(*).
         star: bool,
+        /// Aggregate row filter from `FILTER (WHERE predicate)` (issue #148).
+        filter: Option<Box<TypedExpr>>,
+        /// Aggregate-local ordering. `WITHIN GROUP (ORDER BY ...)` is
+        /// normalized into this list by the type checker.
+        order_by: Vec<SortExpr>,
         /// Optional typed `OVER (...)` specification.
         over: Option<TypedWindowSpec>,
     },
@@ -430,6 +435,8 @@ impl TypedExpr {
                 args,
                 distinct,
                 star,
+                filter: None,
+                order_by: Vec::new(),
                 over: None,
             },
             resolved_type,

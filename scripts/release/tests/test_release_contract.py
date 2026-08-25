@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,24 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class ReleaseContractTests(unittest.TestCase):
+    def test_workspace_alopex_dependencies_are_exact_patch_pins(self) -> None:
+        with (ROOT / "Cargo.toml").open("rb") as stream:
+            workspace = tomllib.load(stream)
+        version = workspace["workspace"]["package"]["version"]
+        dependencies = workspace["workspace"]["dependencies"]
+        owned = {
+            "alopex-core",
+            "alopex-dataframe",
+            "alopex-sql",
+            "alopex-embedded",
+            "alopex-cluster",
+        }
+        for name in owned:
+            self.assertEqual(dependencies[name]["version"], f"={version}")
+        py_manifest = (ROOT / "crates/alopex-py/Cargo.toml").read_text(encoding="utf-8")
+        self.assertIn("alopex-embedded.workspace = true", py_manifest)
+        self.assertNotIn('alopex-embedded = { path = "../alopex-embedded" }', py_manifest)
+
     def test_target_version_is_consistent(self) -> None:
         workspace = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
@@ -232,11 +251,10 @@ class ReleaseContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("scripts/demo/v08/demo_embedded_v08.sh", run)
-        self.assertIn('cp crates/alopex-tools/build.rs "${tool_source}/"', run)
+        self.assertIn("embedded-dependency-smoke", run)
+        self.assertNotIn("crates/alopex-tools/build.rs", run)
         self.assertIn("demo-v08-embedded", wrapper)
-        build = (ROOT / "crates/alopex-tools/build.rs").read_text(encoding="utf-8")
-        self.assertIn("DEP_ALOPEX_SQL_PARSER_LIBDIR", build)
-        self.assertIn("rustc-link-arg-bins", build)
+        self.assertFalse((ROOT / "crates/alopex-tools/build.rs").exists())
         for scenario_id in (
             "EMB-01-storage-durability",
             "EMB-02-kv-transactions",

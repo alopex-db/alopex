@@ -75,9 +75,9 @@ right (qty <= 2):      {2, 4, 5}
 left-only: {3}; right-only: {5}; intersection: {2, 4}
 ```
 
-The Python demo performs exactly 61 result/error checks. The Rust EMB-04
-scenario performs 26 v0.8.x checks: 23 exact result checks and three fail-closed
-checks. The matrix grows cumulatively: CTE column aliases, recursive CTEs,
+The Python demo performs exactly 69 result/error checks. The Rust EMB-04
+scenario performs 34 v0.8.x checks: 27 exact result checks and seven
+fail-closed checks. The matrix grows cumulatively: CTE column aliases, recursive CTEs,
 positional/value/distribution windows, explicit frames, and grouped-window
 composition are all positive checks; their former unsupported-feature
 rejections are gone while the inherited set-operation, CASE, CTE-shadowing,
@@ -153,6 +153,15 @@ happened to run:
 16. `TRY_CAST` returns NULL for invalid text, overflow, invalid UTF-8, and
     vector-dimension failures. Ordinary CAST keeps a stable `ALOPEX-E004`
     error, and source-expression errors are never hidden.
+17. `GROUP BY` accepts `ROLLUP`, `CUBE`, and `GROUPING SETS` (issue #149).
+    Placeholder NULLs in subtotal rows print as `None`/`SqlValue::Null` like
+    real data NULLs; only `GROUPING`/`GROUPING_ID` (BIGINT bitmask, leftmost
+    argument = most significant bit) distinguishes the two.
+18. `FROM` accepts `LATERAL` derived tables, the `UNNEST(vector)` table
+    function, and `AS t(c1, ...)` alias column lists (issue #151). The
+    correlated side runs once per left row, `LEFT JOIN LATERAL` pads an
+    unmatched left row, and a table function reads the preceding FROM item
+    without the `LATERAL` keyword.
 
 Recursive CTEs use the bounded fixed-point contract added for v0.8.7; invalid
 recursive shapes, dependency cycles, and exhausted iteration or memory budgets
@@ -167,3 +176,8 @@ Standard truth, distinctness, row comparison, and error rules are in
 [`docs/sql-standard-predicates.md`](../../../docs/sql-standard-predicates.md).
 Conversion rules and parser-asset migration are in
 [`docs/sql-try-cast.md`](../../../docs/sql-try-cast.md).
+Grouping-set grammar, the `GROUPING` bit order, and resource bounds are in
+[`docs/sql-grouping-sets.md`](../../../docs/sql-grouping-sets.md).
+LATERAL scope rules, the table-function registry, and alias column-list arity
+are in
+[`docs/sql-lateral-table-functions.md`](../../../docs/sql-lateral-table-functions.md).
