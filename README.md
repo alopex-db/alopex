@@ -150,13 +150,13 @@ cargo run -p alopex-cli -- --profile prod sql "SELECT * FROM users"
 
 ```toml
 [dependencies]
-alopex-embedded = "=0.8.7"
+alopex-embedded = "=0.8.8"
 ```
 
 `alopex-embedded`が利用するAlopex兄弟crateも同じpatch版へ固定されるため、通常は兄弟crateを個別にpinする必要はありません。既存のlockfileを更新する場合は、例えば次を実行します。
 
 ```bash
-cargo update -p alopex-embedded --precise 0.8.7
+cargo update -p alopex-embedded --precise 0.8.8
 cargo generate-lockfile
 ```
 

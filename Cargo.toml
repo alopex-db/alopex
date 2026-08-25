@@ -14,18 +14,18 @@ exclude = ["scripts/release/verify-candidate"]
 resolver = "2"
 
 [workspace.package]
-version = "0.8.7"
+version = "0.8.8"
 license = "Apache-2.0"
 repository = "https://github.com/alopex-db/alopex"
 edition = "2021"
 
 [workspace.dependencies]
 # Internal crates
-alopex-core = { version = "=0.8.7", path = "crates/alopex-core", features = ["compression-zstd"] }
-alopex-sql = { version = "=0.8.7", path = "crates/alopex-sql" }
-alopex-dataframe = { version = "=0.8.7", path = "crates/alopex-dataframe" }
-alopex-embedded = { version = "=0.8.7", path = "crates/alopex-embedded" }
-alopex-cluster = { version = "=0.8.7", path = "crates/alopex-cluster" }
+alopex-core = { version = "=0.8.8", path = "crates/alopex-core", features = ["compression-zstd"] }
+alopex-sql = { version = "=0.8.8", path = "crates/alopex-sql" }
+alopex-dataframe = { version = "=0.8.8", path = "crates/alopex-dataframe" }
+alopex-embedded = { version = "=0.8.8", path = "crates/alopex-embedded" }
+alopex-cluster = { version = "=0.8.8", path = "crates/alopex-cluster" }
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
 

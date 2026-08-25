@@ -239,7 +239,7 @@ class ParserAssetManifestTests(unittest.TestCase):
         arguments = [
             "pack-target",
             "--alopex-version",
-            "0.8.7",
+            "0.8.8",
             "--contract-version",
             "0.14.0",
             "--target",
@@ -271,7 +271,7 @@ class ParserAssetManifestTests(unittest.TestCase):
             arguments.extend(("--registry-metadata", f"{name}={path}"))
         arguments.extend(("--output-dir", str(output)))
         self.run_cli(*arguments, expected=expected)
-        stem = f"alopex-parser-v0.8.7-contract-0.14.0-{target}"
+        stem = f"alopex-parser-v0.8.8-contract-0.14.0-{target}"
         return output / f"{stem}.json", output / f"{stem}.tar.gz"
 
     def verify_target(
@@ -400,7 +400,7 @@ print(matches[0])
 
         record = json.loads(second_record.read_text(encoding="utf-8"))
         self.assertEqual(record["schema"], "alopex-parser-target-record-v2")
-        self.assertEqual(record["alopex_version"], "0.8.7")
+        self.assertEqual(record["alopex_version"], "0.8.8")
         self.assertEqual(record["contract_version"], "0.14.0")
         self.assertEqual(record["target"], "x86_64-unknown-linux-gnu")
         self.assertEqual(
@@ -457,7 +457,7 @@ print(matches[0])
         result = self.run_cli(
             "pack-target",
             "--alopex-version",
-            "0.8.7",
+            "0.8.8",
             "--contract-version",
             "0.14.0",
             "--target",
@@ -813,7 +813,7 @@ print(matches[0])
             "--asset-dir",
             str(self.output),
             "--tag",
-            "v0.8.7",
+            "v0.8.8",
             "--tag-sha",
             "0123456789abcdef0123456789abcdef01234567",
             "--output",
@@ -821,7 +821,7 @@ print(matches[0])
         )
         parsed = json.loads(envelope.read_text(encoding="utf-8"))
         self.assertEqual(parsed["schema"], MANIFEST.RELEASE_ENVELOPE_SCHEMA)
-        self.assertEqual(parsed["source"]["tag"], "v0.8.7")
+        self.assertEqual(parsed["source"]["tag"], "v0.8.8")
         self.assertEqual(len(parsed["assets"]), 4)
         self.assertEqual(envelope.read_bytes(), MANIFEST.canonical_json_bytes(parsed))
 
