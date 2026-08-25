@@ -156,7 +156,7 @@ impl<'a> TuiApp<'a> {
     }
 
     pub fn draw(&mut self, frame: &mut ratatui::Frame<'_>) {
-        let area = frame.size();
+        let area = frame.area();
         let mut constraints = Vec::new();
         if self.context_message.is_some() {
             constraints.push(Constraint::Length(3));

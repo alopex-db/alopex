@@ -171,7 +171,7 @@ impl TableView {
         let table = Table::new(rows, constraints)
             .header(TuiRow::new(header))
             .block(Block::default().borders(Borders::ALL).title("Results"))
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
             .highlight_symbol("▌");
 
         frame.render_stateful_widget(table, area, &mut self.state);

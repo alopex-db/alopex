@@ -4,9 +4,15 @@
 
 > New duplicate crate versions fail CI. Existing duplicate versions may remain only as exact, reasoned exceptions that become errors when stale.
 
-`deny.toml` is the machine-facing source of truth. The initial inventory found 84 duplicate crate families and required 101 exact-version exceptions across the configured tier-1, Windows, WASM, all-feature, and dev-dependency graph. The first reduction converged Arrow/Parquet 52 onto 53. The current configured graph has 69 duplicate crate families and 86 exact-version exceptions. This baseline is debt to remove, not a permitted count to refill after an exception disappears.
+`deny.toml` is the machine-facing source of truth. The current configured graph has 44 duplicate crate families and 59 exact-version exceptions across the configured tier-1, Windows, WASM, all-feature, and dev-dependency graph. This baseline is debt to remove, not a permitted count to refill after an exception disappears.
 
-The same reduction removed 15 duplicate families and 15 package entries from `Cargo.lock`: Arrow Array, Buffer, Cast, Data, IPC, Schema, Select, Parquet, Brotli, and the six Lexical crates. The lockfile inventory moved from 95 to 80 duplicate families and from 792 to 777 package entries.
+| Inventory point | Configured graph families | Exact exceptions | Lockfile families | Lockfile packages |
+|---|---:|---:|---:|---:|
+| Initial inventory | 84 | 101 | 95 | 792 |
+| Arrow/Parquet 52 → 53 | 69 | 86 | 80 | 777 |
+| Bevy 0.14 → 0.15 and TUI convergence | 44 | 59 | 55 | 745 |
+
+The TUI reduction aligned workspace-controlled manifest declarations: `alopex-cli` now uses Ratatui 0.29 and Crossterm 0.28, while the vendored test library uses Bevy 0.15 to match `bevy_ratatui` 0.7. It removed 25 additional duplicate families and 32 package entries from `Cargo.lock`; no broad exception or resolver pin was added.
 
 This policy does not pin Cargo resolution. It does not alter `Cargo.toml`, `Cargo.lock`, the rustc crate graph, or compilation. Exact versions identify audit exceptions only; the runtime cost is one metadata-based policy check in the existing dependency-audit job.
 
@@ -45,8 +51,8 @@ The GitHub Action is pinned to an immutable revision packaging cargo-deny 0.20.2
 Prioritize by expected compile and artifact cost, then by how directly this workspace controls the edge:
 
 1. Completed: Arrow/Parquet 52 was converged onto 53, also removing the old Brotli and Lexical branches.
-2. Next: Bevy 0.14/0.15 and TUI crates. `vendor/ratatui-testlib` and `alopex-cli` dev dependencies own much of this test-only cluster.
-3. Then: `alopex-core` 0.3.4/0.8.7. The older version arrives through the Chirps Raft storage dependency.
+2. Completed: Bevy 0.14 was converged onto 0.15, and CLI/test dependencies were aligned on Ratatui 0.29 and Crossterm 0.28.
+3. Next: `alopex-core` 0.3.4/0.8.7. The older version arrives through the Chirps Raft storage dependency.
 4. Ongoing: general cryptography, randomness, platform, and Windows support crates. Converge through direct-owner upgrades where possible; retain only exact transitive exceptions otherwise.
 
 For each candidate:
@@ -62,11 +68,11 @@ Update the nearest workspace-controlled owner, regenerate `Cargo.lock`, remove t
 
 | Path | Current responsibility | Target responsibility | Action | Removal condition | Verification method |
 |---|---|---|---|---|---|
-| `deny.toml` | absent | canonical duplicate policy and exact exception inventory | create | never while Cargo is used | blocking `cargo deny check bans` |
-| `ci.yml:security-audit` | RustSec audit and one advisory reachability guard | duplicate policy followed by RustSec audit | extend | replace only if another required owner preserves both checks | workflow contract plus GitHub run |
+| `deny.toml` | canonical duplicate policy and exact exception inventory | shrink-only duplicate debt | maintain | never while Cargo is used | blocking `cargo deny check bans` |
+| `ci.yml:security-audit` | duplicate policy followed by RustSec audit | same blocking ownership | maintain | replace only if another required owner preserves both checks | workflow contract plus GitHub run |
 | exact `bans.skip` entry | acknowledge one existing version | shrink-only temporary debt | delete | version is absent or family converges | denied unmatched/unnecessary skip diagnostics |
 | `bans.skip-tree` | absent | illegal broad suppression | keep absent | always | contract test and source review |
-| this runbook | absent | operator procedure and ownership map | create | only with an equivalent maintained runbook | documentation contract |
+| this runbook | operator procedure and ownership map | same maintained guidance | maintain | only with an equivalent maintained runbook | documentation contract |
 
 ## Failure, rollback, and operations
 

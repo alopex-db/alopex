@@ -211,7 +211,7 @@ impl<'a> AdminApp<'a> {
     }
 
     fn draw(&mut self, frame: &mut ratatui::Frame<'_>) {
-        let area = frame.size();
+        let area = frame.area();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(5), Constraint::Length(3)])
