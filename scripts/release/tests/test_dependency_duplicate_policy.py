@@ -87,6 +87,39 @@ class DependencyDuplicatePolicyContractTests(unittest.TestCase):
                 re.compile(rf'name = "{crate}"\nversion = "52\.'),
             )
 
+    def test_workspace_owns_one_tui_and_bevy_version_line(self) -> None:
+        cli = self.read("crates/alopex-cli/Cargo.toml")
+        self.assertRegex(cli, re.compile(r'^ratatui\s*=\s*"0\.29"$', re.MULTILINE))
+        self.assertRegex(cli, re.compile(r'^crossterm\s*=\s*"0\.28"$', re.MULTILINE))
+
+        for manifest in (
+            "vendor/ratatui-testlib/Cargo.toml.orig",
+            "vendor/ratatui-testlib/Cargo.toml",
+        ):
+            with (ROOT / manifest).open("rb") as handle:
+                dependencies = tomllib.load(handle)["dependencies"]
+
+            def version(crate: str) -> str:
+                requirement = dependencies[crate]
+                if isinstance(requirement, str):
+                    return requirement
+                return requirement["version"]
+
+            self.assertEqual(version("bevy"), "0.15")
+            self.assertEqual(version("bevy_ecs"), "0.15")
+
+        lockfile = self.read("Cargo.lock")
+        for crate, old_version in (
+            ("bevy", "0.14"),
+            ("bevy_ecs", "0.14"),
+            ("crossterm", "0.27"),
+            ("ratatui", "0.26"),
+        ):
+            self.assertNotRegex(
+                lockfile,
+                re.compile(rf'name = "{crate}"\nversion = "{old_version}\.'),
+            )
+
     def test_policy_runbook_records_ownership_and_exception_lifecycle(self) -> None:
         runbook = self.read("docs/dependency-duplicate-policy.md")
 
