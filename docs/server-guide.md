@@ -202,6 +202,35 @@ same admin authentication and allowlist boundary as the other admin endpoints.
 Their `cluster` response field is the canonical `ClusterStatusSnapshot` JSON
 schema also returned in gRPC `cluster_json`.
 
+## Python client access
+
+The `alopex` package connects to a running server with the same calls the
+embedded `Database` accepts. The connection target alone selects the surface:
+
+```python
+import alopex
+
+db = alopex.connect("https://127.0.0.1:8080", api_key="secret")
+db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+db.execute_sql("INSERT INTO items (id, name) VALUES (?, ?)", [1, "alpha"])
+rows = db.execute_sql("SELECT id, name FROM items")   # [{'id': 1, 'name': 'alpha'}]
+
+with db.begin() as txn:                                # server session
+    txn.execute_sql("INSERT INTO items (id, name) VALUES (2, 'beta')")
+    txn.commit()
+
+db.close()
+```
+
+`alopex.connect("/path/db")` and `alopex.connect(":memory:")` open the embedded
+engine instead, and both surfaces return the same values for the same statement
+apart from a short list of server-side engine gaps (`PRAGMA`, `clear_cache()`,
+a bare `;`) enumerated under "Known value divergences" in
+`docs/python-server-client.md`. Stream, HNSW, and KV APIs raise
+`NotImplementedError` with a reason over the server client. See
+`docs/python-server-client.md` for the full option, error-code, and boundary
+reference.
+
 ## CLI access
 
 Use profiles to connect to a running server:

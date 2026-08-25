@@ -54,10 +54,81 @@ with db.begin(TxnMode.READ_ONLY) as txn:
 db.close()
 ```
 
+## サーバー接続（v0.8.8）
+
+`alopex.connect(target)` は接続先の指定だけで組み込み↔サーバーを切り替えます。
+戻り値の形は両サーフェスで一致します（SELECT は列順を保った `list[dict]`、DML は
+`int`、DDL は `None`）。
+
+```python
+import alopex
+
+embedded = alopex.connect("/var/lib/alopex/db")            # 組み込み Database
+remote = alopex.connect("https://127.0.0.1:8080",          # RemoteDatabase
+                        api_key="secret")
+
+for db in (embedded, remote):
+    db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+    db.execute_sql("INSERT INTO items (id, name) VALUES (?, ?)", [1, "alpha"])
+    assert db.execute_sql("SELECT id, name FROM items") == [{"id": 1, "name": "alpha"}]
+
+with remote.begin() as txn:          # サーバーセッション（/session/begin）
+    txn.execute_sql("INSERT INTO items (id, name) VALUES (2, 'beta')")
+    txn.commit()
+
+remote.close()
+```
+
+| target | 結果 |
+| --- | --- |
+| `http://host:port` / `https://host:port` | `RemoteDatabase` |
+| `:memory:`（既定） | `Database.open_in_memory()` |
+| `file:///path/db` / `/path/db` | `Database.open(path)` |
+| `s3://bucket/prefix` | `NotImplementedError`（`ALOPEX-PY204`） |
+| その他 | `ValueError`（`ALOPEX-PY205`） |
+
+`RemoteDatabase` の主なオプション:
+
+| オプション | 既定 | 説明 |
+| --- | --- | --- |
+| `api_key` | `None` | `x-api-key` ヘッダ。`headers` で `Authorization: Bearer` も可 |
+| `timeout` | `60.0` | サーバー既定 `query_timeout`（30s）の 2 倍。サーバー側の分類済みエラーを優先させる |
+| `sql_path` / `api_prefix` | URL の path 由来 | `/api/sql/query` も同一ハンドラ |
+| `ssl_context` | `None` | `ssl.create_default_context()` の差し替え（mTLS もここ） |
+| `insecure` | `False` | 非 loopback への平文 `http://` を許可する場合に必須 |
+| `retries` | `0` | 接続確立の失敗だけを再試行。送信済みリクエストは絶対に再送しない |
+| `keep_alive` / `idle_reconnect_seconds` | `True` / `5.0` | 1 インスタンス 1 コネクション。並列実行はスレッドごとにインスタンスを作る |
+
+サーバーに等価物が無い操作は `AttributeError` ではなく理由付きの
+`NotImplementedError`（`code == "ALOPEX-PY204"`）になります: `execute_sql_stream` /
+`query_stream` / `flush` / `memory_usage` / `routing_diagnostics` / `thread_mode` /
+HNSW 系 / トランザクションの KV・ベクトル系 / `begin(TxnMode.READ_ONLY)`。
+`cluster_status()` は実装済みで、組み込みと同じ `ClusterStatusSnapshot` を返します。
+
+エラーコードはサーバーの安定コード（`UNAUTHORIZED` / `QUERY_TIMEOUT` /
+`SESSION_EXPIRED` / `ALOPEX-E###` ほか）をそのまま `AlopexError.code` に載せ、
+`.correlation_id` と `.http_status` も付きます。例外型は両サーフェスで一致し、
+実行中に起きるエラー（`CAST` 失敗 = `ALOPEX-E004` など）は安定コードも一致します。
+ただし**パース・カタログ・型検査のエラーはサーバー側のルーティング前段で
+`ALOPEX-E999` に潰れます**（本来のコードはメッセージ内にのみ残る）。これは CLI の
+HTTP 経路でも同じサーバー側の既知の問題で、詳細と追跡は
+`docs/python-server-client.md` の D20 を参照してください。クライアント固有は
+`ALOPEX-PY201`（接続失敗）/ `ALOPEX-PY202`（タイムアウト）/ `ALOPEX-PY203`
+（プロトコル違反）/ `ALOPEX-PY204`（サーバーに等価物なし）/ `ALOPEX-PY205`
+（不正な接続先・オプション）の 5 つです。閉じたハンドルの操作は組み込みと同じ
+`AlopexError("database is closed")` + `ALOPEX-PY999` です。
+
+サーバーセッションはサーバーの `session_ttl`（既定 300 秒）で失効し、
+`SESSION_EXPIRED` として観測されます（組み込みトランザクションには TTL がありません）。
+
+詳細は `docs/python-server-client.md` を参照してください。
+
 ## v0.8 embedded-local stream / DataFrame API
 
-v0.8 の stream API は embedded-local database 専用です。Client、endpoint、remote session、remote
-DataFrame execution は提供しません。`Database` は既定で `thread_mode="multi"` であり、
+v0.8 の stream API は embedded-local database 専用です。remote session（サーバー
+セッション）は `RemoteDatabase.begin()` で利用できますが、stream・remote
+DataFrame execution は引き続き提供しません（サーバーの JSONL ストリームは列名
+メタデータを持たないため、組み込みの dict yield 契約を満たせません）。`Database` は既定で `thread_mode="multi"` であり、
 `thread_mode="single"` を選ぶと database、transaction、stream、DataFrame、LazyFrame は作成した
 Python thread だけで使用できます。
 

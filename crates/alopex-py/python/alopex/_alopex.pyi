@@ -4,6 +4,15 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
 ALOPEX_ERROR_CODES: Tuple[str, ...]
 
 
+def _bind_sql_params(sql: _str, params: Optional[Sequence[Any]] = None) -> _str:
+    """Expand ``?`` placeholders into SQL literals (internal).
+
+    Shared by the embedded bindings and ``alopex.remote`` so both surfaces have
+    one implementation of the placeholder semantics. Not public API.
+    """
+    ...
+
+
 class polars:
     class DataFrame:
         ...
