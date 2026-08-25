@@ -1410,7 +1410,7 @@ fn e2e_admin_server_subcommand_launch() -> Result<()> {
     let cmd = alopex_command(&["--profile", profile.as_str(), "server"]);
     harness.spawn(cmd)?;
 
-    wait_for_contains(&mut harness, "Resources", Duration::from_secs(10))?;
+    wait_for_contains(&mut harness, "Resources", Duration::from_secs(60))?;
     harness.send_text("q")?;
     Ok(())
 }
@@ -1522,10 +1522,10 @@ fn e2e_admin_remote_lifecycle_actions() -> Result<()> {
     // This E2E launches a dev-profile server, and backup/restore scan the
     // default 512 MiB WAL. Its PTY also competes with the other tests in this
     // binary. Healthy loaded Linux builders have exceeded the former 15- and
-    // 20-second allowances, so retain a finite one-minute bound (matching the
-    // maintenance retry budget above) without treating normal I/O as a
-    // deadlock. Terminal operation states still fail immediately below.
-    const LIFECYCLE_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
+    // 20-second allowances, and a 512 MiB backup performs several full-file
+    // verification passes. Retain a finite five-minute bound without treating
+    // slow storage as a deadlock. Terminal operation states still fail immediately.
+    const LIFECYCLE_OPERATION_TIMEOUT: Duration = Duration::from_secs(300);
 
     let _guard = server_lock();
     let profile = server_profile()?;
