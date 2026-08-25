@@ -7,17 +7,19 @@
 
 pub mod buffer_pool;
 pub mod checkpoint;
+pub mod container;
 pub mod free_space;
+mod lock;
 pub mod memtable;
 pub mod metrics;
 pub mod sstable;
 pub mod wal;
 
 use std::collections::VecDeque;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -26,6 +28,8 @@ use crate::error::{Error, Result};
 use crate::kv::{KVStore, KVTransaction};
 use crate::lsm::buffer_pool::{BufferPool, BufferPoolConfig};
 use crate::lsm::checkpoint::{load_checkpoint_meta, save_checkpoint_meta, CheckpointMeta};
+pub use crate::lsm::container::{ConvergePolicy, ConvergeResult};
+pub use crate::lsm::lock::{is_lock_file, LOCK_FILE_NAME};
 use crate::lsm::memtable::{ImmutableMemTable, MemTable, MemTableConfig, MemTableEntry};
 use crate::lsm::metrics::{LsmMetrics, LsmMetricsSnapshot};
 use crate::lsm::sstable::{
@@ -68,6 +72,13 @@ pub struct LsmKVConfig {
     pub thread_mode: ThreadMode,
     /// 書き込みスロットリング設定。
     pub write_throttle: WriteThrottleConfig,
+    /// 単一 `.alopex` ファイルへの収束ポリシー。
+    ///
+    /// 既定の [`ConvergePolicy::SidecarOnly`] は `X.alopex.d` サイドカーだけを対象に
+    /// するため、素のディレクトリ運用（`alopex-server` を含む）の挙動は変わらない。
+    pub converge: ConvergePolicy,
+    /// ハンドル解放時にサイドカー作業ディレクトリを削除するか。
+    pub prune_sidecar_on_drop: bool,
 }
 
 /// チェックポイント設定。
@@ -119,6 +130,8 @@ impl Default for LsmKVConfig {
             buffer_pool: BufferPoolConfig::default(),
             thread_mode: ThreadMode::MultiThread,
             write_throttle: WriteThrottleConfig::default(),
+            converge: ConvergePolicy::default(),
+            prune_sidecar_on_drop: true,
         }
     }
 }
@@ -136,6 +149,58 @@ pub struct RecoveryResult {
     pub stop_reason: Option<String>,
     /// チェックポイント LSN（利用時のみ）。
     pub checkpoint_lsn: Option<u64>,
+}
+
+/// 収束が O(N) コストとして目に見えるサイズの閾値（1 GiB）。
+#[cfg(not(target_arch = "wasm32"))]
+const CONVERGE_WARN_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// 同時に開いたままにする SSTable リーダーの上限（ファイルディスクリプタ保護）。
+const SSTABLE_READER_CACHE_LIMIT: usize = 256;
+
+/// Cache of opened SSTable readers, keyed by file id.
+///
+/// [`SSTableReader::open`] re-reads the whole file to verify its CRC32, so
+/// opening one per point lookup makes a single `get` cost the total size of every
+/// live SSTable. Tables are immutable once written and file ids are never reused,
+/// so a cached reader can never go stale; the only bound needed is on open file
+/// descriptors.
+#[derive(Default)]
+struct SSTableReaderCache {
+    readers: Mutex<HashMap<u64, Arc<Mutex<SSTableReader>>>>,
+}
+
+impl SSTableReaderCache {
+    fn get_or_open(&self, file_id: u64, path: &Path) -> Result<Arc<Mutex<SSTableReader>>> {
+        {
+            let cache = self
+                .readers
+                .lock()
+                .expect("lsm sstable reader cache poisoned");
+            if let Some(reader) = cache.get(&file_id) {
+                return Ok(Arc::clone(reader));
+            }
+        }
+
+        let opened = Arc::new(Mutex::new(SSTableReader::open(path)?));
+        let mut cache = self
+            .readers
+            .lock()
+            .expect("lsm sstable reader cache poisoned");
+        if cache.len() >= SSTABLE_READER_CACHE_LIMIT {
+            cache.clear();
+        }
+        Ok(Arc::clone(cache.entry(file_id).or_insert(opened)))
+    }
+}
+
+impl std::fmt::Debug for SSTableReaderCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let open_readers = self.readers.lock().map(|cache| cache.len()).unwrap_or(0);
+        f.debug_struct("SSTableReaderCache")
+            .field("open_readers", &open_readers)
+            .finish()
+    }
 }
 
 /// チェックポイント実行結果。
@@ -389,6 +454,8 @@ pub struct LsmKV {
     pub levels: RwLock<Vec<Vec<SSTableMeta>>>,
     /// SSTable データブロックのバッファプール。
     pub buffer_pool: BufferPool,
+    /// 開いたままにする SSTable リーダー（file_id -> reader）。
+    sstable_readers: SSTableReaderCache,
     /// メトリクス（Atomic カウンタ）。
     pub metrics: Arc<LsmMetrics>,
     /// タイムスタンプオラクル。
@@ -405,6 +472,21 @@ pub struct LsmKV {
     pub wal_used_bytes: AtomicU64,
     /// 最終チェックポイント時刻（epoch ms）。
     pub last_checkpoint_ms: AtomicU64,
+    /// 収束先の `.alopex` コンテナ（対象外なら `None`）。
+    container_path: Option<PathBuf>,
+    /// 直近の収束以降にコミットがあったか。
+    dirty: AtomicBool,
+    /// コンテナが現在の状態を完全に含んでいるか。
+    container_current: AtomicBool,
+    /// `close()` 済みか（多重 close と Drop 時の二重収束を防ぐ）。
+    closed: AtomicBool,
+    /// データディレクトリの排他ロック（issue #181）。
+    ///
+    /// **必ず最後のフィールドに置くこと。** Rust はフィールドを宣言順に破棄し、
+    /// `Drop::drop` 本体はそのすべてより前に走る。converge と `prune_sidecar` は
+    /// その本体の中で実行されるので、ここに置くことで「サイドカーを消し終えるまで
+    /// ロックが効いている」ことが型レベルで保証される（裁定 D6）。
+    _open_lock: lock::DirectoryLock,
 }
 
 impl LsmKV {
@@ -424,17 +506,39 @@ impl LsmKV {
     /// 設定付きで LsmKV を開く。
     ///
     /// 既存 WAL がある場合は WAL をリプレイして MemTable を復元する（クラッシュリカバリ）。
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AlreadyOpen`] when another handle — in this process or any
+    /// other — already holds this data directory (issue #181). The lock is taken
+    /// **before** anything else happens, in particular before the container
+    /// rehydrate path, which `remove_dir_all`s and rewrites the sidecar (裁定 D5).
     pub fn open_with_config(
         path: impl AsRef<Path>,
         config: LsmKVConfig,
     ) -> Result<(Self, RecoveryResult)> {
         let data_dir = path.as_ref().to_path_buf();
-        fs::create_dir_all(&data_dir)?;
-        let wal_path = data_dir.join("lsm.wal");
-        let sst_dir = data_dir.join("sst");
-        fs::create_dir_all(&sst_dir)?;
         let metrics = Arc::new(LsmMetrics::default());
-        let checkpoint_path = data_dir.join("checkpoint.meta");
+
+        // WASM has no container writer, so it must keep `container_path` at None
+        // exactly as `restore_from_container` used to return it there.
+        #[cfg(not(target_arch = "wasm32"))]
+        let container_path = container::container_path_for(&data_dir, &config.converge);
+        #[cfg(target_arch = "wasm32")]
+        let container_path: Option<PathBuf> = None;
+
+        // Single-process enforcement comes first: everything below this line,
+        // starting with the rehydrate, is destructive.
+        let open_lock =
+            lock::acquire(&data_dir, &lock::lock_path_for(&data_dir, &config.converge))?;
+
+        Self::restore_from_container(&data_dir, container_path.as_deref(), &config, &metrics)?;
+
+        fs::create_dir_all(&data_dir)?;
+        let wal_path = data_dir.join(container::SIDECAR_WAL_FILE);
+        let sst_dir = data_dir.join(container::SIDECAR_SST_DIR);
+        fs::create_dir_all(&sst_dir)?;
+        let checkpoint_path = data_dir.join(container::SIDECAR_CHECKPOINT_FILE);
 
         let (wal_writer, recovered, next_ts, recovery, last_checkpoint_ms) = if wal_path.exists() {
             let wal_version = detect_wal_format_version(&wal_path, &config.wal)?;
@@ -490,18 +594,27 @@ impl LsmKV {
             }
             (wal_writer, mem, next, recovery, last_checkpoint_ms)
         } else {
+            // A missing WAL does not mean a fresh database: a checkpoint may have
+            // persisted everything into SSTables already. Resuming the timestamp
+            // oracle at 1 would hand out commit timestamps below the timestamps
+            // already stored in those SSTables, which surfaces as spurious
+            // `TxnConflict`s and reads that return stale values.
+            let checkpoint = load_checkpoint_meta(&checkpoint_path)?;
+            let checkpoint_lsn = checkpoint.as_ref().map(|meta| meta.checkpoint_lsn);
+            let last_checkpoint_ms = checkpoint.as_ref().map(|meta| meta.created_at).unwrap_or(0);
+            let next = checkpoint_lsn.unwrap_or(0).saturating_add(1).max(1);
             (
-                WalWriter::create(&wal_path, config.wal.clone(), 1, 1)?,
+                WalWriter::create(&wal_path, config.wal.clone(), 1, next)?,
                 MemTable::new(),
-                1,
+                next,
                 RecoveryResult {
                     entries_recovered: 0,
-                    last_lsn: 0,
+                    last_lsn: checkpoint_lsn.unwrap_or(0),
                     warnings: Vec::new(),
                     stop_reason: None,
-                    checkpoint_lsn: None,
+                    checkpoint_lsn,
                 },
-                0,
+                last_checkpoint_ms,
             )
         };
         let wal_used_bytes = wal_writer.used_bytes();
@@ -514,6 +627,7 @@ impl LsmKV {
             immutable_memtables: RwLock::new(VecDeque::new()),
             levels: RwLock::new(levels),
             buffer_pool: BufferPool::new(config.buffer_pool),
+            sstable_readers: SSTableReaderCache::default(),
             metrics: Arc::clone(&metrics),
             ts_oracle: TimestampOracle::new(next_ts),
             txn_manager: LsmTxnManager::default(),
@@ -522,13 +636,83 @@ impl LsmKV {
             next_sstable_id: AtomicU64::new(next_sstable_id),
             wal_used_bytes: AtomicU64::new(wal_used_bytes),
             last_checkpoint_ms: AtomicU64::new(last_checkpoint_ms),
+            container_path,
+            dirty: AtomicBool::new(false),
+            container_current: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
             data_dir,
             sst_dir,
             wal_path,
             config,
+            _open_lock: open_lock,
         };
         store.refresh_memtable_size_metrics();
         Ok((store, recovery))
+    }
+
+    /// Decide between the sidecar working directory and the `.alopex` container,
+    /// rebuilding the sidecar from the container when the container is the only
+    /// authoritative copy left.
+    ///
+    /// The rule is one line (裁定 D7): **`X.alopex.d/lsm.wal` exists ⇒ the sidecar
+    /// wins**. A container is consulted only when no live sidecar is present, so
+    /// crash recovery behaves exactly as it did before this file existed.
+    ///
+    /// The caller resolves `container_path` and, crucially, takes the data
+    /// directory lock before calling this: `discard_dead_sidecar` and
+    /// `rehydrate` below destroy and rebuild the working directory, which two
+    /// concurrent openers must never do to each other (裁定 D5).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn restore_from_container(
+        data_dir: &Path,
+        container_path: Option<&Path>,
+        config: &LsmKVConfig,
+        metrics: &LsmMetrics,
+    ) -> Result<()> {
+        let Some(container_path) = container_path else {
+            return Ok(());
+        };
+        if container::sidecar_is_live(data_dir) {
+            // Two-file steady state while running: the sidecar is authoritative.
+            return Ok(());
+        }
+        if container::is_legacy_marker(container_path) {
+            // Either no container at all, or the v0.8.6 zero-byte marker. Both mean
+            // "there is nothing to restore"; fall through to the normal open path.
+            return Ok(());
+        }
+        if data_dir.exists() {
+            // A sidecar without a WAL is the debris of an interrupted prune. The
+            // container already supersedes it, so discard it before rebuilding.
+            container::discard_dead_sidecar(data_dir);
+        }
+        fs::create_dir_all(data_dir)?;
+        let outcome = container::rehydrate(container_path, data_dir, &config.wal)?;
+        metrics.add_rehydrate_bytes_read(outcome.bytes_read);
+        info!(
+            container = ?container_path,
+            tables_restored = outcome.tables_restored,
+            converged_lsn = outcome.converged_lsn,
+            bytes_read = outcome.bytes_read,
+            "Rehydrated a sidecar working directory from a single .alopex container"
+        );
+        Ok(())
+    }
+
+    /// WASM has no container writer, so nothing ever converges there.
+    #[cfg(target_arch = "wasm32")]
+    fn restore_from_container(
+        _data_dir: &Path,
+        _container_path: Option<&Path>,
+        _config: &LsmKVConfig,
+        _metrics: &LsmMetrics,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// The `.alopex` container this store converges into, if any.
+    pub fn container_path(&self) -> Option<&Path> {
+        self.container_path.as_deref()
     }
 
     fn migrate_legacy_wal(
@@ -588,10 +772,13 @@ impl LsmKV {
 
     /// MemTable をフラッシュする（手動）。
     ///
-    /// 現段階では「Active MemTable を freeze して Immutable キューへ移す」までを行う。
+    /// Active MemTable を freeze し、Immutable キューに溜まった分を SSTable として
+    /// 実際にディスクへ書き出す。WAL の truncate は行わない（それは
+    /// [`Self::checkpoint`] / [`Self::converge`] の仕事）。
     pub fn flush(&self) -> Result<()> {
         let _snapshot_writer = self.owned_snapshot_gate.acquire_writer();
-        self.flush_inner()
+        self.flush_inner()?;
+        self.persist_immutable_memtables()
     }
 
     /// Flush while the caller already owns the snapshot writer gate.
@@ -611,14 +798,15 @@ impl LsmKV {
                 .write()
                 .expect("lsm immutable_memtables lock poisoned");
             queue.push_back(imm);
-
-            while queue.len() > self.config.memtable.max_immutable_count {
-                queue.pop_front();
-            }
         }
         self.metrics.inc_memtable_flush_count();
         self.refresh_memtable_size_metrics();
-        Ok(())
+
+        // Overflowing immutable MemTables are *persisted*, never dropped. The
+        // previous `pop_front()` silently discarded unpersisted data as soon as
+        // more than `max_immutable_count` tables piled up.
+        let limit = self.config.memtable.max_immutable_count;
+        self.drain_immutables_while(move |len| len > limit)
     }
 
     /// 明示的にチェックポイントを作成する。
@@ -652,6 +840,134 @@ impl LsmKV {
             wal_bytes_reclaimed,
             duration_ms: start.elapsed().as_millis() as u64,
         })
+    }
+
+    /// 単一 `.alopex` ファイルへ収束する。
+    ///
+    /// 「安定状態」= すべての MemTable が SSTable 化され、その全量と manifest が
+    /// `.alopex` コンテナ 1 本に入り、WAL が空になった状態。収束後の `.alopex` は
+    /// 単体でコピーしても完全に復元できる（`docs-public/tech/file-format-comparison.md`
+    /// L67「安定後は `.alopex` 単体で完全状態」）。
+    ///
+    /// 収束対象外（素のディレクトリ運用や [`ConvergePolicy::Never`]）の場合は
+    /// MemTable の SSTable 化だけを行い、WAL には触れない。
+    pub fn converge(&self) -> Result<ConvergeResult> {
+        let _snapshot_writer = self.owned_snapshot_gate.acquire_writer();
+        let _guard = self.commit_lock.lock().expect("lsm commit_lock poisoned");
+        self.converge_locked()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn converge_locked(&self) -> Result<ConvergeResult> {
+        let Some(container_path) = self.container_path.as_ref() else {
+            self.flush_inner()?;
+            self.persist_immutable_memtables()?;
+            self.dirty.store(false, Ordering::Relaxed);
+            return Ok(ConvergeResult::skipped(self.ts_oracle.current_timestamp()));
+        };
+
+        if !self.dirty.load(Ordering::Relaxed) && self.container_current.load(Ordering::Relaxed) {
+            // Nothing changed since the last converge: never rewrite the file.
+            return Ok(ConvergeResult::skipped(self.ts_oracle.current_timestamp()));
+        }
+
+        // 1. Every MemTable becomes an SSTable. This is what "stable" means here.
+        self.flush_inner()?;
+        self.persist_immutable_memtables()?;
+
+        let converged_lsn = self.ts_oracle.current_timestamp();
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        // 2. Record the checkpoint before touching the container.
+        let checkpoint_path = self.data_dir.join(container::SIDECAR_CHECKPOINT_FILE);
+        save_checkpoint_meta(
+            &checkpoint_path,
+            &CheckpointMeta::new(converged_lsn, created_at),
+        )?;
+
+        // 3. Write the container atomically (tmp -> fsync -> rename -> fsync dir).
+        let tables: Vec<SSTableMeta> = self
+            .levels
+            .read()
+            .expect("lsm levels lock poisoned")
+            .iter()
+            .flatten()
+            .cloned()
+            .collect();
+        let result =
+            container::write_container(container_path, &self.sst_dir, &tables, converged_lsn)?;
+
+        // 4. Only now may the WAL be reclaimed. Truncating before the container is
+        //    durable would turn converge into a data-loss device.
+        {
+            let mut wal = self.wal.write().expect("lsm wal lock poisoned");
+            let end_offset = wal.end_offset();
+            wal.advance_start(end_offset)?;
+            self.wal_used_bytes
+                .store(wal.used_bytes(), Ordering::Relaxed);
+        }
+        self.last_checkpoint_ms.store(created_at, Ordering::Relaxed);
+        self.dirty.store(false, Ordering::Relaxed);
+        self.container_current.store(true, Ordering::Relaxed);
+        self.metrics
+            .record_converge(result.bytes_written, result.duration_ms);
+        if result.bytes_written >= CONVERGE_WARN_BYTES {
+            warn!(
+                bytes_written = result.bytes_written,
+                duration_ms = result.duration_ms,
+                container = ?container_path,
+                "Converging a large database copies every live SSTable into the container"
+            );
+        }
+        Ok(result)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn converge_locked(&self) -> Result<ConvergeResult> {
+        self.flush_inner()?;
+        self.persist_immutable_memtables()?;
+        self.dirty.store(false, Ordering::Relaxed);
+        Ok(ConvergeResult::skipped(self.ts_oracle.current_timestamp()))
+    }
+
+    /// Converge and mark the store closed. Idempotent; errors are visible.
+    ///
+    /// The sidecar is intentionally *not* pruned here (裁定 D8): live cursors and
+    /// `get_visible_at` reopen `sst/<id>.sst` on demand, so deleting the working
+    /// directory behind a usable handle would break reads. Pruning happens on drop.
+    ///
+    /// For the same reason the data-directory lock is **not** released here
+    /// (裁定 D6): this store stays writable after `close()`, so handing the
+    /// directory to another process now would recreate exactly the two-writer
+    /// corruption of issue #181. Drop the handle to release the lock.
+    pub fn close(&self) -> Result<()> {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        match self.converge() {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                self.closed.store(false, Ordering::SeqCst);
+                Err(err)
+            }
+        }
+    }
+
+    /// Whether every lock this store owns is usable (i.e. none is poisoned).
+    ///
+    /// `Drop` consults this before doing any I/O so a panic elsewhere can never be
+    /// escalated into a panic inside a destructor.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn locks_are_healthy(&self) -> bool {
+        !self.active_memtable.is_poisoned()
+            && !self.immutable_memtables.is_poisoned()
+            && !self.levels.is_poisoned()
+            && !self.wal.is_poisoned()
+            && !self.commit_lock.is_poisoned()
+            && !self.owned_snapshot_gate.state.is_poisoned()
     }
 
     /// Determine whether an auto-checkpoint should run based on size and time thresholds.
@@ -708,6 +1024,10 @@ impl LsmKV {
             buffer_pool_size_bytes: self.buffer_pool.current_size_bytes() as u64,
             compaction_bytes_written: counters.compaction_bytes_written,
             compaction_duration_ms: counters.compaction_duration_ms,
+            converge_count: counters.converge_count,
+            converge_bytes_written: counters.converge_bytes_written,
+            converge_duration_ms: counters.converge_duration_ms,
+            rehydrate_bytes_read: counters.rehydrate_bytes_read,
         }
     }
 
@@ -730,60 +1050,103 @@ impl LsmKV {
         self.sst_dir.join(format!("{file_id}.sst"))
     }
 
+    /// Return a shared, already-validated reader for `file_id`.
+    fn sstable_reader(&self, file_id: u64) -> Result<Arc<Mutex<SSTableReader>>> {
+        self.sstable_readers
+            .get_or_open(file_id, &self.sstable_path_for(file_id))
+    }
+
     fn persist_immutable_memtables(&self) -> Result<()> {
-        let immutables = {
-            let mut guard = self
+        self.drain_immutables_while(|len| len > 0)
+    }
+
+    /// Persist immutable MemTables from the front of the queue while `keep_going`
+    /// holds for the current queue length.
+    ///
+    /// Each table is written to an SSTable **before** it leaves the queue, so a
+    /// failed write can never silently drop unpersisted data: the table stays
+    /// readable in memory and the error propagates to the caller. During the short
+    /// window where a table is both in the queue and in `levels`, reads simply see
+    /// the same entries twice and pick the newest, which is already how the merge
+    /// path resolves duplicates.
+    fn drain_immutables_while(&self, keep_going: impl Fn(usize) -> bool) -> Result<()> {
+        loop {
+            let front = {
+                let queue = self
+                    .immutable_memtables
+                    .read()
+                    .expect("lsm immutable_memtables lock poisoned");
+                if !keep_going(queue.len()) {
+                    break;
+                }
+                queue.front().cloned()
+            };
+            let Some(front) = front else {
+                break;
+            };
+
+            self.persist_immutable_table(&front)?;
+
+            let mut queue = self
                 .immutable_memtables
                 .write()
                 .expect("lsm immutable_memtables lock poisoned");
-            std::mem::take(&mut *guard)
-        };
+            match queue.front() {
+                Some(head) if Arc::ptr_eq(head, &front) => {
+                    queue.pop_front();
+                }
+                // Another writer already retired this table. Stop instead of
+                // risking an unbounded loop; anything left is still readable.
+                _ => break,
+            }
+        }
+        self.refresh_memtable_size_metrics();
+        Ok(())
+    }
 
-        if immutables.is_empty() {
+    /// Write one immutable MemTable to an SSTable and register it at level 0.
+    fn persist_immutable_table(&self, mem: &ImmutableMemTable) -> Result<()> {
+        let entries = mem.scan_prefix(b"", u64::MAX);
+        if entries.is_empty() {
             return Ok(());
         }
 
-        let mut levels = self.levels.write().expect("lsm levels lock poisoned");
-        for mem in immutables {
-            let entries = mem.scan_prefix(b"", u64::MAX);
-            if entries.is_empty() {
-                continue;
-            }
-            let file_id = self.next_sstable_id.fetch_add(1, Ordering::Relaxed);
-            let path = self.sstable_path_for(file_id);
-            let mut writer = SSTableWriter::create(&path, self.config.sstable)?;
+        let file_id = self.next_sstable_id.fetch_add(1, Ordering::Relaxed);
+        let path = self.sstable_path_for(file_id);
+        let mut writer = SSTableWriter::create(&path, self.config.sstable)?;
 
-            let mut first_key: Option<Key> = None;
-            let mut last_key: Option<Key> = None;
-            for (key, entry) in entries {
-                if first_key.is_none() {
-                    first_key = Some(key.clone());
-                }
-                last_key = Some(key.clone());
-                writer.append(SSTableEntry {
-                    key,
-                    value: entry.value,
-                    timestamp: entry.timestamp,
-                    sequence: entry.sequence,
-                })?;
+        let mut first_key: Option<Key> = None;
+        let mut last_key: Option<Key> = None;
+        for (key, entry) in entries {
+            if first_key.is_none() {
+                first_key = Some(key.clone());
             }
-            writer.finish()?;
-            let size_bytes = fs::metadata(&path)?.len();
-
-            let key_range = KeyRange {
-                first_key: first_key.unwrap(),
-                last_key: last_key.unwrap(),
-            };
-            let meta = SSTableMeta {
-                id: file_id,
-                level: 0,
-                size_bytes,
-                key_range,
-            };
-            levels[0].push(meta);
+            last_key = Some(key.clone());
+            writer.append(SSTableEntry {
+                key,
+                value: entry.value,
+                timestamp: entry.timestamp,
+                sequence: entry.sequence,
+            })?;
         }
+        writer.finish()?;
+        let size_bytes = fs::metadata(&path)?.len();
 
-        self.refresh_memtable_size_metrics();
+        let meta = SSTableMeta {
+            id: file_id,
+            level: 0,
+            size_bytes,
+            key_range: KeyRange {
+                first_key: first_key.expect("non-empty table has a first key"),
+                last_key: last_key.expect("non-empty table has a last key"),
+            },
+        };
+        self.levels
+            .write()
+            .expect("lsm levels lock poisoned")
+            .get_mut(0)
+            .expect("lsm always has at least one level")
+            .push(meta);
         Ok(())
     }
 
@@ -832,8 +1195,15 @@ impl LsmKV {
         let mut best: Option<crate::lsm::memtable::MemTableEntry> = None;
         for level in levels.iter() {
             for meta in level.iter() {
-                let path = self.sstable_path_for(meta.id);
-                let Ok(mut reader) = SSTableReader::open(&path) else {
+                // Skip tables that provably cannot hold the key before paying for
+                // an open, which validates the whole file.
+                if !meta.key_range.contains(key) {
+                    continue;
+                }
+                let Ok(reader) = self.sstable_reader(meta.id) else {
+                    continue;
+                };
+                let Ok(mut reader) = reader.lock() else {
                     continue;
                 };
                 let Ok(found) = reader.get_with_buffer_pool(
@@ -898,8 +1268,11 @@ impl LsmKV {
         let mut best: Option<MemTableEntry> = None;
         for level in levels.iter() {
             for meta in level {
-                let path = self.sstable_path_for(meta.id);
-                let mut reader = SSTableReader::open(&path)?;
+                if !meta.key_range.contains(key) {
+                    continue;
+                }
+                let reader = self.sstable_reader(meta.id)?;
+                let mut reader = reader.lock().expect("lsm sstable reader lock poisoned");
                 let Some(found) = reader.get_with_buffer_pool(
                     &self.buffer_pool,
                     &self.metrics,
@@ -1079,6 +1452,10 @@ impl LsmKV {
             self.wal_used_bytes
                 .store(wal.used_bytes(), Ordering::Relaxed);
         }
+        // The durable WAL record is what makes this commit real, so the container
+        // is stale from this point on.
+        self.dirty.store(true, Ordering::Relaxed);
+        self.container_current.store(false, Ordering::Relaxed);
 
         {
             let active = self
@@ -1159,8 +1536,10 @@ impl LsmKV {
         let levels = self.levels.read().expect("lsm levels lock poisoned");
         for level in levels.iter() {
             for meta in level.iter() {
-                let path = self.sstable_path_for(meta.id);
-                let Ok(mut reader) = SSTableReader::open(&path) else {
+                let Ok(reader) = self.sstable_reader(meta.id) else {
+                    continue;
+                };
+                let Ok(mut reader) = reader.lock() else {
                     continue;
                 };
                 let Ok(entries) = reader.scan_prefix_with_buffer_pool(
@@ -1278,6 +1657,53 @@ impl LsmKV {
         }
 
         out
+    }
+}
+
+/// Best-effort convergence when a handle is released without an explicit close.
+///
+/// The issue this fixes (#178) reproduces through `open` → commit → normal exit,
+/// which only ever passes through `Drop`, so converging here is mandatory. A
+/// destructor cannot report errors, so [`LsmKV::close`] stays the error-visible
+/// path and everything here is defensive:
+///
+/// * stores with no container (plain directories, `alopex-server`) return immediately,
+///   leaving their on-disk layout byte-identical to previous releases;
+/// * a panicking thread or any poisoned lock skips the work rather than risking a
+///   panic inside a destructor;
+/// * failures are logged, never propagated — the sidecar remains authoritative, so
+///   a failed converge costs nothing but a slower next open.
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for LsmKV {
+    fn drop(&mut self) {
+        if self.container_path.is_none() {
+            return;
+        }
+        if std::thread::panicking() || !self.locks_are_healthy() {
+            warn!(
+                data_dir = ?self.data_dir,
+                "Skipping converge on drop: the store is unwinding or a lock is poisoned"
+            );
+            return;
+        }
+        if let Err(err) = self.converge() {
+            warn!(
+                error = %err,
+                data_dir = ?self.data_dir,
+                "Converge on drop failed; the sidecar working directory stays authoritative"
+            );
+            return;
+        }
+        if !self.config.prune_sidecar_on_drop || !self.container_current.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Err(err) = container::prune_sidecar(&self.data_dir) {
+            warn!(
+                error = %err,
+                data_dir = ?self.data_dir,
+                "Failed to prune the sidecar working directory after converge"
+            );
+        }
     }
 }
 
@@ -1643,6 +2069,7 @@ mod kv_store {
             immutable_memtables: RwLock::new(VecDeque::new()),
             levels: RwLock::new(levels),
             buffer_pool: BufferPool::new(BufferPoolConfig::default()),
+            sstable_readers: SSTableReaderCache::default(),
             metrics: Arc::new(LsmMetrics::default()),
             ts_oracle: TimestampOracle::new(1),
             txn_manager: LsmTxnManager::default(),
@@ -1651,6 +2078,13 @@ mod kv_store {
             next_sstable_id: AtomicU64::new(1),
             wal_used_bytes: AtomicU64::new(0),
             last_checkpoint_ms: AtomicU64::new(0),
+            container_path: None,
+            dirty: AtomicBool::new(false),
+            container_current: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            // Hand-built stores are single-instance test fixtures that never
+            // race anybody, so they skip the lock entirely.
+            _open_lock: lock::DirectoryLock::disabled(),
         }
     }
 
@@ -1674,6 +2108,7 @@ mod kv_store {
             immutable_memtables: RwLock::new(VecDeque::new()),
             levels: RwLock::new(levels),
             buffer_pool: BufferPool::new(BufferPoolConfig::default()),
+            sstable_readers: SSTableReaderCache::default(),
             metrics: Arc::new(LsmMetrics::default()),
             ts_oracle: TimestampOracle::new(1),
             txn_manager: LsmTxnManager::default(),
@@ -1682,6 +2117,13 @@ mod kv_store {
             next_sstable_id: AtomicU64::new(1),
             wal_used_bytes: AtomicU64::new(0),
             last_checkpoint_ms: AtomicU64::new(0),
+            container_path: None,
+            dirty: AtomicBool::new(false),
+            container_current: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            // Hand-built stores are single-instance test fixtures that never
+            // race anybody, so they skip the lock entirely.
+            _open_lock: lock::DirectoryLock::disabled(),
         }
     }
 
@@ -1811,6 +2253,7 @@ mod txn {
             immutable_memtables: RwLock::new(VecDeque::new()),
             levels: RwLock::new(levels),
             buffer_pool: BufferPool::new(BufferPoolConfig::default()),
+            sstable_readers: SSTableReaderCache::default(),
             metrics: Arc::new(LsmMetrics::default()),
             ts_oracle: TimestampOracle::new(1),
             txn_manager: LsmTxnManager::default(),
@@ -1819,6 +2262,13 @@ mod txn {
             next_sstable_id: AtomicU64::new(1),
             wal_used_bytes: AtomicU64::new(0),
             last_checkpoint_ms: AtomicU64::new(0),
+            container_path: None,
+            dirty: AtomicBool::new(false),
+            container_current: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            // Hand-built stores are single-instance test fixtures that never
+            // race anybody, so they skip the lock entirely.
+            _open_lock: lock::DirectoryLock::disabled(),
         }
     }
 
@@ -1916,6 +2366,96 @@ mod methods {
 
         let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
         assert_eq!(ro.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
+    }
+
+    /// `flush()` must actually produce an SSTable, not merely freeze the MemTable.
+    /// Its documentation always claimed it did, but before v0.8.8 only
+    /// `checkpoint()` ever wrote one, which is why embedded databases kept every
+    /// row in the WAL and `sst/` stayed empty.
+    #[test]
+    fn flush_writes_an_sstable_to_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (store, _recovery) = LsmKV::open_with_config(dir.path(), test_config()).expect("open");
+
+        let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+        tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
+        tx.commit_self().unwrap();
+        store.flush().unwrap();
+
+        let sst_files: Vec<_> = fs::read_dir(dir.path().join("sst"))
+            .expect("read sst dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("sst"))
+            .collect();
+        assert_eq!(sst_files.len(), 1, "flush must persist one SSTable");
+        assert_eq!(store.metrics().sstable_count_per_level[0], 1);
+    }
+
+    /// Overflowing the immutable-MemTable queue used to drop the oldest table with
+    /// `pop_front()`, silently losing every unpersisted row in it. With converge
+    /// truncating the WAL at every close, that would have become deterministic data
+    /// loss, so overflow now persists before it pops.
+    #[test]
+    fn immutable_queue_overflow_persists_instead_of_dropping_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = LsmKVConfig {
+            memtable: MemTableConfig {
+                // Every commit freezes the active table, so the queue overflows
+                // without any explicit flush draining it first.
+                flush_threshold: 1,
+                max_immutable_count: 2,
+            },
+            ..test_config()
+        };
+        let (store, _recovery) = LsmKV::open_with_config(dir.path(), config).expect("open");
+
+        // Six freezes against a queue capped at two: four tables must overflow.
+        for index in 0..6u32 {
+            let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
+            tx.put(
+                format!("k{index}").into_bytes(),
+                format!("v{index}").into_bytes(),
+            )
+            .unwrap();
+            tx.commit_self().unwrap();
+        }
+        assert!(
+            store.immutable_memtables.read().unwrap().len() <= 2,
+            "the queue must stay capped"
+        );
+        store.checkpoint().unwrap();
+
+        let mut ro = store.begin(TxnMode::ReadOnly).unwrap();
+        for index in 0..6u32 {
+            assert_eq!(
+                ro.get(&format!("k{index}").into_bytes()).unwrap(),
+                Some(format!("v{index}").into_bytes()),
+                "row k{index} was dropped from the immutable queue"
+            );
+        }
+    }
+
+    /// A surviving `checkpoint.meta` must keep the MVCC clock ahead of the
+    /// timestamps already written into SSTables. Resuming at 1 used to hand out
+    /// commit timestamps below them, producing spurious conflicts and stale reads.
+    #[test]
+    fn missing_wal_resumes_the_clock_from_checkpoint_meta() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path();
+        fs::create_dir_all(data_dir.join("sst")).unwrap();
+        save_checkpoint_meta(
+            &data_dir.join("checkpoint.meta"),
+            &CheckpointMeta::new(5000, 1),
+        )
+        .unwrap();
+
+        let (store, recovery) = LsmKV::open_with_config(data_dir, test_config()).expect("open");
+        assert_eq!(recovery.checkpoint_lsn, Some(5000));
+        assert!(
+            store.ts_oracle.current_timestamp() >= 5000,
+            "timestamp oracle rewound to {}",
+            store.ts_oracle.current_timestamp()
+        );
     }
 }
 
@@ -2032,6 +2572,11 @@ mod recovery_tests {
         tx.put(b"after".to_vec(), b"2".to_vec()).unwrap();
         tx.commit_self().unwrap();
 
+        // Shadowing the binding below would keep the first handle alive to the
+        // end of the scope, which is not a reopen at all — it is two live
+        // writers on one directory (issue #181). Release it first.
+        drop(store);
+
         let (store, recovery) = LsmKV::open_with_config(dir.path(), test_config()).expect("reopen");
         assert!(recovery.checkpoint_lsn.is_some());
         assert_eq!(recovery.entries_recovered, 1);
@@ -2047,6 +2592,10 @@ mod recovery_tests {
         let mut tx = store.begin(TxnMode::ReadWrite).unwrap();
         tx.put(b"k".to_vec(), b"v".to_vec()).unwrap();
         tx.commit_self().unwrap();
+
+        // See `recovery_uses_checkpoint_lsn_when_present`: shadowing does not
+        // drop, so the first handle has to be released explicitly.
+        drop(store);
 
         let (store, recovery) = LsmKV::open_with_config(dir.path(), test_config()).expect("reopen");
         assert!(recovery.checkpoint_lsn.is_none());

@@ -8,6 +8,14 @@ use std::path::PathBuf;
 use crate::kv::s3::S3Config;
 
 /// Storage mode selection for the KV store.
+///
+/// The `Disk` variant is much larger than the others because it carries a whole
+/// [`LsmKVConfig`] by value. That is deliberate: a `StorageMode` is built once per
+/// database open, moved straight into [`StorageFactory::create`], and dropped —
+/// it is never stored in a collection nor passed along a hot path, so its size
+/// costs nothing. Boxing the config to satisfy `large_enum_variant` would churn
+/// every construction site across five crates for no runtime benefit.
+#[allow(clippy::large_enum_variant)]
 pub enum StorageMode {
     /// Disk-backed storage using LSM-Tree (file-mode).
     Disk {

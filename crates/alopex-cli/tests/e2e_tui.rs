@@ -1519,6 +1519,14 @@ fn e2e_admin_remote_resources_and_actions() -> Result<()> {
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn e2e_admin_remote_lifecycle_actions() -> Result<()> {
+    // This E2E launches a dev-profile server, and backup/restore scan the
+    // default 512 MiB WAL. Its PTY also competes with the other tests in this
+    // binary. Healthy loaded Linux builders have exceeded the former 15- and
+    // 20-second allowances, so retain a finite one-minute bound (matching the
+    // maintenance retry budget above) without treating normal I/O as a
+    // deadlock. Terminal operation states still fail immediately below.
+    const LIFECYCLE_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
+
     let _guard = server_lock();
     let profile = server_profile()?;
     let mut harness = new_harness()?;
@@ -1532,20 +1540,20 @@ fn e2e_admin_remote_lifecycle_actions() -> Result<()> {
     wait_for_contains(&mut harness, "Focus: Detail", Duration::from_secs(5))?;
 
     execute_action(&mut harness, "Archive", 10)?;
-    wait_for_contains(&mut harness, "Archived", Duration::from_secs(15))?;
+    wait_for_contains(&mut harness, "Archived", LIFECYCLE_OPERATION_TIMEOUT)?;
 
     execute_action(&mut harness, "Export", 10)?;
-    wait_for_contains(&mut harness, "Exported", Duration::from_secs(15))?;
+    wait_for_contains(&mut harness, "Exported", LIFECYCLE_OPERATION_TIMEOUT)?;
 
     ensure_action_selected(&mut harness, "Backup", 10)?;
     ensure_guided_fields(&mut harness)?;
     ensure_active_field(&mut harness, "Handle", 6)?;
     edit_guided_field(&mut harness, "")?;
     execute_admin_action(&mut harness)?;
-    wait_for_contains(&mut harness, "Handle", Duration::from_secs(15))?;
+    wait_for_contains(&mut harness, "Handle", LIFECYCLE_OPERATION_TIMEOUT)?;
     let backup_handle =
         wait_for_value(&mut harness, Duration::from_secs(5), find_handle_in_status)?;
-    wait_for_backup_completion(&mut harness, &backup_handle, Duration::from_secs(20))?;
+    wait_for_backup_completion(&mut harness, &backup_handle, LIFECYCLE_OPERATION_TIMEOUT)?;
     let backup_location =
         read_latest_marker(&server_data_dir()?.join(".lifecycle").join("backup"))?
             .display()
@@ -1558,9 +1566,9 @@ fn e2e_admin_remote_lifecycle_actions() -> Result<()> {
     ensure_active_field(&mut harness, "Source", 6)?;
     edit_guided_field(&mut harness, &backup_location)?;
     execute_admin_action(&mut harness)?;
-    wait_for_contains(&mut harness, "Handle", Duration::from_secs(15))?;
+    wait_for_contains(&mut harness, "Handle", LIFECYCLE_OPERATION_TIMEOUT)?;
     let handle = wait_for_value(&mut harness, Duration::from_secs(5), find_handle_in_status)?;
-    wait_for_restore_completion(&mut harness, &handle, Duration::from_secs(20))?;
+    wait_for_restore_completion(&mut harness, &handle, LIFECYCLE_OPERATION_TIMEOUT)?;
 
     harness.send_text("q")?;
     Ok(())

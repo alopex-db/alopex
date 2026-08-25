@@ -150,6 +150,60 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Opening one data directory from two places is now rejected instead of
+  silently corrupting it (issue #181). Two processes sharing a `data_dir` each
+  kept their own WAL ring offset and their own SSTable id counter, so they
+  overwrote each other's WAL bytes and each other's `sst/<id>.sst`, and each
+  one's drop-time prune could delete the other's live sidecar — all with no
+  error or warning. `LsmKV::open_with_config` now takes an OS-level exclusive
+  lock (`flock` on Unix, `LockFileEx` on Windows) before it touches anything,
+  including before the container rehydrate path, and fails with
+  `Error::AlreadyOpen` — rendered with the stable string `already open by
+  another process` — when someone already holds it. The lock is released only
+  when the handle is dropped (not by `close()`, which leaves the store
+  writable), and because it is an OS lock the kernel releases it on any
+  abnormal exit, so a `SIGKILL`ed process leaves nothing stale behind. The lock
+  file is `X.alopex.lock` beside the container for the sidecar shape and
+  `<data_dir>/.alopex.lock` for a plain directory; it is excluded from backup,
+  restore, and S3 sync. To share one database across processes, run
+  `alopex-server` and connect over HTTP/gRPC. In-memory databases are
+  unaffected (docs/single-process-lock.md).
+  **Breaking**: pointing `alopex --data-dir` at a running server's `data_dir`,
+  or opening one embedded database twice, now returns an error.
+- A disk database opened through an `X.alopex` path now actually converges into
+  that single file (issue #178). Previously all data stayed in the
+  `X.alopex.d/` sidecar directory and `X.alopex` was either absent or a
+  zero-byte existence marker, so copying `X.alopex` on its own restored
+  nothing — the documented "安定後は `.alopex` 単体で完全状態" contract was
+  unmet. `flush()`, the new `converge()`/`close()`, and dropping the handle now
+  write every live SSTable plus an `LsmManifest` into the existing unified
+  container format (`ALPX` header, per-section CRC32, `XPLA` footer carrying
+  the converged LSN) via a temp file and atomic rename, and dropping the handle
+  additionally prunes the sidecar. Opening a path whose sidecar WAL is absent
+  rehydrates the working directory from the container. Copying only `X.alopex`
+  to another directory and reopening it now restores every committed row,
+  including tombstones and the MVCC clock (docs/single-file-convergence.md).
+- `Database::persist_to_disk()` no longer leaves a zero-byte `.alopex` marker
+  next to the data directory; it writes a real, self-contained container at the
+  given path. Its staging directory moved from `X.alopex.tmp` to
+  `X.alopex.d.tmp` because the container writer already claims the former for
+  its own atomic-rename staging file.
+- `LsmKV` no longer silently discards unpersisted immutable MemTables. Once
+  more than `memtable.max_immutable_count` tables piled up, the oldest was
+  dropped with `pop_front()` and its rows were lost; each table is now written
+  to an SSTable *before* it leaves the queue, and a failed write propagates
+  instead of losing data.
+- A point lookup no longer costs the total size of every live SSTable.
+  `SSTableReader::open` re-reads and CRC32s the whole file, and `get`/conflict
+  detection opened one per SSTable *per key*, so a database with real SSTables
+  spent all its time re-validating them. Lookups now skip SSTables whose key
+  range cannot contain the key and share cached, already-validated readers
+  (bounded at 256 open files). This was latent until `flush()` began producing
+  SSTables in this release.
+- Opening a data directory whose WAL is missing but whose `checkpoint.meta`
+  survives no longer rewinds the timestamp oracle to 1. Committing after such
+  an open used to issue commit timestamps below those already stored in
+  SSTables, surfacing as spurious `TxnConflict`s and stale reads.
 - Rust consumers of the published Embedded/SQL crates no longer require the
   Nim parser shared library at runtime: target-specific static parser archives
   are bundled into `alopex-sql`, while shared libraries remain Python-wheel
@@ -181,6 +235,20 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- `Database::flush()` now costs more than it used to: it freezes the MemTable,
+  writes it to an SSTable, and converges the database into its single
+  `.alopex` file. Previously it only froze the active MemTable and wrote
+  nothing to disk, contradicting its own documentation. This propagates to
+  Python's `db.flush()`. `Database::converge()`, `Database::close()`, and
+  `Database::container_path()` are new; `db.close()` on the Python surface now
+  reports convergence failures instead of leaving them to the best-effort drop
+  path.
+- Convergence is scoped by `LsmKVConfig::converge`, whose default
+  `ConvergePolicy::SidecarOnly` only applies to `X.alopex.d` sidecar
+  directories. Plain-directory disk databases — including every `alopex-server`
+  deployment — keep the classic multi-file layout byte for byte, and no
+  migration or data conversion is required for existing 0.8.x data
+  (docs/single-file-convergence.md).
 - The Nim parser wire contract is `0.14.0`. It widens `FromItem` for LATERAL,
   FROM-clause table functions, and relation alias column lists: `Table` gains
   `columns` (always written, empty when absent), `Derived` gains `lateral`,
