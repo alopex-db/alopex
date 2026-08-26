@@ -378,7 +378,10 @@ fn lifecycle_action_for(command: &LifecycleCommand) -> AdminAction {
 
 fn matches_kv_action(action: AdminAction, command: &KvCommand) -> bool {
     match command {
-        KvCommand::Get { .. } | KvCommand::List { .. } | KvCommand::Txn(_) => {
+        KvCommand::Get { .. }
+        | KvCommand::List { .. }
+        | KvCommand::Search { .. }
+        | KvCommand::Txn(_) => {
             matches!(action, AdminAction::Read)
         }
         KvCommand::Put { .. } => matches!(action, AdminAction::Create | AdminAction::Update),
@@ -423,6 +426,7 @@ fn kv_columns_for(cmd: &KvCommand) -> Vec<crate::models::Column> {
     match cmd {
         KvCommand::Put { .. } | KvCommand::Delete { .. } => kv::kv_status_columns(),
         KvCommand::Get { .. } | KvCommand::List { .. } => kv::kv_columns(),
+        KvCommand::Search { .. } => kv::kv_search_columns(),
         KvCommand::Txn(_) => kv::kv_columns(),
     }
 }

@@ -2,6 +2,7 @@
 
 use crate::async_runtime::{BoxFuture, BoxStream, MaybeSend};
 use crate::error::Result;
+use crate::kv::{KeySearchCancellation, KeySearchPage, KeySearchRequest};
 use crate::types::{Key, Value};
 
 /// Async version of [`KVStore`].
@@ -28,6 +29,19 @@ pub trait AsyncKVTransaction<'txn>: MaybeSend {
 
     /// Scans all key-value pairs whose keys start with the given prefix.
     fn async_scan_prefix<'a>(&'a self, prefix: &'a [u8]) -> BoxStream<'a, Result<(Key, Value)>>;
+
+    /// Searches opaque key bytes with bounded pagination.
+    fn async_search_keys<'a>(
+        &'a self,
+        request: KeySearchRequest,
+    ) -> BoxFuture<'a, Result<KeySearchPage>>;
+
+    /// Searches key bytes while observing a cooperative cancellation token.
+    fn async_search_keys_with_cancellation<'a>(
+        &'a self,
+        request: KeySearchRequest,
+        cancellation: KeySearchCancellation,
+    ) -> BoxFuture<'a, Result<KeySearchPage>>;
 
     /// Commits the transaction, applying all buffered writes.
     fn async_commit(self) -> BoxFuture<'txn, Result<()>>;

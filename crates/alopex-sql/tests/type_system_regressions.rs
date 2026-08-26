@@ -49,6 +49,15 @@ impl SqlHarness {
             })
             .expect("query result")
     }
+
+    fn plan_sql(&self, sql: &str) -> alopex_sql::planner::LogicalPlan {
+        let statement = Parser::parse_sql(&AlopexDialect, sql)
+            .expect("parse SQL")
+            .pop()
+            .expect("one statement");
+        let catalog = self.catalog.read().expect("catalog read");
+        Planner::new(&*catalog).plan(&statement).expect("plan SQL")
+    }
 }
 
 fn parsed_column_type(sql: &str) -> DataType {
@@ -116,6 +125,44 @@ fn double_integer_arithmetic_promotes_and_preserves_existing_numeric_queries() {
             .rows
             .is_empty()
     );
+}
+
+#[test]
+fn bitwise_operators_preserve_integer_width_and_signed_shift() {
+    let mut harness = SqlHarness::new();
+    assert_eq!(
+        harness
+            .query_sql(
+                "SELECT 5 & 3, 5 | 2, 5 ^ 1, ~5, 1 << 3, -8 >> 2, \
+                 CAST(1 AS BIGINT) << 40",
+            )
+            .rows,
+        vec![vec![
+            SqlValue::Integer(1),
+            SqlValue::Integer(7),
+            SqlValue::Integer(4),
+            SqlValue::Integer(-6),
+            SqlValue::Integer(8),
+            SqlValue::Integer(-2),
+            SqlValue::BigInt(1_099_511_627_776),
+        ]]
+    );
+
+    use alopex_sql::ast::expr::Literal;
+    use alopex_sql::planner::{LogicalPlan, Projection, TypedExprKind};
+    let plan = harness.plan_sql("SELECT 1 << 3");
+    let Projection::Columns(columns) = (match plan {
+        LogicalPlan::Scan { projection, .. } | LogicalPlan::Project { projection, .. } => {
+            projection
+        }
+        _ => panic!("expected projected constant"),
+    }) else {
+        panic!("expected projected columns")
+    };
+    assert!(matches!(
+        &columns[0].expr.kind,
+        TypedExprKind::Literal(Literal::Number(value)) if value == "8"
+    ));
 }
 
 #[test]

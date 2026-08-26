@@ -4,8 +4,7 @@ Three related FROM-clause features:
 
 - `LATERAL (subquery)` — a derived table that may reference the FROM items to
   its left, re-evaluated once per left row.
-- FROM-clause table functions — `UNNEST(v)` today, with `GENERATE_SERIES`
-  reserved for issue #157.
+- FROM-clause table functions — v0.8.9 supports `UNNEST(v)`.
 - `AS t(c1, c2, …)` — a relation alias column-name list, now accepted for base
   tables, CTE references, derived tables, and table functions alike.
 
@@ -63,13 +62,11 @@ named `lateral` keeps working.
   resolution error. Passing the scope through unconditionally would silently
   turn a typo into a correlated reference. This is standard SQL and
   PostgreSQL.
-- **D5 — The table-function registry is closed.** `UNNEST` and
-  `GENERATE_SERIES` are the only names the FROM clause resolves.
-  `GENERATE_SERIES` is a reserved hook: planning rejects it with a message
-  naming issue #157, which is distinguishable from the unknown-function error
-  (`ALOPEX-C007`, `table function 'x' does not exist`). Alopex does not follow
-  PostgreSQL in letting an arbitrary scalar function appear in FROM; the
-  surface stays closed.
+- **D5 — The table-function registry is closed.** v0.8.9 resolves `UNNEST` as
+  the only FROM-clause table function. Any name outside the release registry is `ALOPEX-C007`
+  (`table function 'x' does not exist`). Alopex does not follow PostgreSQL in
+  letting an arbitrary scalar function appear in FROM; the surface stays
+  closed.
 - **D6 — `UNNEST` operates on `VECTOR`.** Exactly one argument, of type
   `VECTOR(n)` or `NULL`; anything else is `ALOPEX-T001` with expected type
   `VECTOR`. Output is one `FLOAT` column, one row per element in element
@@ -88,6 +85,10 @@ named `lateral` keeps working.
   count so that every relation kind behaves like the derived-table rule that
   already shipped. Renaming affects only the relation the query sees; the
   physical scan keeps the stored column names.
+- **D9 — Integer series are inclusive and bounded.** A positive or negative
+  non-zero step emits both endpoints when reachable. A direction mismatch or
+  `NULL` argument emits no rows. Zero steps, arithmetic overflow, and output
+  beyond 100,000 rows are errors.
 - **D9 — Correlated binding reuses the correlated-subquery convention.** At
   execution the outer row of a lateral item is `left join row ++ enclosing
   outer row`. At planning the left scope is rebased to the left row's own base
@@ -175,7 +176,6 @@ named `lateral` keeps working.
 | Alias column list width mismatch | `ALOPEX-T012` |
 | Alias column list repeats a name | `ALOPEX-T007` |
 | `RIGHT`/`FULL JOIN LATERAL` | `ALOPEX-T015` |
-| `GENERATE_SERIES` in FROM | `ALOPEX-F001` (names issue #157) |
 | Outer reference from a non-LATERAL derived table | `ALOPEX-C001`/`ALOPEX-C003` |
 
 ## Engine comparison

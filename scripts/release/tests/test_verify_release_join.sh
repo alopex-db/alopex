@@ -6,8 +6,9 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 RUNNER="${REPO_ROOT}/scripts/release/verify-release/run.sh"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/alopex-release-join.XXXXXX")"
 trap 'rm -rf "${TEMP_ROOT}"' EXIT
+VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
 
-python3 - "${TEMP_ROOT}/candidate.json" <<'PY'
+python3 - "${TEMP_ROOT}/candidate.json" "${VERSION}" <<'PY'
 import json
 import sys
 
@@ -19,10 +20,11 @@ targets = [
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
 ]
+version = sys.argv[2]
 candidate = {
-    "version": "0.8.8",
+    "version": version,
     "reviewed_main_sha": sha,
-    "tag": {"name": "v0.8.8", "peeled_sha": sha},
+    "tag": {"name": f"v{version}", "peeled_sha": sha},
     "core": {
         "status": "success",
         "published": True,
@@ -43,7 +45,7 @@ candidate = {
         "distributions": [{"name": "alopex", "status": "published", "sha256": digest}],
     },
     "parser": {
-        "contract": "0.14.0",
+        "contract": "0.15.0",
         "manifest_sha256": digest,
         "envelope_sha256": digest,
         "assets": [

@@ -35,6 +35,7 @@ type
     tkLParen, tkRParen, tkLBracket, tkRBracket
     tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe
     tkPlus, tkMinus, tkSlash, tkPercent, tkPipePipe
+    tkBitAnd, tkBitOr, tkBitXor, tkBitNot, tkShiftLeft, tkShiftRight
     tkQuestion
     # Special
     tkEof
@@ -251,13 +252,25 @@ proc nextToken*(lex: var Lexer): Token =
     if lex.peek() == '|':
       discard lex.advance()
       return lex.makeToken(tkPipePipe, "||", startLine, startCol)
-    return lex.makeToken(tkIdent, "|", startLine, startCol)
+    return lex.makeToken(tkBitOr, "|", startLine, startCol)
+  of '&':
+    discard lex.advance()
+    return lex.makeToken(tkBitAnd, "&", startLine, startCol)
+  of '^':
+    discard lex.advance()
+    return lex.makeToken(tkBitXor, "^", startLine, startCol)
+  of '~':
+    discard lex.advance()
+    return lex.makeToken(tkBitNot, "~", startLine, startCol)
   of '=':
     discard lex.advance()
     return lex.makeToken(tkEq, "=", startLine, startCol)
   of '<':
     discard lex.advance()
-    if lex.peek() == '=':
+    if lex.peek() == '<':
+      discard lex.advance()
+      return lex.makeToken(tkShiftLeft, "<<", startLine, startCol)
+    elif lex.peek() == '=':
       discard lex.advance()
       return lex.makeToken(tkLe, "<=", startLine, startCol)
     elif lex.peek() == '>':
@@ -266,7 +279,10 @@ proc nextToken*(lex: var Lexer): Token =
     return lex.makeToken(tkLt, "<", startLine, startCol)
   of '>':
     discard lex.advance()
-    if lex.peek() == '=':
+    if lex.peek() == '>':
+      discard lex.advance()
+      return lex.makeToken(tkShiftRight, ">>", startLine, startCol)
+    elif lex.peek() == '=':
       discard lex.advance()
       return lex.makeToken(tkGe, ">=", startLine, startCol)
     return lex.makeToken(tkGt, ">", startLine, startCol)

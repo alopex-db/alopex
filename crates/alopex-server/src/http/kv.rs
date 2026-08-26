@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use alopex_core::kv::KVTransaction;
+use alopex_core::kv::{KeySearchPage, KeySearchRequest};
 use alopex_core::types::TxnMode;
 use alopex_core::KVStore;
 use axum::extract::Extension;
@@ -117,6 +118,18 @@ pub async fn list(
     }
 }
 
+/// Searches raw KV key bytes with an explicit bounded glob or regex request.
+pub async fn search(
+    Extension(state): Extension<Arc<ServerState>>,
+    Extension(ctx): Extension<RequestContext>,
+    Json(request): Json<KeySearchRequest>,
+) -> Response {
+    match search_impl(state.clone(), request) {
+        Ok(resp) => json_response(resp, state.config.max_response_size, &ctx),
+        Err(err) => error_response(err, &ctx),
+    }
+}
+
 pub async fn txn_begin(
     Extension(state): Extension<Arc<ServerState>>,
     Extension(ctx): Extension<RequestContext>,
@@ -219,6 +232,34 @@ fn list_impl(state: Arc<ServerState>, request: KvListRequest) -> Result<KvListRe
     }
     txn.commit_self()?;
     Ok(KvListResponse { entries })
+}
+
+fn search_impl(state: Arc<ServerState>, mut request: KeySearchRequest) -> Result<KeySearchPage> {
+    // JSON byte arrays can expand every raw byte to three decimal digits plus a comma.
+    // Bound the raw page before serialization so the transport cap is not an allocation cap only.
+    let transport_raw_limit = (state.config.max_response_size / 4).max(1);
+    request.max_bytes = request.max_bytes.min(transport_raw_limit);
+    let mut txn = state.store.begin(TxnMode::ReadOnly)?;
+    let page = txn.search_keys(&request).map_err(map_search_error)?;
+    txn.commit_self()?;
+    Ok(page)
+}
+
+fn map_search_error(error: alopex_core::Error) -> ServerError {
+    match error {
+        alopex_core::Error::InvalidParameter { param, reason } => {
+            ServerError::BadRequest(format!("invalid {param}: {reason}"))
+        }
+        alopex_core::Error::SearchBudgetExceeded { limit } => {
+            ServerError::PayloadTooLarge(format!("search scan budget exceeded: limit={limit}"))
+        }
+        alopex_core::Error::SearchResponseTooLarge { limit, requested } => {
+            ServerError::PayloadTooLarge(format!(
+                "search response size exceeded: limit={limit}, requested={requested}"
+            ))
+        }
+        other => ServerError::Core(other),
+    }
 }
 
 fn txn_begin_impl(

@@ -635,6 +635,12 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             span,
         )?;
 
+        if let Some(folded) =
+            fold_integral_binary(&left_typed, op, &right_typed, &result_type, span)
+        {
+            return Ok(folded);
+        }
+
         Ok(TypedExpr {
             kind: TypedExprKind::BinaryOp {
                 left: Box::new(left_typed),
@@ -690,6 +696,12 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             &right_typed.resolved_type,
             span,
         )?;
+
+        if let Some(folded) =
+            fold_integral_binary(&left_typed, op, &right_typed, &result_type, span)
+        {
+            return Ok(folded);
+        }
 
         Ok(TypedExpr {
             kind: TypedExprKind::BinaryOp {
@@ -832,6 +844,10 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             // Remainder is defined only for integral operands.
             Mod => self.check_modulo_op(left, right, span),
 
+            BitAnd | BitOr | BitXor | ShiftLeft | ShiftRight => {
+                self.check_integral_op(left, right, span)
+            }
+
             // Comparison operators: require compatible types, return boolean
             Eq | Neq | Lt | Gt | LtEq | GtEq => {
                 self.check_comparison_op(left, right, span)?;
@@ -917,6 +933,27 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 line: span.start.line,
                 column: span.start.column,
             }),
+        }
+    }
+
+    fn check_integral_op(
+        &self,
+        left: &ResolvedType,
+        right: &ResolvedType,
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        use ResolvedType::*;
+        if matches!(left, Null) || matches!(right, Null) {
+            return Ok(Null);
+        }
+        match (left, right) {
+            (Integer, Integer) => Ok(Integer),
+            (Integer | BigInt, Integer | BigInt) => Ok(BigInt),
+            _ => Err(PlannerError::invalid_operator(
+                "bitwise",
+                format!("{} and {}", left.type_name(), right.type_name()),
+                span,
+            )),
         }
     }
 
@@ -1082,6 +1119,19 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     }
                 }
             }
+            UnaryOp::BitNot => match &operand_typed.resolved_type {
+                ResolvedType::Integer => ResolvedType::Integer,
+                ResolvedType::BigInt => ResolvedType::BigInt,
+                ResolvedType::Null => ResolvedType::Null,
+                other => {
+                    return Err(PlannerError::InvalidOperator {
+                        op: "bitwise not".to_string(),
+                        type_name: other.type_name().to_string(),
+                        line: span.start.line,
+                        column: span.start.column,
+                    });
+                }
+            },
         };
 
         Ok(TypedExpr {
@@ -1128,6 +1178,19 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 other => {
                     return Err(PlannerError::InvalidOperator {
                         op: "unary minus".to_string(),
+                        type_name: other.type_name().to_string(),
+                        line: span.start.line,
+                        column: span.start.column,
+                    });
+                }
+            },
+            UnaryOp::BitNot => match &operand_typed.resolved_type {
+                ResolvedType::Integer => ResolvedType::Integer,
+                ResolvedType::BigInt => ResolvedType::BigInt,
+                ResolvedType::Null => ResolvedType::Null,
+                other => {
+                    return Err(PlannerError::InvalidOperator {
+                        op: "bitwise not".to_string(),
                         type_name: other.type_name().to_string(),
                         line: span.start.line,
                         column: span.start.column,
@@ -1326,7 +1389,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     }
                     ResolvedType::BigInt
                 }
-                "sum" | "count" | "avg" | "min" | "max" => {
+                name if is_aggregate_name(name) => {
                     self.check_function_call(name, &typed_args, distinct, star, span)?
                 }
                 _ => {
@@ -1337,8 +1400,16 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     ));
                 }
             }
-        } else if lower_name == "percentile_disc" {
-            self.check_percentile_disc(&typed_args, &typed_order_by, span)?
+        } else if matches!(lower_name.as_str(), "percentile_disc" | "percentile_cont") {
+            self.check_percentile(&lower_name, &typed_args, &typed_order_by, span)?
+        } else if lower_name == "mode" && !within_group.is_empty() {
+            if !typed_args.is_empty() || typed_order_by.len() != 1 {
+                return Err(PlannerError::invalid_expression(
+                    "MODE requires no arguments and exactly one WITHIN GROUP sort expression"
+                        .to_string(),
+                ));
+            }
+            typed_order_by[0].expr.resolved_type.clone()
         } else {
             self.check_function_call(name, &typed_args, distinct, star, span)?
         };
@@ -1490,7 +1561,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             }
         }
 
-        if is_ordered_set && within_group.is_empty() && !has_over {
+        if matches!(lower_name, "percentile_disc" | "percentile_cont") && within_group.is_empty() {
             return Err(PlannerError::invalid_expression(format!(
                 "WITHIN GROUP (ORDER BY ...) is required for {}",
                 lower_name.to_ascii_uppercase()
@@ -1503,8 +1574,9 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     /// Argument and ordering rules for `PERCENTILE_DISC(fraction) WITHIN
     /// GROUP (ORDER BY sort_expr)` (issue #148, D5). The result type is the
     /// sort expression's type; PostgreSQL 16 behaves identically.
-    fn check_percentile_disc(
+    fn check_percentile(
         &self,
+        name: &str,
         args: &[TypedExpr],
         order_by: &[SortExpr],
         span: Span,
@@ -1516,13 +1588,12 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 span,
             ));
         }
-        let _ = percentile_fraction(&args[0])?;
+        let _ = percentile_fraction_named(name, &args[0])?;
         if order_by.len() != 1 {
-            return Err(PlannerError::invalid_expression(
-                "PERCENTILE_DISC requires WITHIN GROUP (ORDER BY ...) with exactly one \
-                 sort expression"
-                    .to_string(),
-            ));
+            return Err(PlannerError::invalid_expression(format!(
+                "{} requires WITHIN GROUP (ORDER BY ...) with exactly one sort expression",
+                name.to_ascii_uppercase()
+            )));
         }
         Ok(order_by[0].expr.resolved_type.clone())
     }
@@ -2121,6 +2192,9 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             "max" => self.check_min_max(args, distinct, star, span),
             "group_concat" => self.check_group_concat(args, distinct, star, span),
             "string_agg" => self.check_string_agg(args, distinct, star, span),
+            name if is_portable_aggregate_name(name) => {
+                check_portable_aggregate(name, args, distinct, star, span)
+            }
             // GROUPING/GROUPING_ID distinguish grouping-set placeholder NULLs
             // from data NULLs (issue #149, D4). Placement and argument
             // validation happen in the planner; the result is a BIGINT
@@ -2950,6 +3024,52 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
     }
 }
 
+fn fold_integral_binary(
+    left: &TypedExpr,
+    op: BinaryOp,
+    right: &TypedExpr,
+    result_type: &ResolvedType,
+    span: Span,
+) -> Option<TypedExpr> {
+    let value = |expr: &TypedExpr| match &expr.kind {
+        TypedExprKind::Literal(Literal::Number(value)) => value.parse::<i64>().ok(),
+        _ => None,
+    };
+    let left = value(left)?;
+    let right = value(right)?;
+    let folded = match op {
+        BinaryOp::BitAnd => left & right,
+        BinaryOp::BitOr => left | right,
+        BinaryOp::BitXor => left ^ right,
+        BinaryOp::ShiftLeft | BinaryOp::ShiftRight => {
+            let width = if matches!(result_type, ResolvedType::BigInt) {
+                64
+            } else {
+                32
+            };
+            if !(0..width).contains(&right) {
+                return None;
+            }
+            if op == BinaryOp::ShiftRight {
+                left >> right as u32
+            } else {
+                let shifted = i128::from(left) * (1_i128 << right as u32);
+                if matches!(result_type, ResolvedType::BigInt) {
+                    i64::try_from(shifted).ok()?
+                } else {
+                    i64::from(i32::try_from(shifted).ok()?)
+                }
+            }
+        }
+        _ => return None,
+    };
+    Some(TypedExpr::literal(
+        Literal::Number(folded.to_string()),
+        result_type.clone(),
+        span,
+    ))
+}
+
 fn is_numeric_type(ty: &ResolvedType) -> bool {
     matches!(
         ty,
@@ -2962,10 +3082,9 @@ fn validate_window_frame(
     frame: &WindowFrame,
     order_by: &[SortExpr],
 ) -> Result<(), PlannerError> {
-    if !matches!(
-        function_name,
-        "sum" | "count" | "avg" | "min" | "max" | "first_value" | "last_value" | "nth_value"
-    ) {
+    if !is_aggregate_name(function_name)
+        && !matches!(function_name, "first_value" | "last_value" | "nth_value")
+    {
         return Err(PlannerError::invalid_expression(format!(
             "explicit window frames are only supported for aggregate functions and \
              FIRST_VALUE/LAST_VALUE/NTH_VALUE, not {}()",
@@ -3119,6 +3238,7 @@ struct AggregateSignature {
     distinct: bool,
     star: bool,
     arg_key: Option<String>,
+    extra_arg_keys: Vec<String>,
     separator: Option<String>,
     /// FILTER (WHERE ...) predicate identity; aggregates that differ only in
     /// their filter are distinct physical aggregates (issue #148, D10).
@@ -3127,6 +3247,183 @@ struct AggregateSignature {
     /// aggregates so that a validated-then-discarded ORDER BY (D3) still
     /// deduplicates with the unordered call.
     order_key: Option<String>,
+}
+
+pub(crate) fn is_portable_aggregate_name(name: &str) -> bool {
+    matches!(
+        name,
+        "variance"
+            | "var_samp"
+            | "var_pop"
+            | "stddev"
+            | "stddev_samp"
+            | "stddev_pop"
+            | "covar_samp"
+            | "covar_pop"
+            | "corr"
+            | "median"
+            | "mode"
+            | "quantile_cont"
+            | "regr_count"
+            | "regr_avgx"
+            | "regr_avgy"
+            | "regr_sxx"
+            | "regr_syy"
+            | "regr_sxy"
+            | "regr_slope"
+            | "regr_intercept"
+            | "regr_r2"
+            | "any_value"
+            | "first"
+            | "last"
+            | "arg_min"
+            | "min_by"
+            | "arg_max"
+            | "max_by"
+            | "bit_and"
+            | "bit_or"
+            | "bit_xor"
+            | "bool_and"
+            | "bool_or"
+    )
+}
+
+fn canonical_aggregate_name(name: &str) -> String {
+    match name.to_ascii_lowercase().as_str() {
+        "variance" | "var_samp" => "var_samp".into(),
+        "stddev" | "stddev_samp" => "stddev_samp".into(),
+        "min_by" => "arg_min".into(),
+        "max_by" => "arg_max".into(),
+        lower => lower.into(),
+    }
+}
+
+fn check_portable_aggregate(
+    name: &str,
+    args: &[TypedExpr],
+    distinct: bool,
+    star: bool,
+    span: Span,
+) -> Result<ResolvedType, PlannerError> {
+    if distinct || star {
+        return Err(PlannerError::invalid_expression(format!(
+            "{} does not support DISTINCT or *",
+            name.to_ascii_uppercase()
+        )));
+    }
+    let expected = if matches!(
+        name,
+        "covar_samp"
+            | "covar_pop"
+            | "corr"
+            | "quantile_cont"
+            | "regr_count"
+            | "regr_avgx"
+            | "regr_avgy"
+            | "regr_sxx"
+            | "regr_syy"
+            | "regr_sxy"
+            | "regr_slope"
+            | "regr_intercept"
+            | "regr_r2"
+            | "arg_min"
+            | "min_by"
+            | "arg_max"
+            | "max_by"
+    ) {
+        2
+    } else {
+        1
+    };
+    if args.len() != expected {
+        return Err(PlannerError::type_mismatch(
+            format!("{expected} argument(s)"),
+            format!("{} arguments", args.len()),
+            span,
+        ));
+    }
+
+    let numeric = |arg: &TypedExpr| {
+        matches!(
+            arg.resolved_type,
+            ResolvedType::Integer
+                | ResolvedType::BigInt
+                | ResolvedType::Float
+                | ResolvedType::Double
+                | ResolvedType::Null
+        )
+    };
+    if matches!(
+        name,
+        "variance"
+            | "var_samp"
+            | "var_pop"
+            | "stddev"
+            | "stddev_samp"
+            | "stddev_pop"
+            | "median"
+            | "quantile_cont"
+            | "covar_samp"
+            | "covar_pop"
+            | "corr"
+            | "regr_count"
+            | "regr_avgx"
+            | "regr_avgy"
+            | "regr_sxx"
+            | "regr_syy"
+            | "regr_sxy"
+            | "regr_slope"
+            | "regr_intercept"
+            | "regr_r2"
+    ) && !args.iter().all(numeric)
+    {
+        return Err(PlannerError::type_mismatch(
+            "numeric aggregate argument",
+            args.iter()
+                .find(|arg| !numeric(arg))
+                .expect("non-numeric argument")
+                .resolved_type
+                .type_name(),
+            span,
+        ));
+    }
+    if name == "quantile_cont" {
+        let _ = percentile_fraction_named(name, &args[1])?;
+    }
+    if matches!(name, "bit_and" | "bit_or" | "bit_xor")
+        && !matches!(
+            args[0].resolved_type,
+            ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Null
+        )
+    {
+        return Err(PlannerError::type_mismatch(
+            "INTEGER or BIGINT",
+            args[0].resolved_type.type_name(),
+            span,
+        ));
+    }
+    if matches!(name, "bool_and" | "bool_or")
+        && !matches!(
+            args[0].resolved_type,
+            ResolvedType::Boolean | ResolvedType::Null
+        )
+    {
+        return Err(PlannerError::type_mismatch(
+            "BOOLEAN",
+            args[0].resolved_type.type_name(),
+            span,
+        ));
+    }
+
+    Ok(match name {
+        "regr_count" => ResolvedType::BigInt,
+        "any_value" | "first" | "last" | "arg_min" | "min_by" | "arg_max" | "max_by" | "mode" => {
+            args[0].resolved_type.clone()
+        }
+        "bit_and" | "bit_or" | "bit_xor" => args[0].resolved_type.clone(),
+        "bool_and" | "bool_or" => ResolvedType::Boolean,
+        _ => ResolvedType::Double,
+    })
 }
 
 fn is_aggregate_name(name: &str) -> bool {
@@ -3141,12 +3438,45 @@ fn is_aggregate_name(name: &str) -> bool {
             | "group_concat"
             | "string_agg"
             | "percentile_disc"
+            | "percentile_cont"
+            | "variance"
+            | "var_samp"
+            | "var_pop"
+            | "stddev"
+            | "stddev_samp"
+            | "stddev_pop"
+            | "covar_samp"
+            | "covar_pop"
+            | "corr"
+            | "median"
+            | "mode"
+            | "quantile_cont"
+            | "regr_count"
+            | "regr_avgx"
+            | "regr_avgy"
+            | "regr_sxx"
+            | "regr_syy"
+            | "regr_sxy"
+            | "regr_slope"
+            | "regr_intercept"
+            | "regr_r2"
+            | "any_value"
+            | "first"
+            | "last"
+            | "arg_min"
+            | "min_by"
+            | "arg_max"
+            | "max_by"
+            | "bit_and"
+            | "bit_or"
+            | "bit_xor"
+            | "bool_and"
+            | "bool_or"
     )
 }
 
 fn is_ordered_set_aggregate_name(name: &str) -> bool {
-    // Issue #154 adds percentile_cont / mode here.
-    name.eq_ignore_ascii_case("percentile_disc")
+    matches!(name, "percentile_disc" | "percentile_cont" | "mode")
 }
 
 /// Order identity participates in the signature only where ordering changes
@@ -3155,13 +3485,23 @@ fn is_ordered_set_aggregate_name(name: &str) -> bool {
 fn is_order_sensitive_aggregate_name(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "group_concat" | "string_agg" | "percentile_disc"
+        "group_concat"
+            | "string_agg"
+            | "percentile_disc"
+            | "percentile_cont"
+            | "mode"
+            | "first"
+            | "last"
     )
 }
 
 /// Extract and validate the `PERCENTILE_DISC` fraction literal (D5): a
 /// numeric literal (optionally negated) inside `[0, 1]`.
 pub(crate) fn percentile_fraction(arg: &TypedExpr) -> Result<f64, PlannerError> {
+    percentile_fraction_named("percentile_disc", arg)
+}
+
+pub(crate) fn percentile_fraction_named(name: &str, arg: &TypedExpr) -> Result<f64, PlannerError> {
     let literal = match &arg.kind {
         TypedExprKind::Literal(Literal::Number(text)) => text.parse::<f64>().ok(),
         TypedExprKind::UnaryOp {
@@ -3176,14 +3516,16 @@ pub(crate) fn percentile_fraction(arg: &TypedExpr) -> Result<f64, PlannerError> 
         _ => None,
     };
     let Some(value) = literal else {
-        return Err(PlannerError::invalid_expression(
-            "PERCENTILE_DISC fraction must be a numeric literal".to_string(),
-        ));
+        return Err(PlannerError::invalid_expression(format!(
+            "{} fraction must be a numeric literal",
+            name.to_ascii_uppercase()
+        )));
     };
     if !(0.0..=1.0).contains(&value) {
-        return Err(PlannerError::invalid_expression(
-            "PERCENTILE_DISC fraction must be between 0 and 1".to_string(),
-        ));
+        return Err(PlannerError::invalid_expression(format!(
+            "{} fraction must be between 0 and 1",
+            name.to_ascii_uppercase()
+        )));
     }
     Ok(value)
 }
@@ -3241,12 +3583,75 @@ fn aggregate_signature_from_expr(expr: &AggregateExpr) -> AggregateSignature {
             false,
             None,
         ),
+        AggregateFunction::PercentileCont { fraction } => (
+            "percentile_cont".to_string(),
+            Some(format!("{fraction:?}")),
+            false,
+            None,
+        ),
+        AggregateFunction::QuantileCont { fraction } => (
+            "quantile_cont".to_string(),
+            Some(format!("{fraction:?}")),
+            false,
+            expr.arg.as_ref(),
+        ),
+        AggregateFunction::Variance { sample } => (
+            if *sample { "var_samp" } else { "var_pop" }.to_string(),
+            None,
+            false,
+            expr.arg.as_ref(),
+        ),
+        AggregateFunction::Stddev { sample } => (
+            if *sample { "stddev_samp" } else { "stddev_pop" }.to_string(),
+            None,
+            false,
+            expr.arg.as_ref(),
+        ),
+        AggregateFunction::Covariance { sample } => (
+            if *sample { "covar_samp" } else { "covar_pop" }.to_string(),
+            None,
+            false,
+            expr.arg.as_ref(),
+        ),
+        AggregateFunction::Corr => ("corr".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::Median => ("median".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::Mode => (
+            "mode".into(),
+            None,
+            false,
+            expr.order_by
+                .is_empty()
+                .then_some(())
+                .and(expr.arg.as_ref()),
+        ),
+        AggregateFunction::RegrCount => ("regr_count".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::RegrAvgX => ("regr_avgx".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::RegrAvgY => ("regr_avgy".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::RegrSxx => ("regr_sxx".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::RegrSyy => ("regr_syy".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::RegrSxy => ("regr_sxy".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::RegrSlope => ("regr_slope".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::RegrIntercept => {
+            ("regr_intercept".into(), None, false, expr.arg.as_ref())
+        }
+        AggregateFunction::RegrR2 => ("regr_r2".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::AnyValue => ("any_value".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::First => ("first".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::Last => ("last".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::ArgMin => ("arg_min".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::ArgMax => ("arg_max".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::BitAnd => ("bit_and".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::BitOr => ("bit_or".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::BitXor => ("bit_xor".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::BoolAnd => ("bool_and".into(), None, false, expr.arg.as_ref()),
+        AggregateFunction::BoolOr => ("bool_or".into(), None, false, expr.arg.as_ref()),
     };
     AggregateSignature {
         name,
         distinct: expr.distinct,
         star,
         arg_key: arg.map(typed_expr_signature),
+        extra_arg_keys: expr.extra_args.iter().map(typed_expr_signature).collect(),
         separator,
         filter_key: expr.filter.as_ref().map(typed_expr_signature),
         order_key: typed_sort_signature(&expr.order_by),
@@ -3261,7 +3666,8 @@ fn aggregate_signature_from_call(
     filter: Option<&TypedExpr>,
     order_by: &[SortExpr],
 ) -> Result<AggregateSignature, PlannerError> {
-    let is_percentile = name.eq_ignore_ascii_case("percentile_disc");
+    let lower = name.to_ascii_lowercase();
+    let is_percentile = matches!(lower.as_str(), "percentile_disc" | "percentile_cont");
     let separator = if name.eq_ignore_ascii_case("group_concat") && args.len() == 2 {
         if let TypedExprKind::Literal(Literal::String(value)) = &args[1].kind {
             Some(value.clone())
@@ -3279,18 +3685,34 @@ fn aggregate_signature_from_call(
             ));
         }
     } else if is_percentile && args.len() == 1 {
-        Some(format!("{:?}", percentile_fraction(&args[0])?))
+        Some(format!(
+            "{:?}",
+            percentile_fraction_named(&lower, &args[0])?
+        ))
+    } else if lower == "quantile_cont" && args.len() == 2 {
+        Some(format!(
+            "{:?}",
+            percentile_fraction_named(&lower, &args[1])?
+        ))
     } else {
         None
     };
     Ok(AggregateSignature {
-        name: name.to_ascii_lowercase(),
+        name: canonical_aggregate_name(name),
         distinct,
         star,
         arg_key: if is_percentile {
             None
         } else {
             args.first().map(typed_expr_signature)
+        },
+        extra_arg_keys: if matches!(
+            lower.as_str(),
+            "group_concat" | "string_agg" | "percentile_disc" | "percentile_cont" | "quantile_cont"
+        ) {
+            Vec::new()
+        } else {
+            args.iter().skip(1).map(typed_expr_signature).collect()
         },
         separator,
         filter_key: filter.map(typed_expr_signature),

@@ -36,7 +36,10 @@ pub use alopex_dataframe::{DataFrame, JoinKeys, JoinType, SortOptions};
 pub use alopex_sql::{DataSourceFormat, TableType};
 /// `Database::execute_sql()` / `Transaction::execute_sql()` の返却型。
 pub type SqlResult = alopex_sql::SqlResult;
-pub use alopex_core::kv::{OwnedReadOptions, OwnedReadSession, OwnedTransactionSession};
+pub use alopex_core::kv::{
+    KeyPattern, KeySearchCancellation, KeySearchEntry, KeySearchPage, KeySearchRequest,
+    OwnedReadOptions, OwnedReadSession, OwnedTransactionSession,
+};
 use alopex_core::vector::hnsw::{HnswTransactionState, SearchStats as HnswSearchStats};
 use alopex_core::{
     columnar::{
@@ -926,6 +929,22 @@ impl<'a> Transaction<'a> {
         prefix: &[u8],
     ) -> Result<Box<dyn Iterator<Item = (Key, Vec<u8>)> + '_>> {
         self.inner_mut()?.scan_prefix(prefix).map_err(Error::Core)
+    }
+
+    /// Searches opaque key bytes using an explicit glob or regex mode.
+    pub fn search_keys(&mut self, request: &KeySearchRequest) -> Result<KeySearchPage> {
+        self.inner_mut()?.search_keys(request).map_err(Error::Core)
+    }
+
+    /// Searches key bytes while observing a cooperative cancellation token.
+    pub fn search_keys_with_cancellation(
+        &mut self,
+        request: &KeySearchRequest,
+        cancellation: &KeySearchCancellation,
+    ) -> Result<KeySearchPage> {
+        self.inner_mut()?
+            .search_keys_with_cancellation(request, cancellation)
+            .map_err(Error::Core)
     }
 
     /// HNSW にベクトルをステージング挿入/更新する。

@@ -31,6 +31,7 @@ pub mod memory;
 pub mod owned;
 /// Read-point capability for fenced distributed reads.
 pub mod read_at;
+pub mod search;
 /// Storage mode selection helpers (disk vs memory).
 pub mod storage;
 
@@ -53,6 +54,9 @@ pub use owned::{
     OwnedTransactionLease, OwnedTransactionSession, OwnedTransactionSessionApi,
 };
 pub use read_at::{ReadAtCapability, ReadAtError, ReadAtPoint, ReadAtResult};
+pub use search::{
+    KeyPattern, KeySearchCancellation, KeySearchEntry, KeySearchPage, KeySearchRequest,
+};
 
 #[cfg(feature = "s3")]
 pub use s3::{S3Config, S3KV};
@@ -102,6 +106,45 @@ pub trait KVTransaction<'a> {
         start: &[u8],
         end: &[u8],
     ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>>;
+
+    /// Scans all key-value pairs at or after `start`.
+    fn scan_from(&mut self, start: &[u8]) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
+        let _ = start;
+        Err(crate::error::Error::InvalidParameter {
+            param: "scan_from".into(),
+            reason: "backend does not implement cursor-based scanning".into(),
+        })
+    }
+
+    /// Searches opaque key bytes in deterministic bytewise order.
+    ///
+    /// The request bounds both returned entries and inspected candidate keys.
+    /// Dropping the transaction cancels any later page; callers resume with the
+    /// response cursor. Existing exact, prefix, and range methods are unchanged.
+    fn search_keys(&mut self, request: &KeySearchRequest) -> Result<KeySearchPage> {
+        self.search_keys_with_cancellation(request, &KeySearchCancellation::default())
+    }
+
+    /// Searches key bytes while observing a cooperative cancellation token.
+    fn search_keys_with_cancellation(
+        &mut self,
+        request: &KeySearchRequest,
+        cancellation: &KeySearchCancellation,
+    ) -> Result<KeySearchPage> {
+        let prepared = search::PreparedKeySearch::new(request)?;
+        let mut cursor_start = request.cursor.clone().unwrap_or_default();
+        let mut scan = if request.cursor.is_some() {
+            cursor_start.push(0);
+            self.scan_from(&cursor_start)?
+        } else {
+            self.scan_prefix(prepared.prefix())?
+        };
+        prepared.collect(
+            || Ok(scan.next().map(|(key, value)| (key, Some(value)))),
+            request,
+            cancellation,
+        )
+    }
 
     /// Commits the transaction, applying all buffered writes.
     ///

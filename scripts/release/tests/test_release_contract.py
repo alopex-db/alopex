@@ -79,6 +79,32 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("Place vendored libraries in clean source staging", release)
         self.assertNotIn("Upload vendored Nim shared library", release)
 
+    def test_release_parser_contract_matches_source_contract(self) -> None:
+        contract = (
+            ROOT / "crates/alopex-sql/nim-sql-parser/PARSER_CONTRACT_VERSION"
+        ).read_text(encoding="utf-8").strip()
+        release = (ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        python_ci = (ROOT / ".github/workflows/alopex-py.yml").read_text(
+            encoding="utf-8"
+        )
+        python_release = (
+            ROOT / ".github/workflows/alopex-py-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(f'if version != "{contract}":', release)
+        self.assertIn(f'contract-{contract}-*.tar.gz', release)
+        self.assertIn(f'write_bytes(b"{contract}\\n")', release)
+        self.assertIn(f"printf '{contract}\\n'", python_ci)
+        self.assertIn(f'contract-{contract}-*.tar.gz', python_release)
+        self.assertIn(f"write_bytes(b'{contract}\\n')", python_release)
+        self.assertIn(
+            f"--expected-contract-version {contract}", python_release
+        )
+        for workflow in (release, python_ci, python_release):
+            self.assertNotIn("0.14.0", workflow)
+
     def test_release_rust_toolchain_is_pinned(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"

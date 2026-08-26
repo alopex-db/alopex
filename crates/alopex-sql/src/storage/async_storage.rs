@@ -4,7 +4,9 @@ use std::sync::{Arc, RwLock};
 
 use alopex_core::async_runtime::{BoxFuture, BoxStream, MaybeSend};
 use alopex_core::kv::async_kv::AsyncKVTransaction;
-use alopex_core::kv::{KVStore, KVTransaction};
+use alopex_core::kv::{
+    KVStore, KVTransaction, KeySearchCancellation, KeySearchPage, KeySearchRequest,
+};
 use alopex_core::txn::TxnManager;
 use alopex_core::types::{Key, TxnId, TxnMode, Value};
 use alopex_core::vector::hnsw::{HnswIndex, HnswTransactionState};
@@ -953,6 +955,30 @@ where
         let iter = BlockingScanIter::new(stream, self.handle.clone())
             .filter(move |(key, _)| key.as_slice() >= start && key.as_slice() < end);
         Ok(Box::new(iter))
+    }
+
+    fn scan_from(
+        &mut self,
+        start: &[u8],
+    ) -> alopex_core::Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
+        self.scan_range_start.clear();
+        self.scan_range_start.extend_from_slice(start);
+        let start = self.scan_range_start.as_slice();
+        let stream = self.txn.async_scan_prefix(&[]);
+        let iter = BlockingScanIter::new(stream, self.handle.clone())
+            .filter(move |(key, _)| key.as_slice() >= start);
+        Ok(Box::new(iter))
+    }
+
+    fn search_keys_with_cancellation(
+        &mut self,
+        request: &KeySearchRequest,
+        cancellation: &KeySearchCancellation,
+    ) -> alopex_core::Result<KeySearchPage> {
+        self.handle.block_on(
+            self.txn
+                .async_search_keys_with_cancellation(request.clone(), cancellation.clone()),
+        )
     }
 
     fn commit_self(self) -> alopex_core::Result<()> {

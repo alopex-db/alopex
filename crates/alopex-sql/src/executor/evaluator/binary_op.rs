@@ -32,6 +32,67 @@ pub(crate) fn eval_binary_values(op: &BinaryOp, l: SqlValue, r: SqlValue) -> Res
         BinaryOp::And => logical_and(l, r),
         BinaryOp::Or => logical_or(l, r),
         BinaryOp::StringConcat => string_concat(l, r),
+        BinaryOp::BitAnd => bitwise(l, r, |a, b| a & b),
+        BinaryOp::BitOr => bitwise(l, r, |a, b| a | b),
+        BinaryOp::BitXor => bitwise(l, r, |a, b| a ^ b),
+        BinaryOp::ShiftLeft => shift(l, r, true),
+        BinaryOp::ShiftRight => shift(l, r, false),
+    }
+}
+
+fn bitwise(left: SqlValue, right: SqlValue, op: fn(i64, i64) -> i64) -> Result<SqlValue> {
+    if left.is_null() || right.is_null() {
+        return Ok(SqlValue::Null);
+    }
+    match (&left, &right) {
+        (SqlValue::Integer(a), SqlValue::Integer(b)) => {
+            Ok(SqlValue::Integer(op(i64::from(*a), i64::from(*b)) as i32))
+        }
+        (SqlValue::Integer(a), SqlValue::BigInt(b)) => Ok(SqlValue::BigInt(op(i64::from(*a), *b))),
+        (SqlValue::BigInt(a), SqlValue::Integer(b)) => Ok(SqlValue::BigInt(op(*a, i64::from(*b)))),
+        (SqlValue::BigInt(a), SqlValue::BigInt(b)) => Ok(SqlValue::BigInt(op(*a, *b))),
+        _ => type_mismatch("Integer/BigInt", &left, &right),
+    }
+}
+
+fn shift(left: SqlValue, right: SqlValue, left_shift: bool) -> Result<SqlValue> {
+    if left.is_null() || right.is_null() {
+        return Ok(SqlValue::Null);
+    }
+    let (amount, right_wide) = match right {
+        SqlValue::Integer(value) => (i64::from(value), false),
+        SqlValue::BigInt(value) => (value, true),
+        other => return type_mismatch("Integer/BigInt", &left, &other),
+    };
+    let wide = matches!(left, SqlValue::BigInt(_)) || right_wide;
+    let width = if wide { 64 } else { 32 };
+    if !(0..width).contains(&amount) {
+        return Err(ExecutorError::Evaluation(EvaluationError::Overflow));
+    }
+    let amount = amount as u32;
+    match (left, wide, left_shift) {
+        (SqlValue::Integer(value), false, true) => {
+            let shifted = i128::from(value) * (1_i128 << amount);
+            i32::try_from(shifted)
+                .map(SqlValue::Integer)
+                .map_err(|_| ExecutorError::Evaluation(EvaluationError::Overflow))
+        }
+        (SqlValue::Integer(value), true, true) => {
+            let shifted = i128::from(value) * (1_i128 << amount);
+            i64::try_from(shifted)
+                .map(SqlValue::BigInt)
+                .map_err(|_| ExecutorError::Evaluation(EvaluationError::Overflow))
+        }
+        (SqlValue::BigInt(value), _, true) => {
+            let shifted = i128::from(value) * (1_i128 << amount);
+            i64::try_from(shifted)
+                .map(SqlValue::BigInt)
+                .map_err(|_| ExecutorError::Evaluation(EvaluationError::Overflow))
+        }
+        (SqlValue::Integer(value), false, false) => Ok(SqlValue::Integer(value >> amount)),
+        (SqlValue::Integer(value), true, false) => Ok(SqlValue::BigInt(i64::from(value) >> amount)),
+        (SqlValue::BigInt(value), _, false) => Ok(SqlValue::BigInt(value >> amount)),
+        (other, _, _) => type_mismatch("Integer/BigInt", &other, &SqlValue::Integer(amount as i32)),
     }
 }
 
@@ -302,5 +363,19 @@ mod tests {
             logical_and(SqlValue::Null, SqlValue::Boolean(true)).unwrap(),
             SqlValue::Null
         );
+    }
+
+    #[test]
+    fn shifts_reject_invalid_counts_and_left_overflow() {
+        for amount in [-1, 32] {
+            assert!(matches!(
+                shift(SqlValue::Integer(1), SqlValue::Integer(amount), true),
+                Err(ExecutorError::Evaluation(EvaluationError::Overflow))
+            ));
+        }
+        assert!(matches!(
+            shift(SqlValue::Integer(i32::MAX), SqlValue::Integer(1), true),
+            Err(ExecutorError::Evaluation(EvaluationError::Overflow))
+        ));
     }
 }

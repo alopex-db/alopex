@@ -3,7 +3,7 @@
 use crate::async_runtime::{BoxFuture, BoxStream};
 use crate::error::{Error, Result};
 use crate::kv::async_kv::{AsyncKVStore, AsyncKVTransaction};
-use crate::kv::{KVStore, KVTransaction};
+use crate::kv::{KVStore, KVTransaction, KeySearchCancellation, KeySearchPage, KeySearchRequest};
 use crate::types::{Key, TxnMode, Value};
 use core::pin::Pin;
 use core::task::{Context, Poll};
@@ -141,6 +141,33 @@ impl<'txn> AsyncKVTransaction<'txn> for AsyncKVTransactionAdapter {
         Box::pin(ReceiverStream { receiver })
     }
 
+    fn async_search_keys<'a>(
+        &'a self,
+        request: KeySearchRequest,
+    ) -> BoxFuture<'a, Result<KeySearchPage>> {
+        self.async_search_keys_with_cancellation(request, KeySearchCancellation::default())
+    }
+
+    fn async_search_keys_with_cancellation<'a>(
+        &'a self,
+        request: KeySearchRequest,
+        cancellation: KeySearchCancellation,
+    ) -> BoxFuture<'a, Result<KeySearchPage>> {
+        let command_tx = self.command_tx.clone();
+        Box::pin(async move {
+            let (respond_to, response) = tokio::sync::oneshot::channel();
+            command_tx
+                .send(Command::SearchKeys {
+                    request,
+                    cancellation,
+                    respond_to,
+                })
+                .await
+                .map_err(|_| Error::TxnClosed)?;
+            response.await.map_err(|_| Error::TxnClosed)?
+        })
+    }
+
     fn async_commit(self) -> BoxFuture<'txn, Result<()>> {
         let command_tx = self.command_tx;
         Box::pin(async move {
@@ -183,6 +210,11 @@ enum Command {
     ScanPrefix {
         prefix: Vec<u8>,
         sender: tokio::sync::mpsc::Sender<Result<(Key, Value)>>,
+    },
+    SearchKeys {
+        request: KeySearchRequest,
+        cancellation: KeySearchCancellation,
+        respond_to: tokio::sync::oneshot::Sender<Result<KeySearchPage>>,
     },
     Commit {
         respond_to: tokio::sync::oneshot::Sender<Result<()>>,
@@ -253,6 +285,17 @@ fn run_worker<S>(
                 if let Err(err) = result {
                     let _ = sender.blocking_send(Err(err));
                 }
+            }
+            Command::SearchKeys {
+                request,
+                cancellation,
+                respond_to,
+            } => {
+                let result = (|| {
+                    let txn = txn.as_mut().ok_or(Error::TxnClosed)?;
+                    txn.search_keys_with_cancellation(&request, &cancellation)
+                })();
+                let _ = respond_to.send(result);
             }
             Command::Commit { respond_to } => {
                 let result = match txn.take() {

@@ -97,13 +97,15 @@ SELECT r.a, r.b FROM child AS r(a, b, c);
 `LATERAL` 派生表は左側の FROM item を参照でき、左行ごとに再評価される
 (`CROSS JOIN LATERAL` / `[INNER] JOIN LATERAL ... ON` /
 `LEFT [OUTER] JOIN LATERAL ... ON`。`RIGHT`/`FULL` は `ALOPEX-T015`)。
-`LATERAL` を書かない派生表は従来どおり外側 FROM を参照できない。FROM 句の
-table function は `UNNEST(VECTOR)` のみで、`LATERAL` なしでも左側を参照する
-(implicit lateral)。`GENERATE_SERIES` は issue #157 用の予約枠。
+`LATERAL` を書かない派生表は従来どおり外側 FROM を参照できない。v0.8.9の
+FROM 句の table function は `UNNEST(VECTOR)` で、`LATERAL` なしでも左側を
+参照する(implicit lateral)。
 `AS t(c1, ..., cn)` は base table / CTE 参照 / 派生表 / table function すべてで
 使え、列数完全一致(`ALOPEX-T012`)を要求する。`LATERAL` は文脈キーワードなの
 で `lateral` という名前の関係は引き続き使える。詳細は
 [docs/sql-lateral-table-functions.md](../../docs/sql-lateral-table-functions.md)。
+v0.8.9 の portable SQL 関数一覧と境界条件は
+[docs/sql-portable-functions-v0.8.9.md](../../docs/sql-portable-functions-v0.8.9.md)。
 
 ## Supported Aggregate Functions
 
@@ -117,6 +119,12 @@ table function は `UNNEST(VECTOR)` のみで、`LATERAL` なしでも左側を�
 - `GROUP_CONCAT(column)` / `GROUP_CONCAT(column, separator)`
 - `STRING_AGG(column, separator)`
 - `PERCENTILE_DISC(fraction) WITHIN GROUP (ORDER BY expr)` (ordered-set)
+- `PERCENTILE_CONT` / `QUANTILE_CONT` / `MEDIAN` / `MODE`
+- `VARIANCE` / `VAR_SAMP` / `VAR_POP` / `STDDEV` / `COVAR_*` / `CORR`
+- `REGR_COUNT` / `REGR_AVGX` / `REGR_AVGY` / `REGR_SXX` / `REGR_SYY` /
+  `REGR_SXY` / `REGR_SLOPE` / `REGR_INTERCEPT` / `REGR_R2`
+- `ANY_VALUE` / `FIRST` / `LAST` / `ARG_MIN` / `ARG_MAX` (`MIN_BY`/`MAX_BY`)
+- `BIT_AND` / `BIT_OR` / `BIT_XOR` / `BOOL_AND` / `BOOL_OR`
 
 ## Aggregate FILTER / ordered aggregates / WITHIN GROUP
 

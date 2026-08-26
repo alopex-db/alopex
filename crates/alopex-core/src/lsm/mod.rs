@@ -18,6 +18,7 @@ pub mod wal;
 use std::collections::VecDeque;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -25,7 +26,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::compaction::leveled::{KeyRange, LeveledCompactionConfig, SSTableMeta};
 use crate::error::{Error, Result};
-use crate::kv::{KVStore, KVTransaction};
+use crate::kv::{KVStore, KVTransaction, KeySearchCancellation, KeySearchPage, KeySearchRequest};
 use crate::lsm::buffer_pool::{BufferPool, BufferPoolConfig};
 use crate::lsm::checkpoint::{load_checkpoint_meta, save_checkpoint_meta, CheckpointMeta};
 pub use crate::lsm::container::{ConvergePolicy, ConvergeResult};
@@ -297,6 +298,15 @@ impl OwnedLsmScanBounds {
         Self {
             start,
             end: Some(end),
+            prefix: None,
+        }
+    }
+
+    /// Construct an unbounded range at or after `start`.
+    pub(crate) fn from(start: Key) -> Self {
+        Self {
+            start,
+            end: None,
             prefix: None,
         }
     }
@@ -1852,6 +1862,107 @@ impl<'a> LsmTransaction<'a> {
             .range(prefix_vec..)
             .take_while(move |(k, _)| k.starts_with(prefix))
     }
+
+    fn next_search_entry(
+        &mut self,
+        state: &mut LsmSearchState,
+    ) -> Result<Option<(Key, Option<Value>)>> {
+        let memory_key = self.store.owned_next_memtable_key_after(
+            state.last_key.as_ref(),
+            &state.bounds,
+            self.start_ts,
+        );
+        let table_key = state.table_candidate(self.store)?;
+        let base_key = match (memory_key, table_key) {
+            (Some(memory), Some(table)) => Some(memory.min(table)),
+            (Some(memory), None) => Some(memory),
+            (None, Some(table)) => Some(table),
+            (None, None) => None,
+        };
+        let write = match state.last_key.as_ref() {
+            Some(last) => self
+                .write_set
+                .range::<Key, _>((Excluded(last), Unbounded))
+                .next(),
+            None => self
+                .write_set
+                .range::<Key, _>((Included(state.bounds.start()), Unbounded))
+                .next(),
+        }
+        .filter(|(key, _)| state.bounds.contains(key))
+        .map(|(key, value)| (key.clone(), value.clone()));
+
+        let (key, value) = match (base_key, write) {
+            (Some(base), Some((write_key, write_value))) if base == write_key => {
+                (base, write_value)
+            }
+            (Some(base), Some((write_key, _))) if base < write_key => {
+                let value = self
+                    .store
+                    .owned_visible_at(&base, self.start_ts)?
+                    .and_then(|entry| entry.value);
+                (base, value)
+            }
+            (Some(_), Some(write)) => write,
+            (Some(base), None) => {
+                let value = self
+                    .store
+                    .owned_visible_at(&base, self.start_ts)?
+                    .and_then(|entry| entry.value);
+                (base, value)
+            }
+            (None, Some(write)) => write,
+            (None, None) => return Ok(None),
+        };
+        self.read_set.insert(key.clone());
+        state.last_key = Some(key.clone());
+        Ok(Some((key, value)))
+    }
+}
+
+struct LsmSearchTableCursor {
+    cursor: SSTableCursor,
+    candidate: Option<SSTableEntry>,
+}
+
+struct LsmSearchState {
+    _snapshot: OwnedLsmSnapshotReader,
+    bounds: OwnedLsmScanBounds,
+    tables: Vec<LsmSearchTableCursor>,
+    last_key: Option<Key>,
+}
+
+impl LsmSearchState {
+    fn table_candidate(&mut self, store: &LsmKV) -> Result<Option<Key>> {
+        let mut least = None;
+        for table in &mut self.tables {
+            loop {
+                if let Some(candidate) = &table.candidate {
+                    if self
+                        .last_key
+                        .as_ref()
+                        .is_none_or(|last| candidate.key > *last)
+                    {
+                        if least
+                            .as_ref()
+                            .is_none_or(|current: &Key| candidate.key < *current)
+                        {
+                            least = Some(candidate.key.clone());
+                        }
+                        break;
+                    }
+                }
+                let Some(candidate) = table
+                    .cursor
+                    .next_entry(&store.buffer_pool, &store.metrics)?
+                else {
+                    break;
+                };
+                table.candidate = Some(candidate);
+            }
+        }
+        Ok(least)
+    }
 }
 
 impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
@@ -1957,6 +2068,38 @@ impl<'a> KVTransaction<'a> for LsmTransaction<'a> {
 
         let iter = map.into_iter().filter_map(|(k, v)| v.map(|vv| (k, vv)));
         Ok(Box::new(iter))
+    }
+
+    fn search_keys_with_cancellation(
+        &mut self,
+        request: &KeySearchRequest,
+        cancellation: &KeySearchCancellation,
+    ) -> Result<KeySearchPage> {
+        let prepared = crate::kv::search::PreparedKeySearch::new(request)?;
+        let bounds = if let Some(cursor) = &request.cursor {
+            let mut start = cursor.clone();
+            start.push(0);
+            OwnedLsmScanBounds::from(start)
+        } else {
+            OwnedLsmScanBounds::prefix(prepared.prefix().to_vec())
+        };
+        let snapshot = self.store.acquire_owned_snapshot_reader();
+        let tables = self
+            .store
+            .open_owned_sstable_cursors(&bounds, self.start_ts)?
+            .into_iter()
+            .map(|cursor| LsmSearchTableCursor {
+                cursor,
+                candidate: None,
+            })
+            .collect();
+        let mut state = LsmSearchState {
+            _snapshot: snapshot,
+            bounds,
+            tables,
+            last_key: None,
+        };
+        prepared.collect(|| self.next_search_entry(&mut state), request, cancellation)
     }
 
     fn commit_self(mut self) -> Result<()> {

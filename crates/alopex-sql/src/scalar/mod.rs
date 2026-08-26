@@ -175,11 +175,70 @@ pub fn check_text_or_blob(args: &[TypedExpr]) -> Result<(), PlannerError> {
     Ok(())
 }
 
+fn check_timestamp(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    for arg in args {
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Timestamp | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Timestamp",
+                arg.resolved_type.type_name(),
+                arg.span,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_text_timestamp(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_text(&args[..1])?;
+    check_timestamp(&args[1..])
+}
+
+fn check_timestamp_text(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_timestamp(&args[..1])?;
+    check_text(&args[1..])
+}
+
+fn check_to_timestamp(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    if args.len() == 1 {
+        let arg = &args[0];
+        if is_numeric(&arg.resolved_type)
+            || matches!(arg.resolved_type, ResolvedType::Text | ResolvedType::Null)
+        {
+            return Ok(());
+        }
+        return Err(PlannerError::type_mismatch(
+            "Numeric or Text",
+            arg.resolved_type.type_name(),
+            arg.span,
+        ));
+    }
+    check_text(args)
+}
+
 pub fn check_bigint(args: &[TypedExpr]) -> Result<(), PlannerError> {
     for arg in args {
         if !matches!(arg.resolved_type, ResolvedType::BigInt | ResolvedType::Null) {
             return Err(PlannerError::type_mismatch(
                 "BigInt",
+                arg.resolved_type.type_name(),
+                arg.span,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_integer(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    for arg in args {
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Integer",
                 arg.resolved_type.type_name(),
                 arg.span,
             ));
@@ -466,6 +525,66 @@ static SIGNATURES: &[ScalarSignature] = &[
         check_numeric,
         ReturnRule::Fixed(ResolvedType::Double),
     ),
+    sig(
+        "cbrt",
+        Arity::Exact(1),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "cot",
+        Arity::Exact(1),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "log2",
+        Arity::Exact(1),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "acosh",
+        Arity::Exact(1),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "asinh",
+        Arity::Exact(1),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "atanh",
+        Arity::Exact(1),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "cosh",
+        Arity::Exact(1),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "sinh",
+        Arity::Exact(1),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "tanh",
+        Arity::Exact(1),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "isnan",
+        Arity::Exact(1),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Boolean),
+    ),
     sig_meta(
         "random",
         Arity::Exact(0),
@@ -475,10 +594,65 @@ static SIGNATURES: &[ScalarSignature] = &[
     ),
     sig_meta(
         "now",
-        Arity::Exact(0),
-        check_no_args,
+        Arity::Range(0, 1),
+        check_numeric,
         ReturnRule::Fixed(ResolvedType::Timestamp),
         STATEMENT_STABLE_META,
+    ),
+    sig_meta(
+        "current_timestamp",
+        Arity::Range(0, 1),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Timestamp),
+        STATEMENT_STABLE_META,
+    ),
+    sig(
+        "extract",
+        Arity::Exact(2),
+        check_text_timestamp,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "date_part",
+        Arity::Exact(2),
+        check_text_timestamp,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "date_trunc",
+        Arity::Exact(2),
+        check_text_timestamp,
+        ReturnRule::Fixed(ResolvedType::Timestamp),
+    ),
+    sig(
+        "to_char",
+        Arity::Exact(2),
+        check_timestamp_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "to_timestamp",
+        Arity::Range(1, 2),
+        check_to_timestamp,
+        ReturnRule::Fixed(ResolvedType::Timestamp),
+    ),
+    sig(
+        "strftime",
+        Arity::Exact(2),
+        check_text_timestamp,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "julianday",
+        Arity::Exact(1),
+        check_timestamp,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "unixepoch",
+        Arity::Exact(1),
+        check_timestamp,
+        ReturnRule::Fixed(ResolvedType::BigInt),
     ),
     sig(
         "sin",
@@ -621,6 +795,48 @@ static SIGNATURES: &[ScalarSignature] = &[
         ReturnRule::Fixed(ResolvedType::Integer),
     ),
     sig(
+        "ascii",
+        Arity::Exact(1),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Integer),
+    ),
+    sig(
+        "chr",
+        Arity::Exact(1),
+        check_integer,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "bit_length",
+        Arity::Exact(1),
+        check_text_or_blob,
+        ReturnRule::Fixed(ResolvedType::Integer),
+    ),
+    sig(
+        "starts_with",
+        Arity::Exact(2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Boolean),
+    ),
+    sig(
+        "ends_with",
+        Arity::Exact(2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Boolean),
+    ),
+    sig(
+        "translate",
+        Arity::Exact(3),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "levenshtein",
+        Arity::Exact(2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Integer),
+    ),
+    sig(
         "upper",
         Arity::Exact(1),
         check_text,
@@ -751,6 +967,12 @@ static SIGNATURES: &[ScalarSignature] = &[
         Arity::Range(2, 3),
         check_text,
         ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "regexp_like",
+        Arity::Range(2, 3),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Boolean),
     ),
     sig(
         "coalesce",

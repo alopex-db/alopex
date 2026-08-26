@@ -23,7 +23,7 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.11.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
-      isExactContractDescriptor(parserContractDescriptor, "0.14.0"),
+  isExactContractDescriptor(parserContractDescriptor, "0.15.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -108,6 +108,11 @@ proc normalizedBinaryOp(op: BinaryOpKind): string =
   of opAnd: "And"
   of opOr: "Or"
   of opStringConcat: "StringConcat"
+  of opBitAnd: "BitAnd"
+  of opBitOr: "BitOr"
+  of opBitXor: "BitXor"
+  of opShiftLeft: "ShiftLeft"
+  of opShiftRight: "ShiftRight"
   of opLike, opNotLike, opILike, opNotILike, opGlob, opNotGlob,
      opSimilarTo, opNotSimilarTo, opIn, opNotIn, opBetween, opNotBetween, opIs: $op
 
@@ -134,12 +139,18 @@ proc normalizedBinaryOp(opName: string): string =
   of "opAnd": "And"
   of "opOr": "Or"
   of "opStringConcat": "StringConcat"
+  of "opBitAnd": "BitAnd"
+  of "opBitOr": "BitOr"
+  of "opBitXor": "BitXor"
+  of "opShiftLeft": "ShiftLeft"
+  of "opShiftRight": "ShiftRight"
   else: opName
 
 proc normalizedUnaryOp(op: UnaryOpKind): string =
   case op
   of opNot: "Not"
   of opNeg: "Minus"
+  of opBitNot: "BitNot"
   of opIsNull, opIsNotNull: $op
 
 proc normalizedJoinKind(kind: JoinKind): string =
