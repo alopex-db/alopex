@@ -20,9 +20,9 @@ targets = [
     "x86_64-pc-windows-msvc",
 ]
 candidate = {
-    "version": "0.8.7",
+    "version": "0.8.8",
     "reviewed_main_sha": sha,
-    "tag": {"name": "v0.8.7", "peeled_sha": sha},
+    "tag": {"name": "v0.8.8", "peeled_sha": sha},
     "core": {
         "status": "success",
         "published": True,
@@ -43,7 +43,7 @@ candidate = {
         "distributions": [{"name": "alopex", "status": "published", "sha256": digest}],
     },
     "parser": {
-        "contract": "0.9.0",
+        "contract": "0.14.0",
         "manifest_sha256": digest,
         "envelope_sha256": digest,
         "assets": [

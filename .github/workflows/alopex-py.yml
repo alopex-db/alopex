@@ -11,6 +11,10 @@ on:
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
       - "crates/alopex-sql/**"
+      # The server client's e2e lane asserts the HTTP wire contract, so a
+      # change on the server side has to re-run it.
+      - "crates/alopex-server/**"
+      - "crates/alopex-cluster/**"
   pull_request:
     paths:
       - ".github/workflows/alopex-py.yml"
@@ -20,6 +24,10 @@ on:
       - "crates/alopex-embedded/**"
       - "crates/alopex-core/**"
       - "crates/alopex-sql/**"
+      # The server client's e2e lane asserts the HTTP wire contract, so a
+      # change on the server side has to re-run it.
+      - "crates/alopex-server/**"
+      - "crates/alopex-cluster/**"
 
 defaults:
   run:
@@ -151,7 +159,7 @@ jobs:
           fi
           test -f "$library"
           cp "$library" crates/alopex-py/python/alopex/native/
-          printf '0.9.0\n' > crates/alopex-py/python/alopex/native/CONTRACT_VERSION
+          printf '0.14.0\n' > crates/alopex-py/python/alopex/native/CONTRACT_VERSION
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$library" | sed "s#${NIM_SQL_PARSER_DIR}/##" > crates/alopex-py/python/alopex/native/SHA256SUMS
           else
@@ -292,6 +300,57 @@ jobs:
         run: |
           pytest crates/alopex-py/tests -m "requires_polars"
 
+  server-e2e:
+    name: server-e2e
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Setup virtualenv
+        run: |
+          rm -rf .venv
+          python -m venv .venv
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install maturin pytest
+      - name: Install patchelf
+        run: |
+          if command -v patchelf &> /dev/null; then
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y patchelf
+      - name: Build Nim SQL parser library
+        run: bash scripts/build-nim-parser.sh --backend docker
+      - name: Maturin develop
+        run: maturin develop -m crates/alopex-py/Cargo.toml
+      - name: Build alopex-server
+        run: cargo build -p alopex-server
+      - name: Run server e2e tests
+        env:
+          # Without this the lane would silently skip when the binary is
+          # missing, and the wire contract would go unverified.
+          ALOPEX_REQUIRE_SERVER_E2E: "1"
+          ALOPEX_SERVER_BIN: ${{ github.workspace }}/target/debug/alopex-server
+        run: |
+          export LD_LIBRARY_PATH="${NIM_SQL_PARSER_LIB_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          pytest crates/alopex-py/tests -m requires_server
+
   typecheck:
     name: typecheck
     runs-on: ubuntu-latest
@@ -402,7 +461,7 @@ jobs:
   ci-success:
     name: ci-success
     if: ${{ always() }}
-    needs: [rust-check, test, polars-test, typecheck]
+    needs: [rust-check, test, polars-test, server-e2e, typecheck]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -414,6 +473,9 @@ jobs:
             exit 1
           fi
           if [[ "${{ needs.polars-test.result }}" != "success" ]]; then
+            exit 1
+          fi
+          if [[ "${{ needs.server-e2e.result }}" != "success" ]]; then
             exit 1
           fi
           if [[ "${{ needs.typecheck.result }}" != "success" ]]; then

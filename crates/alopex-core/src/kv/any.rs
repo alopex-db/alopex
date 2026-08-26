@@ -61,6 +61,36 @@ impl AnyKV {
         }
     }
 
+    /// 単一 `.alopex` ファイルへ収束する（対象外のバックエンドでは no-op）。
+    pub fn converge(&self) -> Result<()> {
+        match self {
+            Self::Memory(_) => Ok(()),
+            Self::Lsm(kv) => kv.converge().map(|_| ()),
+            #[cfg(feature = "s3")]
+            Self::S3(kv) => kv.inner().converge().map(|_| ()),
+        }
+    }
+
+    /// 収束したうえでストアを閉じる（冪等）。
+    pub fn close(&self) -> Result<()> {
+        match self {
+            Self::Memory(_) => Ok(()),
+            Self::Lsm(kv) => kv.close(),
+            #[cfg(feature = "s3")]
+            Self::S3(kv) => kv.inner().close(),
+        }
+    }
+
+    /// 収束先の `.alopex` コンテナパス（対象外なら `None`）。
+    pub fn container_path(&self) -> Option<&Path> {
+        match self {
+            Self::Memory(_) => None,
+            Self::Lsm(kv) => kv.container_path(),
+            #[cfg(feature = "s3")]
+            Self::S3(kv) => kv.inner().container_path(),
+        }
+    }
+
     /// Reports whether this backend supports durable local range-change journaling.
     pub fn range_change_journal_capability(&self) -> crate::kv::RangeChangeJournalCapability {
         match self {

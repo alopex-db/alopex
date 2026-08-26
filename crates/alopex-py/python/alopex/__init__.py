@@ -46,3 +46,55 @@ for _name in ("Catalog", "CatalogInfo", "NamespaceInfo", "TableInfo", "ColumnInf
     if _name not in _seen:
         __all__.append(_name)
         _seen.add(_name)
+
+# Server client (issue #182). Imported after the native exports so `remote`
+# can rely on `alopex._alopex` already being loaded. Both modules use only the
+# standard library, so `import alopex` gains no third-party import cost.
+from .protocols import DatabaseLike as DatabaseLike  # noqa: E402
+from .protocols import TransactionLike as TransactionLike  # noqa: E402
+from .remote import RemoteDatabase as RemoteDatabase  # noqa: E402
+from .remote import RemoteTransaction as RemoteTransaction  # noqa: E402
+from .remote import (  # noqa: E402
+    TARGET_MEMORY as _TARGET_MEMORY,
+    TARGET_REMOTE as _TARGET_REMOTE,
+    resolve_connect_target as _resolve_connect_target,
+)
+
+
+def connect(target=":memory:", **options):
+    """Open a database from a connection target, embedded or server.
+
+    The target alone selects the surface; the returned object answers the same
+    ``execute_sql`` / ``begin`` / ``close`` calls either way (D3).
+
+    - ``http://host:8080`` / ``https://host:8080`` -> :class:`RemoteDatabase`
+      (``**options`` are its keyword arguments, e.g. ``api_key=``).
+    - ``:memory:`` (the default) -> in-memory embedded ``Database``.
+    - ``file:///path/db`` or a bare path -> embedded ``Database`` on that path.
+      Only ``thread_mode`` may be passed for embedded targets.
+
+    Raises:
+        NotImplementedError: ``s3://`` targets; the Python bindings do not
+            expose the embedded URI opener that the CLI uses (code
+            ``ALOPEX-PY204``).
+        ValueError: An unusable target or an option the chosen surface does not
+            accept (code ``ALOPEX-PY205``).
+    """
+    kind, value = _resolve_connect_target(target, options)
+    if kind == _TARGET_REMOTE:
+        return RemoteDatabase(value, **options)
+    if kind == _TARGET_MEMORY:
+        return _database.Database.open_in_memory(**options)
+    return _database.Database.open(value, **options)
+
+
+for _name in (
+    "connect",
+    "RemoteDatabase",
+    "RemoteTransaction",
+    "DatabaseLike",
+    "TransactionLike",
+):
+    if _name not in _seen:
+        __all__.append(_name)
+        _seen.add(_name)

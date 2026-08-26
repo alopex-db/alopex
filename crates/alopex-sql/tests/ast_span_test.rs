@@ -41,10 +41,12 @@ fn dml_nodes_carry_spans() {
     let select = Select {
         with: None,
         distinct: false,
+        distinct_on: vec![],
         projection: vec![SelectItem::Wildcard { span: span(1, 1) }],
         from: vec![FromItem::Table {
             name: "t".into(),
             alias: None,
+            columns: Vec::new(),
             span: span(1, 10),
         }],
         selection: None,
@@ -66,6 +68,7 @@ fn dml_nodes_carry_spans() {
         }],
         limit: None,
         offset: None,
+        limit_with_ties: false,
         span: span(1, 1),
     };
     assert_eq!(select.span().start.column, 1);

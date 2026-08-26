@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
+use pyo3::wrap_pyfunction;
 
 mod catalog;
 mod embedded;
@@ -16,6 +17,10 @@ fn _alopex(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<catalog::PyNamespaceInfo>()?;
     m.add_class::<catalog::PyTableInfo>()?;
     m.add_class::<catalog::PyColumnInfo>()?;
+    // pure-Python のサーバークライアント（python/alopex/remote.py）が使う
+    // 内部関数。先頭アンダースコアなので __init__.py の _export_public は
+    // 再公開しない（公開 API 面は変わらない）。
+    m.add_function(wrap_pyfunction!(embedded::sql::bind_sql_params_py, m)?)?;
     let database_module = PyModule::new(py, "database")?;
     embedded::database::register(py, &database_module)?;
     m.add_submodule(&database_module)?;
@@ -82,6 +87,58 @@ mod tests {
                 1
             );
         });
+    }
+
+    /// The server client reuses the embedded `?` binder through this private
+    /// module-level function; without it the two surfaces would drift (D2).
+    #[test]
+    fn exported_module_provides_private_sql_param_binder() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "_alopex_runtime_binder_test").unwrap();
+            super::_alopex(py, &module).unwrap();
+            let binder = module.getattr("_bind_sql_params").unwrap();
+            assert_eq!(
+                binder
+                    .call1(("SELECT 1",))
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "SELECT 1"
+            );
+            let params = pyo3::types::PyList::new(py, [1i64]).unwrap();
+            assert_eq!(
+                binder
+                    .call1(("SELECT ?", params))
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "SELECT 1"
+            );
+        });
+    }
+
+    /// The forwarded server codes and the client-side `ALOPEX-PY2##` block are
+    /// part of the published registry, so the Python contract test can assert
+    /// an exact set.
+    #[test]
+    fn error_code_registry_covers_the_server_client_surface() {
+        for code in [
+            "ALOPEX-PY201",
+            "ALOPEX-PY202",
+            "ALOPEX-PY203",
+            "ALOPEX-PY204",
+            "ALOPEX-PY205",
+            "UNAUTHORIZED",
+            "QUERY_TIMEOUT",
+            "SESSION_EXPIRED",
+            "SERVER_BACKPRESSURE",
+        ] {
+            assert!(
+                super::error::ERROR_CODES.contains(&code),
+                "ERROR_CODES must publish {code}"
+            );
+        }
     }
 
     #[test]

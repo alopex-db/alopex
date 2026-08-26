@@ -239,7 +239,11 @@ fn unwrap_stream_nodes(
             input,
             limit: next_limit,
             offset: next_offset,
+            ties,
         } => {
+            if ties.is_some() {
+                return Err(unsupported("FETCH ... WITH TIES is not streamable"));
+            }
             if limit.is_some() || *offset != 0 {
                 return Err(unsupported("multiple slice nodes are not streamable"));
             }

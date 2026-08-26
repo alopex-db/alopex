@@ -306,17 +306,25 @@ pub(crate) fn plan_contains_subquery(plan: &LogicalPlan) -> bool {
             right,
             condition,
             ..
+        }
+        | LogicalPlan::LateralJoin {
+            left,
+            right,
+            condition,
+            ..
         } => {
             condition.as_ref().is_some_and(contains_subquery)
                 || plan_contains_subquery(left)
                 || plan_contains_subquery(right)
         }
+        LogicalPlan::TableFunction { args, .. } => args.iter().any(contains_subquery),
         LogicalPlan::Aggregate {
             input,
             group_keys,
             aggregates,
             having,
             projection,
+            grouping_sets: _,
         } => {
             group_keys.iter().any(contains_subquery)
                 || aggregates
@@ -336,6 +344,12 @@ pub(crate) fn plan_contains_subquery(plan: &LogicalPlan) -> bool {
         } => plan_contains_subquery(anchor) || plan_contains_subquery(recursive_term),
         LogicalPlan::RecursiveReference { .. } => false,
         LogicalPlan::Sort { input, order_by } => {
+            order_by.iter().any(|sort| contains_subquery(&sort.expr))
+                || plan_contains_subquery(input)
+        }
+        LogicalPlan::DistinctOn {
+            input, order_by, ..
+        } => {
             order_by.iter().any(|sort| contains_subquery(&sort.expr))
                 || plan_contains_subquery(input)
         }

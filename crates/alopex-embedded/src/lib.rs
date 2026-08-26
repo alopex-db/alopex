@@ -494,9 +494,38 @@ impl Database {
         cache.clear();
     }
 
-    /// Flushes the current in-memory data to an SSTable on disk (beta).
+    /// Flushes the current in-memory data to an SSTable on disk and converges the
+    /// database into its single `.alopex` file.
+    ///
+    /// After this returns, a disk database opened through an `X.alopex` path has a
+    /// complete, self-contained `X.alopex`: copying that one file elsewhere and
+    /// reopening it restores every committed row. The `X.alopex.d` working
+    /// directory is deliberately kept while the handle is alive, which is the
+    /// documented two-file steady state during operation.
     pub fn flush(&self) -> Result<()> {
-        self.store.flush().map_err(Error::Core)
+        self.store.flush().map_err(Error::Core)?;
+        self.store.converge().map_err(Error::Core)
+    }
+
+    /// Converges the database into its single `.alopex` file without closing it.
+    pub fn converge(&self) -> Result<()> {
+        self.store.converge().map_err(Error::Core)
+    }
+
+    /// Converges and marks the database closed.
+    ///
+    /// Idempotent, and the error-visible counterpart to dropping the handle: the
+    /// `Drop` path also converges, but cannot report a failure.
+    pub fn close(&self) -> Result<()> {
+        self.store.close().map_err(Error::Core)
+    }
+
+    /// Returns the single `.alopex` file this database converges into, if any.
+    ///
+    /// `None` for in-memory databases and for plain-directory disk databases,
+    /// which keep the classic multi-file layout.
+    pub fn container_path(&self) -> Option<PathBuf> {
+        self.store.container_path().map(Path::to_path_buf)
     }
 
     /// Returns the file format version supported by the embedded engine.
@@ -518,7 +547,10 @@ impl Database {
 
     /// Persists the current in-memory database to disk atomically.
     ///
-    /// `wal_path` は「データディレクトリ」として扱う（file-mode）。
+    /// `wal_path` は「データディレクトリ」として扱う（file-mode）。When it carries the
+    /// `.alopex` extension the result is a **real, self-contained container** at that
+    /// path plus its `X.alopex.d` working directory — never the zero-byte existence
+    /// marker earlier releases wrote there.
     pub fn persist_to_disk(&self, wal_path: &Path) -> Result<()> {
         if !matches!(self.store.as_ref(), AnyKV::Memory(_)) {
             return Err(Error::NotInMemoryMode);
@@ -530,16 +562,38 @@ impl Database {
             )));
         }
 
-        let tmp_dir = data_dir.with_extension("tmp");
+        // `X.alopex.d.tmp`, not `X.alopex.tmp`: the container writer already claims
+        // `X.alopex.tmp` for its own atomic-rename staging file, and a directory
+        // sitting on that name makes the container write fail.
+        let tmp_dir = data_dir.with_extension("d.tmp");
         if tmp_dir.exists() {
             return Err(Error::Core(alopex_core::Error::PathExists(tmp_dir)));
         }
 
         let snapshot = self.snapshot_pairs()?;
+        let is_container_path = wal_path.extension().is_some_and(|e| e == "alopex");
         let write_result = (|| -> Result<()> {
+            // Converge straight into the caller's `.alopex` path while the data still
+            // lives in the temp directory, so the container and the working directory
+            // become visible together.
+            let converge = if is_container_path {
+                alopex_core::lsm::ConvergePolicy::Always {
+                    container: wal_path.to_path_buf(),
+                }
+            } else {
+                alopex_core::lsm::ConvergePolicy::Never
+            };
+            let config = alopex_core::lsm::LsmKVConfig {
+                converge,
+                // The working directory is renamed into place right after this
+                // closure returns, so it must survive the store being dropped.
+                prune_sidecar_on_drop: false,
+                ..alopex_core::lsm::LsmKVConfig::default()
+            };
+
             let store = StorageFactory::create(alopex_core::StorageMode::Disk {
                 path: tmp_dir.clone(),
-                config: None,
+                config: Some(config),
             })
             .map_err(Error::Core)?;
 
@@ -548,22 +602,21 @@ impl Database {
                 txn.put(key, value).map_err(Error::Core)?;
             }
             txn.commit_self().map_err(Error::Core)?;
+            store.converge().map_err(Error::Core)?;
 
             Ok(())
         })();
 
         if let Err(e) = write_result {
             let _ = fs::remove_dir_all(&tmp_dir);
+            let _ = fs::remove_file(wal_path);
             return Err(e);
         }
 
-        fs::rename(&tmp_dir, &data_dir).map_err(|e| Error::Core(e.into()))?;
-        if wal_path.extension().is_some_and(|e| e == "alopex") {
-            // `.alopex` パスを渡した場合は、存在確認用のマーカーを作る。
-            let _ = fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(wal_path);
+        if let Err(e) = fs::rename(&tmp_dir, &data_dir) {
+            let _ = fs::remove_dir_all(&tmp_dir);
+            let _ = fs::remove_file(wal_path);
+            return Err(Error::Core(e.into()));
         }
         Ok(())
     }

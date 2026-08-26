@@ -6,7 +6,7 @@ Nim parser boundary.
 
 ## Contract Overview
 
-- Current contract version: `0.9.0`, returned by `alopex_parser_version()`.
+- Current contract version: `0.14.0`, returned by `alopex_parser_version()`.
 - Alopex v0.8.4 is the first release whose public producer emits the
   `CreateContinuousAggregate` variant. The variant is owned by Skulk; Alopex
   transports and validates it but does not execute the statement.
@@ -16,7 +16,7 @@ Nim parser boundary.
   buffers that the caller releases with `alopex_free_buffer`.
 - A non-zero parse error is returned as `prkError`; no Nim exception crosses
   the C ABI boundary.
-- Contract `0.9.0` is compatibility metadata inside the Alopex release; it is
+- Contract `0.14.0` is compatibility metadata inside the Alopex release; it is
   not an independent parser feature or release lane.
 
 ## Encoding Rules
@@ -35,13 +35,13 @@ Nim parser boundary.
 ### Version and Compatibility Boundary
 
 The linked Nim shared library, the Rust crate, and the staged payload must all
-report exactly `0.9.0`. A mismatch is rejected before MessagePack decoding;
+report exactly `0.14.0`. A mismatch is rejected before MessagePack decoding;
 callers must not attempt to interpret a payload produced by another contract.
 The v0.8.2 and v0.8.3 releases remain immutable historical `0.3.0` releases:
 they do not emit `CreateContinuousAggregate` and must continue to be consumed
 by a `0.3.0` binding. Alopex v0.8.4-v0.8.6 remain historical `0.4.0`
 releases, and v0.8.7 remains the historical `0.5.0` release. This document
-describes the current `0.9.0` surface and does not retroactively change them.
+describes the current `0.14.0` surface and does not retroactively change them.
 
 ### Input, Payload, and Resource Bounds
 
@@ -90,8 +90,8 @@ from invalid user SQL.
 
 | Variant | Fields |
 | --- | --- |
-| `Select` | `with: WithClause?`, `distinct: bool`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [Expr]?`, `having: Expr?`, `windows: [NamedWindow]`, `qualify: Expr?`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?` |
-| `Values` | `with: WithClause?`, `rows: [[Expr]]`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `span: Span` |
+| `Select` | `with: WithClause?`, `distinct: bool`, `distinct_on: [Expr]`, `projection: [SelectItem]`, `from: [FromItem]`, `selection: Expr?`, `group_by: [GroupByItem]?`, `having: Expr?`, `windows: [NamedWindow]`, `qualify: Expr?`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool` |
+| `Values` | `with: WithClause?`, `rows: [[Expr]]`, `set_operations: [SetOperation]`, `order_by: [OrderByExpr]`, `limit: Expr?`, `offset: Expr?`, `limit_with_ties: bool`, `span: Span` |
 | `Insert` | `table: string`, `columns: [string]?`, `source: InsertSource`, `span: Span` |
 | `Update` | `table: string`, `assignments: [Assignment]`, `selection: Expr?`, `span: Span` |
 | `Delete` | `table: string`, `selection: Expr?`, `span: Span` |
@@ -166,11 +166,18 @@ the Alopex v0.8.8 release rather than on a separate parser release lane.
 
 | Variant | Fields |
 | --- | --- |
-| `Table` | `name: string`, `alias: string?`, `span: Span` |
+| `Table` | `name: string`, `alias: string?`, `columns: [string]`, `span: Span` |
 | `Join` | `left: FromItem`, `right: FromItem`, `join_type: JoinType`, `condition: Expr?`, `using: [string]?`, `span: Span` |
-| `Derived` | `subquery: QueryBody`, `alias: string?`, `columns: [string]`, `span: Span` |
+| `Derived` | `subquery: QueryBody`, `alias: string?`, `columns: [string]`, `lateral: bool`, `span: Span` |
+| `Function` | `name: string`, `args: [Expr]`, `alias: string?`, `columns: [string]`, `lateral: bool`, `span: Span` |
 
 `JoinType` is a string: `Inner`, `Left`, `Right`, `Full`, or `Cross`.
+
+`columns` is the relation alias column-name list (`AS t(c1, c2)`); it is always
+written and empty when the clause is absent. `lateral` records an explicit
+`LATERAL` keyword. `Function` carries a FROM-clause table function; its `args`
+are ordinary expressions and may reference earlier FROM items whether or not
+`lateral` is set.
 
 ## Expr And Subquery
 
@@ -185,7 +192,7 @@ the Alopex v0.8.8 release rather than on a separate parser release lane.
 | `BinaryOp` | `left: Expr`, `op: BinaryOp`, `right: Expr` |
 | `UnaryOp` | `op: UnaryOp`, `operand: Expr` |
 | `Case` | `operand: Expr?`, `branches: [CaseWhen]`, `else_expr: Expr?` |
-| `FunctionCall` | `name: string`, `args: [Expr]`, `distinct: bool`, `star: bool`, `over: WindowSpec?` |
+| `FunctionCall` | `name: string`, `args: [Expr]`, `distinct: bool`, `star: bool`, [`order_by: [OrderByExpr]`, `within_group: [OrderByExpr]`, `filter: Expr?`,] `over: WindowSpec?` — the three bracketed aggregate-clause keys are written together only when at least one clause is present (contract `0.12.0`); clause-free calls keep the historical 6-key map |
 | `Cast` | `expr: Expr`, `target_type: DataType` |
 | `Between` | `expr: Expr`, `low: Expr`, `high: Expr`, `negated: bool` |
 | `Like` | `expr: Expr`, `pattern: Expr`, `escape: Expr?`, `negated: bool` |
@@ -250,8 +257,20 @@ scope, inheritance rules, and logical evaluation order.
 The staged `CreateContinuousAggregate.query` payload deliberately retains its
 historical 11-field Select shape. Its validator therefore rejects top-level
 `WINDOW` and `QUALIFY` clauses before encoding instead of silently omitting
-their semantics. Ordinary public `SELECT` payloads carry the full `0.9.0`
-fields above.
+their semantics. The validator also rejects `FETCH ... WITH TIES` (contract
+`0.10.0`) before encoding because the frozen payload has no
+`limit_with_ties` key; a plain `FETCH ... ONLY` or `OFFSET n ROWS` desugars
+onto the frozen `limit`/`offset` keys. The validator likewise rejects
+`DISTINCT ON` (contract `0.11.0`) because the frozen payload has no
+`distinct_on` key. It also rejects aggregate `FILTER`, `WITHIN GROUP`, and
+aggregate-local `ORDER BY` (contract `0.12.0`) because the frozen 6-key
+`FunctionCall` map cannot express them, `ROLLUP`/`CUBE`/`GROUPING SETS`
+(contract `0.13.0`) because the frozen `group_by` keeps its `[Expr]` shape,
+and a table alias column list (contract `0.14.0`) because the frozen `Table`
+map has no `columns` key. Ordinary public `SELECT` payloads carry the full
+`0.14.0` fields described below, including `Select.group_by: [GroupByItem]`
+(`0.13.0`) and the widened `FromItem` (`0.14.0`); both are mandatory,
+always-written parts of the current wire.
 
 Contract `0.7.0` introduces `StatementKind::Values` and the tagged `QueryBody`
 shape for CTE, derived-table, and set-operation positions. A `0.6.0` consumer
@@ -278,6 +297,76 @@ Contract `0.9.0` adds the dedicated
 so it is rejected before decode. See
 [`sql-try-cast.md`](sql-try-cast.md) for the conversion matrix, error boundary,
 and release lifecycle.
+
+Contract `0.10.0` adds the `limit_with_ties: bool` field to `Select` and
+`Values` (always written) and detaches `OFFSET` from `LIMIT`: `OFFSET n
+[ROW | ROWS]` is accepted without a `LIMIT`, and `FETCH { FIRST | NEXT }
+[count] { ROW | ROWS } { ONLY | WITH TIES }` desugars onto the `limit` key
+with `limit_with_ties` set for `WITH TIES`. A `0.9.0` consumer would silently
+drop tie semantics, so producer and consumer must match at the
+exported-version gate. The staged continuous-aggregate payload stays frozen
+and rejects `WITH TIES` before encoding. See
+[`sql-fetch-pagination.md`](sql-fetch-pagination.md) for grammar, desugaring,
+and execution semantics.
+
+Contract `0.11.0` adds the `distinct_on: [Expr]` field to `Select` (always
+written, empty when the clause is absent, placed after `distinct`). It carries
+the `SELECT DISTINCT ON (expr, ...)` key expressions; `distinct` stays `false`
+when `distinct_on` is non-empty because the grammar keeps the two forms
+mutually exclusive. A `0.10.0` consumer would silently return duplicate rows,
+so producer and consumer must match at the exported-version gate. The staged
+continuous-aggregate payload stays frozen and rejects `DISTINCT ON` before
+encoding. See [`sql-distinct-on.md`](sql-distinct-on.md) for the ORDER BY
+prefix contract, determinism guarantee, and execution semantics.
+
+Contract `0.12.0` widens `FunctionCall` for aggregate clauses (issue #148):
+when any of `FILTER (WHERE ...)`, `WITHIN GROUP (ORDER BY ...)`, or an
+argument-list `ORDER BY` is present, the map carries three additional keys —
+`order_by: [OrderByExpr]`, `within_group: [OrderByExpr]`, and
+`filter: Expr | nil` — inserted between `star` and `over`. Clause-free calls
+keep the historical 6-key map, which keeps the byte-frozen staged
+continuous-aggregate payload unchanged; the Rust reader treats the absent keys
+as empty/none defaults. A `0.11.0` consumer would silently drop filter or
+ordering semantics, so producer and consumer must match at the
+exported-version gate. The staged continuous-aggregate validator rejects the
+new clauses before encoding. See
+[`sql-aggregate-filter-within-group.md`](sql-aggregate-filter-within-group.md)
+for grammar, semantics, and the decision log.
+
+Contract `0.13.0` changes `Select.group_by` from `[Expr]?` to
+`[GroupByItem]?` (issue #149):
+
+`GroupByItem` variants:
+
+| Variant | Fields |
+| --- | --- |
+| `Expr` | `expr: Expr` |
+| `Rollup` | `exprs: [Expr]` |
+| `Cube` | `exprs: [Expr]` |
+| `GroupingSets` | `sets: [[Expr]]` |
+
+An ordinary `GROUP BY a, b` becomes two `Expr` items, so the item order and
+expression payloads are unchanged apart from the added variant tagging. A
+`0.12.0` consumer cannot decode the tagged items, so producer and consumer
+must match at the exported-version gate. `GROUP BY ()` encodes as one
+`GroupingSets` item with a single empty set. The staged continuous-aggregate
+payload keeps its frozen `[Expr]` shape; the parser rejects ROLLUP/CUBE/
+GROUPING SETS inside continuous aggregates before encoding. See
+[`sql-grouping-sets.md`](sql-grouping-sets.md) for grammar, semantics, and the
+decision log.
+
+Contract `0.14.0` widens `FromItem` for LATERAL, table functions, and relation
+alias column lists (issue #151): `Table` gains `columns: [string]` (always
+written, empty when absent), `Derived` gains `lateral: bool`, and a new
+`Function` variant carries a FROM-clause table function. A `0.13.0` consumer
+cannot decode the `Function` variant and would read the extra keys as unknown
+fields, so producer and consumer must match at the exported-version gate. The
+staged continuous-aggregate payload keeps its frozen 4-key `Table` and 5-key
+`Derived` maps; the parser's single-source rule already rejects LATERAL and
+table functions there, and the staged validator rejects a table alias column
+list before encoding. See
+[`sql-lateral-table-functions.md`](sql-lateral-table-functions.md) for grammar,
+semantics, and the decision log.
 
 ## DDL Types
 
@@ -327,6 +416,7 @@ and release lifecycle.
 | `nkSelect` | `Statement.kind.variant = "Select"` | `StatementKind::Select` |
 | `nkJoin` / `nkFromJoin` | `FromItem.variant = "Join"` | `FromItem::Join` |
 | `nkFromDerived` | `FromItem.variant = "Derived"` | `FromItem::Derived` |
+| `nkFromFunction` | `FromItem.variant = "Function"` | `FromItem::Function` |
 | `nkScalarSubquery` | `ExprKind.variant = "ScalarSubquery"` | `ExprKind::ScalarSubquery` |
 | `nkInSubquery` | `ExprKind.variant = "InSubquery"` | `ExprKind::InSubquery` |
 | `nkExists` | `ExprKind.variant = "Exists"` | `ExprKind::Exists` |

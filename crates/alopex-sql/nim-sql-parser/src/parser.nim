@@ -27,6 +27,17 @@ const
                 tkTimestamp, tkDate, tkTime, tkVector}
   OptionValueTokens = {tkIdent, tkString, tkInteger, tkFloat, tkHnsw, tkBtree,
                        tkCosine, tkL2, tkInner, tkText, tkBoolean, tkBool}
+  # FETCH pagination (issue #152) reserves FETCH/NEXT/TIES/ONLY/ROW in the
+  # lexer, but they stay legal identifiers wherever an identifier is
+  # *mandatory* and no clause can start (issue #152 D16). Every `expectIdent`
+  # call site is such a position: a table/column/alias/index/window/CTE name
+  # the grammar requires, so accepting these tokens cannot make a parse
+  # ambiguous.
+  PaginationIdentTokens = {tkFetch, tkNext, tkTies, tkOnly, tkRow}
+  # An *implicit* (bare) alias is optional, so the token must not be able to
+  # start the clause that follows. `FETCH` starts the pagination tail there
+  # and therefore stays reserved; the other four cannot begin any clause.
+  ImplicitAliasTokens = {tkIdent, tkNext, tkTies, tkOnly, tkRow}
 
 proc initParser*(input: string): Parser =
   result.lex = initLexer(input)
@@ -69,6 +80,28 @@ proc check(p: Parser, kind: TokenKind): bool =
 proc checkContextual(p: Parser; value: string): bool =
   p.current.kind == tkIdent and p.current.value.cmpIgnoreCase(value) == 0
 
+proc peekNext(p: Parser): TokenKind =
+  ## One-token lookahead. The lexer is a value object, so advancing a copy
+  ## never disturbs the live token stream. The input string is copied with
+  ## the lexer, so call this only after a cheap contextual-keyword check.
+  var lookahead = p.lex
+  lookahead.nextToken().kind
+
+proc peekNextIsContextual(p: Parser; value: string): bool =
+  ## One-token lookahead for a contextual keyword (issue #149: the SETS in
+  ## GROUPING SETS). Same copy-the-lexer discipline as peekNext.
+  var lookahead = p.lex
+  let tok = lookahead.nextToken()
+  tok.kind == tkIdent and tok.value.cmpIgnoreCase(value) == 0
+
+proc peekSecond(p: Parser): TokenKind =
+  ## Two-token lookahead. LATERAL stays a contextual keyword (issue #151), so
+  ## telling `FROM lateral (SELECT ...)` from a relation named `lateral` needs
+  ## the token past the parenthesis. Same copy-the-lexer discipline as peekNext.
+  var lookahead = p.lex
+  discard lookahead.nextToken()
+  lookahead.nextToken().kind
+
 proc expectContextual(p: var Parser; value: string): Token =
   if not p.checkContextual(value):
     p.error("expected " & value)
@@ -78,14 +111,20 @@ proc spanThrough(first, last: Span): Span =
   Span(start: first.start, `end`: last.`end`)
 
 proc expectIdent(p: var Parser; context = "identifier"): Token =
-  if p.current.kind != tkIdent:
+  ## A mandatory identifier position. FETCH/NEXT/TIES/ONLY/ROW are lexer
+  ## keywords for the FETCH pagination tail (issue #152) but remain legal
+  ## names here, so `CREATE TABLE t (row INTEGER)`, `INSERT INTO t (next)`,
+  ## `UPDATE t SET only = 1` and `... AS ties` keep parsing (issue #152 D16).
+  if p.current.kind notin {tkIdent} + PaginationIdentTokens:
     p.error("expected " & context)
   result = p.advance()
 
 proc expectExprIdent(p: var Parser; context = "identifier"): Token =
-  ## FIRST/LAST/time are reserved by ORDER BY and type grammar, but SQL-TS
+  ## FIRST/LAST/time are reserved by ORDER BY and type grammar, and
+  ## FETCH/NEXT/TIES/ONLY/ROW by FETCH pagination (issue #152), but SQL-TS
   ## also uses them as ordinary function/column identifiers.
-  if p.current.kind notin {tkIdent, tkFirst, tkLast, tkTime}:
+  if p.current.kind notin {tkIdent, tkFirst, tkLast, tkTime} +
+                          PaginationIdentTokens:
     p.error("expected " & context)
   result = p.advance()
 
@@ -177,7 +216,9 @@ proc parseWindowFrameBound(p: var Parser): SqlNode =
       p.error("expected PRECEDING or FOLLOWING after UNBOUNDED")
   elif p.checkContextual("current"):
     discard p.advance()
-    let endTok = p.expectContextual("row")
+    if not p.check(tkRow):
+      p.error("expected row")
+    let endTok = p.advance()
     result = SqlNode(kind: nkWindowFrameBound,
       frameBoundKind: wfbCurrentRow, frameOffset: 0,
       span: Span(start: tokenSpan(startTok).start, `end`: tokenSpan(endTok).`end`),
@@ -227,7 +268,10 @@ proc parseWindowFrame(p: var Parser): SqlNode =
     orderAsc: -1, nullsFirst: -1)
 
 proc parseWindowSpecContents(p: var Parser; window: SqlNode) =
-  if p.check(tkIdent):
+  # A base window name, if present, is an identifier; the pagination keywords
+  # stay usable as window names so `WINDOW row AS (...)` and `OVER (row ...)`
+  # agree with the widened `expectIdent` (issue #152 D16).
+  if p.current.kind in {tkIdent} + PaginationIdentTokens:
     let base = p.advance()
     window.children.add(newIdent(base.value, tokenSpan(base)))
 
@@ -266,7 +310,7 @@ proc parseWindowSpec(p: var Parser): SqlNode =
   p.enterNesting()
   defer: p.leaveNesting()
   let overTok = p.expect(tkOver)
-  if p.check(tkIdent):
+  if p.current.kind in {tkIdent} + PaginationIdentTokens:
     let base = p.advance()
     result = newNode(nkWindowSpec,
       Span(start: tokenSpan(overTok).start, `end`: tokenSpan(base).`end`))
@@ -280,6 +324,40 @@ proc parseWindowSpec(p: var Parser): SqlNode =
 proc parseOptionalOver(p: var Parser; functionCall: SqlNode) =
   if p.check(tkOver):
     functionCall.children.add(p.parseWindowSpec())
+
+proc parseAggregateTail(p: var Parser; functionCall: SqlNode) =
+  ## Shared post-`)` tail of every function call:
+  ## [WITHIN GROUP (ORDER BY ...)] [FILTER (WHERE expr)] [OVER ...].
+  ## FILTER and WITHIN are contextual identifiers (issue #148): they start a
+  ## clause only when followed by `(` / GROUP, so `SELECT count(x) filter`
+  ## still parses as an implicit alias.
+  if p.checkContextual("within") and p.peekNext() == tkGroup:
+    discard p.advance()
+    discard p.expect(tkGroup)
+    discard p.expect(tkLParen)
+    let orderTok = p.expect(tkOrder)
+    discard p.expect(tkBy)
+    let clause = newNode(nkWithinGroupClause, tokenSpan(orderTok))
+    clause.children.add(p.parseOrderByItem())
+    while p.check(tkComma):
+      discard p.advance()
+      clause.children.add(p.parseOrderByItem())
+    let closeTok = p.expect(tkRParen)
+    clause.span = spanThrough(tokenSpan(orderTok), tokenSpan(closeTok))
+    for child in functionCall.children:
+      if child.kind == nkOrderByClause:
+        p.error("cannot combine an aggregate ORDER BY argument with WITHIN GROUP")
+    functionCall.children.add(clause)
+  if p.checkContextual("filter") and p.peekNext() == tkLParen:
+    let filterTok = p.advance()
+    discard p.expect(tkLParen)
+    discard p.expect(tkWhere)
+    let clause = newNode(nkAggFilterClause, tokenSpan(filterTok))
+    clause.children.add(p.parseExpr())
+    let closeTok = p.expect(tkRParen)
+    clause.span = spanThrough(tokenSpan(filterTok), tokenSpan(closeTok))
+    functionCall.children.add(clause)
+  p.parseOptionalOver(functionCall)
 
 proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
   p.enterNesting()
@@ -300,13 +378,13 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
         discard p.advance()
         result.children.add(p.parseExpr())
       discard p.expect(tkRParen)
-      p.parseOptionalOver(result)
+      p.parseAggregateTail(result)
       return
     while p.check(tkComma):
       discard p.advance()
       result.children.add(p.parseExpr())
     discard p.expect(tkRParen)
-    p.parseOptionalOver(result)
+    p.parseAggregateTail(result)
     return
   if nameTok.value.toLowerAscii() == "position" and not p.check(tkRParen):
     let searched = p.parseConcat()
@@ -316,14 +394,14 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
       result.children.add(source)
       result.children.add(searched)
       discard p.expect(tkRParen)
-      p.parseOptionalOver(result)
+      p.parseAggregateTail(result)
       return
     result.children.add(searched)
     while p.check(tkComma):
       discard p.advance()
       result.children.add(p.parseExpr())
     discard p.expect(tkRParen)
-    p.parseOptionalOver(result)
+    p.parseAggregateTail(result)
     return
   if nameTok.value.toLowerAscii() == "trim" and not p.check(tkRParen):
     result.children.add(p.parseExpr())
@@ -331,13 +409,13 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
       discard p.advance()
       result.children.add(p.parseExpr())
       discard p.expect(tkRParen)
-      p.parseOptionalOver(result)
+      p.parseAggregateTail(result)
       return
     while p.check(tkComma):
       discard p.advance()
       result.children.add(p.parseExpr())
     discard p.expect(tkRParen)
-    p.parseOptionalOver(result)
+    p.parseAggregateTail(result)
     return
   if not p.check(tkRParen):
     if p.check(tkStar):
@@ -351,8 +429,18 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
       while p.check(tkComma):
         discard p.advance()
         result.children.add(p.parseExpr())
+      if p.check(tkOrder):
+        # Aggregate-local ordering: agg(expr [, ...] ORDER BY key [, ...]).
+        let orderTok = p.advance()
+        discard p.expect(tkBy)
+        let orderBy = newNode(nkOrderByClause, tokenSpan(orderTok))
+        orderBy.children.add(p.parseOrderByItem())
+        while p.check(tkComma):
+          discard p.advance()
+          orderBy.children.add(p.parseOrderByItem())
+        result.children.add(orderBy)
   discard p.expect(tkRParen)
-  p.parseOptionalOver(result)
+  p.parseAggregateTail(result)
 
 proc parseCastBody(p: var Parser; tok: Token; kind: SqlNodeKind): SqlNode =
   p.enterNesting()
@@ -468,7 +556,10 @@ proc parsePrimary(p: var Parser): SqlNode =
     defer: p.leaveNesting()
     let tok = p.advance()
     result = newUnaryOp(opNeg, p.parsePrimary(), tokenSpan(tok))
-  of tkIdent, tkFirst, tkLast, tkTime:
+  of tkQuestion:
+    p.error("bind parameters are not yet supported; pass literal values " &
+      "instead (prepared statements are tracked by issue #166)")
+  of tkIdent, tkFirst, tkLast, tkTime, tkFetch, tkNext, tkTies, tkOnly, tkRow:
     let tok = p.advance()
     if tok.value.cmpIgnoreCase("try_cast") == 0 and p.check(tkLParen):
       result = p.parseCastBody(tok, nkTryCast)
@@ -677,7 +768,7 @@ proc parseSelectItem(p: var Parser): SqlNode =
     discard p.advance()
     let alias = p.expectExprIdent("alias")
     result = makeAlias(result, alias.value, tokenSpan(alias))
-  elif p.check(tkIdent):
+  elif p.current.kind in ImplicitAliasTokens:
     let alias = p.advance()
     result = makeAlias(result, alias.value, tokenSpan(alias))
 
@@ -695,7 +786,8 @@ proc parseOptionalAlias(p: var Parser; item: SqlNode): SqlNode =
     discard p.advance()
     aliasToken = p.expectIdent("alias")
     hasAlias = true
-  elif p.check(tkIdent) and p.current.kind notin ClauseTerminators:
+  elif p.current.kind in ImplicitAliasTokens and
+      p.current.kind notin ClauseTerminators:
     aliasToken = p.advance()
     hasAlias = true
 
@@ -708,11 +800,39 @@ proc parseOptionalAlias(p: var Parser; item: SqlNode): SqlNode =
         discard p.advance()
         columns.add(p.expectIdent("table alias column name").value)
       discard p.expect(tkRParen)
-    if columns.len > 0 and item.kind != nkFromDerived:
-      p.error("column aliases are currently supported only for derived tables")
+    # Issue #151: a column-name list is accepted for every relation a FROM item
+    # can produce - base tables and table functions as well as derived tables.
+    if columns.len > 0 and item.kind notin {nkFromDerived, nkFromFunction, nkIdentifier}:
+      p.error("column aliases are only supported for FROM-clause relations")
     result = makeAlias(item, aliasToken.value, tokenSpan(aliasToken), columns)
 
+proc parseTableFunction(p: var Parser; name: Token; lateral: bool): SqlNode =
+  ## `name(arg, ...)` in FROM position (issue #151). children[0] is the function
+  ## name; the remaining children are the argument expressions.
+  p.enterNesting()
+  defer: p.leaveNesting()
+  discard p.expect(tkLParen)
+  result = newNode(nkFromFunction, tokenSpan(name))
+  result.lateral = lateral
+  result.children.add(newIdent(name.value, tokenSpan(name)))
+  if not p.check(tkRParen):
+    result.children.add(p.parseExpr())
+    while p.check(tkComma):
+      discard p.advance()
+      result.children.add(p.parseExpr())
+  discard p.expect(tkRParen)
+
 proc parseFromItem(p: var Parser): SqlNode =
+  # LATERAL is contextual: it only introduces a FROM item when a subquery or a
+  # table function follows, so a relation named `lateral` keeps working.
+  var lateral = false
+  if p.checkContextual("lateral"):
+    let next = p.peekNext()
+    if (next == tkLParen and p.peekSecond() in {tkSelect, tkValues, tkWith}) or
+        (next == tkIdent and p.peekSecond() == tkLParen):
+      discard p.advance()
+      lateral = true
+
   if p.check(tkLParen):
     p.enterNesting()
     defer: p.leaveNesting()
@@ -721,13 +841,17 @@ proc parseFromItem(p: var Parser): SqlNode =
       let subquery = p.parseQueryStmt()
       discard p.expect(tkRParen)
       result = newNode(nkFromDerived, tokenSpan(start))
+      result.lateral = lateral
       result.children.add(subquery)
       result = p.parseOptionalAlias(result)
     else:
       p.error("expected SELECT, VALUES, or WITH in FROM derived table")
   else:
     let name = p.expectIdent("table name")
-    result = newIdent(name.value, tokenSpan(name))
+    if p.check(tkLParen):
+      result = p.parseTableFunction(name, lateral)
+    else:
+      result = newIdent(name.value, tokenSpan(name))
     result = p.parseOptionalAlias(result)
 
 proc parseUsingClause(p: var Parser): seq[string] =
@@ -818,13 +942,112 @@ proc parseOrderByItem(p: var Parser): SqlNode =
     else:
       p.error("expected FIRST or LAST after NULLS")
 
+proc parseRollupOrCube(p: var Parser; kind: SqlNodeKind): SqlNode =
+  ## ROLLUP(e1, ..., en) or CUBE(e1, ..., en) inside GROUP BY (issue #149).
+  ## The caller has verified the contextual keyword and the `(` lookahead.
+  let start = p.advance()
+  discard p.expect(tkLParen)
+  result = newNode(kind, tokenSpan(start))
+  if p.check(tkRParen):
+    p.error("expected expression in " & start.value.toUpperAscii() & " list")
+  result.children.add(p.parseExpr())
+  while p.check(tkComma):
+    discard p.advance()
+    result.children.add(p.parseExpr())
+  let closing = p.expect(tkRParen)
+  result.span = spanThrough(tokenSpan(start), tokenSpan(closing))
+
+proc parseGroupingSetElement(p: var Parser): SqlNode =
+  ## One element of GROUPING SETS: `()` | expr | `(e1, ..., en)`.
+  ## D1: nested ROLLUP/CUBE/GROUPING SETS is a syntax error in v1.
+  if (p.checkContextual("rollup") or p.checkContextual("cube")) and
+      p.peekNext() == tkLParen:
+    p.error("ROLLUP and CUBE cannot be nested inside GROUPING SETS")
+  if p.checkContextual("grouping") and p.peekNextIsContextual("sets"):
+    p.error("GROUPING SETS cannot be nested inside GROUPING SETS")
+  result = newNode(nkGroupingSet, p.currentSpan())
+  if p.check(tkLParen):
+    let open = p.advance()
+    if p.check(tkRParen):
+      let closing = p.advance()
+      result.span = spanThrough(tokenSpan(open), tokenSpan(closing))
+      return
+    result.children.add(p.parseExpr())
+    while p.check(tkComma):
+      discard p.advance()
+      result.children.add(p.parseExpr())
+    let closing = p.expect(tkRParen)
+    result.span = spanThrough(tokenSpan(open), tokenSpan(closing))
+  else:
+    let expr = p.parseExpr()
+    result.children.add(expr)
+    result.span = expr.span
+
+proc parseGroupByItem(p: var Parser): SqlNode =
+  ## GROUP BY item := expr | ROLLUP(...) | CUBE(...) | GROUPING SETS (...)
+  ## | `()` (issue #149, D1). ROLLUP/CUBE/GROUPING stay contextual: a bare
+  ## identifier with those names still parses as an ordinary expression.
+  if p.checkContextual("rollup") and p.peekNext() == tkLParen:
+    result = p.parseRollupOrCube(nkRollup)
+  elif p.checkContextual("cube") and p.peekNext() == tkLParen:
+    result = p.parseRollupOrCube(nkCube)
+  elif p.checkContextual("grouping") and p.peekNextIsContextual("sets"):
+    let start = p.advance()          # GROUPING
+    discard p.advance()              # SETS
+    discard p.expect(tkLParen)
+    result = newNode(nkGroupingSets, tokenSpan(start))
+    if p.check(tkRParen):
+      p.error("expected at least one grouping set in GROUPING SETS")
+    result.children.add(p.parseGroupingSetElement())
+    while p.check(tkComma):
+      discard p.advance()
+      result.children.add(p.parseGroupingSetElement())
+    let closing = p.expect(tkRParen)
+    result.span = spanThrough(tokenSpan(start), tokenSpan(closing))
+  elif p.check(tkLParen) and p.peekNext() == tkRParen:
+    # GROUP BY () — the single empty grouping set.
+    let open = p.advance()
+    let closing = p.advance()
+    result = newNode(nkGroupingSets,
+                     spanThrough(tokenSpan(open), tokenSpan(closing)))
+    result.children.add(newNode(nkGroupingSet, result.span))
+  else:
+    result = p.parseExpr()
+
+proc groupByContainsGroupingSetModifier(query: SqlNode): bool =
+  ## Whether a parsed SELECT carries ROLLUP/CUBE/GROUPING SETS in GROUP BY.
+  ## Used to keep the staged continuous-aggregate wire byte-compatible.
+  for child in query.children:
+    if child.kind == nkGroupByClause:
+      for item in child.children:
+        if item.kind in {nkRollup, nkCube, nkGroupingSets}:
+          return true
+  false
+
 proc parseSelectCore(p: var Parser): SqlNode =
   let start = p.expect(tkSelect)
   result = newNode(nkSelect, tokenSpan(start))
 
   if p.check(tkDistinct):
-    discard p.advance()
-    result.children.add(newIdent("DISTINCT"))
+    let distinctTok = p.advance()
+    if p.check(tkOn):
+      # SELECT DISTINCT ON (expr [, ...]) — PostgreSQL/DuckDB form
+      # (issue #150). Parentheses are mandatory and the key list must
+      # contain at least one expression.
+      discard p.advance()
+      discard p.expect(tkLParen)
+      if p.check(tkRParen):
+        p.error("expected expression in DISTINCT ON list")
+      let clause = newNode(nkDistinctOnClause, tokenSpan(distinctTok))
+      clause.children.add(p.parseExpr())
+      while p.check(tkComma):
+        discard p.advance()
+        clause.children.add(p.parseExpr())
+      let closing = p.expect(tkRParen)
+      clause.span = spanThrough(tokenSpan(distinctTok), tokenSpan(closing))
+      result.children.add(clause)
+    else:
+      result.children.add(newIdent("DISTINCT"))
 
   let selectList = newNode(nkExprList)
   selectList.children = p.parseSelectList()
@@ -844,10 +1067,10 @@ proc parseSelectCore(p: var Parser): SqlNode =
     discard p.advance()
     discard p.expect(tkBy)
     let groupBy = newNode(nkGroupByClause)
-    groupBy.children.add(p.parseExpr())
+    groupBy.children.add(p.parseGroupByItem())
     while p.check(tkComma):
       discard p.advance()
-      groupBy.children.add(p.parseExpr())
+      groupBy.children.add(p.parseGroupByItem())
     result.children.add(groupBy)
 
   if p.check(tkHaving):
@@ -923,6 +1146,75 @@ proc parseIntersectTerm(p: var Parser): SqlNode =
       setOp: soIntersect, setAll: all, setRight: right,
       span: tokenSpan(operatorToken), orderAsc: -1, nullsFirst: -1))
 
+proc parseFetchCount(p: var Parser): SqlNode =
+  ## FETCH { FIRST | NEXT } [count] { ROW | ROWS }: the count may be omitted
+  ## and defaults to 1 (SQL standard, PostgreSQL, DuckDB).
+  if p.current.kind in {tkRow, tkRows}:
+    newIntLit(1, p.currentSpan())
+  else:
+    p.parseExpr()
+
+proc parseLimitOffsetFetch(p: var Parser; target: SqlNode) =
+  ## Query tail pagination (issue #152):
+  ##   LIMIT (ALL | expr) / OFFSET expr [ROW | ROWS] /
+  ##   FETCH (FIRST | NEXT) [expr] (ROW | ROWS) (ONLY | WITH TIES)
+  ## Clauses may appear in any order, but at most one limit-setting clause
+  ## (LIMIT or FETCH) and one OFFSET are accepted (PostgreSQL semantics).
+  var limitNode: SqlNode = nil
+  var offsetNode: SqlNode = nil
+  var sawLimitAll = false
+  while p.current.kind in {tkLimit, tkOffset, tkFetch}:
+    case p.current.kind
+    of tkLimit:
+      if limitNode != nil or sawLimitAll:
+        p.error("multiple LIMIT clauses are not allowed")
+      discard p.advance()
+      if p.check(tkAll):
+        # LIMIT ALL means no limit; no nkLimitClause node is produced.
+        discard p.advance()
+        sawLimitAll = true
+      else:
+        limitNode = newNode(nkLimitClause)
+        limitNode.children.add(p.parseExpr())
+    of tkOffset:
+      if offsetNode != nil:
+        p.error("multiple OFFSET clauses are not allowed")
+      discard p.advance()
+      offsetNode = newNode(nkOffsetClause)
+      offsetNode.children.add(p.parseExpr())
+      if p.current.kind in {tkRow, tkRows}:
+        discard p.advance()
+    of tkFetch:
+      if limitNode != nil or sawLimitAll:
+        p.error("multiple LIMIT clauses are not allowed")
+      discard p.advance()
+      if p.current.kind notin {tkFirst, tkNext}:
+        p.error("expected FIRST or NEXT after FETCH")
+      discard p.advance()
+      limitNode = newNode(nkLimitClause)
+      limitNode.children.add(p.parseFetchCount())
+      if p.checkContextual("percent"):
+        p.error("FETCH ... PERCENT is not supported")
+      if p.current.kind notin {tkRow, tkRows}:
+        p.error("expected ROW or ROWS after FETCH count")
+      discard p.advance()
+      if p.check(tkOnly):
+        discard p.advance()
+      elif p.check(tkWith):
+        discard p.advance()
+        if not p.check(tkTies):
+          p.error("expected TIES after WITH in FETCH clause")
+        discard p.advance()
+        limitNode.limitWithTies = true
+      else:
+        p.error("expected ONLY or WITH TIES in FETCH clause")
+    else:
+      discard
+  if limitNode != nil:
+    target.children.add(limitNode)
+  if offsetNode != nil:
+    target.children.add(offsetNode)
+
 proc parseSelectStmt(p: var Parser): SqlNode =
   result = p.parseIntersectTerm()
 
@@ -949,14 +1241,7 @@ proc parseSelectStmt(p: var Parser): SqlNode =
       orderBy.children.add(p.parseOrderByItem())
     result.children.add(orderBy)
 
-  if p.check(tkLimit):
-    discard p.advance()
-    let limitNode = newNode(nkLimitClause)
-    limitNode.children.add(p.parseExpr())
-    if p.check(tkOffset):
-      discard p.advance()
-      limitNode.children.add(p.parseExpr())
-    result.children.add(limitNode)
+  p.parseLimitOffsetFetch(result)
 
 proc parseWithQueryStmt(p: var Parser): SqlNode =
   let start = p.expect(tkWith)
@@ -1235,6 +1520,11 @@ proc parseCreateContinuousAggregateAfterCreate(
   query.span = spanThrough(query.span, tokenSpan(p.previous))
   if not query.isSingleMeasurementSelect():
     p.error("continuous aggregate query requires one source measurement")
+  # The staged continuous-aggregate wire stays byte-compatible with its
+  # historical [Expr] group_by payload (issue #149, D10), so grouping-set
+  # modifiers are rejected before they can reach the encoder.
+  if query.groupByContainsGroupingSetModifier():
+    p.error("continuous aggregate queries do not support GROUPING SETS, ROLLUP, or CUBE")
   if not p.check(tkWith):
     p.error("expected WITH options after continuous aggregate SELECT")
   let options = p.parseContinuousAggregateOptions()

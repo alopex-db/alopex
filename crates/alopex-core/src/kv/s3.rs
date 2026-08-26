@@ -27,7 +27,7 @@ use tokio::runtime::Runtime;
 
 use crate::error::{Error, Result};
 use crate::kv::KVStore;
-use crate::lsm::{LsmKV, LsmKVConfig};
+use crate::lsm::{is_lock_file, LsmKV, LsmKVConfig};
 use crate::types::TxnMode;
 
 /// Map S3 error to user-friendly message with Japanese support.
@@ -409,6 +409,13 @@ impl S3KV {
             if path.is_dir() {
                 Self::collect_files_recursive(base_dir, &path, files)?;
             } else {
+                // The data-directory lock (issue #181) is a purely local
+                // artifact naming *this* host's pid. Uploading it would ship
+                // one machine's diagnostics to every other one, and syncing it
+                // back down could delete the lock file a running process holds.
+                if is_lock_file(&path) {
+                    continue;
+                }
                 let relative = path
                     .strip_prefix(base_dir)
                     .map_err(|e| Error::InvalidFormat(e.to_string()))?;
@@ -500,6 +507,27 @@ impl Drop for S3KV {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    /// 裁定 D15: the data-directory lock file is host-local and must never be
+    /// uploaded — a sync back down would delete the lock a live process holds.
+    #[test]
+    fn collect_local_files_skips_the_data_directory_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sst")).unwrap();
+        std::fs::write(dir.path().join("lsm.wal"), b"wal").unwrap();
+        std::fs::write(dir.path().join("sst/1.sst"), b"sst").unwrap();
+        std::fs::write(dir.path().join(".alopex.lock"), b"pid=1").unwrap();
+        std::fs::write(dir.path().join("mydb.alopex.lock"), b"pid=1").unwrap();
+
+        let files = S3KV::collect_local_files(dir.path()).unwrap();
+
+        assert!(files.contains("lsm.wal"));
+        assert!(files.contains("sst/1.sst"));
+        assert!(
+            !files.iter().any(|name| name.ends_with(".alopex.lock")),
+            "lock files must not be uploaded, got: {files:?}"
+        );
+    }
 
     #[test]
     fn test_s3_config_from_uri() {

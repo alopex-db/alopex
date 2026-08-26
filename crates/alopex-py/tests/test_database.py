@@ -1,3 +1,5 @@
+import shutil
+
 import pytest
 
 from alopex import AlopexError, Database, EmbeddedConfig, TxnMode
@@ -44,3 +46,58 @@ def test_close_rolls_back_active_transaction(db):
 def test_close_twice_is_idempotent(db):
     db.close()
     db.close()
+
+
+def test_close_converges_disk_db_into_a_single_alopex_file(tmp_path):
+    """`close()` must leave a self-contained `.alopex`, per issue #178."""
+    source = tmp_path / "source"
+    source.mkdir()
+    container = source / "mydb.alopex"
+
+    db = Database.open(str(container))
+    txn = db.begin(TxnMode.READ_WRITE)
+    for index in range(200):
+        txn.put(f"k-{index:04}".encode(), f"v-{index:04}".encode())
+    txn.commit()
+    db.close()
+
+    assert container.exists()
+    assert container.stat().st_size > 0, "close() must not leave a zero-byte marker"
+    # The sidecar working directory may still be present here: pruning it happens
+    # when the last handle is released, and a live Transaction object still holds
+    # a reference to the store. What `close()` guarantees is that the container is
+    # already complete, which is exactly what the copy below proves.
+
+    # Copy only the single file, leaving every working artifact behind.
+    target = tmp_path / "target"
+    target.mkdir()
+    copied = target / "mydb.alopex"
+    shutil.copyfile(container, copied)
+    assert list(p.name for p in target.iterdir()) == ["mydb.alopex"]
+
+    restored = Database.open(str(copied))
+    with restored.begin(TxnMode.READ_ONLY) as txn:
+        for index in range(200):
+            assert txn.get(f"k-{index:04}".encode()) == f"v-{index:04}".encode()
+    restored.close()
+
+
+def test_second_open_of_one_database_is_rejected(tmp_path):
+    """One data directory, one holder — issue #181."""
+    container = tmp_path / "locked.alopex"
+
+    db = Database.open(str(container))
+    try:
+        with pytest.raises(AlopexError) as excinfo:
+            Database.open(str(container))
+        assert "already open by another process" in str(excinfo.value)
+    finally:
+        db.close()
+
+
+def test_in_memory_databases_are_not_locked():
+    """In-memory databases have no path, so #181 locking never applies."""
+    first = Database.open_in_memory()
+    second = Database.open_in_memory()
+    first.close()
+    second.close()

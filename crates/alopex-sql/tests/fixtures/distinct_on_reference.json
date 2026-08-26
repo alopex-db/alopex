@@ -1,0 +1,49 @@
+{
+  "reference_versions": {
+    "postgresql": "16.14",
+    "duckdb": "1.5.5"
+  },
+  "basis": "Expected rows are pinned to the documented SQL semantics linked below; external engines are not executed by this fixture test. All cases with a full ORDER BY (unique winner per group) agree between PostgreSQL 16 and DuckDB 1.5.5. Cases whose winner is left unpredictable by PostgreSQL (ties under the user ORDER BY) additionally pin the Alopex determinism extension D4: ties resolve by every input column in schema order ASC NULLS LAST. Setup: CREATE TABLE sales (id INTEGER PRIMARY KEY, region TEXT, amount INTEGER, note TEXT); INSERT INTO sales VALUES (1,'east',100,'a'),(2,'east',50,'b'),(3,'west',75,'c'),(4,'west',75,'d'),(5,NULL,10,'e'),(6,NULL,5,'f').",
+  "source_docs": {
+    "postgresql_distinct_on": "https://www.postgresql.org/docs/16/sql-select.html#SQL-DISTINCT",
+    "duckdb_select_distinct_on": "https://duckdb.org/docs/stable/sql/query_syntax/select"
+  },
+  "cases": [
+    {
+      "name": "single_key_first_row_per_group_nulls_last",
+      "sql": "SELECT DISTINCT ON (region) region, amount FROM sales ORDER BY region, amount, id",
+      "rows": [["east", 50], ["west", 75], [null, 5]]
+    },
+    {
+      "name": "descending_tail_picks_the_largest_amount",
+      "sql": "SELECT DISTINCT ON (region) region, amount FROM sales ORDER BY region, amount DESC, id",
+      "rows": [["east", 100], ["west", 75], [null, 10]]
+    },
+    {
+      "name": "composite_keys_emit_one_row_per_pair",
+      "sql": "SELECT DISTINCT ON (region, amount) region, amount, id FROM sales ORDER BY region, amount, id",
+      "rows": [
+        ["east", 50, 2],
+        ["east", 100, 1],
+        ["west", 75, 3],
+        [null, 5, 6],
+        [null, 10, 5]
+      ]
+    },
+    {
+      "name": "tie_resolves_by_schema_order_tie_breaker_d4",
+      "sql": "SELECT DISTINCT ON (region) id FROM sales WHERE region = 'west' ORDER BY region, amount",
+      "rows": [[3]]
+    },
+    {
+      "name": "prefix_permutation_is_accepted",
+      "sql": "SELECT DISTINCT ON (region, amount) id FROM sales ORDER BY amount, region, id",
+      "rows": [[6], [5], [2], [3], [1]]
+    },
+    {
+      "name": "limit_offset_apply_after_deduplication",
+      "sql": "SELECT DISTINCT ON (region) region, amount FROM sales ORDER BY region, amount, id LIMIT 1 OFFSET 1",
+      "rows": [["west", 75]]
+    }
+  ]
+}

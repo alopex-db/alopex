@@ -20,11 +20,11 @@ with pathlib.Path(sys.argv[1]).open("rb") as stream:
     print(tomllib.load(stream)["workspace"]["package"]["version"])
 PY
 )"
-REQUIRED_CONTRACT_VERSION="0.9.0"
+REQUIRED_CONTRACT_VERSION="0.14.0"
 REQUIRED_NIM_VERSION="2.2.10"
 REQUIRED_NIMBLE_VERSION="0.22.3"
 REQUIRED_NIMBLE_SHA="42ef70c2102a942c46f13eb76872326edd525cec"
-REQUIRED_BUILD_PROFILE="nim-release-library-v1"
+REQUIRED_BUILD_PROFILE="nim-release-dual-library-v2"
 NIM_IMAGE="${NIM_IMAGE:-nimlang/nim:2.2@sha256:62428daa4a39baeb6f5e429a9c2ca3cee27a80ef880fe6e1bf3e29cc2296ac1b}"
 SEED_DIR="${ALOPEX_NIMBLE_SEED_DIR:-${ALOPEX_NIMBLE_DIR:-}}"
 
@@ -32,6 +32,7 @@ RUNNER_IS_WINDOWS=0
 case "$(uname -s)" in
   Darwin)
     OUTPUT="${PARSER_DIR}/libalopex_sql_parser.dylib"
+    STATIC_OUTPUT="${PARSER_DIR}/libalopex_sql_parser.a"
     case "$(uname -m)" in
       arm64|aarch64) HOST_TARGET="aarch64-apple-darwin" ;;
       x86_64|amd64) HOST_TARGET="x86_64-apple-darwin" ;;
@@ -41,6 +42,7 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     RUNNER_IS_WINDOWS=1
     OUTPUT="${PARSER_DIR}/alopex_sql_parser.dll"
+    STATIC_OUTPUT="${PARSER_DIR}/alopex_sql_parser.lib"
     case "$(uname -m)" in
       x86_64|amd64) HOST_TARGET="x86_64-pc-windows-msvc" ;;
       *) HOST_TARGET="" ;;
@@ -48,6 +50,7 @@ case "$(uname -s)" in
     ;;
   Linux)
     OUTPUT="${PARSER_DIR}/libalopex_sql_parser.so"
+    STATIC_OUTPUT="${PARSER_DIR}/libalopex_sql_parser.a"
     case "$(uname -m)" in
       x86_64|amd64) HOST_TARGET="x86_64-unknown-linux-gnu" ;;
       *) HOST_TARGET="" ;;
@@ -55,10 +58,12 @@ case "$(uname -s)" in
     ;;
   *)
     OUTPUT="${PARSER_DIR}/libalopex_sql_parser.so"
+    STATIC_OUTPUT="${PARSER_DIR}/libalopex_sql_parser.a"
     HOST_TARGET=""
     ;;
 esac
 DEFAULT_OUTPUT="${OUTPUT}"
+DEFAULT_STATIC_OUTPUT="${STATIC_OUTPUT}"
 
 usage() {
   cat <<'EOF'
@@ -147,10 +152,12 @@ validate_output_path() {
   local output_name
   local output_parent
   local canonical_parent
+  local static_output_name
 
   OUTPUT="$(to_posix_path "${OUTPUT}")"
   expected_name="$(basename "${DEFAULT_OUTPUT}")"
   output_name="$(basename "${OUTPUT}")"
+  static_output_name="$(basename "${STATIC_OUTPUT}")"
   if [[ "${output_name}" != "${expected_name}" ]]; then
     echo "--output basename must be ${expected_name}" >&2
     exit 2
@@ -163,8 +170,14 @@ validate_output_path() {
   fi
   canonical_parent="$(cd "${output_parent}" && pwd -P)"
   OUTPUT="${canonical_parent}/${output_name}"
+  static_output_name="$(basename "${DEFAULT_STATIC_OUTPUT}")"
+  STATIC_OUTPUT="${canonical_parent}/${static_output_name}"
   if [[ -L "${OUTPUT}" || ( -e "${OUTPUT}" && ! -f "${OUTPUT}" ) ]]; then
     echo "--output must be absent or a regular file: ${OUTPUT}" >&2
+    exit 2
+  fi
+  if [[ -L "${STATIC_OUTPUT}" || ( -e "${STATIC_OUTPUT}" && ! -f "${STATIC_OUTPUT}" ) ]]; then
+    echo "static parser output must be absent or a regular file: ${STATIC_OUTPUT}" >&2
     exit 2
   fi
 }
@@ -490,14 +503,23 @@ EOF
     --registry-metadata "packages_official.json=${packages_official_arg}" \
     --registry-metadata "packages_temp.json=${packages_temp_arg}"
 
-  rm -f -- "${OUTPUT}"
+  rm -f -- "${OUTPUT}" "${STATIC_OUTPUT}"
   (
     cd "${PARSER_DIR}"
     nimcache_arg="$(to_native_path "${build_root}/nimcache")"
     output_build_arg="$(to_native_path "${OUTPUT}")"
     npeg_source_arg="$(to_native_path "${npeg_resolved}")"
     msgpack_source_arg="$(to_native_path "${msgpack_resolved}")"
+    static_output_build_arg="$(to_native_path "${STATIC_OUTPUT}")"
     static_flags=()
+    # The static archive is linked into cdylib consumers (the Python
+    # extension module), so its objects must be position independent with a
+    # TLS model usable from a dlopen'd library. Without this the Linux
+    # archive carries R_X86_64_TPOFF32 relocations and `maturin build` fails
+    # with "relocation ... cannot be used when making a shared object". This
+    # mirrors the `staticlib` nimble task, which the --backend docker path
+    # uses; the host path must produce byte-comparable inputs (issue #179).
+    static_cc_flags=(--passC:-fPIC)
     case "${HOST_TARGET}" in
       x86_64-unknown-linux-gnu)
         static_flags+=(--passL:-s)
@@ -512,6 +534,9 @@ EOF
           --passL:-s
           --passL:-Wl,--no-insert-timestamp
         )
+        # MSVC has no -fPIC (all code is position independent there) and
+        # rejects the flag, so the Windows branch replaces it outright.
+        static_cc_flags=(--cc:vcc)
         ;;
     esac
     "${NIM_BIN}" c -d:release --app:lib --mm:orc --opt:speed \
@@ -520,9 +545,20 @@ EOF
       --path:"${npeg_source_arg}" \
       --path:"${msgpack_source_arg}" \
       -o:"${output_build_arg}" src/alopex_sql_parser.nim
+    static_nimcache_arg="$(to_native_path "${build_root}/nimcache-static")"
+    "${NIM_BIN}" c -d:release --app:staticlib --mm:orc --opt:speed \
+      "${static_cc_flags[@]}" \
+      --nimcache:"${static_nimcache_arg}" \
+      --path:"${npeg_source_arg}" \
+      --path:"${msgpack_source_arg}" \
+      -o:"${static_output_build_arg}" src/alopex_sql_parser.nim
   )
   [[ -f "${OUTPUT}" ]] || {
     echo "Nim parser output not found: ${OUTPUT}" >&2
+    exit 1
+  }
+  [[ -f "${STATIC_OUTPUT}" ]] || {
+    echo "Nim parser static output not found: ${STATIC_OUTPUT}" >&2
     exit 1
   }
 
@@ -536,6 +572,7 @@ EOF
       --contract-version "${REQUIRED_CONTRACT_VERSION}" \
       --target "${TARGET}" \
       --library "${output_arg}" \
+      --static-library "$(to_native_path "${STATIC_OUTPUT}")" \
       --source-root "${parser_dir_arg}" \
       --nim-version "${REQUIRED_NIM_VERSION}" \
       --nim-binary "${nim_bin_arg}" \
@@ -556,6 +593,7 @@ build_docker() {
   local container_output
   local output_dir
   local output_name
+  local static_output_name
   local -a output_mount=()
   command -v docker >/dev/null 2>&1 || {
     echo "docker is required for the Docker backend" >&2
@@ -563,6 +601,7 @@ build_docker() {
   }
   output_dir="$(dirname "${OUTPUT}")"
   output_name="$(basename "${OUTPUT}")"
+  static_output_name="$(basename "${DEFAULT_STATIC_OUTPUT}")"
   if [[ "${output_dir}" == "${PARSER_DIR}" ]]; then
     container_output="/workspace/${output_name}"
   else
@@ -576,9 +615,10 @@ build_docker() {
     -w "/workspace" \
     -e HOME=/tmp \
     -e "ALOPEX_NIM_PARSER_OUTPUT=${container_output}" \
+    -e "ALOPEX_NIM_PARSER_STATIC_OUTPUT=$(dirname "${container_output}")/${static_output_name}" \
     --user "$(id -u):$(id -g)" \
     "${NIM_IMAGE}" \
-    -c 'export PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin; nimble install -y "npeg@1.3.0" "msgpack4nim@0.4.4" && nimble lib'
+    -c 'export PATH=/opt/nim/bin:/usr/local/bin:/usr/bin:/bin; nimble install -y "npeg@1.3.0" "msgpack4nim@0.4.4" && nimble lib && nimble staticlib'
 }
 
 validate_docker_target() {
@@ -589,14 +629,43 @@ validate_docker_target() {
   fi
 }
 
+# Fail closed when a Linux static archive is not position independent.
+#
+# The archive is linked into the Python extension module, a cdylib. A non-PIC
+# build carries R_X86_64_TPOFF32 TLS relocations that the linker refuses in a
+# shared object, and the failure only surfaces in the wheel job — long after
+# the release assets were staged. Both backends run this check, so the host
+# and nimble/docker paths cannot silently diverge again (issue #179).
+assert_static_archive_is_pic() {
+  local effective_target
+  effective_target="${TARGET:-${HOST_TARGET}}"
+  case "${effective_target}" in
+    *-linux-gnu|*-linux-musl) ;;
+    *) return 0 ;;
+  esac
+  command -v readelf >/dev/null 2>&1 || {
+    echo "readelf not found; skipping the position-independence check for ${STATIC_OUTPUT}" >&2
+    return 0
+  }
+  if readelf --relocs -- "${STATIC_OUTPUT}" 2>/dev/null | grep -q "R_X86_64_TPOFF32"; then
+    echo "static parser archive is not position independent: ${STATIC_OUTPUT}" >&2
+    echo "it carries R_X86_64_TPOFF32 relocations and cannot link into a cdylib" >&2
+    echo "build it with --passC:-fPIC" >&2
+    exit 1
+  fi
+}
+
 write_identity_sidecars() (
   local output_dir
   local output_name
   local output_sha
+  local static_output_name
+  local static_output_sha
   local contract_tmp
   local checksum_tmp
   output_dir="$(dirname "${OUTPUT}")"
   output_name="$(basename "${OUTPUT}")"
+  static_output_name="$(basename "${STATIC_OUTPUT}")"
   contract_tmp="${output_dir}/.CONTRACT_VERSION.$$"
   checksum_tmp="${output_dir}/.SHA256SUMS.$$"
   trap 'rm -f -- "${contract_tmp}" "${checksum_tmp}"' EXIT
@@ -604,12 +673,18 @@ write_identity_sidecars() (
   if command -v sha256sum >/dev/null 2>&1; then
     output_sha="$(sha256sum "${OUTPUT}")"
     output_sha="${output_sha%% *}"
+    static_output_sha="$(sha256sum "${STATIC_OUTPUT}")"
+    static_output_sha="${static_output_sha%% *}"
   elif command -v shasum >/dev/null 2>&1; then
     output_sha="$(shasum -a 256 "${OUTPUT}")"
     output_sha="${output_sha%% *}"
+    static_output_sha="$(shasum -a 256 "${STATIC_OUTPUT}")"
+    static_output_sha="${static_output_sha%% *}"
   elif command -v openssl >/dev/null 2>&1; then
     output_sha="$(openssl dgst -sha256 "${OUTPUT}")"
     output_sha="${output_sha##*= }"
+    static_output_sha="$(openssl dgst -sha256 "${STATIC_OUTPUT}")"
+    static_output_sha="${static_output_sha##*= }"
   else
     echo "sha256sum, shasum, or openssl is required to identify the parser output" >&2
     exit 1
@@ -618,9 +693,14 @@ write_identity_sidecars() (
     echo "could not identify Nim parser output: ${OUTPUT}" >&2
     exit 1
   }
+  [[ "${static_output_sha}" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "could not identify Nim parser static output: ${STATIC_OUTPUT}" >&2
+    exit 1
+  }
 
   printf '%s\n' "${REQUIRED_CONTRACT_VERSION}" >"${contract_tmp}"
   printf '%s  %s\n' "${output_sha}" "${output_name}" >"${checksum_tmp}"
+  printf '%s  %s\n' "${static_output_sha}" "${static_output_name}" >>"${checksum_tmp}"
   chmod 0644 "${contract_tmp}" "${checksum_tmp}"
   mv -f -- "${contract_tmp}" "${output_dir}/CONTRACT_VERSION"
   mv -f -- "${checksum_tmp}" "${output_dir}/SHA256SUMS"
@@ -631,7 +711,7 @@ validate_output_path
 if [[ "${BACKEND}" == "docker" ]]; then
   validate_docker_target
 fi
-rm -f -- "${OUTPUT}" "$(dirname "${OUTPUT}")/CONTRACT_VERSION" \
+rm -f -- "${OUTPUT}" "${STATIC_OUTPUT}" "$(dirname "${OUTPUT}")/CONTRACT_VERSION" \
   "$(dirname "${OUTPUT}")/SHA256SUMS"
 if [[ "${BACKEND}" == "host" ]]; then
   build_host
@@ -640,5 +720,8 @@ else
 fi
 
 [[ -f "${OUTPUT}" ]] || { echo "Nim parser output not found: ${OUTPUT}" >&2; exit 1; }
+[[ -f "${STATIC_OUTPUT}" ]] || { echo "Nim parser static output not found: ${STATIC_OUTPUT}" >&2; exit 1; }
+assert_static_archive_is_pic
 write_identity_sidecars
 echo "Built ${OUTPUT}"
+echo "Built ${STATIC_OUTPUT}"

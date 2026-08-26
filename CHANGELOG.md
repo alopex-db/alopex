@@ -2,10 +2,139 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.8.8] — 2026-08-26
 
 ### Added
 
+- SQL `FROM` supports `LATERAL` derived tables, table functions, and relation
+  alias column lists (issue #151). `CROSS JOIN LATERAL`, `[INNER] JOIN
+  LATERAL … ON`, `LEFT [OUTER] JOIN LATERAL … ON`, and comma-separated
+  `LATERAL` items evaluate the correlated right side once per left row, with a
+  `LEFT JOIN LATERAL` padding unmatched left rows; `RIGHT`/`FULL JOIN LATERAL`
+  is a stable planner error (`ALOPEX-T015`). A derived table without `LATERAL`
+  still cannot see the enclosing FROM items. `UNNEST(vector)` is the first
+  FROM-clause table function — one `FLOAT` column named `unnest`, zero rows for
+  `NULL` or an empty vector — and its argument may reference the preceding FROM
+  items without writing `LATERAL`; `GENERATE_SERIES` is reserved and reports
+  issue #157, any other name is `ALOPEX-C007`. `AS t(c1, …, cn)` now applies to
+  base tables, CTE references, derived tables, and table functions with exact
+  arity (`ALOPEX-T012`) and no repeated names. Columnar filter fusion no longer
+  applies to a correlated predicate: the `Filter` operator evaluates it over a
+  columnar scan widened to the local columns it reads, which keeps the
+  correlation boundary intact and also fixes subquery predicates over columnar
+  storage. The v0.8 remote-read catalog rejects lateral joins before transport
+  (`lateral_join_not_supported_remote`) and classifies table functions
+  local-only (`table_function_not_supported_remote`). Covered on Rust, CLI,
+  Embedded, and Python surfaces (docs/sql-lateral-table-functions.md). Parser
+  FFI contract bumped 0.13.0 → 0.14.0: `FromItem.Table` gains `columns`,
+  `FromItem.Derived` gains `lateral`, and a new `FromItem.Function` variant
+  carries `{name, args, alias, columns, lateral}`, while the staged
+  continuous-aggregate payload keeps its frozen FROM-item maps. `LATERAL`
+  stays a contextual identifier, so a relation named `lateral` keeps working.
+
+- The Python package can connect to a running `alopex-server` (issue #182).
+  `alopex.connect(target)` selects the surface from the target alone:
+  `http(s)://host:port` returns the new `alopex.RemoteDatabase`, while
+  `:memory:`, `file:///path`, and bare paths open the embedded `Database`.
+  `RemoteDatabase.execute_sql(sql, params)` returns what the embedded
+  `Database` returns for the same statement — `list[dict]` in column order for
+  SELECT, `int` for DML, `None` for DDL — by normalizing the server's
+  `columns`/`rows` (`SqlValue` in serde's externally tagged form) in one place;
+  `Float` values are re-narrowed through binary32 so they match the embedded
+  `f64::from(f32)` exactly. `?` placeholders are expanded by the embedded binder
+  itself (exported as the private `_alopex._bind_sql_params`), so parameter
+  semantics cannot drift between the two surfaces. `begin()` opens a server
+  session (`/session/begin` … `/commit` … `/rollback`) as `RemoteTransaction`.
+  `alopex.DatabaseLike` and `alopex.TransactionLike` are runtime-checkable
+  protocols describing the shared surface. The client is pure Python on
+  `http.client`, adds no dependency to the wheel, opens no socket until the
+  first call, never resends a request that was already sent, and requires
+  `insecure=True` for plaintext `http://` to a non-loopback host.
+  Operations with no server equivalent — stream APIs, HNSW, transactional KV
+  and vector calls, `flush`, `memory_usage`, `routing_diagnostics`,
+  `thread_mode`, and `begin(TxnMode.READ_ONLY)` — raise `NotImplementedError`
+  with a reason instead of failing as a missing attribute. New stable codes:
+  `ALOPEX-PY201` (connect failed), `ALOPEX-PY202` (client timeout),
+  `ALOPEX-PY203` (protocol violation), `ALOPEX-PY204` (no server equivalent),
+  `ALOPEX-PY205` (unusable target/option); the server's own codes
+  (`UNAUTHORIZED`, `QUERY_TIMEOUT`, `SESSION_EXPIRED`, `SERVER_BACKPRESSURE`,
+  and the rest) are forwarded verbatim onto `AlopexError.code` alongside
+  `.correlation_id` and `.http_status`. Known asymmetry: the server's routing
+  pre-pass flattens parse/catalog/type-check codes to `ALOPEX-E999` on the wire
+  (documented as D20 in `docs/python-server-client.md`, same on the CLI's HTTP
+  path), and a short list of statement-level value divergences — `PRAGMA`,
+  `clear_cache()`, and a bare `;` — is pinned by a test and listed under
+  "Known value divergences" (D24). Dropping a `RemoteTransaction` or calling
+  `RemoteDatabase.close()` mid-transaction rolls the server session back
+  instead of leaving it committable until the `session_ttl` sweep (D21);
+  `RemoteTransaction.status` reports the embedded `stream_effect` value
+  (`"committable"` while active) (D22); blank SQL returns `None` without a
+  request like the embedded surface (D23); an explicit `:0` port and a `bool`
+  `timeout` are rejected with `ALOPEX-PY205` instead of being read as port 80
+  and a 1-second deadline. See `docs/python-server-client.md` and
+  `docs/server-guide.md`.
+- SQL `GROUP BY` supports `GROUPING SETS`, `ROLLUP`, `CUBE`, the empty
+  grouping set `()`, and the `GROUPING`/`GROUPING_ID` functions (issue #149).
+  Ordinary keys cross-product with the modifiers, duplicate sets emit
+  duplicate rows (PostgreSQL semantics), and placeholder NULLs are
+  distinguished from data NULLs only through `GROUPING` (BIGINT bitmask,
+  leftmost argument = most significant bit, at most 63 arguments).
+  `HAVING`/`ORDER BY`/window functions compose over a hidden `__grouping_id`
+  aggregate column. Expansion is bounded at 4096 grouping sets and 63 union
+  keys with stable planner errors; execution is single-pass and
+  single-threaded (parallel/spill aggregation bypassed) with the existing
+  1,000,000-group limit applied across all sets, and the v0.8 remote-read
+  catalog classifies the forms local-only (`grouping_sets_local_only`).
+  Covered on Rust, CLI, Embedded, and Python surfaces
+  (docs/sql-grouping-sets.md). Parser FFI contract bumped 0.12.0 → 0.13.0:
+  `Select.group_by` now carries tagged `GroupByItem` values
+  (`Expr`/`Rollup`/`Cube`/`GroupingSets`) instead of bare expressions, while
+  the staged continuous-aggregate payload keeps its frozen `[Expr]` shape and
+  rejects the modifiers. `ROLLUP`/`CUBE`/`GROUPING`/`SETS` stay contextual
+  identifiers.
+
+- SQL aggregates support `FILTER (WHERE predicate)` on every aggregate
+  (predicate rows that are not TRUE are excluded before `DISTINCT`),
+  aggregate-local `ORDER BY` for `GROUP_CONCAT`/`STRING_AGG` (validated then
+  discarded on order-insensitive aggregates), and the first ordered-set
+  aggregate `PERCENTILE_DISC(fraction) WITHIN GROUP (ORDER BY expr)` with
+  PostgreSQL selection semantics. `HAVING` recognizes filtered/ordered
+  aggregates, aggregates differing only in FILTER/ORDER BY occupy distinct
+  slots, ordered aggregates force single-threaded execution, and the v0.8
+  remote-read catalog classifies the new forms local-only
+  (`aggregate_filter_local_only`/`ordered_aggregate_local_only`). Combining
+  the clauses with `OVER` is a stable planner error. Covered on Rust, CLI,
+  Embedded, and Python surfaces (docs/sql-aggregate-filter-within-group.md).
+  Breaking note: `filter`/`within` remain valid identifiers, but an implicit
+  alias named `filter` directly followed by `(`, or `within` directly
+  followed by `GROUP`, now parses as a clause — write `AS filter`/`AS within`
+  instead. Parser FFI contract bumped 0.11.0 → 0.12.0: the `FunctionCall`
+  wire map gains `order_by`/`within_group`/`filter` keys when any aggregate
+  clause is present and keeps its historical 6-key shape otherwise.
+- SQL supports PostgreSQL-style `SELECT DISTINCT ON (expr, ...)`: one row per
+  key group with the PostgreSQL `ORDER BY` prefix contract (42P10-equivalent
+  `ALOPEX-T014` on mismatch), NULL keys grouped as equal, select-list aliases
+  in keys, and a documented determinism extension — remaining ties resolve by
+  every input column in schema order, so results never depend on physical row
+  order. `LIMIT`/`OFFSET`/`FETCH` — including `FETCH ... WITH TIES`, whose
+  peer groups come from the user's `ORDER BY` — apply after deduplication.
+  Covered on Rust, CLI, Embedded, and Python surfaces; v1 rejects
+  combining it with `DISTINCT`, `GROUP BY`/aggregates/`HAVING`, window
+  functions/`QUALIFY`, and trailing set operations (docs/sql-distinct-on.md).
+- SQL supports standard pagination: `OFFSET n [ROW|ROWS]` without `LIMIT`,
+  `FETCH {FIRST|NEXT} [count] {ROW|ROWS} {ONLY|WITH TIES}` with PostgreSQL
+  peer semantics for `WITH TIES`, constant-expression and NULL/`ALL` counts
+  folded at plan time, and negative/typed-count rejection across Rust, CLI,
+  Embedded, and Python surfaces. A `?` bind placeholder now fails with a
+  dedicated "bind parameters are not yet supported" parse error (prepared
+  statements are tracked by issue #166) instead of a column-not-found.
+  Breaking note: `FETCH`, `NEXT`, `TIES`, `ONLY` and `ROW` became lexer
+  keywords. They remain valid identifiers wherever the grammar requires a
+  name — expressions, `CREATE TABLE` column names, `INSERT`/CTE/alias column
+  lists, `UPDATE SET` targets, table/index/window/CTE names, `USING` columns
+  and `AS <name>` aliases — but an implicit alias named `fetch` now starts the
+  pagination tail, so write `AS fetch` instead (`next`/`ties`/`only`/`row`
+  still work as implicit aliases).
 - SQL supports `TRY_CAST`, returning NULL only for conversion failures while
   preserving source-expression errors; CAST and TRY_CAST share bounded
   numeric, text, boolean, timestamp, BLOB, and vector conversion rules.
@@ -21,13 +150,147 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Opening one data directory from two places is now rejected instead of
+  silently corrupting it (issue #181). Two processes sharing a `data_dir` each
+  kept their own WAL ring offset and their own SSTable id counter, so they
+  overwrote each other's WAL bytes and each other's `sst/<id>.sst`, and each
+  one's drop-time prune could delete the other's live sidecar — all with no
+  error or warning. `LsmKV::open_with_config` now takes an OS-level exclusive
+  lock (`flock` on Unix, `LockFileEx` on Windows) before it touches anything,
+  including before the container rehydrate path, and fails with
+  `Error::AlreadyOpen` — rendered with the stable string `already open by
+  another process` — when someone already holds it. The lock is released only
+  when the handle is dropped (not by `close()`, which leaves the store
+  writable), and because it is an OS lock the kernel releases it on any
+  abnormal exit, so a `SIGKILL`ed process leaves nothing stale behind. The lock
+  file is `X.alopex.lock` beside the container for the sidecar shape and
+  `<data_dir>/.alopex.lock` for a plain directory; it is excluded from backup,
+  restore, and S3 sync. To share one database across processes, run
+  `alopex-server` and connect over HTTP/gRPC. In-memory databases are
+  unaffected (docs/single-process-lock.md).
+  **Breaking**: pointing `alopex --data-dir` at a running server's `data_dir`,
+  or opening one embedded database twice, now returns an error.
+- A disk database opened through an `X.alopex` path now actually converges into
+  that single file (issue #178). Previously all data stayed in the
+  `X.alopex.d/` sidecar directory and `X.alopex` was either absent or a
+  zero-byte existence marker, so copying `X.alopex` on its own restored
+  nothing — the documented "安定後は `.alopex` 単体で完全状態" contract was
+  unmet. `flush()`, the new `converge()`/`close()`, and dropping the handle now
+  write every live SSTable plus an `LsmManifest` into the existing unified
+  container format (`ALPX` header, per-section CRC32, `XPLA` footer carrying
+  the converged LSN) via a temp file and atomic rename, and dropping the handle
+  additionally prunes the sidecar. Opening a path whose sidecar WAL is absent
+  rehydrates the working directory from the container. Copying only `X.alopex`
+  to another directory and reopening it now restores every committed row,
+  including tombstones and the MVCC clock (docs/single-file-convergence.md).
+- `Database::persist_to_disk()` no longer leaves a zero-byte `.alopex` marker
+  next to the data directory; it writes a real, self-contained container at the
+  given path. Its staging directory moved from `X.alopex.tmp` to
+  `X.alopex.d.tmp` because the container writer already claims the former for
+  its own atomic-rename staging file.
+- `LsmKV` no longer silently discards unpersisted immutable MemTables. Once
+  more than `memtable.max_immutable_count` tables piled up, the oldest was
+  dropped with `pop_front()` and its rows were lost; each table is now written
+  to an SSTable *before* it leaves the queue, and a failed write propagates
+  instead of losing data.
+- A point lookup no longer costs the total size of every live SSTable.
+  `SSTableReader::open` re-reads and CRC32s the whole file, and `get`/conflict
+  detection opened one per SSTable *per key*, so a database with real SSTables
+  spent all its time re-validating them. Lookups now skip SSTables whose key
+  range cannot contain the key and share cached, already-validated readers
+  (bounded at 256 open files). This was latent until `flush()` began producing
+  SSTables in this release.
+- Opening a data directory whose WAL is missing but whose `checkpoint.meta`
+  survives no longer rewinds the timestamp oracle to 1. Committing after such
+  an open used to issue commit timestamps below those already stored in
+  SSTables, surfacing as spurious `TxnConflict`s and stale reads.
+- Rust consumers of the published Embedded/SQL crates no longer require the
+  Nim parser shared library at runtime: target-specific static parser archives
+  are bundled into `alopex-sql`, while shared libraries remain Python-wheel
+  assets. The release verifier now runs a published dependency smoke without
+  `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH`.
+- Internal Alopex crate dependencies use exact `=0.8.8` patch requirements so
+  pinning `alopex-embedded = "=0.8.8"` cannot resolve sibling Alopex crates to a
+  newer patch line. The public verifier checks the generated Cargo.lock.
 - An explicit default RANGE frame for a value window uses the same linear
   peer-group path as its implicit form, avoiding a size-dependent resource
   failure for semantically identical queries.
+- A correlated reference from a `LATERAL` item or a correlated subquery works
+  in every operator, not only `WHERE` and the projection: aggregate `FILTER`
+  predicates, aggregate-local `ORDER BY`, group keys, plain `ORDER BY`,
+  `DISTINCT ON`, `FETCH ... WITH TIES` peer keys and window
+  `PARTITION BY`/`ORDER BY` used to escape as an internal `ALOPEX-E999`
+  "invalid column reference".
+- Columnar projection pushdown collects the columns an aggregate `FILTER`
+  predicate, an aggregate-local `ORDER BY`, or an `OVER (...)` partition/order
+  key reads. They were previously materialized as `NULL`, so
+  `SUM(v) FILTER (WHERE flag > 0)` silently returned `NULL` on a columnar
+  table.
+- `scripts/build-nim-parser.sh --backend host` — the path the release workflow
+  uses for all four parser archives — compiles the static archive with
+  `-fPIC`, matching the `staticlib` nimble task. The published Linux archive
+  otherwise carried `R_X86_64_TPOFF32` relocations and could not be linked
+  into the Python extension module. The script now fails closed when a Linux
+  archive still carries them.
+- Windows Embedded/Python convergence no longer reports `Access is denied`
+  after atomically replacing the `.alopex` container: the file body is still
+  synced before rename, while the unsupported standard-library directory sync
+  is skipped on Windows.
+- Python `file://` targets use the platform URL-to-path converter, so valid
+  Windows file URIs open the intended embedded database.
 
 ### Changed
 
-- The Nim parser wire contract is `0.9.0`. It adds a dedicated `TryCast`
+- `Database::flush()` now costs more than it used to: it freezes the MemTable,
+  writes it to an SSTable, and converges the database into its single
+  `.alopex` file. Previously it only froze the active MemTable and wrote
+  nothing to disk, contradicting its own documentation. This propagates to
+  Python's `db.flush()`. `Database::converge()`, `Database::close()`, and
+  `Database::container_path()` are new; `db.close()` on the Python surface now
+  reports convergence failures instead of leaving them to the best-effort drop
+  path.
+- Convergence is scoped by `LsmKVConfig::converge`, whose default
+  `ConvergePolicy::SidecarOnly` only applies to `X.alopex.d` sidecar
+  directories. Plain-directory disk databases — including every `alopex-server`
+  deployment — keep the classic multi-file layout byte for byte, and no
+  migration or data conversion is required for existing 0.8.x data
+  (docs/single-file-convergence.md).
+- The Nim parser wire contract is `0.14.0`. It widens `FromItem` for LATERAL,
+  FROM-clause table functions, and relation alias column lists: `Table` gains
+  `columns` (always written, empty when absent), `Derived` gains `lateral`,
+  and a new `Function` variant carries
+  `{name, args, alias, columns, lateral}`. Contract `0.13.0` producers are
+  rejected before decode. The byte-frozen staged continuous-aggregate payload
+  is unchanged and rejects LATERAL, FROM table functions, and a table alias
+  column list before staging. This remains internal metadata of the unified
+  Alopex v0.8.8 release, not a separate parser release lane.
+- The Nim parser wire contract `0.13.0` changed `Select.group_by` from
+  `[Expr]?` to tagged `[GroupByItem]?` values
+  (`Expr`/`Rollup`/`Cube`/`GroupingSets`); contract `0.12.0` producers are
+  rejected before decode. The byte-frozen staged continuous-aggregate payload
+  keeps its `[Expr]` shape and rejects `ROLLUP`/`CUBE`/`GROUPING SETS` before
+  staging. This remains internal metadata of the unified Alopex v0.8.8
+  release, not a separate parser release lane.
+- The Nim parser wire contract `0.12.0` added `order_by`, `within_group`, and
+  `filter` keys to the `FunctionCall` map when any aggregate clause is present
+  (the historical 6-key shape is kept otherwise); contract `0.11.0` producers
+  are rejected before decode. The byte-frozen staged continuous-aggregate
+  payload is unchanged and rejects aggregate `FILTER`, `WITHIN GROUP`, and
+  aggregate-local `ORDER BY` before staging. This remains internal metadata of
+  the unified Alopex v0.8.8 release, not a separate parser release lane.
+- The Nim parser wire contract `0.11.0` added the always-written
+  `distinct_on` expression list to `Select` (empty when the clause is absent);
+  contract `0.10.0` producers are rejected before decode. The byte-frozen
+  staged continuous-aggregate payload is unchanged and rejects `DISTINCT ON`
+  before staging. This remains internal metadata of the unified Alopex v0.8.8
+  release, not a separate parser release lane.
+- The Nim parser wire contract `0.10.0` added the always-written
+  `limit_with_ties` field to `Select`/`Values` and detached `OFFSET` from
+  `LIMIT` on the wire; contract `0.9.0` producers are rejected before decode.
+  The byte-frozen staged continuous-aggregate payload is unchanged and rejects
+  `WITH TIES` before staging. This remains internal metadata of the unified
+  Alopex v0.8.8 release, not a separate parser release lane.
+- The Nim parser wire contract `0.9.0` added a dedicated `TryCast`
   expression variant; contract `0.8.0` producers are rejected before decode.
   This remains internal metadata of the unified Alopex v0.8.8 release, not a
   separate parser release lane.
@@ -37,6 +300,8 @@ All notable changes to this project will be documented in this file.
 - Python and Rust v0.8 demos verify `TRY_CAST`, `VALUES` query composition, and all six
   window functions with exact frame, peer, NULL, bucket, rank, and
   cumulative-distribution results.
+- Python and Rust v0.8 demos verify `DISTINCT ON` deterministic tie
+  resolution and the `ALOPEX-T014` ORDER BY prefix rejection.
 
 ## [0.8.7] — 2026-08-18
 

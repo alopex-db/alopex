@@ -27,7 +27,7 @@ pub use error::PlannerError;
 pub use knn_optimizer::{KnnPattern, SortDirection, detect_knn_pattern};
 pub use logical_plan::{
     JoinType, LogicalPlan, OffsetWindowFunction, RecursiveCteLimits, SetOperator,
-    ValueWindowFunction, WindowExpr, WindowFunction,
+    TableFunctionKind, ValueWindowFunction, WindowExpr, WindowFunction,
 };
 pub use name_resolver::{NameResolver, ResolvedColumn};
 pub use type_checker::{ScopedTable, TypeChecker};
@@ -40,8 +40,9 @@ use crate::ast::ddl::{
     ColumnConstraint, ColumnDef, CreateIndex, CreateTable, DropIndex, DropTable,
 };
 use crate::ast::dml::{
-    Delete, FromItem, Insert, InsertSource, LITERAL_TABLE, OrderByExpr, QueryBody, Select,
-    SelectItem, SetOperation as AstSetOperation, SetOperator as AstSetOperator, Update, Values,
+    Delete, FromItem, GroupByItem, Insert, InsertSource, LITERAL_TABLE, OrderByExpr, QueryBody,
+    Select, SelectItem, SetOperation as AstSetOperation, SetOperator as AstSetOperator, Update,
+    Values,
 };
 use crate::ast::expr::{Expr, ExprKind, Literal};
 use crate::ast::{PragmaValue, Spanned, Statement, StatementKind};
@@ -79,7 +80,7 @@ fn direct_from_reference_count(items: &[FromItem], name: &str) -> usize {
                 direct_from_item_reference_count(left, name)
                     + direct_from_item_reference_count(right, name)
             }
-            FromItem::Derived { .. } => 0,
+            FromItem::Derived { .. } | FromItem::Function { .. } => 0,
         })
         .sum()
 }
@@ -93,7 +94,7 @@ fn direct_from_item_reference_count(item: &FromItem, name: &str) -> usize {
             direct_from_item_reference_count(left, name)
                 + direct_from_item_reference_count(right, name)
         }
-        FromItem::Derived { .. } => 0,
+        FromItem::Derived { .. } | FromItem::Function { .. } => 0,
     }
 }
 
@@ -107,6 +108,10 @@ fn select_table_reference_count(select: &Select, name: &str) -> usize {
                 from_item_count(left, name) + from_item_count(right, name)
             }
             FromItem::Derived { subquery, .. } => query_body_table_reference_count(subquery, name),
+            // A table-function argument is an expression; expression-level
+            // subqueries are outside this FROM-shape count, exactly as they
+            // are for WHERE and the projection.
+            FromItem::Function { .. } => 0,
         }
     }
 
@@ -208,8 +213,22 @@ fn expr_contains_subquery(expr: &Expr) -> bool {
                 })
                 || else_expr.as_deref().is_some_and(expr_contains_subquery)
         }
-        ExprKind::FunctionCall { args, over, .. } => {
+        ExprKind::FunctionCall {
+            args,
+            order_by,
+            within_group,
+            filter,
+            over,
+            ..
+        } => {
             args.iter().any(expr_contains_subquery)
+                || order_by
+                    .iter()
+                    .any(|order| expr_contains_subquery(&order.expr))
+                || within_group
+                    .iter()
+                    .any(|order| expr_contains_subquery(&order.expr))
+                || filter.as_deref().is_some_and(expr_contains_subquery)
                 || over.as_ref().is_some_and(|window| {
                     window.partition_by.iter().any(expr_contains_subquery)
                         || window
@@ -251,7 +270,9 @@ fn expr_contains_subquery(expr: &Expr) -> bool {
 fn from_item_contains_subquery(item: &FromItem) -> bool {
     match item {
         FromItem::Table { .. } => false,
-        FromItem::Derived { .. } => true,
+        // A table function is a correlated relation source, so it is treated
+        // as a subquery boundary wherever one is rejected (issue #151).
+        FromItem::Derived { .. } | FromItem::Function { .. } => true,
         FromItem::Join {
             left,
             right,
@@ -274,10 +295,12 @@ fn select_contains_subquery(select: &Select) -> bool {
             .selection
             .as_ref()
             .is_some_and(expr_contains_subquery)
-        || select
-            .group_by
-            .as_ref()
-            .is_some_and(|group| group.iter().any(expr_contains_subquery))
+        || select.group_by.as_ref().is_some_and(|group| {
+            group
+                .iter()
+                .flat_map(GroupByItem::exprs)
+                .any(expr_contains_subquery)
+        })
         || select.having.as_ref().is_some_and(expr_contains_subquery)
         || select
             .set_operations
@@ -618,6 +641,12 @@ impl TableReferenceExtractor {
                 right,
                 condition,
                 ..
+            }
+            | LogicalPlan::LateralJoin {
+                left,
+                right,
+                condition,
+                ..
             } => {
                 self.extract_plan(
                     left,
@@ -637,12 +666,18 @@ impl TableReferenceExtractor {
                     self.extract_typed_expr(condition, diagnostics, references);
                 }
             }
+            LogicalPlan::TableFunction { args, .. } => {
+                for arg in args {
+                    self.extract_typed_expr(arg, diagnostics, references);
+                }
+            }
             LogicalPlan::Aggregate {
                 input,
                 group_keys,
                 aggregates,
                 having,
                 projection,
+                grouping_sets: _,
             } => {
                 self.extract_plan(input, root_access, scan_source, diagnostics, references);
                 for expr in group_keys {
@@ -723,6 +758,14 @@ impl TableReferenceExtractor {
             }
             LogicalPlan::RecursiveReference { .. } => {}
             LogicalPlan::Sort { input, order_by } => {
+                self.extract_plan(input, root_access, scan_source, diagnostics, references);
+                for sort_expr in order_by {
+                    self.extract_typed_expr(&sort_expr.expr, diagnostics, references);
+                }
+            }
+            LogicalPlan::DistinctOn {
+                input, order_by, ..
+            } => {
                 self.extract_plan(input, root_access, scan_source, diagnostics, references);
                 for sort_expr in order_by {
                     self.extract_typed_expr(&sort_expr.expr, diagnostics, references);
@@ -865,9 +908,20 @@ impl TableReferenceExtractor {
                     self.extract_typed_expr(else_expr, diagnostics, references);
                 }
             }
-            TypedExprKind::FunctionCall { args, .. } => {
+            TypedExprKind::FunctionCall {
+                args,
+                filter,
+                order_by,
+                ..
+            } => {
                 for arg in args {
                     self.extract_typed_expr(arg, diagnostics, references);
+                }
+                if let Some(filter) = filter {
+                    self.extract_typed_expr(filter, diagnostics, references);
+                }
+                for sort in order_by {
+                    self.extract_typed_expr(&sort.expr, diagnostics, references);
                 }
             }
             TypedExprKind::Between {
@@ -1506,9 +1560,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 cte.span,
             ));
         }
-        if !body.order_by.is_empty() || body.limit.is_some() || body.offset.is_some() {
+        if !body.order_by.is_empty()
+            || body.limit.is_some()
+            || body.offset.is_some()
+            || body.limit_with_ties
+        {
             return Err(PlannerError::unsupported_feature(
-                "ORDER BY, LIMIT, or OFFSET inside a recursive common table expression",
+                "ORDER BY, LIMIT, OFFSET, or FETCH inside a recursive common table expression",
                 "a future version",
                 body.span,
             ));
@@ -1661,7 +1719,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             &stmt.order_by,
             &stmt.limit,
             &stmt.offset,
-            stmt.span,
+            stmt.limit_with_ties,
             outer_scope,
             &ctes,
         )
@@ -1769,7 +1827,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         order_by: &[OrderByExpr],
         limit: &Option<Expr>,
         offset: &Option<Expr>,
-        span: crate::ast::Span,
+        limit_with_ties: bool,
         outer_scope: &[ScopedTable],
         ctes: &CtePlans,
     ) -> Result<PlannedRelation, PlannerError> {
@@ -1816,13 +1874,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 order_by,
             };
         }
-        if limit.is_some() || offset.is_some() {
-            relation.plan = LogicalPlan::Limit {
-                input: Box::new(relation.plan),
-                limit: self.extract_limit_value(limit, span)?,
-                offset: self.extract_limit_value(offset, span)?,
-            };
-        }
+        relation.plan = self.apply_pagination(relation.plan, limit, offset, limit_with_ties)?;
         Ok(relation)
     }
 
@@ -1836,12 +1888,23 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let stmt = &resolved_stmt;
         let ctes = self.plan_ctes(stmt, enclosing_ctes)?;
         if !stmt.set_operations.is_empty() {
+            // D7: the trailing ORDER BY belongs to the whole set operation,
+            // so the DISTINCT ON prefix contract has no owner here. A nested
+            // operand SELECT with its own DISTINCT ON remains supported.
+            if !stmt.distinct_on.is_empty() {
+                return Err(PlannerError::unsupported_feature(
+                    "DISTINCT ON combined with UNION, INTERSECT, or EXCEPT",
+                    "a future version",
+                    stmt.span,
+                ));
+            }
             let mut left_select = stmt.clone();
             left_select.with = None;
             left_select.set_operations.clear();
             left_select.order_by.clear();
             left_select.limit = None;
             left_select.offset = None;
+            left_select.limit_with_ties = false;
             let relation = self.plan_select_relation(&left_select, outer_scope, &ctes)?;
 
             return self.apply_set_operations_and_tail(
@@ -1850,7 +1913,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 &stmt.order_by,
                 &stmt.limit,
                 &stmt.offset,
-                stmt.span,
+                stmt.limit_with_ties,
                 outer_scope,
                 &ctes,
             );
@@ -1878,19 +1941,92 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let distinct_only =
             stmt.distinct && !has_group_by && !has_aggregate && stmt.having.is_none();
 
+        let has_distinct_on = !stmt.distinct_on.is_empty();
+        if has_distinct_on {
+            // D10: the grammar cannot produce both, so a hand-built AST with
+            // both set is a defect of the producer, not a user error.
+            if stmt.distinct {
+                return Err(PlannerError::invalid_expression(
+                    "DISTINCT and DISTINCT ON cannot be combined".to_string(),
+                ));
+            }
+            // D6: DISTINCT ON keys are scalar sort keys.
+            for key in &stmt.distinct_on {
+                if expr_contains_aggregate(key) || expr_contains_window(key) {
+                    return Err(PlannerError::invalid_expression(
+                        "DISTINCT ON expressions cannot contain aggregate or window functions"
+                            .to_string(),
+                    ));
+                }
+                if expr_contains_subquery(key) {
+                    return Err(PlannerError::invalid_expression(
+                        "DISTINCT ON expressions cannot contain subqueries".to_string(),
+                    ));
+                }
+            }
+            // D7: v1 rejects combinations whose deduplication order is not
+            // covered by the DistinctOn sort contract.
+            if has_group_by || has_aggregate || stmt.having.is_some() {
+                return Err(PlannerError::unsupported_feature(
+                    "DISTINCT ON with GROUP BY, aggregate functions, or HAVING",
+                    "a future version",
+                    stmt.span,
+                ));
+            }
+            if has_window || stmt.qualify.is_some() {
+                return Err(PlannerError::unsupported_feature(
+                    "DISTINCT ON with window functions or QUALIFY",
+                    "a future version",
+                    stmt.span,
+                ));
+            }
+        }
+
         if stmt.having.as_ref().is_some_and(expr_contains_window) {
             return Err(PlannerError::invalid_expression(
                 "HAVING cannot contain window functions".to_string(),
             ));
         }
-        if stmt
-            .group_by
-            .as_ref()
-            .is_some_and(|items| items.iter().any(expr_contains_window))
-        {
+        if stmt.group_by.as_ref().is_some_and(|items| {
+            items
+                .iter()
+                .flat_map(GroupByItem::exprs)
+                .any(expr_contains_window)
+        }) {
             return Err(PlannerError::invalid_expression(
                 "GROUP BY cannot contain window functions".to_string(),
             ));
+        }
+        // D5: GROUPING/GROUPING_ID are meaningful only over aggregate output.
+        if stmt.group_by.as_ref().is_some_and(|items| {
+            items
+                .iter()
+                .flat_map(GroupByItem::exprs)
+                .any(expr_contains_grouping)
+        }) {
+            return Err(PlannerError::invalid_expression(
+                "GROUPING is not allowed in GROUP BY".to_string(),
+            ));
+        }
+        if stmt.selection.as_ref().is_some_and(expr_contains_grouping) {
+            return Err(PlannerError::invalid_expression(
+                "GROUPING is not allowed in WHERE".to_string(),
+            ));
+        }
+        if !(has_group_by || has_aggregate || stmt.having.is_some()) {
+            let grouping_present = stmt.projection.iter().any(|item| match item {
+                SelectItem::Expr { expr, .. } => expr_contains_grouping(expr),
+                SelectItem::Wildcard { .. } | SelectItem::QualifiedWildcard { .. } => false,
+            }) || stmt
+                .order_by
+                .iter()
+                .any(|order| expr_contains_grouping(&order.expr))
+                || stmt.qualify.as_ref().is_some_and(expr_contains_grouping);
+            if grouping_present {
+                return Err(PlannerError::invalid_expression(
+                    "GROUPING is only allowed in grouped queries".to_string(),
+                ));
+            }
         }
 
         // SELECT-list aliases are visible to HAVING, QUALIFY, and ORDER BY.
@@ -2048,7 +2184,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 ));
             }
 
-            let (group_keys, projected) = if distinct_only {
+            let (group_keys, grouping_sets, projected) = if distinct_only {
                 let projected = self.build_projected_columns_for_distinct_with_scope(
                     &stmt.projection,
                     &relation.schema,
@@ -2056,15 +2192,15 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     &ctes,
                 )?;
                 let group_keys = projected.iter().map(|col| col.expr.clone()).collect();
-                (group_keys, projected)
+                (group_keys, None, projected)
             } else {
-                let group_keys = self.build_group_keys_with_scope(stmt, &expr_scope, &ctes)?;
+                let expanded = self.expand_group_by_items(stmt, &expr_scope, &ctes)?;
                 let projected = self.build_projected_columns_for_aggregate_with_scope(
                     &stmt.projection,
                     &expr_scope,
                     &ctes,
                 )?;
-                (group_keys, projected)
+                (expanded.group_keys, expanded.grouping_sets, projected)
             };
             let mut aggregates = Vec::new();
             let mut agg_map = HashMap::new();
@@ -2107,14 +2243,26 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     .validate_having_expr(having, &group_keys, &aggregates)?;
             }
 
-            let output_schema = build_aggregate_schema(&group_keys, &aggregates);
+            let mut output_schema = build_aggregate_schema(&group_keys, &aggregates);
+            // GROUPING rewrites resolve indexes against the key+aggregate
+            // names only; the trailing __grouping_id column is appended to
+            // the schema afterwards so the group-key arithmetic inside
+            // rewrite_expr_with_maps stays exact (issue #149).
             let output_names: Vec<String> = output_schema.iter().map(|c| c.name.clone()).collect();
+            let grouping_rewrite = GroupingRewrite::new(&group_keys, &aggregates, &grouping_sets);
+            if grouping_sets.is_some() {
+                output_schema.push(ColumnMetadata::new(
+                    GROUPING_ID_COLUMN,
+                    ResolvedType::BigInt,
+                ));
+            }
 
             let projection = self.build_aggregate_projection(
                 projected,
                 &group_keys,
                 &aggregates,
                 &output_names,
+                Some(&grouping_rewrite),
             )?;
 
             let having = if let Some(having) = having_typed {
@@ -2123,6 +2271,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     &group_keys,
                     &aggregates,
                     &output_names,
+                    Some(&grouping_rewrite),
                 )?)
             } else {
                 None
@@ -2136,6 +2285,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         &group_keys,
                         &aggregates,
                         &output_names,
+                        Some(&grouping_rewrite),
                     )?;
                     Ok(SortExpr::new(rewritten, expr.asc, expr.nulls_first))
                 })
@@ -2148,6 +2298,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 aggregates,
                 having,
                 projection,
+                grouping_sets,
             };
 
             if !order_by.is_empty() {
@@ -2157,15 +2308,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 };
             }
 
-            if stmt.limit.is_some() || stmt.offset.is_some() {
-                let limit = self.extract_limit_value(&stmt.limit, stmt.span)?;
-                let offset = self.extract_limit_value(&stmt.offset, stmt.span)?;
-                plan = LogicalPlan::Limit {
-                    input: Box::new(plan),
-                    limit,
-                    offset,
-                };
-            }
+            plan = self.apply_pagination(plan, &stmt.limit, &stmt.offset, stmt.limit_with_ties)?;
 
             return Ok(PlannedRelation {
                 plan,
@@ -2178,7 +2321,46 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
 
         // Non-aggregate path: ORDER BY + LIMIT/OFFSET
-        if !stmt.order_by.is_empty() {
+        let mut distinct_on_tie_keys: Option<Vec<SortExpr>> = None;
+        if has_distinct_on {
+            // D2/D3/D4: type the deduplicated ON keys and the user ORDER BY,
+            // verify the prefix contract, and synthesize the complete
+            // deterministic sort specification. The DistinctOn node emits
+            // rows already ordered by that specification, so no separate
+            // Sort node is planned (D8). LIMIT/OFFSET applies after
+            // deduplication.
+            let mut key_exprs: Vec<TypedExpr> = Vec::new();
+            let mut key_signatures = HashSet::new();
+            for key in &stmt.distinct_on {
+                let source = substitute_projection_aliases(key, &projection_aliases);
+                let typed = self.infer_expr_with_scope(&source, &expr_scope, &ctes)?;
+                if key_signatures.insert(distinct_on_expr_signature(&typed)) {
+                    key_exprs.push(typed);
+                }
+            }
+            let user_order_by = self.build_sort_exprs_with_scope(
+                &stmt.order_by,
+                &expr_scope,
+                &projection_aliases,
+                &ctes,
+            )?;
+            // D13: `build_distinct_on_sort_spec` places the user's ORDER BY
+            // items first, so the leading `user_order_by_len` entries of the
+            // effective specification are exactly that ORDER BY. WITH TIES
+            // must read its peer groups from those entries alone: the
+            // synthesized implicit ON keys and the all-column tie-breaker
+            // tail make every surviving row unique, which would silently
+            // degrade WITH TIES to a plain LIMIT.
+            let user_order_by_len = user_order_by.len();
+            let (key_count, order_by) =
+                build_distinct_on_sort_spec(key_exprs, user_order_by, &base_schema, stmt.span)?;
+            distinct_on_tie_keys = Some(order_by[..user_order_by_len.min(order_by.len())].to_vec());
+            plan = LogicalPlan::DistinctOn {
+                input: Box::new(plan),
+                key_count,
+                order_by,
+            };
+        } else if !stmt.order_by.is_empty() {
             let order_by = self.build_sort_exprs_with_scope(
                 &stmt.order_by,
                 &expr_scope,
@@ -2191,15 +2373,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             };
         }
 
-        if stmt.limit.is_some() || stmt.offset.is_some() {
-            let limit = self.extract_limit_value(&stmt.limit, stmt.span)?;
-            let offset = self.extract_limit_value(&stmt.offset, stmt.span)?;
-            plan = LogicalPlan::Limit {
-                input: Box::new(plan),
-                limit,
-                offset,
-            };
-        }
+        plan = self.apply_pagination_with_tie_keys(
+            plan,
+            &stmt.limit,
+            &stmt.offset,
+            stmt.limit_with_ties,
+            distinct_on_tie_keys.as_deref(),
+        )?;
 
         let output_schema = projection_schema(&final_projection, &relation.schema);
         if needs_project_boundary {
@@ -2232,7 +2412,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         projection_aliases: &HashMap<String, crate::ast::expr::Expr>,
         mut plan: LogicalPlan,
     ) -> Result<PlannedRelation, PlannerError> {
-        let group_keys = self.build_group_keys_with_scope(stmt, expr_scope, ctes)?;
+        let expanded = self.expand_group_by_items(stmt, expr_scope, ctes)?;
+        let group_keys = expanded.group_keys;
+        let grouping_sets = expanded.grouping_sets;
         let projected = self.build_projected_columns_for_aggregate_with_scope(
             &stmt.projection,
             expr_scope,
@@ -2302,17 +2484,41 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 .validate_having_expr(having, &group_keys, &aggregates)?;
         }
 
-        let aggregate_schema = build_aggregate_schema(&group_keys, &aggregates);
+        let mut aggregate_schema = build_aggregate_schema(&group_keys, &aggregates);
+        // GROUPING rewrites resolve indexes against key+aggregate names only;
+        // the __grouping_id column joins the schema afterwards (issue #149).
+        let rewrite_names = aggregate_schema
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let grouping_rewrite = GroupingRewrite::new(&group_keys, &aggregates, &grouping_sets);
+        if grouping_sets.is_some() {
+            aggregate_schema.push(ColumnMetadata::new(
+                GROUPING_ID_COLUMN,
+                ResolvedType::BigInt,
+            ));
+        }
         let aggregate_names = aggregate_schema
             .iter()
             .map(|column| column.name.clone())
             .collect::<Vec<_>>();
-        let projection =
-            self.build_aggregate_projection(projected, &group_keys, &aggregates, &aggregate_names)?;
+        let projection = self.build_aggregate_projection(
+            projected,
+            &group_keys,
+            &aggregates,
+            &rewrite_names,
+            Some(&grouping_rewrite),
+        )?;
         let having = having_typed
             .as_ref()
             .map(|expr| {
-                self.rewrite_expr_for_aggregate(expr, &group_keys, &aggregates, &aggregate_names)
+                self.rewrite_expr_for_aggregate(
+                    expr,
+                    &group_keys,
+                    &aggregates,
+                    &rewrite_names,
+                    Some(&grouping_rewrite),
+                )
             })
             .transpose()?;
         let outer_order_by = outer_order_by
@@ -2323,7 +2529,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         &sort.expr,
                         &group_keys,
                         &aggregates,
-                        &aggregate_names,
+                        &rewrite_names,
+                        Some(&grouping_rewrite),
                     )?,
                     sort.asc,
                     sort.nulls_first,
@@ -2333,7 +2540,13 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let qualify = qualify_typed
             .as_ref()
             .map(|expr| {
-                self.rewrite_expr_for_aggregate(expr, &group_keys, &aggregates, &aggregate_names)
+                self.rewrite_expr_for_aggregate(
+                    expr,
+                    &group_keys,
+                    &aggregates,
+                    &rewrite_names,
+                    Some(&grouping_rewrite),
+                )
             })
             .transpose()?;
 
@@ -2343,6 +2556,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             aggregates,
             having,
             projection: Projection::All(aggregate_names),
+            grouping_sets,
         };
 
         let mut windows = Vec::new();
@@ -2518,6 +2732,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         .map(|column| column.name.clone())
                         .collect(),
                 ),
+                grouping_sets: None,
             };
         }
         if !projected_order_by.is_empty() {
@@ -2526,13 +2741,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 order_by: projected_order_by,
             };
         }
-        if stmt.limit.is_some() || stmt.offset.is_some() {
-            plan = LogicalPlan::Limit {
-                input: Box::new(plan),
-                limit: self.extract_limit_value(&stmt.limit, stmt.span)?,
-                offset: self.extract_limit_value(&stmt.offset, stmt.span)?,
-            };
-        }
+        plan = self.apply_pagination(plan, &stmt.limit, &stmt.offset, stmt.limit_with_ties)?;
         if has_hidden_order_keys {
             plan = LogicalPlan::Project {
                 input: Box::new(plan),
@@ -2590,20 +2799,36 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     )],
                 })
             }
-            [single] => self.plan_from_item(single, 0, outer_scope, ctes),
+            [single] => self.plan_from_item(single, 0, outer_scope, outer_scope, ctes),
             [first, rest @ ..] => {
-                let mut relation = self.plan_from_item(first, 0, outer_scope, ctes)?;
+                let mut relation = self.plan_from_item(first, 0, outer_scope, outer_scope, ctes)?;
                 for item in rest {
+                    // Comma-separated items are an implicit cross join, so a
+                    // later item may be LATERAL over everything to its left.
+                    let left_width = relation.schema.len();
+                    let lateral_scope =
+                        lateral_outer_scope(&relation.scope, 0, left_width, outer_scope);
                     let right =
-                        self.plan_from_item(item, relation.schema.len(), outer_scope, ctes)?;
-                    relation = self.combine_join_relation(
-                        relation,
-                        right,
-                        JoinType::Cross,
-                        None,
-                        None,
-                        select_span,
-                    )?;
+                        self.plan_from_item(item, left_width, outer_scope, &lateral_scope, ctes)?;
+                    relation = if from_item_is_lateral(item) {
+                        self.combine_lateral_join_relation(
+                            relation,
+                            right,
+                            JoinType::Cross,
+                            None,
+                            None,
+                            select_span,
+                        )?
+                    } else {
+                        self.combine_join_relation(
+                            relation,
+                            right,
+                            JoinType::Cross,
+                            None,
+                            None,
+                            select_span,
+                        )?
+                    };
                 }
                 Ok(relation)
             }
@@ -2615,10 +2840,16 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         item: &FromItem,
         start_index: usize,
         outer_scope: &[ScopedTable],
+        lateral_scope: &[ScopedTable],
         ctes: &CtePlans,
     ) -> Result<PlannedRelation, PlannerError> {
         match item {
-            FromItem::Table { name, alias, span } => {
+            FromItem::Table {
+                name,
+                alias,
+                columns,
+                span,
+            } => {
                 if let Some(cte) = ctes.get(name) {
                     let mut relation = cte.clone();
                     relation.plan = LogicalPlan::Project {
@@ -2627,11 +2858,10 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                             relation.schema.iter().map(|col| col.name.clone()).collect(),
                         ),
                     };
+                    let relation_name = alias.clone().unwrap_or_else(|| name.clone());
+                    apply_alias_columns(&relation_name, columns, &mut relation.schema, *span)?;
                     relation.scope = vec![ScopedTable::new(
-                        TableMetadata::new(
-                            alias.clone().unwrap_or_else(|| name.clone()),
-                            relation.schema.clone(),
-                        ),
+                        TableMetadata::new(relation_name, relation.schema.clone()),
                         start_index,
                     )];
                     return Ok(relation);
@@ -2641,18 +2871,39 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 if let Some(alias) = alias {
                     scope_table.name = alias.clone();
                 }
-                let schema = table.columns.clone();
+                let mut schema = table.columns.clone();
+                // The physical scan keeps the stored column names; only the
+                // relation the query sees is renamed (issue #151, D8).
+                let projection =
+                    Projection::All(schema.iter().map(|col| col.name.clone()).collect());
+                apply_alias_columns(&scope_table.name, columns, &mut schema, *span)?;
+                scope_table.columns = schema.clone();
                 Ok(PlannedRelation {
                     plan: LogicalPlan::Scan {
                         table: name.clone(),
-                        projection: Projection::All(
-                            schema.iter().map(|col| col.name.clone()).collect(),
-                        ),
+                        projection,
                     },
                     schema,
                     scope: vec![ScopedTable::new(scope_table, start_index)],
                 })
             }
+            FromItem::Function {
+                name,
+                args,
+                alias,
+                columns,
+                span,
+                ..
+            } => self.plan_table_function(
+                name,
+                args,
+                alias.as_deref(),
+                columns,
+                *span,
+                start_index,
+                lateral_scope,
+                ctes,
+            ),
             FromItem::Join {
                 left,
                 right,
@@ -2662,11 +2913,38 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 natural,
                 span,
             } => {
-                let left_relation = self.plan_from_item(left, start_index, outer_scope, ctes)?;
+                let right_lateral = from_item_is_lateral(right);
+                if right_lateral {
+                    // PostgreSQL rejects the same shape: a correlated relation
+                    // cannot be the null-supplying side of the join (D3).
+                    let unsupported = match join_type {
+                        crate::ast::dml::JoinType::Right => Some("RIGHT"),
+                        crate::ast::dml::JoinType::Full => Some("FULL"),
+                        _ => None,
+                    };
+                    if let Some(kind) = unsupported {
+                        return Err(PlannerError::lateral_join_type_unsupported(kind, *span));
+                    }
+                }
+                let left_relation =
+                    self.plan_from_item(left, start_index, outer_scope, lateral_scope, ctes)?;
+                // A LATERAL right side is planned against the left row, which
+                // is the row the executor supplies as its outer row. An
+                // ordinary right side never reads this scope, so the rebase is
+                // only paid where it is used.
+                let right_lateral_scope = right_lateral.then(|| {
+                    lateral_outer_scope(
+                        &left_relation.scope,
+                        start_index,
+                        left_relation.schema.len(),
+                        outer_scope,
+                    )
+                });
                 let right_relation = self.plan_from_item(
                     right,
                     start_index + left_relation.schema.len(),
                     outer_scope,
+                    right_lateral_scope.as_deref().unwrap_or(lateral_scope),
                     ctes,
                 )?;
                 let expr_scope = left_relation
@@ -2705,28 +2983,40 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         *span,
                     )?
                 };
-                self.combine_join_relation(
-                    left_relation,
-                    right_relation,
-                    map_join_type(*join_type),
-                    typed_condition,
-                    using,
-                    *span,
-                )
+                if right_lateral {
+                    self.combine_lateral_join_relation(
+                        left_relation,
+                        right_relation,
+                        map_join_type(*join_type),
+                        typed_condition,
+                        using.as_deref(),
+                        *span,
+                    )
+                } else {
+                    self.combine_join_relation(
+                        left_relation,
+                        right_relation,
+                        map_join_type(*join_type),
+                        typed_condition,
+                        using,
+                        *span,
+                    )
+                }
             }
             FromItem::Derived {
                 subquery,
                 alias,
                 columns,
+                lateral,
                 span,
             } => {
                 // A derived table is evaluated independently of the query it
                 // sits in, so nothing from the enclosing scopes is visible
-                // inside it. Only LATERAL lifts that restriction, and Alopex
-                // does not accept LATERAL yet. Passing `outer_scope` through
-                // here would resolve an outer name into a correlated reference
-                // the user never wrote, so the scope stops at this boundary.
-                let mut relation = self.plan_query_body_relation(subquery, &[], ctes)?;
+                // inside it (D4). LATERAL is what lifts that restriction:
+                // passing the scope through unconditionally would resolve an
+                // outer name into a correlated reference the user never wrote.
+                let visible: &[ScopedTable] = if *lateral { lateral_scope } else { &[] };
+                let mut relation = self.plan_query_body_relation(subquery, visible, ctes)?;
                 let alias = alias.clone().ok_or_else(|| {
                     PlannerError::invalid_expression("derived table requires an alias".to_string())
                 })?;
@@ -2739,27 +3029,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     input: Box::new(relation.plan),
                     projection: Projection::All(source_names),
                 };
-                if !columns.is_empty() {
-                    if columns.len() != relation.schema.len() {
-                        return Err(PlannerError::table_alias_column_count_mismatch(
-                            &alias,
-                            columns.len(),
-                            relation.schema.len(),
-                            *span,
-                        ));
-                    }
-                    let mut names = HashSet::new();
-                    for name in columns {
-                        if !names.insert(name) {
-                            return Err(PlannerError::invalid_expression(format!(
-                                "derived table alias '{alias}' declares column '{name}' more than once"
-                            )));
-                        }
-                    }
-                    for (column, alias) in relation.schema.iter_mut().zip(columns) {
-                        column.name.clone_from(alias);
-                    }
-                }
+                apply_alias_columns(&alias, columns, &mut relation.schema, *span)?;
                 relation.scope = vec![ScopedTable::new(
                     TableMetadata::new(alias, relation.schema.clone()),
                     start_index,
@@ -2767,6 +3037,106 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 Ok(relation)
             }
         }
+    }
+
+    /// Plan a FROM-clause table function (issue #151).
+    ///
+    /// Arguments are typed against `lateral_scope`, which addresses the row the
+    /// executor supplies as the outer row: the preceding FROM items followed by
+    /// the enclosing query's own outer row. That holds whether or not LATERAL
+    /// was written, because table-function arguments are implicitly lateral
+    /// (D2).
+    #[allow(clippy::too_many_arguments)]
+    fn plan_table_function(
+        &self,
+        name: &str,
+        args: &[Expr],
+        alias: Option<&str>,
+        columns: &[String],
+        span: crate::ast::Span,
+        start_index: usize,
+        lateral_scope: &[ScopedTable],
+        ctes: &CtePlans,
+    ) -> Result<PlannedRelation, PlannerError> {
+        let Some(function) = TableFunctionKind::from_name(name) else {
+            return Err(PlannerError::unknown_table_function(name, span));
+        };
+        if function == TableFunctionKind::GenerateSeries {
+            return Err(PlannerError::unsupported_feature(
+                "table function GENERATE_SERIES",
+                "a future version (issue #157)",
+                span,
+            ));
+        }
+
+        if args.len() != 1 {
+            return Err(PlannerError::invalid_expression(format!(
+                "table function UNNEST takes exactly 1 argument, found {}",
+                args.len()
+            )));
+        }
+        let typed_arg = self.infer_expr_with_scope(&args[0], lateral_scope, ctes)?;
+        if !matches!(
+            typed_arg.resolved_type,
+            ResolvedType::Vector { .. } | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "VECTOR",
+                typed_arg.resolved_type.to_string(),
+                args[0].span,
+            ));
+        }
+
+        // A VECTOR holds f32 elements, so the single output column is FLOAT
+        // and is named after the function, as PostgreSQL names it (D6/D7).
+        let mut schema = vec![ColumnMetadata::new(
+            function.default_relation_name(),
+            ResolvedType::Float,
+        )];
+        let relation_name = alias
+            .map(str::to_string)
+            .unwrap_or_else(|| function.default_relation_name().to_string());
+        apply_alias_columns(&relation_name, columns, &mut schema, span)?;
+
+        Ok(PlannedRelation {
+            plan: LogicalPlan::TableFunction {
+                function,
+                args: vec![typed_arg],
+                schema: schema.clone(),
+            },
+            schema: schema.clone(),
+            scope: vec![ScopedTable::new(
+                TableMetadata::new(relation_name, schema),
+                start_index,
+            )],
+        })
+    }
+
+    fn combine_lateral_join_relation(
+        &self,
+        left: PlannedRelation,
+        right: PlannedRelation,
+        join_type: JoinType,
+        condition: Option<TypedExpr>,
+        using: Option<&[String]>,
+        _span: crate::ast::Span,
+    ) -> Result<PlannedRelation, PlannerError> {
+        // USING/NATURAL merges the common columns the same way it does for an
+        // ordinary join; only the execution strategy differs. The merged
+        // equality already lives in `condition`, so the node itself does not
+        // carry the column list.
+        let (schema, scope) = combine_join_shape(&left, &right, using);
+        Ok(PlannedRelation {
+            plan: LogicalPlan::LateralJoin {
+                left: Box::new(left.plan),
+                right: Box::new(right.plan),
+                join_type,
+                condition,
+                right_schema: right.schema,
+            },
+            schema,
+            scope,
+        })
     }
 
     fn combine_join_relation(
@@ -2778,35 +3148,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         using: Option<Vec<String>>,
         _span: crate::ast::Span,
     ) -> Result<PlannedRelation, PlannerError> {
-        let mut schema = left.schema.clone();
-        schema.extend(right.schema.clone());
-        let mut scope = left.scope.clone();
-        let mut right_scope = right.scope.clone();
-        if let Some(columns) = &using {
-            // The right-hand copy of a common column stops being an unqualified
-            // candidate, and the surviving left-hand column records where its
-            // partner lives so that an unqualified reference can merge the two.
-            for column in columns {
-                let right_index = right_scope.iter().find_map(|table| {
-                    table
-                        .table
-                        .get_column_index(column)
-                        .map(|index| table.start_index + index)
-                });
-                let Some(right_index) = right_index else {
-                    continue;
-                };
-                for table in &mut scope {
-                    if table.table.get_column_index(column).is_some() {
-                        table.merge_column_with(column, right_index);
-                    }
-                }
-            }
-            for table in &mut right_scope {
-                table.hide_unqualified_columns(columns);
-            }
-        }
-        scope.extend(right_scope);
+        let (schema, scope) = combine_join_shape(&left, &right, using.as_deref());
         Ok(PlannedRelation {
             plan: LogicalPlan::Join {
                 left: Box::new(left.plan),
@@ -3078,7 +3420,12 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }) || stmt
             .group_by
             .as_ref()
-            .map(|items| items.iter().any(expr_contains_aggregate))
+            .map(|items| {
+                items
+                    .iter()
+                    .flat_map(GroupByItem::exprs)
+                    .any(expr_contains_aggregate)
+            })
             .unwrap_or(false)
             || stmt
                 .having
@@ -3104,7 +3451,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
     ) -> Result<Vec<TypedExpr>, PlannerError> {
         let mut keys = Vec::new();
         if let Some(items) = &stmt.group_by {
-            for expr in items {
+            for expr in items.iter().flat_map(GroupByItem::exprs) {
                 let typed = self.type_checker.infer_type(expr, table)?;
                 if typed_expr_contains_aggregate(&typed) {
                     return Err(PlannerError::invalid_expression(
@@ -3122,30 +3469,183 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         Ok(keys)
     }
 
-    fn build_group_keys_with_scope(
+    /// Type one grouping key with the shared GROUP BY constraints.
+    fn type_group_key_with_scope(
+        &self,
+        expr: &Expr,
+        scope: &[ScopedTable],
+        ctes: &CtePlans,
+    ) -> Result<TypedExpr, PlannerError> {
+        let typed = self.infer_expr_with_scope(expr, scope, ctes)?;
+        if typed_expr_contains_aggregate(&typed) {
+            return Err(PlannerError::invalid_expression(
+                "GROUP BY cannot contain aggregate functions".to_string(),
+            ));
+        }
+        if !matches!(typed.kind, TypedExprKind::ColumnRef { .. }) {
+            return Err(PlannerError::invalid_expression(
+                "GROUP BY expressions must be column references".to_string(),
+            ));
+        }
+        Ok(typed)
+    }
+
+    /// Expand GROUP BY items into a flat key list plus grouping-set masks.
+    ///
+    /// Without ROLLUP/CUBE/GROUPING SETS the result is the pre-existing key
+    /// list with `grouping_sets: None`, keeping the legacy single-set plan
+    /// byte-for-byte identical (issue #149, D12). With modifiers, keys are
+    /// unioned by expression identity in first-appearance order and every
+    /// item contributes a set list that is combined by cross product (D2).
+    fn expand_group_by_items(
         &self,
         stmt: &Select,
         scope: &[ScopedTable],
         ctes: &CtePlans,
-    ) -> Result<Vec<TypedExpr>, PlannerError> {
-        let mut keys = Vec::new();
-        if let Some(items) = &stmt.group_by {
-            for expr in items {
-                let typed = self.infer_expr_with_scope(expr, scope, ctes)?;
-                if typed_expr_contains_aggregate(&typed) {
-                    return Err(PlannerError::invalid_expression(
-                        "GROUP BY cannot contain aggregate functions".to_string(),
-                    ));
+    ) -> Result<ExpandedGroupBy, PlannerError> {
+        let Some(items) = &stmt.group_by else {
+            return Ok(ExpandedGroupBy {
+                group_keys: Vec::new(),
+                grouping_sets: None,
+            });
+        };
+
+        if items
+            .iter()
+            .all(|item| matches!(item, GroupByItem::Expr { .. }))
+        {
+            // Legacy path: no dedup, no masks (D12).
+            let mut keys = Vec::new();
+            for item in items {
+                if let GroupByItem::Expr { expr } = item {
+                    keys.push(self.type_group_key_with_scope(expr, scope, ctes)?);
                 }
-                if !matches!(typed.kind, TypedExprKind::ColumnRef { .. }) {
-                    return Err(PlannerError::invalid_expression(
-                        "GROUP BY expressions must be column references".to_string(),
-                    ));
-                }
-                keys.push(typed);
             }
+            return Ok(ExpandedGroupBy {
+                group_keys: keys,
+                grouping_sets: None,
+            });
         }
-        Ok(keys)
+
+        let mut keys: Vec<TypedExpr> = Vec::new();
+        let mut key_index: HashMap<String, usize> = HashMap::new();
+        let mut add_key = |planner: &Self, expr: &Expr| -> Result<usize, PlannerError> {
+            let typed = planner.type_group_key_with_scope(expr, scope, ctes)?;
+            let signature = expr_key(&typed);
+            if let Some(&index) = key_index.get(&signature) {
+                return Ok(index);
+            }
+            let index = keys.len();
+            keys.push(typed);
+            key_index.insert(signature, index);
+            Ok(index)
+        };
+
+        // Cross product of per-item set lists (D2); each set is a list of
+        // union-key indexes.
+        let mut sets: Vec<Vec<usize>> = vec![Vec::new()];
+        for item in items {
+            let item_sets: Vec<Vec<usize>> = match item {
+                GroupByItem::Expr { expr } => vec![vec![add_key(self, expr)?]],
+                GroupByItem::Rollup { exprs } => {
+                    if exprs.is_empty() {
+                        return Err(PlannerError::invalid_expression(
+                            "ROLLUP requires at least one expression".to_string(),
+                        ));
+                    }
+                    let indexes = exprs
+                        .iter()
+                        .map(|expr| add_key(self, expr))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    (0..=indexes.len())
+                        .rev()
+                        .map(|len| indexes[..len].to_vec())
+                        .collect()
+                }
+                GroupByItem::Cube { exprs } => {
+                    if exprs.is_empty() {
+                        return Err(PlannerError::invalid_expression(
+                            "CUBE requires at least one expression".to_string(),
+                        ));
+                    }
+                    if exprs.len() > MAX_CUBE_COLUMNS {
+                        return Err(PlannerError::invalid_expression(format!(
+                            "too many grouping sets (max {MAX_GROUPING_SETS})"
+                        )));
+                    }
+                    let indexes = exprs
+                        .iter()
+                        .map(|expr| add_key(self, expr))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let n = indexes.len();
+                    (0..(1usize << n))
+                        .rev()
+                        .map(|included| {
+                            indexes
+                                .iter()
+                                .enumerate()
+                                .filter(|(position, _)| (included >> (n - 1 - position)) & 1 == 1)
+                                .map(|(_, &index)| index)
+                                .collect()
+                        })
+                        .collect()
+                }
+                GroupByItem::GroupingSets { sets: listed } => {
+                    if listed.is_empty() {
+                        return Err(PlannerError::invalid_expression(
+                            "GROUPING SETS requires at least one grouping set".to_string(),
+                        ));
+                    }
+                    listed
+                        .iter()
+                        .map(|set| {
+                            set.iter()
+                                .map(|expr| add_key(self, expr))
+                                .collect::<Result<Vec<_>, _>>()
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                }
+            };
+
+            let mut combined = Vec::with_capacity(sets.len().saturating_mul(item_sets.len()));
+            for base in &sets {
+                for item_set in &item_sets {
+                    if combined.len() >= MAX_GROUPING_SETS {
+                        return Err(PlannerError::invalid_expression(format!(
+                            "too many grouping sets (max {MAX_GROUPING_SETS})"
+                        )));
+                    }
+                    let mut set = base.clone();
+                    set.extend(item_set.iter().copied());
+                    combined.push(set);
+                }
+            }
+            sets = combined;
+        }
+
+        if keys.len() > MAX_GROUPING_KEYS {
+            return Err(PlannerError::invalid_expression(format!(
+                "too many grouping columns (max {MAX_GROUPING_KEYS})"
+            )));
+        }
+
+        let key_count = keys.len();
+        let full_mask = grouping_full_mask(key_count);
+        let masks = sets
+            .iter()
+            .map(|set| {
+                let mut mask = full_mask;
+                for &index in set {
+                    mask &= !(1u64 << (key_count - 1 - index));
+                }
+                mask
+            })
+            .collect();
+
+        Ok(ExpandedGroupBy {
+            group_keys: keys,
+            grouping_sets: Some(masks),
+        })
     }
 
     #[allow(dead_code)]
@@ -3279,6 +3779,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 args,
                 distinct,
                 star,
+                filter,
+                order_by,
                 over: None,
             } if is_aggregate_function(name) => {
                 if args.iter().any(typed_expr_contains_window) {
@@ -3293,8 +3795,42 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         ));
                     }
                 }
-                let (agg, signature) =
-                    self.build_aggregate_expr_from_typed(expr, name, args, *distinct, *star)?;
+                // The type checker rejects aggregates and window functions in
+                // FILTER / aggregate ORDER BY; keep a defensive re-check so a
+                // future construction path cannot smuggle them through.
+                if let Some(filter) = filter {
+                    if typed_expr_contains_aggregate(filter) {
+                        return Err(PlannerError::invalid_expression(
+                            "aggregate functions are not allowed in FILTER".to_string(),
+                        ));
+                    }
+                    if typed_expr_contains_window(filter) {
+                        return Err(PlannerError::invalid_expression(
+                            "window functions are not allowed in FILTER".to_string(),
+                        ));
+                    }
+                }
+                for sort in order_by {
+                    if typed_expr_contains_aggregate(&sort.expr) {
+                        return Err(PlannerError::invalid_expression(
+                            "aggregate functions are not allowed in aggregate ORDER BY".to_string(),
+                        ));
+                    }
+                    if typed_expr_contains_window(&sort.expr) {
+                        return Err(PlannerError::invalid_expression(
+                            "window functions are not allowed in aggregate ORDER BY".to_string(),
+                        ));
+                    }
+                }
+                let (agg, signature) = self.build_aggregate_expr_from_typed(
+                    expr,
+                    name,
+                    args,
+                    *distinct,
+                    *star,
+                    filter.as_deref(),
+                    order_by,
+                )?;
                 aggregate_map.entry(signature).or_insert_with(|| {
                     aggregates.push(agg);
                     aggregates.len() - 1
@@ -3402,8 +3938,18 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 args,
                 distinct,
                 star,
+                filter,
+                order_by,
                 over: Some(over),
             } => {
+                if filter.is_some() || !order_by.is_empty() {
+                    // The type checker rejects these combinations (D2); this
+                    // guard keeps the window planner from silently ignoring a
+                    // filter if a future path forgets that validation.
+                    return Err(PlannerError::invalid_expression(
+                        "FILTER and aggregate ORDER BY cannot be combined with OVER".to_string(),
+                    ));
+                }
                 if args.iter().any(typed_expr_contains_window)
                     || over.partition_by.iter().any(typed_expr_contains_window)
                     || over
@@ -3438,8 +3984,15 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         nth: args[1].clone(),
                     }),
                     "sum" | "count" | "avg" | "min" | "max" => {
-                        let (aggregate, _) = self
-                            .build_aggregate_expr_from_typed(expr, name, args, *distinct, *star)?;
+                        let (aggregate, _) = self.build_aggregate_expr_from_typed(
+                            expr,
+                            name,
+                            args,
+                            *distinct,
+                            *star,
+                            None,
+                            &[],
+                        )?;
                         WindowFunction::Aggregate(aggregate)
                     }
                     "lag" | "lead" => {
@@ -3518,6 +4071,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_aggregate_expr_from_typed(
         &self,
         expr: &TypedExpr,
@@ -3525,13 +4079,35 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         args: &[TypedExpr],
         distinct: bool,
         star: bool,
+        filter: Option<&TypedExpr>,
+        order_by: &[SortExpr],
     ) -> Result<(AggregateExpr, AggregateSignature), PlannerError> {
         let lower = name.to_lowercase();
+        let filter_owned = filter.cloned();
+        // D3: order-insensitive aggregates validate their ORDER BY (names and
+        // types) and then discard it — the result is order-independent, so
+        // the sort cost is avoided and the signature matches the unordered
+        // spelling. Order-sensitive aggregates keep the ordering.
+        let retained_order_by: Vec<SortExpr> = if is_order_sensitive_aggregate(&lower) {
+            order_by.to_vec()
+        } else {
+            Vec::new()
+        };
         match lower.as_str() {
             "count" => {
                 if star {
-                    let agg = AggregateExpr::count_star();
-                    let signature = aggregate_signature(name, distinct, star, None, None, expr);
+                    let mut agg = AggregateExpr::count_star();
+                    agg.filter = filter_owned;
+                    let signature = aggregate_signature(
+                        name,
+                        distinct,
+                        star,
+                        None,
+                        None,
+                        expr,
+                        filter,
+                        &retained_order_by,
+                    );
                     return Ok((agg, signature));
                 }
                 if args.len() != 1 {
@@ -3546,9 +4122,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     arg: Some(args[0].clone()),
                     distinct,
                     result_type: ResolvedType::BigInt,
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
-                let signature =
-                    aggregate_signature(name, distinct, star, Some(&args[0]), None, expr);
+                let signature = aggregate_signature(
+                    name,
+                    distinct,
+                    star,
+                    Some(&args[0]),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
                 Ok((agg, signature))
             }
             "sum" => {
@@ -3560,8 +4146,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     result_type: crate::planner::aggregate_expr::sum_result_type(
                         &arg.resolved_type,
                     ),
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
-                let signature = aggregate_signature(name, distinct, star, Some(arg), None, expr);
+                let signature = aggregate_signature(
+                    name,
+                    distinct,
+                    star,
+                    Some(arg),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
                 Ok((agg, signature))
             }
             "total" => {
@@ -3571,8 +4168,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     arg: Some(arg.clone()),
                     distinct: false,
                     result_type: ResolvedType::Double,
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
-                let signature = aggregate_signature(name, false, star, Some(arg), None, expr);
+                let signature = aggregate_signature(
+                    name,
+                    false,
+                    star,
+                    Some(arg),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
                 Ok((agg, signature))
             }
             "avg" => {
@@ -3582,8 +4190,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     arg: Some(arg.clone()),
                     distinct,
                     result_type: ResolvedType::Double,
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
-                let signature = aggregate_signature(name, distinct, star, Some(arg), None, expr);
+                let signature = aggregate_signature(
+                    name,
+                    distinct,
+                    star,
+                    Some(arg),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
                 Ok((agg, signature))
             }
             "min" => {
@@ -3593,8 +4212,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     arg: Some(arg.clone()),
                     distinct,
                     result_type: arg.resolved_type.clone(),
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
-                let signature = aggregate_signature(name, distinct, star, Some(arg), None, expr);
+                let signature = aggregate_signature(
+                    name,
+                    distinct,
+                    star,
+                    Some(arg),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
                 Ok((agg, signature))
             }
             "max" => {
@@ -3604,8 +4234,19 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     arg: Some(arg.clone()),
                     distinct,
                     result_type: arg.resolved_type.clone(),
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
-                let signature = aggregate_signature(name, distinct, star, Some(arg), None, expr);
+                let signature = aggregate_signature(
+                    name,
+                    distinct,
+                    star,
+                    Some(arg),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
                 Ok((agg, signature))
             }
             "group_concat" => {
@@ -3632,6 +4273,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     arg: Some(arg.clone()),
                     distinct,
                     result_type: ResolvedType::Text,
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
                 let signature = aggregate_signature(
                     name,
@@ -3643,6 +4286,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         _ => None,
                     },
                     expr,
+                    filter,
+                    &retained_order_by,
                 );
                 Ok((agg, signature))
             }
@@ -3668,6 +4313,8 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     arg: Some(arg.clone()),
                     distinct,
                     result_type: ResolvedType::Text,
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
                 };
                 let signature = aggregate_signature(
                     name,
@@ -3679,6 +4326,48 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         _ => None,
                     },
                     expr,
+                    filter,
+                    &retained_order_by,
+                );
+                Ok((agg, signature))
+            }
+            "percentile_disc" => {
+                if args.len() != 1 {
+                    return Err(PlannerError::type_mismatch(
+                        "1 argument",
+                        format!("{} arguments", args.len()),
+                        expr.span,
+                    ));
+                }
+                let fraction = type_checker::percentile_fraction(&args[0])?;
+                if retained_order_by.len() != 1 {
+                    return Err(PlannerError::invalid_expression(
+                        "PERCENTILE_DISC requires WITHIN GROUP (ORDER BY ...) with exactly \
+                         one sort expression"
+                            .to_string(),
+                    ));
+                }
+                let sort = &retained_order_by[0];
+                let agg = AggregateExpr {
+                    function: AggregateFunction::PercentileDisc { fraction },
+                    arg: Some(sort.expr.clone()),
+                    distinct: false,
+                    result_type: sort.expr.resolved_type.clone(),
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
+                };
+                // The fraction rides the separator slot; the sort value's
+                // identity lives in the order key (see AggregateSignature).
+                let fraction_key = format!("{fraction:?}");
+                let signature = aggregate_signature(
+                    name,
+                    false,
+                    star,
+                    None,
+                    Some(&fraction_key),
+                    expr,
+                    filter,
+                    &retained_order_by,
                 );
                 Ok((agg, signature))
             }
@@ -3689,7 +4378,6 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             )),
         }
     }
-
     fn require_single_aggregate_arg<'b>(
         &self,
         args: &'b [TypedExpr],
@@ -3711,11 +4399,17 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         group_keys: &[TypedExpr],
         aggregates: &[AggregateExpr],
         output_names: &[String],
+        grouping: Option<&GroupingRewrite>,
     ) -> Result<Projection, PlannerError> {
         let mut columns = Vec::new();
         for col in projected {
-            let rewritten =
-                self.rewrite_expr_for_aggregate(&col.expr, group_keys, aggregates, output_names)?;
+            let rewritten = self.rewrite_expr_for_aggregate(
+                &col.expr,
+                group_keys,
+                aggregates,
+                output_names,
+                grouping,
+            )?;
             columns.push(ProjectedColumn {
                 expr: rewritten,
                 alias: col.alias,
@@ -3724,47 +4418,167 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         Ok(Projection::Columns(columns))
     }
 
+    /// Rewrite an aggregate-context expression onto the aggregate output.
+    ///
+    /// `output_names` must name the group keys and aggregates only, never a
+    /// trailing `__grouping_id` column: `rewrite_expr_with_maps` derives the
+    /// group-key count from `output_names.len() - aggregate_map.len()`.
+    /// GROUPING/GROUPING_ID calls are lowered onto `__grouping_id` first via
+    /// the `grouping` context (issue #149, D4/D5).
     fn rewrite_expr_for_aggregate(
         &self,
         expr: &TypedExpr,
         group_keys: &[TypedExpr],
         aggregates: &[AggregateExpr],
         output_names: &[String],
+        grouping: Option<&GroupingRewrite>,
     ) -> Result<TypedExpr, PlannerError> {
         let group_key_map = build_group_key_map(group_keys);
         let aggregate_map = build_aggregate_map(aggregates);
 
-        rewrite_expr_with_maps(expr, &group_key_map, &aggregate_map, output_names)
+        let expr = match grouping {
+            Some(context) => rewrite_grouping_calls(expr, context)?,
+            None => expr.clone(),
+        };
+        rewrite_expr_with_maps(&expr, &group_key_map, &aggregate_map, output_names)
     }
 
-    /// Extract a numeric value from a LIMIT or OFFSET expression.
+    /// Resolve a LIMIT/OFFSET/FETCH count expression to a concrete value.
     ///
-    /// Currently only supports literal integer values.
-    fn extract_limit_value(
+    /// The expression must be a constant scalar of an integer type
+    /// (issue #152, D4/D5): literals, arithmetic, CAST, CASE, and
+    /// deterministic scalar functions over constants are accepted and
+    /// const-folded at plan time; column references, subqueries, and
+    /// aggregate/window functions are rejected. NULL means "no limit"
+    /// (`LIMIT NULL` / `FETCH FIRST NULL ROWS`) or "no offset"
+    /// (`OFFSET NULL`), matching PostgreSQL (D6). Negative values are
+    /// rejected (D7).
+    fn resolve_pagination_count(
         &self,
         expr: &Option<crate::ast::expr::Expr>,
-        stmt_span: crate::ast::Span,
+        clause: &str,
     ) -> Result<Option<u64>, PlannerError> {
-        match expr {
-            None => Ok(None),
-            Some(e) => {
-                // For now, only support literal integers
-                if let crate::ast::expr::ExprKind::Literal {
-                    literal: Literal::Number(s),
-                } = &e.kind
-                {
-                    s.parse::<u64>().map(Some).map_err(|_| {
-                        PlannerError::type_mismatch("unsigned integer", s.clone(), e.span)
-                    })
-                } else {
-                    Err(PlannerError::unsupported_feature(
-                        "non-literal LIMIT/OFFSET",
-                        "v0.3.0+",
-                        stmt_span,
-                    ))
-                }
+        let Some(expr) = expr else {
+            return Ok(None);
+        };
+        if expr_contains_subquery(expr) {
+            return Err(PlannerError::unsupported_feature(
+                format!("subquery in {clause}"),
+                "a future version",
+                expr.span,
+            ));
+        }
+        // Empty scope: any column reference fails name resolution here.
+        let typed = self
+            .type_checker
+            .infer_type_with_scope(expr, &[], &|stmt, _outer| {
+                Err(PlannerError::unsupported_feature(
+                    format!("subquery in {clause}"),
+                    "a future version",
+                    stmt.span(),
+                ))
+            })?;
+        if typed_expr_contains_aggregate(&typed) {
+            return Err(PlannerError::invalid_expression(format!(
+                "aggregate functions are not allowed in {clause}"
+            )));
+        }
+        if typed_expr_contains_window(&typed) {
+            return Err(PlannerError::invalid_expression(format!(
+                "window functions are not allowed in {clause}"
+            )));
+        }
+        match typed.resolved_type {
+            ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Null => {}
+            ref other => {
+                return Err(PlannerError::type_mismatch(
+                    "BIGINT",
+                    other.type_name().to_string(),
+                    expr.span,
+                ));
             }
         }
+        // Constant-fold with an empty row context; the plan carries the
+        // concrete value, so distributed execution never re-evaluates it.
+        let context = crate::executor::evaluator::EvalContext::new(&[]);
+        let value = crate::executor::evaluator::evaluate(&typed, &context).map_err(|error| {
+            PlannerError::invalid_expression(format!("{clause} expression is invalid: {error}"))
+        })?;
+        let count = match value {
+            crate::storage::SqlValue::Null => return Ok(None),
+            crate::storage::SqlValue::Integer(value) => i64::from(value),
+            crate::storage::SqlValue::BigInt(value) => value,
+            other => {
+                return Err(PlannerError::type_mismatch(
+                    "BIGINT",
+                    format!("{other:?}"),
+                    expr.span,
+                ));
+            }
+        };
+        if count < 0 {
+            return Err(PlannerError::invalid_expression(format!(
+                "{clause} must not be negative"
+            )));
+        }
+        Ok(Some(count as u64))
+    }
+
+    /// Apply the LIMIT/OFFSET/FETCH tail to a plan (issue #152).
+    ///
+    /// WITH TIES copies the sort keys from the `Sort` node directly beneath
+    /// the Limit; without ORDER BY it is rejected (D3, PostgreSQL 42P20).
+    fn apply_pagination(
+        &self,
+        plan: LogicalPlan,
+        limit: &Option<Expr>,
+        offset: &Option<Expr>,
+        with_ties: bool,
+    ) -> Result<LogicalPlan, PlannerError> {
+        self.apply_pagination_with_tie_keys(plan, limit, offset, with_ties, None)
+    }
+
+    /// Apply the pagination tail with an explicit WITH TIES peer specification.
+    ///
+    /// `tie_keys` is `None` for every ordinary query block, where the peer
+    /// specification is the `Sort` node directly beneath the Limit. The
+    /// DISTINCT ON path plans no `Sort` node of its own (sql-distinct-on.md
+    /// D8), so it supplies the user's ORDER BY explicitly (D13); an empty
+    /// slice there means the query has no ORDER BY and WITH TIES is rejected.
+    fn apply_pagination_with_tie_keys(
+        &self,
+        plan: LogicalPlan,
+        limit: &Option<Expr>,
+        offset: &Option<Expr>,
+        with_ties: bool,
+        tie_keys: Option<&[SortExpr]>,
+    ) -> Result<LogicalPlan, PlannerError> {
+        if limit.is_none() && offset.is_none() && !with_ties {
+            return Ok(plan);
+        }
+        let ties = if with_ties {
+            let keys = match tie_keys {
+                Some(keys) => keys.to_vec(),
+                None => match &plan {
+                    LogicalPlan::Sort { order_by, .. } => order_by.clone(),
+                    _ => Vec::new(),
+                },
+            };
+            if keys.is_empty() {
+                return Err(PlannerError::invalid_expression(
+                    "FETCH ... WITH TIES requires ORDER BY".to_string(),
+                ));
+            }
+            Some(keys)
+        } else {
+            None
+        };
+        Ok(LogicalPlan::Limit {
+            input: Box::new(plan),
+            limit: self.resolve_pagination_count(limit, "LIMIT")?,
+            offset: self.resolve_pagination_count(offset, "OFFSET")?,
+            ties,
+        })
     }
 
     /// Plan an INSERT statement.
@@ -4098,6 +4912,13 @@ struct AggregateSignature {
     star: bool,
     arg_key: Option<String>,
     separator: Option<String>,
+    /// FILTER (WHERE ...) identity: aggregates that differ only in their
+    /// filter are distinct physical aggregates (issue #148, D10).
+    filter_key: Option<String>,
+    /// Aggregate-local ordering identity; populated only for order-sensitive
+    /// aggregates so a discarded ORDER BY (D3) still deduplicates with the
+    /// unordered spelling.
+    order_key: Option<String>,
 }
 
 /// Collect the SELECT-list aliases that ORDER BY / HAVING may reference.
@@ -4179,12 +5000,36 @@ fn substitute_projection_aliases(
             args,
             distinct,
             star,
+            order_by,
+            within_group,
+            filter,
             over,
         } => ExprKind::FunctionCall {
             name: name.clone(),
             args: args.iter().map(recurse).collect(),
             distinct: *distinct,
             star: *star,
+            order_by: order_by
+                .iter()
+                .map(|order| OrderByExpr {
+                    expr: recurse(&order.expr),
+                    asc: order.asc,
+                    nulls_first: order.nulls_first,
+                    span: order.span,
+                })
+                .collect(),
+            within_group: within_group
+                .iter()
+                .map(|order| OrderByExpr {
+                    expr: recurse(&order.expr),
+                    asc: order.asc,
+                    nulls_first: order.nulls_first,
+                    span: order.span,
+                })
+                .collect(),
+            filter: filter
+                .as_deref()
+                .map(|predicate| Box::new(recurse(predicate))),
             over: over.as_ref().map(|window| crate::ast::expr::WindowSpec {
                 base: window.base.clone(),
                 partition_by: window.partition_by.iter().map(recurse).collect(),
@@ -4327,12 +5172,25 @@ fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
 
     match &expr.kind {
         ExprKind::FunctionCall {
-            name, args, over, ..
+            name,
+            args,
+            order_by,
+            within_group,
+            filter,
+            over,
+            ..
         } => {
             if over.is_none() && is_aggregate_function(name) {
                 return true;
             }
             args.iter().any(expr_contains_aggregate)
+                || order_by
+                    .iter()
+                    .any(|sort| expr_contains_aggregate(&sort.expr))
+                || within_group
+                    .iter()
+                    .any(|sort| expr_contains_aggregate(&sort.expr))
+                || filter.as_deref().is_some_and(expr_contains_aggregate)
                 || over.as_ref().is_some_and(|window| {
                     window.partition_by.iter().any(expr_contains_aggregate)
                         || window
@@ -4398,12 +5256,21 @@ fn expr_contains_aggregate(expr: &crate::ast::expr::Expr) -> bool {
 fn typed_expr_contains_aggregate(expr: &TypedExpr) -> bool {
     match &expr.kind {
         TypedExprKind::FunctionCall {
-            name, args, over, ..
+            name,
+            args,
+            filter,
+            order_by,
+            over,
+            ..
         } => {
             if over.is_none() && is_aggregate_function(name) {
                 return true;
             }
             args.iter().any(typed_expr_contains_aggregate)
+                || filter.as_deref().is_some_and(typed_expr_contains_aggregate)
+                || order_by
+                    .iter()
+                    .any(|sort| typed_expr_contains_aggregate(&sort.expr))
                 || over.as_ref().is_some_and(|window| {
                     window
                         .partition_by
@@ -4481,8 +5348,21 @@ fn select_contains_window(stmt: &Select) -> bool {
 
 fn expr_contains_window(expr: &crate::ast::expr::Expr) -> bool {
     match &expr.kind {
-        crate::ast::expr::ExprKind::FunctionCall { args, over, .. } => {
-            over.is_some() || args.iter().any(expr_contains_window)
+        crate::ast::expr::ExprKind::FunctionCall {
+            args,
+            order_by,
+            within_group,
+            filter,
+            over,
+            ..
+        } => {
+            over.is_some()
+                || args.iter().any(expr_contains_window)
+                || order_by.iter().any(|sort| expr_contains_window(&sort.expr))
+                || within_group
+                    .iter()
+                    .any(|sort| expr_contains_window(&sort.expr))
+                || filter.as_deref().is_some_and(expr_contains_window)
         }
         crate::ast::expr::ExprKind::BinaryOp { left, right, .. } => {
             expr_contains_window(left) || expr_contains_window(right)
@@ -4513,8 +5393,19 @@ fn expr_contains_window(expr: &crate::ast::expr::Expr) -> bool {
 
 fn typed_expr_contains_window(expr: &TypedExpr) -> bool {
     match &expr.kind {
-        TypedExprKind::FunctionCall { args, over, .. } => {
-            over.is_some() || args.iter().any(typed_expr_contains_window)
+        TypedExprKind::FunctionCall {
+            args,
+            filter,
+            order_by,
+            over,
+            ..
+        } => {
+            over.is_some()
+                || args.iter().any(typed_expr_contains_window)
+                || filter.as_deref().is_some_and(typed_expr_contains_window)
+                || order_by
+                    .iter()
+                    .any(|sort| typed_expr_contains_window(&sort.expr))
         }
         TypedExprKind::BinaryOp { left, right, .. } => {
             typed_expr_contains_window(left) || typed_expr_contains_window(right)
@@ -4601,6 +5492,8 @@ fn rewrite_expr_for_windows(
             args,
             distinct,
             star,
+            filter,
+            order_by,
             over,
         } => {
             if over.is_some() {
@@ -4613,6 +5506,17 @@ fn rewrite_expr_for_windows(
                 args: args.iter().map(rewrite).collect::<Result<Vec<_>, _>>()?,
                 distinct: *distinct,
                 star: *star,
+                filter: filter.as_deref().map(rewrite).transpose()?.map(Box::new),
+                order_by: order_by
+                    .iter()
+                    .map(|sort| {
+                        Ok(SortExpr::new(
+                            rewrite(&sort.expr)?,
+                            sort.asc,
+                            sort.nulls_first,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, PlannerError>>()?,
                 over: None,
             }
         }
@@ -4816,6 +5720,8 @@ fn merged_scoped_column_expr(
             args,
             distinct: false,
             star: false,
+            filter: None,
+            order_by: Vec::new(),
             over: None,
         },
         resolved_type: found.ty.clone(),
@@ -4896,6 +5802,125 @@ fn visible_wildcard_columns(schema: &[ColumnMetadata], scope: &[ScopedTable]) ->
         .collect()
 }
 
+/// Output schema and name scope of a join over `left` and `right`.
+///
+/// Shared by the plain and LATERAL join builders so both expose the same
+/// USING/NATURAL column merging.
+fn combine_join_shape(
+    left: &PlannedRelation,
+    right: &PlannedRelation,
+    using: Option<&[String]>,
+) -> (Vec<ColumnMetadata>, Vec<ScopedTable>) {
+    let mut schema = left.schema.clone();
+    schema.extend(right.schema.clone());
+    let mut scope = left.scope.clone();
+    let mut right_scope = right.scope.clone();
+    if let Some(columns) = using {
+        // The right-hand copy of a common column stops being an unqualified
+        // candidate, and the surviving left-hand column records where its
+        // partner lives so that an unqualified reference can merge the two.
+        for column in columns {
+            let right_index = right_scope.iter().find_map(|table| {
+                table
+                    .table
+                    .get_column_index(column)
+                    .map(|index| table.start_index + index)
+            });
+            let Some(right_index) = right_index else {
+                continue;
+            };
+            for table in &mut scope {
+                if table.table.get_column_index(column).is_some() {
+                    table.merge_column_with(column, right_index);
+                }
+            }
+        }
+        for table in &mut right_scope {
+            table.hide_unqualified_columns(columns);
+        }
+    }
+    scope.extend(right_scope);
+    (schema, scope)
+}
+
+/// Whether this FROM item is evaluated once per row of everything to its left.
+///
+/// An explicit `LATERAL` marks a derived table; a table function is implicitly
+/// lateral because its arguments may reference the preceding items (D2).
+fn from_item_is_lateral(item: &FromItem) -> bool {
+    match item {
+        FromItem::Derived { lateral, .. } => *lateral,
+        FromItem::Function { .. } => true,
+        FromItem::Table { .. } | FromItem::Join { .. } => false,
+    }
+}
+
+/// Scope a LATERAL item sees, addressed against the outer row the executor
+/// builds for it: the left join row followed by the enclosing outer row.
+///
+/// `base` is the output offset the left relation was planned at, so its scope
+/// is rebased to 0; the enclosing scope shifts past the left row. Neither side
+/// changes `scope_level` here, because planning the lateral relation applies
+/// [`offset_scope`] once and that is the single level it is nested by.
+fn lateral_outer_scope(
+    left_scope: &[ScopedTable],
+    base: usize,
+    left_width: usize,
+    outer_scope: &[ScopedTable],
+) -> Vec<ScopedTable> {
+    debug_assert!(
+        left_scope.iter().all(|table| table.start_index >= base),
+        "a FROM item's left sibling scope must start at the join's own base"
+    );
+    left_scope
+        .iter()
+        .cloned()
+        .map(|mut table| {
+            table.start_index -= base;
+            table
+        })
+        .chain(outer_scope.iter().cloned().map(|mut table| {
+            table.start_index += left_width;
+            table
+        }))
+        .collect()
+}
+
+/// Apply a relation alias column-name list to `schema` in place.
+///
+/// Exact arity is required for every relation kind, and a repeated name is
+/// rejected (issue #151, D8).
+fn apply_alias_columns(
+    alias: &str,
+    columns: &[String],
+    schema: &mut [ColumnMetadata],
+    span: crate::ast::Span,
+) -> Result<(), PlannerError> {
+    if columns.is_empty() {
+        return Ok(());
+    }
+    if columns.len() != schema.len() {
+        return Err(PlannerError::table_alias_column_count_mismatch(
+            alias,
+            columns.len(),
+            schema.len(),
+            span,
+        ));
+    }
+    let mut names = HashSet::new();
+    for name in columns {
+        if !names.insert(name) {
+            return Err(PlannerError::invalid_expression(format!(
+                "relation alias '{alias}' declares column '{name}' more than once"
+            )));
+        }
+    }
+    for (column, name) in schema.iter_mut().zip(columns) {
+        column.name.clone_from(name);
+    }
+    Ok(())
+}
+
 fn offset_scope(scope: &[ScopedTable], offset: usize) -> Vec<ScopedTable> {
     scope
         .iter()
@@ -4940,7 +5965,15 @@ fn install_base_projection(plan: &mut LogicalPlan, projection: &Projection) {
 fn is_aggregate_function(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "count" | "sum" | "total" | "avg" | "min" | "max" | "group_concat" | "string_agg"
+        "count"
+            | "sum"
+            | "total"
+            | "avg"
+            | "min"
+            | "max"
+            | "group_concat"
+            | "string_agg"
+            | "percentile_disc"
     )
 }
 
@@ -4948,6 +5981,182 @@ fn expr_key(expr: &TypedExpr) -> String {
     format!("{:?}", expr.kind)
 }
 
+/// Structural signature for DISTINCT ON key matching (D2).
+///
+/// `expr_key` embeds the source spans of nested sub-expressions, so the same
+/// compound expression written once in the ON list and once in ORDER BY would
+/// never compare equal. This signature erases every rendered
+/// `span: Span { .. }` segment first. The eraser only rewrites segments that
+/// match the exact derived-Debug shape (digits and fixed punctuation), so a
+/// string literal that happens to contain the marker text is left untouched
+/// and still compares consistently on both sides.
+fn distinct_on_expr_signature(expr: &TypedExpr) -> String {
+    const MARKER: &str = "span: Span { start: Location { line: ";
+    let rendered = format!("{:?}", expr.kind);
+    let mut result = String::with_capacity(rendered.len());
+    let mut rest = rendered.as_str();
+    while let Some(position) = rest.find(MARKER) {
+        let after = &rest[position + MARKER.len()..];
+        match debug_span_tail_length(after) {
+            Some(consumed) => {
+                result.push_str(&rest[..position]);
+                result.push_str("span: _");
+                rest = &after[consumed..];
+            }
+            None => {
+                let keep = position + MARKER.len();
+                result.push_str(&rest[..keep]);
+                rest = &rest[keep..];
+            }
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
+/// Length of `<digits>, column: <digits> }, end: Location { line: <digits>,
+/// column: <digits> } }` at the start of `input`, or `None` when the text does
+/// not match that exact derived-Debug shape.
+fn debug_span_tail_length(input: &str) -> Option<usize> {
+    fn digits(input: &str, offset: &mut usize) -> bool {
+        let start = *offset;
+        while input
+            .as_bytes()
+            .get(*offset)
+            .is_some_and(u8::is_ascii_digit)
+        {
+            *offset += 1;
+        }
+        *offset > start
+    }
+    fn literal(input: &str, offset: &mut usize, expected: &str) -> bool {
+        if input[*offset..].starts_with(expected) {
+            *offset += expected.len();
+            true
+        } else {
+            false
+        }
+    }
+    let mut offset = 0;
+    (digits(input, &mut offset)
+        && literal(input, &mut offset, ", column: ")
+        && digits(input, &mut offset)
+        && literal(input, &mut offset, " }, end: Location { line: ")
+        && digits(input, &mut offset)
+        && literal(input, &mut offset, ", column: ")
+        && digits(input, &mut offset)
+        && literal(input, &mut offset, " } }"))
+    .then_some(offset)
+}
+
+/// Verify the DISTINCT ON / ORDER BY prefix contract (D2) and synthesize the
+/// complete deterministic sort specification for [`LogicalPlan::DistinctOn`].
+///
+/// Returns `(key_count, order_by)` where the leading `key_count` entries cover
+/// every deduplicated ON key: the user's matching ORDER BY prefix (any
+/// permutation, keeping the user's direction), then any keys the user ORDER BY
+/// did not reach as implicit ASC NULLS LAST (D3). The user's non-key tail
+/// follows, and every input column is appended in schema order as an ASC NULLS
+/// LAST tie-breaker (D4) so the surviving row of each key group never depends
+/// on the physical input order.
+///
+/// Invariant relied on by `FETCH ... WITH TIES` (D13): the leading
+/// `user_order_by.len()` entries of the returned specification are exactly the
+/// user's ORDER BY, in the user's order. Implicit ON keys are only synthesized
+/// when the user ORDER BY has no non-key tail (a tail plus an unreached key is
+/// a D2 error), so the two groups can never interleave.
+fn build_distinct_on_sort_spec(
+    key_exprs: Vec<TypedExpr>,
+    user_order_by: Vec<SortExpr>,
+    base_schema: &[ColumnMetadata],
+    fallback_span: crate::ast::Span,
+) -> Result<(usize, Vec<SortExpr>), PlannerError> {
+    let key_signatures: Vec<String> = key_exprs.iter().map(distinct_on_expr_signature).collect();
+    let mut consumed = vec![false; key_exprs.len()];
+    let mut prefix: Vec<SortExpr> = Vec::new();
+    let mut tail: Vec<SortExpr> = Vec::new();
+    let mut prefix_ended = false;
+    for sort in user_order_by {
+        let signature = distinct_on_expr_signature(&sort.expr);
+        if let Some(index) = key_signatures
+            .iter()
+            .position(|candidate| candidate == &signature)
+        {
+            if prefix_ended {
+                // D2: an ON key reappears after a non-key ORDER BY item
+                // already ended the prefix (PostgreSQL 42P10).
+                return Err(PlannerError::distinct_on_order_by_mismatch(sort.expr.span));
+            }
+            consumed[index] = true;
+            prefix.push(sort);
+        } else {
+            prefix_ended = true;
+            tail.push(sort);
+        }
+    }
+    let mut implicit: Vec<SortExpr> = Vec::new();
+    for (index, key) in key_exprs.into_iter().enumerate() {
+        if consumed[index] {
+            continue;
+        }
+        if prefix_ended {
+            // D2: with non-key tail items present, an ON key the prefix never
+            // reached leaves the deduplication order ambiguous.
+            return Err(PlannerError::distinct_on_order_by_mismatch(key.span));
+        }
+        implicit.push(SortExpr::new(key, true, false));
+    }
+    let key_count = prefix.len() + implicit.len();
+    let mut order_by = prefix;
+    order_by.append(&mut implicit);
+    order_by.append(&mut tail);
+    let mut seen_columns: HashSet<usize> = order_by
+        .iter()
+        .filter_map(|sort| match &sort.expr.kind {
+            TypedExprKind::ColumnRef { column_index, .. } => Some(*column_index),
+            _ => None,
+        })
+        .collect();
+    for (index, column) in base_schema.iter().enumerate() {
+        if seen_columns.insert(index) {
+            order_by.push(SortExpr::new(
+                TypedExpr::column_ref(
+                    String::new(),
+                    column.name.clone(),
+                    index,
+                    column.data_type.clone(),
+                    fallback_span,
+                ),
+                true,
+                false,
+            ));
+        }
+    }
+    Ok((key_count, order_by))
+}
+
+/// Ordering changes the result only for these aggregates (issue #148, D3).
+fn is_order_sensitive_aggregate(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "group_concat" | "string_agg" | "percentile_disc"
+    )
+}
+
+fn sort_exprs_key(order_by: &[SortExpr]) -> Option<String> {
+    if order_by.is_empty() {
+        return None;
+    }
+    Some(
+        order_by
+            .iter()
+            .map(|sort| format!("{}|{}|{}", expr_key(&sort.expr), sort.asc, sort.nulls_first))
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn aggregate_signature(
     name: &str,
     distinct: bool,
@@ -4955,6 +6164,8 @@ fn aggregate_signature(
     arg: Option<&TypedExpr>,
     separator: Option<&String>,
     _expr: &TypedExpr,
+    filter: Option<&TypedExpr>,
+    order_by: &[SortExpr],
 ) -> AggregateSignature {
     AggregateSignature {
         name: name.to_ascii_lowercase(),
@@ -4962,6 +6173,8 @@ fn aggregate_signature(
         star,
         arg_key: arg.map(expr_key),
         separator: separator.cloned(),
+        filter_key: filter.map(expr_key),
+        order_key: sort_exprs_key(order_by),
     }
 }
 
@@ -5000,6 +6213,12 @@ fn build_aggregate_map(aggregates: &[AggregateExpr]) -> HashMap<AggregateSignatu
                 false,
                 agg.arg.as_ref(),
             ),
+            AggregateFunction::PercentileDisc { fraction } => (
+                "percentile_disc".to_string(),
+                Some(format!("{fraction:?}")),
+                false,
+                None,
+            ),
         };
         let signature = AggregateSignature {
             name,
@@ -5007,10 +6226,535 @@ fn build_aggregate_map(aggregates: &[AggregateExpr]) -> HashMap<AggregateSignatu
             star,
             arg_key: arg.map(expr_key),
             separator,
+            filter_key: agg.filter.as_ref().map(expr_key),
+            order_key: sort_exprs_key(&agg.order_by),
         };
         map.insert(signature, idx);
     }
     map
+}
+
+/// Hidden aggregate output column carrying the grouping-set mask (issue #149).
+pub(crate) const GROUPING_ID_COLUMN: &str = "__grouping_id";
+/// PostgreSQL-compatible bound on expanded grouping sets (D6).
+const MAX_GROUPING_SETS: usize = 4096;
+/// CUBE with more than 12 columns always exceeds `MAX_GROUPING_SETS`.
+const MAX_CUBE_COLUMNS: usize = 12;
+/// The grouping-id mask is a BIGINT, so 63 keys/arguments at most (D4).
+const MAX_GROUPING_KEYS: usize = 63;
+
+/// GROUP BY expansion result (issue #149).
+struct ExpandedGroupBy {
+    group_keys: Vec<TypedExpr>,
+    grouping_sets: Option<Vec<u64>>,
+}
+
+fn grouping_full_mask(key_count: usize) -> u64 {
+    if key_count == 0 {
+        0
+    } else {
+        (1u64 << key_count) - 1
+    }
+}
+
+fn is_grouping_function(name: &str) -> bool {
+    name.eq_ignore_ascii_case("grouping") || name.eq_ignore_ascii_case("grouping_id")
+}
+
+/// Context for lowering GROUPING/GROUPING_ID onto `__grouping_id` (D4/D5).
+struct GroupingRewrite {
+    /// Group-key expression identity -> union key position.
+    key_index: HashMap<String, usize>,
+    key_count: usize,
+    /// Output position of `__grouping_id` (after keys and aggregates).
+    gid_index: usize,
+    /// Whether the plan actually carries grouping sets; a plain GROUP BY
+    /// still accepts GROUPING but every call folds to constant 0.
+    sets_present: bool,
+}
+
+impl GroupingRewrite {
+    fn new(
+        group_keys: &[TypedExpr],
+        aggregates: &[AggregateExpr],
+        grouping_sets: &Option<Vec<u64>>,
+    ) -> Self {
+        let key_index = group_keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| (expr_key(key), index))
+            .collect();
+        Self {
+            key_index,
+            key_count: group_keys.len(),
+            gid_index: group_keys.len() + aggregates.len(),
+            sets_present: grouping_sets.is_some(),
+        }
+    }
+}
+
+/// AST-level detection of GROUPING/GROUPING_ID calls (D5 placement rules).
+fn expr_contains_grouping(expr: &crate::ast::expr::Expr) -> bool {
+    use crate::ast::expr::ExprKind;
+
+    match &expr.kind {
+        ExprKind::FunctionCall {
+            name,
+            args,
+            order_by,
+            within_group,
+            filter,
+            over,
+            ..
+        } => {
+            is_grouping_function(name)
+                || args.iter().any(expr_contains_grouping)
+                || order_by
+                    .iter()
+                    .any(|sort| expr_contains_grouping(&sort.expr))
+                || within_group
+                    .iter()
+                    .any(|sort| expr_contains_grouping(&sort.expr))
+                || filter.as_deref().is_some_and(expr_contains_grouping)
+                || over.as_ref().is_some_and(|window| {
+                    window.partition_by.iter().any(expr_contains_grouping)
+                        || window
+                            .order_by
+                            .iter()
+                            .any(|sort| expr_contains_grouping(&sort.expr))
+                })
+        }
+        ExprKind::BinaryOp { left, right, .. } => {
+            expr_contains_grouping(left) || expr_contains_grouping(right)
+        }
+        ExprKind::UnaryOp { operand, .. } => expr_contains_grouping(operand),
+        ExprKind::TruthPredicate { expr, .. } => expr_contains_grouping(expr),
+        ExprKind::IsDistinctFrom { left, right, .. } => {
+            expr_contains_grouping(left) || expr_contains_grouping(right)
+        }
+        ExprKind::Row { items } => items.iter().any(expr_contains_grouping),
+        ExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            operand.as_deref().is_some_and(expr_contains_grouping)
+                || branches.iter().any(|branch| {
+                    expr_contains_grouping(&branch.when) || expr_contains_grouping(&branch.then)
+                })
+                || else_expr.as_deref().is_some_and(expr_contains_grouping)
+        }
+        ExprKind::Cast { expr, .. } | ExprKind::TryCast { expr, .. } => {
+            expr_contains_grouping(expr)
+        }
+        ExprKind::Between {
+            expr, low, high, ..
+        } => {
+            expr_contains_grouping(expr)
+                || expr_contains_grouping(low)
+                || expr_contains_grouping(high)
+        }
+        ExprKind::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_grouping(expr)
+                || expr_contains_grouping(pattern)
+                || escape.as_deref().is_some_and(expr_contains_grouping)
+        }
+        ExprKind::InList { expr, list, .. } => {
+            expr_contains_grouping(expr) || list.iter().any(expr_contains_grouping)
+        }
+        ExprKind::IsNull { expr, .. } => expr_contains_grouping(expr),
+        ExprKind::ScalarSubquery { .. }
+        | ExprKind::InSubquery { .. }
+        | ExprKind::Exists { .. }
+        | ExprKind::Quantified { .. }
+        | ExprKind::Literal { .. }
+        | ExprKind::VectorLiteral { .. }
+        | ExprKind::ColumnRef { .. } => false,
+    }
+}
+
+fn typed_expr_contains_grouping(expr: &TypedExpr) -> bool {
+    match &expr.kind {
+        TypedExprKind::FunctionCall {
+            name,
+            args,
+            filter,
+            order_by,
+            over,
+            ..
+        } => {
+            is_grouping_function(name)
+                || args.iter().any(typed_expr_contains_grouping)
+                || filter.as_deref().is_some_and(typed_expr_contains_grouping)
+                || order_by
+                    .iter()
+                    .any(|sort| typed_expr_contains_grouping(&sort.expr))
+                || over.as_ref().is_some_and(|window| {
+                    window.partition_by.iter().any(typed_expr_contains_grouping)
+                        || window
+                            .order_by
+                            .iter()
+                            .any(|sort| typed_expr_contains_grouping(&sort.expr))
+                })
+        }
+        TypedExprKind::BinaryOp { left, right, .. } => {
+            typed_expr_contains_grouping(left) || typed_expr_contains_grouping(right)
+        }
+        TypedExprKind::UnaryOp { operand, .. } => typed_expr_contains_grouping(operand),
+        TypedExprKind::Cast { expr, .. } | TypedExprKind::TryCast { expr, .. } => {
+            typed_expr_contains_grouping(expr)
+        }
+        TypedExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            operand.as_deref().is_some_and(typed_expr_contains_grouping)
+                || branches.iter().any(|branch| {
+                    typed_expr_contains_grouping(&branch.when)
+                        || typed_expr_contains_grouping(&branch.then)
+                })
+                || else_expr
+                    .as_deref()
+                    .is_some_and(typed_expr_contains_grouping)
+        }
+        TypedExprKind::Between {
+            expr, low, high, ..
+        } => {
+            typed_expr_contains_grouping(expr)
+                || typed_expr_contains_grouping(low)
+                || typed_expr_contains_grouping(high)
+        }
+        TypedExprKind::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            typed_expr_contains_grouping(expr)
+                || typed_expr_contains_grouping(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|inner| typed_expr_contains_grouping(inner))
+        }
+        TypedExprKind::InList { expr, list, .. } => {
+            typed_expr_contains_grouping(expr) || list.iter().any(typed_expr_contains_grouping)
+        }
+        TypedExprKind::IsNull { expr, .. } => typed_expr_contains_grouping(expr),
+        TypedExprKind::InSubquery { expr, .. } => typed_expr_contains_grouping(expr),
+        TypedExprKind::Quantified { expr, .. } => typed_expr_contains_grouping(expr),
+        TypedExprKind::Literal(_)
+        | TypedExprKind::VectorLiteral(_)
+        | TypedExprKind::ColumnRef { .. }
+        | TypedExprKind::ScalarSubquery(_)
+        | TypedExprKind::Exists { .. } => false,
+    }
+}
+
+fn bigint_literal(value: u64, span: crate::ast::Span) -> TypedExpr {
+    TypedExpr {
+        kind: TypedExprKind::Literal(Literal::Number(value.to_string())),
+        resolved_type: ResolvedType::BigInt,
+        span,
+    }
+}
+
+fn bigint_binary_op(
+    left: TypedExpr,
+    op: crate::ast::expr::BinaryOp,
+    right: TypedExpr,
+    span: crate::ast::Span,
+) -> TypedExpr {
+    TypedExpr {
+        kind: TypedExprKind::BinaryOp {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        },
+        resolved_type: ResolvedType::BigInt,
+        span,
+    }
+}
+
+/// Lower a `GROUPING(e1, ..., en)` call to integer arithmetic over the
+/// hidden `__grouping_id` output column (D4).
+///
+/// Argument `j` (0-based, leftmost = most significant result bit) whose key
+/// occupies union position `i` contributes
+/// `((__grouping_id / 2^(K-1-i)) % 2) * 2^(n-1-j)`; the divisor is a power
+/// of two, so no division by zero is possible at runtime.
+fn lower_grouping_call(
+    args: &[TypedExpr],
+    context: &GroupingRewrite,
+    span: crate::ast::Span,
+) -> Result<TypedExpr, PlannerError> {
+    use crate::ast::expr::BinaryOp as AstBinaryOp;
+
+    if args.is_empty() {
+        return Err(PlannerError::invalid_expression(
+            "GROUPING requires at least one argument".to_string(),
+        ));
+    }
+    if args.len() > MAX_GROUPING_KEYS {
+        return Err(PlannerError::invalid_expression(format!(
+            "GROUPING accepts at most {MAX_GROUPING_KEYS} arguments"
+        )));
+    }
+    let mut key_positions = Vec::with_capacity(args.len());
+    for arg in args {
+        let Some(&position) = context.key_index.get(&expr_key(arg)) else {
+            return Err(PlannerError::invalid_expression(
+                "arguments to GROUPING must be grouping expressions of the query".to_string(),
+            ));
+        };
+        key_positions.push(position);
+    }
+
+    if !context.sets_present {
+        // Plain GROUP BY has exactly one grouping set: every key is present.
+        return Ok(bigint_literal(0, span));
+    }
+
+    let argument_count = key_positions.len();
+    let mut sum: Option<TypedExpr> = None;
+    for (argument, key_position) in key_positions.into_iter().enumerate() {
+        let gid_ref = TypedExpr::column_ref(
+            "__agg__".to_string(),
+            GROUPING_ID_COLUMN.to_string(),
+            context.gid_index,
+            ResolvedType::BigInt,
+            span,
+        );
+        let excluded_shift = (context.key_count - 1 - key_position) as u32;
+        let bit = bigint_binary_op(
+            bigint_binary_op(
+                gid_ref,
+                AstBinaryOp::Div,
+                bigint_literal(1u64 << excluded_shift, span),
+                span,
+            ),
+            AstBinaryOp::Mod,
+            bigint_literal(2, span),
+            span,
+        );
+        let weight = 1u64 << (argument_count - 1 - argument);
+        let term = if weight == 1 {
+            bit
+        } else {
+            bigint_binary_op(bit, AstBinaryOp::Mul, bigint_literal(weight, span), span)
+        };
+        sum = Some(match sum {
+            None => term,
+            Some(current) => bigint_binary_op(current, AstBinaryOp::Add, term, span),
+        });
+    }
+    Ok(sum.expect("GROUPING argument list is non-empty"))
+}
+
+/// Pre-pass over aggregate-context expressions: replace GROUPING calls and
+/// validate their placement before `rewrite_expr_with_maps` runs (D5).
+///
+/// Aggregate calls are returned unchanged (their signature must keep matching
+/// the collected plan aggregates), but GROUPING inside their arguments is a
+/// planning error because aggregate arguments evaluate against input rows.
+fn rewrite_grouping_calls(
+    expr: &TypedExpr,
+    context: &GroupingRewrite,
+) -> Result<TypedExpr, PlannerError> {
+    let rebuild = |inner: &TypedExpr| rewrite_grouping_calls(inner, context);
+    let rebuild_box = |inner: &TypedExpr| -> Result<Box<TypedExpr>, PlannerError> {
+        Ok(Box::new(rewrite_grouping_calls(inner, context)?))
+    };
+    let kind = match &expr.kind {
+        TypedExprKind::FunctionCall {
+            name,
+            args,
+            distinct,
+            star,
+            filter,
+            order_by,
+            over,
+        } => {
+            if is_grouping_function(name) {
+                if over.is_some() {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUPING cannot be used as a window function".to_string(),
+                    ));
+                }
+                return lower_grouping_call(args, context, expr.span);
+            }
+            if over.is_none() && is_aggregate_function(name) {
+                if args.iter().any(typed_expr_contains_grouping)
+                    || filter.as_deref().is_some_and(typed_expr_contains_grouping)
+                    || order_by
+                        .iter()
+                        .any(|sort| typed_expr_contains_grouping(&sort.expr))
+                {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUPING cannot appear inside aggregate function arguments".to_string(),
+                    ));
+                }
+                return Ok(expr.clone());
+            }
+            TypedExprKind::FunctionCall {
+                name: name.clone(),
+                args: args.iter().map(rebuild).collect::<Result<Vec<_>, _>>()?,
+                distinct: *distinct,
+                star: *star,
+                filter: filter.as_deref().map(rebuild_box).transpose()?,
+                order_by: order_by
+                    .iter()
+                    .map(|sort| {
+                        Ok(SortExpr::new(
+                            rebuild(&sort.expr)?,
+                            sort.asc,
+                            sort.nulls_first,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, PlannerError>>()?,
+                over: over
+                    .as_ref()
+                    .map(|window| {
+                        Ok(typed_expr::TypedWindowSpec {
+                            partition_by: window
+                                .partition_by
+                                .iter()
+                                .map(rebuild)
+                                .collect::<Result<Vec<_>, _>>()?,
+                            order_by: window
+                                .order_by
+                                .iter()
+                                .map(|sort| {
+                                    Ok(SortExpr::new(
+                                        rebuild(&sort.expr)?,
+                                        sort.asc,
+                                        sort.nulls_first,
+                                    ))
+                                })
+                                .collect::<Result<Vec<_>, PlannerError>>()?,
+                            frame: window.frame.clone(),
+                        })
+                    })
+                    .transpose()
+                    .map_err(|error: PlannerError| error)?,
+            }
+        }
+        TypedExprKind::BinaryOp { left, op, right } => TypedExprKind::BinaryOp {
+            left: rebuild_box(left)?,
+            op: *op,
+            right: rebuild_box(right)?,
+        },
+        TypedExprKind::UnaryOp { op, operand } => TypedExprKind::UnaryOp {
+            op: *op,
+            operand: rebuild_box(operand)?,
+        },
+        TypedExprKind::Case {
+            operand,
+            branches,
+            else_expr,
+        } => TypedExprKind::Case {
+            operand: operand.as_deref().map(rebuild_box).transpose()?,
+            branches: branches
+                .iter()
+                .map(|branch| {
+                    Ok(TypedCaseWhen {
+                        when: rebuild(&branch.when)?,
+                        then: rebuild(&branch.then)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, PlannerError>>()?,
+            else_expr: else_expr.as_deref().map(rebuild_box).transpose()?,
+        },
+        TypedExprKind::Cast {
+            expr: inner,
+            target_type,
+        } => TypedExprKind::Cast {
+            expr: rebuild_box(inner)?,
+            target_type: target_type.clone(),
+        },
+        TypedExprKind::TryCast {
+            expr: inner,
+            target_type,
+        } => TypedExprKind::TryCast {
+            expr: rebuild_box(inner)?,
+            target_type: target_type.clone(),
+        },
+        TypedExprKind::Between {
+            expr: inner,
+            low,
+            high,
+            negated,
+        } => TypedExprKind::Between {
+            expr: rebuild_box(inner)?,
+            low: rebuild_box(low)?,
+            high: rebuild_box(high)?,
+            negated: *negated,
+        },
+        TypedExprKind::Like {
+            expr: inner,
+            pattern,
+            escape,
+            negated,
+            kind,
+        } => TypedExprKind::Like {
+            expr: rebuild_box(inner)?,
+            pattern: rebuild_box(pattern)?,
+            escape: escape.as_deref().map(rebuild_box).transpose()?,
+            negated: *negated,
+            kind: *kind,
+        },
+        TypedExprKind::InList {
+            expr: inner,
+            list,
+            negated,
+        } => TypedExprKind::InList {
+            expr: rebuild_box(inner)?,
+            list: list.iter().map(rebuild).collect::<Result<Vec<_>, _>>()?,
+            negated: *negated,
+        },
+        TypedExprKind::IsNull {
+            expr: inner,
+            negated,
+        } => TypedExprKind::IsNull {
+            expr: rebuild_box(inner)?,
+            negated: *negated,
+        },
+        TypedExprKind::InSubquery {
+            expr: inner,
+            subquery,
+            negated,
+        } => TypedExprKind::InSubquery {
+            expr: rebuild_box(inner)?,
+            subquery: subquery.clone(),
+            negated: *negated,
+        },
+        TypedExprKind::Quantified {
+            expr: inner,
+            op,
+            quantifier,
+            subquery,
+        } => TypedExprKind::Quantified {
+            expr: rebuild_box(inner)?,
+            op: *op,
+            quantifier: *quantifier,
+            subquery: subquery.clone(),
+        },
+        TypedExprKind::Literal(_)
+        | TypedExprKind::VectorLiteral(_)
+        | TypedExprKind::ColumnRef { .. }
+        | TypedExprKind::ScalarSubquery(_)
+        | TypedExprKind::Exists { .. } => return Ok(expr.clone()),
+    };
+    Ok(TypedExpr {
+        kind,
+        resolved_type: expr.resolved_type.clone(),
+        span: expr.span,
+    })
 }
 
 fn build_aggregate_schema(
@@ -5035,6 +6779,7 @@ fn build_aggregate_schema(
             AggregateFunction::Max => format!("max_{idx}"),
             AggregateFunction::GroupConcat { .. } => format!("group_concat_{idx}"),
             AggregateFunction::StringAgg { .. } => format!("string_agg_{idx}"),
+            AggregateFunction::PercentileDisc { .. } => format!("percentile_disc_{idx}"),
         };
         schema.push(ColumnMetadata::new(name, agg.result_type.clone()));
     }
@@ -5064,8 +6809,11 @@ fn rewrite_expr_with_maps(
             args,
             distinct,
             star,
+            filter,
+            order_by,
             over: None,
         } if is_aggregate_function(name) => {
+            let is_percentile = name.eq_ignore_ascii_case("percentile_disc");
             let separator = if name.eq_ignore_ascii_case("group_concat") && args.len() == 2 {
                 if let TypedExprKind::Literal(Literal::String(value)) = &args[1].kind {
                     Some(value.clone())
@@ -5082,6 +6830,11 @@ fn rewrite_expr_with_maps(
                         "STRING_AGG separator must be a string literal".to_string(),
                     ));
                 }
+            } else if is_percentile && args.len() == 1 {
+                Some(format!(
+                    "{:?}",
+                    type_checker::percentile_fraction(&args[0])?
+                ))
             } else {
                 None
             };
@@ -5089,8 +6842,18 @@ fn rewrite_expr_with_maps(
                 name: name.to_ascii_lowercase(),
                 distinct: *distinct,
                 star: *star,
-                arg_key: args.first().map(expr_key),
+                arg_key: if is_percentile {
+                    None
+                } else {
+                    args.first().map(expr_key)
+                },
                 separator,
+                filter_key: filter.as_deref().map(expr_key),
+                order_key: if is_order_sensitive_aggregate(name) {
+                    sort_exprs_key(order_by)
+                } else {
+                    None
+                },
             };
             let idx = aggregate_map.get(&signature).ok_or_else(|| {
                 PlannerError::invalid_expression(
@@ -5110,11 +6873,21 @@ fn rewrite_expr_with_maps(
             args,
             distinct,
             star,
+            filter,
+            order_by,
             over,
         } => {
             if over.is_none() && (*distinct || *star) {
                 return Err(PlannerError::invalid_expression(
                     "DISTINCT/STAR modifiers are only supported for aggregates".to_string(),
+                ));
+            }
+            if filter.is_some() || !order_by.is_empty() {
+                // Non-aggregate calls never carry these clauses (rejected by
+                // the type checker), so reaching here means the aggregate
+                // above did not match the plan.
+                return Err(PlannerError::invalid_expression(
+                    "aggregate in expression is not part of plan".to_string(),
                 ));
             }
             let mut rewritten_args = Vec::with_capacity(args.len());
@@ -5165,6 +6938,8 @@ fn rewrite_expr_with_maps(
                     args: rewritten_args,
                     distinct: *distinct,
                     star: *star,
+                    filter: None,
+                    order_by: Vec::new(),
                     over,
                 },
                 resolved_type: expr.resolved_type.clone(),
@@ -5334,6 +7109,9 @@ fn rewrite_expr_with_maps(
             })
         }
         TypedExprKind::Literal(_) | TypedExprKind::VectorLiteral(_) => Ok(expr.clone()),
+        // References the GROUPING pre-pass already resolved onto the
+        // aggregate output (the hidden __grouping_id column) pass through.
+        TypedExprKind::ColumnRef { table, .. } if table == "__agg__" => Ok(expr.clone()),
         TypedExprKind::ColumnRef { .. } => Err(PlannerError::invalid_expression(
             "column reference must appear in GROUP BY or be aggregated".to_string(),
         )),

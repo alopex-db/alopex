@@ -124,7 +124,11 @@ pub mod crud {
             }
         }
 
-        // reopen 後も整合が保たれること
+        // reopen 後も整合が保たれること。
+        // シャドーイングは値を drop しないので、明示的に解放してから開き直す。
+        // 解放しないと 2 つのハンドルが同じディレクトリを同時に持つことになり、
+        // それは issue #181 の破損そのもの（ロックが拒否する）。
+        drop(store);
         let (store, _recovery) =
             LsmKV::open_with_config(dir.path(), cfg).expect("reopen after updates");
         {

@@ -273,6 +273,212 @@ def test_execute_sql_try_cast_preserves_values_and_cast_errors(db):
     assert "TypedExpr" not in rendered
 
 
+def test_execute_sql_fetch_pagination_and_with_ties(db):
+    db.execute_sql("CREATE TABLE pages (id INTEGER PRIMARY KEY, score INTEGER)")
+    db.execute_sql(
+        "INSERT INTO pages (id, score) VALUES "
+        "(1, 10), (2, 20), (3, 20), (4, 20), (5, 30), (6, NULL)"
+    )
+
+    ties = db.execute_sql(
+        "SELECT id FROM pages ORDER BY score FETCH FIRST 2 ROWS WITH TIES"
+    )
+    assert [row["id"] for row in ties] == [1, 2, 3, 4]
+
+    fetched = db.execute_sql(
+        "SELECT id FROM pages ORDER BY id OFFSET 2 ROWS FETCH NEXT 2 ROWS ONLY"
+    )
+    assert [row["id"] for row in fetched] == [3, 4]
+
+    # `?` placeholders keep working through the documented params substitution
+    # (true bind parameters are tracked by issue #166).
+    limited = db.execute_sql("SELECT id FROM pages ORDER BY id LIMIT ?", [2])
+    assert [row["id"] for row in limited] == [1, 2]
+
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT id FROM pages LIMIT -1")
+    assert "LIMIT must not be negative" in str(captured.value)
+
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT id FROM pages FETCH FIRST 2 ROWS WITH TIES")
+    assert "WITH TIES requires ORDER BY" in str(captured.value)
+
+
+def test_execute_sql_distinct_on_preserves_exact_rows(db):
+    db.execute_sql(
+        "CREATE TABLE sales (id INTEGER PRIMARY KEY, region TEXT, amount INTEGER)"
+    )
+    db.execute_sql(
+        "INSERT INTO sales (id, region, amount) VALUES "
+        "(1, 'east', 100), (2, 'east', 50), (3, 'west', 75), "
+        "(4, 'west', 75), (5, NULL, 10), (6, NULL, 5)"
+    )
+
+    rows = db.execute_sql(
+        "SELECT DISTINCT ON (region) region, amount FROM sales "
+        "ORDER BY region, amount"
+    )
+    assert rows == [
+        {"region": "east", "amount": 50},
+        {"region": "west", "amount": 75},
+        {"region": None, "amount": 5},
+    ]
+
+    # D4 tie contract: the two west rows tie on amount; the schema-order
+    # tie-breaker deterministically elects id 3.
+    tie = db.execute_sql(
+        "SELECT DISTINCT ON (region) id FROM sales WHERE region = 'west' "
+        "ORDER BY region, amount"
+    )
+    assert [row["id"] for row in tie] == [3]
+
+
+def test_execute_sql_distinct_on_order_by_mismatch_raises(db):
+    db.execute_sql(
+        "CREATE TABLE sales (id INTEGER PRIMARY KEY, region TEXT, amount INTEGER)"
+    )
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT DISTINCT ON (region) region FROM sales ORDER BY amount")
+    rendered = str(captured.value)
+    assert (
+        "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
+        in rendered
+    )
+    assert "ALOPEX-T014" in rendered
+
+
+def test_execute_sql_grouping_sets_distinguish_placeholder_nulls(db):
+    db.execute_sql(
+        "CREATE TABLE gs_sales (id INTEGER PRIMARY KEY, region TEXT, "
+        "product TEXT, amount INTEGER)"
+    )
+    db.execute_sql(
+        "INSERT INTO gs_sales VALUES "
+        "(1, 'east', 'a', 10), (2, 'east', 'b', 20), "
+        "(3, 'west', 'a', 30), (4, NULL, 'b', 40)"
+    )
+
+    # The real NULL region maps to Python None with GROUPING(region) == 0;
+    # the ROLLUP grand-total placeholder is also None but carries g == 1
+    # (issue #149, D7).
+    rows = db.execute_sql(
+        "SELECT region, SUM(amount) AS total, GROUPING(region) AS g "
+        "FROM gs_sales GROUP BY ROLLUP(region) ORDER BY g, region NULLS FIRST"
+    )
+    assert rows == [
+        {"region": None, "total": 40, "g": 0},
+        {"region": "east", "total": 30, "g": 0},
+        {"region": "west", "total": 30, "g": 0},
+        {"region": None, "total": 100, "g": 1},
+    ]
+
+    sets = db.execute_sql(
+        "SELECT region, product, COUNT(*) AS c, "
+        "GROUPING(region, product) AS gid FROM gs_sales "
+        "GROUP BY GROUPING SETS ((region), (product), ()) "
+        "ORDER BY gid, region NULLS FIRST, product NULLS FIRST"
+    )
+    assert sets == [
+        {"region": None, "product": None, "c": 1, "gid": 1},
+        {"region": "east", "product": None, "c": 2, "gid": 1},
+        {"region": "west", "product": None, "c": 1, "gid": 1},
+        {"region": None, "product": "a", "c": 2, "gid": 2},
+        {"region": None, "product": "b", "c": 2, "gid": 2},
+        {"region": None, "product": None, "c": 4, "gid": 3},
+    ]
+
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT GROUPING(region) FROM gs_sales")
+    assert "GROUPING is only allowed in grouped queries" in str(captured.value)
+
+
+def test_execute_sql_lateral_join_and_table_function(db):
+    db.execute_sql(
+        "CREATE TABLE lat_parent (id INTEGER PRIMARY KEY, emb VECTOR(2))"
+    )
+    db.execute_sql(
+        "CREATE TABLE lat_child (id INTEGER PRIMARY KEY, parent_id INTEGER, "
+        "val INTEGER)"
+    )
+    db.execute_sql("INSERT INTO lat_parent VALUES (1, [1.0, 2.0]), (2, [3.0, 4.0])")
+    db.execute_sql("INSERT INTO lat_child VALUES (10, 1, 100), (11, 1, 200)")
+
+    # A table-function argument sees the preceding FROM item even without the
+    # LATERAL keyword (issue #151, D2).
+    rows = db.execute_sql(
+        "SELECT p.id, u.unnest FROM lat_parent AS p, UNNEST(p.emb) AS u "
+        "ORDER BY p.id, u.unnest"
+    )
+    assert rows == [
+        {"id": 1, "unnest": 1.0},
+        {"id": 1, "unnest": 2.0},
+        {"id": 2, "unnest": 3.0},
+        {"id": 2, "unnest": 4.0},
+    ]
+
+    # LEFT JOIN LATERAL keeps the unmatched left row as None (D10).
+    padded = db.execute_sql(
+        "SELECT p.id, l.mx FROM lat_parent AS p LEFT JOIN LATERAL "
+        "(SELECT MAX(c.val) AS mx FROM lat_child AS c WHERE c.parent_id = p.id) AS l "
+        "ON TRUE ORDER BY p.id"
+    )
+    assert padded == [{"id": 1, "mx": 200}, {"id": 2, "mx": None}]
+
+    # A relation alias column list renames a base table and requires exact
+    # arity (D8).
+    renamed = db.execute_sql(
+        "SELECT r.a, r.c FROM lat_child AS r(a, b, c) ORDER BY r.a"
+    )
+    assert renamed == [{"a": 10, "c": 100}, {"a": 11, "c": 200}]
+
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT * FROM lat_child AS r(a, b)")
+    assert "ALOPEX-T012" in str(captured.value)
+
+    with pytest.raises(AlopexError) as unknown:
+        db.execute_sql("SELECT * FROM frobnicate(1) AS f")
+    assert "frobnicate" in str(unknown.value)
+
+
+def test_execute_sql_aggregate_filter_and_percentile_disc(db):
+    db.execute_sql(
+        "CREATE TABLE metrics (id INTEGER PRIMARY KEY, g TEXT, v INTEGER, name TEXT)"
+    )
+    db.execute_sql(
+        "INSERT INTO metrics VALUES "
+        "(1, 'a', 5, 'x'), (2, 'a', 20, 'y'), (3, 'a', NULL, 'z'), "
+        "(4, 'b', 30, 'w'), (5, 'b', NULL, NULL), (6, 'b', 20, 'y')"
+    )
+
+    rows = db.execute_sql(
+        "SELECT g, COUNT(*) FILTER (WHERE v > 10) AS big, "
+        "STRING_AGG(name, ',' ORDER BY v DESC, name ASC) AS names, "
+        "PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v) AS median "
+        "FROM metrics GROUP BY g ORDER BY g"
+    )
+    assert rows == [
+        {"g": "a", "big": 1, "names": "y,x,z", "median": 5},
+        {"g": "b", "big": 2, "names": "w,y", "median": 20},
+    ]
+
+    empty = db.execute_sql(
+        "SELECT SUM(v) FILTER (WHERE FALSE) AS none, "
+        "COUNT(*) FILTER (WHERE FALSE) AS zero FROM metrics"
+    )
+    assert empty == [{"none": None, "zero": 0}]
+
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT SUM(v) WITHIN GROUP (ORDER BY v) FROM metrics")
+    rendered = str(captured.value)
+    assert "ALOPEX-T007" in rendered
+    assert "WITHIN GROUP is only valid for ordered-set aggregate functions" in rendered
+    assert "TypedExpr" not in rendered
+
+    with pytest.raises(AlopexError) as captured:
+        db.execute_sql("SELECT PERCENTILE_DISC(2.0) WITHIN GROUP (ORDER BY v) FROM metrics")
+    assert "PERCENTILE_DISC fraction must be between 0 and 1" in str(captured.value)
+
+
 def test_execute_sql_grouped_window_composition_preserves_exact_rows(db):
     db.execute_sql(
         "CREATE TABLE samples (id INTEGER PRIMARY KEY, region TEXT, value INTEGER)"

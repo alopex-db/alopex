@@ -222,7 +222,10 @@ pub(crate) fn copy_dir_filtered(src: &Path, dest: &Path) -> Result<()> {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let name = entry.file_name();
-        if name == ".lifecycle" {
+        // 裁定 D15: the data-directory lock names *this* process. Copying it
+        // into a backup would make a restore later stomp on a running server's
+        // live lock file (or, on Windows, fail to delete it at all).
+        if name == ".lifecycle" || alopex_core::lsm::is_lock_file(Path::new(&name)) {
             continue;
         }
         let dest_path = dest.join(name);
@@ -380,7 +383,7 @@ fn collect_manifest_entries(
         if skip_lifecycle && name == ".lifecycle" {
             continue;
         }
-        if name == SNAPSHOT_MANIFEST_NAME {
+        if name == SNAPSHOT_MANIFEST_NAME || alopex_core::lsm::is_lock_file(&path) {
             continue;
         }
         let metadata = entry.metadata()?;
@@ -418,6 +421,43 @@ fn crc32_file(path: &Path) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 裁定 D15: the data-directory lock is host-local state. A backup that
+    /// captured it would, on restore, drop another process's pid into a live
+    /// directory — and `clear_data_dir` would have to delete the very file the
+    /// running server holds.
+    #[test]
+    fn backup_snapshot_skips_the_data_directory_lock() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let dest = tempfile::tempdir().expect("dest tempdir");
+        fs::create_dir_all(source.path().join("sst")).expect("sst dir");
+        fs::write(source.path().join("lsm.wal"), b"wal").expect("wal");
+        fs::write(source.path().join("sst/1.sst"), b"sst").expect("sst");
+        fs::write(source.path().join(".alopex.lock"), b"pid=1").expect("lock");
+        fs::write(source.path().join("mydb.alopex.lock"), b"pid=1").expect("sidecar lock");
+
+        let manifest = build_snapshot_manifest(source.path()).expect("manifest");
+        assert!(
+            manifest
+                .entries
+                .iter()
+                .all(|entry| !entry.path.ends_with(".alopex.lock")),
+            "host-local lock files must not be promised by the snapshot manifest"
+        );
+
+        copy_dir_filtered(source.path(), dest.path()).expect("copy");
+
+        assert!(dest.path().join("lsm.wal").exists());
+        assert!(dest.path().join("sst/1.sst").exists());
+        assert!(
+            !dest.path().join(".alopex.lock").exists(),
+            "a plain-directory lock must not land in a backup"
+        );
+        assert!(
+            !dest.path().join("mydb.alopex.lock").exists(),
+            "a sidecar-shape lock must not land in a backup"
+        );
+    }
 
     #[test]
     fn lifecycle_copy_preserves_sparse_file_without_materializing_holes() {

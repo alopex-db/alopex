@@ -122,6 +122,75 @@ def main() -> int:
                 "SELECT id, label FROM (VALUES (2, 'b'), (1, 'a')) AS v(id, label) ORDER BY id",
                 [{"id": 1, "label": "a"}, {"id": 2, "label": "b"}],
             ),
+            (
+                "VALUES (2), (2), (1) ORDER BY column1 DESC FETCH FIRST 1 ROW WITH TIES",
+                [{"column1": 2}, {"column1": 2}],
+            ),
+            (
+                "SELECT id FROM (VALUES (1), (2), (3)) AS v(id) "
+                "ORDER BY id OFFSET 1 ROW FETCH NEXT 1 + 1 ROWS ONLY",
+                [{"id": 2}, {"id": 3}],
+            ),
+            (
+                # The two west rows tie on amount; the deterministic D4
+                # tie-breaker (schema-order columns) elects id 3.
+                "SELECT DISTINCT ON (region) region, id FROM sales "
+                "ORDER BY region, amount",
+                [
+                    {"region": "east", "id": 1},
+                    {"region": "north", "id": 5},
+                    {"region": "west", "id": 3},
+                ],
+            ),
+            (
+                # Aggregate FILTER + ordered GROUP_CONCAT + PERCENTILE_DISC
+                # (issue #148).
+                "SELECT COUNT(*) FILTER (WHERE qty > 1) AS heavy, "
+                "GROUP_CONCAT(region ORDER BY amount DESC, id ASC) AS by_amount, "
+                "PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY qty) AS median_qty "
+                "FROM sales",
+                [
+                    {
+                        "heavy": 3,
+                        "by_amount": "east,west,west,east,north",
+                        "median_qty": 2,
+                    }
+                ],
+            ),
+            (
+                # GROUPING SETS / ROLLUP (issue #149): the grand-total row
+                # prints region as None while GROUPING(region) = 1 keeps it
+                # distinct from any real NULL group (D7).
+                "SELECT region, SUM(qty) AS total_qty, GROUPING(region) AS g "
+                "FROM sales GROUP BY ROLLUP(region) ORDER BY g, region",
+                [
+                    {"region": "east", "total_qty": 4, "g": 0},
+                    {"region": "north", "total_qty": 0, "g": 0},
+                    {"region": "west", "total_qty": 7, "g": 0},
+                    {"region": None, "total_qty": 11, "g": 1},
+                ],
+            ),
+            (
+                # LATERAL (issue #151): the correlated subquery runs once per
+                # left row and takes that region's largest sale.
+                "SELECT r.region, top.id AS top_id FROM "
+                "(SELECT DISTINCT ON (region) region FROM sales ORDER BY region) AS r "
+                "CROSS JOIN LATERAL (SELECT s.id FROM sales AS s "
+                "WHERE s.region = r.region ORDER BY s.amount DESC, s.id LIMIT 1) AS top "
+                "ORDER BY r.region",
+                [
+                    {"region": "east", "top_id": 2},
+                    {"region": "north", "top_id": 5},
+                    {"region": "west", "top_id": 3},
+                ],
+            ),
+            (
+                # A relation alias column list renames a base table, and the
+                # column names come back through the Python surface (D8).
+                "SELECT p.ident, p.label FROM sales AS p(ident, label, amount, qty, bonus) "
+                "WHERE p.ident = 1",
+                [{"ident": 1, "label": "east"}],
+            ),
             ("SELECT SUM(n) AS total FROM metrics", [{"total": 5}]),
             (
                 "SELECT id, n * 2.0 AS doubled FROM metrics ORDER BY doubled",
@@ -573,6 +642,19 @@ def main() -> int:
             ("SELECT id FROM sales UNION SELECT region FROM sales", "type mismatch"),
             ("WITH defined AS (SELECT 1 AS id) SELECT id FROM missing", "missing"),
             ("SELECT CAST('bad' AS INTEGER)", "ALOPEX-E004"),
+            (
+                "SELECT 1 FETCH FIRST 1 ROW WITH TIES",
+                "FETCH ... WITH TIES requires ORDER BY",
+            ),
+            ("SELECT 1 LIMIT -1", "LIMIT must not be negative"),
+            (
+                "SELECT DISTINCT ON (region) region FROM sales ORDER BY amount",
+                "ALOPEX-T014",
+            ),
+            (
+                "SELECT SUM(amount) WITHIN GROUP (ORDER BY amount) FROM sales",
+                "WITHIN GROUP is only valid for ordered-set aggregate functions",
+            ),
         ]
 
         completed = 0
@@ -586,12 +668,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 61:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 61")
+        if completed != 72:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 72")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 61 checks passed")
+    print("v0.8 SQL correctness demo completed: 72 checks passed")
     return 0
 
 

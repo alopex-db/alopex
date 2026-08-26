@@ -155,7 +155,7 @@ jobs:
           loaded = ctypes.CDLL(str(library))
           loaded.alopex_parser_version.restype = ctypes.c_char_p
           version = loaded.alopex_parser_version().decode("ascii")
-          if version != "0.9.0":
+          if version != "0.14.0":
               raise SystemExit(f"native smoke version mismatch: {version}")
           print(f"native smoke passed: {record['target']} parser {version}")
           PY
@@ -331,7 +331,7 @@ jobs:
           mkdir -p "${asset_dir}"
           gh release download "${RELEASE_TAG_NAME}" --repo "${GITHUB_REPOSITORY}" \
             --pattern "parser-vendor-manifest-v${version}.json" \
-            --pattern "alopex-parser-v${version}-contract-0.9.0-*.tar.gz" \
+            --pattern "alopex-parser-v${version}-contract-0.14.0-*.tar.gz" \
             --dir "${asset_dir}" --clobber
           manifest="${asset_dir}/parser-vendor-manifest-v${version}.json"
           python "${RELEASE_STAGE}/scripts/release/parser_asset_manifest.py" verify-manifest \
@@ -355,21 +355,28 @@ jobs:
               if library_path.is_absolute() or ".." in library_path.parts:
                   raise SystemExit(f"unsafe parser library path: {library_path}")
               with tarfile.open(archive, "r:gz") as handle:
-                  member = handle.getmember(str(library_path))
-                  source = handle.extractfile(member)
-                  if source is None:
-                      raise SystemExit(f"parser library is not a file: {library_path}")
-                  library = source.read()
+                  def read_asset(identity):
+                      path = PurePosixPath(identity["path"])
+                      if path.is_absolute() or ".." in path.parts:
+                          raise SystemExit(f"unsafe parser library path: {path}")
+                      member = handle.getmember(str(path))
+                      source = handle.extractfile(member)
+                      if source is None:
+                          raise SystemExit(f"parser library is not a file: {path}")
+                      data = source.read()
+                      if hashlib.sha256(data).hexdigest() != identity["sha256"]:
+                          raise SystemExit(f"parser library digest mismatch: {asset['target']}")
+                      return path.name, data
+                  dynamic_name, library = read_asset(asset["library"])
+                  static_name, static_library = read_asset(asset["static_library"])
               expected = asset["library"]["sha256"]
-              if hashlib.sha256(library).hexdigest() != expected:
-                  raise SystemExit(f"parser library digest mismatch: {asset['target']}")
               target_dir = vendor / asset["target"]
               target_dir.mkdir(parents=True, exist_ok=True)
-              name = library_path.name
-              (target_dir / name).write_bytes(library)
-              (target_dir / "CONTRACT_VERSION").write_bytes(b"0.9.0\n")
+              (target_dir / dynamic_name).write_bytes(library)
+              (target_dir / static_name).write_bytes(static_library)
+              (target_dir / "CONTRACT_VERSION").write_bytes(b"0.14.0\n")
               (target_dir / "SHA256SUMS").write_bytes(
-                  f"{expected}  {name}\n".encode()
+                  f"{expected}  {dynamic_name}\n{asset['static_library']['sha256']}  {static_name}\n".encode()
               )
           fixed_manifest = vendor / "parser-vendor-manifest.json"
           versioned_manifests = sorted(vendor.glob("parser-vendor-manifest-v*.json"))

@@ -215,12 +215,18 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 args,
                 distinct,
                 star,
+                order_by,
+                within_group,
+                filter,
                 over,
             } => self.infer_function_call_type_with_scope(
                 name,
                 args,
                 *distinct,
                 *star,
+                order_by,
+                within_group,
+                filter.as_deref(),
                 over.as_ref(),
                 scope,
                 plan_subquery,
@@ -582,6 +588,8 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                                 args,
                                 distinct: false,
                                 star: false,
+                                filter: None,
+                                order_by: Vec::new(),
                                 over: None,
                             },
                             resolved_type: column.data_type.clone(),
@@ -1164,6 +1172,8 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 args: typed_args,
                 distinct,
                 star,
+                filter: None,
+                order_by: Vec::new(),
                 over: None,
             },
             resolved_type: result_type,
@@ -1178,12 +1188,24 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         args: &[Expr],
         distinct: bool,
         star: bool,
+        order_by: &[crate::ast::dml::OrderByExpr],
+        within_group: &[crate::ast::dml::OrderByExpr],
+        filter: Option<&Expr>,
         over: Option<&WindowSpec>,
         scope: &[ScopedTable],
         plan_subquery: &SubqueryPlanner<'_>,
         span: Span,
     ) -> Result<TypedExpr, PlannerError> {
         let lower_name = name.to_ascii_lowercase();
+        self.validate_aggregate_clause_placement(
+            &lower_name,
+            distinct,
+            order_by,
+            within_group,
+            filter,
+            over.is_some(),
+            span,
+        )?;
         if over.is_some() {
             match lower_name.as_str() {
                 "lag" | "lead" => {
@@ -1206,6 +1228,82 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             .iter()
             .map(|arg| self.infer_type_with_scope(arg, scope, plan_subquery))
             .collect::<Result<Vec<_>, _>>()?;
+
+        // WITHIN GROUP normalizes onto the same aggregate-local ordering as an
+        // in-argument ORDER BY; the parser rejects supplying both at once.
+        let order_by_source = if within_group.is_empty() {
+            order_by
+        } else {
+            within_group
+        };
+        let typed_order_by = order_by_source
+            .iter()
+            .map(|order| {
+                let expr = self.infer_type_with_scope(&order.expr, scope, plan_subquery)?;
+                if super::typed_expr_contains_aggregate(&expr) {
+                    return Err(PlannerError::invalid_expression(
+                        "aggregate functions are not allowed in aggregate ORDER BY".to_string(),
+                    ));
+                }
+                if super::typed_expr_contains_window(&expr) {
+                    return Err(PlannerError::invalid_expression(
+                        "window functions are not allowed in aggregate ORDER BY".to_string(),
+                    ));
+                }
+                Ok(SortExpr::new(
+                    expr,
+                    order.asc.unwrap_or(true),
+                    order.nulls_first.unwrap_or(false),
+                ))
+            })
+            .collect::<Result<Vec<_>, PlannerError>>()?;
+
+        let typed_filter = filter
+            .map(|predicate| {
+                let typed = self.infer_type_with_scope(predicate, scope, plan_subquery)?;
+                if super::typed_expr_contains_aggregate(&typed) {
+                    return Err(PlannerError::invalid_expression(
+                        "aggregate functions are not allowed in FILTER".to_string(),
+                    ));
+                }
+                if super::typed_expr_contains_window(&typed) {
+                    return Err(PlannerError::invalid_expression(
+                        "window functions are not allowed in FILTER".to_string(),
+                    ));
+                }
+                if !matches!(
+                    typed.resolved_type,
+                    ResolvedType::Boolean | ResolvedType::Null
+                ) {
+                    return Err(PlannerError::type_mismatch(
+                        "BOOLEAN FILTER predicate",
+                        typed.resolved_type.type_name(),
+                        typed.span,
+                    ));
+                }
+                Ok(Box::new(typed))
+            })
+            .transpose()?;
+
+        // D4 (PostgreSQL rule): with DISTINCT, every aggregate ORDER BY
+        // expression must appear in the argument list, otherwise the sort key
+        // is undefined after deduplication.
+        if distinct && !typed_order_by.is_empty() {
+            for sort in &typed_order_by {
+                let key = super::distinct_on_expr_signature(&sort.expr);
+                let appears = typed_args
+                    .iter()
+                    .any(|arg| super::distinct_on_expr_signature(arg) == key);
+                if !appears {
+                    return Err(PlannerError::invalid_expression(
+                        "in an aggregate with DISTINCT, ORDER BY expressions must appear in \
+                         the argument list"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
         let result_type = if over.is_some() {
             match lower_name.as_str() {
                 "lag" | "lead" => self.infer_offset_window_result_type(name, &mut typed_args)?,
@@ -1239,6 +1337,8 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     ));
                 }
             }
+        } else if lower_name == "percentile_disc" {
+            self.check_percentile_disc(&typed_args, &typed_order_by, span)?
         } else {
             self.check_function_call(name, &typed_args, distinct, star, span)?
         };
@@ -1284,11 +1384,147 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 args: typed_args,
                 distinct,
                 star,
+                filter: typed_filter,
+                order_by: typed_order_by,
                 over: typed_over,
             },
             resolved_type: result_type,
             span,
         })
+    }
+
+    /// Placement rules for FILTER / WITHIN GROUP / aggregate ORDER BY that do
+    /// not require typed arguments (issue #148, D2/D6/D7).
+    #[allow(clippy::too_many_arguments)]
+    fn validate_aggregate_clause_placement(
+        &self,
+        lower_name: &str,
+        distinct: bool,
+        order_by: &[crate::ast::dml::OrderByExpr],
+        within_group: &[crate::ast::dml::OrderByExpr],
+        filter: Option<&Expr>,
+        has_over: bool,
+        span: Span,
+    ) -> Result<(), PlannerError> {
+        let is_ordered_set = is_ordered_set_aggregate_name(lower_name);
+        let is_aggregate = is_aggregate_name(lower_name);
+
+        if let Some(filter) = filter {
+            if has_over {
+                // PostgreSQL allows FILTER on window-aggregates; the Alopex
+                // window executor frame path does not implement it yet, so the
+                // boundary is a stable explicit error (D2).
+                return Err(PlannerError::unsupported_feature(
+                    "FILTER on a window function call",
+                    "future",
+                    span,
+                ));
+            }
+            if !is_aggregate {
+                return Err(PlannerError::invalid_expression(format!(
+                    "FILTER (WHERE ...) is only valid for aggregate functions, not '{lower_name}'"
+                )));
+            }
+            if super::expr_contains_subquery(filter) {
+                return Err(PlannerError::unsupported_feature(
+                    "subquery in aggregate FILTER",
+                    "future",
+                    filter.span,
+                ));
+            }
+        }
+
+        if !within_group.is_empty() {
+            if has_over {
+                // PostgreSQL: ordered-set aggregates cannot be window calls.
+                return Err(PlannerError::invalid_expression(
+                    "WITHIN GROUP cannot be combined with OVER".to_string(),
+                ));
+            }
+            if !is_ordered_set {
+                return Err(PlannerError::invalid_expression(format!(
+                    "WITHIN GROUP is only valid for ordered-set aggregate functions, \
+                     not '{lower_name}'"
+                )));
+            }
+            if distinct {
+                return Err(PlannerError::invalid_expression(
+                    "DISTINCT is not supported with WITHIN GROUP".to_string(),
+                ));
+            }
+            if within_group
+                .iter()
+                .any(|order| super::expr_contains_subquery(&order.expr))
+            {
+                return Err(PlannerError::unsupported_feature(
+                    "subquery in aggregate ORDER BY",
+                    "future",
+                    span,
+                ));
+            }
+        }
+
+        if !order_by.is_empty() {
+            if has_over {
+                // PostgreSQL: "aggregate ORDER BY is not implemented for
+                // window functions".
+                return Err(PlannerError::invalid_expression(
+                    "aggregate ORDER BY cannot be combined with OVER".to_string(),
+                ));
+            }
+            if !is_aggregate || is_ordered_set {
+                return Err(PlannerError::invalid_expression(format!(
+                    "ORDER BY in the argument list is only valid for aggregate functions, \
+                     not '{lower_name}'"
+                )));
+            }
+            if order_by
+                .iter()
+                .any(|order| super::expr_contains_subquery(&order.expr))
+            {
+                return Err(PlannerError::unsupported_feature(
+                    "subquery in aggregate ORDER BY",
+                    "future",
+                    span,
+                ));
+            }
+        }
+
+        if is_ordered_set && within_group.is_empty() && !has_over {
+            return Err(PlannerError::invalid_expression(format!(
+                "WITHIN GROUP (ORDER BY ...) is required for {}",
+                lower_name.to_ascii_uppercase()
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Argument and ordering rules for `PERCENTILE_DISC(fraction) WITHIN
+    /// GROUP (ORDER BY sort_expr)` (issue #148, D5). The result type is the
+    /// sort expression's type; PostgreSQL 16 behaves identically.
+    fn check_percentile_disc(
+        &self,
+        args: &[TypedExpr],
+        order_by: &[SortExpr],
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        if args.len() != 1 {
+            return Err(PlannerError::type_mismatch(
+                "1 argument",
+                format!("{} arguments", args.len()),
+                span,
+            ));
+        }
+        let _ = percentile_fraction(&args[0])?;
+        if order_by.len() != 1 {
+            return Err(PlannerError::invalid_expression(
+                "PERCENTILE_DISC requires WITHIN GROUP (ORDER BY ...) with exactly one \
+                 sort expression"
+                    .to_string(),
+            ));
+        }
+        Ok(order_by[0].expr.resolved_type.clone())
     }
 
     fn infer_offset_window_result_type(
@@ -1885,6 +2121,28 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             "max" => self.check_min_max(args, distinct, star, span),
             "group_concat" => self.check_group_concat(args, distinct, star, span),
             "string_agg" => self.check_string_agg(args, distinct, star, span),
+            // GROUPING/GROUPING_ID distinguish grouping-set placeholder NULLs
+            // from data NULLs (issue #149, D4). Placement and argument
+            // validation happen in the planner; the result is a BIGINT
+            // bitmask, so at most 63 arguments are accepted.
+            "grouping" | "grouping_id" => {
+                if distinct || star {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUPING does not support DISTINCT or *".to_string(),
+                    ));
+                }
+                if args.is_empty() {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUPING requires at least one argument".to_string(),
+                    ));
+                }
+                if args.len() > 63 {
+                    return Err(PlannerError::invalid_expression(
+                        "GROUPING accepts at most 63 arguments".to_string(),
+                    ));
+                }
+                Ok(ResolvedType::BigInt)
+            }
             _ => {
                 let Some(signature) = crate::scalar::signature(&lower_name) else {
                     return Err(PlannerError::unsupported_feature(
@@ -1945,14 +2203,45 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                         ))
                     }
                 }
+                TypedExprKind::FunctionCall { name, args, .. }
+                    if name.eq_ignore_ascii_case("grouping")
+                        || name.eq_ignore_ascii_case("grouping_id") =>
+                {
+                    // GROUPING in HAVING is valid when every argument is a
+                    // grouping expression (issue #149, D5); the planner
+                    // rewrites the call onto __grouping_id afterwards.
+                    for arg in args {
+                        match &arg.kind {
+                            TypedExprKind::ColumnRef { column_index, .. }
+                                if group_key_indices.contains(column_index) => {}
+                            _ => {
+                                return Err(PlannerError::invalid_expression(
+                                    "arguments to GROUPING must be grouping expressions \
+                                     of the query"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    Ok(())
+                }
                 TypedExprKind::FunctionCall {
                     name,
                     args,
                     distinct,
                     star,
+                    filter,
+                    order_by,
                     over: _,
                 } if is_aggregate_name(name) => {
-                    let signature = aggregate_signature_from_call(name, args, *distinct, *star)?;
+                    let signature = aggregate_signature_from_call(
+                        name,
+                        args,
+                        *distinct,
+                        *star,
+                        filter.as_deref(),
+                        order_by,
+                    )?;
                     if aggregate_signatures.contains(&signature) {
                         Ok(())
                     } else {
@@ -2831,12 +3120,91 @@ struct AggregateSignature {
     star: bool,
     arg_key: Option<String>,
     separator: Option<String>,
+    /// FILTER (WHERE ...) predicate identity; aggregates that differ only in
+    /// their filter are distinct physical aggregates (issue #148, D10).
+    filter_key: Option<String>,
+    /// Aggregate-local ordering identity. Populated only for order-sensitive
+    /// aggregates so that a validated-then-discarded ORDER BY (D3) still
+    /// deduplicates with the unordered call.
+    order_key: Option<String>,
 }
 
 fn is_aggregate_name(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "count" | "sum" | "total" | "avg" | "min" | "max" | "group_concat" | "string_agg"
+        "count"
+            | "sum"
+            | "total"
+            | "avg"
+            | "min"
+            | "max"
+            | "group_concat"
+            | "string_agg"
+            | "percentile_disc"
+    )
+}
+
+fn is_ordered_set_aggregate_name(name: &str) -> bool {
+    // Issue #154 adds percentile_cont / mode here.
+    name.eq_ignore_ascii_case("percentile_disc")
+}
+
+/// Order identity participates in the signature only where ordering changes
+/// the result (D3): order-insensitive aggregates discard their validated
+/// ORDER BY, and their signature must match the unordered spelling.
+fn is_order_sensitive_aggregate_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "group_concat" | "string_agg" | "percentile_disc"
+    )
+}
+
+/// Extract and validate the `PERCENTILE_DISC` fraction literal (D5): a
+/// numeric literal (optionally negated) inside `[0, 1]`.
+pub(crate) fn percentile_fraction(arg: &TypedExpr) -> Result<f64, PlannerError> {
+    let literal = match &arg.kind {
+        TypedExprKind::Literal(Literal::Number(text)) => text.parse::<f64>().ok(),
+        TypedExprKind::UnaryOp {
+            op: crate::ast::expr::UnaryOp::Minus,
+            operand,
+        } => match &operand.kind {
+            TypedExprKind::Literal(Literal::Number(text)) => {
+                text.parse::<f64>().ok().map(|value| -value)
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(value) = literal else {
+        return Err(PlannerError::invalid_expression(
+            "PERCENTILE_DISC fraction must be a numeric literal".to_string(),
+        ));
+    };
+    if !(0.0..=1.0).contains(&value) {
+        return Err(PlannerError::invalid_expression(
+            "PERCENTILE_DISC fraction must be between 0 and 1".to_string(),
+        ));
+    }
+    Ok(value)
+}
+
+fn typed_sort_signature(order_by: &[SortExpr]) -> Option<String> {
+    if order_by.is_empty() {
+        return None;
+    }
+    Some(
+        order_by
+            .iter()
+            .map(|sort| {
+                format!(
+                    "{}|{}|{}",
+                    typed_expr_signature(&sort.expr),
+                    sort.asc,
+                    sort.nulls_first
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(","),
     )
 }
 
@@ -2865,6 +3233,14 @@ fn aggregate_signature_from_expr(expr: &AggregateExpr) -> AggregateSignature {
             false,
             expr.arg.as_ref(),
         ),
+        // The sort value lives in `order_key`; the fraction rides the
+        // separator slot so both signature constructions stay symmetric.
+        AggregateFunction::PercentileDisc { fraction } => (
+            "percentile_disc".to_string(),
+            Some(format!("{fraction:?}")),
+            false,
+            None,
+        ),
     };
     AggregateSignature {
         name,
@@ -2872,6 +3248,8 @@ fn aggregate_signature_from_expr(expr: &AggregateExpr) -> AggregateSignature {
         star,
         arg_key: arg.map(typed_expr_signature),
         separator,
+        filter_key: expr.filter.as_ref().map(typed_expr_signature),
+        order_key: typed_sort_signature(&expr.order_by),
     }
 }
 
@@ -2880,7 +3258,10 @@ fn aggregate_signature_from_call(
     args: &[TypedExpr],
     distinct: bool,
     star: bool,
+    filter: Option<&TypedExpr>,
+    order_by: &[SortExpr],
 ) -> Result<AggregateSignature, PlannerError> {
+    let is_percentile = name.eq_ignore_ascii_case("percentile_disc");
     let separator = if name.eq_ignore_ascii_case("group_concat") && args.len() == 2 {
         if let TypedExprKind::Literal(Literal::String(value)) = &args[1].kind {
             Some(value.clone())
@@ -2897,6 +3278,8 @@ fn aggregate_signature_from_call(
                 "STRING_AGG separator must be a string literal".to_string(),
             ));
         }
+    } else if is_percentile && args.len() == 1 {
+        Some(format!("{:?}", percentile_fraction(&args[0])?))
     } else {
         None
     };
@@ -2904,8 +3287,18 @@ fn aggregate_signature_from_call(
         name: name.to_ascii_lowercase(),
         distinct,
         star,
-        arg_key: args.first().map(typed_expr_signature),
+        arg_key: if is_percentile {
+            None
+        } else {
+            args.first().map(typed_expr_signature)
+        },
         separator,
+        filter_key: filter.map(typed_expr_signature),
+        order_key: if is_order_sensitive_aggregate_name(name) {
+            typed_sort_signature(order_by)
+        } else {
+            None
+        },
     })
 }
 

@@ -42,6 +42,20 @@ SELECT TRUE IS TRUE AS truth_value,
 SELECT TRY_CAST('42' AS INTEGER) AS parsed,
        TRY_CAST('bad' AS INTEGER) AS rejected,
        TRY_CAST([1.0, 2.0] AS VECTOR(3)) AS wrong_dimension;
+VALUES (2), (2), (1) ORDER BY column1 DESC FETCH FIRST 1 ROW WITH TIES;
+SELECT id FROM stdin_test ORDER BY id OFFSET 1 ROW FETCH NEXT 1 + 1 ROWS ONLY;
+SELECT DISTINCT ON (id % 2) id % 2 AS parity, id, qty FROM stdin_test ORDER BY parity, qty, id;
+SELECT COUNT(*) FILTER (WHERE qty > 2) AS heavy,
+       SUM(qty) FILTER (WHERE FALSE) AS none,
+       GROUP_CONCAT(CAST(id AS TEXT) ORDER BY qty DESC) AS by_qty,
+       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY qty) AS median
+FROM stdin_test;
+SELECT qty, COUNT(*) AS c, GROUPING(qty) AS g FROM stdin_test
+GROUP BY ROLLUP(qty) ORDER BY g, qty NULLS FIRST;
+SELECT t.id, top.qty AS top_qty FROM stdin_test AS t(id, qty) CROSS JOIN LATERAL
+(SELECT s.qty FROM stdin_test AS s WHERE s.qty <= t.qty ORDER BY s.qty DESC LIMIT 1) AS top
+ORDER BY t.id;
+SELECT u.unnest FROM UNNEST([1.0, 2.0]) AS u ORDER BY u.unnest;
 "#;
 
     {
@@ -65,7 +79,7 @@ SELECT TRY_CAST('42' AS INTEGER) AS parsed,
         .expect("json output should be an array of result sets");
     assert_eq!(
         sets.len(),
-        11,
+        18,
         "one result set per statement\nstdout:\n{stdout}"
     );
     let select_rows = sets[2].as_array().expect("SELECT result set");
@@ -180,6 +194,77 @@ SELECT TRY_CAST('42' AS INTEGER) AS parsed,
             "wrong_dimension": null,
         })]
     );
+
+    let with_ties_rows = sets[11].as_array().expect("WITH TIES result set");
+    assert_eq!(
+        with_ties_rows,
+        &[
+            serde_json::json!({ "column1": 2 }),
+            serde_json::json!({ "column1": 2 }),
+        ]
+    );
+
+    let fetch_rows = sets[12].as_array().expect("OFFSET/FETCH result set");
+    assert_eq!(
+        fetch_rows,
+        &[
+            serde_json::json!({ "id": 2 }),
+            serde_json::json!({ "id": 3 }),
+        ]
+    );
+
+    let distinct_on_rows = sets[13].as_array().expect("DISTINCT ON result set");
+    assert_eq!(
+        distinct_on_rows,
+        &[
+            serde_json::json!({ "parity": 0, "id": 2, "qty": 1 }),
+            serde_json::json!({ "parity": 1, "id": 1, "qty": 3 }),
+        ]
+    );
+
+    let aggregate_clause_rows = sets[14]
+        .as_array()
+        .expect("aggregate FILTER / WITHIN GROUP result set");
+    assert_eq!(
+        aggregate_clause_rows,
+        &[serde_json::json!({
+            "heavy": 2,
+            "none": null,
+            "by_qty": "3,1,2",
+            "median": 3,
+        })]
+    );
+
+    let rollup_rows = sets[15].as_array().expect("ROLLUP result set");
+    assert_eq!(
+        rollup_rows,
+        &[
+            serde_json::json!({ "qty": 1, "c": 1, "g": 0 }),
+            serde_json::json!({ "qty": 3, "c": 1, "g": 0 }),
+            serde_json::json!({ "qty": 5, "c": 1, "g": 0 }),
+            serde_json::json!({ "qty": null, "c": 3, "g": 1 }),
+        ]
+    );
+
+    // CROSS JOIN LATERAL over an alias-renamed base table (issue #151).
+    let lateral_rows = sets[16].as_array().expect("LATERAL result set");
+    assert_eq!(
+        lateral_rows,
+        &[
+            serde_json::json!({ "id": 1, "top_qty": 3 }),
+            serde_json::json!({ "id": 2, "top_qty": 1 }),
+            serde_json::json!({ "id": 3, "top_qty": 5 }),
+        ]
+    );
+
+    let unnest_rows = sets[17].as_array().expect("UNNEST result set");
+    assert_eq!(
+        unnest_rows,
+        &[
+            serde_json::json!({ "unnest": 1.0 }),
+            serde_json::json!({ "unnest": 2.0 }),
+        ]
+    );
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -209,4 +294,107 @@ fn cast_failure_reports_stable_public_error() {
     );
     assert!(!stderr.contains("TypedExpr"), "stderr:\n{stderr}");
     assert!(!stderr.contains("MessagePack"), "stderr:\n{stderr}");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn with_ties_without_order_by_and_bind_parameters_report_stable_errors() {
+    for (sql, expected) in [
+        (
+            "SELECT 1 FETCH FIRST 1 ROW WITH TIES;",
+            "FETCH ... WITH TIES requires ORDER BY",
+        ),
+        ("SELECT 1 LIMIT ?;", "bind parameters are not yet supported"),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_alopex"))
+            .args(["--in-memory", "--output", "json", "sql"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn alopex");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(sql.as_bytes())
+            .expect("write stdin");
+
+        let output = child.wait_with_output().expect("wait");
+        assert!(!output.status.success(), "`{sql}` must fail the CLI");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "`{sql}` stderr:\n{stderr}");
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn distinct_on_order_by_mismatch_reports_stable_error() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_alopex"))
+        .args(["--in-memory", "--output", "json", "sql"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn alopex");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(
+            b"CREATE TABLE t (a INTEGER, b INTEGER); \
+              SELECT DISTINCT ON (a) a FROM t ORDER BY b;",
+        )
+        .expect("write stdin");
+
+    let output = child.wait_with_output().expect("wait");
+    assert!(
+        !output.status.success(),
+        "DISTINCT ON prefix mismatch must fail the CLI"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("SELECT DISTINCT ON expressions must match initial ORDER BY expressions"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn aggregate_clause_misuse_reports_stable_errors() {
+    for (sql, expected) in [
+        (
+            "CREATE TABLE t (v INTEGER); SELECT SUM(v) WITHIN GROUP (ORDER BY v) FROM t;",
+            "WITHIN GROUP is only valid for ordered-set aggregate functions",
+        ),
+        (
+            "CREATE TABLE t (v INTEGER); SELECT PERCENTILE_DISC(0.5) FROM t;",
+            "WITHIN GROUP (ORDER BY ...) is required for PERCENTILE_DISC",
+        ),
+        (
+            "CREATE TABLE t (v INTEGER); SELECT ABS(v) FILTER (WHERE v > 0) FROM t;",
+            "FILTER (WHERE ...) is only valid for aggregate functions",
+        ),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_alopex"))
+            .args(["--in-memory", "--output", "json", "sql"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn alopex");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(sql.as_bytes())
+            .expect("write stdin");
+
+        let output = child.wait_with_output().expect("wait");
+        assert!(!output.status.success(), "`{sql}` must fail the CLI");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("ALOPEX-T007"), "`{sql}` stderr:\n{stderr}");
+        assert!(stderr.contains(expected), "`{sql}` stderr:\n{stderr}");
+        assert!(!stderr.contains("TypedExpr"), "`{sql}` stderr:\n{stderr}");
+    }
 }

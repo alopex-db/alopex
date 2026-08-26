@@ -1,0 +1,53 @@
+{
+  "reference": {
+    "postgresql": "17",
+    "duckdb": "1.5.5",
+    "datafusion": "54.0.0"
+  },
+  "provenance": "Expected rows are the documented LATERAL semantics of the referenced engines (see source_docs); this fixture pins Alopex against that reference and is not a recording of an external engine run.",
+  "source_docs": {
+    "postgresql_lateral": "https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-LATERAL",
+    "postgresql_table_aliases": "https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-TABLE-ALIASES",
+    "duckdb_lateral": "https://duckdb.org/docs/stable/sql/query_syntax/from",
+    "datafusion_select": "https://datafusion.apache.org/user-guide/sql/select.html"
+  },
+  "setup": "CREATE TABLE t (id INTEGER PRIMARY KEY); CREATE TABLE s (id INTEGER PRIMARY KEY, t_id INTEGER, val INTEGER); INSERT INTO t VALUES (1), (2); INSERT INTO s VALUES (10, 1, 100), (11, 1, 200)",
+  "cases": [
+    {
+      "name": "cross_join_lateral_top_one_per_row",
+      "sql": "SELECT t.id, l.val FROM t CROSS JOIN LATERAL (SELECT s.val FROM s WHERE s.t_id = t.id ORDER BY s.val DESC LIMIT 1) AS l ORDER BY t.id",
+      "columns": ["id", "val"],
+      "rows": [[1, 200]]
+    },
+    {
+      "name": "left_join_lateral_pads_unmatched_left_row",
+      "sql": "SELECT t.id, l.val FROM t LEFT JOIN LATERAL (SELECT s.val FROM s WHERE s.t_id = t.id ORDER BY s.val DESC LIMIT 1) AS l ON TRUE ORDER BY t.id",
+      "columns": ["id", "val"],
+      "rows": [[1, 200], [2, null]]
+    },
+    {
+      "name": "lateral_aggregate_returns_one_row_per_left_row",
+      "sql": "SELECT t.id, m.mx FROM t CROSS JOIN LATERAL (SELECT MAX(s.val) AS mx FROM s WHERE s.t_id = t.id) AS m ORDER BY t.id",
+      "columns": ["id", "mx"],
+      "rows": [[1, 200], [2, null]]
+    },
+    {
+      "name": "lateral_join_condition_filters_correlated_rows",
+      "sql": "SELECT t.id, l.val FROM t LEFT JOIN LATERAL (SELECT s.val FROM s WHERE s.t_id = t.id) AS l ON l.val > 150 ORDER BY t.id",
+      "columns": ["id", "val"],
+      "rows": [[1, 200], [2, null]]
+    },
+    {
+      "name": "lateral_cross_join_expands_every_correlated_row",
+      "sql": "SELECT t.id, l.val FROM t CROSS JOIN LATERAL (SELECT s.val FROM s WHERE s.t_id = t.id) AS l ORDER BY t.id, l.val",
+      "columns": ["id", "val"],
+      "rows": [[1, 100], [1, 200]]
+    },
+    {
+      "name": "relation_alias_column_list_renames_a_base_table",
+      "sql": "SELECT p.a, p.c FROM s AS p(a, b, c) ORDER BY p.a",
+      "columns": ["a", "c"],
+      "rows": [[10, 100], [11, 200]]
+    }
+  ]
+}

@@ -136,6 +136,32 @@ cd alopex
 cargo run -p alopex-cli -- --profile prod sql "SELECT * FROM users"
 ```
 
+> **⚠️ 1 データディレクトリ = 1 プロセス**
+> `--data-dir` が指すディレクトリは、同時にただ 1 つのプロセスからしか開けない。
+> 稼働中の `alopex-server` の `data_dir` を CLI や組み込みから直接開こうとすると、
+> `already open by another process` エラーで失敗する（v0.8.7 までは黙って通り、
+> WAL と SSTable が壊れた）。共有したいときはサーバーを 1 つだけ立て、
+> `--profile` / HTTP / gRPC 経由で接続すること。
+> 詳細: [docs/single-process-lock.md](docs/single-process-lock.md)
+
+### crates.io から Embedded を使う
+
+公開版では、アプリケーション側のトップレベル依存を同じpatch版へ固定してください。
+
+```toml
+[dependencies]
+alopex-embedded = "=0.8.8"
+```
+
+`alopex-embedded`が利用するAlopex兄弟crateも同じpatch版へ固定されるため、通常は兄弟crateを個別にpinする必要はありません。既存のlockfileを更新する場合は、例えば次を実行します。
+
+```bash
+cargo update -p alopex-embedded --precise 0.8.8
+cargo generate-lockfile
+```
+
+Rust向けparserは`alopex-sql`に静的同梱されます。実行時に`libalopex_sql_parser.so`などを検索する設定や、利用者crateの`build.rs`でのrpath追加は不要です。
+
 -----
 
 ## 🛣 Roadmap

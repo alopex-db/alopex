@@ -369,6 +369,69 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
             failure_outcome: "try_cast_local_only before transport",
         },
         RemoteReadCoverageEntry {
+            id: "pagination.fetch_with_ties",
+            public_surface: "FETCH ... WITH TIES peer-preserving row limits",
+            identities: &["fetch_with_ties"],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "peer-preserving limit evaluation by the local executor",
+            failure_outcome: "fetch_with_ties_local_only before transport",
+        },
+        RemoteReadCoverageEntry {
+            id: "relation.distinct_on",
+            public_surface: "SELECT DISTINCT ON deterministic first-row deduplication",
+            identities: &["distinct_on"],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "deterministic per-key first-row evaluation by the local executor",
+            failure_outcome: "distinct_on_local_only before transport",
+        },
+        RemoteReadCoverageEntry {
+            id: "scalar.aggregate_filter",
+            public_surface: "aggregate FILTER (WHERE ...) per-aggregate row filtering",
+            identities: &["aggregate_filter"],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "per-aggregate predicate filtering by the local executor",
+            failure_outcome: "aggregate_filter_local_only before transport",
+        },
+        RemoteReadCoverageEntry {
+            id: "scalar.ordered_aggregate",
+            public_surface: "aggregate-local ORDER BY and WITHIN GROUP ordered-set aggregates",
+            identities: &["aggregate_order_by", "within_group", "percentile_disc"],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "ordered aggregate evaluation by the local executor",
+            failure_outcome: "ordered_aggregate_local_only before transport",
+        },
+        RemoteReadCoverageEntry {
+            id: "aggregate.grouping_sets",
+            public_surface: "GROUPING SETS / ROLLUP / CUBE multi-set aggregation",
+            identities: &["rollup", "cube", "grouping_sets", "grouping", "grouping_id"],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "single-pass multi-set aggregation by the local executor",
+            failure_outcome: "grouping_sets_local_only before transport",
+        },
+        RemoteReadCoverageEntry {
+            id: "relation.lateral_join",
+            public_surface: "LATERAL joins over a correlated relation",
+            identities: &["lateral", "cross_join_lateral", "left_join_lateral"],
+            remote_status: PreExecutionRejection,
+            prerequisite: "local execution profile",
+            normal_outcome: "per-left-row correlated evaluation by the local executor",
+            failure_outcome: "lateral_join_not_supported_remote before transport",
+        },
+        RemoteReadCoverageEntry {
+            id: "relation.table_function",
+            public_surface: "FROM-clause table functions",
+            identities: &["unnest", "generate_series"],
+            remote_status: LocalOnly,
+            prerequisite: "local execution profile",
+            normal_outcome: "row generation by the local executor",
+            failure_outcome: "table_function_not_supported_remote before transport",
+        },
+        RemoteReadCoverageEntry {
             id: "relation.recursive_cte",
             public_surface: "recursive common table expressions",
             identities: &["with_recursive"],
@@ -512,6 +575,14 @@ fn validate_plan(
             "join_not_supported_remote",
             "JOIN is outside the v0.8 remote-read catalog",
         )),
+        LogicalPlan::LateralJoin { .. } => Err(RemoteReadRejection::unsupported(
+            "lateral_join_not_supported_remote",
+            "LATERAL joins are outside the v0.8 remote-read catalog",
+        )),
+        LogicalPlan::TableFunction { .. } => Err(RemoteReadRejection::local_only(
+            "table_function_not_supported_remote",
+            "FROM-clause table functions are evaluated by the local executor",
+        )),
         LogicalPlan::Window { .. } => Err(RemoteReadRejection::unsupported(
             "window_not_supported_remote",
             "window functions are outside the v0.8 remote-read catalog",
@@ -551,14 +622,38 @@ fn validate_plan(
             aggregates,
             having,
             projection,
+            grouping_sets,
         } => {
+            if grouping_sets.is_some() {
+                return Err(RemoteReadRejection::local_only(
+                    "grouping_sets_local_only",
+                    "GROUPING SETS/ROLLUP/CUBE aggregation is not in the v0.8 remote-read catalog",
+                ));
+            }
             analysis.operators.group_by = !group_keys.is_empty();
             analysis.operators.having = having.is_some();
             for group_key in group_keys {
                 validate_expr(group_key, false, analysis)?;
             }
             for aggregate in aggregates {
-                let aggregate_name = remote_aggregate(&aggregate.function);
+                if aggregate.filter.is_some() {
+                    return Err(RemoteReadRejection::local_only(
+                        "aggregate_filter_local_only",
+                        "aggregate FILTER (WHERE ...) is not in the v0.8 remote-read catalog",
+                    ));
+                }
+                let Some(aggregate_name) = remote_aggregate(&aggregate.function) else {
+                    return Err(RemoteReadRejection::local_only(
+                        "ordered_aggregate_local_only",
+                        "ordered-set aggregates are not in the v0.8 remote-read catalog",
+                    ));
+                };
+                if !aggregate.order_by.is_empty() {
+                    return Err(RemoteReadRejection::local_only(
+                        "ordered_aggregate_local_only",
+                        "aggregate-local ORDER BY is not in the v0.8 remote-read catalog",
+                    ));
+                }
                 analysis.operators.aggregate_distinct |= aggregate.distinct;
                 if let Some(argument) = &aggregate.arg {
                     validate_expr(argument, false, analysis)?;
@@ -583,11 +678,22 @@ fn validate_plan(
             input,
             limit,
             offset,
+            ties,
         } => {
+            if ties.is_some() {
+                return Err(RemoteReadRejection::local_only(
+                    "fetch_with_ties_local_only",
+                    "FETCH ... WITH TIES is not in the v0.8 remote-read catalog",
+                ));
+            }
             analysis.operators.limit |= limit.is_some();
             analysis.operators.offset |= offset.is_some();
             validate_plan(input, analysis)
         }
+        LogicalPlan::DistinctOn { .. } => Err(RemoteReadRejection::local_only(
+            "distinct_on_local_only",
+            "SELECT DISTINCT ON is not in the v0.8 remote-read catalog",
+        )),
     }
 }
 
@@ -716,16 +822,20 @@ fn validate_expr(
     }
 }
 
-fn remote_aggregate(function: &AggregateFunction) -> RemoteAggregate {
+/// Aggregate identities admitted to the closed v0.8 catalog. Ordered-set
+/// aggregates (PERCENTILE_DISC, issue #148) return `None` and classify as
+/// `ordered_aggregate_local_only`.
+fn remote_aggregate(function: &AggregateFunction) -> Option<RemoteAggregate> {
     match function {
-        AggregateFunction::Count => RemoteAggregate::Count,
-        AggregateFunction::Sum => RemoteAggregate::Sum,
-        AggregateFunction::Total => RemoteAggregate::Total,
-        AggregateFunction::Avg => RemoteAggregate::Avg,
-        AggregateFunction::Min => RemoteAggregate::Min,
-        AggregateFunction::Max => RemoteAggregate::Max,
-        AggregateFunction::GroupConcat { .. } => RemoteAggregate::GroupConcat,
-        AggregateFunction::StringAgg { .. } => RemoteAggregate::StringAgg,
+        AggregateFunction::Count => Some(RemoteAggregate::Count),
+        AggregateFunction::Sum => Some(RemoteAggregate::Sum),
+        AggregateFunction::Total => Some(RemoteAggregate::Total),
+        AggregateFunction::Avg => Some(RemoteAggregate::Avg),
+        AggregateFunction::Min => Some(RemoteAggregate::Min),
+        AggregateFunction::Max => Some(RemoteAggregate::Max),
+        AggregateFunction::GroupConcat { .. } => Some(RemoteAggregate::GroupConcat),
+        AggregateFunction::StringAgg { .. } => Some(RemoteAggregate::StringAgg),
+        AggregateFunction::PercentileDisc { .. } => None,
     }
 }
 
@@ -947,6 +1057,62 @@ mod tests {
     }
 
     #[test]
+    fn grouping_sets_remain_local_only() {
+        let plan = LogicalPlan::Aggregate {
+            input: Box::new(scan()),
+            group_keys: vec![column()],
+            aggregates: Vec::new(),
+            having: None,
+            projection: Projection::All(vec!["value".to_string()]),
+            grouping_sets: Some(vec![0b0, 0b1]),
+        };
+        assert!(matches!(
+            classify(&plan, &references()),
+            RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                if code == "grouping_sets_local_only"
+        ));
+    }
+
+    #[test]
+    fn fetch_with_ties_remains_local_only() {
+        let sorted = LogicalPlan::sort(scan(), vec![SortExpr::asc(column())]);
+        let ties = if let LogicalPlan::Sort { order_by, .. } = &sorted {
+            Some(order_by.clone())
+        } else {
+            unreachable!("sort constructed above")
+        };
+        let plan = LogicalPlan::Limit {
+            input: Box::new(sorted),
+            limit: Some(2),
+            offset: None,
+            ties,
+        };
+        assert!(matches!(
+            classify(&plan, &references()),
+            RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                if code == "fetch_with_ties_local_only"
+        ));
+
+        // Plain FETCH ... ONLY desugars to limit/offset and stays remote-supported.
+        let desugared = LogicalPlan::limit(
+            LogicalPlan::sort(scan(), vec![SortExpr::asc(column())]),
+            Some(2),
+            Some(1),
+        );
+        assert!(matches!(
+            classify(&desugared, &references()),
+            RemoteReadClassification::Supported(_)
+        ));
+
+        assert!(
+            coverage_entries()
+                .iter()
+                .any(|entry| entry.id == "pagination.fetch_with_ties"
+                    && matches!(entry.remote_status, RemoteReadCoverageStatus::LocalOnly))
+        );
+    }
+
+    #[test]
     fn subqueries_are_rejected_and_descriptor_never_contains_plan() {
         let subquery = TypedExpr::new(
             TypedExprKind::ScalarSubquery(Box::new(scan())),
@@ -973,6 +1139,8 @@ mod tests {
             arg: Some(column()),
             distinct: true,
             result_type: ResolvedType::Text,
+            filter: None,
+            order_by: Vec::new(),
         };
         let plan = LogicalPlan::aggregate(
             scan(),

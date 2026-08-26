@@ -312,13 +312,149 @@ fn case_expression_crosses_the_nim_messagepack_boundary() {
 
 #[test]
 fn exposes_the_nim_wire_contract_version() {
-    assert_eq!(parser_contract_version(), "0.9.0");
+    assert_eq!(parser_contract_version(), "0.14.0");
+}
+
+#[test]
+fn distinct_on_crosses_the_nim_messagepack_boundary() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT DISTINCT ON (region) region FROM sales ORDER BY region",
+    )
+    .expect("DISTINCT ON should deserialize from Nim MessagePack");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    assert_eq!(select.distinct_on.len(), 1);
+    assert!(!select.distinct);
+    assert!(matches!(
+        select.distinct_on[0].kind,
+        ExprKind::ColumnRef { ref column, .. } if column == "region"
+    ));
+
+    let plain = Parser::parse_sql(&AlopexDialect, "SELECT DISTINCT region FROM sales")
+        .expect("plain DISTINCT parses");
+    let StatementKind::Select(plain_select) = &plain[0].kind else {
+        panic!("expected SELECT");
+    };
+    assert!(plain_select.distinct);
+    assert!(plain_select.distinct_on.is_empty());
+}
+
+#[test]
+fn group_by_items_cross_the_nim_messagepack_boundary() {
+    use alopex_sql::GroupByItem;
+
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT region FROM sales \
+         GROUP BY region, ROLLUP(product), CUBE(amount), GROUPING SETS ((region), ())",
+    )
+    .expect("grouping-set items should deserialize from Nim MessagePack");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    let group_by = select.group_by.as_ref().expect("GROUP BY items");
+    assert_eq!(group_by.len(), 4);
+    assert!(matches!(
+        &group_by[0],
+        GroupByItem::Expr { expr } if matches!(
+            &expr.kind,
+            ExprKind::ColumnRef { column, .. } if column == "region"
+        )
+    ));
+    assert!(matches!(&group_by[1], GroupByItem::Rollup { exprs } if exprs.len() == 1));
+    assert!(matches!(&group_by[2], GroupByItem::Cube { exprs } if exprs.len() == 1));
+    let GroupByItem::GroupingSets { sets } = &group_by[3] else {
+        panic!("expected GROUPING SETS item, got {:?}", group_by[3]);
+    };
+    assert_eq!(sets.len(), 2);
+    assert_eq!(sets[0].len(), 1);
+    assert!(sets[1].is_empty());
+
+    let plain = Parser::parse_sql(&AlopexDialect, "SELECT region FROM sales GROUP BY region")
+        .expect("plain GROUP BY parses");
+    let StatementKind::Select(plain_select) = &plain[0].kind else {
+        panic!("expected SELECT");
+    };
+    let plain_items = plain_select.group_by.as_ref().expect("GROUP BY items");
+    assert!(matches!(&plain_items[0], GroupByItem::Expr { .. }));
+}
+
+#[test]
+fn pre_distinct_on_payload_without_the_key_defaults_to_empty() {
+    // A contract-0.10.0 payload has no distinct_on key; serde(default) must
+    // decode it as an empty key list (one-way migration evidence only).
+    let value = json!([{
+        "kind": {
+            "variant": "Select",
+            "distinct": false,
+            "projection": [{
+                "variant": "Expr",
+                "expr": {
+                    "kind": {"variant": "Literal", "literal": {"variant": "Number", "value": "1"}},
+                    "span": wire_span(1, 8, 1, 8),
+                },
+                "alias": null,
+                "span": wire_span(1, 8, 1, 8),
+            }],
+            "from": [],
+            "selection": null,
+            "group_by": null,
+            "having": null,
+            "order_by": [],
+            "limit": null,
+            "offset": null,
+            "span": wire_span(1, 1, 1, 8),
+        },
+        "span": wire_span(1, 1, 1, 8),
+    }]);
+    let payload = rmp_serde::to_vec_named(&value).expect("encode legacy payload");
+    let statements: Vec<Statement> =
+        rmp_serde::from_slice(&payload).expect("current Rust AST must decode the legacy payload");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    assert!(select.distinct_on.is_empty());
+    assert!(!select.limit_with_ties);
+}
+
+#[test]
+fn top_level_set_operation_preserves_fetch_with_ties() {
+    // The set-operation batch splitter re-assembles the query tail; dropping
+    // limit_with_ties here would silently downgrade WITH TIES to ONLY.
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT a FROM t UNION SELECT b FROM u ORDER BY a FETCH FIRST 1 ROW WITH TIES",
+    )
+    .expect("set operation with FETCH tail parses");
+    let [statement] = statements.as_slice() else {
+        panic!("expected one statement, got {statements:?}");
+    };
+    let StatementKind::Select(select) = &statement.kind else {
+        panic!("expected SELECT, got {statement:?}");
+    };
+    assert_eq!(select.set_operations.len(), 1);
+    assert_eq!(select.order_by.len(), 1);
+    assert!(select.limit.is_some());
+    assert!(select.limit_with_ties);
+
+    let plain = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT a FROM t UNION SELECT b FROM u ORDER BY a FETCH FIRST 1 ROW ONLY",
+    )
+    .expect("plain FETCH tail parses");
+    let StatementKind::Select(plain_select) = &plain[0].kind else {
+        panic!("expected SELECT, got {plain:?}");
+    };
+    assert!(plain_select.limit.is_some());
+    assert!(!plain_select.limit_with_ties);
 }
 
 #[test]
 fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
     let statements = Parser::parse_sql(&AlopexDialect, MINIMAL_CONTINUOUS_AGGREGATE_SQL)
-        .expect("contract 0.9.0 must publicly emit the prepared continuous aggregate payload");
+        .expect("contract 0.14.0 must publicly emit the prepared continuous aggregate payload");
     let [statement] = statements.as_slice() else {
         panic!("expected one continuous aggregate statement, got {statements:?}");
     };
@@ -326,7 +462,7 @@ fn public_sql_boundary_emits_continuous_aggregate_after_contract_cutover() {
         panic!("expected typed continuous aggregate statement, got {statement:?}");
     };
 
-    assert_eq!(parser_contract_version(), "0.9.0");
+    assert_eq!(parser_contract_version(), "0.14.0");
     assert_eq!(definition.name, "cpu_hourly");
     assert_eq!(definition.query.from.len(), 1);
     assert_eq!(definition.options.len(), 2);
@@ -676,6 +812,78 @@ fn parse_insert_with_values_query_from_nim() {
 }
 
 #[test]
+fn parse_lateral_table_function_and_alias_columns_from_nim() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT * FROM sales AS p(a, b) CROSS JOIN LATERAL (SELECT p.a AS x) AS l",
+    )
+    .expect("Nim parser should parse LATERAL");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected Select");
+    };
+    let FromItem::Join { left, right, .. } = &select.from[0] else {
+        panic!("expected a join");
+    };
+    let FromItem::Table {
+        name,
+        alias,
+        columns,
+        ..
+    } = left.as_ref()
+    else {
+        panic!("expected a base table on the left");
+    };
+    assert_eq!(name, "sales");
+    assert_eq!(alias.as_deref(), Some("p"));
+    assert_eq!(columns, &["a".to_string(), "b".to_string()]);
+    assert!(matches!(
+        right.as_ref(),
+        FromItem::Derived { lateral: true, alias: Some(alias), .. } if alias == "l"
+    ));
+
+    let functions = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT * FROM d, LATERAL UNNEST(d.emb) AS u(component)",
+    )
+    .expect("Nim parser should parse a table function");
+    let StatementKind::Select(select) = &functions[0].kind else {
+        panic!("expected Select");
+    };
+    let FromItem::Join { right, .. } = &select.from[0] else {
+        panic!("expected a join");
+    };
+    let FromItem::Function {
+        name,
+        args,
+        alias,
+        columns,
+        lateral,
+        ..
+    } = right.as_ref()
+    else {
+        panic!("expected a table function");
+    };
+    // The bridge folds bare identifiers to lowercase before parsing, exactly
+    // as PostgreSQL does; the planner resolves the name case-insensitively.
+    assert_eq!(name, "unnest");
+    assert_eq!(args.len(), 1);
+    assert_eq!(alias.as_deref(), Some("u"));
+    assert_eq!(columns, &["component".to_string()]);
+    assert!(lateral);
+
+    // A plain table and a plain derived table keep the absent-clause defaults.
+    let plain = Parser::parse_sql(&AlopexDialect, "SELECT * FROM sales")
+        .expect("Nim parser should parse a plain table");
+    let StatementKind::Select(select) = &plain[0].kind else {
+        panic!("expected Select");
+    };
+    assert!(matches!(
+        &select.from[0],
+        FromItem::Table { columns, alias: None, .. } if columns.is_empty()
+    ));
+}
+
+#[test]
 fn parse_derived_and_quantified_subqueries_from_nim() {
     let sql = "\
         SELECT x.id FROM (SELECT id FROM docs) x \
@@ -691,4 +899,94 @@ fn parse_derived_and_quantified_subqueries_from_nim() {
         select.selection.as_ref().map(|expr| &expr.kind),
         Some(ExprKind::Quantified { .. })
     ));
+}
+
+#[test]
+fn aggregate_filter_and_within_group_cross_the_nim_messagepack_boundary() {
+    let statements = Parser::parse_sql(
+        &AlopexDialect,
+        "SELECT COUNT(*) FILTER (WHERE v > 10), \
+         STRING_AGG(name, ',' ORDER BY v DESC), \
+         PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v) FROM t",
+    )
+    .expect("issue #148 clauses should deserialize from Nim MessagePack");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    let call = |index: usize| match &select.projection[index] {
+        SelectItem::Expr { expr, .. } => &expr.kind,
+        other => panic!("expected expression projection, got {other:?}"),
+    };
+
+    let ExprKind::FunctionCall {
+        star,
+        filter,
+        order_by,
+        within_group,
+        ..
+    } = call(0)
+    else {
+        panic!("expected FunctionCall");
+    };
+    assert!(*star);
+    assert!(filter.is_some());
+    assert!(order_by.is_empty());
+    assert!(within_group.is_empty());
+
+    let ExprKind::FunctionCall {
+        args,
+        filter,
+        order_by,
+        within_group,
+        ..
+    } = call(1)
+    else {
+        panic!("expected FunctionCall");
+    };
+    assert_eq!(args.len(), 2);
+    assert!(filter.is_none());
+    assert_eq!(order_by.len(), 1);
+    assert_eq!(order_by[0].asc, Some(false));
+    assert!(within_group.is_empty());
+
+    let ExprKind::FunctionCall {
+        name,
+        args,
+        within_group,
+        order_by,
+        ..
+    } = call(2)
+    else {
+        panic!("expected FunctionCall");
+    };
+    assert!(name.eq_ignore_ascii_case("percentile_disc"));
+    assert_eq!(args.len(), 1);
+    assert!(order_by.is_empty());
+    assert_eq!(within_group.len(), 1);
+}
+
+#[test]
+fn clause_free_function_calls_still_decode_without_the_new_keys() {
+    // The Nim writer keeps the historical 6-key FunctionCall map when no
+    // aggregate clause is present; serde defaults must fill the new fields.
+    let statements = Parser::parse_sql(&AlopexDialect, "SELECT COUNT(*) FROM t")
+        .expect("clause-free calls stay decodable");
+    let StatementKind::Select(select) = &statements[0].kind else {
+        panic!("expected SELECT");
+    };
+    let SelectItem::Expr { expr, .. } = &select.projection[0] else {
+        panic!("expected expression projection");
+    };
+    let ExprKind::FunctionCall {
+        filter,
+        order_by,
+        within_group,
+        ..
+    } = &expr.kind
+    else {
+        panic!("expected FunctionCall");
+    };
+    assert!(filter.is_none());
+    assert!(order_by.is_empty());
+    assert!(within_group.is_empty());
 }

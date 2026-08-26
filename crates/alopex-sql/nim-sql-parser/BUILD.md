@@ -1,8 +1,8 @@
 # Nim SQL Parser Build Procedure
 
-The parser shared library is a generated local artifact and is intentionally
+The parser native artifacts are generated local outputs and are intentionally
 ignored by Git. Use the repository-level scripts so the toolchain and output
-name stay aligned with Cargo's FFI build script.
+names stay aligned with Cargo's FFI build script.
 
 ## Linux, macOS, and Windows
 
@@ -31,15 +31,21 @@ only `crates/alopex-sql/nim-sql-parser`. Mounting only the parser directory is
 intentional: a Git worktree's `.git` file points outside the container and can
 break Nimble's dependency resolution.
 
-The build output is one of:
+The build produces two target-specific artifacts:
 
 - Linux: `libalopex_sql_parser.so`
 - macOS: `libalopex_sql_parser.dylib`
 - Windows: `alopex_sql_parser.dll`
+- Linux/macOS: `libalopex_sql_parser.a`
+- Windows MSVC: `alopex_sql_parser.lib`
+
+Rust consumers use the static artifact, bundled into `alopex-sql` by Cargo.
+The shared artifact remains available for the Python wheel's native asset
+directory; Rust applications do not need a parser DLL/SO at runtime.
 
 The library exports `alopex_parse_sql`, `alopex_parse_promql`,
 `alopex_parser_version`, `alopex_parser_init`, and `alopex_free_buffer`.
-The current SQL/PromQL MessagePack contract version is `0.9.0`.
+The current SQL/PromQL MessagePack contract version is `0.14.0`.
 
 For Skulk v0.5 development, consume the public Alopex v0.8.5 parser envelope
 and its `parser-vendor-manifest-v0.8.5.json`. Select the exact target entry,
@@ -62,21 +68,20 @@ sidecars with the library and use:
 ```sh
 NIM_SQL_PARSER_LIB_DIR="$PWD/crates/alopex-sql/nim-sql-parser" \
 ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD=1 \
-LD_LIBRARY_PATH="$PWD/crates/alopex-sql/nim-sql-parser" \
 cargo test -p alopex-sql --lib
 ```
 
 The checked-in v0.8.4 vendor binaries remain immutable contract-0.4.0 history.
 Current-source development therefore requires both the explicit directory and
 the opt-in above. Cargo then proves only that the target library is a regular
-file and that its contract-0.9.0 and checksum sidecars are self-consistent; a
+file and that its contract-0.14.0 and checksum sidecars are self-consistent; a
 sidecar can be relabeled, so the library's exported contract is checked again
 before any MessagePack decode. Without both settings, the stale vendor manifest
 is rejected. The override alone is local validation and is not release identity
 evidence. The release workflow may use it to link the CLI only after that same
 target job has verified the freshly generated target record and run the native
 exported-contract smoke. Release staging then replaces all four target
-libraries and the manifest with verified contract-0.9.0 assets, retargets the
+libraries and the manifest with verified contract-0.14.0 assets, retargets the
 pinned manifest identity, and uses the strict default path for crate
 staging/publish.
 

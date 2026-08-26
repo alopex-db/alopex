@@ -3,7 +3,7 @@ mod build_support;
 use std::env;
 use std::path::PathBuf;
 
-use build_support::{LinkBehavior, resolve_native_library};
+use build_support::resolve_native_library;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=NIM_SQL_PARSER_LIB_DIR");
@@ -31,26 +31,11 @@ fn main() {
     println!("cargo:rerun-if-changed={}", resolved.library_path.display());
 
     println!(
+        "cargo:rerun-if-changed={}",
+        resolved.static_library_path.display()
+    );
+    println!(
         "cargo:rustc-link-search=native={}",
         resolved.directory.display()
     );
-    if resolved.link_behavior == LinkBehavior::UnixRpath {
-        println!("cargo:rustc-link-lib=dylib=alopex_sql_parser");
-    }
-
-    // `cargo:rustc-link-arg` emitted by a dependency build script does not
-    // propagate to final downstream binaries. The metadata path remains the
-    // consumer build-script contract; these arguments cover alopex-sql's own
-    // test executables on Unix targets.
-    println!("cargo::metadata=libdir={}", resolved.directory.display());
-    if resolved.link_behavior == LinkBehavior::UnixRpath {
-        println!(
-            "cargo:rustc-link-arg=-Wl,-rpath,{}",
-            resolved.directory.display()
-        );
-        println!(
-            "cargo:rustc-link-arg-tests=-Wl,-rpath,{}",
-            resolved.directory.display()
-        );
-    }
 }

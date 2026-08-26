@@ -62,6 +62,13 @@ impl RecoveryCoordinator {
                 let info = RecoveryInfo::from_result(&recovery, start.elapsed());
                 Ok((AnyKV::Lsm(Box::new(store)), info))
             }
+            Err(err @ alopex_core::Error::AlreadyOpen { .. }) => {
+                // 裁定 D16: the WAL this would quarantine belongs to a *live*
+                // process. Renaming it to `lsm.wal.bad.<ts>` would inflict the
+                // exact corruption the lock exists to prevent (issue #181), and
+                // retrying is pointless because the holder is still there.
+                Err(err.into())
+            }
             Err(err) => {
                 let mut reason = format!("initial recovery failed: {err}");
                 match quarantine_wal(data_dir) {

@@ -1156,6 +1156,8 @@ mod tests {
             arg: None,
             distinct: true,
             result_type: ResolvedType::Text,
+            filter: None,
+            order_by: Vec::new(),
         };
         let output_columns = columns(&[("names", ResolvedType::Text)]);
         let plan = AssemblyPlan::OrderedAggregates(OrderedAggregatePlan {
@@ -1221,6 +1223,8 @@ mod tests {
             arg: None,
             distinct: false,
             result_type: ResolvedType::Double,
+            filter: None,
+            order_by: Vec::new(),
         };
         let output_columns = columns(&[("sum", ResolvedType::Double)]);
         let plan = AssemblyPlan::ExactAggregates(ExactAggregatePlan {

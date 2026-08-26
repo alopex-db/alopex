@@ -38,6 +38,30 @@ Environment variables can override settings using the `ALOPEX__` prefix (double 
 | `audit_log_enabled` | bool | `true` | Enable audit logs |
 | `audit_log_output` | object | `{ type = "stdout" }` | Audit log output (`stdout` or `file`) |
 
+### `data_dir` は 1 プロセスだけが開ける
+
+An Alopex data directory can be opened by **exactly one process at a time**.
+サーバーは起動時に `<data_dir>/.alopex.lock` へ OS 排他ロックを取り、
+同じディレクトリを開こうとした 2 つ目のプロセス（別のサーバー、CLI の `--data-dir`、
+組み込みの `Database::open`）は `already open by another process` を含むエラーで失敗する。
+
+```bash
+# サーバーが ./data を所有している間は、これは失敗する
+alopex --data-dir ./data sql "SELECT 1"
+```
+
+同じデータベースを複数のプロセスやマシンから使いたいときは、
+**サーバーを 1 つだけ立てて HTTP / gRPC で接続する**。
+
+```bash
+alopex --profile prod sql "SELECT * FROM users"
+curl -X POST http://127.0.0.1:8080/v1/sql -d '{"sql":"SELECT 1"}'
+```
+
+ロックは OS が保持するため、サーバーが `SIGKILL` やクラッシュで落ちても残らない
+（次回起動はそのまま成功する）。制限と設計裁定は
+[docs/single-process-lock.md](single-process-lock.md) を参照。
+
 Example `alopex.toml`:
 
 ```toml
@@ -201,6 +225,35 @@ Cluster join and leave require `cluster.mode = "cluster_aware"`; in the default
 same admin authentication and allowlist boundary as the other admin endpoints.
 Their `cluster` response field is the canonical `ClusterStatusSnapshot` JSON
 schema also returned in gRPC `cluster_json`.
+
+## Python client access
+
+The `alopex` package connects to a running server with the same calls the
+embedded `Database` accepts. The connection target alone selects the surface:
+
+```python
+import alopex
+
+db = alopex.connect("https://127.0.0.1:8080", api_key="secret")
+db.execute_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+db.execute_sql("INSERT INTO items (id, name) VALUES (?, ?)", [1, "alpha"])
+rows = db.execute_sql("SELECT id, name FROM items")   # [{'id': 1, 'name': 'alpha'}]
+
+with db.begin() as txn:                                # server session
+    txn.execute_sql("INSERT INTO items (id, name) VALUES (2, 'beta')")
+    txn.commit()
+
+db.close()
+```
+
+`alopex.connect("/path/db")` and `alopex.connect(":memory:")` open the embedded
+engine instead, and both surfaces return the same values for the same statement
+apart from a short list of server-side engine gaps (`PRAGMA`, `clear_cache()`,
+a bare `;`) enumerated under "Known value divergences" in
+`docs/python-server-client.md`. Stream, HNSW, and KV APIs raise
+`NotImplementedError` with a reason over the server client. See
+`docs/python-server-client.md` for the full option, error-code, and boundary
+reference.
 
 ## CLI access
 

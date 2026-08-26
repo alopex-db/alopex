@@ -229,6 +229,99 @@ suite "MessagePack output - contract shape":
       let create = payloadJson(sql).stmtKind()
       check create["columns"][0]["data_type"]["variant"].getStr() == "Float"
 
+  test "SELECT emits limit_with_ties and a detached OFFSET (issue #152)":
+    let kind = selectKind(
+      "SELECT id FROM t ORDER BY id OFFSET 2 ROWS FETCH FIRST 3 ROWS WITH TIES")
+    check kind["limit"]["kind"]["literal"]["value"].getStr() == "3"
+    check kind["offset"]["kind"]["literal"]["value"].getStr() == "2"
+    check kind["limit_with_ties"].getBool() == true
+
+  test "OFFSET without LIMIT emits nil limit and false limit_with_ties":
+    let kind = selectKind("SELECT id FROM t OFFSET 4")
+    check kind["limit"].kind == JNull
+    check kind["offset"]["kind"]["literal"]["value"].getStr() == "4"
+    check kind["limit_with_ties"].getBool() == false
+
+  test "FETCH ... ONLY desugars onto the limit key":
+    let kind = selectKind("SELECT id FROM t FETCH NEXT ROW ONLY")
+    check kind["limit"]["kind"]["literal"]["value"].getStr() == "1"
+    check kind["limit_with_ties"].getBool() == false
+
+  test "VALUES tail emits limit_with_ties":
+    let kind = payloadJson(
+      "VALUES (1), (2) ORDER BY 1 FETCH FIRST 1 ROW WITH TIES").stmtKind()
+    check kind["variant"].getStr() == "Values"
+    check kind["limit"]["kind"]["literal"]["value"].getStr() == "1"
+    check kind["limit_with_ties"].getBool() == true
+
+  test "SELECT DISTINCT ON emits its key expressions (issue #150)":
+    let kind = selectKind(
+      "SELECT DISTINCT ON (region, amount % 2) region FROM sales " &
+      "ORDER BY region, amount % 2")
+    check kind["distinct"].getBool() == false
+    check kind["distinct_on"].len == 2
+    check kind["distinct_on"][0]["kind"]["variant"].getStr() == "ColumnRef"
+    check kind["distinct_on"][0]["kind"]["column"].getStr() == "region"
+    check kind["distinct_on"][1]["kind"]["variant"].getStr() == "BinaryOp"
+
+  test "SELECT without DISTINCT ON emits an empty distinct_on list":
+    let kind = selectKind("SELECT id FROM t")
+    check kind["distinct_on"].kind == JArray
+    check kind["distinct_on"].len == 0
+
+  test "SELECT DISTINCT keeps distinct true and distinct_on empty":
+    let kind = selectKind("SELECT DISTINCT id FROM t")
+    check kind["distinct"].getBool() == true
+    check kind["distinct_on"].len == 0
+
+  test "DISTINCT ON round-trips":
+    assertMsgpackRoundtrip(
+      "SELECT DISTINCT ON (region) region, amount FROM sales " &
+      "ORDER BY region, amount DESC")
+
+  test "plain GROUP BY emits Expr grouping items (issue #149)":
+    let kind = selectKind("SELECT region FROM sales GROUP BY region, product")
+    check kind["group_by"].len == 2
+    check kind["group_by"][0]["variant"].getStr() == "Expr"
+    check kind["group_by"][0]["expr"]["kind"]["variant"].getStr() == "ColumnRef"
+    check kind["group_by"][0]["expr"]["kind"]["column"].getStr() == "region"
+
+  test "GROUP BY ROLLUP emits a Rollup grouping item (issue #149)":
+    let kind = selectKind(
+      "SELECT region FROM sales GROUP BY ROLLUP(region, product)")
+    check kind["group_by"].len == 1
+    check kind["group_by"][0]["variant"].getStr() == "Rollup"
+    check kind["group_by"][0]["exprs"].len == 2
+    check kind["group_by"][0]["exprs"][0]["kind"]["column"].getStr() == "region"
+
+  test "GROUP BY CUBE emits a Cube grouping item (issue #149)":
+    let kind = selectKind("SELECT region FROM sales GROUP BY CUBE(region, product)")
+    check kind["group_by"][0]["variant"].getStr() == "Cube"
+    check kind["group_by"][0]["exprs"].len == 2
+
+  test "GROUPING SETS emits nested expression lists (issue #149)":
+    let kind = selectKind(
+      "SELECT region FROM sales GROUP BY " &
+      "GROUPING SETS ((region, product), (region), ())")
+    check kind["group_by"][0]["variant"].getStr() == "GroupingSets"
+    check kind["group_by"][0]["sets"].len == 3
+    check kind["group_by"][0]["sets"][0].len == 2
+    check kind["group_by"][0]["sets"][1].len == 1
+    check kind["group_by"][0]["sets"][2].len == 0
+
+  test "mixed GROUP BY keeps item order (issue #149)":
+    let kind = selectKind(
+      "SELECT region FROM sales GROUP BY region, ROLLUP(product)")
+    check kind["group_by"].len == 2
+    check kind["group_by"][0]["variant"].getStr() == "Expr"
+    check kind["group_by"][1]["variant"].getStr() == "Rollup"
+
+  test "grouping-set modifiers round-trip":
+    assertMsgpackRoundtrip(
+      "SELECT region, product, SUM(amount), GROUPING(region, product) " &
+      "FROM sales GROUP BY CUBE(region, product) " &
+      "HAVING GROUPING(region) = 0 ORDER BY region")
+
   test "CREATE INDEX emits method and WITH options":
     let doc = payloadJson("CREATE INDEX idx_doc_embedding ON documents (embedding) USING HNSW WITH (m = 16, ef_construction = 200)")
     let create = doc.stmtKind()
@@ -333,7 +426,31 @@ suite "MessagePack output - stability":
         "A6686176696E67C0A777696E646F777390A77175616C696679C0" &
           "AE7365745F6F7065726174696F6E73"
       )
-    check hexPayload("SELECT 1") == v060Payload
+    # Contract 0.10.0 (issue #152) appends limit_with_ties after offset.
+    let v0100Payload = v060Payload
+      .replace("A46B696E648D", "A46B696E648E")
+      .replace(
+        "A56C696D6974C0A66F6666736574C0",
+        "A56C696D6974C0A66F6666736574C0" &
+          "AF6C696D69745F776974685F74696573C2"
+      )
+    # Contract 0.11.0 (issue #150) inserts distinct_on after distinct.
+    let v0110Payload = v0100Payload
+      .replace("A46B696E648E", "A46B696E648F")
+      .replace(
+        "A864697374696E6374C2AA70726F6A656374696F6E",
+        "A864697374696E6374C2" &
+          "AB64697374696E63745F6F6E90" &
+          "AA70726F6A656374696F6E"
+      )
+    check hexPayload("SELECT 1") == v0110Payload
+
+  test "WITH select declares the exact 16-entry map header":
+    # 15 fixed keys plus `with` exceeds the fixmap range, so the Select map
+    # must switch to map16 (DE0010). A shorter declared count leaves trailing
+    # bytes that the Rust MessagePack preflight rejects (issue #150).
+    let payload = hexPayload("WITH c AS (SELECT 1) SELECT 2")
+    check payload.startsWith("9182A46B696E64DE0010A776617269616E74A653656C656374A477697468")
 
 suite "MessagePack output - staged continuous aggregate contract":
 
@@ -395,6 +512,20 @@ suite "MessagePack output - staged continuous aggregate contract":
       "WITH (retention = '7d', refresh_interval = '1h')"
     )
     checkStagedError(qualifyQuery, "cannot contain QUALIFY")
+
+    let withTiesQuery = parseSql(
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+      "SELECT 1 FROM m ORDER BY 1 FETCH FIRST 1 ROW WITH TIES " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    checkStagedError(withTiesQuery, "cannot contain FETCH ... WITH TIES")
+
+    let distinctOnQuery = parseSql(
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+      "SELECT DISTINCT ON (host) host FROM m " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    checkStagedError(distinctOnQuery, "cannot contain DISTINCT ON")
 
     var malformedWhere = canonicalContinuousAggregate()
     malformedWhere.children[1].children.add(
@@ -592,6 +723,21 @@ suite "MessagePack output - staged continuous aggregate contract":
     check query["order_by"].len == 1
     check query["limit"].kind != JNull
 
+  test "staged payload keeps FETCH ... ONLY on the frozen limit/offset keys":
+    let statement = parseSql(
+      "CREATE CONTINUOUS AGGREGATE hourly AS " &
+      "SELECT host FROM samples ORDER BY host OFFSET 1 ROW " &
+      "FETCH FIRST 2 ROWS ONLY " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    let query = toJsonNode(
+      encodeContinuousAggregateV040ToMsgPack(statement)
+    )["kind"]["query"]
+    check query["limit"]["kind"]["literal"]["value"].getStr() == "2"
+    check query["offset"]["kind"]["literal"]["value"].getStr() == "1"
+    check not query.hasKey("limit_with_ties")
+    check not query.hasKey("distinct_on")
+
   test "future helper accepts the existing CAST DECIMAL grammar":
     let statement = parseSql(
       "CREATE CONTINUOUS AGGREGATE hourly AS " &
@@ -681,3 +827,181 @@ suite "MessagePack output - staged continuous aggregate contract":
     check kind["projection"][0]["expr"]["kind"]["over"]["base"].getStr() ==
       "ranked"
     check kind["qualify"]["kind"]["variant"].getStr() == "BinaryOp"
+
+suite "MessagePack output - aggregate FILTER / WITHIN GROUP (issue #148)":
+
+  test "clause-free FunctionCall keeps the historical 6-key map":
+    let kind = selectKind("SELECT COUNT(*) FROM t")
+    let call = kind["projection"][0]["expr"]["kind"]
+    check call["variant"].getStr() == "FunctionCall"
+    check not call.hasKey("order_by")
+    check not call.hasKey("within_group")
+    check not call.hasKey("filter")
+    check call.hasKey("over")
+
+  test "FILTER emits the 9-key FunctionCall map":
+    let kind = selectKind("SELECT COUNT(*) FILTER (WHERE v > 10) FROM t")
+    let call = kind["projection"][0]["expr"]["kind"]
+    check call["variant"].getStr() == "FunctionCall"
+    check call["star"].getBool() == true
+    check call["order_by"].len == 0
+    check call["within_group"].len == 0
+    check call["filter"]["kind"]["variant"].getStr() == "BinaryOp"
+    check call["over"].kind == JNull
+
+  test "aggregate-local ORDER BY emits order_by items with direction":
+    let kind = selectKind(
+      "SELECT STRING_AGG(name, ',' ORDER BY v DESC, name ASC) FROM t")
+    let call = kind["projection"][0]["expr"]["kind"]
+    check call["args"].len == 2
+    check call["order_by"].len == 2
+    check call["order_by"][0]["asc"].getBool() == false
+    check call["order_by"][1]["asc"].getBool() == true
+    check call["within_group"].len == 0
+    check call["filter"].kind == JNull
+
+  test "WITHIN GROUP emits within_group and keeps args":
+    let kind = selectKind(
+      "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v DESC) " &
+      "FILTER (WHERE g = 'a') FROM t")
+    let call = kind["projection"][0]["expr"]["kind"]
+    check call["args"].len == 1
+    check call["within_group"].len == 1
+    check call["within_group"][0]["asc"].getBool() == false
+    check call["order_by"].len == 0
+    check call["filter"]["kind"]["variant"].getStr() == "BinaryOp"
+
+  test "aggregate clause forms round-trip":
+    for sql in [
+      "SELECT COUNT(*) FILTER (WHERE v > 10) FROM t",
+      "SELECT SUM(v) FILTER (WHERE g = 'a') FROM t GROUP BY g",
+      "SELECT STRING_AGG(name, ',' ORDER BY v DESC, name ASC) FROM t",
+      "SELECT GROUP_CONCAT(name ORDER BY name NULLS FIRST) FROM t",
+      "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY v) FROM t",
+      "SELECT PERCENTILE_DISC(0.25) WITHIN GROUP (ORDER BY v DESC) " &
+        "FILTER (WHERE v > 0) FROM t GROUP BY g",
+    ]:
+      assertMsgpackRoundtrip(sql)
+
+  test "staged continuous aggregate rejects the new aggregate clauses":
+    let filterQuery = parseSql(
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+      "SELECT COUNT(*) FILTER (WHERE v > 0) FROM m " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    checkStagedError(filterQuery, "cannot contain aggregate")
+
+    let orderedQuery = parseSql(
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+      "SELECT GROUP_CONCAT(host ORDER BY host) FROM m " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    checkStagedError(orderedQuery, "cannot contain aggregate")
+
+suite "LATERAL and table functions (issue #151, contract 0.14.0)":
+
+  test "the Table variant carries the alias column list":
+    let item = selectKind("SELECT * FROM o AS p(a, b)")["from"][0]
+    check item["variant"].getStr() == "Table"
+    check item["name"].getStr() == "o"
+    check item["alias"].getStr() == "p"
+    check item["columns"].len == 2
+    check item["columns"][0].getStr() == "a"
+    check item["columns"][1].getStr() == "b"
+
+  test "a plain table keeps an empty column list":
+    let item = selectKind("SELECT * FROM o")["from"][0]
+    check item["variant"].getStr() == "Table"
+    check item["alias"].kind == JNull
+    check item["columns"].len == 0
+
+  test "the Derived variant carries the lateral flag":
+    let plain = selectKind("SELECT * FROM (SELECT 1) AS d")["from"][0]
+    check plain["variant"].getStr() == "Derived"
+    check plain["lateral"].getBool() == false
+
+    let join = selectKind(
+      "SELECT * FROM t CROSS JOIN LATERAL (SELECT t.id AS x) AS l")["from"][0]
+    check join["variant"].getStr() == "Join"
+    check join["join_type"].getStr() == "Cross"
+    check join["right"]["variant"].getStr() == "Derived"
+    check join["right"]["lateral"].getBool()
+
+  test "the Function variant carries name, args, alias, columns, and lateral":
+    let item = selectKind("SELECT * FROM UNNEST(t.v) AS u(x)")["from"][0]
+    check item["variant"].getStr() == "Function"
+    check item["name"].getStr() == "UNNEST"
+    check item["args"].len == 1
+    check item["args"][0]["kind"]["variant"].getStr() == "ColumnRef"
+    check item["alias"].getStr() == "u"
+    check item["columns"].len == 1
+    check item["columns"][0].getStr() == "x"
+    check item["lateral"].getBool() == false
+
+    let lateral = selectKind(
+      "SELECT * FROM t, LATERAL GENERATE_SERIES(1, t.n)")["from"][0]
+    check lateral["right"]["variant"].getStr() == "Function"
+    check lateral["right"]["name"].getStr() == "GENERATE_SERIES"
+    check lateral["right"]["args"].len == 2
+    check lateral["right"]["alias"].kind == JNull
+    check lateral["right"]["lateral"].getBool()
+
+  test "LATERAL and table-function forms round-trip":
+    for sql in [
+      "SELECT * FROM UNNEST([1.0, 2.0]) AS u",
+      "SELECT * FROM UNNEST([1.0]) AS u(x)",
+      "SELECT * FROM t, UNNEST(t.v) AS u",
+      "SELECT * FROM t CROSS JOIN LATERAL (SELECT t.id AS x) AS l",
+      "SELECT * FROM t LEFT JOIN LATERAL (SELECT t.id AS x) AS l ON TRUE",
+      "SELECT * FROM o AS p(a, b)",
+    ]:
+      assertMsgpackRoundtrip(sql)
+
+  test "staged continuous aggregate rejects the new FROM forms":
+    # LATERAL and table functions cannot reach the encoder: the single-source
+    # rule already rejects them while parsing.
+    for sql in [
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+        "SELECT 1 FROM m CROSS JOIN LATERAL (SELECT m.id AS x) AS l " &
+        "WITH (retention = '7d', refresh_interval = '1h')",
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+        "SELECT 1 FROM UNNEST(m.v) AS u " &
+        "WITH (retention = '7d', refresh_interval = '1h')",
+    ]:
+      var message = ""
+      try:
+        discard parseSql(sql)
+      except ParseError as error:
+        message = error.msg
+      check message.contains("requires one source measurement")
+
+    # An alias column list does parse as a single measurement, so the staged
+    # validator is what keeps the frozen 4-key Table payload intact.
+    let aliasQuery = parseSql(
+      "CREATE CONTINUOUS AGGREGATE c AS " &
+      "SELECT 1 FROM m AS p(a) " &
+      "WITH (retention = '7d', refresh_interval = '1h')"
+    )
+    checkStagedError(aliasQuery, "cannot contain a table alias column list")
+
+  test "staged validation rejects hand-built LATERAL and table-function trees":
+    proc fromClause(statement: SqlNode): SqlNode =
+      for child in statement.children[1].children:
+        if child.kind == nkFromClause:
+          return child
+      nil
+
+    let lateralQuery = canonicalContinuousAggregate()
+    let lateralFrom = lateralQuery.fromClause()
+    let derived = newNode(nkFromDerived, lateralFrom.children[0].span)
+    derived.lateral = true
+    derived.children.add(parseSql("SELECT 1"))
+    lateralFrom.children[0] = derived
+    checkStagedError(lateralQuery, "cannot contain LATERAL")
+
+    let functionQuery = canonicalContinuousAggregate()
+    let functionFrom = functionQuery.fromClause()
+    let function = newNode(nkFromFunction, functionFrom.children[0].span)
+    function.children.add(newIdent("UNNEST", functionFrom.children[0].span))
+    functionFrom.children[0] = function
+    checkStagedError(functionQuery, "cannot contain a FROM table function")

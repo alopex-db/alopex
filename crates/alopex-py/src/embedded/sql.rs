@@ -62,6 +62,23 @@ pub(crate) fn bind_params(sql: &str, params: Option<&Bound<'_, PyAny>>) -> PyRes
     Ok(out)
 }
 
+/// 組み込みのパラメータバインダを pure-Python のサーバークライアントへ公開する。
+///
+/// `alopex.RemoteDatabase`（`python/alopex/remote.py`）はサーバーへ送る SQL を
+/// この関数で組み立てる。`?` プレースホルダの意味論（引用符の二重化、
+/// 引用符・コメント内の `?` を無視、NUL 拒否、非有限 float 拒否、指数表記回避、
+/// ベクトルリテラル、naive datetime のみ許可）を組み込みとサーバーで二重実装
+/// しないための唯一の共有点である。
+///
+/// `_alopex` 直下に `_bind_sql_params` という名前で登録する。先頭のアンダースコア
+/// により `python/alopex/__init__.py` の `_export_public` は再公開しない
+/// （公開 API 面を汚さない）。
+#[pyfunction]
+#[pyo3(name = "_bind_sql_params", signature = (sql, params = None))]
+pub(crate) fn bind_sql_params_py(sql: &str, params: Option<Bound<'_, PyAny>>) -> PyResult<String> {
+    bind_params(sql, params.as_ref())
+}
+
 /// `ExecutionResult` を Python ネイティブ値へ変換する。
 ///
 /// - DDL（Success）: `None`
@@ -373,7 +390,7 @@ mod tests {
     use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyTuple};
     use pyo3::IntoPyObjectExt;
 
-    use super::bind_params;
+    use super::{bind_params, bind_sql_params_py};
 
     fn with_py<F: FnOnce(Python<'_>)>(f: F) {
         pyo3::Python::initialize();
@@ -647,6 +664,40 @@ mod tests {
             let params = params_list(py, vec![vector]);
             let err = bind_params("SELECT ?", Some(&params)).expect_err("empty vector");
             assert!(err.is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    /// サーバークライアント向けラッパは組み込みの `bind_params` と同一結果を返す。
+    /// ここが割れると `?` 展開が組み込みとサーバーで二重実装になる（D2）。
+    #[test]
+    fn bind_sql_params_py_matches_embedded_binder() {
+        with_py(|py| {
+            let values = || {
+                vec![
+                    1i64.into_bound_py_any(py).expect("int"),
+                    "O'Brien".into_bound_py_any(py).expect("str"),
+                ]
+            };
+            let sql = "SELECT * FROM t WHERE id = ? AND name = ? -- ? ignored";
+            let expected = bind_params(sql, Some(&params_list(py, values()))).expect("embedded");
+            let actual = bind_sql_params_py(sql, Some(params_list(py, values()))).expect("wrapper");
+            assert_eq!(actual, expected);
+            assert_eq!(
+                bind_sql_params_py("SELECT 1", None).expect("no params"),
+                "SELECT 1"
+            );
+        });
+    }
+
+    /// パラメータ数不一致など、エラー分類もラッパを跨いで保たれる。
+    #[test]
+    fn bind_sql_params_py_preserves_error_classification() {
+        with_py(|py| {
+            let err = bind_sql_params_py("SELECT ?", None).expect_err("count mismatch");
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let params = params_list(py, vec![PyBytes::new(py, b"blob").into_any()]);
+            let err = bind_sql_params_py("SELECT ?", Some(params)).expect_err("bytes");
+            assert!(err.is_instance_of::<PyNotImplementedError>(py));
         });
     }
 }

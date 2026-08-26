@@ -23,12 +23,14 @@ fn select_from(name: &str) -> Statement {
         kind: StatementKind::Select(Select {
             with: None,
             distinct: false,
+            distinct_on: vec![],
             projection: vec![SelectItem::Wildcard {
                 span: Span::empty(),
             }],
             from: vec![FromItem::Table {
                 name: name.to_string(),
                 alias: None,
+                columns: Vec::new(),
                 span: Span::empty(),
             }],
             selection: None,
@@ -40,6 +42,7 @@ fn select_from(name: &str) -> Statement {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            limit_with_ties: false,
             span: Span::empty(),
         }),
         span: Span::empty(),
@@ -113,6 +116,7 @@ fn join_plan_extracts_both_table_references() {
         kind: StatementKind::Select(Select {
             with: None,
             distinct: false,
+            distinct_on: vec![],
             projection: vec![SelectItem::Wildcard {
                 span: Span::empty(),
             }],
@@ -120,11 +124,13 @@ fn join_plan_extracts_both_table_references() {
                 left: Box::new(FromItem::Table {
                     name: "users".to_string(),
                     alias: None,
+                    columns: Vec::new(),
                     span: Span::empty(),
                 }),
                 right: Box::new(FromItem::Table {
                     name: "orders".to_string(),
                     alias: None,
+                    columns: Vec::new(),
                     span: Span::empty(),
                 }),
                 join_type: JoinType::Inner,
@@ -142,6 +148,7 @@ fn join_plan_extracts_both_table_references() {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            limit_with_ties: false,
             span: Span::empty(),
         }),
         span: Span::empty(),
