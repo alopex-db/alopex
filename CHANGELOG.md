@@ -7,10 +7,8 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - SQL adds portable UTC timestamp functions, math/string/regex functions,
-  statistics/regression/value/bitwise/boolean aggregates, integer
-  `GENERATE_SERIES`, and integer bitwise operators (issues #153-#157). The
-  timestamp/interval series overload remains blocked on native `INTERVAL`
-  support in issue #159.
+  statistics/regression/value/bitwise/boolean aggregates, and integer bitwise
+  operators (issues #153-#156).
 - The Nim parser wire contract is `0.15.0`.
 - KV transactions add bounded explicit byte-glob and byte-regex key search
   (issue #192), with deterministic bytewise ordering, binary cursors, resource

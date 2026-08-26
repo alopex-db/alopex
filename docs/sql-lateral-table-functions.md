@@ -4,8 +4,7 @@ Three related FROM-clause features:
 
 - `LATERAL (subquery)` — a derived table that may reference the FROM items to
   its left, re-evaluated once per left row.
-- FROM-clause table functions — `UNNEST(v)` and integer
-  `GENERATE_SERIES(start, stop [, step])`.
+- FROM-clause table functions — v0.8.9 supports `UNNEST(v)`.
 - `AS t(c1, c2, …)` — a relation alias column-name list, now accepted for base
   tables, CTE references, derived tables, and table functions alike.
 
@@ -19,7 +18,6 @@ CROSS JOIN LATERAL (
 ORDER BY p.id;
 
 SELECT p.id, u.unnest FROM parent AS p, UNNEST(p.emb) AS u;
-SELECT n.generate_series FROM GENERATE_SERIES(1, 5) AS n;
 ```
 
 Alopex follows PostgreSQL semantics. Where PostgreSQL and DuckDB differ, the
@@ -64,13 +62,11 @@ named `lateral` keeps working.
   resolution error. Passing the scope through unconditionally would silently
   turn a typo into a correlated reference. This is standard SQL and
   PostgreSQL.
-- **D5 — The table-function registry is closed.** `UNNEST` and
-  `GENERATE_SERIES` are the only names the FROM clause resolves.
-  `GENERATE_SERIES` accepts two or three `INTEGER`/`BIGINT` arguments; its
-  timestamp overload remains blocked on native `INTERVAL` support (issue
-  #159). Any name outside the registry is `ALOPEX-C007` (`table function 'x'
-  does not exist`). Alopex does not follow PostgreSQL in letting an arbitrary
-  scalar function appear in FROM; the surface stays closed.
+- **D5 — The table-function registry is closed.** v0.8.9 resolves `UNNEST` as
+  the only FROM-clause table function. Any name outside the release registry is `ALOPEX-C007`
+  (`table function 'x' does not exist`). Alopex does not follow PostgreSQL in
+  letting an arbitrary scalar function appear in FROM; the surface stays
+  closed.
 - **D6 — `UNNEST` operates on `VECTOR`.** Exactly one argument, of type
   `VECTOR(n)` or `NULL`; anything else is `ALOPEX-T001` with expected type
   `VECTOR`. Output is one `FLOAT` column, one row per element in element
@@ -180,8 +176,6 @@ named `lateral` keeps working.
 | Alias column list width mismatch | `ALOPEX-T012` |
 | Alias column list repeats a name | `ALOPEX-T007` |
 | `RIGHT`/`FULL JOIN LATERAL` | `ALOPEX-T015` |
-| `GENERATE_SERIES` with wrong arity/type | `ALOPEX-T007`/`ALOPEX-T001` |
-| `GENERATE_SERIES` with zero step, overflow, or more than 100,000 rows | execution error |
 | Outer reference from a non-LATERAL derived table | `ALOPEX-C001`/`ALOPEX-C003` |
 
 ## Engine comparison

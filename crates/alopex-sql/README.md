@@ -91,16 +91,15 @@ FROM parent AS p
 CROSS JOIN LATERAL (SELECT c.val FROM child AS c
                     WHERE c.parent_id = p.id ORDER BY c.val DESC LIMIT 1) AS top;
 SELECT p.id, u.unnest FROM parent AS p, UNNEST(p.emb) AS u;
-SELECT n.generate_series FROM GENERATE_SERIES(1, 5) AS n;
 SELECT r.a, r.b FROM child AS r(a, b, c);
 ```
 
 `LATERAL` 派生表は左側の FROM item を参照でき、左行ごとに再評価される
 (`CROSS JOIN LATERAL` / `[INNER] JOIN LATERAL ... ON` /
 `LEFT [OUTER] JOIN LATERAL ... ON`。`RIGHT`/`FULL` は `ALOPEX-T015`)。
-`LATERAL` を書かない派生表は従来どおり外側 FROM を参照できない。FROM 句の
-table function は `UNNEST(VECTOR)` と整数版 `GENERATE_SERIES(start, stop [, step])`
-で、`LATERAL` なしでも左側を参照する(implicit lateral)。
+`LATERAL` を書かない派生表は従来どおり外側 FROM を参照できない。v0.8.9の
+FROM 句の table function は `UNNEST(VECTOR)` で、`LATERAL` なしでも左側を
+参照する(implicit lateral)。
 `AS t(c1, ..., cn)` は base table / CTE 参照 / 派生表 / table function すべてで
 使え、列数完全一致(`ALOPEX-T012`)を要求する。`LATERAL` は文脈キーワードなの
 で `lateral` という名前の関係は引き続き使える。詳細は

@@ -165,6 +165,7 @@ fn unnest_takes_exactly_one_argument() {
 }
 
 #[test]
+#[cfg(feature = "generate_series")]
 fn generate_series_supports_inclusive_positive_and_negative_integer_ranges() {
     let ascending = Harness::new().query("SELECT * FROM GENERATE_SERIES(1, 3) AS g");
     assert_eq!(
@@ -180,6 +181,7 @@ fn generate_series_supports_inclusive_positive_and_negative_integer_ranges() {
 }
 
 #[test]
+#[cfg(feature = "generate_series")]
 fn generate_series_returns_empty_when_step_moves_away_from_stop() {
     assert!(
         Harness::new()
@@ -190,6 +192,7 @@ fn generate_series_returns_empty_when_step_moves_away_from_stop() {
 }
 
 #[test]
+#[cfg(feature = "generate_series")]
 fn generate_series_rejects_zero_step_and_bounded_output() {
     let zero = Harness::new().error("SELECT * FROM GENERATE_SERIES(1, 3, 0)");
     assert!(
@@ -212,6 +215,7 @@ fn generate_series_rejects_zero_step_and_bounded_output() {
 }
 
 #[test]
+#[cfg(feature = "generate_series")]
 fn generate_series_composes_with_lateral_cte_join_and_window() {
     let mut harness = Harness::new();
     harness

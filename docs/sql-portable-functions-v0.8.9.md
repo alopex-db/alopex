@@ -8,7 +8,6 @@ add `DATE`, `TIME`, or `INTERVAL` storage types.
 
 - Temporal: `CURRENT_TIMESTAMP`, `NOW`, `EXTRACT`, `DATE_PART`, `DATE_TRUNC`,
   `TO_CHAR`, `TO_TIMESTAMP`, `STRFTIME`, `JULIANDAY`, and `UNIXEPOCH`.
-- Integer table function: `GENERATE_SERIES(start, stop [, step])`.
 - Bitwise operators: `~`, `<<`, `>>`, `&`, `^`, and `|`.
 - Math, string, regex, statistics, regression, value-selecting, bitwise, and
   boolean aggregates are listed in the SQL README.
@@ -39,10 +38,3 @@ Bitwise operators accept `INTEGER` and `BIGINT`; mixed operands return
 the result, or a left shift that loses significant bits returns integer
 overflow. Precedence from tightest to loosest is unary `~`, arithmetic,
 shifts, `&`, `^`, `|`, string concatenation, comparison, `NOT`, `AND`, `OR`.
-
-Integer `GENERATE_SERIES` includes both boundaries, accepts positive or
-negative non-zero steps, and returns no rows when the step moves away from the
-stop value. It rejects arithmetic overflow and output beyond 100,000 rows.
-Arguments are implicitly lateral, so the function composes with CTEs, joins,
-and windows. The timestamp/interval overload remains dependent on native
-`INTERVAL` support in issue #159; it is not silently treated as complete.
