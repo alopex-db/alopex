@@ -6,11 +6,14 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use alopex_embedded::{Database, TransactionManager as Transaction, TxnMode};
+use alopex_embedded::{
+    Database, KeyPattern, KeySearchPage, KeySearchRequest, TransactionManager as Transaction,
+    TxnMode,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::batch::BatchMode;
-use crate::cli::{KvCommand, KvTxnCommand, OutputFormat};
+use crate::cli::{KvCommand, KvSearchMode, KvTxnCommand, OutputFormat};
 use crate::client::http::{ClientError, HttpClient};
 use crate::error::{CliError, Result};
 use crate::models::{Column, DataType, Row, Value};
@@ -120,6 +123,25 @@ pub fn execute<W: Write>(
         KvCommand::Put { key, value } => execute_put(db, &key, &value, writer),
         KvCommand::Delete { key } => execute_delete(db, &key, writer),
         KvCommand::List { prefix } => execute_list(db, prefix.as_deref(), writer),
+        KvCommand::Search {
+            mode,
+            pattern,
+            pattern_hex,
+            cursor_hex,
+            page_size,
+            scan_budget,
+            max_bytes,
+        } => execute_search(
+            db,
+            mode,
+            &pattern,
+            pattern_hex,
+            cursor_hex.as_deref(),
+            page_size,
+            scan_budget,
+            max_bytes,
+            writer,
+        ),
         KvCommand::Txn(cmd) => execute_txn_command(db, cmd, writer),
     }
 }
@@ -277,6 +299,33 @@ pub async fn execute_remote_with_formatter<W: Write>(
                 }
             }
             streaming_writer.finish()
+        }
+        KvCommand::Search {
+            mode,
+            pattern,
+            pattern_hex,
+            cursor_hex,
+            page_size,
+            scan_budget,
+            max_bytes,
+        } => {
+            let request = search_request(
+                *mode,
+                pattern,
+                *pattern_hex,
+                cursor_hex.as_deref(),
+                *page_size,
+                *scan_budget,
+                *max_bytes,
+            )?;
+            let page: KeySearchPage = client
+                .post_json("kv/search", &request)
+                .await
+                .map_err(map_client_error)?;
+            let columns = kv_search_columns();
+            let mut streaming_writer =
+                StreamingWriter::new(writer, formatter, columns, limit).with_quiet(quiet);
+            write_search_page(page, &mut streaming_writer)
         }
         KvCommand::Txn(txn_cmd) => {
             execute_remote_txn_command(client, txn_cmd, writer, formatter, limit, quiet).await
@@ -469,6 +518,9 @@ fn kv_command_context(cmd: &KvCommand) -> String {
             Some(prefix) => format!("kv list --prefix {prefix}"),
             None => "kv list".to_string(),
         },
+        KvCommand::Search { mode, pattern, .. } => {
+            format!("kv search --mode {mode:?} {pattern}")
+        }
         KvCommand::Txn(command) => match command {
             KvTxnCommand::Begin { timeout_secs } => match timeout_secs {
                 Some(secs) => format!("kv txn begin --timeout-secs {secs}"),
@@ -487,6 +539,108 @@ fn kv_command_context(cmd: &KvCommand) -> String {
             KvTxnCommand::Rollback { txn_id } => format!("kv txn rollback --txn-id {txn_id}"),
         },
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_search<W: Write>(
+    db: &Database,
+    mode: KvSearchMode,
+    pattern: &str,
+    pattern_hex: bool,
+    cursor_hex: Option<&str>,
+    page_size: usize,
+    scan_budget: usize,
+    max_bytes: usize,
+    writer: &mut StreamingWriter<W>,
+) -> Result<()> {
+    let request = search_request(
+        mode,
+        pattern,
+        pattern_hex,
+        cursor_hex,
+        page_size,
+        scan_budget,
+        max_bytes,
+    )?;
+    let mut txn = db.begin(TxnMode::ReadOnly)?;
+    let page = txn.search_keys(&request)?;
+    txn.commit()?;
+    write_search_page(page, writer)
+}
+
+fn search_request(
+    mode: KvSearchMode,
+    pattern: &str,
+    pattern_hex: bool,
+    cursor_hex: Option<&str>,
+    page_size: usize,
+    scan_budget: usize,
+    max_bytes: usize,
+) -> Result<KeySearchRequest> {
+    let pattern = match (mode, pattern_hex) {
+        (KvSearchMode::Glob, false) => KeyPattern::glob(pattern.as_bytes()),
+        (KvSearchMode::Glob, true) => KeyPattern::glob(decode_hex("pattern", pattern)?),
+        (KvSearchMode::Regex, false) => KeyPattern::regex(pattern),
+        (KvSearchMode::Regex, true) => {
+            return Err(CliError::InvalidArgument(
+                "--pattern-hex is only valid with --mode glob".into(),
+            ));
+        }
+    };
+    let mut request =
+        KeySearchRequest::new(pattern, page_size, scan_budget).with_max_bytes(max_bytes);
+    if let Some(cursor) = cursor_hex {
+        request.cursor = Some(decode_hex("cursor", cursor)?);
+    }
+    Ok(request)
+}
+
+fn write_search_page<W: Write>(page: KeySearchPage, writer: &mut StreamingWriter<W>) -> Result<()> {
+    writer.prepare(Some(page.entries.len()))?;
+    let cursor = page
+        .next_cursor
+        .as_deref()
+        .map(encode_hex)
+        .map(Value::Text)
+        .unwrap_or(Value::Null);
+    for entry in page.entries {
+        let row = Row::new(vec![
+            bytes_to_value(entry.key),
+            bytes_to_value(entry.value),
+            cursor.clone(),
+        ]);
+        if writer.write_row(row)? == WriteStatus::LimitReached {
+            break;
+        }
+    }
+    writer.finish()
+}
+
+fn decode_hex(name: &str, value: &str) -> Result<Vec<u8>> {
+    if value.len() % 2 != 0 {
+        return Err(CliError::InvalidArgument(format!(
+            "{name} hex must contain an even number of digits"
+        )));
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).expect("hex input is UTF-8");
+            u8::from_str_radix(text, 16).map_err(|_| {
+                CliError::InvalidArgument(format!("{name} contains invalid hex: {text}"))
+            })
+        })
+        .collect()
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
 }
 
 fn bytes_to_value(bytes: Vec<u8>) -> Value {
@@ -781,6 +935,15 @@ pub fn kv_columns() -> Vec<Column> {
     ]
 }
 
+/// Create columns for a bounded KV search page.
+pub fn kv_search_columns() -> Vec<Column> {
+    vec![
+        Column::new("key", DataType::Text),
+        Column::new("value", DataType::Text),
+        Column::new("next_cursor_hex", DataType::Text),
+    ]
+}
+
 /// Create columns for KV status output.
 pub fn kv_status_columns() -> Vec<Column> {
     vec![
@@ -808,6 +971,15 @@ mod tests {
         let formatter = Box::new(JsonlFormatter::new());
         let columns = kv_status_columns();
         StreamingWriter::new(output, formatter, columns, None)
+    }
+
+    fn create_search_writer(output: &mut Vec<u8>) -> StreamingWriter<&mut Vec<u8>> {
+        StreamingWriter::new(
+            output,
+            Box::new(JsonlFormatter::new()),
+            kv_search_columns(),
+            None,
+        )
     }
 
     #[test]
@@ -950,5 +1122,32 @@ mod tests {
         let result = String::from_utf8(output).unwrap();
         // Empty output is fine
         assert!(result.is_empty() || result.lines().count() == 0);
+    }
+
+    #[test]
+    fn test_search_accepts_binary_glob_and_emits_cursor() {
+        let db = create_test_db();
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+        txn.put(&[0xff, b'/', b'a'], b"a").unwrap();
+        txn.put(&[0xff, b'/', b'b'], b"b").unwrap();
+        txn.commit().unwrap();
+
+        let mut output = Vec::new();
+        let mut writer = create_search_writer(&mut output);
+        execute_search(
+            &db,
+            KvSearchMode::Glob,
+            "ff2f2a",
+            true,
+            None,
+            1,
+            10,
+            1024,
+            &mut writer,
+        )
+        .unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("ff2f61"), "missing binary cursor: {output}");
     }
 }

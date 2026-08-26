@@ -434,6 +434,36 @@ async fn server_binary_exposes_all_http_apis() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    let (status, search_body) = send_json(
+        &client,
+        Method::POST,
+        &format!("{http_url}/kv/search"),
+        json!({
+            "pattern": { "mode": "glob", "pattern": [97, 42] },
+            "cursor": null,
+            "limit": 10,
+            "scan_budget": 10
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        search_body["entries"][0]["key"],
+        json!([97, 108, 112, 104, 97])
+    );
+    let (status, _) = send_json(
+        &client,
+        Method::POST,
+        &format!("{http_url}/kv/search"),
+        json!({
+            "pattern": { "mode": "regex", "pattern": "[" },
+            "cursor": null,
+            "limit": 10,
+            "scan_budget": 10
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, _) = send_json(
         &client,
         Method::POST,

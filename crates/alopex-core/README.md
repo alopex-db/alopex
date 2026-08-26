@@ -10,6 +10,7 @@ Core storage engine for [Alopex DB](https://github.com/alopex-db/alopex) - a uni
 - **Multiple Compression**: Snappy (default), Zstd, LZ4 compression options
 - **Memory Mapping**: Efficient file I/O with mmap support
 - **WASM Support**: Optional WebAssembly target with IndexedDB backend
+- **Bounded Key Search**: Explicit byte-glob and byte-regex search with pagination and scan budgets ([contract](../../docs/kv-key-search.md))
 
 ## Installation
 

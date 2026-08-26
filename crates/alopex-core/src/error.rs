@@ -96,6 +96,26 @@ pub enum Error {
         requested: usize,
     },
 
+    /// A bounded key search inspected its maximum candidate count.
+    #[error("search scan budget exceeded: limit={limit}")]
+    SearchBudgetExceeded {
+        /// Maximum candidate keys permitted for one page.
+        limit: usize,
+    },
+
+    /// A key search page would exceed its response payload budget.
+    #[error("search response size exceeded: limit={limit}, requested={requested}")]
+    SearchResponseTooLarge {
+        /// Maximum combined key and value bytes.
+        limit: usize,
+        /// Combined key and value bytes requested so far.
+        requested: usize,
+    },
+
+    /// A cooperative key search cancellation was observed.
+    #[error("key search cancelled")]
+    SearchCancelled,
+
     /// External spill operation failed.
     #[error("spill failed: {reason}")]
     SpillFailed {

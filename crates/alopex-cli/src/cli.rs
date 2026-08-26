@@ -244,9 +244,41 @@ pub enum KvCommand {
         #[arg(long)]
         prefix: Option<String>,
     },
+    /// Search opaque key bytes with an explicit bounded pattern mode
+    Search {
+        /// Matching mode
+        #[arg(long, value_enum)]
+        mode: KvSearchMode,
+        /// Pattern text, or hexadecimal bytes with --pattern-hex
+        pattern: String,
+        /// Decode the glob pattern as hexadecimal bytes
+        #[arg(long, requires = "mode")]
+        pattern_hex: bool,
+        /// Exclusive prior-page cursor encoded as hexadecimal bytes
+        #[arg(long)]
+        cursor_hex: Option<String>,
+        /// Maximum entries returned by this page
+        #[arg(long, default_value_t = 100)]
+        page_size: usize,
+        /// Maximum candidate keys inspected by this page
+        #[arg(long, default_value_t = 10_000)]
+        scan_budget: usize,
+        /// Maximum combined key and value bytes returned by this page
+        #[arg(long, default_value_t = 16 * 1024 * 1024)]
+        max_bytes: usize,
+    },
     /// Transaction operations
     #[command(subcommand)]
     Txn(KvTxnCommand),
+}
+
+/// Explicit KV key-search pattern mode.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum KvSearchMode {
+    /// Byte glob (`*`, `?`, and backslash escaping)
+    Glob,
+    /// Rust byte regular expression
+    Regex,
 }
 
 /// KV transaction subcommands
@@ -1218,6 +1250,34 @@ mod tests {
             Some(Command::Kv {
                 command: Some(KvCommand::List { prefix: Some(p) })
             }) if p == "user:"
+        ));
+    }
+
+    #[test]
+    fn test_parse_kv_search_requires_an_explicit_mode() {
+        let cli = Cli::try_parse_from([
+            "alopex",
+            "--in-memory",
+            "kv",
+            "search",
+            "--mode",
+            "glob",
+            "6170702f2a",
+            "--pattern-hex",
+            "--page-size",
+            "5",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Kv {
+                command: Some(KvCommand::Search {
+                    mode: KvSearchMode::Glob,
+                    page_size: 5,
+                    pattern_hex: true,
+                    ..
+                })
+            })
         ));
     }
 

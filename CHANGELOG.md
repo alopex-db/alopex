@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- KV transactions support explicit byte-glob and byte-regex key search
+  (issue #192) with derived prefix bounds, deterministic bytewise ordering,
+  binary cursors, page and scan budgets, invalid-pattern errors, and
+  cooperative cancellation. Embedded, async, HTTP (`POST /kv/search`), and CLI
+  (`kv search --mode glob|regex`) surfaces share the same additive contract;
+  exact, prefix, and range APIs remain unchanged.
+
 - SQL `FROM` supports `LATERAL` derived tables, table functions, and relation
   alias column lists (issue #151). `CROSS JOIN LATERAL`, `[INNER] JOIN
   LATERAL … ON`, `LEFT [OUTER] JOIN LATERAL … ON`, and comma-separated

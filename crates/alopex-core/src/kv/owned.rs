@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::error::{Error, Result};
-use crate::kv::KVTransaction;
+use crate::kv::{search, KVTransaction, KeySearchCancellation, KeySearchPage, KeySearchRequest};
 use crate::txn::{OwnedLeaseOutcome, OwnedReadSessionStatus, OwnedTransactionSessionStatus};
 use crate::types::{Key, TxnId, TxnMode, Value};
 
@@ -53,6 +53,26 @@ pub trait OwnedKVTransaction: Send {
 
     /// Open an owned half-open range cursor at the transaction's snapshot.
     fn scan_range(&mut self, start: &[u8], end: &[u8]) -> Result<Box<dyn OwnedKVScan>>;
+
+    /// Searches opaque key bytes with the common bounded search contract.
+    fn search_keys(&mut self, request: &KeySearchRequest) -> Result<KeySearchPage> {
+        self.search_keys_with_cancellation(request, &KeySearchCancellation::default())
+    }
+
+    /// Searches key bytes while observing a cooperative cancellation token.
+    fn search_keys_with_cancellation(
+        &mut self,
+        request: &KeySearchRequest,
+        cancellation: &KeySearchCancellation,
+    ) -> Result<KeySearchPage> {
+        let prepared = search::PreparedKeySearch::new(request)?;
+        let mut scan = self.scan_prefix(prepared.prefix())?;
+        let result = prepared.collect(|| scan.next_entry(), request, cancellation);
+        match (result, scan.close()) {
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+            (Ok(page), Ok(())) => Ok(page),
+        }
+    }
 
     /// Commit once.  The caller cannot use this transaction afterwards.
     fn commit(self: Box<Self>) -> Result<()>;

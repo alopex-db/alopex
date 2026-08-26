@@ -2,7 +2,9 @@
 
 use alopex_core::kv::async_adapter::AsyncKVStoreAdapter;
 use alopex_core::kv::memory::MemoryKV;
-use alopex_core::kv::{AsyncKVStore, AsyncKVTransaction};
+use alopex_core::kv::{
+    AsyncKVStore, AsyncKVTransaction, KeyPattern, KeySearchCancellation, KeySearchRequest,
+};
 use futures::StreamExt;
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -51,4 +53,35 @@ async fn async_kv_rollback_discards_changes() {
     let value = txn.async_get(b"temp:1").await.expect("get");
     assert!(value.is_none());
     txn.async_rollback().await.expect("rollback");
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[tokio::test]
+async fn async_kv_search_uses_the_common_contract() {
+    let async_store = AsyncKVStoreAdapter::new(MemoryKV::new());
+    let mut txn = async_store.begin_async().await.expect("begin");
+    txn.async_put(b"app/one/config", b"one").await.unwrap();
+    txn.async_put(b"app/two/config", b"two").await.unwrap();
+
+    let page = txn
+        .async_search_keys(KeySearchRequest::new(
+            KeyPattern::glob(b"app/*/config"),
+            10,
+            10,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 2);
+
+    let cancellation = KeySearchCancellation::default();
+    cancellation.cancel();
+    let error = txn
+        .async_search_keys_with_cancellation(
+            KeySearchRequest::new(KeyPattern::glob(b"*"), 10, 10),
+            cancellation,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("cancelled"));
+    txn.async_rollback().await.unwrap();
 }

@@ -66,6 +66,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
         .route("/kv/put", axum::routing::post(kv::put))
         .route("/kv/delete", axum::routing::post(kv::delete))
         .route("/kv/list", axum::routing::post(kv::list))
+        .route("/kv/search", axum::routing::post(kv::search))
         .route("/kv/txn/begin", axum::routing::post(kv::txn_begin))
         .route("/kv/txn/get", axum::routing::post(kv::txn_get))
         .route("/kv/txn/put", axum::routing::post(kv::txn_put))
