@@ -11,8 +11,9 @@ use std::sync::{Arc, Mutex};
 use crate::error::{Error, Result};
 use crate::kv::memory::{MemoryKV, MemoryTransaction, MemoryTxnManager};
 use crate::kv::{
-    KVStore, KVTransaction, OwnedKVScan, OwnedKVStore, OwnedKVTransaction,
-    OwnedKVTransactionAdapter, ReadAtCapability, ReadAtPoint, ReadAtResult,
+    KVStore, KVTransaction, KeySearchCancellation, KeySearchPage, KeySearchRequest, OwnedKVScan,
+    OwnedKVStore, OwnedKVTransaction, OwnedKVTransactionAdapter, ReadAtCapability, ReadAtPoint,
+    ReadAtResult,
 };
 use crate::lsm::sstable::{SSTableCursor, SSTableEntry};
 use crate::lsm::{
@@ -299,6 +300,10 @@ impl OwnedKVTransaction for OwnedLsmTransaction {
         self.open_cursor(OwnedLsmScanBounds::range(start.to_vec(), end.to_vec()))
     }
 
+    fn scan_from(&mut self, start: &[u8]) -> Result<Box<dyn OwnedKVScan>> {
+        self.open_cursor(OwnedLsmScanBounds::from(start.to_vec()))
+    }
+
     fn commit(self: Box<Self>) -> Result<()> {
         let (mode, start_timestamp, read_set, write_set) = {
             let mut state = self
@@ -461,63 +466,67 @@ impl OwnedLsmCursor {
 
 impl OwnedKVScan for OwnedLsmCursor {
     fn next_entry(&mut self) -> Result<Option<(Key, Value)>> {
+        loop {
+            let Some((key, value)) = self.next_search_entry()? else {
+                return Ok(None);
+            };
+            if let Some(value) = value {
+                return Ok(Some((key, value)));
+            }
+        }
+    }
+
+    fn next_search_entry(&mut self) -> Result<Option<(Key, Option<Value>)>> {
         if self.snapshot.is_none() {
             return Ok(None);
         }
-        loop {
-            let read_timestamp = self.read_timestamp()?;
-            let lsm = OwnedLsmTransaction::lsm_from(&self.store)?;
-            let memtable_key = lsm.owned_next_memtable_key_after(
-                self.last_key.as_ref(),
-                &self.bounds,
-                read_timestamp,
-            );
-            let table_key = Self::table_candidate(&mut self.tables, self.last_key.as_ref(), lsm)?;
-            let base_key = match (memtable_key, table_key) {
-                (Some(memory), Some(table)) => Some(memory.min(table)),
-                (Some(memory), None) => Some(memory),
-                (None, Some(table)) => Some(table),
-                (None, None) => None,
-            };
-            let write = self.write_candidate()?;
+        let read_timestamp = self.read_timestamp()?;
+        let lsm = OwnedLsmTransaction::lsm_from(&self.store)?;
+        let memtable_key =
+            lsm.owned_next_memtable_key_after(self.last_key.as_ref(), &self.bounds, read_timestamp);
+        let table_key = Self::table_candidate(&mut self.tables, self.last_key.as_ref(), lsm)?;
+        let base_key = match (memtable_key, table_key) {
+            (Some(memory), Some(table)) => Some(memory.min(table)),
+            (Some(memory), None) => Some(memory),
+            (None, Some(table)) => Some(table),
+            (None, None) => None,
+        };
+        let write = self.write_candidate()?;
 
-            let next = match (base_key, write) {
-                (Some(base_key), Some((write_key, write_value))) if base_key == write_key => {
-                    self.record_read(base_key.clone())?;
-                    (base_key, write_value)
-                }
-                (Some(base_key), Some((write_key, _))) if base_key < write_key => {
-                    self.record_read(base_key.clone())?;
-                    let value = lsm
-                        .owned_visible_at(&base_key, read_timestamp)?
-                        .and_then(|entry| entry.value);
-                    (base_key, value)
-                }
-                (Some(_), Some((write_key, write_value))) => {
-                    self.record_read(write_key.clone())?;
-                    (write_key, write_value)
-                }
-                (Some(base_key), None) => {
-                    self.record_read(base_key.clone())?;
-                    let value = lsm
-                        .owned_visible_at(&base_key, read_timestamp)?
-                        .and_then(|entry| entry.value);
-                    (base_key, value)
-                }
-                (None, Some((write_key, write_value))) => {
-                    self.record_read(write_key.clone())?;
-                    (write_key, write_value)
-                }
-                (None, None) => {
-                    self.finish();
-                    return Ok(None);
-                }
-            };
-            self.last_key = Some(next.0.clone());
-            if let Some(value) = next.1 {
-                return Ok(Some((next.0, value)));
+        let next = match (base_key, write) {
+            (Some(base_key), Some((write_key, write_value))) if base_key == write_key => {
+                self.record_read(base_key.clone())?;
+                (base_key, write_value)
             }
-        }
+            (Some(base_key), Some((write_key, _))) if base_key < write_key => {
+                self.record_read(base_key.clone())?;
+                let value = lsm
+                    .owned_visible_at(&base_key, read_timestamp)?
+                    .and_then(|entry| entry.value);
+                (base_key, value)
+            }
+            (Some(_), Some((write_key, write_value))) => {
+                self.record_read(write_key.clone())?;
+                (write_key, write_value)
+            }
+            (Some(base_key), None) => {
+                self.record_read(base_key.clone())?;
+                let value = lsm
+                    .owned_visible_at(&base_key, read_timestamp)?
+                    .and_then(|entry| entry.value);
+                (base_key, value)
+            }
+            (None, Some((write_key, write_value))) => {
+                self.record_read(write_key.clone())?;
+                (write_key, write_value)
+            }
+            (None, None) => {
+                self.finish();
+                return Ok(None);
+            }
+        };
+        self.last_key = Some(next.0.clone());
+        Ok(Some(next))
     }
 
     fn close(&mut self) -> Result<()> {
@@ -604,6 +613,29 @@ impl<'a> KVTransaction<'a> for AnyKVTransaction<'a> {
             Self::Memory(tx) => tx.scan_range(start, end),
             Self::Lsm(tx) => tx.scan_range(start, end),
             Self::Owned(tx) => tx.scan_range(start, end),
+        }
+    }
+
+    fn scan_from(
+        &mut self,
+        start: &[u8],
+    ) -> Result<Box<dyn Iterator<Item = (crate::types::Key, crate::types::Value)> + '_>> {
+        match self {
+            Self::Memory(tx) => tx.scan_from(start),
+            Self::Lsm(tx) => tx.scan_from(start),
+            Self::Owned(tx) => tx.scan_from(start),
+        }
+    }
+
+    fn search_keys_with_cancellation(
+        &mut self,
+        request: &KeySearchRequest,
+        cancellation: &KeySearchCancellation,
+    ) -> Result<KeySearchPage> {
+        match self {
+            Self::Memory(tx) => tx.search_keys_with_cancellation(request, cancellation),
+            Self::Lsm(tx) => tx.search_keys_with_cancellation(request, cancellation),
+            Self::Owned(tx) => tx.search_keys_with_cancellation(request, cancellation),
         }
     }
 
@@ -748,7 +780,7 @@ mod tests {
 
     use super::AnyKV;
     use crate::kv::storage::{StorageFactory, StorageMode};
-    use crate::kv::{OwnedReadOptions, OwnedSessionFactory};
+    use crate::kv::{KeyPattern, KeySearchRequest, OwnedReadOptions, OwnedSessionFactory};
     use crate::txn::OwnedLeaseOutcome;
     use crate::types::TxnMode;
 
@@ -868,5 +900,44 @@ mod tests {
             None
         );
         lease.finish(OwnedLeaseOutcome::Exhausted).unwrap();
+    }
+
+    #[test]
+    fn owned_lsm_tombstones_consume_the_search_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = disk_store(directory.path());
+        let writer = store
+            .clone()
+            .begin_owned_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        writer
+            .with_transaction(|transaction| {
+                for key in [b"dead-1".as_slice(), b"dead-2", b"live"] {
+                    transaction.put(key.to_vec(), Vec::new())?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        writer.commit().unwrap();
+
+        let writer = store
+            .clone()
+            .begin_owned_transaction(TxnMode::ReadWrite)
+            .unwrap();
+        writer
+            .with_transaction(|transaction| {
+                transaction.delete(b"dead-1".to_vec())?;
+                transaction.delete(b"dead-2".to_vec())
+            })
+            .unwrap();
+        writer.commit().unwrap();
+
+        let reader = store.begin_owned_transaction(TxnMode::ReadOnly).unwrap();
+        let error = reader
+            .with_transaction(|transaction| {
+                transaction.search_keys(&KeySearchRequest::new(KeyPattern::regex("^live$"), 1, 2))
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("search scan budget exceeded"));
     }
 }

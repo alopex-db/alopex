@@ -271,6 +271,12 @@ impl<W: Write> StreamingWriter<W> {
         self.written_count
     }
 
+    /// Returns the remaining configured row limit, if any.
+    pub fn remaining_limit(&self) -> Option<usize> {
+        self.limit
+            .map(|limit| limit.saturating_sub(self.written_count))
+    }
+
     /// Returns whether output has started.
     #[allow(dead_code)]
     pub fn output_started(&self) -> bool {

@@ -120,6 +120,12 @@ v0.8.9 の portable SQL 関数一覧と境界条件は
 - `GROUP_CONCAT(column)` / `GROUP_CONCAT(column, separator)`
 - `STRING_AGG(column, separator)`
 - `PERCENTILE_DISC(fraction) WITHIN GROUP (ORDER BY expr)` (ordered-set)
+- `PERCENTILE_CONT` / `QUANTILE_CONT` / `MEDIAN` / `MODE`
+- `VARIANCE` / `VAR_SAMP` / `VAR_POP` / `STDDEV` / `COVAR_*` / `CORR`
+- `REGR_COUNT` / `REGR_AVGX` / `REGR_AVGY` / `REGR_SXX` / `REGR_SYY` /
+  `REGR_SXY` / `REGR_SLOPE` / `REGR_INTERCEPT` / `REGR_R2`
+- `ANY_VALUE` / `FIRST` / `LAST` / `ARG_MIN` / `ARG_MAX` (`MIN_BY`/`MAX_BY`)
+- `BIT_AND` / `BIT_OR` / `BIT_XOR` / `BOOL_AND` / `BOOL_OR`
 
 ## Aggregate FILTER / ordered aggregates / WITHIN GROUP
 

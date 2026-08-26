@@ -16,16 +16,18 @@ separator, hierarchy, normalization, or canonicalization meaning.
 - `cursor` is the exclusive last key from a prior page. HTTP transports keys,
   glob patterns, and cursors as JSON byte arrays; the CLI uses hexadecimal for
   binary glob patterns and cursors.
-- The implementation automatically constrains glob scans by their leading
-  literal bytes and constrains anchored regex scans by a simple literal prefix.
+- The implementation constrains glob scans by their leading literal bytes.
+  Regex syntax is not reduced to a hand-written prefix hint; regex requests use
+  the bounded full-keyspace path so alternation and quantifiers cannot cause
+  false negatives.
 
 ## Resource and error behavior
 
 Each request must set `limit` and `scan_budget`. One page returns at most
 10,000 entries, inspects at most 1,000,000 candidate keys, and accepts at most
-4 KiB of pattern input. The raw key-and-value response budget defaults to 16
-MiB and cannot exceed 100 MiB; HTTP further caps it from the configured
-serialized-response limit. Zero or excessive bounds and invalid patterns are
+4 KiB of pattern input. The inspected and returned raw key-and-value byte
+budget defaults to 16 MiB and cannot exceed 100 MiB; HTTP further caps it from
+the configured serialized-response limit. Zero or excessive bounds and invalid patterns are
 `InvalidParameter` errors. Exhausting the candidate budget is
 `SearchBudgetExceeded`; exceeding the response budget is
 `SearchResponseTooLarge`. HTTP maps invalid input to 400 and either resource
@@ -66,4 +68,6 @@ alopex kv search --mode glob --pattern-hex ff2f2a --cursor-hex ff2f61
 alopex kv search --mode regex 'tenant/[0-9]+/events'
 ```
 
-The CLI `next_cursor_hex` column reports the resume cursor.
+The CLI `next_cursor_hex` column reports the resume cursor. A global CLI
+`--limit` also reduces the requested page size, so the cursor never skips rows
+that the writer did not display.

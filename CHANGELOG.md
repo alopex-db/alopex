@@ -2,16 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.8.8] — 2026-08-26
+## [0.8.9] — Unreleased
 
 ### Added
 
-- KV transactions support explicit byte-glob and byte-regex key search
-  (issue #192) with derived prefix bounds, deterministic bytewise ordering,
-  binary cursors, page and scan budgets, invalid-pattern errors, and
-  cooperative cancellation. Embedded, async, HTTP (`POST /kv/search`), and CLI
-  (`kv search --mode glob|regex`) surfaces share the same additive contract;
-  exact, prefix, and range APIs remain unchanged.
+- SQL adds portable UTC timestamp functions, math/string/regex functions,
+  statistics/regression/value/bitwise/boolean aggregates, integer
+  `GENERATE_SERIES`, and integer bitwise operators (issues #153-#157). The
+  timestamp/interval series overload remains blocked on native `INTERVAL`
+  support in issue #159.
+- The Nim parser wire contract is `0.15.0`.
+- KV transactions add bounded explicit byte-glob and byte-regex key search
+  (issue #192), with deterministic bytewise ordering, binary cursors, resource
+  limits, invalid-pattern errors, and cooperative cancellation. Embedded,
+  async, HTTP (`POST /kv/search`), and CLI (`kv search --mode glob|regex`)
+  surfaces share the additive contract; exact, prefix, and range APIs remain
+  unchanged.
+
+## [0.8.8] — 2026-08-26
+
+### Added
 
 - SQL `FROM` supports `LATERAL` derived tables, table functions, and relation
   alias column lists (issue #151). `CROSS JOIN LATERAL`, `[INNER] JOIN

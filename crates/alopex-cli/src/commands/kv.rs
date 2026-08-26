@@ -314,7 +314,7 @@ pub async fn execute_remote_with_formatter<W: Write>(
                 pattern,
                 *pattern_hex,
                 cursor_hex.as_deref(),
-                *page_size,
+                limit.map_or(*page_size, |limit| (*page_size).min(limit)),
                 *scan_budget,
                 *max_bytes,
             )?;
@@ -553,6 +553,9 @@ fn execute_search<W: Write>(
     max_bytes: usize,
     writer: &mut StreamingWriter<W>,
 ) -> Result<()> {
+    let page_size = writer
+        .remaining_limit()
+        .map_or(page_size, |limit| page_size.min(limit));
     let request = search_request(
         mode,
         pattern,
@@ -617,7 +620,7 @@ fn write_search_page<W: Write>(page: KeySearchPage, writer: &mut StreamingWriter
 }
 
 fn decode_hex(name: &str, value: &str) -> Result<Vec<u8>> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(CliError::InvalidArgument(format!(
             "{name} hex must contain an even number of digits"
         )));
@@ -1149,5 +1152,39 @@ mod tests {
 
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("ff2f61"), "missing binary cursor: {output}");
+    }
+
+    #[test]
+    fn test_search_output_limit_becomes_the_page_boundary() {
+        let db = create_test_db();
+        let mut txn = db.begin(TxnMode::ReadWrite).unwrap();
+        for key in [b"a1".as_slice(), b"a2", b"a3"] {
+            txn.put(key, key).unwrap();
+        }
+        txn.commit().unwrap();
+
+        let mut output = Vec::new();
+        let mut writer = StreamingWriter::new(
+            &mut output,
+            Box::new(JsonlFormatter::new()),
+            kv_search_columns(),
+            Some(1),
+        );
+        execute_search(
+            &db,
+            KvSearchMode::Glob,
+            "a*",
+            false,
+            None,
+            3,
+            10,
+            1024,
+            &mut writer,
+        )
+        .unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("6131"));
+        assert!(!output.contains("6132"));
     }
 }

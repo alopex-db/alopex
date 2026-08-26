@@ -22,6 +22,12 @@ pub trait OwnedKVScan: Send {
     /// Return one key/value pair, or `None` after normal exhaustion.
     fn next_entry(&mut self) -> Result<Option<(Key, Value)>>;
 
+    /// Return one physical search candidate, including a deleted key.
+    fn next_search_entry(&mut self) -> Result<Option<(Key, Option<Value>)>> {
+        self.next_entry()
+            .map(|entry| entry.map(|(key, value)| (key, Some(value))))
+    }
+
     /// Release backend cursor resources.  Repeated calls must be harmless.
     fn close(&mut self) -> Result<()> {
         Ok(())
@@ -54,6 +60,15 @@ pub trait OwnedKVTransaction: Send {
     /// Open an owned half-open range cursor at the transaction's snapshot.
     fn scan_range(&mut self, start: &[u8], end: &[u8]) -> Result<Box<dyn OwnedKVScan>>;
 
+    /// Open an owned cursor at or after `start`.
+    fn scan_from(&mut self, start: &[u8]) -> Result<Box<dyn OwnedKVScan>> {
+        let _ = start;
+        Err(Error::InvalidParameter {
+            param: "scan_from".into(),
+            reason: "backend does not implement cursor-based scanning".into(),
+        })
+    }
+
     /// Searches opaque key bytes with the common bounded search contract.
     fn search_keys(&mut self, request: &KeySearchRequest) -> Result<KeySearchPage> {
         self.search_keys_with_cancellation(request, &KeySearchCancellation::default())
@@ -66,8 +81,14 @@ pub trait OwnedKVTransaction: Send {
         cancellation: &KeySearchCancellation,
     ) -> Result<KeySearchPage> {
         let prepared = search::PreparedKeySearch::new(request)?;
-        let mut scan = self.scan_prefix(prepared.prefix())?;
-        let result = prepared.collect(|| scan.next_entry(), request, cancellation);
+        let mut cursor_start = request.cursor.clone().unwrap_or_default();
+        let mut scan = if request.cursor.is_some() {
+            cursor_start.push(0);
+            self.scan_from(&cursor_start)?
+        } else {
+            self.scan_prefix(prepared.prefix())?
+        };
+        let result = prepared.collect(|| scan.next_search_entry(), request, cancellation);
         match (result, scan.close()) {
             (Err(error), _) | (Ok(_), Err(error)) => Err(error),
             (Ok(page), Ok(())) => Ok(page),
@@ -147,6 +168,15 @@ impl<'a> KVTransaction<'a> for OwnedKVTransactionAdapter<'a> {
     ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
         let entries = Self::collect_cursor(self.transaction.scan_range(start, end)?)?;
         Ok(Box::new(entries.into_iter()))
+    }
+
+    fn search_keys_with_cancellation(
+        &mut self,
+        request: &KeySearchRequest,
+        cancellation: &KeySearchCancellation,
+    ) -> Result<KeySearchPage> {
+        self.transaction
+            .search_keys_with_cancellation(request, cancellation)
     }
 
     fn commit_self(self) -> Result<()> {
@@ -650,6 +680,10 @@ mod tests {
         }
 
         fn scan_range(&mut self, _start: &[u8], _end: &[u8]) -> Result<Box<dyn OwnedKVScan>> {
+            Ok(Box::new(TestCursor))
+        }
+
+        fn scan_from(&mut self, _start: &[u8]) -> Result<Box<dyn OwnedKVScan>> {
             Ok(Box::new(TestCursor))
         }
 

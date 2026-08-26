@@ -231,6 +231,12 @@ fn translate(value: &str, from: &str, to: &str) -> String {
 }
 
 fn levenshtein(left: &str, right: &str) -> Result<i32> {
+    if left.len() > 1_000_000 || right.len() > 1_000_000 {
+        return Err(invalid_argument(
+            "levenshtein",
+            "each input must be at most one million bytes",
+        ));
+    }
     let mut left: Vec<char> = left.chars().collect();
     let mut right: Vec<char> = right.chars().collect();
     if left.len() < right.len() {
@@ -604,6 +610,17 @@ mod tests {
         let right = "b".repeat(1_000);
         let error =
             eval_for("levenshtein").unwrap()(&[SqlValue::Text(left), SqlValue::Text(right)]);
+        assert!(matches!(
+            error,
+            Err(ExecutorError::Evaluation(
+                EvaluationError::InvalidArgument { .. }
+            ))
+        ));
+
+        let error = eval_for("levenshtein").unwrap()(&[
+            SqlValue::Text(String::new()),
+            SqlValue::Text("a".repeat(1_000_001)),
+        ]);
         assert!(matches!(
             error,
             Err(ExecutorError::Evaluation(

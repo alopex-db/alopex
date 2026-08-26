@@ -107,6 +107,15 @@ pub trait KVTransaction<'a> {
         end: &[u8],
     ) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>>;
 
+    /// Scans all key-value pairs at or after `start`.
+    fn scan_from(&mut self, start: &[u8]) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
+        let _ = start;
+        Err(crate::error::Error::InvalidParameter {
+            param: "scan_from".into(),
+            reason: "backend does not implement cursor-based scanning".into(),
+        })
+    }
+
     /// Searches opaque key bytes in deterministic bytewise order.
     ///
     /// The request bounds both returned entries and inspected candidate keys.
@@ -123,8 +132,18 @@ pub trait KVTransaction<'a> {
         cancellation: &KeySearchCancellation,
     ) -> Result<KeySearchPage> {
         let prepared = search::PreparedKeySearch::new(request)?;
-        let mut scan = self.scan_prefix(prepared.prefix())?;
-        prepared.collect(|| Ok(scan.next()), request, cancellation)
+        let mut cursor_start = request.cursor.clone().unwrap_or_default();
+        let mut scan = if request.cursor.is_some() {
+            cursor_start.push(0);
+            self.scan_from(&cursor_start)?
+        } else {
+            self.scan_prefix(prepared.prefix())?
+        };
+        prepared.collect(
+            || Ok(scan.next().map(|(key, value)| (key, Some(value)))),
+            request,
+            cancellation,
+        )
     }
 
     /// Commits the transaction, applying all buffered writes.

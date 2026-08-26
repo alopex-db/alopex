@@ -915,6 +915,26 @@ impl<'a> MemoryTransaction<'a> {
             &mut self.read_set,
         )
     }
+
+    fn scan_from_internal(&mut self, start: &[u8]) -> MergedScanIter<'_> {
+        let start_vec = start.to_vec();
+        let data_guard = self.manager.state.data.read().unwrap();
+        let data_ptr: *const BTreeMap<Key, VersionedValue> = &*data_guard;
+        let data_iter = unsafe {
+            // Safety: data_guard keeps the map alive for the lifetime of the iterator.
+            (&*data_ptr).range(start_vec.clone()..)
+        };
+        let write_iter = self.writes.range(start_vec..);
+        MergedScanIter::new(
+            data_guard,
+            data_iter,
+            write_iter,
+            None,
+            None,
+            self.start_version,
+            &mut self.read_set,
+        )
+    }
 }
 
 impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
@@ -997,6 +1017,14 @@ impl<'a> KVTransaction<'a> for MemoryTransaction<'a> {
         let iter = self
             .scan_range_internal(start, end)
             .filter_map(|(k, v)| v.map(|val| (k, val)));
+        Ok(Box::new(iter))
+    }
+
+    fn scan_from(&mut self, start: &[u8]) -> Result<Box<dyn Iterator<Item = (Key, Value)> + '_>> {
+        self.ensure_active()?;
+        let iter = self
+            .scan_from_internal(start)
+            .filter_map(|(key, value)| value.map(|value| (key, value)));
         Ok(Box::new(iter))
     }
 
@@ -1243,6 +1271,10 @@ impl OwnedKVTransaction for OwnedMemoryTransaction {
 
     fn scan_range(&mut self, start: &[u8], end: &[u8]) -> Result<Box<dyn OwnedKVScan>> {
         self.open_cursor(Some(start.to_vec()), None, Some(end.to_vec()))
+    }
+
+    fn scan_from(&mut self, start: &[u8]) -> Result<Box<dyn OwnedKVScan>> {
+        self.open_cursor(Some(start.to_vec()), None, None)
     }
 
     fn commit(self: Box<Self>) -> Result<()> {

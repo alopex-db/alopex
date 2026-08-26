@@ -76,7 +76,8 @@ fn statistics_percentiles_and_regression_share_the_aggregate_surface() {
              MEDIAN(x), MODE(m), QUANTILE_CONT(x, 0.25), \
              REGR_COUNT(y, x), REGR_AVGX(y, x), REGR_AVGY(y, x), \
              REGR_SXX(y, x), REGR_SYY(y, x), REGR_SXY(y, x), \
-             REGR_SLOPE(y, x), REGR_INTERCEPT(y, x), REGR_R2(y, x) FROM t",
+             REGR_SLOPE(y, x), REGR_INTERCEPT(y, x), REGR_R2(y, x), \
+             PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY x DESC) FROM t",
         )
         .rows
         .remove(0);
@@ -104,6 +105,7 @@ fn statistics_percentiles_and_regression_share_the_aggregate_surface() {
     assert_close(&row[20], 1.9);
     assert_close(&row[21], 0.0);
     assert_close(&row[22], 90.25 / 93.75);
+    assert_close(&row[23], 3.25);
 }
 
 #[test]

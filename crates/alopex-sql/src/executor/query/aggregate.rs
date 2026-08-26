@@ -1358,13 +1358,15 @@ impl Accumulator for StatisticsAccumulator {
 #[derive(Debug, Clone)]
 struct PercentileContAccumulator {
     fraction: f64,
+    ascending: bool,
     values: Vec<f64>,
 }
 
 impl PercentileContAccumulator {
-    fn new(fraction: f64) -> Self {
+    fn new(fraction: f64, ascending: bool) -> Self {
         Self {
             fraction,
+            ascending,
             values: Vec::new(),
         }
     }
@@ -1399,6 +1401,9 @@ impl Accumulator for PercentileContAccumulator {
         }
         let mut values = self.values.clone();
         values.sort_by(f64::total_cmp);
+        if !self.ascending {
+            values.reverse();
+        }
         let position = self.fraction * (values.len() - 1) as f64;
         let lower = position.floor() as usize;
         let upper = position.ceil() as usize;
@@ -1788,7 +1793,7 @@ pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<d
         }
         AggregateFunction::PercentileCont { fraction }
         | AggregateFunction::QuantileCont { fraction } => {
-            Box::new(PercentileContAccumulator::new(*fraction))
+            Box::new(PercentileContAccumulator::new(*fraction, true))
         }
         AggregateFunction::Variance { sample } => Box::new(StatisticsAccumulator::new(
             StatisticsKind::Variance(*sample),
@@ -1800,7 +1805,7 @@ pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<d
             StatisticsKind::Covariance(*sample),
         )),
         AggregateFunction::Corr => Box::new(StatisticsAccumulator::new(StatisticsKind::Corr)),
-        AggregateFunction::Median => Box::new(PercentileContAccumulator::new(0.5)),
+        AggregateFunction::Median => Box::new(PercentileContAccumulator::new(0.5, true)),
         AggregateFunction::Mode => Box::new(ModeAccumulator::new(Vec::new())),
         AggregateFunction::RegrCount => {
             Box::new(StatisticsAccumulator::new(StatisticsKind::RegrCount))
@@ -1869,6 +1874,13 @@ pub fn create_accumulator_for_aggregate(aggregate: &AggregateExpr) -> Box<dyn Ac
         AggregateFunction::PercentileDisc { fraction } => Box::new(PercentileDiscAccumulator::new(
             *fraction,
             aggregate_sort_specs(aggregate),
+        )),
+        AggregateFunction::PercentileCont { fraction }
+        | AggregateFunction::QuantileCont { fraction } => Box::new(PercentileContAccumulator::new(
+            *fraction,
+            aggregate_sort_specs(aggregate)
+                .first()
+                .is_none_or(|(ascending, _)| *ascending),
         )),
         AggregateFunction::Mode if !aggregate.order_by.is_empty() => {
             Box::new(ModeAccumulator::new(aggregate_sort_specs(aggregate)))
@@ -4179,7 +4191,7 @@ mod tests {
     #[test]
     fn continuous_percentiles_preserve_non_finite_endpoints() {
         for (fraction, expected) in [(0.0, f64::NEG_INFINITY), (1.0, f64::INFINITY)] {
-            let mut acc = PercentileContAccumulator::new(fraction);
+            let mut acc = PercentileContAccumulator::new(fraction, true);
             acc.update(Some(SqlValue::Double(f64::NEG_INFINITY)))
                 .unwrap();
             acc.update(Some(SqlValue::Double(0.0))).unwrap();
@@ -4187,7 +4199,7 @@ mod tests {
             assert_eq!(acc.finalize().unwrap(), SqlValue::Double(expected));
         }
 
-        let mut acc = PercentileContAccumulator::new(1.0);
+        let mut acc = PercentileContAccumulator::new(1.0, true);
         acc.update(Some(SqlValue::Double(f64::NAN))).unwrap();
         let SqlValue::Double(value) = acc.finalize().unwrap() else {
             panic!("continuous percentile must return DOUBLE");

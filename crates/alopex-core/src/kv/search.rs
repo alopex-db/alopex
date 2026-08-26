@@ -79,7 +79,7 @@ pub struct KeySearchRequest {
     pub limit: usize,
     /// Maximum candidate keys inspected after `cursor`.
     pub scan_budget: usize,
-    /// Maximum combined key and value bytes returned by one page.
+    /// Maximum combined key and value bytes inspected or returned by one page.
     #[serde(default = "default_response_bytes")]
     pub max_bytes: usize,
 }
@@ -139,7 +139,10 @@ impl PreparedKeySearch {
         validate_request(request)?;
         let (source, prefix) = match &request.pattern {
             KeyPattern::Glob { pattern } => (glob_regex(pattern)?, glob_prefix(pattern)?),
-            KeyPattern::Regex { pattern } => (pattern.clone(), regex_prefix(pattern)),
+            // Regex syntax is rich enough that a hand-written literal-prefix
+            // extractor can introduce false negatives. Keep regex searches
+            // on the bounded full-keyspace path.
+            KeyPattern::Regex { pattern } => (pattern.clone(), Vec::new()),
         };
         let matcher = Regex::new(&source).map_err(|error| Error::InvalidParameter {
             param: "pattern".into(),
@@ -154,30 +157,49 @@ impl PreparedKeySearch {
 
     pub(crate) fn collect(
         &self,
-        mut next: impl FnMut() -> Result<Option<(Key, Value)>>,
+        mut next: impl FnMut() -> Result<Option<(Key, Option<Value>)>>,
         request: &KeySearchRequest,
         cancellation: &KeySearchCancellation,
     ) -> Result<KeySearchPage> {
         let mut entries = Vec::with_capacity(request.limit);
         let mut scanned = 0usize;
+        let mut scanned_bytes = 0usize;
         let mut response_bytes = 0usize;
-        while let Some((key, value)) = next()? {
+        loop {
             if cancellation.is_cancelled() {
                 return Err(Error::SearchCancelled);
-            }
-            if request.cursor.as_ref().is_some_and(|cursor| key <= *cursor) {
-                continue;
             }
             if scanned == request.scan_budget {
                 return Err(Error::SearchBudgetExceeded {
                     limit: request.scan_budget,
                 });
             }
+            let Some((key, value)) = next()? else {
+                break;
+            };
+            if !self.prefix.is_empty() && !key.starts_with(&self.prefix) {
+                break;
+            }
             scanned += 1;
-            if self.matcher.is_match(&key) {
+            scanned_bytes = scanned_bytes
+                .saturating_add(key.len())
+                .saturating_add(value.as_ref().map_or(0, Vec::len));
+            if scanned_bytes > request.max_bytes {
+                return Err(Error::SearchResponseTooLarge {
+                    limit: request.max_bytes,
+                    requested: scanned_bytes,
+                });
+            }
+            if let Some(value) = value.filter(|_| self.matcher.is_match(&key)) {
+                let cursor_bytes = if entries.len() + 1 == request.limit {
+                    key.len()
+                } else {
+                    0
+                };
                 let requested = response_bytes
                     .saturating_add(key.len())
-                    .saturating_add(value.len());
+                    .saturating_add(value.len())
+                    .saturating_add(cursor_bytes);
                 if requested > request.max_bytes {
                     return Err(Error::SearchResponseTooLarge {
                         limit: request.max_bytes,
@@ -286,20 +308,6 @@ fn glob_prefix(pattern: &[u8]) -> Result<Key> {
         return invalid("pattern", "glob ends with an escape byte".into());
     }
     Ok(prefix)
-}
-
-fn regex_prefix(pattern: &str) -> Key {
-    let Some(rest) = pattern.strip_prefix('^') else {
-        return Vec::new();
-    };
-    rest.bytes()
-        .take_while(|byte| {
-            !matches!(
-                byte,
-                b'.' | b'[' | b'(' | b'|' | b'?' | b'*' | b'+' | b'{' | b'$' | b'\\'
-            )
-        })
-        .collect()
 }
 
 fn push_byte(output: &mut String, byte: u8) {
