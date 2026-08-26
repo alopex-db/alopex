@@ -1,0 +1,8 @@
+{
+  "advisory_only": true,
+  "commit": "27c90eda927ccb6867e668d165329b15b59e5cfe",
+  "reason": "build_nim_cancelled",
+  "schema_version": 1,
+  "status": "not_measured",
+  "tag": "v0.8.9"
+}
