@@ -1,0 +1,100 @@
+{
+  "comparison": {
+    "advisory_only": true,
+    "current_commit": "f76ea118096defdff4b29236472b446acb5ca020",
+    "environment_fingerprint": "56afee25cf7ab058",
+    "has_regressions": false,
+    "metrics": {
+      "read_overhead_pct": {
+        "current": 0.7164365737256042,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 0,
+        "status": "insufficient_history",
+        "unit": "%"
+      },
+      "scan_overhead_ms": {
+        "current": -0.0031465000063235493,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 0,
+        "status": "insufficient_history",
+        "unit": "ms"
+      },
+      "write_overhead_pct": {
+        "current": 1.1083765178927798,
+        "direction": "lower_is_better",
+        "minimum_samples": 5,
+        "robust_z_threshold": 3.5,
+        "sample_count": 0,
+        "status": "insufficient_history",
+        "unit": "%"
+      }
+    },
+    "notification_metrics": [],
+    "notification_ready": false,
+    "schema_version": 1,
+    "status": "insufficient_history",
+    "workload_signature": "3660808adb3c32cd261030686d14ee61055f3f242f133adf366172fa1ae07d17"
+  },
+  "record": {
+    "commit": "f76ea118096defdff4b29236472b446acb5ca020",
+    "dependencies": {
+      "alopex": "0.8.8",
+      "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
+      "iniconfig": "2.3.0",
+      "maturin": "1.14.1",
+      "nim": "unavailable",
+      "numpy": "2.4.6",
+      "packaging": "26.3",
+      "patchelf": "patchelf 0.18.0",
+      "pip": "26.2",
+      "pluggy": "1.6.0",
+      "polars": "1.43.2",
+      "polars-runtime-32": "1.43.2",
+      "py-cpuinfo": "9.0.0",
+      "pygments": "2.21.0",
+      "pytest": "9.1.1",
+      "pytest-benchmark": "5.2.3",
+      "python": "3.11.11",
+      "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+      "setuptools": "65.5.0"
+    },
+    "environment": {
+      "cpu": "Intel(R) Xeon(R) 6973P-C",
+      "cpu_governor": "performance",
+      "fingerprint": "56afee25cf7ab058",
+      "kernel": "6.17.0-1022-azure",
+      "machine": "x86_64",
+      "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+      "python": "3.11.11",
+      "system": "Linux",
+      "turbo_policy": "no_turbo=0"
+    },
+    "lock_hash": "aa20ce0125bb88f53960ecf3de2ce81fd82eb8b0d3249448ea25f122bbd1c037",
+    "measured_at": "2026-08-26T03:51:15.749228+00:00",
+    "metrics": {
+      "read_overhead_pct": {
+        "direction": "lower_is_better",
+        "unit": "%",
+        "value": 0.7164365737256042
+      },
+      "scan_overhead_ms": {
+        "direction": "lower_is_better",
+        "unit": "ms",
+        "value": -0.0031465000063235493
+      },
+      "write_overhead_pct": {
+        "direction": "lower_is_better",
+        "unit": "%",
+        "value": 1.1083765178927798
+      }
+    },
+    "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+    "ref": "refs/tags/alopex-py-v0.8.8-repair.1",
+    "schema_version": 1,
+    "workload_signature": "3660808adb3c32cd261030686d14ee61055f3f242f133adf366172fa1ae07d17"
+  }
+}
