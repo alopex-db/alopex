@@ -246,12 +246,20 @@ pub fn is_legacy_marker(path: &Path) -> bool {
 }
 
 /// fsync a directory so entry creations/removals inside it become durable.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(windows)))]
 pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
     if dir.as_os_str().is_empty() || !dir.is_dir() {
         return Ok(());
     }
     File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+/// `std::fs::File::open` cannot open a directory for syncing on Windows.
+#[cfg(windows)]
+pub(crate) fn sync_dir(_dir: &Path) -> Result<()> {
+    // ponytail: add a narrow Win32 directory-flush wrapper if power-loss
+    // durability of the directory entry becomes a Windows requirement.
     Ok(())
 }
 

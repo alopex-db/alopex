@@ -232,6 +232,12 @@ All notable changes to this project will be documented in this file.
   otherwise carried `R_X86_64_TPOFF32` relocations and could not be linked
   into the Python extension module. The script now fails closed when a Linux
   archive still carries them.
+- Windows Embedded/Python convergence no longer reports `Access is denied`
+  after atomically replacing the `.alopex` container: the file body is still
+  synced before rename, while the unsupported standard-library directory sync
+  is skipped on Windows.
+- Python `file://` targets use the platform URL-to-path converter, so valid
+  Windows file URIs open the intended embedded database.
 
 ### Changed
 

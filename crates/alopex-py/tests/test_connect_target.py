@@ -45,7 +45,7 @@ def test_filesystem_path_and_file_url_open_embedded(tmp_path):
     finally:
         db.close()
 
-    reopened = alopex.connect(f"file://{path}")
+    reopened = alopex.connect(path.as_uri())
     try:
         assert isinstance(reopened, Database)
     finally:

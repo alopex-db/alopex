@@ -53,7 +53,8 @@ import time
 import weakref
 from http import client as _http_client
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 from ._alopex import AlopexError as AlopexError
 from ._alopex import _bind_sql_params
@@ -396,7 +397,7 @@ def resolve_connect_target(
             "opener yet; open the database locally or point at a server URL",
         )
     if scheme == "file":
-        path = unquote(parts.path)
+        path = url2pathname(parts.path)
         if not path:
             raise _invalid_target(f"file:// target has no path: {target!r}")
         return (TARGET_PATH, path)
