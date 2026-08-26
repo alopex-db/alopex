@@ -627,7 +627,9 @@ fn decode_hex(name: &str, value: &str) -> Result<Vec<u8>> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let text = std::str::from_utf8(pair).expect("hex input is UTF-8");
             u8::from_str_radix(text, 16).map_err(|_| {
