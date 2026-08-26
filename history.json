@@ -4001,6 +4001,64 @@
       "ref": "refs/tags/alopex-py-v0.8.8-repair.1",
       "schema_version": 1,
       "workload_signature": "3660808adb3c32cd261030686d14ee61055f3f242f133adf366172fa1ae07d17"
+    },
+    {
+      "commit": "27c90eda927ccb6867e668d165329b15b59e5cfe",
+      "dependencies": {
+        "alopex": "0.8.9",
+        "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
+        "iniconfig": "2.3.0",
+        "maturin": "1.14.1",
+        "nim": "unavailable",
+        "numpy": "2.4.6",
+        "packaging": "26.3",
+        "patchelf": "patchelf 0.18.0",
+        "pip": "26.2",
+        "pluggy": "1.6.0",
+        "polars": "1.43.2",
+        "polars-runtime-32": "1.43.2",
+        "py-cpuinfo": "9.0.0",
+        "pygments": "2.21.0",
+        "pytest": "9.1.1",
+        "pytest-benchmark": "5.2.3",
+        "python": "3.11.11",
+        "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+        "setuptools": "65.5.0"
+      },
+      "environment": {
+        "cpu": "AMD EPYC 7763 64-Core Processor",
+        "cpu_governor": "unavailable",
+        "fingerprint": "5085be655afe9b76",
+        "kernel": "6.17.0-1022-azure",
+        "machine": "x86_64",
+        "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+        "python": "3.11.11",
+        "system": "Linux",
+        "turbo_policy": "unavailable"
+      },
+      "lock_hash": "9589d0a31545afdae254a1f9af03834920d1086e405f11173f2e468b0a2ac3d0",
+      "measured_at": "2026-08-26T14:46:38.574011+00:00",
+      "metrics": {
+        "read_overhead_pct": {
+          "direction": "lower_is_better",
+          "unit": "%",
+          "value": 0.34807008598982164
+        },
+        "scan_overhead_ms": {
+          "direction": "lower_is_better",
+          "unit": "ms",
+          "value": -0.005632400001331917
+        },
+        "write_overhead_pct": {
+          "direction": "lower_is_better",
+          "unit": "%",
+          "value": 1.4546265716096405
+        }
+      },
+      "profile": "gha-ubuntu-24.04-x64-single-core-v1",
+      "ref": "refs/heads/main",
+      "schema_version": 1,
+      "workload_signature": "00cae6bc8aebd6a61f4897638a6f0bf908d120da049f377ca35ef2c9b16da912"
     }
   ],
   "schema_version": 1
