@@ -16,6 +16,9 @@ macro_rules! wrappers {
 
 wrappers!(
     eval_length => "length", eval_char_length => "char_length", eval_octet_length => "octet_length",
+    eval_ascii => "ascii", eval_chr => "chr", eval_bit_length => "bit_length",
+    eval_starts_with => "starts_with", eval_ends_with => "ends_with",
+    eval_translate => "translate", eval_levenshtein => "levenshtein",
     eval_upper => "upper", eval_lower => "lower", eval_initcap => "initcap",
     eval_substr => "substr", eval_left => "left", eval_right => "right", eval_trim => "trim",
     eval_ltrim => "ltrim", eval_rtrim => "rtrim", eval_replace => "replace", eval_instr => "instr",
@@ -23,6 +26,7 @@ wrappers!(
     eval_repeat => "repeat", eval_reverse => "reverse", eval_lpad => "lpad", eval_rpad => "rpad",
     eval_split_part => "split_part", eval_regexp_replace => "regexp_replace",
     eval_regexp_match => "regexp_match", eval_regexp_matches => "regexp_matches",
+    eval_regexp_like => "regexp_like",
 );
 
 fn eval_named(name: &str, values: &[SqlValue]) -> Result<SqlValue> {
@@ -64,6 +68,36 @@ fn eval_named(name: &str, values: &[SqlValue]) -> Result<SqlValue> {
             Some(SqlValue::Blob(b)) => b.len(),
             _ => 0,
         } as i32)),
+        "ascii" => Ok(SqlValue::Integer(
+            text(0)?.chars().next().map_or(0, |ch| ch as i32),
+        )),
+        "chr" => {
+            let value = numeric_i64(values.first())?;
+            let character = u32::try_from(value)
+                .ok()
+                .filter(|value| *value != 0)
+                .and_then(char::from_u32)
+                .ok_or_else(|| {
+                    invalid_argument(name, "value is not a valid non-zero Unicode scalar")
+                })?;
+            Ok(SqlValue::Text(character.to_string()))
+        }
+        "bit_length" => {
+            let bytes = match values.first() {
+                Some(SqlValue::Text(value)) => value.len(),
+                Some(SqlValue::Blob(value)) => value.len(),
+                _ => 0,
+            };
+            let bits = bytes
+                .checked_mul(8)
+                .and_then(|value| i32::try_from(value).ok())
+                .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+            Ok(SqlValue::Integer(bits))
+        }
+        "starts_with" => Ok(SqlValue::Boolean(text(0)?.starts_with(text(1)?))),
+        "ends_with" => Ok(SqlValue::Boolean(text(0)?.ends_with(text(1)?))),
+        "translate" => Ok(SqlValue::Text(translate(text(0)?, text(1)?, text(2)?))),
+        "levenshtein" => Ok(SqlValue::Integer(levenshtein(text(0)?, text(1)?)?)),
         "upper" => Ok(SqlValue::Text(text(0)?.to_uppercase())),
         "lower" => Ok(SqlValue::Text(text(0)?.to_lowercase())),
         "initcap" => Ok(SqlValue::Text(initcap(text(0)?))),
@@ -130,12 +164,7 @@ fn eval_named(name: &str, values: &[SqlValue]) -> Result<SqlValue> {
             ))
         }
         "regexp_replace" => {
-            if text(0)?.len() > 1_048_576 {
-                return Err(ExecutorError::Evaluation(EvaluationError::InvalidRegex {
-                    pattern: text(1)?.into(),
-                    reason: "input exceeds 1 MiB".into(),
-                }));
-            }
+            validate_regex_input(text(0)?, text(1)?)?;
             let regex = compile_regex(text(1)?, "")?;
             Ok(SqlValue::Text(
                 regex.replace_all(text(0)?, text(2)?).into_owned(),
@@ -143,6 +172,11 @@ fn eval_named(name: &str, values: &[SqlValue]) -> Result<SqlValue> {
         }
         "regexp_match" => regexp_match(text(0)?, text(1)?, ""),
         "regexp_matches" => regexp_match(
+            text(0)?,
+            text(1)?,
+            values.get(2).and_then(as_text).unwrap_or(""),
+        ),
+        "regexp_like" => regexp_like(
             text(0)?,
             text(1)?,
             values.get(2).and_then(as_text).unwrap_or(""),
@@ -174,6 +208,57 @@ fn numeric_i64(value: Option<&SqlValue>) -> Result<i64> {
         Some(other) => Err(type_error("Integer", Some(other))),
         None => Err(type_error("Integer", None)),
     }
+}
+
+fn invalid_argument(function: &str, reason: &str) -> ExecutorError {
+    ExecutorError::Evaluation(EvaluationError::InvalidArgument {
+        function: function.into(),
+        reason: reason.into(),
+    })
+}
+
+fn translate(value: &str, from: &str, to: &str) -> String {
+    let from: Vec<char> = from.chars().collect();
+    let to: Vec<char> = to.chars().collect();
+    value
+        .chars()
+        .filter_map(|character| {
+            from.iter()
+                .position(|candidate| *candidate == character)
+                .map_or(Some(character), |index| to.get(index).copied())
+        })
+        .collect()
+}
+
+fn levenshtein(left: &str, right: &str) -> Result<i32> {
+    let mut left: Vec<char> = left.chars().collect();
+    let mut right: Vec<char> = right.chars().collect();
+    if left.len() < right.len() {
+        std::mem::swap(&mut left, &mut right);
+    }
+    if left.len().saturating_mul(right.len()) > 1_000_000 {
+        return Err(invalid_argument(
+            "levenshtein",
+            "inputs exceed one million comparison cells",
+        ));
+    }
+
+    let mut costs: Vec<usize> = (0..=right.len()).collect();
+    for (left_index, left_char) in left.iter().enumerate() {
+        let mut diagonal = costs[0];
+        costs[0] = left_index + 1;
+        for (right_index, right_char) in right.iter().enumerate() {
+            let above = costs[right_index + 1];
+            costs[right_index + 1] = if left_char == right_char {
+                diagonal
+            } else {
+                1 + diagonal.min(above).min(costs[right_index])
+            };
+            diagonal = above;
+        }
+    }
+    i32::try_from(costs[right.len()])
+        .map_err(|_| ExecutorError::Evaluation(EvaluationError::Overflow))
 }
 
 fn initcap(value: &str) -> String {
@@ -246,6 +331,7 @@ fn pad(values: &[SqlValue], value: &str, left: bool) -> Result<SqlValue> {
 }
 
 fn compile_regex(pattern: &str, flags: &str) -> Result<regex::Regex> {
+    validate_regex_flags(pattern, flags)?;
     if pattern.len() > 4096 {
         return Err(ExecutorError::Evaluation(EvaluationError::InvalidRegex {
             pattern: pattern.into(),
@@ -265,18 +351,54 @@ fn compile_regex(pattern: &str, flags: &str) -> Result<regex::Regex> {
     })
 }
 
-fn regexp_match(value: &str, pattern: &str, flags: &str) -> Result<SqlValue> {
+fn validate_regex_flags(pattern: &str, flags: &str) -> Result<()> {
+    let mut seen = [false; 3];
+    for flag in flags.chars() {
+        let index = match flag {
+            'i' => 0,
+            'm' => 1,
+            's' => 2,
+            _ => {
+                return Err(ExecutorError::Evaluation(EvaluationError::InvalidRegex {
+                    pattern: pattern.into(),
+                    reason: format!("unsupported flag '{flag}'"),
+                }));
+            }
+        };
+        if std::mem::replace(&mut seen[index], true) {
+            return Err(ExecutorError::Evaluation(EvaluationError::InvalidRegex {
+                pattern: pattern.into(),
+                reason: format!("duplicate flag '{flag}'"),
+            }));
+        }
+    }
+    Ok(())
+}
+
+fn validate_regex_input(value: &str, pattern: &str) -> Result<()> {
     if value.len() > 1_048_576 {
         return Err(ExecutorError::Evaluation(EvaluationError::InvalidRegex {
             pattern: pattern.into(),
             reason: "input exceeds 1 MiB".into(),
         }));
     }
+    Ok(())
+}
+
+fn regexp_match(value: &str, pattern: &str, flags: &str) -> Result<SqlValue> {
+    validate_regex_input(value, pattern)?;
     let regex = compile_regex(pattern, flags)?;
     Ok(regex
         .find(value)
         .map(|m| SqlValue::Text(m.as_str().into()))
         .unwrap_or(SqlValue::Null))
+}
+
+fn regexp_like(value: &str, pattern: &str, flags: &str) -> Result<SqlValue> {
+    validate_regex_input(value, pattern)?;
+    Ok(SqlValue::Boolean(
+        compile_regex(pattern, flags)?.is_match(value),
+    ))
 }
 
 #[cfg(test)]
@@ -365,5 +487,128 @@ mod tests {
             ),
             SqlValue::Text("abc  ".into())
         );
+    }
+
+    #[test]
+    fn portable_string_functions_are_unicode_aware() {
+        assert_eq!(
+            eval("ascii", &[SqlValue::Text("あ".into())]),
+            SqlValue::Integer('あ' as i32)
+        );
+        assert_eq!(
+            eval("ascii", &[SqlValue::Text(String::new())]),
+            SqlValue::Integer(0)
+        );
+        assert_eq!(
+            eval("chr", &[SqlValue::Integer('猫' as i32)]),
+            SqlValue::Text("猫".into())
+        );
+        assert_eq!(
+            eval("bit_length", &[SqlValue::Text("あ".into())]),
+            SqlValue::Integer(24)
+        );
+        assert_eq!(
+            eval(
+                "starts_with",
+                &[
+                    SqlValue::Text("東京駅".into()),
+                    SqlValue::Text("東京".into())
+                ]
+            ),
+            SqlValue::Boolean(true)
+        );
+        assert_eq!(
+            eval(
+                "ends_with",
+                &[SqlValue::Text("東京駅".into()), SqlValue::Text("駅".into())]
+            ),
+            SqlValue::Boolean(true)
+        );
+        assert_eq!(
+            eval(
+                "translate",
+                &[
+                    SqlValue::Text("ábca".into()),
+                    SqlValue::Text("aá".into()),
+                    SqlValue::Text("XY".into()),
+                ]
+            ),
+            SqlValue::Text("YbcX".into())
+        );
+        assert_eq!(
+            eval(
+                "translate",
+                &[
+                    SqlValue::Text("abc".into()),
+                    SqlValue::Text("abc".into()),
+                    SqlValue::Text("XY".into()),
+                ]
+            ),
+            SqlValue::Text("XY".into())
+        );
+        assert_eq!(
+            eval(
+                "levenshtein",
+                &[SqlValue::Text("猫".into()), SqlValue::Text("子猫".into())]
+            ),
+            SqlValue::Integer(1)
+        );
+    }
+
+    #[test]
+    fn regex_like_shares_flag_and_error_rules() {
+        assert_eq!(
+            eval(
+                "regexp_like",
+                &[
+                    SqlValue::Text("Abc\nxyz".into()),
+                    SqlValue::Text("^abc".into()),
+                    SqlValue::Text("im".into()),
+                ]
+            ),
+            SqlValue::Boolean(true)
+        );
+
+        for name in ["regexp_matches", "regexp_like"] {
+            for flags in ["x", "ii"] {
+                let error = eval_for(name).unwrap()(&[
+                    SqlValue::Text("abc".into()),
+                    SqlValue::Text("abc".into()),
+                    SqlValue::Text(flags.into()),
+                ])
+                .unwrap_err();
+                assert!(matches!(
+                    error,
+                    ExecutorError::Evaluation(EvaluationError::InvalidRegex { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn chr_rejects_invalid_unicode_scalars() {
+        for value in [0, -1, 0xd800, 0x11_0000] {
+            let error = eval_for("chr").unwrap()(&[SqlValue::Integer(value)]);
+            assert!(matches!(
+                error,
+                Err(ExecutorError::Evaluation(
+                    EvaluationError::InvalidArgument { .. }
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn levenshtein_rejects_excessive_work() {
+        let left = "a".repeat(1_001);
+        let right = "b".repeat(1_000);
+        let error =
+            eval_for("levenshtein").unwrap()(&[SqlValue::Text(left), SqlValue::Text(right)]);
+        assert!(matches!(
+            error,
+            Err(ExecutorError::Evaluation(
+                EvaluationError::InvalidArgument { .. }
+            ))
+        ));
     }
 }

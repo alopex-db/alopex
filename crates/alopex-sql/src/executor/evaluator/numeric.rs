@@ -18,6 +18,9 @@ wrappers!(
     eval_trunc => "trunc", eval_mod => "mod", eval_power => "power",
     eval_pow => "pow", eval_sqrt => "sqrt", eval_exp => "exp", eval_ln => "ln",
     eval_log => "log", eval_log10 => "log10", eval_random => "random",
+    eval_cbrt => "cbrt", eval_cot => "cot", eval_log2 => "log2",
+    eval_acosh => "acosh", eval_asinh => "asinh", eval_atanh => "atanh",
+    eval_cosh => "cosh", eval_sinh => "sinh", eval_tanh => "tanh", eval_isnan => "isnan",
     eval_sin => "sin", eval_cos => "cos", eval_tan => "tan", eval_asin => "asin",
     eval_acos => "acos", eval_atan => "atan", eval_atan2 => "atan2",
     eval_degrees => "degrees", eval_radians => "radians", eval_pi => "pi",
@@ -86,6 +89,22 @@ fn eval_named(name: &str, values: &[SqlValue]) -> Result<SqlValue> {
             }
         }
         "log10" => domain_float(first, |v| if v > 0.0 { Some(v.log10()) } else { None }),
+        "cbrt" => unary_float(|v| v.cbrt()),
+        "cot" => unary_float(|v| 1.0 / v.tan()),
+        "log2" => domain_float(first, |v| if v > 0.0 { Some(v.log2()) } else { None }),
+        "acosh" => domain_float(first, |v| if v >= 1.0 { Some(v.acosh()) } else { None }),
+        "asinh" => unary_float(|v| v.asinh()),
+        "atanh" => domain_float(first, |v| {
+            if (-1.0..1.0).contains(&v) {
+                Some(v.atanh())
+            } else {
+                None
+            }
+        }),
+        "cosh" => unary_float(|v| v.cosh()),
+        "sinh" => unary_float(|v| v.sinh()),
+        "tanh" => unary_float(|v| v.tanh()),
+        "isnan" => Ok(SqlValue::Boolean(as_f64(first)?.is_nan())),
         "sin" => unary_float(|v| v.sin()),
         "cos" => unary_float(|v| v.cos()),
         "tan" => unary_float(|v| v.tan()),
@@ -187,6 +206,48 @@ mod tests {
         assert_eq!(eval("sqrt", &[SqlValue::Double(-1.0)]), SqlValue::Null);
         assert_eq!(eval("acos", &[SqlValue::Double(2.0)]), SqlValue::Null);
         assert_eq!(eval("abs", &[SqlValue::Null]), SqlValue::Null);
+    }
+
+    #[test]
+    fn portable_math_functions_cover_values_domains_and_non_finite_results() {
+        let cases = [
+            ("cbrt", -8.0, -2.0),
+            ("cot", std::f64::consts::FRAC_PI_4, 1.0),
+            ("log2", 8.0, 3.0),
+            ("acosh", 1.0, 0.0),
+            ("asinh", 0.0, 0.0),
+            ("atanh", 0.0, 0.0),
+            ("cosh", 0.0, 1.0),
+            ("sinh", 0.0, 0.0),
+            ("tanh", 0.0, 0.0),
+        ];
+        for (name, input, expected) in cases {
+            let SqlValue::Double(actual) = eval(name, &[SqlValue::Double(input)]) else {
+                panic!("{name} did not return DOUBLE");
+            };
+            assert!((actual - expected).abs() < 1e-12, "{name}: {actual}");
+        }
+
+        assert_eq!(eval("log2", &[SqlValue::Double(0.0)]), SqlValue::Null);
+        assert_eq!(eval("acosh", &[SqlValue::Double(0.5)]), SqlValue::Null);
+        assert_eq!(eval("atanh", &[SqlValue::Double(1.0)]), SqlValue::Null);
+        assert!(matches!(
+            eval("cot", &[SqlValue::Double(0.0)]),
+            SqlValue::Double(value) if value.is_infinite()
+        ));
+        assert!(matches!(
+            eval("cosh", &[SqlValue::Double(1_000.0)]),
+            SqlValue::Double(value) if value.is_infinite()
+        ));
+        assert_eq!(
+            eval("isnan", &[SqlValue::Double(f64::NAN)]),
+            SqlValue::Boolean(true)
+        );
+        assert_eq!(
+            eval("isnan", &[SqlValue::Double(f64::INFINITY)]),
+            SqlValue::Boolean(false)
+        );
+        assert_eq!(eval("isnan", &[SqlValue::Null]), SqlValue::Null);
     }
 
     #[test]
