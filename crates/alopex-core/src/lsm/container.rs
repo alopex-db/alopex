@@ -40,8 +40,10 @@ use crate::storage::format::bincode_config;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::format::{FOOTER_SIZE, HEADER_SIZE};
 
+#[cfg(all(not(target_arch = "wasm32"), not(windows)))]
+use std::fs::File;
 #[cfg(not(target_arch = "wasm32"))]
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
 #[cfg(not(target_arch = "wasm32"))]
