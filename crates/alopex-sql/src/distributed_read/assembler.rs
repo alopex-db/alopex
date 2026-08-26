@@ -1154,6 +1154,7 @@ mod tests {
                 separator: Some("|".into()),
             },
             arg: None,
+            extra_args: Vec::new(),
             distinct: true,
             result_type: ResolvedType::Text,
             filter: None,
@@ -1221,6 +1222,7 @@ mod tests {
         let aggregate = AggregateExpr {
             function: AggregateFunction::Sum,
             arg: None,
+            extra_args: Vec::new(),
             distinct: false,
             result_type: ResolvedType::Double,
             filter: None,

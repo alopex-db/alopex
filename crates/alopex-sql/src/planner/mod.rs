@@ -4004,15 +4004,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                         value: args[0].clone(),
                         nth: args[1].clone(),
                     }),
-                    "sum" | "count" | "avg" | "min" | "max" => {
+                    name if is_aggregate_function(name) => {
                         let (aggregate, _) = self.build_aggregate_expr_from_typed(
-                            expr,
-                            name,
-                            args,
-                            *distinct,
-                            *star,
-                            None,
-                            &[],
+                            expr, name, args, *distinct, *star, None, order_by,
                         )?;
                         WindowFunction::Aggregate(aggregate)
                     }
@@ -4141,6 +4135,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::Count,
                     arg: Some(args[0].clone()),
+                    extra_args: Vec::new(),
                     distinct,
                     result_type: ResolvedType::BigInt,
                     filter: filter_owned,
@@ -4163,6 +4158,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::Sum,
                     arg: Some(arg.clone()),
+                    extra_args: Vec::new(),
                     distinct,
                     result_type: crate::planner::aggregate_expr::sum_result_type(
                         &arg.resolved_type,
@@ -4187,6 +4183,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::Total,
                     arg: Some(arg.clone()),
+                    extra_args: Vec::new(),
                     distinct: false,
                     result_type: ResolvedType::Double,
                     filter: filter_owned,
@@ -4209,6 +4206,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::Avg,
                     arg: Some(arg.clone()),
+                    extra_args: Vec::new(),
                     distinct,
                     result_type: ResolvedType::Double,
                     filter: filter_owned,
@@ -4231,6 +4229,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::Min,
                     arg: Some(arg.clone()),
+                    extra_args: Vec::new(),
                     distinct,
                     result_type: arg.resolved_type.clone(),
                     filter: filter_owned,
@@ -4253,6 +4252,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::Max,
                     arg: Some(arg.clone()),
+                    extra_args: Vec::new(),
                     distinct,
                     result_type: arg.resolved_type.clone(),
                     filter: filter_owned,
@@ -4292,6 +4292,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::GroupConcat { separator },
                     arg: Some(arg.clone()),
+                    extra_args: Vec::new(),
                     distinct,
                     result_type: ResolvedType::Text,
                     filter: filter_owned,
@@ -4332,6 +4333,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::StringAgg { separator },
                     arg: Some(arg.clone()),
+                    extra_args: Vec::new(),
                     distinct,
                     result_type: ResolvedType::Text,
                     filter: filter_owned,
@@ -4372,6 +4374,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 let agg = AggregateExpr {
                     function: AggregateFunction::PercentileDisc { fraction },
                     arg: Some(sort.expr.clone()),
+                    extra_args: Vec::new(),
                     distinct: false,
                     result_type: sort.expr.resolved_type.clone(),
                     filter: filter_owned,
@@ -4390,6 +4393,130 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     filter,
                     &retained_order_by,
                 );
+                Ok((agg, signature))
+            }
+            "percentile_cont" => {
+                let fraction = type_checker::percentile_fraction_named(name, &args[0])?;
+                let sort = retained_order_by.first().ok_or_else(|| {
+                    PlannerError::invalid_expression(
+                        "PERCENTILE_CONT requires WITHIN GROUP (ORDER BY ...)".to_string(),
+                    )
+                })?;
+                let agg = AggregateExpr {
+                    function: AggregateFunction::PercentileCont { fraction },
+                    arg: Some(sort.expr.clone()),
+                    extra_args: Vec::new(),
+                    distinct: false,
+                    result_type: ResolvedType::Double,
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
+                };
+                let fraction_key = format!("{fraction:?}");
+                let signature = aggregate_signature(
+                    name,
+                    false,
+                    star,
+                    None,
+                    Some(&fraction_key),
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
+                Ok((agg, signature))
+            }
+            "mode" if args.is_empty() => {
+                let sort = retained_order_by.first().ok_or_else(|| {
+                    PlannerError::invalid_expression(
+                        "MODE requires WITHIN GROUP (ORDER BY ...)".to_string(),
+                    )
+                })?;
+                let agg = AggregateExpr {
+                    function: AggregateFunction::Mode,
+                    arg: Some(sort.expr.clone()),
+                    extra_args: Vec::new(),
+                    distinct: false,
+                    result_type: sort.expr.resolved_type.clone(),
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
+                };
+                let signature = aggregate_signature(
+                    name,
+                    false,
+                    star,
+                    None,
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
+                Ok((agg, signature))
+            }
+            name if type_checker::is_portable_aggregate_name(name) => {
+                let function = match name {
+                    "variance" | "var_samp" => AggregateFunction::Variance { sample: true },
+                    "var_pop" => AggregateFunction::Variance { sample: false },
+                    "stddev" | "stddev_samp" => AggregateFunction::Stddev { sample: true },
+                    "stddev_pop" => AggregateFunction::Stddev { sample: false },
+                    "covar_samp" => AggregateFunction::Covariance { sample: true },
+                    "covar_pop" => AggregateFunction::Covariance { sample: false },
+                    "corr" => AggregateFunction::Corr,
+                    "median" => AggregateFunction::Median,
+                    "mode" => AggregateFunction::Mode,
+                    "quantile_cont" => AggregateFunction::QuantileCont {
+                        fraction: type_checker::percentile_fraction_named(name, &args[1])?,
+                    },
+                    "regr_count" => AggregateFunction::RegrCount,
+                    "regr_avgx" => AggregateFunction::RegrAvgX,
+                    "regr_avgy" => AggregateFunction::RegrAvgY,
+                    "regr_sxx" => AggregateFunction::RegrSxx,
+                    "regr_syy" => AggregateFunction::RegrSyy,
+                    "regr_sxy" => AggregateFunction::RegrSxy,
+                    "regr_slope" => AggregateFunction::RegrSlope,
+                    "regr_intercept" => AggregateFunction::RegrIntercept,
+                    "regr_r2" => AggregateFunction::RegrR2,
+                    "any_value" => AggregateFunction::AnyValue,
+                    "first" => AggregateFunction::First,
+                    "last" => AggregateFunction::Last,
+                    "arg_min" | "min_by" => AggregateFunction::ArgMin,
+                    "arg_max" | "max_by" => AggregateFunction::ArgMax,
+                    "bit_and" => AggregateFunction::BitAnd,
+                    "bit_or" => AggregateFunction::BitOr,
+                    "bit_xor" => AggregateFunction::BitXor,
+                    "bool_and" => AggregateFunction::BoolAnd,
+                    "bool_or" => AggregateFunction::BoolOr,
+                    _ => unreachable!(),
+                };
+                let primary = args[0].clone();
+                let extra_args = if matches!(name, "quantile_cont") {
+                    Vec::new()
+                } else {
+                    args[1..].to_vec()
+                };
+                let config = match &function {
+                    AggregateFunction::PercentileCont { fraction }
+                    | AggregateFunction::QuantileCont { fraction } => Some(format!("{fraction:?}")),
+                    _ => None,
+                };
+                let agg = AggregateExpr {
+                    function,
+                    arg: Some(primary.clone()),
+                    extra_args: extra_args.clone(),
+                    distinct: false,
+                    result_type: expr.resolved_type.clone(),
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
+                };
+                let mut signature = aggregate_signature(
+                    name,
+                    false,
+                    star,
+                    Some(&primary),
+                    config.as_ref(),
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
+                signature.extra_arg_keys = extra_args.iter().map(expr_key).collect();
                 Ok((agg, signature))
             }
             _ => Err(PlannerError::unsupported_feature(
@@ -4932,6 +5059,7 @@ struct AggregateSignature {
     distinct: bool,
     star: bool,
     arg_key: Option<String>,
+    extra_arg_keys: Vec<String>,
     separator: Option<String>,
     /// FILTER (WHERE ...) identity: aggregates that differ only in their
     /// filter are distinct physical aggregates (issue #148, D10).
@@ -5995,7 +6123,8 @@ fn is_aggregate_function(name: &str) -> bool {
             | "group_concat"
             | "string_agg"
             | "percentile_disc"
-    )
+            | "percentile_cont"
+    ) || type_checker::is_portable_aggregate_name(&name.to_ascii_lowercase())
 }
 
 fn expr_key(expr: &TypedExpr) -> String {
@@ -6160,7 +6289,13 @@ fn build_distinct_on_sort_spec(
 fn is_order_sensitive_aggregate(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "group_concat" | "string_agg" | "percentile_disc"
+        "group_concat"
+            | "string_agg"
+            | "percentile_disc"
+            | "percentile_cont"
+            | "mode"
+            | "first"
+            | "last"
     )
 }
 
@@ -6189,13 +6324,24 @@ fn aggregate_signature(
     order_by: &[SortExpr],
 ) -> AggregateSignature {
     AggregateSignature {
-        name: name.to_ascii_lowercase(),
+        name: canonical_aggregate_name(name),
         distinct,
         star,
         arg_key: arg.map(expr_key),
+        extra_arg_keys: Vec::new(),
         separator: separator.cloned(),
         filter_key: filter.map(expr_key),
         order_key: sort_exprs_key(order_by),
+    }
+}
+
+fn canonical_aggregate_name(name: &str) -> String {
+    match name.to_ascii_lowercase().as_str() {
+        "variance" | "var_samp" => "var_samp".into(),
+        "stddev" | "stddev_samp" => "stddev_samp".into(),
+        "min_by" => "arg_min".into(),
+        "max_by" => "arg_max".into(),
+        lower => lower.into(),
     }
 }
 
@@ -6240,12 +6386,72 @@ fn build_aggregate_map(aggregates: &[AggregateExpr]) -> HashMap<AggregateSignatu
                 false,
                 None,
             ),
+            AggregateFunction::PercentileCont { fraction } => (
+                "percentile_cont".to_string(),
+                Some(format!("{fraction:?}")),
+                false,
+                None,
+            ),
+            AggregateFunction::QuantileCont { fraction } => (
+                "quantile_cont".to_string(),
+                Some(format!("{fraction:?}")),
+                false,
+                agg.arg.as_ref(),
+            ),
+            AggregateFunction::Variance { sample } => (
+                if *sample { "var_samp" } else { "var_pop" }.to_string(),
+                None,
+                false,
+                agg.arg.as_ref(),
+            ),
+            AggregateFunction::Stddev { sample } => (
+                if *sample { "stddev_samp" } else { "stddev_pop" }.to_string(),
+                None,
+                false,
+                agg.arg.as_ref(),
+            ),
+            AggregateFunction::Covariance { sample } => (
+                if *sample { "covar_samp" } else { "covar_pop" }.to_string(),
+                None,
+                false,
+                agg.arg.as_ref(),
+            ),
+            AggregateFunction::Corr => ("corr".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::Median => ("median".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::Mode => (
+                "mode".into(),
+                None,
+                false,
+                agg.order_by.is_empty().then_some(()).and(agg.arg.as_ref()),
+            ),
+            AggregateFunction::RegrCount => ("regr_count".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::RegrAvgX => ("regr_avgx".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::RegrAvgY => ("regr_avgy".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::RegrSxx => ("regr_sxx".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::RegrSyy => ("regr_syy".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::RegrSxy => ("regr_sxy".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::RegrSlope => ("regr_slope".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::RegrIntercept => {
+                ("regr_intercept".into(), None, false, agg.arg.as_ref())
+            }
+            AggregateFunction::RegrR2 => ("regr_r2".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::AnyValue => ("any_value".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::First => ("first".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::Last => ("last".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::ArgMin => ("arg_min".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::ArgMax => ("arg_max".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::BitAnd => ("bit_and".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::BitOr => ("bit_or".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::BitXor => ("bit_xor".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::BoolAnd => ("bool_and".into(), None, false, agg.arg.as_ref()),
+            AggregateFunction::BoolOr => ("bool_or".into(), None, false, agg.arg.as_ref()),
         };
         let signature = AggregateSignature {
             name,
             distinct: agg.distinct,
             star,
             arg_key: arg.map(expr_key),
+            extra_arg_keys: agg.extra_args.iter().map(expr_key).collect(),
             separator,
             filter_key: agg.filter.as_ref().map(expr_key),
             order_key: sort_exprs_key(&agg.order_by),
@@ -6801,6 +7007,7 @@ fn build_aggregate_schema(
             AggregateFunction::GroupConcat { .. } => format!("group_concat_{idx}"),
             AggregateFunction::StringAgg { .. } => format!("string_agg_{idx}"),
             AggregateFunction::PercentileDisc { .. } => format!("percentile_disc_{idx}"),
+            _ => format!("aggregate_{idx}"),
         };
         schema.push(ColumnMetadata::new(name, agg.result_type.clone()));
     }
@@ -6834,7 +7041,8 @@ fn rewrite_expr_with_maps(
             order_by,
             over: None,
         } if is_aggregate_function(name) => {
-            let is_percentile = name.eq_ignore_ascii_case("percentile_disc");
+            let lower = name.to_ascii_lowercase();
+            let is_percentile = matches!(lower.as_str(), "percentile_disc" | "percentile_cont");
             let separator = if name.eq_ignore_ascii_case("group_concat") && args.len() == 2 {
                 if let TypedExprKind::Literal(Literal::String(value)) = &args[1].kind {
                     Some(value.clone())
@@ -6854,19 +7062,36 @@ fn rewrite_expr_with_maps(
             } else if is_percentile && args.len() == 1 {
                 Some(format!(
                     "{:?}",
-                    type_checker::percentile_fraction(&args[0])?
+                    type_checker::percentile_fraction_named(&lower, &args[0])?
+                ))
+            } else if lower == "quantile_cont" && args.len() == 2 {
+                Some(format!(
+                    "{:?}",
+                    type_checker::percentile_fraction_named(&lower, &args[1])?
                 ))
             } else {
                 None
             };
             let signature = AggregateSignature {
-                name: name.to_ascii_lowercase(),
+                name: canonical_aggregate_name(name),
                 distinct: *distinct,
                 star: *star,
                 arg_key: if is_percentile {
                     None
                 } else {
                     args.first().map(expr_key)
+                },
+                extra_arg_keys: if matches!(
+                    lower.as_str(),
+                    "group_concat"
+                        | "string_agg"
+                        | "percentile_disc"
+                        | "percentile_cont"
+                        | "quantile_cont"
+                ) {
+                    Vec::new()
+                } else {
+                    args.iter().skip(1).map(expr_key).collect()
                 },
                 separator,
                 filter_key: filter.as_deref().map(expr_key),

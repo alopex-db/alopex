@@ -23,6 +23,43 @@ pub enum AggregateFunction {
     PercentileDisc {
         fraction: f64,
     },
+    PercentileCont {
+        fraction: f64,
+    },
+    QuantileCont {
+        fraction: f64,
+    },
+    Variance {
+        sample: bool,
+    },
+    Stddev {
+        sample: bool,
+    },
+    Covariance {
+        sample: bool,
+    },
+    Corr,
+    Median,
+    Mode,
+    RegrCount,
+    RegrAvgX,
+    RegrAvgY,
+    RegrSxx,
+    RegrSyy,
+    RegrSxy,
+    RegrSlope,
+    RegrIntercept,
+    RegrR2,
+    AnyValue,
+    First,
+    Last,
+    ArgMin,
+    ArgMax,
+    BitAnd,
+    BitOr,
+    BitXor,
+    BoolAnd,
+    BoolOr,
 }
 
 /// Aggregate expression definition.
@@ -30,6 +67,10 @@ pub enum AggregateFunction {
 pub struct AggregateExpr {
     pub function: AggregateFunction,
     pub arg: Option<TypedExpr>,
+    /// Additional inputs for two-argument aggregates. Existing accumulators
+    /// remain single-input through `arg`; only covariance, regression, and
+    /// arg-min/max consume this vector.
+    pub extra_args: Vec<TypedExpr>,
     pub distinct: bool,
     pub result_type: ResolvedType,
     /// `FILTER (WHERE predicate)`: rows where the predicate is not TRUE are
@@ -47,6 +88,7 @@ impl AggregateExpr {
         Self {
             function: AggregateFunction::Count,
             arg: None,
+            extra_args: Vec::new(),
             distinct: false,
             result_type: ResolvedType::BigInt,
             filter: None,
@@ -58,6 +100,7 @@ impl AggregateExpr {
         Self {
             function: AggregateFunction::Count,
             arg: Some(arg),
+            extra_args: Vec::new(),
             distinct,
             result_type: ResolvedType::BigInt,
             filter: None,
@@ -70,6 +113,7 @@ impl AggregateExpr {
         Self {
             function: AggregateFunction::Sum,
             arg: Some(arg),
+            extra_args: Vec::new(),
             distinct: false,
             result_type,
             filter: None,
@@ -81,6 +125,7 @@ impl AggregateExpr {
         Self {
             function: AggregateFunction::Total,
             arg: Some(arg),
+            extra_args: Vec::new(),
             distinct: false,
             result_type: ResolvedType::Double,
             filter: None,
@@ -92,6 +137,7 @@ impl AggregateExpr {
         Self {
             function: AggregateFunction::Avg,
             arg: Some(arg),
+            extra_args: Vec::new(),
             distinct: false,
             result_type: ResolvedType::Double,
             filter: None,
@@ -104,6 +150,7 @@ impl AggregateExpr {
         Self {
             function: AggregateFunction::Min,
             arg: Some(arg),
+            extra_args: Vec::new(),
             distinct: false,
             result_type,
             filter: None,
@@ -116,6 +163,7 @@ impl AggregateExpr {
         Self {
             function: AggregateFunction::Max,
             arg: Some(arg),
+            extra_args: Vec::new(),
             distinct: false,
             result_type,
             filter: None,

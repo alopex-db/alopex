@@ -863,6 +863,7 @@ fn remote_aggregate(function: &AggregateFunction) -> Option<RemoteAggregate> {
         AggregateFunction::GroupConcat { .. } => Some(RemoteAggregate::GroupConcat),
         AggregateFunction::StringAgg { .. } => Some(RemoteAggregate::StringAgg),
         AggregateFunction::PercentileDisc { .. } => None,
+        _ => None,
     }
 }
 
@@ -1164,6 +1165,7 @@ mod tests {
                 separator: Some(",".to_string()),
             },
             arg: Some(column()),
+            extra_args: Vec::new(),
             distinct: true,
             result_type: ResolvedType::Text,
             filter: None,

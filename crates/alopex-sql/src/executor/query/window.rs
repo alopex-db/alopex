@@ -446,7 +446,7 @@ fn evaluate_partition(
                     for row in partition {
                         update_accumulator(
                             accumulator.as_mut(),
-                            aggregate_value(aggregate, row)?,
+                            aggregate_values(aggregate, row)?,
                             memory,
                             &mut accumulator_bytes,
                         )?;
@@ -471,7 +471,7 @@ fn evaluate_partition(
                         for row in &partition[peer_start..peer_end] {
                             update_accumulator(
                                 accumulator.as_mut(),
-                                aggregate_value(aggregate, row)?,
+                                aggregate_values(aggregate, row)?,
                                 memory,
                                 &mut accumulator_bytes,
                             )?;
@@ -783,7 +783,7 @@ fn evaluate_framed_aggregate(
             for row in &partition[range] {
                 update_accumulator(
                     accumulator.as_mut(),
-                    aggregate_value(aggregate, row)?,
+                    aggregate_values(aggregate, row)?,
                     memory,
                     &mut accumulator_bytes,
                 )?;
@@ -1129,26 +1129,24 @@ fn order_values(row: &Row, order_by: &[SortExpr]) -> Result<Vec<SqlValue>> {
         .collect()
 }
 
-fn aggregate_value(
-    aggregate: &crate::planner::AggregateExpr,
-    row: &Row,
-) -> Result<Option<SqlValue>> {
+fn aggregate_values(aggregate: &crate::planner::AggregateExpr, row: &Row) -> Result<Vec<SqlValue>> {
     aggregate
         .arg
-        .as_ref()
+        .iter()
+        .chain(&aggregate.extra_args)
         .map(|arg| evaluator::evaluate(arg, &EvalContext::new(&row.values)))
-        .transpose()
+        .collect()
 }
 
 fn update_accumulator(
     accumulator: &mut dyn Accumulator,
-    value: Option<SqlValue>,
+    values: Vec<SqlValue>,
     memory: &mut WindowMemory,
     accounted_bytes: &mut u64,
 ) -> Result<()> {
-    let temporary_bytes = value.as_ref().map(ByteSized::estimated_bytes).unwrap_or(0);
+    let temporary_bytes = values.iter().map(ByteSized::estimated_bytes).sum();
     memory.reserve_bytes(temporary_bytes)?;
-    accumulator.update(value)?;
+    accumulator.update_values(&values)?;
     let retained_bytes = accumulator.retained_bytes();
     if retained_bytes > *accounted_bytes {
         memory.reserve_bytes(retained_bytes - *accounted_bytes)?;

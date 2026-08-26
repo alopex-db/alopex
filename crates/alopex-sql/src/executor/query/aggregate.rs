@@ -91,6 +91,11 @@ pub fn encode_group_key(values: &[SqlValue]) -> Result<GroupKeyBytes> {
 pub trait Accumulator: Send {
     /// Update the accumulator with a new value (None for COUNT(*) rows).
     fn update(&mut self, value: Option<SqlValue>) -> Result<()>;
+    /// Update all aggregate inputs. Two-argument aggregates override this;
+    /// existing single-input accumulators keep their established path.
+    fn update_values(&mut self, values: &[SqlValue]) -> Result<()> {
+        self.update(values.first().cloned())
+    }
     /// Update with the row's aggregate-local sort key values (issue #148).
     ///
     /// Order-insensitive accumulators ignore the keys and defer to
@@ -98,6 +103,9 @@ pub trait Accumulator: Send {
     /// `(keys, value)` pairs and sort in [`Accumulator::finalize`].
     fn update_ordered(&mut self, value: Option<SqlValue>, _sort_keys: &[SqlValue]) -> Result<()> {
         self.update(value)
+    }
+    fn update_ordered_values(&mut self, values: &[SqlValue], sort_keys: &[SqlValue]) -> Result<()> {
+        self.update_ordered(values.first().cloned(), sort_keys)
     }
     /// Return the serializable partial aggregate state.
     fn state(&self) -> Result<Vec<SqlValue>>;
@@ -1129,6 +1137,635 @@ impl Accumulator for PercentileDiscAccumulator {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum StatisticsKind {
+    Variance(bool),
+    Stddev(bool),
+    Covariance(bool),
+    Corr,
+    RegrCount,
+    RegrAvgX,
+    RegrAvgY,
+    RegrSxx,
+    RegrSyy,
+    RegrSxy,
+    RegrSlope,
+    RegrIntercept,
+    RegrR2,
+}
+
+/// Numerically stable one-pass moments with Chan-compatible merge state.
+#[derive(Debug, Clone)]
+struct StatisticsAccumulator {
+    kind: StatisticsKind,
+    count: u64,
+    mean_x: f64,
+    mean_y: f64,
+    m2_x: f64,
+    m2_y: f64,
+    co_moment: f64,
+}
+
+impl StatisticsAccumulator {
+    fn new(kind: StatisticsKind) -> Self {
+        Self {
+            kind,
+            count: 0,
+            mean_x: 0.0,
+            mean_y: 0.0,
+            m2_x: 0.0,
+            m2_y: 0.0,
+            co_moment: 0.0,
+        }
+    }
+
+    fn update_pair(&mut self, y: f64, x: f64) {
+        self.count += 1;
+        let count = self.count as f64;
+        let dx = x - self.mean_x;
+        let dy = y - self.mean_y;
+        self.mean_x += dx / count;
+        self.mean_y += dy / count;
+        self.m2_x += dx * (x - self.mean_x);
+        self.m2_y += dy * (y - self.mean_y);
+        self.co_moment += dx * (y - self.mean_y);
+    }
+
+    fn null_or(&self, value: f64) -> SqlValue {
+        if self.count == 0 {
+            SqlValue::Null
+        } else {
+            SqlValue::Double(value)
+        }
+    }
+}
+
+impl Accumulator for StatisticsAccumulator {
+    fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            return Ok(());
+        };
+        let value = numeric_to_f64(&value)?;
+        self.update_pair(value, value);
+        Ok(())
+    }
+
+    fn update_values(&mut self, values: &[SqlValue]) -> Result<()> {
+        if values.len() == 1 {
+            return self.update(values.first().cloned());
+        }
+        let [y, x] = values else {
+            return Err(invalid_aggregate_state(
+                "statistics",
+                format!("expected one or two inputs, got {}", values.len()),
+            ));
+        };
+        if y.is_null() || x.is_null() {
+            return Ok(());
+        }
+        self.update_pair(numeric_to_f64(y)?, numeric_to_f64(x)?);
+        Ok(())
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![
+            SqlValue::BigInt(self.count as i64),
+            SqlValue::Double(self.mean_x),
+            SqlValue::Double(self.mean_y),
+            SqlValue::Double(self.m2_x),
+            SqlValue::Double(self.m2_y),
+            SqlValue::Double(self.co_moment),
+        ])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("statistics", state, 6)?;
+        let other_count = state_bigint("statistics", &state[0], 0)?;
+        if other_count < 0 {
+            return Err(invalid_aggregate_state(
+                "statistics",
+                "state count must be non-negative",
+            ));
+        }
+        let other_count = other_count as u64;
+        if other_count == 0 {
+            return Ok(());
+        }
+        let other_mean_x = state_double("statistics", &state[1], 1)?;
+        let other_mean_y = state_double("statistics", &state[2], 2)?;
+        let other_m2_x = state_double("statistics", &state[3], 3)?;
+        let other_m2_y = state_double("statistics", &state[4], 4)?;
+        let other_co_moment = state_double("statistics", &state[5], 5)?;
+        if self.count == 0 {
+            self.count = other_count;
+            self.mean_x = other_mean_x;
+            self.mean_y = other_mean_y;
+            self.m2_x = other_m2_x;
+            self.m2_y = other_m2_y;
+            self.co_moment = other_co_moment;
+            return Ok(());
+        }
+        let total = self.count + other_count;
+        let left = self.count as f64;
+        let right = other_count as f64;
+        let total_f = total as f64;
+        let dx = other_mean_x - self.mean_x;
+        let dy = other_mean_y - self.mean_y;
+        self.m2_x += other_m2_x + dx * dx * left * right / total_f;
+        self.m2_y += other_m2_y + dy * dy * left * right / total_f;
+        self.co_moment += other_co_moment + dx * dy * left * right / total_f;
+        self.mean_x += dx * right / total_f;
+        self.mean_y += dy * right / total_f;
+        self.count = total;
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        let sample_divisor = || (self.count > 1).then(|| (self.count - 1) as f64);
+        let population_divisor = || (self.count > 0).then_some(self.count as f64);
+        let value = match self.kind {
+            StatisticsKind::Variance(sample) | StatisticsKind::Stddev(sample) => {
+                let divisor = if sample {
+                    sample_divisor()
+                } else {
+                    population_divisor()
+                };
+                let Some(divisor) = divisor else {
+                    return Ok(SqlValue::Null);
+                };
+                let variance = self.m2_x / divisor;
+                if matches!(self.kind, StatisticsKind::Stddev(_)) {
+                    variance.sqrt()
+                } else {
+                    variance
+                }
+            }
+            StatisticsKind::Covariance(sample) => {
+                let divisor = if sample {
+                    sample_divisor()
+                } else {
+                    population_divisor()
+                };
+                let Some(divisor) = divisor else {
+                    return Ok(SqlValue::Null);
+                };
+                self.co_moment / divisor
+            }
+            StatisticsKind::Corr => {
+                let divisor = (self.m2_x * self.m2_y).sqrt();
+                if self.count == 0 || divisor == 0.0 {
+                    return Ok(SqlValue::Null);
+                }
+                self.co_moment / divisor
+            }
+            StatisticsKind::RegrCount => return Ok(SqlValue::BigInt(self.count as i64)),
+            StatisticsKind::RegrAvgX => return Ok(self.null_or(self.mean_x)),
+            StatisticsKind::RegrAvgY => return Ok(self.null_or(self.mean_y)),
+            StatisticsKind::RegrSxx => return Ok(self.null_or(self.m2_x)),
+            StatisticsKind::RegrSyy => return Ok(self.null_or(self.m2_y)),
+            StatisticsKind::RegrSxy => return Ok(self.null_or(self.co_moment)),
+            StatisticsKind::RegrSlope => {
+                if self.count == 0 || self.m2_x == 0.0 {
+                    return Ok(SqlValue::Null);
+                }
+                self.co_moment / self.m2_x
+            }
+            StatisticsKind::RegrIntercept => {
+                if self.count == 0 || self.m2_x == 0.0 {
+                    return Ok(SqlValue::Null);
+                }
+                self.mean_y - (self.co_moment / self.m2_x) * self.mean_x
+            }
+            StatisticsKind::RegrR2 => {
+                if self.count == 0 || self.m2_x == 0.0 {
+                    return Ok(SqlValue::Null);
+                }
+                if self.m2_y == 0.0 {
+                    1.0
+                } else {
+                    self.co_moment * self.co_moment / (self.m2_x * self.m2_y)
+                }
+            }
+        };
+        Ok(SqlValue::Double(value))
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PercentileContAccumulator {
+    fraction: f64,
+    values: Vec<f64>,
+}
+
+impl PercentileContAccumulator {
+    fn new(fraction: f64) -> Self {
+        Self {
+            fraction,
+            values: Vec::new(),
+        }
+    }
+}
+
+impl Accumulator for PercentileContAccumulator {
+    fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            return Ok(());
+        };
+        self.values.push(numeric_to_f64(&value)?);
+        Ok(())
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Err(invalid_aggregate_state(
+            "percentile_cont",
+            "ordered aggregation cannot produce partial state",
+        ))
+    }
+
+    fn merge(&mut self, _state: &[SqlValue]) -> Result<()> {
+        Err(invalid_aggregate_state(
+            "percentile_cont",
+            "ordered aggregation cannot merge partial state",
+        ))
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        if self.values.is_empty() {
+            return Ok(SqlValue::Null);
+        }
+        let mut values = self.values.clone();
+        values.sort_by(f64::total_cmp);
+        let position = self.fraction * (values.len() - 1) as f64;
+        let lower = position.floor() as usize;
+        let upper = position.ceil() as usize;
+        if lower == upper {
+            return Ok(SqlValue::Double(values[lower]));
+        }
+        let weight = position - lower as f64;
+        Ok(SqlValue::Double(
+            values[lower] + (values[upper] - values[lower]) * weight,
+        ))
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+
+    fn retained_bytes(&self) -> u64 {
+        u64::try_from(
+            self.values
+                .capacity()
+                .saturating_mul(std::mem::size_of::<f64>()),
+        )
+        .unwrap_or(u64::MAX)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ModeAccumulator {
+    sort_specs: Vec<(bool, bool)>,
+    values: Vec<(Vec<SqlValue>, SqlValue)>,
+}
+
+impl ModeAccumulator {
+    fn new(sort_specs: Vec<(bool, bool)>) -> Self {
+        Self {
+            sort_specs: if sort_specs.is_empty() {
+                vec![(true, false)]
+            } else {
+                sort_specs
+            },
+            values: Vec::new(),
+        }
+    }
+}
+
+impl Accumulator for ModeAccumulator {
+    fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            return Ok(());
+        };
+        self.values.push((vec![value.clone()], value));
+        Ok(())
+    }
+
+    fn update_ordered(&mut self, value: Option<SqlValue>, sort_keys: &[SqlValue]) -> Result<()> {
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            return Ok(());
+        };
+        self.values.push((sort_keys.to_vec(), value));
+        Ok(())
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Err(invalid_aggregate_state(
+            "mode",
+            "ordered aggregation cannot produce partial state",
+        ))
+    }
+
+    fn merge(&mut self, _state: &[SqlValue]) -> Result<()> {
+        Err(invalid_aggregate_state(
+            "mode",
+            "ordered aggregation cannot merge partial state",
+        ))
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        if self.values.is_empty() {
+            return Ok(SqlValue::Null);
+        }
+        let mut values = self.values.clone();
+        values.sort_by(|left, right| compare_ordered_keys(&left.0, &right.0, &self.sort_specs));
+        let mut best_start = 0;
+        let mut best_count = 0;
+        let mut start = 0;
+        while start < values.len() {
+            let mut end = start + 1;
+            while end < values.len()
+                && compare_ordered_keys(&values[start].0, &values[end].0, &self.sort_specs)
+                    == Ordering::Equal
+            {
+                end += 1;
+            }
+            if end - start > best_count {
+                best_start = start;
+                best_count = end - start;
+            }
+            start = end;
+        }
+        Ok(values[best_start].1.clone())
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+
+    fn retained_bytes(&self) -> u64 {
+        self.values.iter().fold(0, |total, (keys, value)| {
+            total
+                .saturating_add(keys.iter().map(ByteSized::estimated_bytes).sum::<u64>())
+                .saturating_add(value.estimated_bytes())
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ValueKind {
+    Any,
+    First,
+    Last,
+    ArgMin,
+    ArgMax,
+}
+
+#[derive(Debug, Clone)]
+struct ValueAccumulator {
+    kind: ValueKind,
+    sort_specs: Vec<(bool, bool)>,
+    chosen: Option<(Vec<SqlValue>, SqlValue)>,
+}
+
+impl ValueAccumulator {
+    fn new(kind: ValueKind, sort_specs: Vec<(bool, bool)>) -> Self {
+        Self {
+            kind,
+            sort_specs,
+            chosen: None,
+        }
+    }
+
+    fn select(&mut self, keys: Vec<SqlValue>, value: SqlValue) {
+        let replace = match &self.chosen {
+            None => true,
+            Some((current, _)) => match self.kind {
+                ValueKind::Any | ValueKind::First => false,
+                ValueKind::Last => true,
+                ValueKind::ArgMin => {
+                    compare_ordered_keys(&keys, current, &[(true, false)]) == Ordering::Less
+                }
+                ValueKind::ArgMax => {
+                    compare_ordered_keys(&keys, current, &[(true, false)]) == Ordering::Greater
+                }
+            },
+        };
+        if replace {
+            self.chosen = Some((keys, value));
+        }
+    }
+}
+
+impl Accumulator for ValueAccumulator {
+    fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        let Some(value) = value else {
+            return Ok(());
+        };
+        if matches!(self.kind, ValueKind::Any) && value.is_null() {
+            return Ok(());
+        }
+        self.select(Vec::new(), value);
+        Ok(())
+    }
+
+    fn update_values(&mut self, values: &[SqlValue]) -> Result<()> {
+        if matches!(self.kind, ValueKind::ArgMin | ValueKind::ArgMax) {
+            let [value, key] = values else {
+                return Err(invalid_aggregate_state(
+                    "arg_min/max",
+                    format!("expected two inputs, got {}", values.len()),
+                ));
+            };
+            if value.is_null() || key.is_null() {
+                return Ok(());
+            }
+            self.select(vec![key.clone()], value.clone());
+            return Ok(());
+        }
+        self.update(values.first().cloned())
+    }
+
+    fn update_ordered(&mut self, value: Option<SqlValue>, sort_keys: &[SqlValue]) -> Result<()> {
+        let Some(value) = value else {
+            return Ok(());
+        };
+        match &self.chosen {
+            None => self.chosen = Some((sort_keys.to_vec(), value)),
+            Some((keys, _)) => {
+                let ordering = compare_ordered_keys(sort_keys, keys, &self.sort_specs);
+                let replace = matches!(
+                    (self.kind, ordering),
+                    (ValueKind::First, Ordering::Less) | (ValueKind::Last, Ordering::Greater)
+                );
+                if replace {
+                    self.chosen = Some((sort_keys.to_vec(), value));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![
+            self.chosen
+                .as_ref()
+                .map(|(_, value)| value.clone())
+                .unwrap_or(SqlValue::Null),
+        ])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("value aggregate", state, 1)?;
+        self.update(Some(state[0].clone()))
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        Ok(self
+            .chosen
+            .as_ref()
+            .map(|(_, value)| value.clone())
+            .unwrap_or(SqlValue::Null))
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+
+    fn retained_bytes(&self) -> u64 {
+        self.chosen
+            .as_ref()
+            .map(|(keys, value)| {
+                keys.iter()
+                    .map(ByteSized::estimated_bytes)
+                    .sum::<u64>()
+                    .saturating_add(value.estimated_bytes())
+            })
+            .unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BitKind {
+    And,
+    Or,
+    Xor,
+}
+
+#[derive(Debug, Clone)]
+struct BitAccumulator {
+    kind: BitKind,
+    value: Option<SqlValue>,
+}
+
+impl BitAccumulator {
+    fn new(kind: BitKind) -> Self {
+        Self { kind, value: None }
+    }
+}
+
+impl Accumulator for BitAccumulator {
+    fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            return Ok(());
+        };
+        self.value = Some(match (self.value.take(), value) {
+            (None, value) => value,
+            (Some(SqlValue::Integer(left)), SqlValue::Integer(right)) => {
+                SqlValue::Integer(match self.kind {
+                    BitKind::And => left & right,
+                    BitKind::Or => left | right,
+                    BitKind::Xor => left ^ right,
+                })
+            }
+            (Some(SqlValue::BigInt(left)), SqlValue::BigInt(right)) => {
+                SqlValue::BigInt(match self.kind {
+                    BitKind::And => left & right,
+                    BitKind::Or => left | right,
+                    BitKind::Xor => left ^ right,
+                })
+            }
+            (Some(left), right) => {
+                return Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {
+                    expected: "matching integer types".into(),
+                    actual: format!("{} vs {}", left.type_name(), right.type_name()),
+                }));
+            }
+        });
+        Ok(())
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![self.value.clone().unwrap_or(SqlValue::Null)])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("bit aggregate", state, 1)?;
+        self.update(Some(state[0].clone()))
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        Ok(self.value.clone().unwrap_or(SqlValue::Null))
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BoolAccumulator {
+    and: bool,
+    value: Option<bool>,
+}
+
+impl BoolAccumulator {
+    fn new(and: bool) -> Self {
+        Self { and, value: None }
+    }
+}
+
+impl Accumulator for BoolAccumulator {
+    fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        match value {
+            None | Some(SqlValue::Null) => Ok(()),
+            Some(SqlValue::Boolean(value)) => {
+                self.value = Some(match self.value {
+                    None => value,
+                    Some(current) if self.and => current && value,
+                    Some(current) => current || value,
+                });
+                Ok(())
+            }
+            Some(other) => Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {
+                expected: "Boolean".into(),
+                actual: other.type_name().into(),
+            })),
+        }
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![
+            self.value.map(SqlValue::Boolean).unwrap_or(SqlValue::Null),
+        ])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("boolean aggregate", state, 1)?;
+        self.update(Some(state[0].clone()))
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        Ok(self.value.map(SqlValue::Boolean).unwrap_or(SqlValue::Null))
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+}
+
 /// Create a new accumulator instance for the aggregate function.
 pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<dyn Accumulator> {
     match function {
@@ -1149,6 +1786,51 @@ pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<d
         AggregateFunction::PercentileDisc { fraction } => {
             Box::new(PercentileDiscAccumulator::new(*fraction, Vec::new()))
         }
+        AggregateFunction::PercentileCont { fraction }
+        | AggregateFunction::QuantileCont { fraction } => {
+            Box::new(PercentileContAccumulator::new(*fraction))
+        }
+        AggregateFunction::Variance { sample } => Box::new(StatisticsAccumulator::new(
+            StatisticsKind::Variance(*sample),
+        )),
+        AggregateFunction::Stddev { sample } => {
+            Box::new(StatisticsAccumulator::new(StatisticsKind::Stddev(*sample)))
+        }
+        AggregateFunction::Covariance { sample } => Box::new(StatisticsAccumulator::new(
+            StatisticsKind::Covariance(*sample),
+        )),
+        AggregateFunction::Corr => Box::new(StatisticsAccumulator::new(StatisticsKind::Corr)),
+        AggregateFunction::Median => Box::new(PercentileContAccumulator::new(0.5)),
+        AggregateFunction::Mode => Box::new(ModeAccumulator::new(Vec::new())),
+        AggregateFunction::RegrCount => {
+            Box::new(StatisticsAccumulator::new(StatisticsKind::RegrCount))
+        }
+        AggregateFunction::RegrAvgX => {
+            Box::new(StatisticsAccumulator::new(StatisticsKind::RegrAvgX))
+        }
+        AggregateFunction::RegrAvgY => {
+            Box::new(StatisticsAccumulator::new(StatisticsKind::RegrAvgY))
+        }
+        AggregateFunction::RegrSxx => Box::new(StatisticsAccumulator::new(StatisticsKind::RegrSxx)),
+        AggregateFunction::RegrSyy => Box::new(StatisticsAccumulator::new(StatisticsKind::RegrSyy)),
+        AggregateFunction::RegrSxy => Box::new(StatisticsAccumulator::new(StatisticsKind::RegrSxy)),
+        AggregateFunction::RegrSlope => {
+            Box::new(StatisticsAccumulator::new(StatisticsKind::RegrSlope))
+        }
+        AggregateFunction::RegrIntercept => {
+            Box::new(StatisticsAccumulator::new(StatisticsKind::RegrIntercept))
+        }
+        AggregateFunction::RegrR2 => Box::new(StatisticsAccumulator::new(StatisticsKind::RegrR2)),
+        AggregateFunction::AnyValue => Box::new(ValueAccumulator::new(ValueKind::Any, Vec::new())),
+        AggregateFunction::First => Box::new(ValueAccumulator::new(ValueKind::First, Vec::new())),
+        AggregateFunction::Last => Box::new(ValueAccumulator::new(ValueKind::Last, Vec::new())),
+        AggregateFunction::ArgMin => Box::new(ValueAccumulator::new(ValueKind::ArgMin, Vec::new())),
+        AggregateFunction::ArgMax => Box::new(ValueAccumulator::new(ValueKind::ArgMax, Vec::new())),
+        AggregateFunction::BitAnd => Box::new(BitAccumulator::new(BitKind::And)),
+        AggregateFunction::BitOr => Box::new(BitAccumulator::new(BitKind::Or)),
+        AggregateFunction::BitXor => Box::new(BitAccumulator::new(BitKind::Xor)),
+        AggregateFunction::BoolAnd => Box::new(BoolAccumulator::new(true)),
+        AggregateFunction::BoolOr => Box::new(BoolAccumulator::new(false)),
     }
 }
 
@@ -1188,6 +1870,15 @@ pub fn create_accumulator_for_aggregate(aggregate: &AggregateExpr) -> Box<dyn Ac
             *fraction,
             aggregate_sort_specs(aggregate),
         )),
+        AggregateFunction::Mode if !aggregate.order_by.is_empty() => {
+            Box::new(ModeAccumulator::new(aggregate_sort_specs(aggregate)))
+        }
+        AggregateFunction::First if !aggregate.order_by.is_empty() => Box::new(
+            ValueAccumulator::new(ValueKind::First, aggregate_sort_specs(aggregate)),
+        ),
+        AggregateFunction::Last if !aggregate.order_by.is_empty() => Box::new(
+            ValueAccumulator::new(ValueKind::Last, aggregate_sort_specs(aggregate)),
+        ),
         _ => create_accumulator(&aggregate.function, aggregate.distinct),
     }
 }
@@ -1483,30 +2174,30 @@ impl<'a> AggregateIterator<'a> {
                                 if !aggregate_filter_accepts(agg, &ctx)? {
                                     continue;
                                 }
-                                let value = match &agg.arg {
-                                    None => None,
-                                    Some(expr) => {
-                                        Some(crate::executor::evaluator::evaluate(expr, &ctx)?)
-                                    }
-                                };
+                                let values = evaluate_aggregate_values(agg, &ctx)?;
                                 if let Some(tracker) = &mut self.memory_tracker
                                     && matches!(
                                         agg.function,
                                         AggregateFunction::GroupConcat { .. }
                                             | AggregateFunction::StringAgg { .. }
                                             | AggregateFunction::PercentileDisc { .. }
+                                            | AggregateFunction::PercentileCont { .. }
+                                            | AggregateFunction::QuantileCont { .. }
+                                            | AggregateFunction::Median
+                                            | AggregateFunction::Mode
                                     )
-                                    && let Some(value_ref) = value.as_ref()
+                                    && let Some(value_ref) = values.first()
                                 {
                                     tracker
                                         .add_value(value_ref)
                                         .map_err(map_core_memory_error)?;
                                 }
                                 if agg.order_by.is_empty() {
-                                    group.accumulators[idx].update(value)?;
+                                    group.accumulators[idx].update_values(&values)?;
                                 } else {
                                     let keys = evaluate_sort_keys(agg, &ctx)?;
-                                    group.accumulators[idx].update_ordered(value, &keys)?;
+                                    group.accumulators[idx]
+                                        .update_ordered_values(&values, &keys)?;
                                 }
                             }
                         }
@@ -1724,15 +2415,12 @@ impl<'a> StreamingAggregateIterator<'a> {
             if !aggregate_filter_accepts(agg, ctx)? {
                 continue;
             }
-            let value = match &agg.arg {
-                None => None,
-                Some(expr) => Some(crate::executor::evaluator::evaluate(expr, ctx)?),
-            };
+            let values = evaluate_aggregate_values(agg, ctx)?;
             if agg.order_by.is_empty() {
-                self.accumulators[idx].update(value)?;
+                self.accumulators[idx].update_values(&values)?;
             } else {
                 let keys = evaluate_sort_keys(agg, ctx)?;
-                self.accumulators[idx].update_ordered(value, &keys)?;
+                self.accumulators[idx].update_ordered_values(&values, &keys)?;
             }
         }
         Ok(())
@@ -1861,6 +2549,40 @@ fn aggregate_state_types(agg: &AggregateExpr) -> Vec<ResolvedType> {
         // Ordered-set aggregation never runs in Partial mode (D11); the
         // accumulator rejects state()/merge() with invalid_aggregate_state.
         AggregateFunction::PercentileDisc { .. } => vec![agg.result_type.clone()],
+        AggregateFunction::PercentileCont { .. }
+        | AggregateFunction::QuantileCont { .. }
+        | AggregateFunction::Median
+        | AggregateFunction::Mode => vec![agg.result_type.clone()],
+        AggregateFunction::Variance { .. }
+        | AggregateFunction::Stddev { .. }
+        | AggregateFunction::Covariance { .. }
+        | AggregateFunction::Corr
+        | AggregateFunction::RegrCount
+        | AggregateFunction::RegrAvgX
+        | AggregateFunction::RegrAvgY
+        | AggregateFunction::RegrSxx
+        | AggregateFunction::RegrSyy
+        | AggregateFunction::RegrSxy
+        | AggregateFunction::RegrSlope
+        | AggregateFunction::RegrIntercept
+        | AggregateFunction::RegrR2 => vec![
+            ResolvedType::BigInt,
+            ResolvedType::Double,
+            ResolvedType::Double,
+            ResolvedType::Double,
+            ResolvedType::Double,
+            ResolvedType::Double,
+        ],
+        AggregateFunction::AnyValue
+        | AggregateFunction::First
+        | AggregateFunction::Last
+        | AggregateFunction::ArgMin
+        | AggregateFunction::ArgMax
+        | AggregateFunction::BitAnd
+        | AggregateFunction::BitOr
+        | AggregateFunction::BitXor
+        | AggregateFunction::BoolAnd
+        | AggregateFunction::BoolOr => vec![agg.result_type.clone()],
     }
 }
 
@@ -1890,6 +2612,14 @@ fn evaluate_sort_keys(agg: &AggregateExpr, ctx: &EvalContext<'_>) -> Result<Vec<
         .collect()
 }
 
+fn evaluate_aggregate_values(agg: &AggregateExpr, ctx: &EvalContext<'_>) -> Result<Vec<SqlValue>> {
+    agg.arg
+        .iter()
+        .chain(&agg.extra_args)
+        .map(|expr| crate::executor::evaluator::evaluate(expr, ctx))
+        .collect()
+}
+
 /// Build output schema for aggregate results.
 pub fn build_aggregate_schema(
     group_keys: &[TypedExpr],
@@ -1914,6 +2644,39 @@ pub fn build_aggregate_schema(
             AggregateFunction::GroupConcat { .. } => format!("group_concat_{idx}"),
             AggregateFunction::StringAgg { .. } => format!("string_agg_{idx}"),
             AggregateFunction::PercentileDisc { .. } => format!("percentile_disc_{idx}"),
+            AggregateFunction::PercentileCont { .. } => format!("percentile_cont_{idx}"),
+            AggregateFunction::QuantileCont { .. } => format!("quantile_cont_{idx}"),
+            AggregateFunction::Variance { sample } => {
+                format!("var_{}_{idx}", if *sample { "samp" } else { "pop" })
+            }
+            AggregateFunction::Stddev { sample } => {
+                format!("stddev_{}_{idx}", if *sample { "samp" } else { "pop" })
+            }
+            AggregateFunction::Covariance { sample } => {
+                format!("covar_{}_{idx}", if *sample { "samp" } else { "pop" })
+            }
+            AggregateFunction::Corr => format!("corr_{idx}"),
+            AggregateFunction::Median => format!("median_{idx}"),
+            AggregateFunction::Mode => format!("mode_{idx}"),
+            AggregateFunction::RegrCount => format!("regr_count_{idx}"),
+            AggregateFunction::RegrAvgX => format!("regr_avgx_{idx}"),
+            AggregateFunction::RegrAvgY => format!("regr_avgy_{idx}"),
+            AggregateFunction::RegrSxx => format!("regr_sxx_{idx}"),
+            AggregateFunction::RegrSyy => format!("regr_syy_{idx}"),
+            AggregateFunction::RegrSxy => format!("regr_sxy_{idx}"),
+            AggregateFunction::RegrSlope => format!("regr_slope_{idx}"),
+            AggregateFunction::RegrIntercept => format!("regr_intercept_{idx}"),
+            AggregateFunction::RegrR2 => format!("regr_r2_{idx}"),
+            AggregateFunction::AnyValue => format!("any_value_{idx}"),
+            AggregateFunction::First => format!("first_{idx}"),
+            AggregateFunction::Last => format!("last_{idx}"),
+            AggregateFunction::ArgMin => format!("arg_min_{idx}"),
+            AggregateFunction::ArgMax => format!("arg_max_{idx}"),
+            AggregateFunction::BitAnd => format!("bit_and_{idx}"),
+            AggregateFunction::BitOr => format!("bit_or_{idx}"),
+            AggregateFunction::BitXor => format!("bit_xor_{idx}"),
+            AggregateFunction::BoolAnd => format!("bool_and_{idx}"),
+            AggregateFunction::BoolOr => format!("bool_or_{idx}"),
         };
         schema.push(ColumnMetadata::new(name, agg.result_type.clone()));
     }
@@ -1955,6 +2718,18 @@ pub fn should_use_single_for_parallel(parallelism: usize, aggregates: &[Aggregat
             agg.distinct
                 || !agg.order_by.is_empty()
                 || matches!(agg.function, AggregateFunction::PercentileDisc { .. })
+                || matches!(
+                    agg.function,
+                    AggregateFunction::PercentileCont { .. }
+                        | AggregateFunction::QuantileCont { .. }
+                        | AggregateFunction::Median
+                        | AggregateFunction::Mode
+                        | AggregateFunction::AnyValue
+                        | AggregateFunction::First
+                        | AggregateFunction::Last
+                        | AggregateFunction::ArgMin
+                        | AggregateFunction::ArgMax
+                )
         })
 }
 
@@ -2533,6 +3308,7 @@ mod tests {
                     separator: Some("|".into()),
                 },
                 arg: Some(label),
+                extra_args: Vec::new(),
                 distinct: false,
                 result_type: ResolvedType::Text,
                 filter: None,
@@ -2822,6 +3598,7 @@ mod tests {
                     separator: Some("|".into()),
                 },
                 arg: Some(label),
+                extra_args: Vec::new(),
                 distinct: true,
                 result_type: ResolvedType::Text,
                 filter: None,
@@ -3368,5 +4145,53 @@ mod tests {
         }
         // DISTINCT drops the second "x"; ASC by key -> y,x.
         assert_eq!(concat.finalize().unwrap(), SqlValue::Text("y|x".into()));
+    }
+
+    #[test]
+    fn stable_moments_merge_and_preserve_sample_boundaries() {
+        let mut whole = StatisticsAccumulator::new(StatisticsKind::Variance(true));
+        let mut left = whole.clone();
+        let mut right = whole.clone();
+        for (index, value) in [1.0e12, 1.0e12 + 1.0, 1.0e12 + 2.0, 1.0e12 + 3.0]
+            .into_iter()
+            .enumerate()
+        {
+            whole.update(Some(SqlValue::Double(value))).unwrap();
+            if index < 2 {
+                left.update(Some(SqlValue::Double(value))).unwrap();
+            } else {
+                right.update(Some(SqlValue::Double(value))).unwrap();
+            }
+        }
+        left.merge(&right.state().unwrap()).unwrap();
+        assert_eq!(whole.finalize().unwrap(), left.finalize().unwrap());
+        assert_eq!(whole.finalize().unwrap(), SqlValue::Double(5.0 / 3.0));
+
+        let empty = StatisticsAccumulator::new(StatisticsKind::Variance(true));
+        assert_eq!(empty.finalize().unwrap(), SqlValue::Null);
+        let mut singleton = empty.clone();
+        singleton.update(Some(SqlValue::Integer(7))).unwrap();
+        assert_eq!(singleton.finalize().unwrap(), SqlValue::Null);
+        singleton.kind = StatisticsKind::Variance(false);
+        assert_eq!(singleton.finalize().unwrap(), SqlValue::Double(0.0));
+    }
+
+    #[test]
+    fn continuous_percentiles_preserve_non_finite_endpoints() {
+        for (fraction, expected) in [(0.0, f64::NEG_INFINITY), (1.0, f64::INFINITY)] {
+            let mut acc = PercentileContAccumulator::new(fraction);
+            acc.update(Some(SqlValue::Double(f64::NEG_INFINITY)))
+                .unwrap();
+            acc.update(Some(SqlValue::Double(0.0))).unwrap();
+            acc.update(Some(SqlValue::Double(f64::INFINITY))).unwrap();
+            assert_eq!(acc.finalize().unwrap(), SqlValue::Double(expected));
+        }
+
+        let mut acc = PercentileContAccumulator::new(1.0);
+        acc.update(Some(SqlValue::Double(f64::NAN))).unwrap();
+        let SqlValue::Double(value) = acc.finalize().unwrap() else {
+            panic!("continuous percentile must return DOUBLE");
+        };
+        assert!(value.is_nan());
     }
 }
