@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "contract_version": "sql-value-v1",
+  "migration_policy": {
+    "type_tags": "Existing tags are immutable; new tags are append-only.",
+    "old_data": "New readers must retain tests for old stored values.",
+    "old_readers": "Old readers must reject unsupported new values without coercion."
+  },
+  "surfaces": [
+    {
+      "id": "parser_ast",
+      "owners": [
+        "crates/alopex-sql/nim-sql-parser/src/ast.nim",
+        "crates/alopex-sql/src/ast/ddl.rs"
+      ]
+    },
+    {
+      "id": "catalog_schema",
+      "owners": [
+        "crates/alopex-sql/src/planner/types.rs",
+        "crates/alopex-core/src/storage/format/models/metadata.rs"
+      ]
+    },
+    {
+      "id": "storage",
+      "owners": [
+        "crates/alopex-sql/src/storage/value.rs",
+        "crates/alopex-sql/src/storage/codec.rs"
+      ]
+    },
+    {
+      "id": "wal_snapshot_backup",
+      "owners": [
+        "crates/alopex-core/src/log/wal.rs",
+        "crates/alopex-server/src/ops/backup.rs"
+      ]
+    },
+    {
+      "id": "distributed_wire",
+      "owners": [
+        "crates/alopex-sql/src/distributed_read/assembler.rs"
+      ]
+    },
+    {
+      "id": "rust_api",
+      "owners": [
+        "crates/alopex-sql/src/storage/value.rs"
+      ]
+    },
+    {
+      "id": "python_ffi",
+      "owners": [
+        "crates/alopex-py/src/embedded/sql.rs"
+      ]
+    },
+    {
+      "id": "dataframe_arrow_parquet",
+      "owners": [
+        "crates/alopex-dataframe/src/lib.rs"
+      ]
+    },
+    {
+      "id": "packaging_demo",
+      "owners": [
+        "crates/alopex-tools/v08/verify-v08-surfaces.sh",
+        "scripts/demo/v08/demo_sql_v08.py"
+      ]
+    }
+  ],
+  "type_families": [
+    {
+      "id": "decimal",
+      "issue": 158,
+      "target_release": "0.8.10",
+      "status": "planned",
+      "evidence": {
+        "parser_ast": [],
+        "catalog_schema": [],
+        "storage": [],
+        "wal_snapshot_backup": [],
+        "distributed_wire": [],
+        "rust_api": [],
+        "python_ffi": [],
+        "dataframe_arrow_parquet": [],
+        "packaging_demo": []
+      }
+    },
+    {
+      "id": "temporal",
+      "issue": 159,
+      "target_release": "0.8.10",
+      "status": "planned",
+      "evidence": {
+        "parser_ast": [],
+        "catalog_schema": [],
+        "storage": [],
+        "wal_snapshot_backup": [],
+        "distributed_wire": [],
+        "rust_api": [],
+        "python_ffi": [],
+        "dataframe_arrow_parquet": [],
+        "packaging_demo": []
+      }
+    },
+    {
+      "id": "json",
+      "issue": 161,
+      "target_release": "0.8.10",
+      "status": "planned",
+      "evidence": {
+        "parser_ast": [],
+        "catalog_schema": [],
+        "storage": [],
+        "wal_snapshot_backup": [],
+        "distributed_wire": [],
+        "rust_api": [],
+        "python_ffi": [],
+        "dataframe_arrow_parquet": [],
+        "packaging_demo": []
+      }
+    },
+    {
+      "id": "nested",
+      "issue": 162,
+      "target_release": "0.8.10",
+      "status": "planned",
+      "evidence": {
+        "parser_ast": [],
+        "catalog_schema": [],
+        "storage": [],
+        "wal_snapshot_backup": [],
+        "distributed_wire": [],
+        "rust_api": [],
+        "python_ffi": [],
+        "dataframe_arrow_parquet": [],
+        "packaging_demo": []
+      }
+    }
+  ]
+}

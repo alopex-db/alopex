@@ -46,6 +46,9 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.release_tag || github.ref }}
+      - name: Verify SQL type capability contract
+        shell: bash
+        run: python scripts/release/type_capability_gate.py --release-version "${RELEASE_TAG_NAME#v}"
       - name: Verify immutable tag and approved CI evidence
         env:
           GH_TOKEN: ${{ github.token }}

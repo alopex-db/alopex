@@ -20,6 +20,12 @@ The exact public operation, normal outcome, rejection class, prerequisite, test
 evidence, and artifact identity must be present in the generated matrix. A
 missing row is a release-readiness blocker, not an implicit support claim.
 
+The [SQL type capability catalog](sql-type-capabilities.json) maps every planned
+v0.8.10 value-type family to its production owners and required evidence. Its
+release gate rejects a target version until every required surface is complete.
+JSON-on-TEXT functions in issue #160 reuse `TEXT`, so the value-type catalog
+tracks native JSON in issue #161 and leaves function coverage to its own tests.
+
 ## Artifact identity
 
 The candidate verifier inventories every Cargo workspace member separately.

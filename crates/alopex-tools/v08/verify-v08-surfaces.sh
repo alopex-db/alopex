@@ -60,6 +60,8 @@ if ! "${PYTHON_BIN}" -m pytest --version >/dev/null 2>&1; then
     exit 2
 fi
 
+"${PYTHON_BIN}" "${ROOT}/scripts/release/type_capability_gate.py"
+
 PYTHON_LIB_DIR="$(${PYTHON_BIN} -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
 if [[ -n "${PYTHON_LIB_DIR}" && -d "${PYTHON_LIB_DIR}" ]]; then
     export LD_LIBRARY_PATH="${PYTHON_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
