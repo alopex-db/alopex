@@ -3061,37 +3061,58 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         let Some(function) = TableFunctionKind::from_name(name) else {
             return Err(PlannerError::unknown_table_function(name, span));
         };
-        if function == TableFunctionKind::GenerateSeries {
-            return Err(PlannerError::unsupported_feature(
-                "table function GENERATE_SERIES",
-                "a future version (issue #157)",
-                span,
-            ));
-        }
+        let (typed_args, output_type) = match function {
+            TableFunctionKind::Unnest => {
+                if args.len() != 1 {
+                    return Err(PlannerError::invalid_expression(format!(
+                        "table function UNNEST takes exactly 1 argument, found {}",
+                        args.len()
+                    )));
+                }
+                let typed = self.infer_expr_with_scope(&args[0], lateral_scope, ctes)?;
+                if !matches!(
+                    typed.resolved_type,
+                    ResolvedType::Vector { .. } | ResolvedType::Null
+                ) {
+                    return Err(PlannerError::type_mismatch(
+                        "VECTOR",
+                        typed.resolved_type.to_string(),
+                        args[0].span,
+                    ));
+                }
+                (vec![typed], ResolvedType::Float)
+            }
+            TableFunctionKind::GenerateSeries => {
+                if !(2..=3).contains(&args.len()) {
+                    return Err(PlannerError::invalid_expression(format!(
+                        "table function GENERATE_SERIES takes 2 or 3 arguments, found {}",
+                        args.len()
+                    )));
+                }
+                let mut typed = Vec::with_capacity(args.len());
+                let mut output_type = ResolvedType::Integer;
+                for arg in args {
+                    let value = self.infer_expr_with_scope(arg, lateral_scope, ctes)?;
+                    match value.resolved_type {
+                        ResolvedType::BigInt => output_type = ResolvedType::BigInt,
+                        ResolvedType::Integer | ResolvedType::Null => {}
+                        _ => {
+                            return Err(PlannerError::type_mismatch(
+                                "INTEGER or BIGINT",
+                                value.resolved_type.to_string(),
+                                arg.span,
+                            ));
+                        }
+                    }
+                    typed.push(value);
+                }
+                (typed, output_type)
+            }
+        };
 
-        if args.len() != 1 {
-            return Err(PlannerError::invalid_expression(format!(
-                "table function UNNEST takes exactly 1 argument, found {}",
-                args.len()
-            )));
-        }
-        let typed_arg = self.infer_expr_with_scope(&args[0], lateral_scope, ctes)?;
-        if !matches!(
-            typed_arg.resolved_type,
-            ResolvedType::Vector { .. } | ResolvedType::Null
-        ) {
-            return Err(PlannerError::type_mismatch(
-                "VECTOR",
-                typed_arg.resolved_type.to_string(),
-                args[0].span,
-            ));
-        }
-
-        // A VECTOR holds f32 elements, so the single output column is FLOAT
-        // and is named after the function, as PostgreSQL names it (D6/D7).
         let mut schema = vec![ColumnMetadata::new(
             function.default_relation_name(),
-            ResolvedType::Float,
+            output_type,
         )];
         let relation_name = alias
             .map(str::to_string)
@@ -3101,7 +3122,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
         Ok(PlannedRelation {
             plan: LogicalPlan::TableFunction {
                 function,
-                args: vec![typed_arg],
+                args: typed_args,
                 schema: schema.clone(),
             },
             schema: schema.clone(),

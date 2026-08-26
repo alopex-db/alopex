@@ -14,6 +14,19 @@ pub fn eval_unary_op(
     match op {
         UnaryOp::Not => eval_not(value),
         UnaryOp::Minus => eval_minus(value),
+        UnaryOp::BitNot => eval_bit_not(value),
+    }
+}
+
+fn eval_bit_not(value: SqlValue) -> Result<SqlValue> {
+    match value {
+        SqlValue::Null => Ok(SqlValue::Null),
+        SqlValue::Integer(value) => Ok(SqlValue::Integer(!value)),
+        SqlValue::BigInt(value) => Ok(SqlValue::BigInt(!value)),
+        other => Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {
+            expected: "Integer/BigInt".into(),
+            actual: other.type_name().into(),
+        })),
     }
 }
 

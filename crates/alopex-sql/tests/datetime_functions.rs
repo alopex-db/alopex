@@ -120,3 +120,75 @@ fn insert_uses_timestamp_default_now() {
     };
     assert!((before_insert..=after_insert).contains(&value));
 }
+
+#[test]
+fn portable_timestamp_functions_return_exact_utc_values() {
+    let (mut executor, catalog) = setup();
+    let query = query_sql(
+        &mut executor,
+        &catalog,
+        "SELECT \
+         EXTRACT(year FROM CAST('2025-01-15 10:30:45.123456' AS TIMESTAMP)), \
+         DATE_PART('epoch', CAST('2025-01-15 10:30:45.123456' AS TIMESTAMP)), \
+         DATE_TRUNC('day', CAST('2025-01-15 10:30:45.123456' AS TIMESTAMP)), \
+         TO_CHAR(CAST('2025-01-15 10:30:45.123456' AS TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS.US'), \
+         TO_TIMESTAMP(1736937045), \
+         STRFTIME('%Y-%m-%d %H:%M:%S', CAST('2025-01-15 10:30:45.123456' AS TIMESTAMP)), \
+         JULIANDAY(CAST('1970-01-01 00:00:00' AS TIMESTAMP)), \
+         UNIXEPOCH(CAST('2025-01-15 10:30:45.123456' AS TIMESTAMP))",
+    );
+
+    assert_eq!(
+        query.rows,
+        vec![vec![
+            SqlValue::Double(2025.0),
+            SqlValue::Double(1_736_937_045.123_456),
+            SqlValue::Timestamp(1_736_899_200_000_000),
+            SqlValue::Text("2025-01-15 10:30:45.123456".into()),
+            SqlValue::Timestamp(1_736_937_045_000_000),
+            SqlValue::Text("2025-01-15 10:30:45".into()),
+            SqlValue::Double(2_440_587.5),
+            SqlValue::BigInt(1_736_937_045),
+        ]]
+    );
+}
+
+#[test]
+fn current_timestamp_alias_is_statement_stable() {
+    let (mut executor, catalog) = setup();
+    let query = query_sql(
+        &mut executor,
+        &catalog,
+        "SELECT CURRENT_TIMESTAMP, CURRENT_TIMESTAMP(3)",
+    );
+    assert!(matches!(query.rows[0][0], SqlValue::Timestamp(_)));
+    let SqlValue::Timestamp(millis) = query.rows[0][1] else {
+        panic!("CURRENT_TIMESTAMP(3) must return a timestamp");
+    };
+    assert_eq!(millis % 1_000, 0);
+    let SqlValue::Timestamp(micros) = query.rows[0][0] else {
+        unreachable!()
+    };
+    assert!((micros - millis).abs() < 1_000);
+}
+
+#[test]
+fn timestamp_scalar_defaults_use_the_normal_expression_path() {
+    let (mut executor, catalog) = setup();
+    execute_sql(
+        &mut executor,
+        &catalog,
+        "CREATE TABLE d (\
+             id INTEGER, \
+             day TIMESTAMP DEFAULT DATE_TRUNC(\
+                 'day', CAST('2025-01-15 10:30:45.123456' AS TIMESTAMP)\
+             )\
+         ); \
+         INSERT INTO d (id) VALUES (1)",
+    );
+    let query = query_sql(&mut executor, &catalog, "SELECT day FROM d");
+    assert_eq!(
+        query.rows,
+        vec![vec![SqlValue::Timestamp(1_736_899_200_000_000)]]
+    );
+}

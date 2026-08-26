@@ -91,6 +91,7 @@ FROM parent AS p
 CROSS JOIN LATERAL (SELECT c.val FROM child AS c
                     WHERE c.parent_id = p.id ORDER BY c.val DESC LIMIT 1) AS top;
 SELECT p.id, u.unnest FROM parent AS p, UNNEST(p.emb) AS u;
+SELECT n.generate_series FROM GENERATE_SERIES(1, 5) AS n;
 SELECT r.a, r.b FROM child AS r(a, b, c);
 ```
 
@@ -98,12 +99,14 @@ SELECT r.a, r.b FROM child AS r(a, b, c);
 (`CROSS JOIN LATERAL` / `[INNER] JOIN LATERAL ... ON` /
 `LEFT [OUTER] JOIN LATERAL ... ON`。`RIGHT`/`FULL` は `ALOPEX-T015`)。
 `LATERAL` を書かない派生表は従来どおり外側 FROM を参照できない。FROM 句の
-table function は `UNNEST(VECTOR)` のみで、`LATERAL` なしでも左側を参照する
-(implicit lateral)。`GENERATE_SERIES` は issue #157 用の予約枠。
+table function は `UNNEST(VECTOR)` と整数版 `GENERATE_SERIES(start, stop [, step])`
+で、`LATERAL` なしでも左側を参照する(implicit lateral)。
 `AS t(c1, ..., cn)` は base table / CTE 参照 / 派生表 / table function すべてで
 使え、列数完全一致(`ALOPEX-T012`)を要求する。`LATERAL` は文脈キーワードなの
 で `lateral` という名前の関係は引き続き使える。詳細は
 [docs/sql-lateral-table-functions.md](../../docs/sql-lateral-table-functions.md)。
+v0.8.9 の portable SQL 関数一覧と境界条件は
+[docs/sql-portable-functions-v0.8.9.md](../../docs/sql-portable-functions-v0.8.9.md)。
 
 ## Supported Aggregate Functions
 

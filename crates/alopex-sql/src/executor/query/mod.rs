@@ -1624,12 +1624,71 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
                 }),
             }
         }
-        // Planning rejects GENERATE_SERIES (issue #157); this arm keeps the
-        // executor total if a hand-built plan reaches it.
-        TableFunctionKind::GenerateSeries => Err(ExecutorError::UnsupportedOperation(
-            "table function GENERATE_SERIES".into(),
-        )),
+        TableFunctionKind::GenerateSeries => generate_integer_series(&values),
     }
+}
+
+const MAX_GENERATED_SERIES_ROWS: usize = 100_000;
+
+fn generate_integer_series(values: &[SqlValue]) -> Result<Vec<Row>> {
+    if values.iter().any(SqlValue::is_null) {
+        return Ok(Vec::new());
+    }
+    let integer = |index: usize| match values.get(index) {
+        Some(SqlValue::Integer(value)) => Ok(i64::from(*value)),
+        Some(SqlValue::BigInt(value)) => Ok(*value),
+        Some(value) => Err(ExecutorError::InvalidOperation {
+            operation: "GENERATE_SERIES".into(),
+            reason: format!("expected INTEGER, found {}", value.type_name()),
+        }),
+        None => Err(ExecutorError::InvalidOperation {
+            operation: "GENERATE_SERIES".into(),
+            reason: "missing argument".into(),
+        }),
+    };
+    let start = integer(0)?;
+    let stop = integer(1)?;
+    let step = if values.len() == 3 { integer(2)? } else { 1 };
+    if step == 0 {
+        return Err(ExecutorError::InvalidOperation {
+            operation: "GENERATE_SERIES".into(),
+            reason: "step must not be zero".into(),
+        });
+    }
+    if (step > 0 && start > stop) || (step < 0 && start < stop) {
+        return Ok(Vec::new());
+    }
+
+    let use_bigint = values
+        .iter()
+        .any(|value| matches!(value, SqlValue::BigInt(_)));
+    let mut rows = Vec::new();
+    let mut current = start;
+    loop {
+        if rows.len() == MAX_GENERATED_SERIES_ROWS {
+            return Err(ExecutorError::ResourceExhausted {
+                message: format!("GENERATE_SERIES is limited to {MAX_GENERATED_SERIES_ROWS} rows"),
+            });
+        }
+        let value = if use_bigint {
+            SqlValue::BigInt(current)
+        } else {
+            SqlValue::Integer(i32::try_from(current).map_err(|_| {
+                ExecutorError::Evaluation(crate::executor::EvaluationError::Overflow)
+            })?)
+        };
+        rows.push(Row::new(rows.len() as u64, vec![value]));
+        if current == stop {
+            break;
+        }
+        current = current.checked_add(step).ok_or(ExecutorError::Evaluation(
+            crate::executor::EvaluationError::Overflow,
+        ))?;
+        if (step > 0 && current > stop) || (step < 0 && current < stop) {
+            break;
+        }
+    }
+    Ok(rows)
 }
 
 /// Evaluate a typed expression against a row, returning SqlValue.

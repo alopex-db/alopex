@@ -275,6 +275,16 @@ suite "Expressions — operator precedence":
     check expr.binLeft.binRight.intVal == 2
     check expr.binRight.intVal == 3
 
+  test "bitwise precedence is unary, arithmetic, shift, and, xor, or":
+    let ast = parseSql("SELECT ~1 & 7 | 8 ^ 3 << 1 + 1")
+    let expr = ast.children[0].children[0]
+    check expr.binOp == opBitOr
+    check expr.binLeft.binOp == opBitAnd
+    check expr.binLeft.binLeft.unOp == opBitNot
+    check expr.binRight.binOp == opBitXor
+    check expr.binRight.binRight.binOp == opShiftLeft
+    check expr.binRight.binRight.binRight.binOp == opAdd
+
 suite "Set operations":
 
   test "UNION ALL records the right input and duplicate policy":
@@ -360,6 +370,21 @@ suite "Expressions — standard pattern operators":
     check negated.children[^1].children[0].binOp == opNotSimilarTo
 
 suite "Expressions — standard function syntax":
+
+  test "CURRENT_TIMESTAMP works without parentheses":
+    let ast = parseSql("SELECT CURRENT_TIMESTAMP")
+    let call = ast.children[0].children[0]
+    check call.kind == nkFunctionCall
+    check call.children[0].strVal.cmpIgnoreCase("current_timestamp") == 0
+
+  test "EXTRACT field FROM timestamp normalizes the field to text":
+    let ast = parseSql("SELECT EXTRACT(year FROM ts)")
+    let call = ast.children[0].children[0]
+    check call.kind == nkFunctionCall
+    check call.children[0].strVal.cmpIgnoreCase("extract") == 0
+    check call.children[1].kind == nkStringLit
+    check call.children[1].strVal == "year"
+    check call.children[2].kind == nkIdentifier
 
   test "SUBSTRING normalizes to SUBSTR":
     let ast = parseSql("SELECT SUBSTRING(name FROM 2 FOR 3)")

@@ -165,14 +165,75 @@ fn unnest_takes_exactly_one_argument() {
 }
 
 #[test]
-fn generate_series_is_a_reserved_hook_rather_than_an_unknown_function() {
-    let message = Harness::new().error("SELECT * FROM GENERATE_SERIES(1, 3) AS g");
-
-    assert!(
-        message.contains("GENERATE_SERIES"),
-        "unexpected message: {message}"
+fn generate_series_supports_inclusive_positive_and_negative_integer_ranges() {
+    let ascending = Harness::new().query("SELECT * FROM GENERATE_SERIES(1, 3) AS g");
+    assert_eq!(
+        ascending.rows,
+        vec![vec![int(1)], vec![int(2)], vec![int(3)]]
     );
-    assert!(message.contains("#157"), "unexpected message: {message}");
+
+    let descending = Harness::new().query("SELECT n FROM GENERATE_SERIES(3, 1, -1) AS g(n)");
+    assert_eq!(
+        descending.rows,
+        vec![vec![int(3)], vec![int(2)], vec![int(1)]]
+    );
+}
+
+#[test]
+fn generate_series_returns_empty_when_step_moves_away_from_stop() {
+    assert!(
+        Harness::new()
+            .query("SELECT * FROM GENERATE_SERIES(3, 1)")
+            .rows
+            .is_empty()
+    );
+}
+
+#[test]
+fn generate_series_rejects_zero_step_and_bounded_output() {
+    let zero = Harness::new().error("SELECT * FROM GENERATE_SERIES(1, 3, 0)");
+    assert!(
+        zero.contains("step must not be zero"),
+        "unexpected message: {zero}"
+    );
+
+    let too_many = Harness::new().error("SELECT * FROM GENERATE_SERIES(1, 100002)");
+    assert!(
+        too_many.contains("100000 rows"),
+        "unexpected message: {too_many}"
+    );
+
+    let overflow = Harness::new()
+        .error("SELECT * FROM GENERATE_SERIES(9223372036854775806, 9223372036854775807, 2)");
+    assert!(
+        overflow.contains("integer overflow"),
+        "unexpected message: {overflow}"
+    );
+}
+
+#[test]
+fn generate_series_composes_with_lateral_cte_join_and_window() {
+    let mut harness = Harness::new();
+    harness
+        .run("CREATE TABLE bounds (id INT PRIMARY KEY, stop INT); INSERT INTO bounds VALUES (1, 2)")
+        .expect("create bounds");
+
+    let result = harness.query(
+        "WITH expanded AS (\
+             SELECT b.id, g.n FROM bounds AS b \
+             CROSS JOIN LATERAL GENERATE_SERIES(1, b.stop) AS g(n)\
+         ) \
+         SELECT e.n, ROW_NUMBER() OVER (ORDER BY e.n) AS rn \
+         FROM expanded AS e JOIN bounds AS b ON e.id = b.id ORDER BY e.n",
+    );
+
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![int(1), SqlValue::BigInt(1)],
+            vec![int(2), SqlValue::BigInt(2)],
+        ]
+    );
 }
 
 // === Alias column lists ==================================================

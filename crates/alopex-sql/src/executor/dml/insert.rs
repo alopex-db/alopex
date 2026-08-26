@@ -1,11 +1,12 @@
 use alopex_core::kv::KVStore;
 
 use crate::ast::ddl::IndexMethod;
-use crate::ast::expr::{Expr, ExprKind};
+use crate::ast::expr::Expr;
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
+use crate::planner::type_checker::TypeChecker;
 use crate::planner::typed_expr::TypedExpr;
 use crate::storage::{SqlTxn, SqlValue, StorageError};
 
@@ -28,7 +29,7 @@ pub fn execute_insert<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
     let ctx = EvalContext::new(&[]);
     let rows = values
         .into_iter()
-        .map(|row_exprs| build_row(&table, &columns, row_exprs, &ctx))
+        .map(|row_exprs| build_row(catalog, &table, &columns, row_exprs, &ctx))
         .collect::<Result<Vec<_>>>()?;
 
     insert_rows(txn, catalog, &table, table_name, rows)
@@ -145,7 +146,8 @@ fn build_row_from_values(
     Ok(row)
 }
 
-fn build_row(
+fn build_row<C: Catalog + ?Sized>(
+    catalog: &C,
     table: &TableMetadata,
     columns: &[String],
     exprs: Vec<TypedExpr>,
@@ -184,7 +186,7 @@ fn build_row(
             .ok_or_else(|| ExecutorError::ColumnRequired {
                 column: column.name.clone(),
             })?;
-        row[col_index] = evaluate_default(default, column, ctx)?;
+        row[col_index] = evaluate_default(catalog, table, default, column, ctx)?;
     }
 
     Ok(row)
@@ -208,56 +210,15 @@ fn normalize_assignment_value(
     }
 }
 
-fn evaluate_default(
+fn evaluate_default<C: Catalog + ?Sized>(
+    catalog: &C,
+    table: &TableMetadata,
     default: &Expr,
     column: &ColumnMetadata,
     ctx: &EvalContext<'_>,
 ) -> Result<SqlValue> {
-    let typed = match &default.kind {
-        ExprKind::Literal { literal } => TypedExpr {
-            kind: crate::planner::typed_expr::TypedExprKind::Literal(literal.clone()),
-            resolved_type: column.data_type.clone(),
-            span: default.span,
-        },
-        ExprKind::FunctionCall {
-            name,
-            args,
-            distinct,
-            star,
-            order_by,
-            within_group,
-            filter,
-            over: None,
-        } if name.eq_ignore_ascii_case("now")
-            && args.is_empty()
-            && !distinct
-            && !star
-            && order_by.is_empty()
-            && within_group.is_empty()
-            && filter.is_none() =>
-        {
-            TypedExpr {
-                kind: crate::planner::typed_expr::TypedExprKind::FunctionCall {
-                    name: name.clone(),
-                    args: Vec::new(),
-                    distinct: false,
-                    star: false,
-                    filter: None,
-                    order_by: Vec::new(),
-                    over: None,
-                },
-                resolved_type: crate::planner::types::ResolvedType::Timestamp,
-                span: default.span,
-            }
-        }
-        _ => {
-            return Err(ExecutorError::UnsupportedOperation(format!(
-                "DEFAULT expression for column '{}'",
-                column.name
-            )));
-        }
-    };
-    evaluate(&typed, ctx)
+    let typed = TypeChecker::new(catalog).infer_type(default, table)?;
+    normalize_assignment_value(evaluate(&typed, ctx)?, &column.data_type)
 }
 
 fn map_storage_error(table: &TableMetadata, err: StorageError) -> ExecutorError {

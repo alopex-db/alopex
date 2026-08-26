@@ -369,6 +369,14 @@ proc parseFunctionCall(p: var Parser; nameTok: Token): SqlNode =
     of "position": "STRPOS"
     else: nameTok.value
   result.children.add(newIdent(normalizedName, tokenSpan(nameTok)))
+  if nameTok.value.toLowerAscii() == "extract" and not p.check(tkRParen):
+    let field = p.expectExprIdent("date part")
+    result.children.add(newStringLit(field.value.toLowerAscii(), tokenSpan(field)))
+    discard p.expect(tkFrom)
+    result.children.add(p.parseExpr())
+    discard p.expect(tkRParen)
+    p.parseAggregateTail(result)
+    return
   if nameTok.value.toLowerAscii() == "substring" and not p.check(tkRParen):
     result.children.add(p.parseExpr())
     if p.check(tkFrom):
@@ -556,6 +564,11 @@ proc parsePrimary(p: var Parser): SqlNode =
     defer: p.leaveNesting()
     let tok = p.advance()
     result = newUnaryOp(opNeg, p.parsePrimary(), tokenSpan(tok))
+  of tkBitNot:
+    p.enterNesting()
+    defer: p.leaveNesting()
+    let tok = p.advance()
+    result = newUnaryOp(opBitNot, p.parsePrimary(), tokenSpan(tok))
   of tkQuestion:
     p.error("bind parameters are not yet supported; pass literal values " &
       "instead (prepared statements are tracked by issue #166)")
@@ -565,6 +578,9 @@ proc parsePrimary(p: var Parser): SqlNode =
       result = p.parseCastBody(tok, nkTryCast)
     elif p.check(tkLParen):
       result = p.parseFunctionCall(tok)
+    elif tok.value.cmpIgnoreCase("current_timestamp") == 0:
+      result = newNode(nkFunctionCall, tokenSpan(tok))
+      result.children.add(newIdent("CURRENT_TIMESTAMP", tokenSpan(tok)))
     elif p.check(tkDot):
       discard p.advance()
       if p.check(tkStar):
@@ -605,11 +621,36 @@ proc parseAddSub(p: var Parser): SqlNode =
     discard p.advance()
     result = newBinaryOp(op, result, p.parseMulDiv())
 
-proc parseConcat(p: var Parser): SqlNode =
+proc parseShift(p: var Parser): SqlNode =
   result = p.parseAddSub()
+  while p.current.kind in {tkShiftLeft, tkShiftRight}:
+    let op = if p.current.kind == tkShiftLeft: opShiftLeft else: opShiftRight
+    discard p.advance()
+    result = newBinaryOp(op, result, p.parseAddSub())
+
+proc parseBitAnd(p: var Parser): SqlNode =
+  result = p.parseShift()
+  while p.check(tkBitAnd):
+    discard p.advance()
+    result = newBinaryOp(opBitAnd, result, p.parseShift())
+
+proc parseBitXor(p: var Parser): SqlNode =
+  result = p.parseBitAnd()
+  while p.check(tkBitXor):
+    discard p.advance()
+    result = newBinaryOp(opBitXor, result, p.parseBitAnd())
+
+proc parseBitOr(p: var Parser): SqlNode =
+  result = p.parseBitXor()
+  while p.check(tkBitOr):
+    discard p.advance()
+    result = newBinaryOp(opBitOr, result, p.parseBitXor())
+
+proc parseConcat(p: var Parser): SqlNode =
+  result = p.parseBitOr()
   while p.check(tkPipePipe):
     discard p.advance()
-    result = newBinaryOp(opStringConcat, result, p.parseAddSub())
+    result = newBinaryOp(opStringConcat, result, p.parseBitOr())
 
 proc comparisonOp(kind: TokenKind): BinaryOpKind =
   case kind

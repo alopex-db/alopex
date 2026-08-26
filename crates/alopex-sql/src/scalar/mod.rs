@@ -175,6 +175,49 @@ pub fn check_text_or_blob(args: &[TypedExpr]) -> Result<(), PlannerError> {
     Ok(())
 }
 
+fn check_timestamp(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    for arg in args {
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Timestamp | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Timestamp",
+                arg.resolved_type.type_name(),
+                arg.span,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_text_timestamp(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_text(&args[..1])?;
+    check_timestamp(&args[1..])
+}
+
+fn check_timestamp_text(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_timestamp(&args[..1])?;
+    check_text(&args[1..])
+}
+
+fn check_to_timestamp(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    if args.len() == 1 {
+        let arg = &args[0];
+        if is_numeric(&arg.resolved_type)
+            || matches!(arg.resolved_type, ResolvedType::Text | ResolvedType::Null)
+        {
+            return Ok(());
+        }
+        return Err(PlannerError::type_mismatch(
+            "Numeric or Text",
+            arg.resolved_type.type_name(),
+            arg.span,
+        ));
+    }
+    check_text(args)
+}
+
 pub fn check_bigint(args: &[TypedExpr]) -> Result<(), PlannerError> {
     for arg in args {
         if !matches!(arg.resolved_type, ResolvedType::BigInt | ResolvedType::Null) {
@@ -475,10 +518,65 @@ static SIGNATURES: &[ScalarSignature] = &[
     ),
     sig_meta(
         "now",
-        Arity::Exact(0),
-        check_no_args,
+        Arity::Range(0, 1),
+        check_numeric,
         ReturnRule::Fixed(ResolvedType::Timestamp),
         STATEMENT_STABLE_META,
+    ),
+    sig_meta(
+        "current_timestamp",
+        Arity::Range(0, 1),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Timestamp),
+        STATEMENT_STABLE_META,
+    ),
+    sig(
+        "extract",
+        Arity::Exact(2),
+        check_text_timestamp,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "date_part",
+        Arity::Exact(2),
+        check_text_timestamp,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "date_trunc",
+        Arity::Exact(2),
+        check_text_timestamp,
+        ReturnRule::Fixed(ResolvedType::Timestamp),
+    ),
+    sig(
+        "to_char",
+        Arity::Exact(2),
+        check_timestamp_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "to_timestamp",
+        Arity::Range(1, 2),
+        check_to_timestamp,
+        ReturnRule::Fixed(ResolvedType::Timestamp),
+    ),
+    sig(
+        "strftime",
+        Arity::Exact(2),
+        check_text_timestamp,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "julianday",
+        Arity::Exact(1),
+        check_timestamp,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "unixepoch",
+        Arity::Exact(1),
+        check_timestamp,
+        ReturnRule::Fixed(ResolvedType::BigInt),
     ),
     sig(
         "sin",

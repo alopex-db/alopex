@@ -635,6 +635,12 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             span,
         )?;
 
+        if let Some(folded) =
+            fold_integral_binary(&left_typed, op, &right_typed, &result_type, span)
+        {
+            return Ok(folded);
+        }
+
         Ok(TypedExpr {
             kind: TypedExprKind::BinaryOp {
                 left: Box::new(left_typed),
@@ -690,6 +696,12 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             &right_typed.resolved_type,
             span,
         )?;
+
+        if let Some(folded) =
+            fold_integral_binary(&left_typed, op, &right_typed, &result_type, span)
+        {
+            return Ok(folded);
+        }
 
         Ok(TypedExpr {
             kind: TypedExprKind::BinaryOp {
@@ -832,6 +844,10 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             // Remainder is defined only for integral operands.
             Mod => self.check_modulo_op(left, right, span),
 
+            BitAnd | BitOr | BitXor | ShiftLeft | ShiftRight => {
+                self.check_integral_op(left, right, span)
+            }
+
             // Comparison operators: require compatible types, return boolean
             Eq | Neq | Lt | Gt | LtEq | GtEq => {
                 self.check_comparison_op(left, right, span)?;
@@ -917,6 +933,27 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 line: span.start.line,
                 column: span.start.column,
             }),
+        }
+    }
+
+    fn check_integral_op(
+        &self,
+        left: &ResolvedType,
+        right: &ResolvedType,
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        use ResolvedType::*;
+        if matches!(left, Null) || matches!(right, Null) {
+            return Ok(Null);
+        }
+        match (left, right) {
+            (Integer, Integer) => Ok(Integer),
+            (Integer | BigInt, Integer | BigInt) => Ok(BigInt),
+            _ => Err(PlannerError::invalid_operator(
+                "bitwise",
+                format!("{} and {}", left.type_name(), right.type_name()),
+                span,
+            )),
         }
     }
 
@@ -1082,6 +1119,19 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     }
                 }
             }
+            UnaryOp::BitNot => match &operand_typed.resolved_type {
+                ResolvedType::Integer => ResolvedType::Integer,
+                ResolvedType::BigInt => ResolvedType::BigInt,
+                ResolvedType::Null => ResolvedType::Null,
+                other => {
+                    return Err(PlannerError::InvalidOperator {
+                        op: "bitwise not".to_string(),
+                        type_name: other.type_name().to_string(),
+                        line: span.start.line,
+                        column: span.start.column,
+                    });
+                }
+            },
         };
 
         Ok(TypedExpr {
@@ -1128,6 +1178,19 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 other => {
                     return Err(PlannerError::InvalidOperator {
                         op: "unary minus".to_string(),
+                        type_name: other.type_name().to_string(),
+                        line: span.start.line,
+                        column: span.start.column,
+                    });
+                }
+            },
+            UnaryOp::BitNot => match &operand_typed.resolved_type {
+                ResolvedType::Integer => ResolvedType::Integer,
+                ResolvedType::BigInt => ResolvedType::BigInt,
+                ResolvedType::Null => ResolvedType::Null,
+                other => {
+                    return Err(PlannerError::InvalidOperator {
+                        op: "bitwise not".to_string(),
                         type_name: other.type_name().to_string(),
                         line: span.start.line,
                         column: span.start.column,
@@ -2948,6 +3011,52 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             value
         }
     }
+}
+
+fn fold_integral_binary(
+    left: &TypedExpr,
+    op: BinaryOp,
+    right: &TypedExpr,
+    result_type: &ResolvedType,
+    span: Span,
+) -> Option<TypedExpr> {
+    let value = |expr: &TypedExpr| match &expr.kind {
+        TypedExprKind::Literal(Literal::Number(value)) => value.parse::<i64>().ok(),
+        _ => None,
+    };
+    let left = value(left)?;
+    let right = value(right)?;
+    let folded = match op {
+        BinaryOp::BitAnd => left & right,
+        BinaryOp::BitOr => left | right,
+        BinaryOp::BitXor => left ^ right,
+        BinaryOp::ShiftLeft | BinaryOp::ShiftRight => {
+            let width = if matches!(result_type, ResolvedType::BigInt) {
+                64
+            } else {
+                32
+            };
+            if !(0..width).contains(&right) {
+                return None;
+            }
+            if op == BinaryOp::ShiftRight {
+                left >> right as u32
+            } else {
+                let shifted = i128::from(left) * (1_i128 << right as u32);
+                if matches!(result_type, ResolvedType::BigInt) {
+                    i64::try_from(shifted).ok()?
+                } else {
+                    i64::from(i32::try_from(shifted).ok()?)
+                }
+            }
+        }
+        _ => return None,
+    };
+    Some(TypedExpr::literal(
+        Literal::Number(folded.to_string()),
+        result_type.clone(),
+        span,
+    ))
 }
 
 fn is_numeric_type(ty: &ResolvedType) -> bool {

@@ -146,7 +146,7 @@ impl Default for RecursiveCteLimits {
 pub enum TableFunctionKind {
     /// `UNNEST(vector)` — one row per element.
     Unnest,
-    /// `GENERATE_SERIES(...)` — reserved for issue #157; planning rejects it.
+    /// `GENERATE_SERIES(start, stop [, step])` over integers.
     GenerateSeries,
 }
 

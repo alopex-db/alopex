@@ -101,10 +101,11 @@ type
     opStringConcat
     opAnd, opOr
     opLike, opNotLike, opILike, opNotILike, opGlob, opNotGlob,
-    opSimilarTo, opNotSimilarTo, opIn, opNotIn, opBetween, opNotBetween, opIs
+    opSimilarTo, opNotSimilarTo, opIn, opNotIn, opBetween, opNotBetween, opIs,
+    opBitAnd, opBitOr, opBitXor, opShiftLeft, opShiftRight
 
   UnaryOpKind* = enum
-    opNot, opNeg, opIsNull, opIsNotNull
+    opNot, opNeg, opIsNull, opIsNotNull, opBitNot
 
   JoinKind* = enum
     jkInner, jkLeft, jkRight, jkFull, jkCross
