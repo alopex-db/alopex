@@ -31,7 +31,7 @@ class RetargetPythonParserSourceTests(unittest.TestCase):
             "x86_64-unknown-linux-gnu",
         )
         return {
-            "schema": "alopex-parser-vendor-manifest-v1",
+            "schema": "alopex-parser-vendor-manifest-v2",
             "alopex_version": "0.8.5",
             "contract_version": "0.14.0",
             "assets": [
