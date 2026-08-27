@@ -74,15 +74,36 @@
       "target_release": "0.8.10",
       "status": "planned",
       "evidence": {
-        "parser_ast": [],
-        "catalog_schema": [],
-        "storage": [],
-        "wal_snapshot_backup": [],
-        "distributed_wire": [],
-        "rust_api": [],
-        "python_ffi": [],
-        "dataframe_arrow_parquet": [],
-        "packaging_demo": []
+        "parser_ast": [
+          "crates/alopex-sql/nim-sql-parser/tests/test_msgpack_output.nim"
+        ],
+        "catalog_schema": [
+          "crates/alopex-sql/src/catalog/persistent.rs"
+        ],
+        "storage": [
+          "crates/alopex-sql/src/storage/codec.rs"
+        ],
+        "wal_snapshot_backup": [
+          "crates/alopex-sql/src/storage/codec.rs"
+        ],
+        "distributed_wire": [
+          "crates/alopex-server/proto/alopex.proto",
+          "crates/alopex-server/src/grpc/mod.rs"
+        ],
+        "rust_api": [
+          "crates/alopex-sql/tests/decimal_types.rs"
+        ],
+        "python_ffi": [
+          "crates/alopex-py/src/embedded/sql.rs"
+        ],
+        "dataframe_arrow_parquet": [
+          "crates/alopex-embedded/tests/dataframe_integration.rs",
+          "crates/alopex-sql/src/executor/bulk/parquet.rs"
+        ],
+        "packaging_demo": [
+          "scripts/demo/v08/demo_sql_v08.py",
+          "docs/sql-decimal.md"
+        ]
       }
     },
     {

@@ -2413,6 +2413,7 @@ fn sql_value_to_value(sql_value: alopex_sql::SqlValue) -> Value {
         value @ (SqlValue::Date(_) | SqlValue::Time(_) | SqlValue::Interval { .. }) => {
             Value::Text(value.temporal_text().expect("valid stored temporal value"))
         }
+        SqlValue::Decimal(value) => Value::Text(value.to_string()),
     }
 }
 
@@ -2433,6 +2434,7 @@ fn remote_value_to_value(sql_value: alopex_sql::storage::SqlValue) -> Value {
         value @ (SqlValue::Date(_) | SqlValue::Time(_) | SqlValue::Interval { .. }) => {
             Value::Text(value.temporal_text().expect("valid stored temporal value"))
         }
+        SqlValue::Decimal(value) => Value::Text(value.to_string()),
     }
 }
 
@@ -2465,6 +2467,7 @@ fn sql_column_to_column(col: &alopex_sql::executor::ColumnInfo) -> Column {
         ResolvedType::Boolean => DataType::Bool,
         ResolvedType::Timestamp => DataType::Text, // Display as text
         ResolvedType::Date | ResolvedType::Time | ResolvedType::Interval => DataType::Text,
+        ResolvedType::Decimal { .. } => DataType::Text,
         ResolvedType::Vector { .. } => DataType::Vector,
         ResolvedType::Null => DataType::Text, // Fallback
     };

@@ -292,6 +292,7 @@ fn resolved_type_to_string(resolved_type: &ResolvedType) -> String {
         ResolvedType::Date => "DATE".to_string(),
         ResolvedType::Time => "TIME".to_string(),
         ResolvedType::Interval => "INTERVAL".to_string(),
+        ResolvedType::Decimal { precision, scale } => format!("DECIMAL({precision},{scale})"),
         ResolvedType::Vector { dimension, metric } => {
             let metric = match metric {
                 VectorMetric::Cosine => "COSINE",

@@ -294,7 +294,7 @@ jobs:
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
         with:
-          version: v0.16.0
+          version: v0.17.0
 
       - name: Ensure wasm-pack in PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"

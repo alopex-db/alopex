@@ -175,6 +175,7 @@ fn normalize_value(value: &SqlValue) -> Result<Value, String> {
             days,
             micros,
         } => Ok(json!({ "months": months, "days": days, "microseconds": micros })),
+        SqlValue::Decimal(value) => Ok(json!(value.to_string())),
         SqlValue::Blob(_) => {
             Err("BLOB 値の正規化表現は未定義(コーパスに BLOB を含めない前提)".to_string())
         }

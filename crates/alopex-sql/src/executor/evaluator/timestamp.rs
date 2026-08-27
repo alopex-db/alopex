@@ -3,7 +3,7 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use crate::executor::{EvaluationError, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;
 use crate::planner::types::ResolvedType;
-use crate::storage::SqlValue;
+use crate::storage::{DecimalValue, SqlValue};
 
 use super::{EvalContext, evaluate};
 
@@ -45,6 +45,9 @@ pub(crate) fn coerce_value(value: SqlValue, target_type: &ResolvedType) -> Resul
         ResolvedType::Date => coerce_date(value),
         ResolvedType::Time => coerce_time(value),
         ResolvedType::Interval => coerce_interval(value),
+        ResolvedType::Decimal { precision, scale } => {
+            coerce_decimal(value, target_type, *precision, *scale)
+        }
         ResolvedType::Integer | ResolvedType::BigInt => coerce_integer(value, target_type),
         ResolvedType::Float | ResolvedType::Double => coerce_double(value, target_type),
         ResolvedType::Text => coerce_text(value),
@@ -55,6 +58,39 @@ pub(crate) fn coerce_value(value: SqlValue, target_type: &ResolvedType) -> Resul
             cast_failure(value.type_name(), target_type, "NULL is not a cast target")
         }
     }
+}
+
+fn coerce_decimal(
+    value: SqlValue,
+    target: &ResolvedType,
+    precision: u8,
+    scale: u8,
+) -> Result<SqlValue> {
+    let source = value.type_name();
+    let decimal = match value {
+        SqlValue::Null => return Ok(SqlValue::Null),
+        SqlValue::Decimal(value) => value,
+        SqlValue::Integer(value) => DecimalValue::new(i128::from(value), 0),
+        SqlValue::BigInt(value) => DecimalValue::new(i128::from(value), 0),
+        SqlValue::Float(value) if value.is_finite() => DecimalValue::parse(&value.to_string())
+            .ok_or_else(|| cast_error_from(source, target, "invalid decimal value"))?,
+        SqlValue::Double(value) if value.is_finite() => DecimalValue::parse(&value.to_string())
+            .ok_or_else(|| cast_error_from(source, target, "invalid decimal value"))?,
+        SqlValue::Text(value) => DecimalValue::parse(&value)
+            .ok_or_else(|| cast_error_from(source, target, "invalid decimal text"))?,
+        other => return Err(cast_error(&other, target, "conversion is not supported")),
+    };
+    let decimal = decimal
+        .rescale(scale)
+        .ok_or_else(|| cast_error_from(source, target, "decimal overflow"))?;
+    if !decimal.fits_precision(precision) {
+        return Err(cast_error_from(
+            source,
+            target,
+            "decimal precision overflow",
+        ));
+    }
+    Ok(SqlValue::Decimal(decimal))
 }
 
 fn cast_error(value: &SqlValue, target: &ResolvedType, reason: &str) -> ExecutorError {
@@ -80,6 +116,13 @@ fn coerce_integer(value: SqlValue, target: &ResolvedType) -> Result<SqlValue> {
         SqlValue::Null => return Ok(SqlValue::Null),
         SqlValue::Integer(v) => i64::from(v),
         SqlValue::BigInt(v) | SqlValue::Timestamp(v) => v,
+        SqlValue::Decimal(v) => {
+            let divisor = crate::storage::value::decimal_power(v.scale).ok_or_else(|| {
+                cast_error_from("Decimal", target, "decimal scale is out of range")
+            })?;
+            i64::try_from(v.coefficient / divisor)
+                .map_err(|_| cast_error_from("Decimal", target, "value is out of range"))?
+        }
         SqlValue::Boolean(b) => i64::from(b),
         SqlValue::Float(v) => {
             let t = f64::from(v).trunc();
@@ -128,6 +171,10 @@ fn coerce_double(value: SqlValue, target: &ResolvedType) -> Result<SqlValue> {
         SqlValue::Float(v) => f64::from(v),
         SqlValue::Integer(v) => f64::from(v),
         SqlValue::BigInt(v) | SqlValue::Timestamp(v) => v as f64,
+        SqlValue::Decimal(v) => v
+            .to_string()
+            .parse::<f64>()
+            .map_err(|_| cast_error_from("Decimal", target, "value is out of range"))?,
         SqlValue::Boolean(b) => f64::from(b),
         SqlValue::Text(ref s) => match s.trim().parse::<f64>() {
             Ok(v) => v,
@@ -160,6 +207,7 @@ fn coerce_text(value: SqlValue) -> Result<SqlValue> {
         SqlValue::BigInt(v) | SqlValue::Timestamp(v) => Ok(SqlValue::Text(v.to_string())),
         SqlValue::Float(v) => Ok(SqlValue::Text(v.to_string())),
         SqlValue::Double(v) => Ok(SqlValue::Text(v.to_string())),
+        SqlValue::Decimal(v) => Ok(SqlValue::Text(v.to_string())),
         SqlValue::Boolean(b) => Ok(SqlValue::Text(if b { "true" } else { "false" }.to_string())),
         SqlValue::Date(days) => {
             let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch");

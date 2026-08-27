@@ -1,7 +1,7 @@
 use crate::ast::expr::BinaryOp;
 use crate::executor::{EvaluationError, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;
-use crate::storage::SqlValue;
+use crate::storage::{DecimalValue, SqlValue};
 use chrono::{Duration, Months, NaiveDate};
 
 use super::evaluate;
@@ -10,19 +10,29 @@ pub fn eval_binary_op(
     op: &BinaryOp,
     left: &TypedExpr,
     right: &TypedExpr,
+    result_type: &crate::planner::ResolvedType,
     ctx: &super::EvalContext<'_>,
 ) -> Result<SqlValue> {
     let l = evaluate(left, ctx)?;
     let r = evaluate(right, ctx)?;
-    eval_binary_values(op, l, r)
+    eval_binary_values_with_type(op, l, r, Some(result_type))
 }
 
 pub(crate) fn eval_binary_values(op: &BinaryOp, l: SqlValue, r: SqlValue) -> Result<SqlValue> {
+    eval_binary_values_with_type(op, l, r, None)
+}
+
+fn eval_binary_values_with_type(
+    op: &BinaryOp,
+    l: SqlValue,
+    r: SqlValue,
+    result_type: Option<&crate::planner::ResolvedType>,
+) -> Result<SqlValue> {
     match op {
-        BinaryOp::Add => add(l, r),
-        BinaryOp::Sub => sub(l, r),
-        BinaryOp::Mul => mul(l, r),
-        BinaryOp::Div => div(l, r),
+        BinaryOp::Add => decimal_binary(op, &l, &r, result_type).unwrap_or_else(|| add(l, r)),
+        BinaryOp::Sub => decimal_binary(op, &l, &r, result_type).unwrap_or_else(|| sub(l, r)),
+        BinaryOp::Mul => decimal_binary(op, &l, &r, result_type).unwrap_or_else(|| mul(l, r)),
+        BinaryOp::Div => decimal_binary(op, &l, &r, result_type).unwrap_or_else(|| div(l, r)),
         BinaryOp::Mod => r#mod(l, r),
         BinaryOp::Eq => compare(l, r, OrderingKind::Eq),
         BinaryOp::Neq => compare(l, r, OrderingKind::Neq),
@@ -39,6 +49,120 @@ pub(crate) fn eval_binary_values(op: &BinaryOp, l: SqlValue, r: SqlValue) -> Res
         BinaryOp::ShiftLeft => shift(l, r, true),
         BinaryOp::ShiftRight => shift(l, r, false),
     }
+}
+
+fn decimal_operand(value: &SqlValue) -> Option<DecimalValue> {
+    match value {
+        SqlValue::Decimal(value) => Some(*value),
+        SqlValue::Integer(value) => Some(DecimalValue::new(i128::from(*value), 0)),
+        SqlValue::BigInt(value) => Some(DecimalValue::new(i128::from(*value), 0)),
+        _ => None,
+    }
+}
+
+fn decimal_binary(
+    op: &BinaryOp,
+    left: &SqlValue,
+    right: &SqlValue,
+    result_type: Option<&crate::planner::ResolvedType>,
+) -> Option<Result<SqlValue>> {
+    if left.is_null() || right.is_null() {
+        return (matches!(left, SqlValue::Decimal(_)) || matches!(right, SqlValue::Decimal(_)))
+            .then_some(Ok(SqlValue::Null));
+    }
+    if !matches!(left, SqlValue::Decimal(_)) && !matches!(right, SqlValue::Decimal(_)) {
+        return None;
+    }
+    let left = decimal_operand(left)?;
+    let right = decimal_operand(right)?;
+    let crate::planner::ResolvedType::Decimal { precision, scale } = result_type? else {
+        return None;
+    };
+    Some(decimal_calculate(op, left, right, *precision, *scale).map(SqlValue::Decimal))
+}
+
+fn decimal_calculate(
+    op: &BinaryOp,
+    left: DecimalValue,
+    right: DecimalValue,
+    precision: u8,
+    scale: u8,
+) -> Result<DecimalValue> {
+    let overflow = || ExecutorError::Evaluation(EvaluationError::Overflow);
+    let result = match op {
+        BinaryOp::Add | BinaryOp::Sub => {
+            let input_scale = left.scale.max(right.scale);
+            let left = left.rescale(input_scale).ok_or_else(overflow)?;
+            let right = right.rescale(input_scale).ok_or_else(overflow)?;
+            let coefficient = if matches!(op, BinaryOp::Add) {
+                left.coefficient.checked_add(right.coefficient)
+            } else {
+                left.coefficient.checked_sub(right.coefficient)
+            }
+            .ok_or_else(overflow)?;
+            DecimalValue::new(coefficient, input_scale)
+                .rescale(scale)
+                .ok_or_else(overflow)?
+        }
+        BinaryOp::Mul => DecimalValue::new(
+            left.coefficient
+                .checked_mul(right.coefficient)
+                .ok_or_else(overflow)?,
+            left.scale.checked_add(right.scale).ok_or_else(overflow)?,
+        )
+        .rescale(scale)
+        .ok_or_else(overflow)?,
+        BinaryOp::Div => {
+            if right.coefficient == 0 {
+                return Err(ExecutorError::Evaluation(EvaluationError::DivisionByZero));
+            }
+            let exponent = i16::from(right.scale) + i16::from(scale) - i16::from(left.scale);
+            let (numerator, denominator) = if exponent >= 0 {
+                (
+                    left.coefficient
+                        .checked_mul(
+                            crate::storage::value::decimal_power(exponent as u8)
+                                .ok_or_else(overflow)?,
+                        )
+                        .ok_or_else(overflow)?,
+                    right.coefficient,
+                )
+            } else {
+                (
+                    left.coefficient,
+                    right
+                        .coefficient
+                        .checked_mul(
+                            crate::storage::value::decimal_power((-exponent) as u8)
+                                .ok_or_else(overflow)?,
+                        )
+                        .ok_or_else(overflow)?,
+                )
+            };
+            let quotient = numerator / denominator;
+            let remainder = numerator % denominator;
+            let rounded =
+                if remainder.abs().checked_mul(2).ok_or_else(overflow)? >= denominator.abs() {
+                    quotient
+                        .checked_add(numerator.signum() * denominator.signum())
+                        .ok_or_else(overflow)?
+                } else {
+                    quotient
+                };
+            DecimalValue::new(rounded, scale)
+        }
+        _ => {
+            return type_mismatch(
+                "Decimal arithmetic",
+                &SqlValue::Decimal(left),
+                &SqlValue::Decimal(right),
+            );
+        }
+    };
+    if !result.fits_precision(precision) {
+        return Err(ExecutorError::Evaluation(EvaluationError::Overflow));
+    }
+    Ok(result)
 }
 
 fn bitwise(left: SqlValue, right: SqlValue, op: fn(i64, i64) -> i64) -> Result<SqlValue> {
@@ -411,8 +535,14 @@ fn compare(left: SqlValue, right: SqlValue, kind: OrderingKind) -> Result<SqlVal
         return Ok(SqlValue::Null);
     }
 
-    use OrderingKind::*;
-    use std::cmp::Ordering;
+    if (matches!(left, SqlValue::Decimal(_)) || matches!(right, SqlValue::Decimal(_)))
+        && let (Some(lhs), Some(rhs)) = (decimal_operand(&left), decimal_operand(&right))
+    {
+        return Ok(SqlValue::Boolean(ordering_matches(
+            lhs.cmp_numeric(rhs),
+            kind,
+        )));
+    }
     if let (Some(lhs), Some(rhs)) = (numeric_as_f64(&left), numeric_as_f64(&right)) {
         let cmp = lhs.partial_cmp(&rhs).ok_or(ExecutorError::Evaluation(
             EvaluationError::TypeMismatch {
@@ -420,15 +550,7 @@ fn compare(left: SqlValue, right: SqlValue, kind: OrderingKind) -> Result<SqlVal
                 actual: format!("{:?} vs {:?}", left.type_name(), right.type_name()),
             },
         ))?;
-        let result = match kind {
-            Eq => cmp == Ordering::Equal,
-            Neq => cmp != Ordering::Equal,
-            Lt => cmp == Ordering::Less,
-            Gt => cmp == Ordering::Greater,
-            Le => cmp != Ordering::Greater,
-            Ge => cmp != Ordering::Less,
-        };
-        return Ok(SqlValue::Boolean(result));
+        return Ok(SqlValue::Boolean(ordering_matches(cmp, kind)));
     }
     let cmp = left.partial_cmp(&right).ok_or(ExecutorError::Evaluation(
         EvaluationError::TypeMismatch {
@@ -437,15 +559,20 @@ fn compare(left: SqlValue, right: SqlValue, kind: OrderingKind) -> Result<SqlVal
         },
     ))?;
 
-    let result = match kind {
+    Ok(SqlValue::Boolean(ordering_matches(cmp, kind)))
+}
+
+fn ordering_matches(cmp: std::cmp::Ordering, kind: OrderingKind) -> bool {
+    use OrderingKind::*;
+    use std::cmp::Ordering;
+    match kind {
         Eq => cmp == Ordering::Equal,
         Neq => cmp != Ordering::Equal,
         Lt => cmp == Ordering::Less,
         Gt => cmp == Ordering::Greater,
         Le => cmp != Ordering::Greater,
         Ge => cmp != Ordering::Less,
-    };
-    Ok(SqlValue::Boolean(result))
+    }
 }
 
 fn numeric_as_f64(value: &SqlValue) -> Option<f64> {
@@ -454,6 +581,7 @@ fn numeric_as_f64(value: &SqlValue) -> Option<f64> {
         SqlValue::BigInt(v) => Some(*v as f64),
         SqlValue::Float(v) => Some(*v as f64),
         SqlValue::Double(v) => Some(*v),
+        SqlValue::Decimal(v) => v.to_string().parse().ok(),
         _ => None,
     }
 }

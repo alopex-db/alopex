@@ -54,6 +54,13 @@ fn eval_minus(value: SqlValue) -> Result<SqlValue> {
             .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
         SqlValue::Float(v) => Ok(SqlValue::Float(-v)),
         SqlValue::Double(v) => Ok(SqlValue::Double(-v)),
+        SqlValue::Decimal(v) => v
+            .coefficient
+            .checked_neg()
+            .map(|coefficient| {
+                SqlValue::Decimal(crate::storage::DecimalValue::new(coefficient, v.scale))
+            })
+            .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow)),
         other => Err(ExecutorError::Evaluation(EvaluationError::TypeMismatch {
             expected: "Numeric".into(),
             actual: other.type_name().into(),

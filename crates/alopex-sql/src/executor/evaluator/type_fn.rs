@@ -35,6 +35,7 @@ fn eval_pg_typeof(values: &[SqlValue]) -> Result<SqlValue> {
         SqlValue::Date(_) => "date",
         SqlValue::Time(_) => "time",
         SqlValue::Interval { .. } => "interval",
+        SqlValue::Decimal(_) => "numeric",
         SqlValue::Vector(_) => "vector",
         SqlValue::Null => "unknown",
     };
@@ -53,6 +54,7 @@ fn eval_quote(values: &[SqlValue]) -> Result<SqlValue> {
             }
         }
         SqlValue::Integer(value) => value.to_string(),
+        SqlValue::Decimal(value) => value.to_string(),
         SqlValue::BigInt(value) => value.to_string(),
         SqlValue::Float(value) => value.to_string(),
         SqlValue::Double(value) => value.to_string(),

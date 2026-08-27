@@ -45,19 +45,19 @@ Arrow and DataFrame mappings are `Date32`, `Time64(Microsecond)`, and `Interval(
 
 | Path or module | Current responsibility | v0.8.10 responsibility | Migration action | Deletion condition | Verification |
 | --- | --- | --- | --- | --- | --- |
-| Nim parser and Rust AST | `DATE`/`TIME` collapsed into `TIMESTAMP` | emit distinct types and typed casts | replace the collapsing mapping; bump parser contract to `0.16.0` | old mapping disappears when new parser assets are staged | parser and exported-contract tests |
+| Nim parser and Rust AST | `DATE`/`TIME` collapsed into `TIMESTAMP` | emit distinct types and typed casts | replace the collapsing mapping; bump parser contract to `0.17.0` | old mapping disappears when new parser assets are staged | parser and exported-contract tests |
 | `SqlValue` and row codec | tags `0x00`–`0x09` | append tags `0x0a`–`0x0c` | keep old tags byte-identical | no old tag is deleted | old fixture plus round-trip tests |
 | persistent catalog | existing enum variants | append temporal variants | old serialized catalogs remain readable | no prior variant is deleted | catalog compatibility tests |
 | evaluator and scalar catalog | UTC `TIMESTAMP` functions | calendar parsing, arithmetic, and public functions | reuse the statement clock and `chrono` | unsupported-literal rejection is removed | boundary and regression tests |
 | columnar, Arrow, and Parquet | numeric and timestamp mappings | exact temporal mappings | reject lossy interval precision | no numeric fallback remains | conversion round trips |
 | Python, Rust, HTTP, and gRPC | timestamp integer transport | distinct temporal values | append wire fields and typed adapters | no previous field number changes | public-surface tests |
-| release verifier | parser contract and prior type gate | require temporal demo and all public surfaces | stage fresh `0.16.0` parser assets | stale `0.15.0` assets fail closed | release tests and demo |
+| release verifier | parser contract and prior type gate | require temporal demo and all public surfaces | stage fresh `0.17.0` parser assets | stale `0.15.0` assets fail closed | release tests and demo |
 
 The implementation keeps existing `TEXT` columns and values unchanged. Alopex does not migrate old text that happens to contain a date; applications opt into native behavior with a new temporal column or an explicit cast.
 
 ## Verification checklist
 
-- Parser tests cover DDL types, typed literals, casts, and contract `0.16.0`.
+- Parser tests cover DDL types, typed literals, casts, and contract `0.17.0`.
 - Calendar tests cover leap years, invalid dates, month-end clamping, negative intervals, and microsecond precision.
 - Storage tests cover all new tags, old rows, unknown-tag rejection, and catalog round trips.
 - Public-surface tests cover embedded Rust, Python, DataFrame, HTTP, gRPC, and CLI output.

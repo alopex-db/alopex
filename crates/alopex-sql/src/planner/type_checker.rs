@@ -834,6 +834,9 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 if let Some(result) = Self::temporal_arithmetic_type(op, left, right) {
                     return Ok(result);
                 }
+                if let Some(result) = decimal_arithmetic_type(op, left, right) {
+                    return Ok(result);
+                }
                 let result = self.check_arithmetic_op(left, right, span)?;
                 Ok(result)
             }
@@ -995,7 +998,10 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             (a, b) if a == b => true,
 
             // Numeric types are comparable with each other
-            (Integer | BigInt | Float | Double, Integer | BigInt | Float | Double) => true,
+            (
+                Integer | BigInt | Float | Double | Decimal { .. },
+                Integer | BigInt | Float | Double | Decimal { .. },
+            ) => true,
 
             // Text types
             (Text, Text) => true,
@@ -1127,6 +1133,10 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     ResolvedType::BigInt => ResolvedType::BigInt,
                     ResolvedType::Float => ResolvedType::Float,
                     ResolvedType::Double => ResolvedType::Double,
+                    ResolvedType::Decimal { precision, scale } => ResolvedType::Decimal {
+                        precision: *precision,
+                        scale: *scale,
+                    },
                     ResolvedType::Null => ResolvedType::Null,
                     other => {
                         return Err(PlannerError::InvalidOperator {
@@ -1193,6 +1203,10 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 ResolvedType::BigInt => ResolvedType::BigInt,
                 ResolvedType::Float => ResolvedType::Float,
                 ResolvedType::Double => ResolvedType::Double,
+                ResolvedType::Decimal { precision, scale } => ResolvedType::Decimal {
+                    precision: *precision,
+                    scale: *scale,
+                },
                 ResolvedType::Null => ResolvedType::Null,
                 other => {
                     return Err(PlannerError::InvalidOperator {
@@ -3081,6 +3095,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     | ResolvedType::Date
                     | ResolvedType::Time
                     | ResolvedType::Interval
+                    | ResolvedType::Decimal { .. }
             )
         {
             TypedExpr::cast(value, expected.clone(), span)
@@ -3139,8 +3154,49 @@ fn fold_integral_binary(
 fn is_numeric_type(ty: &ResolvedType) -> bool {
     matches!(
         ty,
-        ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Float | ResolvedType::Double
+        ResolvedType::Integer
+            | ResolvedType::BigInt
+            | ResolvedType::Float
+            | ResolvedType::Double
+            | ResolvedType::Decimal { .. }
     )
+}
+
+fn decimal_arithmetic_type(
+    op: BinaryOp,
+    left: &ResolvedType,
+    right: &ResolvedType,
+) -> Option<ResolvedType> {
+    let parts = |ty: &ResolvedType| match ty {
+        ResolvedType::Decimal { precision, scale } => Some((*precision, *scale)),
+        ResolvedType::Integer => Some((10, 0)),
+        ResolvedType::BigInt => Some((19, 0)),
+        _ => None,
+    };
+    if !matches!(left, ResolvedType::Decimal { .. })
+        && !matches!(right, ResolvedType::Decimal { .. })
+    {
+        return None;
+    }
+    let (lp, ls) = parts(left)?;
+    let (rp, rs) = parts(right)?;
+    let (raw_precision, raw_scale) = match op {
+        BinaryOp::Add | BinaryOp::Sub => ((lp - ls).max(rp - rs) + ls.max(rs) + 1, ls.max(rs)),
+        BinaryOp::Mul => (
+            lp.saturating_add(rp).saturating_add(1),
+            ls.saturating_add(rs),
+        ),
+        BinaryOp::Div => {
+            let scale = 6_u8.max(ls.saturating_add(rp).saturating_add(1));
+            ((lp - ls).saturating_add(rs).saturating_add(scale), scale)
+        }
+        _ => return None,
+    };
+    let reduction = raw_precision.saturating_sub(38);
+    Some(ResolvedType::Decimal {
+        precision: raw_precision.min(38),
+        scale: raw_scale.saturating_sub(reduction),
+    })
 }
 
 fn validate_window_frame(

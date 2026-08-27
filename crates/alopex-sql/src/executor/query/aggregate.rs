@@ -82,6 +82,11 @@ fn encode_group_value(value: &SqlValue, buf: &mut Vec<u8>) -> Result<()> {
             buf.extend_from_slice(&micros.to_le_bytes());
             Ok(())
         }
+        SqlValue::Decimal(value) => {
+            buf.extend_from_slice(&value.coefficient.to_le_bytes());
+            buf.push(value.scale);
+            Ok(())
+        }
         SqlValue::Vector(values) => {
             let len = u32::try_from(values.len()).map_err(|_| ExecutorError::InvalidOperation {
                 operation: "aggregate".into(),
@@ -378,6 +383,27 @@ impl SumAccumulator {
                 };
                 SqlValue::BigInt(sum)
             }
+            ResolvedType::Decimal { precision, scale } => {
+                let SqlValue::Decimal(value) = value else {
+                    return sum_type_mismatch("Decimal", &value);
+                };
+                let value = value
+                    .rescale(*scale)
+                    .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+                let coefficient = match self.sum.as_ref() {
+                    None => value.coefficient,
+                    Some(SqlValue::Decimal(current)) => current
+                        .coefficient
+                        .checked_add(value.coefficient)
+                        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?,
+                    Some(other) => return sum_type_mismatch("Decimal", other),
+                };
+                let sum = crate::storage::DecimalValue::new(coefficient, *scale);
+                if !sum.fits_precision(*precision) {
+                    return Err(ExecutorError::Evaluation(EvaluationError::Overflow));
+                }
+                SqlValue::Decimal(sum)
+            }
             _ => {
                 let value = numeric_to_f64(&value)?;
                 let sum = match self.sum.as_ref() {
@@ -498,7 +524,8 @@ impl Accumulator for TotalAccumulator {
 /// Accumulator for AVG.
 #[derive(Debug, Clone)]
 pub struct AvgAccumulator {
-    sum: Option<f64>,
+    sum: SumAccumulator,
+    result_type: ResolvedType,
     count: usize,
     distinct_values: Option<HashSet<Vec<u8>>>,
 }
@@ -510,8 +537,13 @@ impl AvgAccumulator {
     }
 
     pub fn with_distinct(distinct: bool) -> Self {
+        Self::with_distinct_for_type(distinct, ResolvedType::Double)
+    }
+
+    pub fn with_distinct_for_type(distinct: bool, result_type: ResolvedType) -> Self {
         Self {
-            sum: None,
+            sum: SumAccumulator::with_distinct_for_type(false, result_type.clone()),
+            result_type,
             count: 0,
             distinct_values: if distinct { Some(HashSet::new()) } else { None },
         }
@@ -535,8 +567,7 @@ impl Accumulator for AvgAccumulator {
         if !distinct_allows(&mut self.distinct_values, &value)? {
             return Ok(());
         }
-        let numeric = numeric_to_f64(&value)?;
-        self.sum = Some(self.sum.unwrap_or(0.0) + numeric);
+        self.sum.add_value(value)?;
         self.count += 1;
         Ok(())
     }
@@ -545,20 +576,42 @@ impl Accumulator for AvgAccumulator {
         if self.count == 0 {
             return Ok(SqlValue::Null);
         }
-        let sum = self.sum.unwrap_or(0.0);
-        Ok(SqlValue::Double(sum / self.count as f64))
+        match self.sum.finalize()? {
+            SqlValue::Decimal(sum) => {
+                let divisor = self.count as i128;
+                let quotient = sum.coefficient / divisor;
+                let remainder = sum.coefficient % divisor;
+                let rounded = if remainder.abs().saturating_mul(2) >= divisor {
+                    quotient
+                        .checked_add(sum.coefficient.signum())
+                        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?
+                } else {
+                    quotient
+                };
+                Ok(SqlValue::Decimal(crate::storage::DecimalValue::new(
+                    rounded, sum.scale,
+                )))
+            }
+            SqlValue::Double(sum) => Ok(SqlValue::Double(sum / self.count as f64)),
+            other => sum_type_mismatch(self.result_type.type_name(), &other),
+        }
     }
 
     fn state(&self) -> Result<Vec<SqlValue>> {
-        Ok(vec![
-            SqlValue::Double(self.sum.unwrap_or(0.0)),
-            SqlValue::BigInt(self.count as i64),
-        ])
+        let sum = match self.sum.finalize()? {
+            SqlValue::Null => match self.result_type {
+                ResolvedType::Decimal { scale, .. } => {
+                    SqlValue::Decimal(crate::storage::DecimalValue::new(0, scale))
+                }
+                _ => SqlValue::Double(0.0),
+            },
+            value => value,
+        };
+        Ok(vec![sum, SqlValue::BigInt(self.count as i64)])
     }
 
     fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
         expect_state_arity("avg", state, 2)?;
-        let sum = state_double("avg", &state[0], 0)?;
         let count = state_bigint("avg", &state[1], 1)?;
         if count < 0 {
             return Err(invalid_aggregate_state(
@@ -566,7 +619,9 @@ impl Accumulator for AvgAccumulator {
                 "state count must be non-negative",
             ));
         }
-        self.sum = Some(self.sum.unwrap_or(0.0) + sum);
+        if !state[0].is_null() {
+            self.sum.add_value(state[0].clone())?;
+        }
         self.count = self.count.saturating_add(count as usize);
         Ok(())
     }
@@ -2037,6 +2092,10 @@ pub fn create_accumulator_for_aggregate(aggregate: &AggregateExpr) -> Box<dyn Ac
             aggregate.distinct,
             aggregate.result_type.clone(),
         )),
+        AggregateFunction::Avg => Box::new(AvgAccumulator::with_distinct_for_type(
+            aggregate.distinct,
+            aggregate.result_type.clone(),
+        )),
         AggregateFunction::GroupConcat { separator } if !aggregate.order_by.is_empty() => {
             let sep = separator.clone().unwrap_or_else(|| ",".to_string());
             Box::new(GroupConcatAccumulator::with_order(
@@ -2737,7 +2796,7 @@ fn aggregate_state_types(agg: &AggregateExpr) -> Vec<ResolvedType> {
         AggregateFunction::Count => vec![ResolvedType::BigInt],
         AggregateFunction::Sum => vec![agg.result_type.clone()],
         AggregateFunction::Total => vec![ResolvedType::Double],
-        AggregateFunction::Avg => vec![ResolvedType::Double, ResolvedType::BigInt],
+        AggregateFunction::Avg => vec![agg.result_type.clone(), ResolvedType::BigInt],
         AggregateFunction::Min | AggregateFunction::Max => vec![agg.result_type.clone()],
         AggregateFunction::GroupConcat { .. } | AggregateFunction::StringAgg { .. } => {
             vec![ResolvedType::Text, ResolvedType::Text]

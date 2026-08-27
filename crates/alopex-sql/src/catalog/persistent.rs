@@ -183,6 +183,10 @@ pub enum PersistedType {
     Date,
     Time,
     Interval,
+    Decimal {
+        precision: u8,
+        scale: u8,
+    },
 }
 
 impl From<ResolvedType> for PersistedType {
@@ -199,6 +203,7 @@ impl From<ResolvedType> for PersistedType {
             ResolvedType::Date => Self::Date,
             ResolvedType::Time => Self::Time,
             ResolvedType::Interval => Self::Interval,
+            ResolvedType::Decimal { precision, scale } => Self::Decimal { precision, scale },
             ResolvedType::Vector { dimension, metric } => Self::Vector {
                 dimension,
                 metric: metric.into(),
@@ -222,6 +227,7 @@ impl From<PersistedType> for ResolvedType {
             PersistedType::Date => Self::Date,
             PersistedType::Time => Self::Time,
             PersistedType::Interval => Self::Interval,
+            PersistedType::Decimal { precision, scale } => Self::Decimal { precision, scale },
             PersistedType::Vector { dimension, metric } => Self::Vector {
                 dimension,
                 metric: metric.into(),

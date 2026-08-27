@@ -143,6 +143,11 @@ message Interval {
   int64 microseconds = 3;
 }
 
+message Decimal {
+  bytes coefficient = 1;
+  uint32 scale = 2;
+}
+
 message Value {
   oneof kind {
     int32 int_value = 1;
@@ -157,6 +162,7 @@ message Value {
     int32 date_value = 10;
     int64 time_value = 11;
     Interval interval_value = 12;
+    Decimal decimal_value = 13;
   }
 }
 

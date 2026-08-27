@@ -334,7 +334,7 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
         },
         RemoteReadCoverageEntry {
             id: "scalar.local_only",
-            public_surface: "vector, random/UUID, statistics, and cache-control scalar functions",
+            public_surface: "JSON, temporal, vector, random/UUID, statistics, and cache-control scalar functions",
             identities: REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS,
             remote_status: LocalOnly,
             prerequisite: "local execution profile",

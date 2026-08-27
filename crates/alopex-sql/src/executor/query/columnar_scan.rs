@@ -1231,6 +1231,20 @@ fn value_from_column(
                 micros: i64::from_le_bytes(raw[8..16].try_into().unwrap()),
             })
         }
+        (ResolvedType::Decimal { scale, .. }, Column::Fixed { values, .. }) => {
+            let raw = values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            let coefficient = i128::from_le_bytes(
+                raw.as_slice()
+                    .try_into()
+                    .map_err(|_| ExecutorError::Columnar("invalid decimal byte length".into()))?,
+            );
+            Ok(SqlValue::Decimal(crate::storage::DecimalValue::new(
+                coefficient,
+                *scale,
+            )))
+        }
         (_, Column::Binary(values)) => {
             let raw = values
                 .get(row_idx)

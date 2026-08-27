@@ -362,6 +362,7 @@ fn logical_type_for(ty: &ResolvedType) -> Result<LogicalType> {
         | ResolvedType::Date
         | ResolvedType::Time => Ok(LogicalType::Int64),
         ResolvedType::Interval => Ok(LogicalType::Fixed(16)),
+        ResolvedType::Decimal { .. } => Ok(LogicalType::Fixed(16)),
         ResolvedType::Vector { dimension, .. } => {
             Ok(LogicalType::Fixed(dimension.checked_mul(4).ok_or_else(|| {
                 ExecutorError::Columnar("vector dimension overflow when computing fixed len".into())
@@ -380,6 +381,7 @@ fn logical_type_for(ty: &ResolvedType) -> Result<LogicalType> {
 fn fixed_len_for(ty: &ResolvedType) -> Option<u32> {
     match ty {
         ResolvedType::Vector { dimension, .. } => Some(dimension.saturating_mul(4)),
+        ResolvedType::Decimal { .. } => Some(16),
         _ => None,
     }
 }
@@ -714,6 +716,38 @@ fn build_column(
                 validity_bitmap(&validity),
             ))
         }
+        ResolvedType::Decimal { precision, scale } => {
+            let mut validity = Vec::with_capacity(rows.len());
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                match row
+                    .get(col_idx)
+                    .ok_or_else(|| ExecutorError::BulkLoad("row too short".into()))?
+                {
+                    SqlValue::Null => {
+                        validity.push(false);
+                        values.push(vec![0; 16]);
+                    }
+                    SqlValue::Decimal(value)
+                        if value.scale == *scale && value.fits_precision(*precision) =>
+                    {
+                        validity.push(true);
+                        values.push(value.coefficient.to_le_bytes().to_vec());
+                    }
+                    other => {
+                        return Err(ExecutorError::BulkLoad(format!(
+                            "type mismatch for column '{}': expected Decimal({precision},{scale}), got {}",
+                            col_meta.name,
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok((
+                Column::Fixed { len: 16, values },
+                validity_bitmap(&validity),
+            ))
+        }
         ResolvedType::Null => Err(ExecutorError::Columnar(
             "NULL column type is not supported for columnar storage".into(),
         )),
@@ -856,7 +890,10 @@ pub(crate) fn parse_value(raw: &str, ty: &ResolvedType) -> Result<SqlValue> {
             .parse::<i64>()
             .map(SqlValue::Timestamp)
             .map_err(|e| parse_error(trimmed, ty, e)),
-        ResolvedType::Date | ResolvedType::Time | ResolvedType::Interval => {
+        ResolvedType::Date
+        | ResolvedType::Time
+        | ResolvedType::Interval
+        | ResolvedType::Decimal { .. } => {
             crate::executor::evaluator::coerce_value(SqlValue::Text(trimmed.to_string()), ty)
         }
         ResolvedType::Text => Ok(SqlValue::Text(trimmed.to_string())),

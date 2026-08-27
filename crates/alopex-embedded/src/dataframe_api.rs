@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use arrow::array::types::IntervalMonthDayNanoType;
 use arrow::array::{
-    ArrayRef, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int32Array,
-    Int64Array, IntervalMonthDayNanoArray, NullArray, StringArray, Time64MicrosecondArray,
-    TimestampMicrosecondArray,
+    ArrayRef, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
+    Int32Array, Int64Array, IntervalMonthDayNanoArray, NullArray, StringArray,
+    Time64MicrosecondArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, Field, IntervalUnit, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -93,6 +93,9 @@ fn arrow_type_for(ty: &ResolvedType) -> DfResult<DataType> {
         ResolvedType::Date => Ok(DataType::Date32),
         ResolvedType::Time => Ok(DataType::Time64(TimeUnit::Microsecond)),
         ResolvedType::Interval => Ok(DataType::Interval(IntervalUnit::MonthDayNano)),
+        ResolvedType::Decimal { precision, scale } => {
+            Ok(DataType::Decimal128(*precision, *scale as i8))
+        }
         ResolvedType::Null => Ok(DataType::Null),
         ResolvedType::Vector { .. } => Err(DataFrameError::invalid_operation(
             "vector columns are not supported for DataFrame conversion",
@@ -118,6 +121,7 @@ enum ColumnBuilderKind {
     Date(Vec<Option<i32>>),
     Time(Vec<Option<i64>>),
     Interval(Vec<Option<<IntervalMonthDayNanoType as arrow::array::ArrowPrimitiveType>::Native>>),
+    Decimal(Vec<Option<i128>>, u8, i8),
     Null(usize),
 }
 
@@ -135,6 +139,9 @@ impl ColumnBuilder {
             ResolvedType::Date => ColumnBuilderKind::Date(Vec::with_capacity(row_count)),
             ResolvedType::Time => ColumnBuilderKind::Time(Vec::with_capacity(row_count)),
             ResolvedType::Interval => ColumnBuilderKind::Interval(Vec::with_capacity(row_count)),
+            ResolvedType::Decimal { precision, scale } => {
+                ColumnBuilderKind::Decimal(Vec::with_capacity(row_count), precision, scale as i8)
+            }
             ResolvedType::Null => ColumnBuilderKind::Null(0),
             ResolvedType::Vector { .. } => {
                 return Err(DataFrameError::invalid_operation(
@@ -208,6 +215,10 @@ impl ColumnBuilder {
                 )));
                 Ok(())
             }
+            (ColumnBuilderKind::Decimal(values, _, _), SqlValue::Decimal(v)) => {
+                values.push(Some(v.coefficient));
+                Ok(())
+            }
             (ColumnBuilderKind::Int32(values), SqlValue::Null) => {
                 values.push(None);
                 Ok(())
@@ -252,6 +263,10 @@ impl ColumnBuilder {
                 values.push(None);
                 Ok(())
             }
+            (ColumnBuilderKind::Decimal(values, _, _), SqlValue::Null) => {
+                values.push(None);
+                Ok(())
+            }
             (ColumnBuilderKind::Null(count), SqlValue::Null) => {
                 *count += 1;
                 Ok(())
@@ -284,6 +299,15 @@ impl ColumnBuilder {
             ColumnBuilderKind::Interval(values) => {
                 Arc::new(IntervalMonthDayNanoArray::from(values))
             }
+            ColumnBuilderKind::Decimal(values, precision, scale) => Arc::new(
+                Decimal128Array::from(values)
+                    .with_precision_and_scale(precision, scale)
+                    .map_err(|error| {
+                        DataFrameError::schema_mismatch(format!(
+                            "invalid DECIMAL({precision},{scale}) Arrow type: {error}"
+                        ))
+                    })?,
+            ),
             ColumnBuilderKind::Null(len) => Arc::new(NullArray::new(len)),
         };
 

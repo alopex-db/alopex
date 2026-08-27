@@ -64,6 +64,10 @@ pub enum DataType {
     Date,
     Time,
     Interval,
+    Decimal {
+        precision: u8,
+        scale: u8,
+    },
     Vector {
         dimension: u32,
         metric: Option<VectorMetric>,

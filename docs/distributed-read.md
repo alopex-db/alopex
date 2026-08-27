@@ -8,7 +8,7 @@ This matrix is generated from the closed `RemoteReadCatalogV0_8` contract. A `lo
 | `select.aggregate.basic` | COUNT, SUM, TOTAL, AVG, MIN, MAX, GROUP BY, HAVING, DISTINCT | `remote_supported` | Closed aggregate descriptor and global finalization budget | Prepared aggregate result | Classified failure |
 | `select.aggregate.ordered_string` | GROUP_CONCAT, STRING_AGG | `remote_supported` | Ordered raw-value finalization budget | Prepared ordered aggregate result | Classified failure |
 | `scalar.deterministic` | Explicit deterministic scalar list | `remote_supported` | Explicit v0.8 function identity | Prepared remote read | Unlisted function rejected before transport |
-| `scalar.local_only` | Vector, random/UUID, statistics, cache control scalar functions | `local_only` | Local execution profile | v0.7.4 local behavior | Explicit local-only classification |
+| `scalar.local_only` | JSON, temporal, vector, random/UUID, statistics, and cache-control scalar functions | `local_only` | Local execution profile | v0.7.4 local behavior | Explicit local-only classification |
 | `statement.ddl` | CREATE/DROP TABLE, CREATE/DROP INDEX | `pre_execution_rejection` | Local schema workflow | v0.7.4 local behavior | `ddl_not_supported_remote` |
 | `statement.dml` | INSERT, UPDATE, DELETE | `pre_execution_rejection` | Local transaction workflow | v0.7.4 local behavior | `dml_not_supported_remote` |
 | `statement.pragma` | PRAGMA | `local_only` | Local execution profile | v0.7.4 local behavior | `pragma_local_only` |

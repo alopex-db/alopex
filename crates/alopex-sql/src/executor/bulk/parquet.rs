@@ -2,9 +2,9 @@ use std::fs::File;
 
 use arrow_array::types::IntervalMonthDayNanoType;
 use arrow_array::{
-    Array, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int32Array,
-    Int64Array, IntervalMonthDayNanoArray, LargeBinaryArray, StringArray, Time64MicrosecondArray,
-    TimestampMicrosecondArray,
+    Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
+    Int32Array, Int64Array, IntervalMonthDayNanoArray, LargeBinaryArray, StringArray,
+    Time64MicrosecondArray, TimestampMicrosecondArray,
 };
 use arrow_schema::{DataType as ArrowDataType, IntervalUnit, TimeUnit};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
@@ -129,6 +129,10 @@ fn map_arrow_type(dt: &ArrowDataType) -> Result<ResolvedType> {
         ArrowDataType::Date32 => Ok(ResolvedType::Date),
         ArrowDataType::Time64(TimeUnit::Microsecond) => Ok(ResolvedType::Time),
         ArrowDataType::Interval(IntervalUnit::MonthDayNano) => Ok(ResolvedType::Interval),
+        ArrowDataType::Decimal128(precision, scale) if *scale >= 0 => Ok(ResolvedType::Decimal {
+            precision: *precision,
+            scale: *scale as u8,
+        }),
         other => Err(ExecutorError::BulkLoad(format!(
             "unsupported parquet/arrow type: {other:?}"
         ))),
@@ -237,9 +241,55 @@ fn arrow_value_to_sql(
                 micros: nanos / 1_000,
             })
         }
+        (ArrowDataType::Decimal128(_, arrow_scale), ResolvedType::Decimal { precision, scale })
+            if *arrow_scale >= 0 =>
+        {
+            let arr = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
+            let value = crate::storage::DecimalValue::new(arr.value(row_idx), *arrow_scale as u8)
+                .rescale(*scale)
+                .ok_or_else(|| ExecutorError::BulkLoad("decimal rescale overflow".into()))?;
+            if !value.fits_precision(*precision) {
+                return Err(ExecutorError::BulkLoad("decimal precision overflow".into()));
+            }
+            Ok(SqlValue::Decimal(value))
+        }
         _ => Err(ExecutorError::BulkLoad(format!(
             "parquet field type {:?} does not match expected {:?}",
             dt, expected
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::DecimalValue;
+
+    #[test]
+    fn decimal128_maps_to_exact_sql_decimal() {
+        let array = Decimal128Array::from(vec![Some(12345)])
+            .with_precision_and_scale(10, 3)
+            .unwrap();
+        let ty = ArrowDataType::Decimal128(10, 3);
+        assert_eq!(
+            map_arrow_type(&ty).unwrap(),
+            ResolvedType::Decimal {
+                precision: 10,
+                scale: 3,
+            }
+        );
+        assert_eq!(
+            arrow_value_to_sql(
+                &array,
+                &ty,
+                &ResolvedType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                },
+                0,
+            )
+            .unwrap(),
+            SqlValue::Decimal(DecimalValue::new(1235, 2))
+        );
     }
 }

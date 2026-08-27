@@ -819,6 +819,10 @@ fn sql_value_to_proto(value: &alopex_sql::storage::SqlValue) -> proto::Value {
             days: *days,
             microseconds: *micros,
         })),
+        alopex_sql::storage::SqlValue::Decimal(value) => Some(Kind::DecimalValue(proto::Decimal {
+            coefficient: value.coefficient.to_be_bytes().to_vec(),
+            scale: u32::from(value.scale),
+        })),
         alopex_sql::storage::SqlValue::Vector(values) => Some(Kind::VectorValue(proto::Vector {
             values: values.clone(),
         })),
@@ -888,7 +892,7 @@ fn map_status(err: ServerError, correlation_id: &str) -> Status {
 #[cfg(test)]
 mod temporal_wire_tests {
     use super::{proto, sql_value_to_proto};
-    use alopex_sql::SqlValue;
+    use alopex_sql::{storage::DecimalValue, SqlValue};
     use prost::Message;
 
     #[test]
@@ -918,5 +922,19 @@ mod temporal_wire_tests {
             (interval.months, interval.days, interval.microseconds),
             (1, -2, 3)
         );
+    }
+
+    #[test]
+    fn decimal_value_uses_appended_wire_variant() {
+        let value = sql_value_to_proto(&SqlValue::Decimal(DecimalValue::new(-12345, 2)));
+        assert_eq!(
+            proto::Value::decode(value.encode_to_vec().as_slice()).unwrap(),
+            value
+        );
+        let Some(proto::value::Kind::DecimalValue(decimal)) = value.kind else {
+            panic!("expected decimal wire value");
+        };
+        assert_eq!(decimal.coefficient, (-12345_i128).to_be_bytes());
+        assert_eq!(decimal.scale, 2);
     }
 }

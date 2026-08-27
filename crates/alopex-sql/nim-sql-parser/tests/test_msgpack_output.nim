@@ -240,7 +240,8 @@ suite "MessagePack output - contract shape":
       "SELECT DATE '2024-02-29', TIME '12:34:56', INTERVAL '1 day'")
     check select["projection"][0]["expr"]["kind"]["target_type"]["variant"].getStr() == "Date"
     check select["projection"][1]["expr"]["kind"]["target_type"]["variant"].getStr() == "Time"
-    check select["projection"][2]["expr"]["kind"]["variant"].getStr() == "IntervalLiteral"
+    check select["projection"][2]["expr"]["kind"]["variant"].getStr() == "Literal"
+    check select["projection"][2]["expr"]["kind"]["literal"]["variant"].getStr() == "Interval"
 
   test "SELECT emits limit_with_ties and a detached OFFSET (issue #152)":
     let kind = selectKind(
@@ -751,7 +752,7 @@ suite "MessagePack output - staged continuous aggregate contract":
     check not query.hasKey("limit_with_ties")
     check not query.hasKey("distinct_on")
 
-  test "future helper accepts the existing CAST DECIMAL grammar":
+  test "DECIMAL precision and scale survive the public AST contract":
     let statement = parseSql(
       "CREATE CONTINUOUS AGGREGATE hourly AS " &
       "SELECT CAST(value AS DECIMAL(10,2)) FROM samples " &
@@ -762,7 +763,9 @@ suite "MessagePack output - staged continuous aggregate contract":
     )["kind"]["query"]
     let castKind = query["projection"][0]["expr"]["kind"]
     check castKind["variant"].getStr() == "Cast"
-    check castKind["target_type"]["variant"].getStr() == "Double"
+    check castKind["target_type"]["variant"].getStr() == "Decimal"
+    check castKind["target_type"]["precision"].getInt() == 10
+    check castKind["target_type"]["scale"].getInt() == 2
 
   test "TRY_CAST has a dedicated MessagePack expression variant":
     let statement = parseSql(

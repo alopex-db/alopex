@@ -1208,6 +1208,9 @@ fn type_to_string(data_type: &alopex_sql::planner::ResolvedType) -> String {
         alopex_sql::planner::ResolvedType::Date => "DATE".to_string(),
         alopex_sql::planner::ResolvedType::Time => "TIME".to_string(),
         alopex_sql::planner::ResolvedType::Interval => "INTERVAL".to_string(),
+        alopex_sql::planner::ResolvedType::Decimal { precision, scale } => {
+            format!("DECIMAL({precision},{scale})")
+        }
         alopex_sql::planner::ResolvedType::Vector { dimension, metric } => {
             format!("VECTOR({dimension}, {metric:?})")
         }

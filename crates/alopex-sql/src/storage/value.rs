@@ -7,6 +7,136 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{Result, StorageError};
 
+/// Exact decimal value represented as a signed coefficient and base-10 scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DecimalValue {
+    pub coefficient: i128,
+    pub scale: u8,
+}
+
+impl DecimalValue {
+    pub fn new(coefficient: i128, scale: u8) -> Self {
+        Self { coefficient, scale }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        let (negative, unsigned) = match value.as_bytes().first() {
+            Some(b'-') => (true, &value[1..]),
+            Some(b'+') => (false, &value[1..]),
+            _ => (false, value),
+        };
+        let mut parts = unsigned.split('.');
+        let whole = parts.next()?;
+        let fraction = parts.next().unwrap_or("");
+        if parts.next().is_some()
+            || (whole.is_empty() && fraction.is_empty())
+            || !whole.bytes().all(|byte| byte.is_ascii_digit())
+            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+            || fraction.len() > 38
+        {
+            return None;
+        }
+        let digits = format!("{whole}{fraction}");
+        let coefficient = digits.parse::<i128>().ok()?;
+        Some(Self {
+            coefficient: if negative {
+                coefficient.checked_neg()?
+            } else {
+                coefficient
+            },
+            scale: fraction.len() as u8,
+        })
+    }
+
+    pub fn rescale(self, target_scale: u8) -> Option<Self> {
+        if target_scale == self.scale {
+            return Some(self);
+        }
+        if target_scale > self.scale {
+            return Some(Self::new(
+                self.coefficient
+                    .checked_mul(decimal_power(target_scale - self.scale)?)?,
+                target_scale,
+            ));
+        }
+        let divisor = decimal_power(self.scale - target_scale)?;
+        let quotient = self.coefficient / divisor;
+        let remainder = self.coefficient % divisor;
+        let rounded = if remainder.abs().checked_mul(2)? >= divisor {
+            quotient.checked_add(self.coefficient.signum())?
+        } else {
+            quotient
+        };
+        Some(Self::new(rounded, target_scale))
+    }
+
+    pub fn fits_precision(self, precision: u8) -> bool {
+        decimal_digits(self.coefficient) <= usize::from(precision)
+    }
+
+    pub(crate) fn cmp_numeric(self, other: Self) -> Ordering {
+        if self.coefficient.signum() != other.coefficient.signum() {
+            return self.coefficient.signum().cmp(&other.coefficient.signum());
+        }
+        let negative = self.coefficient < 0;
+        let mut left = self.coefficient.unsigned_abs().to_string();
+        let mut right = other.coefficient.unsigned_abs().to_string();
+        let left_integer_digits = left.len() as i16 - i16::from(self.scale);
+        let right_integer_digits = right.len() as i16 - i16::from(other.scale);
+        let ordering = left_integer_digits
+            .cmp(&right_integer_digits)
+            .then_with(|| {
+                let scale = self.scale.max(other.scale);
+                left.extend(std::iter::repeat_n('0', usize::from(scale - self.scale)));
+                right.extend(std::iter::repeat_n('0', usize::from(scale - other.scale)));
+                left.cmp(&right)
+            });
+        if negative {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    }
+}
+
+pub(crate) fn decimal_power(scale: u8) -> Option<i128> {
+    10_i128.checked_pow(u32::from(scale))
+}
+
+fn decimal_digits(value: i128) -> usize {
+    value.unsigned_abs().to_string().len()
+}
+
+impl std::fmt::Display for DecimalValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let negative = self.coefficient < 0;
+        let digits = self.coefficient.unsigned_abs().to_string();
+        if self.scale == 0 {
+            return write!(f, "{}{}", if negative { "-" } else { "" }, digits);
+        }
+        let scale = usize::from(self.scale);
+        if digits.len() <= scale {
+            write!(
+                f,
+                "{}0.{:0>width$}",
+                if negative { "-" } else { "" },
+                digits,
+                width = scale
+            )
+        } else {
+            let split = digits.len() - scale;
+            write!(
+                f,
+                "{}{}.{}",
+                if negative { "-" } else { "" },
+                &digits[..split],
+                &digits[split..]
+            )
+        }
+    }
+}
+
 /// Runtime value representation for the SQL storage layer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SqlValue {
@@ -23,6 +153,7 @@ pub enum SqlValue {
     Date(i32), // days since 1970-01-01
     Time(i64), // microseconds since midnight
     Interval { months: i32, days: i32, micros: i64 },
+    Decimal(DecimalValue),
 }
 
 impl SqlValue {
@@ -77,6 +208,7 @@ impl SqlValue {
             SqlValue::Date(_) => 0x0a,
             SqlValue::Time(_) => 0x0b,
             SqlValue::Interval { .. } => 0x0c,
+            SqlValue::Decimal(_) => 0x0d,
         }
     }
 
@@ -101,6 +233,7 @@ impl SqlValue {
             SqlValue::Date(_) => "Date",
             SqlValue::Time(_) => "Time",
             SqlValue::Interval { .. } => "Interval",
+            SqlValue::Decimal(_) => "Decimal",
         }
     }
 
@@ -123,6 +256,10 @@ impl SqlValue {
             SqlValue::Date(_) => ResolvedType::Date,
             SqlValue::Time(_) => ResolvedType::Time,
             SqlValue::Interval { .. } => ResolvedType::Interval,
+            SqlValue::Decimal(value) => ResolvedType::Decimal {
+                precision: 38,
+                scale: value.scale,
+            },
         }
     }
 }
@@ -154,6 +291,7 @@ impl PartialOrd for SqlValue {
                     micros: bu,
                 },
             ) => Some((am, ad, au).cmp(&(bm, bd, bu))),
+            (Decimal(a), Decimal(b)) => Some(a.cmp_numeric(*b)),
             // Vector ordering is undefined for now.
             (Vector(_), Vector(_)) => None,
             _ => None,

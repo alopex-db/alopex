@@ -23,7 +23,7 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.11.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
-  isExactContractDescriptor(parserContractDescriptor, "0.16.0"),
+  isExactContractDescriptor(parserContractDescriptor, "0.17.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -180,7 +180,8 @@ proc normalizedDataTypeName(name: string): string =
   of "BIGINT": "BigInt"
   of "FLOAT": "Float"
   of "REAL": "Float"
-  of "DOUBLE", "DECIMAL": "Double"
+  of "DOUBLE": "Double"
+  of "DECIMAL", "NUMERIC": "Decimal"
   of "TEXT", "VARCHAR", "CHAR": "Text"
   of "BLOB": "Blob"
   of "BOOLEAN": "Boolean"
@@ -564,6 +565,23 @@ proc writeDataType(s: Stream; node: SqlNode) =
       s.pack_type(normalizedMetricName(node.children[2].firstIdent()))
     else:
       s.writeNil()
+  elif variant == "Decimal":
+    var precision = 38
+    var scale = 0
+    if node.children.len > 1 and node.children[1].kind == nkIntLit:
+      precision = node.children[1].intVal.int
+    if node.children.len > 2 and node.children[2].kind == nkIntLit:
+      scale = node.children[2].intVal.int
+    if precision < 1 or precision > 38 or scale < 0 or scale > precision:
+      raise newException(ValueError,
+        "DECIMAL requires 1 <= precision <= 38 and 0 <= scale <= precision")
+    s.pack_map(3)
+    s.writeKey("variant")
+    s.pack_type("Decimal")
+    s.writeKey("precision")
+    s.pack_type(uint8(precision))
+    s.writeKey("scale")
+    s.pack_type(uint8(scale))
   else:
     s.pack_map(1)
     s.writeKey("variant")

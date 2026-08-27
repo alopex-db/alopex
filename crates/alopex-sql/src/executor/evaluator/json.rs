@@ -192,7 +192,8 @@ pub(crate) fn sql_to_json(value: &SqlValue) -> Result<Value> {
         | SqlValue::Vector(_)
         | SqlValue::Date(_)
         | SqlValue::Time(_)
-        | SqlValue::Interval { .. } => {
+        | SqlValue::Interval { .. }
+        | SqlValue::Decimal(_) => {
             return Err(invalid(
                 "JSON",
                 format!("unsupported SQL type {}", value.type_name()),

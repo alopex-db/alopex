@@ -223,6 +223,13 @@ fn render_param(value: &Bound<'_, PyAny>, index: usize) -> PyResult<String> {
             .extract::<String>()?;
         return Ok(escape_text(&text));
     }
+    let decimal_type = PyModule::import(value.py(), "decimal")?.getattr("Decimal")?;
+    if value.is_instance(&decimal_type)? {
+        let text = value
+            .call_method1("__format__", ("f",))?
+            .extract::<String>()?;
+        return Ok(format!("DECIMAL {}", escape_text(&text)));
+    }
     if value.is_instance_of::<PyString>() {
         let text = value.extract::<String>()?;
         // Nim FFI 境界（CString）は NUL を扱えないため明示的に拒否する。
@@ -402,6 +409,11 @@ pub(crate) fn sql_value_to_py(py: Python<'_>, value: SqlValue) -> PyResult<Py<Py
             value.set_item("microseconds", micros)?;
             value.into_py_any(py)
         }
+        SqlValue::Decimal(value) => PyModule::import(py, "decimal")?
+            .getattr("Decimal")?
+            .call1((value.to_string(),))?
+            .unbind()
+            .into_py_any(py),
         SqlValue::Vector(values) => {
             let list = PyList::empty(py);
             for v in values {
@@ -419,7 +431,7 @@ mod tests {
     use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyTuple};
     use pyo3::IntoPyObjectExt;
 
-    use alopex_sql::SqlValue;
+    use alopex_sql::{storage::DecimalValue, SqlValue};
 
     use super::{bind_params, bind_sql_params_py, sql_value_to_py};
 
@@ -549,6 +561,30 @@ mod tests {
             let params = params_list(py, vec![datetime]);
             let sql = bind_params("INSERT INTO ts VALUES (?)", Some(&params)).expect("bind");
             assert_eq!(sql, "INSERT INTO ts VALUES ('2025-01-15 10:30:00.123456')");
+        });
+    }
+
+    #[test]
+    fn decimal_values_roundtrip_as_python_decimal() {
+        with_py(|py| {
+            let decimal_type = PyModule::import(py, "decimal")
+                .unwrap()
+                .getattr("Decimal")
+                .unwrap();
+            let input = decimal_type.call1(("12.340",)).unwrap();
+            let params = params_list(py, vec![input]);
+            assert_eq!(
+                bind_params("SELECT ?", Some(&params)).unwrap(),
+                "SELECT DECIMAL '12.340'"
+            );
+
+            let output =
+                sql_value_to_py(py, SqlValue::Decimal(DecimalValue::new(12340, 3))).unwrap();
+            assert!(output.bind(py).is_instance(&decimal_type).unwrap());
+            assert_eq!(
+                output.bind(py).str().unwrap().extract::<String>().unwrap(),
+                "12.340"
+            );
         });
     }
 

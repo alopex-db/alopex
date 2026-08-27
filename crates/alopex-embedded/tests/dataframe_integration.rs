@@ -1,8 +1,8 @@
 use alopex_dataframe::DataFrameError;
 use alopex_embedded::{Database, Error, JoinType};
 use arrow::array::{
-    Array, Date32Array, Float32Array, Int32Array, IntervalMonthDayNanoArray, StringArray,
-    Time64MicrosecondArray,
+    Array, Date32Array, Decimal128Array, Float32Array, Int32Array, IntervalMonthDayNanoArray,
+    StringArray, Time64MicrosecondArray,
 };
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
@@ -55,6 +55,22 @@ fn dataframe_query_preserves_native_temporal_types() {
         (interval.months, interval.days, interval.nanoseconds),
         (1, -2, 3_000)
     );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn dataframe_query_preserves_decimal128() {
+    let db = Database::new();
+    let frame = db
+        .query_df("SELECT CAST('12.34' AS DECIMAL(10,2)) AS amount")
+        .unwrap();
+    let amounts = frame.column("amount").unwrap().to_arrow();
+    let amounts = amounts[0]
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert_eq!(amounts.value(0), 1234);
+    assert_eq!((amounts.precision(), amounts.scale()), (10, 2));
 }
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]

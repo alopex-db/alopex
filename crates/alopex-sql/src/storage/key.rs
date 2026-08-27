@@ -161,6 +161,12 @@ fn encode_index_value(value: &SqlValue, buf: &mut Vec<u8>) -> Result<()> {
                 actual: "Interval".into(),
             });
         }
+        SqlValue::Decimal(_) => {
+            return Err(StorageError::TypeMismatch {
+                expected: "indexable scalar type".into(),
+                actual: "Decimal".into(),
+            });
+        }
     }
     Ok(())
 }

@@ -511,6 +511,24 @@ proc parsePrimary(p: var Parser): SqlNode =
     let valueTok = p.expect(tkString)
     result = newIntervalLit(valueTok.value,
       Span(start: tokenSpan(intervalTok).start, `end`: tokenSpan(valueTok).`end`))
+  of tkDecimal:
+    let typeTok = p.advance()
+    let valueTok = p.expect(tkString)
+    let unsigned = valueTok.value.strip(chars = {'+', '-'})
+    let dot = unsigned.find('.')
+    let scale = if dot < 0: 0 else: unsigned.len - dot - 1
+    let whole = if dot < 0: unsigned else: unsigned[0 ..< dot]
+    let precision = max(1, whole.strip(chars = {'0'}).len + scale)
+    if precision > 38 or scale > precision:
+      p.error("DECIMAL literal precision must be between 1 and 38")
+    let typeNode = newNode(nkTypeName, tokenSpan(typeTok))
+    typeNode.children.add(newIdent(typeTok.value, tokenSpan(typeTok)))
+    typeNode.children.add(newIntLit(precision, tokenSpan(typeTok)))
+    typeNode.children.add(newIntLit(scale, tokenSpan(typeTok)))
+    result = newNode(nkCast,
+      Span(start: tokenSpan(typeTok).start, `end`: tokenSpan(valueTok).`end`))
+    result.children.add(newStringLit(valueTok.value, tokenSpan(valueTok)))
+    result.children.add(typeNode)
   of tkTimestamp:
     let typeTok = p.advance()
     let valueTok = p.expect(tkString)

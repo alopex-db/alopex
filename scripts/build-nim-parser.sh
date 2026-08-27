@@ -20,7 +20,7 @@ with pathlib.Path(sys.argv[1]).open("rb") as stream:
     print(tomllib.load(stream)["workspace"]["package"]["version"])
 PY
 )"
-REQUIRED_CONTRACT_VERSION="0.16.0"
+REQUIRED_CONTRACT_VERSION="0.17.0"
 REQUIRED_NIM_VERSION="2.2.10"
 REQUIRED_NIMBLE_VERSION="0.22.3"
 REQUIRED_NIMBLE_SHA="42ef70c2102a942c46f13eb76872326edd525cec"

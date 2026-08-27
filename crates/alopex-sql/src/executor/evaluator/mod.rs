@@ -44,7 +44,7 @@ pub fn evaluate(expr: &TypedExpr, ctx: &EvalContext<'_>) -> Result<SqlValue> {
             column_ref::eval_column_ref(*column_index, ctx)
         }
         TypedExprKind::BinaryOp { left, op, right } => {
-            binary_op::eval_binary_op(op, left, right, ctx)
+            binary_op::eval_binary_op(op, left, right, &expr.resolved_type, ctx)
         }
         TypedExprKind::UnaryOp { op, operand } => unary_op::eval_unary_op(op, operand, ctx),
         TypedExprKind::Case {

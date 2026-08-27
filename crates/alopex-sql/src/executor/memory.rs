@@ -33,6 +33,7 @@ impl ByteSized for SqlValue {
             SqlValue::Date(_) => 4,
             SqlValue::Time(_) => 8,
             SqlValue::Interval { .. } => 16,
+            SqlValue::Decimal(_) => 17,
             SqlValue::Vector(values) => values.len() as u64 * 4,
         }
     }

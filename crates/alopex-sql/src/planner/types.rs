@@ -48,6 +48,8 @@ pub enum ResolvedType {
     Time,
     /// Calendar interval stored as independent month, day, and microsecond parts.
     Interval,
+    /// Exact fixed-precision decimal with up to 38 digits.
+    Decimal { precision: u8, scale: u8 },
     /// Vector type with dimension and metric
     /// Metric is always populated (defaults to Cosine if omitted in AST)
     Vector {
@@ -110,6 +112,10 @@ impl ResolvedType {
             DataType::Date => Self::Date,
             DataType::Time => Self::Time,
             DataType::Interval => Self::Interval,
+            DataType::Decimal { precision, scale } => Self::Decimal {
+                precision: *precision,
+                scale: *scale,
+            },
             DataType::Vector { dimension, metric } => Self::Vector {
                 dimension: *dimension,
                 metric: metric.unwrap_or(VectorMetric::Cosine),
@@ -162,9 +168,10 @@ impl ResolvedType {
             (Null, _) => true,
 
             // Numeric widening conversions
-            (Integer, BigInt | Float | Double) => true,
+            (Integer, BigInt | Float | Double | Decimal { .. }) => true,
             (BigInt, Double) => true,
             (Float, Double) => true,
+            (BigInt | Float | Double | Text | Decimal { .. }, Decimal { .. }) => true,
 
             // A decimal literal is typed DOUBLE, so assigning one to a FLOAT
             // column needs this narrowing; the value is rounded to f32 at
@@ -201,6 +208,7 @@ impl ResolvedType {
             Self::Date => "Date",
             Self::Time => "Time",
             Self::Interval => "Interval",
+            Self::Decimal { .. } => "Decimal",
             Self::Vector { .. } => "Vector",
             Self::Null => "Null",
         }
@@ -221,6 +229,7 @@ impl std::fmt::Display for ResolvedType {
             Self::Date => write!(f, "DATE"),
             Self::Time => write!(f, "TIME"),
             Self::Interval => write!(f, "INTERVAL"),
+            Self::Decimal { precision, scale } => write!(f, "DECIMAL({precision},{scale})"),
             Self::Vector { dimension, metric } => {
                 write!(f, "VECTOR({}, {:?})", dimension, metric)
             }
@@ -312,6 +321,17 @@ mod tests {
 
         // Float → Double
         assert!(ResolvedType::Float.can_cast_to(&ResolvedType::Double));
+
+        assert!(
+            ResolvedType::Decimal {
+                precision: 5,
+                scale: 3,
+            }
+            .can_cast_to(&ResolvedType::Decimal {
+                precision: 10,
+                scale: 2,
+            })
+        );
     }
 
     #[test]

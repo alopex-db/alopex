@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 from datetime import date, time
+from decimal import Decimal
 from typing import Any
 
 
@@ -150,6 +151,10 @@ def main() -> int:
                     {"ts": 1704153600000000},
                     {"ts": 1704240000000000},
                 ],
+            ),
+            (
+                "SELECT DECIMAL '12.345' + CAST('0.005' AS DECIMAL(10,3)) AS exact_amount",
+                [{"exact_amount": Decimal("12.350")}],
             ),
             (
                 "SELECT j.fullkey, j.atom FROM JSON_TREE('[1,{\"x\":2}]') "
@@ -710,12 +715,12 @@ def main() -> int:
             expect_error(db, sql, expected_error)
             completed += 1
 
-        if completed != 72:
-            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 72")
+        if completed != 73:
+            raise AssertionError(f"v0.8 SQL demo check count changed: {completed} != 73")
     finally:
         db.close()
 
-    print("v0.8 SQL correctness demo completed: 72 checks passed")
+    print("v0.8 SQL correctness demo completed: 73 checks passed")
     return 0
 
 

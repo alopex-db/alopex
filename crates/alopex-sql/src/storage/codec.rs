@@ -163,6 +163,10 @@ fn encode_value(value: &SqlValue, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&days.to_le_bytes());
             buf.extend_from_slice(&micros.to_le_bytes());
         }
+        SqlValue::Decimal(value) => {
+            buf.extend_from_slice(&value.coefficient.to_le_bytes());
+            buf.push(value.scale);
+        }
     }
 }
 
@@ -282,6 +286,14 @@ fn decode_value(tag: u8, bytes: &[u8], cursor: &mut usize) -> Result<SqlValue> {
             days: i32::from_le_bytes(take(4, "truncated Interval days")?.try_into().unwrap()),
             micros: i64::from_le_bytes(take(8, "truncated Interval micros")?.try_into().unwrap()),
         }),
+        0x0d => Ok(SqlValue::Decimal(super::DecimalValue::new(
+            i128::from_le_bytes(
+                take(16, "truncated Decimal coefficient")?
+                    .try_into()
+                    .unwrap(),
+            ),
+            take(1, "truncated Decimal scale")?[0],
+        ))),
         other => Err(StorageError::CorruptedData {
             reason: format!("unknown type tag: 0x{other:02x}"),
         }),
@@ -303,6 +315,22 @@ fn ensure_type(value: SqlValue, expected: &ResolvedType) -> Result<SqlValue> {
         (Date, SqlValue::Date(v)) => Ok(SqlValue::Date(v)),
         (Time, SqlValue::Time(v)) => Ok(SqlValue::Time(v)),
         (Interval, value @ SqlValue::Interval { .. }) => Ok(value),
+        (Decimal { precision, scale }, SqlValue::Decimal(value)) => {
+            let value = value
+                .rescale(*scale)
+                .ok_or_else(|| StorageError::TypeMismatch {
+                    expected: format!("Decimal({precision},{scale})"),
+                    actual: "Decimal overflow".into(),
+                })?;
+            if value.fits_precision(*precision) {
+                Ok(SqlValue::Decimal(value))
+            } else {
+                Err(StorageError::TypeMismatch {
+                    expected: format!("Decimal({precision},{scale})"),
+                    actual: value.to_string(),
+                })
+            }
+        }
         (Vector { dimension, .. }, SqlValue::Vector(values)) => {
             if values.len() as u32 == *dimension {
                 Ok(SqlValue::Vector(values))
@@ -350,6 +378,7 @@ mod tests {
     fn sql_value_strategy() -> impl Strategy<Value = SqlValue> {
         let finite_f32 = any::<f32>();
         let finite_f64 = any::<f64>();
+        let decimal_max = crate::storage::value::decimal_power(38).unwrap() - 1;
         prop_oneof![
             Just(SqlValue::Null),
             any::<i32>().prop_map(SqlValue::Integer),
@@ -369,6 +398,9 @@ mod tests {
                     days,
                     micros,
                 }
+            }),
+            (-decimal_max..=decimal_max, 0_u8..=38).prop_map(|(coefficient, scale)| {
+                SqlValue::Decimal(crate::storage::DecimalValue::new(coefficient, scale))
             }),
         ]
     }
@@ -393,6 +425,7 @@ mod tests {
                 days: 2,
                 micros: 3,
             },
+            SqlValue::Decimal(crate::storage::DecimalValue::new(-12345, 2)),
         ];
 
         let encoded = RowCodec::encode(&row);
