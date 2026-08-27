@@ -6,15 +6,15 @@
 
 v2.0 は「実装を開始する時期」ではなく、v1.x で段階的に実装した機能を統合し、リリース可能な状態として受け入れる最終ゴールです。
 
-したがって、個別機能の実装 Issue は v1.x のマイルストーンへ割り当て、v2.0 には最終受け入れ・リリース判定を残します。現在の v0.8.8 に属する不具合修正は、現行リリースの品質確保として扱い、このロードマップの実装マイルストーンへ移動しません。
+したがって、個別機能の実装 Issue は v1.x のマイルストーンへ割り当て、v2.0 には最終受け入れ・リリース判定を残します。現在の v0.8.9 に属する不具合修正は、現行リリースの品質確保として扱い、このロードマップの実装マイルストーンへ移動しません。
 
 正本は GitHub のマイルストーンと Issue #184 です。この文書は、それらの関係と依存順を説明します。
 
 ## 全体像
 
 ```text
-v0.8.8 現行リリース修正
-  #178, #181
+v0.8.9 現行リリース修正
+  #192
        |
        v
 v1.1 Storage Foundation
@@ -50,7 +50,7 @@ v1.4 と v1.5 は、v1.1〜v1.3 の契約が安定した後であれば、依存
 
 | 段階 | マイルストーン | 目的 | 対象 Issue |
 | --- | --- | --- | --- |
-| 現行 | [v0.8.8](https://github.com/alopex-db/alopex/milestone/12) | 現行リリースの不具合修正と品質確保 | [#178](https://github.com/alopex-db/alopex/issues/178), [#181](https://github.com/alopex-db/alopex/issues/181) |
+| 現行 | [v0.8.9](https://github.com/alopex-db/alopex/releases/tag/v0.8.9) | 現行リリースの不具合修正と品質確保 | [#192](https://github.com/alopex-db/alopex/issues/192) |
 | SQL 継続 | [v1.0-SQL](https://github.com/alopex-db/alopex/milestone/13) | SQL 機能の既存ロードマップ | SQL 関連 Issue |
 | SQL 継続 | [v0.10.0](https://github.com/alopex-db/alopex/milestone/15) | 既存の SQL／リリース計画 | 既存の v0.10.0 対象 |
 | 1 | [v1.1-Storage-Foundation](https://github.com/alopex-db/alopex/milestone/16) | 永続化の基礎契約とローカルファイルバックエンド | [#183](https://github.com/alopex-db/alopex/issues/183), [#186](https://github.com/alopex-db/alopex/issues/186) |

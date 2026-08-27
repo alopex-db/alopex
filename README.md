@@ -9,6 +9,9 @@ The unified database engine that scales from a single embedded file to a globall
 Native SQL, Vector Search, and Graph capabilities in one Rust-based engine.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/alopex-db/alopex?sort=semver&label=latest)](https://github.com/alopex-db/alopex/releases/latest)
+[![crates.io](https://img.shields.io/crates/v/alopex-embedded.svg)](https://crates.io/crates/alopex-embedded)
+[![PyPI](https://img.shields.io/pypi/v/alopex.svg)](https://pypi.org/project/alopex/)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 [![Status](https://img.shields.io/badge/status-pre--alpha-orange)]()
 
@@ -146,17 +149,16 @@ cargo run -p alopex-cli -- --profile prod sql "SELECT * FROM users"
 
 ### crates.io から Embedded を使う
 
-公開版では、アプリケーション側のトップレベル依存を同じpatch版へ固定してください。
-
-```toml
-[dependencies]
-alopex-embedded = "=0.8.8"
-```
-
-`alopex-embedded`が利用するAlopex兄弟crateも同じpatch版へ固定されるため、通常は兄弟crateを個別にpinする必要はありません。既存のlockfileを更新する場合は、例えば次を実行します。
+最新公開版を追加するには `cargo add` を使います。Alopex兄弟crateは同じpatch版へ固定されます。
 
 ```bash
-cargo update -p alopex-embedded --precise 0.8.8
+cargo add alopex-embedded
+```
+
+通常は兄弟crateを個別にpinする必要はありません。既存のlockfileを最新公開版へ更新する場合は次を実行します。
+
+```bash
+cargo update -p alopex-embedded
 cargo generate-lockfile
 ```
 
@@ -166,10 +168,9 @@ Rust向けparserは`alopex-sql`に静的同梱されます。実行時に`libalo
 
 ## 🛣 Roadmap
 
-  * **v0.1 (Current):** Embedded Key-Value store with basic Vector support.
-  * **v0.2:** Single-Node Server with SQL parser and Parquet reader.
-  * **v0.3:** Distributed Cluster MVP (Raft replication).
-  * **v1.0:** Multi-region locality & Production readiness.
+The current release badge at the top of this README updates automatically from
+GitHub Releases. See the [published roadmap](https://alopex-db.github.io/roadmap/)
+for the current and planned capability boundaries.
 
 -----
 
