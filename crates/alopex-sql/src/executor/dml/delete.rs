@@ -3,6 +3,7 @@ use alopex_core::kv::KVStore;
 use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
 use crate::executor::evaluator::{EvalContext, evaluate};
+use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;
@@ -24,9 +25,12 @@ pub fn execute_delete<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
         .into_iter()
         .cloned()
         .collect();
-    let (hnsw_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
+    let (hnsw_indexes, indexes): (Vec<_>, Vec<_>) = indexes
         .into_iter()
         .partition(|idx| matches!(idx.method, Some(IndexMethod::Hnsw)));
+    let (fts_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
+        .into_iter()
+        .partition(|idx| matches!(idx.method, Some(IndexMethod::Fts)));
 
     let mut rows_affected = 0u64;
     let mut next_row_id = 0u64;
@@ -55,6 +59,7 @@ pub fn execute_delete<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
         }
 
         remove_indexes_batch(txn, &btree_indexes, &deletes)?;
+        remove_fts_indexes(txn, &fts_indexes, &deletes)?;
         remove_hnsw_indexes(txn, &hnsw_indexes, &deletes)?;
         delete_rows(txn, &table, &deletes)?;
 
@@ -62,6 +67,19 @@ pub fn execute_delete<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'t
     }
 
     Ok(ExecutionResult::RowsAffected(rows_affected))
+}
+
+fn remove_fts_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    indexes: &[IndexMetadata],
+    deletes: &[(u64, Vec<SqlValue>)],
+) -> Result<()> {
+    for index in indexes {
+        for (row_id, row) in deletes {
+            FtsBridge::on_delete(txn, index, *row_id, row)?;
+        }
+    }
+    Ok(())
 }
 
 fn fetch_batch<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(

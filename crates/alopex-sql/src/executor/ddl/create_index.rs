@@ -2,6 +2,7 @@ use alopex_core::kv::KVStore;
 
 use crate::ast::ddl::IndexMethod;
 use crate::catalog::{Catalog, IndexMetadata, TableMetadata};
+use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::storage::{SqlTxn, SqlValue, StorageError};
@@ -41,9 +42,15 @@ pub fn execute_create_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     let index_id = catalog.next_index_id();
     index.index_id = index_id;
     index.column_indices = column_indices.clone();
+    if matches!(index.method, Some(IndexMethod::Fts)) {
+        FtsBridge::prepare(&mut index)?;
+    }
 
     if matches!(index.method, Some(IndexMethod::Hnsw)) {
         HnswBridge::create_index(txn, &table, &index)?;
+    } else if matches!(index.method, Some(IndexMethod::Fts)) {
+        FtsBridge::validate(&index, &table.columns[column_indices[0]].data_type)?;
+        build_fts_index_for_existing_rows(txn, &table, &index)?;
     } else {
         // Populate index entries for existing rows before publishing metadata.
         build_index_for_existing_rows(txn, &table, &index, column_indices)?;
@@ -53,6 +60,29 @@ pub fn execute_create_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     persist_index(txn.inner_mut(), &index)?;
 
     Ok(ExecutionResult::Success)
+}
+
+pub(crate) fn build_fts_index_for_existing_rows<'txn, S: KVStore + 'txn>(
+    txn: &mut impl SqlTxn<'txn, S>,
+    table: &TableMetadata,
+    index: &IndexMetadata,
+) -> Result<()> {
+    let mut start_row_id = 0;
+    loop {
+        let rows = txn.with_table(table, |storage| {
+            storage
+                .range_scan(start_row_id, u64::MAX)?
+                .take(2048)
+                .collect::<std::result::Result<Vec<_>, _>>()
+        })?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        for (row_id, row) in rows {
+            FtsBridge::on_insert(txn, index, row_id, &row)?;
+            start_row_id = row_id.saturating_add(1);
+        }
+    }
 }
 
 pub(super) fn ensure_indexable_columns(

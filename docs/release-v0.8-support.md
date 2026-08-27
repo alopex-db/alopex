@@ -27,6 +27,9 @@ The [JSON-on-TEXT contract](sql-json-text.md) defines issue #160 separately
 because those functions reuse `TEXT`; the value-type catalog tracks native JSON
 in issue #161. The [nested SQL type contract](sql-nested-types.md) records the
 ARRAY/LIST/MAP/STRUCT semantics and public mapping boundaries for issue #162.
+The [full-text search contract](sql-full-text-search.md) records the local
+tokenizer, query grammar, FTS index lifecycle, and distributed boundary for
+issue #163.
 
 ## Artifact identity
 
@@ -51,6 +54,7 @@ with a missing, mismatched, or unclassified artifact is `Blocked`.
 - [Python embedded-local API](../crates/alopex-py/README.md)
 - [JSON-on-TEXT SQL contract](sql-json-text.md)
 - [Nested SQL types](sql-nested-types.md)
+- [SQL full-text search](sql-full-text-search.md)
 - [v0.7.4 to v0.8 upgrade and recovery](upgrade-v0.7.4-to-v0.8.md)
 
 Post-release verification is intentionally `not_run` in every candidate report.

@@ -796,6 +796,42 @@ const fn sig_meta(
 
 static SIGNATURES: &[ScalarSignature] = &[
     sig(
+        "to_tsvector",
+        Arity::Range(1, 2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "to_tsquery",
+        Arity::Range(1, 2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "plainto_tsquery",
+        Arity::Range(1, 2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "websearch_to_tsquery",
+        Arity::Range(1, 2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "ts_rank",
+        Arity::Exact(2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Double),
+    ),
+    sig(
+        "ts_headline",
+        Arity::Range(2, 3),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
         "array_value",
         Arity::Variadic(0),
         check_no_args,

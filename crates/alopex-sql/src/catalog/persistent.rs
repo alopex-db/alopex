@@ -272,6 +272,7 @@ impl From<PersistedType> for ResolvedType {
 pub enum PersistedIndexType {
     BTree,
     Hnsw,
+    Fts,
 }
 
 impl From<PersistedIndexType> for IndexMethod {
@@ -279,6 +280,7 @@ impl From<PersistedIndexType> for IndexMethod {
         match value {
             PersistedIndexType::BTree => IndexMethod::BTree,
             PersistedIndexType::Hnsw => IndexMethod::Hnsw,
+            PersistedIndexType::Fts => IndexMethod::Fts,
         }
     }
 }
@@ -290,6 +292,7 @@ impl TryFrom<IndexMethod> for PersistedIndexType {
         match value {
             IndexMethod::BTree => Ok(Self::BTree),
             IndexMethod::Hnsw => Ok(Self::Hnsw),
+            IndexMethod::Fts => Ok(Self::Fts),
         }
     }
 }

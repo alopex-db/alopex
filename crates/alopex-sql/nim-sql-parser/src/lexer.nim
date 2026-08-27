@@ -28,7 +28,7 @@ type
     tkInt, tkBigint, tkSmallint, tkFloatType, tkReal, tkDouble, tkDecimal
     tkVarchar, tkChar, tkText, tkBlob, tkBoolean, tkBool
     tkTimestamp, tkDate, tkTime, tkVector, tkInterval, tkJson, tkJsonb
-    tkHnsw, tkBtree, tkCosine, tkL2
+    tkHnsw, tkBtree, tkFts, tkCosine, tkL2
     tkIf, tkNotKw
     # Symbols
     tkStar, tkComma, tkDot, tkColon, tkSemicolon
@@ -95,7 +95,7 @@ const Keywords = {
   "timestamp": tkTimestamp, "date": tkDate, "time": tkTime,
   "interval": tkInterval,
   "json": tkJson, "jsonb": tkJsonb,
-  "vector": tkVector, "hnsw": tkHnsw, "btree": tkBtree,
+  "vector": tkVector, "hnsw": tkHnsw, "btree": tkBtree, "fts": tkFts,
   "cosine": tkCosine, "l2": tkL2,
   "if": tkIf,
 }.toTable

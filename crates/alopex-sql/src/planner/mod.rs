@@ -3188,6 +3188,33 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 ];
                 (typed, schema)
             }
+            TableFunctionKind::FtsSearch => {
+                if !(3..=4).contains(&args.len()) {
+                    return Err(PlannerError::invalid_expression(format!(
+                        "table function FTS_SEARCH takes 3 or 4 arguments, found {}",
+                        args.len()
+                    )));
+                }
+                let mut typed = Vec::with_capacity(args.len());
+                for arg in args {
+                    let value = self.infer_expr_with_scope(arg, lateral_scope, ctes)?;
+                    if !matches!(value.resolved_type, ResolvedType::Text | ResolvedType::Null) {
+                        return Err(PlannerError::type_mismatch(
+                            "TEXT",
+                            value.resolved_type.to_string(),
+                            arg.span,
+                        ));
+                    }
+                    typed.push(value);
+                }
+                let schema = vec![
+                    ColumnMetadata::new("row_id", ResolvedType::BigInt),
+                    ColumnMetadata::new("document", ResolvedType::Text),
+                    ColumnMetadata::new("rank", ResolvedType::Double),
+                    ColumnMetadata::new("headline", ResolvedType::Text),
+                ];
+                (typed, schema)
+            }
         };
 
         let relation_name = alias

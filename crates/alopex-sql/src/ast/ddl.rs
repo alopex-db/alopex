@@ -139,6 +139,7 @@ pub struct CreateIndex {
 pub enum IndexMethod {
     BTree,
     Hnsw,
+    Fts,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

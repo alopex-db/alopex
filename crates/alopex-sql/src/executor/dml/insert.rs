@@ -4,6 +4,7 @@ use crate::ast::ddl::IndexMethod;
 use crate::ast::expr::Expr;
 use crate::catalog::{Catalog, ColumnMetadata, IndexMetadata, TableMetadata};
 use crate::executor::evaluator::{EvalContext, coerce_value, evaluate};
+use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ConstraintViolation, ExecutionResult, ExecutorError, Result};
 use crate::planner::type_checker::TypeChecker;
@@ -91,9 +92,12 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
         .into_iter()
         .cloned()
         .collect();
-    let (hnsw_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
+    let (hnsw_indexes, indexes): (Vec<_>, Vec<_>) = indexes
         .into_iter()
         .partition(|idx| matches!(idx.method, Some(IndexMethod::Hnsw)));
+    let (fts_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
+        .into_iter()
+        .partition(|idx| matches!(idx.method, Some(IndexMethod::Fts)));
 
     let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
 
@@ -113,9 +117,23 @@ fn insert_rows<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>
 
     // Populate indexes using one handle per index for the whole batch.
     populate_indexes(txn, &btree_indexes, &staged)?;
+    populate_fts_indexes(txn, &fts_indexes, &staged)?;
     populate_hnsw_indexes(txn, table, &hnsw_indexes, &staged)?;
 
     Ok(ExecutionResult::RowsAffected(staged.len() as u64))
+}
+
+fn populate_fts_indexes<'txn, S: KVStore + 'txn, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    indexes: &[IndexMetadata],
+    rows: &[(u64, Vec<SqlValue>)],
+) -> Result<()> {
+    for index in indexes {
+        for (row_id, row) in rows {
+            FtsBridge::on_insert(txn, index, *row_id, row)?;
+        }
+    }
+    Ok(())
 }
 
 fn build_row_from_values(

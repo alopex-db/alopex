@@ -1445,7 +1445,7 @@ suite "DDL — DROP TABLE":
 suite "Roadmap — lexer keywords and symbols":
 
   test "roadmap reserved keywords and symbols":
-    var lex = initLexer("USING NATURAL ANY SOME ALL CAST NOW HNSW BTREE COSINE L2 ESCAPE WITH NULLS FIRST LAST || [ ]")
+    var lex = initLexer("USING NATURAL ANY SOME ALL CAST NOW HNSW BTREE FTS COSINE L2 ESCAPE WITH NULLS FIRST LAST || [ ]")
     check lex.nextToken().kind == tkUsing
     check lex.nextToken().kind == tkNatural
     check lex.nextToken().kind == tkAny
@@ -1455,6 +1455,7 @@ suite "Roadmap — lexer keywords and symbols":
     check lex.nextToken().kind == tkNow
     check lex.nextToken().kind == tkHnsw
     check lex.nextToken().kind == tkBtree
+    check lex.nextToken().kind == tkFts
     check lex.nextToken().kind == tkCosine
     check lex.nextToken().kind == tkL2
     check lex.nextToken().kind == tkEscape
@@ -1477,6 +1478,9 @@ suite "Roadmap — DDL and Vector":
     check createIdx.children[3].strVal == "HNSW"
     check createIdx.children[4].kind == nkWithOptions
     check createIdx.children[4].children.len == 2
+
+    let ftsIdx = parseSql("CREATE INDEX idx_docs_body ON documents (body) USING FTS")
+    check ftsIdx.children[3].strVal == "FTS"
 
     let dropIdx = parseSql("DROP INDEX IF EXISTS idx_doc_embedding")
     check dropIdx.kind == nkDropIndex

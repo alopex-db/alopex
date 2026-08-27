@@ -221,6 +221,20 @@ if [[ -n "${JOIN_FILE}" ]]; then
     exit $?
 fi
 
+for fts_surface in \
+    docs/sql-full-text-search.md \
+    scripts/demo/v08/demo_full_text_search.sql \
+    crates/alopex-sql/tests/full_text_search.rs; do
+    if [[ ! -s "${REPO_ROOT}/${fts_surface}" ]]; then
+        echo "ERROR: missing v0.8.10 full-text search surface: ${fts_surface}" >&2
+        exit 1
+    fi
+done
+if ! grep -Fq "USING FTS" "${REPO_ROOT}/scripts/demo/v08/demo_full_text_search.sql"; then
+    echo "ERROR: the v0.8.10 full-text demo does not cover the FTS index" >&2
+    exit 1
+fi
+
 OVERALL_STATUS="ok"
 STEP_INDEX=0
 

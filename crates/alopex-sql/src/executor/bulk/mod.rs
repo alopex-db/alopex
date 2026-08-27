@@ -23,6 +23,7 @@ use crate::catalog::{
     Catalog, ColumnMetadata, Compression, IndexMetadata, RowIdMode, TableMetadata,
 };
 use crate::columnar::statistics::compute_row_group_statistics;
+use crate::executor::fts_bridge::FtsBridge;
 use crate::executor::hnsw_bridge::HnswBridge;
 use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::planner::types::ResolvedType;
@@ -248,9 +249,12 @@ fn bulk_load_row<S: KVStore, C: Catalog + ?Sized>(
         .into_iter()
         .cloned()
         .collect();
-    let (hnsw_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
+    let (hnsw_indexes, indexes): (Vec<_>, Vec<_>) = indexes
         .into_iter()
         .partition(|idx| matches!(idx.method, Some(IndexMethod::Hnsw)));
+    let (fts_indexes, btree_indexes): (Vec<_>, Vec<_>) = indexes
+        .into_iter()
+        .partition(|idx| matches!(idx.method, Some(IndexMethod::Fts)));
 
     let mut staged: Vec<(u64, Vec<SqlValue>)> = Vec::new();
     {
@@ -276,9 +280,23 @@ fn bulk_load_row<S: KVStore, C: Catalog + ?Sized>(
     }
 
     populate_indexes(txn, &btree_indexes, &staged)?;
+    populate_fts_indexes(txn, &fts_indexes, &staged)?;
     populate_hnsw_indexes(txn, table, &hnsw_indexes, &staged)?;
 
     Ok(staged.len() as u64)
+}
+
+fn populate_fts_indexes<S: KVStore>(
+    txn: &mut SqlTransaction<'_, S>,
+    indexes: &[IndexMetadata],
+    rows: &[(u64, Vec<SqlValue>)],
+) -> Result<()> {
+    for index in indexes {
+        for (row_id, row) in rows {
+            FtsBridge::on_insert(txn, index, *row_id, row)?;
+        }
+    }
+    Ok(())
 }
 
 /// Columnar ストレージへの書き込み（現状は Row と同経路で処理）。

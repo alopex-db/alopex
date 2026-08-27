@@ -162,10 +162,15 @@ pub const REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS: &[&str] = &[
     "make_timestamp",
     "map",
     "list_value",
+    "plainto_tsquery",
     "string_to_array",
     "struct_pack",
     "time",
     "to_date",
+    "to_tsquery",
+    "to_tsvector",
+    "ts_headline",
+    "ts_rank",
     "vector_similarity",
     "vector_distance",
     "vector_dims",
@@ -178,6 +183,7 @@ pub const REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS: &[&str] = &[
     "memory_stats",
     "io_stats",
     "clear_cache",
+    "websearch_to_tsquery",
 ];
 
 /// A complete pre-routing classification for a planned SQL statement.
@@ -358,7 +364,7 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
         },
         RemoteReadCoverageEntry {
             id: "scalar.local_only",
-            public_surface: "JSON, nested, temporal, vector, random/UUID, statistics, and cache-control scalar functions",
+            public_surface: "JSON, nested, full-text, temporal, vector, random/UUID, statistics, and cache-control scalar functions",
             identities: REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS,
             remote_status: LocalOnly,
             prerequisite: "local execution profile",
@@ -515,7 +521,7 @@ pub fn coverage_entries() -> Vec<RemoteReadCoverageEntry> {
         RemoteReadCoverageEntry {
             id: "relation.table_function",
             public_surface: "FROM-clause table functions",
-            identities: &["unnest", "generate_series"],
+            identities: &["unnest", "generate_series", "fts_search"],
             remote_status: LocalOnly,
             prerequisite: "local execution profile",
             normal_outcome: "row generation by the local executor",

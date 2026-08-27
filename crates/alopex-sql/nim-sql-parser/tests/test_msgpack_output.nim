@@ -362,6 +362,11 @@ suite "MessagePack output - contract shape":
     check create["method"].getStr() == "Hnsw"
     check create["options"].len == 2
 
+  test "CREATE INDEX emits FTS method":
+    let create = payloadJson(
+      "CREATE INDEX idx_docs_body ON documents (body) USING FTS").stmtKind()
+    check create["method"].getStr() == "Fts"
+
 suite "MessagePack output - INSERT (issue #40)":
 
   test "multi-row INSERT without column list emits nil columns and all rows":

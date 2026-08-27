@@ -10,6 +10,7 @@ mod column_ref;
 pub(crate) mod conditional;
 mod context;
 pub(crate) mod datetime;
+pub(crate) mod fts;
 mod function_call;
 pub(crate) mod hash;
 mod is_null;

@@ -204,7 +204,7 @@ pub struct IndexInfo {
     pub table_name: String,
     /// 対象カラム名。
     pub columns: Vec<String>,
-    /// インデックス方式（"btree" | "hnsw"）。
+    /// インデックス方式（"btree" | "hnsw" | "fts"）。
     pub method: String,
     /// ユニーク制約。
     pub is_unique: bool,
@@ -215,6 +215,7 @@ impl From<&IndexMetadata> for IndexInfo {
         let method = match value.method {
             Some(IndexMethod::BTree) | None => "btree",
             Some(IndexMethod::Hnsw) => "hnsw",
+            Some(IndexMethod::Fts) => "fts",
         };
         Self {
             name: value.name.clone(),
@@ -2109,6 +2110,7 @@ impl From<&IndexMetadata> for CatalogManifestIndex {
 pub enum CatalogManifestIndexMethod {
     BTree,
     Hnsw,
+    Fts,
 }
 
 impl From<IndexMethod> for CatalogManifestIndexMethod {
@@ -2116,6 +2118,7 @@ impl From<IndexMethod> for CatalogManifestIndexMethod {
         match value {
             IndexMethod::BTree => Self::BTree,
             IndexMethod::Hnsw => Self::Hnsw,
+            IndexMethod::Fts => Self::Fts,
         }
     }
 }
@@ -2125,6 +2128,7 @@ impl From<CatalogManifestIndexMethod> for IndexMethod {
         match value {
             CatalogManifestIndexMethod::BTree => Self::BTree,
             CatalogManifestIndexMethod::Hnsw => Self::Hnsw,
+            CatalogManifestIndexMethod::Fts => Self::Fts,
         }
     }
 }

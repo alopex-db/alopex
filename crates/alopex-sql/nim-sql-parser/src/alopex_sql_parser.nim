@@ -208,6 +208,7 @@ proc normalizedIndexMethod(name: string): string =
   case name.toUpperAscii()
   of "BTREE": "BTree"
   of "HNSW": "Hnsw"
+  of "FTS": "Fts"
   else: name
 
 proc writeStatement(s: Stream; node: SqlNode)

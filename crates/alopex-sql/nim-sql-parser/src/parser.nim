@@ -1807,8 +1807,8 @@ proc parseCreateIndexAfterCreate(p: var Parser; start: Token): SqlNode =
   result.children.add(newIdent(column.value, tokenSpan(column)))
   if p.check(tkUsing):
     discard p.advance()
-    if p.current.kind notin {tkHnsw, tkBtree}:
-      p.error("expected HNSW or BTREE index method")
+    if p.current.kind notin {tkHnsw, tkBtree, tkFts}:
+      p.error("expected HNSW, BTREE, or FTS index method")
     let idxMethod = p.advance()
     result.children.add(newIdent(idxMethod.value, tokenSpan(idxMethod)))
   if p.check(tkWith):

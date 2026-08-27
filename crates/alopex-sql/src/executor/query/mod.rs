@@ -1659,7 +1659,146 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
                     .collect()
             })
         }
+        TableFunctionKind::FtsSearch => execute_fts_search(txn, catalog, &values),
     }
+}
+
+fn execute_fts_search<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTxn<'txn, S>>(
+    txn: &mut T,
+    catalog: &C,
+    values: &[SqlValue],
+) -> Result<Vec<Row>> {
+    let argument = |index: usize| match values.get(index) {
+        Some(SqlValue::Text(value)) => Ok(value.as_str()),
+        Some(value) => Err(ExecutorError::InvalidOperation {
+            operation: "FTS_SEARCH".into(),
+            reason: format!("expected TEXT, found {}", value.type_name()),
+        }),
+        None => Err(ExecutorError::InvalidOperation {
+            operation: "FTS_SEARCH".into(),
+            reason: "missing argument".into(),
+        }),
+    };
+    let table_name = argument(0)?;
+    let column_name = argument(1)?;
+    let query_text = argument(2)?;
+    let config = if values.len() == 4 {
+        argument(3)?
+    } else {
+        "simple"
+    };
+    let table = catalog
+        .get_table(table_name)
+        .cloned()
+        .ok_or_else(|| ExecutorError::TableNotFound(table_name.into()))?;
+    let column = table
+        .get_column_index(column_name)
+        .ok_or_else(|| ExecutorError::ColumnNotFound(column_name.into()))?;
+    if table.columns[column].data_type != crate::planner::ResolvedType::Text {
+        return Err(ExecutorError::InvalidOperation {
+            operation: "FTS_SEARCH".into(),
+            reason: "the searched column must be TEXT".into(),
+        });
+    }
+    let index = catalog
+        .get_indexes_for_table(table_name)
+        .into_iter()
+        .find(|index| {
+            matches!(index.method, Some(crate::ast::ddl::IndexMethod::Fts))
+                && index.column_indices == [column]
+                && crate::executor::fts_bridge::config(index).eq_ignore_ascii_case(config)
+        });
+    if index.is_some_and(|index| {
+        index.get_option("fts_format_version") != Some(crate::fts::INDEX_FORMAT_VERSION)
+    }) {
+        return Err(ExecutorError::InvalidOperation {
+            operation: "FTS_SEARCH".into(),
+            reason: "unsupported or missing FTS index format version".into(),
+        });
+    }
+    let query = crate::fts::parse_tsquery(config, query_text).map_err(|reason| {
+        ExecutorError::InvalidOperation {
+            operation: "FTS_SEARCH".into(),
+            reason,
+        }
+    })?;
+
+    let candidates = if let Some(index) = index {
+        let mut terms = std::collections::BTreeSet::new();
+        if crate::fts::index_terms(&query, &mut terms) {
+            let mut ids = std::collections::BTreeSet::new();
+            let mut storage = txn.index_storage(index.index_id, false, vec![column]);
+            for term in terms {
+                ids.extend(storage.lookup(&SqlValue::Text(term))?);
+            }
+            Some(ids)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut output = Vec::new();
+    let mut start_row_id = 0u64;
+    loop {
+        let rows = txn.with_table(&table, |storage| {
+            storage
+                .range_scan(start_row_id, u64::MAX)?
+                .take(2048)
+                .collect::<std::result::Result<Vec<_>, _>>()
+        })?;
+        if rows.is_empty() {
+            break;
+        }
+        for (row_id, row) in rows {
+            start_row_id = row_id.saturating_add(1);
+            if candidates
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(&row_id))
+            {
+                continue;
+            }
+            let SqlValue::Text(document) = &row[column] else {
+                continue;
+            };
+            let tokens = crate::fts::tokenize(config, document).map_err(|reason| {
+                ExecutorError::InvalidOperation {
+                    operation: "FTS_SEARCH".into(),
+                    reason,
+                }
+            })?;
+            if !crate::fts::matches_query(&tokens, &query) {
+                continue;
+            }
+            let row_id = i64::try_from(row_id).map_err(|_| ExecutorError::InvalidOperation {
+                operation: "FTS_SEARCH".into(),
+                reason: "row id exceeds BIGINT".into(),
+            })?;
+            let headline = crate::fts::headline(config, document, &query).map_err(|reason| {
+                ExecutorError::InvalidOperation {
+                    operation: "FTS_SEARCH".into(),
+                    reason,
+                }
+            })?;
+            if output.len() == 100_000 {
+                return Err(ExecutorError::InvalidOperation {
+                    operation: "FTS_SEARCH".into(),
+                    reason: "result exceeds 100000 rows".into(),
+                });
+            }
+            output.push(Row::new(
+                row_id as u64,
+                vec![
+                    SqlValue::BigInt(row_id),
+                    SqlValue::Text(document.clone()),
+                    SqlValue::Double(crate::fts::rank(&tokens, &query)),
+                    SqlValue::Text(headline),
+                ],
+            ));
+        }
+    }
+    Ok(output)
 }
 
 const MAX_GENERATED_SERIES_ROWS: usize = 100_000;

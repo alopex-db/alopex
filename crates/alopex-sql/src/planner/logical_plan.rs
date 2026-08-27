@@ -154,6 +154,8 @@ pub enum TableFunctionKind {
     JsonEach,
     /// `JSON_TREE(json [, path])` — recursive JSON TEXT traversal.
     JsonTree,
+    /// `FTS_SEARCH(table, column, query [, config])` — ranked full-text matches.
+    FtsSearch,
 }
 
 impl TableFunctionKind {
@@ -164,6 +166,7 @@ impl TableFunctionKind {
             "GENERATE_SERIES" => Some(Self::GenerateSeries),
             "JSON_EACH" => Some(Self::JsonEach),
             "JSON_TREE" => Some(Self::JsonTree),
+            "FTS_SEARCH" => Some(Self::FtsSearch),
             _ => None,
         }
     }
@@ -175,6 +178,7 @@ impl TableFunctionKind {
             Self::GenerateSeries => "GENERATE_SERIES",
             Self::JsonEach => "JSON_EACH",
             Self::JsonTree => "JSON_TREE",
+            Self::FtsSearch => "FTS_SEARCH",
         }
     }
 
@@ -186,6 +190,7 @@ impl TableFunctionKind {
             Self::GenerateSeries => "generate_series",
             Self::JsonEach => "json_each",
             Self::JsonTree => "json_tree",
+            Self::FtsSearch => "fts_search",
         }
     }
 }
