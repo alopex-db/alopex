@@ -141,6 +141,17 @@ def main() -> int:
                 ],
             ),
             (
+                "SELECT g.ts FROM GENERATE_SERIES("
+                "TIMESTAMP '2024-01-01 00:00:00', "
+                "TIMESTAMP '2024-01-03 00:00:00', INTERVAL '1 day') AS g(ts) "
+                "ORDER BY g.ts",
+                [
+                    {"ts": 1704067200000000},
+                    {"ts": 1704153600000000},
+                    {"ts": 1704240000000000},
+                ],
+            ),
+            (
                 "SELECT j.fullkey, j.atom FROM JSON_TREE('[1,{\"x\":2}]') "
                 "AS j(k, v, t, atom, id, parent, fullkey, path) "
                 "WHERE j.atom IS NOT NULL ORDER BY j.id",

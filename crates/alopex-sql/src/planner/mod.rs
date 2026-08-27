@@ -3093,22 +3093,45 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     )));
                 }
                 let mut typed = Vec::with_capacity(args.len());
-                let mut output_type = ResolvedType::Integer;
                 for arg in args {
-                    let value = self.infer_expr_with_scope(arg, lateral_scope, ctes)?;
-                    match value.resolved_type {
-                        ResolvedType::BigInt => output_type = ResolvedType::BigInt,
-                        ResolvedType::Integer | ResolvedType::Null => {}
-                        _ => {
-                            return Err(PlannerError::type_mismatch(
-                                "INTEGER or BIGINT",
-                                value.resolved_type.to_string(),
-                                arg.span,
-                            ));
+                    typed.push(self.infer_expr_with_scope(arg, lateral_scope, ctes)?);
+                }
+
+                let timestamp_series = typed.len() == 3
+                    && matches!(
+                        typed[0].resolved_type,
+                        ResolvedType::Timestamp | ResolvedType::Null
+                    )
+                    && matches!(
+                        typed[1].resolved_type,
+                        ResolvedType::Timestamp | ResolvedType::Null
+                    )
+                    && matches!(
+                        typed[2].resolved_type,
+                        ResolvedType::Interval | ResolvedType::Null
+                    )
+                    && typed
+                        .iter()
+                        .any(|arg| !matches!(arg.resolved_type, ResolvedType::Null));
+                let output_type = if timestamp_series {
+                    ResolvedType::Timestamp
+                } else {
+                    let mut output_type = ResolvedType::Integer;
+                    for (arg, value) in args.iter().zip(&typed) {
+                        match value.resolved_type {
+                            ResolvedType::BigInt => output_type = ResolvedType::BigInt,
+                            ResolvedType::Integer | ResolvedType::Null => {}
+                            _ => {
+                                return Err(PlannerError::type_mismatch(
+                                    "INTEGER/BIGINT or (TIMESTAMP, TIMESTAMP, INTERVAL)",
+                                    value.resolved_type.to_string(),
+                                    arg.span,
+                                ));
+                            }
                         }
                     }
-                    typed.push(value);
-                }
+                    output_type
+                };
                 (
                     typed,
                     vec![ColumnMetadata::new("generate_series", output_type)],

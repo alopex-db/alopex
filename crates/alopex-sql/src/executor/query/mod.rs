@@ -1624,7 +1624,16 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
                 }),
             }
         }
-        TableFunctionKind::GenerateSeries => generate_integer_series(&values),
+        TableFunctionKind::GenerateSeries => {
+            if matches!(values.first(), Some(SqlValue::Timestamp(_)))
+                || matches!(values.get(1), Some(SqlValue::Timestamp(_)))
+                || matches!(values.get(2), Some(SqlValue::Interval { .. }))
+            {
+                generate_timestamp_series(&values)
+            } else {
+                generate_integer_series(&values)
+            }
+        }
         TableFunctionKind::JsonEach | TableFunctionKind::JsonTree => {
             crate::executor::evaluator::json::table_rows(function.name(), &values).map(|rows| {
                 rows.into_iter()
@@ -1695,6 +1704,85 @@ fn generate_integer_series(values: &[SqlValue]) -> Result<Vec<Row>> {
         if (step > 0 && current > stop) || (step < 0 && current < stop) {
             break;
         }
+    }
+    Ok(rows)
+}
+
+fn generate_timestamp_series(values: &[SqlValue]) -> Result<Vec<Row>> {
+    if values.iter().any(SqlValue::is_null) {
+        return Ok(Vec::new());
+    }
+    let [
+        SqlValue::Timestamp(start),
+        SqlValue::Timestamp(stop),
+        SqlValue::Interval {
+            months,
+            days,
+            micros,
+        },
+    ] = values
+    else {
+        return Err(ExecutorError::InvalidOperation {
+            operation: "GENERATE_SERIES".into(),
+            reason: "expected (TIMESTAMP, TIMESTAMP, INTERVAL)".into(),
+        });
+    };
+    if *months == 0 && *days == 0 && *micros == 0 {
+        return Err(ExecutorError::InvalidOperation {
+            operation: "GENERATE_SERIES".into(),
+            reason: "step must not be zero".into(),
+        });
+    }
+    if start == stop {
+        return Ok(vec![Row::new(0, vec![SqlValue::Timestamp(*start)])]);
+    }
+
+    let advance = |value| -> Result<i64> {
+        match crate::executor::evaluator::binary_op::add_timestamp_interval(
+            value, *months, *days, *micros,
+        )? {
+            SqlValue::Timestamp(value) => Ok(value),
+            _ => unreachable!("timestamp plus interval returns timestamp"),
+        }
+    };
+    let first_next = advance(*start)?;
+    let ascending = first_next > *start;
+    if first_next == *start {
+        return Err(ExecutorError::InvalidOperation {
+            operation: "GENERATE_SERIES".into(),
+            reason: "step must advance the timestamp".into(),
+        });
+    }
+    if (ascending && start > stop) || (!ascending && start < stop) {
+        return Ok(Vec::new());
+    }
+
+    let mut rows = Vec::new();
+    let mut current = *start;
+    loop {
+        if rows.len() == MAX_GENERATED_SERIES_ROWS {
+            return Err(ExecutorError::ResourceExhausted {
+                message: format!("GENERATE_SERIES is limited to {MAX_GENERATED_SERIES_ROWS} rows"),
+            });
+        }
+        rows.push(Row::new(
+            rows.len() as u64,
+            vec![SqlValue::Timestamp(current)],
+        ));
+        if current == *stop {
+            break;
+        }
+        let next = advance(current)?;
+        if (ascending && next <= current) || (!ascending && next >= current) {
+            return Err(ExecutorError::InvalidOperation {
+                operation: "GENERATE_SERIES".into(),
+                reason: "step must advance consistently".into(),
+            });
+        }
+        if (ascending && next > *stop) || (!ascending && next < *stop) {
+            break;
+        }
+        current = next;
     }
     Ok(rows)
 }

@@ -269,7 +269,12 @@ fn add_date_interval(value: i32, months: i32, days: i32, micros: i64) -> Result<
     ))
 }
 
-fn add_timestamp_interval(value: i64, months: i32, days: i32, micros: i64) -> Result<SqlValue> {
+pub(crate) fn add_timestamp_interval(
+    value: i64,
+    months: i32,
+    days: i32,
+    micros: i64,
+) -> Result<SqlValue> {
     let datetime = chrono::DateTime::from_timestamp_micros(value)
         .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?
         .naive_utc();

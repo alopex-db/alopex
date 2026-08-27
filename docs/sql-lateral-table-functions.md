@@ -4,7 +4,8 @@ Three related FROM-clause features:
 
 - `LATERAL (subquery)` — a derived table that may reference the FROM items to
   its left, re-evaluated once per left row.
-- FROM-clause table functions — v0.8.9 supports `UNNEST(v)`.
+- FROM-clause table functions — v0.8.10 supports `UNNEST(v)`, integer and
+  timestamp `GENERATE_SERIES`, and the JSON `JSON_EACH`/`JSON_TREE` walkers.
 - `AS t(c1, c2, …)` — a relation alias column-name list, now accepted for base
   tables, CTE references, derived tables, and table functions alike.
 
@@ -37,7 +38,7 @@ join_op        := ',' | [INNER] JOIN | LEFT [OUTER] JOIN | CROSS JOIN
                 | RIGHT [OUTER] JOIN | FULL [OUTER] JOIN | NATURAL ...
 ```
 
-`LATERAL` is a **contextual** keyword, not a reserved word (D14): it introduces
+`LATERAL` is a **contextual** keyword, not a reserved word (D15): it introduces
 a FROM item only when a subquery or a table function follows it. A relation
 named `lateral` keeps working.
 
@@ -47,7 +48,7 @@ named `lateral` keeps working.
   parenthesized subquery or a table function, in any FROM position: after a
   comma, after `CROSS JOIN`, after `[INNER] JOIN … ON`, and after
   `LEFT [OUTER] JOIN … ON`. It follows the PostgreSQL grammar. `LATERAL` before
-  a plain table name is not a LATERAL item — see D14 for what happens instead.
+a plain table name is not a LATERAL item — see D15 for what happens instead.
 - **D2 — Table functions are implicitly lateral.** A FROM-clause table function
   may reference the FROM items to its left with or without the `LATERAL`
   keyword, matching PostgreSQL and DuckDB. `FROM d, UNNEST(d.emb) AS u` is
@@ -62,8 +63,8 @@ named `lateral` keeps working.
   resolution error. Passing the scope through unconditionally would silently
   turn a typo into a correlated reference. This is standard SQL and
   PostgreSQL.
-- **D5 — The table-function registry is closed.** v0.8.9 resolves `UNNEST` as
-  the only FROM-clause table function. Any name outside the release registry is `ALOPEX-C007`
+- **D5 — The table-function registry is closed.** v0.8.10 resolves `UNNEST`,
+  `GENERATE_SERIES`, `JSON_EACH`, and `JSON_TREE`. Any name outside the release registry is `ALOPEX-C007`
   (`table function 'x' does not exist`). Alopex does not follow PostgreSQL in
   letting an arbitrary scalar function appear in FROM; the surface stays
   closed.
@@ -85,18 +86,23 @@ named `lateral` keeps working.
   count so that every relation kind behaves like the derived-table rule that
   already shipped. Renaming affects only the relation the query sees; the
   physical scan keeps the stored column names.
-- **D9 — Integer series are inclusive and bounded.** A positive or negative
-  non-zero step emits both endpoints when reachable. A direction mismatch or
-  `NULL` argument emits no rows. Zero steps, arithmetic overflow, and output
-  beyond 100,000 rows are errors.
-- **D9 — Correlated binding reuses the correlated-subquery convention.** At
+- **D9 — Integer and timestamp series are inclusive and bounded.** Integer
+  overloads accept `(INTEGER|BIGINT, INTEGER|BIGINT [, INTEGER|BIGINT])`.
+  Timestamp series require `(TIMESTAMP, TIMESTAMP, INTERVAL)` and reuse the
+  calendar-aware timestamp-plus-interval operation, including leap days and
+  month-end clamping. A positive or negative non-zero step emits both endpoints
+  when reachable. A direction mismatch or `NULL` argument emits no rows. Zero,
+  non-advancing, direction-changing, overflowing, and output beyond 100,000
+  rows are errors. Alopex `TIMESTAMP` remains UTC-microsecond, timezone-naive;
+  PostgreSQL/DuckDB timezone-aware overloads are outside v0.8.10.
+- **D10 — Correlated binding reuses the correlated-subquery convention.** At
   execution the outer row of a lateral item is `left join row ++ enclosing
   outer row`. At planning the left scope is rebased to the left row's own base
   and the enclosing scope is shifted past the left row's width; the single
   `offset_scope` applied when the lateral relation is planned then supplies the
   inner width and the one nesting level. Column-index and `scope_level` rules
   are unchanged from correlated subqueries.
-- **D10 — Execution is a per-left-row nested loop.** `LogicalPlan::LateralJoin`
+- **D11 — Execution is a per-left-row nested loop.** `LogicalPlan::LateralJoin`
   materializes the left input and re-executes the right sub-plan once per left
   row with that row as the outer row. Hash/equi-join strategies, plan caching,
   and hoisting a non-correlated lateral out of the loop are out of scope; cost
@@ -105,11 +111,11 @@ named `lateral` keeps working.
   empty or the right side never produced a row. The `ON` condition is any
   boolean expression over the concatenated `(left, right)` row, not just
   `ON TRUE`, matching PostgreSQL and DuckDB.
-- **D11 — LATERAL may be the first FROM item.** `FROM LATERAL (…) AS l, t` is
+- **D12 — LATERAL may be the first FROM item.** `FROM LATERAL (…) AS l, t` is
   syntactically accepted; with nothing to its left it sees only the enclosing
   query's outer scope, so a forward reference to a later item is an ordinary
   resolution error. PostgreSQL behaves the same way.
-- **D12 — FFI contract 0.13.0 → 0.14.0.** `FromItem.Table` gains
+- **D13 — FFI contract 0.13.0 → 0.14.0.** `FromItem.Table` gains
   `columns: [string]`, `FromItem.Derived` gains `lateral: bool`, and a new
   `FromItem.Function` variant carries `{name, args, alias, columns, lateral}`.
   The bump follows this repository's convention of moving the minor component
@@ -118,12 +124,12 @@ named `lateral` keeps working.
   keeps its frozen 4-key `Table` and 5-key `Derived` maps: LATERAL and table
   functions are already rejected there by the single-source rule, and the
   staged validator rejects a table alias column list before encoding.
-- **D13 — Remote reads stay local.** The v0.8 remote-read catalog rejects
+- **D14 — Remote reads stay local.** The v0.8 remote-read catalog rejects
   `LateralJoin` before transport (`lateral_join_not_supported_remote`,
   pre-execution rejection) and classifies `TableFunction` as local-only
   (`table_function_not_supported_remote`). Both appear in
   `docs/distributed-read-sql-matrix.json`.
-- **D14 — LATERAL stays a contextual keyword.** Reserving `lateral` would break
+- **D15 — LATERAL stays a contextual keyword.** Reserving `lateral` would break
   every existing query that uses it as a relation name, column name, or alias.
   Instead the parser treats a `lateral` identifier as the keyword only when the
   next tokens are `(` + `SELECT`/`VALUES`/`WITH`, or an identifier followed by
@@ -133,7 +139,7 @@ named `lateral` keeps working.
   aliased `t`; the diagnostic then names the missing relation `lateral` rather
   than the LATERAL misuse. This supersedes the original plan to reserve the
   word, and the CHANGELOG therefore records no breaking change.
-- **D15 — Columnar filter fusion must not cross a correlation boundary.** The
+- **D16 — Columnar filter fusion must not cross a correlation boundary.** The
   materializing pipeline fuses a `Filter` over a columnar `Scan` into the scan
   itself, which evaluates the predicate with every column index resolved
   against the scanned table. A correlated predicate also carries outer-row
@@ -146,8 +152,8 @@ named `lateral` keeps working.
   subquery predicates over columnar storage, which previously reached the
   in-scan evaluator. The regression test drives a `LATERAL` join whose right
   side filters a columnar table.
-- **D16 — Every operator that evaluates expressions honours the outer row.**
-  D9 makes the outer row addressable at `inner width + outer index`, but only
+- **D17 — Every operator that evaluates expressions honours the outer row.**
+  D10 makes the outer row addressable at `inner width + outer index`, but only
   the `Filter` and projection paths were given it. Aggregate (group keys,
   aggregate arguments, aggregate `FILTER` predicates and aggregate-local
   `ORDER BY`), Sort, DistinctOn, `LIMIT ... WITH TIES` and Window build their
@@ -177,6 +183,8 @@ named `lateral` keeps working.
 | Alias column list repeats a name | `ALOPEX-T007` |
 | `RIGHT`/`FULL JOIN LATERAL` | `ALOPEX-T015` |
 | Outer reference from a non-LATERAL derived table | `ALOPEX-C001`/`ALOPEX-C003` |
+| `GENERATE_SERIES` zero or non-advancing step | invalid operation |
+| `GENERATE_SERIES` above 100,000 rows | resource exhausted |
 
 ## Engine comparison
 
@@ -188,19 +196,22 @@ executed conformance evidence.
 | `CROSS JOIN LATERAL` / `LEFT JOIN LATERAL` | yes | yes | yes | not planned |
 | `RIGHT`/`FULL JOIN LATERAL` | rejected (`ALOPEX-T015`) | rejected | not supported | not planned |
 | Implicit LATERAL for table functions | yes (D2) | yes | yes | yes |
-| `LATERAL` reserved word | contextual (D14) | reserved | reserved | reserved |
+| `LATERAL` reserved word | contextual (D15) | reserved | reserved | reserved |
 | Unnestable type | `VECTOR` (D6) | `anyarray` | `LIST` | `List`/`LargeList` |
 | Alias column list on a base table | yes, exact arity (D8) | yes, prefix allowed | yes | limited |
 | Alias column list arity below width | error (D8) | allowed | allowed | — |
 | `UNNEST(NULL)` | 0 rows | 0 rows | 0 rows | 0 rows |
 | Non-LATERAL derived sees outer FROM | no (D4) | no | no | no |
+| Inclusive integer `GENERATE_SERIES` | table function | set-returning function | table/list function | scalar list function |
+| `TIMESTAMP, TIMESTAMP, INTERVAL` series | table function (D9) | set-returning function | table function | scalar list function |
+| Timezone-aware timestamp series | no | yes | yes | no documented table-function form |
 
 ## Performance
 
 A lateral join re-plans and re-runs its right side for every left row. Keep the
 left input small, or push the selective predicate into the left side. There is
 no hoisting of a non-correlated lateral subquery and no per-row plan cache; both
-are deliberately out of scope for this issue (D10).
+are deliberately out of scope for this issue (D11).
 
 ## Related documents
 

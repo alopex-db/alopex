@@ -240,6 +240,116 @@ fn generate_series_composes_with_lateral_cte_join_and_window() {
     );
 }
 
+#[test]
+#[cfg(feature = "generate_series")]
+fn generate_series_supports_inclusive_timestamp_ranges() {
+    let ascending = Harness::new().query(
+        "SELECT g.ts FROM GENERATE_SERIES(\
+             TIMESTAMP '2024-01-01 00:00:00', TIMESTAMP '2024-01-03 00:00:00', \
+             INTERVAL '1 day') AS g(ts)",
+    );
+    assert_eq!(
+        ascending.rows,
+        vec![
+            vec![SqlValue::Timestamp(1_704_067_200_000_000)],
+            vec![SqlValue::Timestamp(1_704_153_600_000_000)],
+            vec![SqlValue::Timestamp(1_704_240_000_000_000)],
+        ]
+    );
+
+    let descending = Harness::new().query(
+        "SELECT g.ts FROM GENERATE_SERIES(\
+             TIMESTAMP '2024-01-03 00:00:00', TIMESTAMP '2024-01-01 00:00:00', \
+             INTERVAL '-1 day') AS g(ts)",
+    );
+    assert_eq!(
+        descending.rows,
+        ascending.rows.into_iter().rev().collect::<Vec<_>>()
+    );
+
+    let single = Harness::new().query(
+        "SELECT * FROM GENERATE_SERIES(\
+             TIMESTAMP '2024-01-01 00:00:00', TIMESTAMP '2024-01-01 00:00:00', \
+             INTERVAL '1 month')",
+    );
+    assert_eq!(
+        single.rows,
+        vec![vec![SqlValue::Timestamp(1_704_067_200_000_000)]]
+    );
+}
+
+#[test]
+#[cfg(feature = "generate_series")]
+fn timestamp_generate_series_rejects_zero_and_bounded_output() {
+    let zero = Harness::new().error(
+        "SELECT * FROM GENERATE_SERIES(\
+             TIMESTAMP '2024-01-01 00:00:00', TIMESTAMP '2024-01-02 00:00:00', \
+             INTERVAL '0 seconds')",
+    );
+    assert!(
+        zero.contains("step must not be zero"),
+        "unexpected message: {zero}"
+    );
+
+    let empty = Harness::new().query(
+        "SELECT * FROM GENERATE_SERIES(\
+             TIMESTAMP '2024-01-03 00:00:00', TIMESTAMP '2024-01-01 00:00:00', \
+             INTERVAL '1 day')",
+    );
+    assert!(empty.rows.is_empty());
+
+    let too_many = Harness::new().error(
+        "SELECT * FROM GENERATE_SERIES(\
+             TIMESTAMP '2024-01-01 00:00:00', TIMESTAMP '2024-01-03 00:00:00', \
+             INTERVAL '1 second')",
+    );
+    assert!(
+        too_many.contains("100000 rows"),
+        "unexpected message: {too_many}"
+    );
+}
+
+#[test]
+#[cfg(feature = "generate_series")]
+fn timestamp_generate_series_composes_with_lateral_cte_join_and_window() {
+    let mut harness = Harness::new();
+    harness
+        .run(
+            "CREATE TABLE bounds (id INT PRIMARY KEY, start_ts TIMESTAMP, stop_ts TIMESTAMP); \
+             INSERT INTO bounds VALUES (1, TIMESTAMP '2024-02-28 00:00:00', \
+                                            TIMESTAMP '2024-03-01 00:00:00')",
+        )
+        .expect("create timestamp bounds");
+
+    let result = harness.query(
+        "WITH expanded AS (\
+             SELECT b.id, g.ts FROM bounds AS b \
+             CROSS JOIN LATERAL GENERATE_SERIES(\
+                 b.start_ts, b.stop_ts, INTERVAL '1 day') AS g(ts)\
+         ) \
+         SELECT e.ts, ROW_NUMBER() OVER (ORDER BY e.ts) AS rn \
+         FROM expanded AS e JOIN bounds AS b ON e.id = b.id ORDER BY e.ts",
+    );
+
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![
+                SqlValue::Timestamp(1_709_078_400_000_000),
+                SqlValue::BigInt(1),
+            ],
+            vec![
+                SqlValue::Timestamp(1_709_164_800_000_000),
+                SqlValue::BigInt(2),
+            ],
+            vec![
+                SqlValue::Timestamp(1_709_251_200_000_000),
+                SqlValue::BigInt(3),
+            ],
+        ]
+    );
+}
+
 // === Alias column lists ==================================================
 
 #[test]
@@ -484,6 +594,7 @@ fn reference_value(value: &SqlValue) -> serde_json::Value {
         SqlValue::Float(value) => serde_json::json!(value),
         SqlValue::Double(value) => serde_json::json!(value),
         SqlValue::Text(value) => serde_json::json!(value),
+        SqlValue::Timestamp(value) => serde_json::json!(value),
         other => panic!("reference fixture does not use {other:?}"),
     }
 }
