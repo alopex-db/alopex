@@ -267,7 +267,7 @@ async fn execute_remote_ingest<W: Write>(
             return Err(CliError::InvalidArgument(format!(
                 "Unsupported file format: {}",
                 options.file.display()
-            )))
+            )));
         }
     };
 
@@ -891,7 +891,7 @@ impl ColumnBuilder {
             _ => {
                 return Err(CliError::InvalidArgument(
                     "Parquet schema mismatch detected".to_string(),
-                ))
+                ));
             }
         }
         Ok(())
@@ -928,7 +928,7 @@ fn execute_ingest<W: Write>(
             return Err(CliError::InvalidArgument(format!(
                 "Unsupported file format: {}",
                 options.file.display()
-            )))
+            )));
         }
     };
 
@@ -1226,6 +1226,9 @@ fn sql_value_to_value(sql_value: alopex_sql::SqlValue) -> Value {
         SqlValue::Boolean(b) => Value::Bool(b),
         SqlValue::Timestamp(ts) => Value::Text(format!("{}", ts)),
         SqlValue::Vector(v) => Value::Vector(v),
+        value @ (SqlValue::Date(_) | SqlValue::Time(_) | SqlValue::Interval { .. }) => {
+            Value::Text(value.temporal_text().expect("valid stored temporal value"))
+        }
     }
 }
 

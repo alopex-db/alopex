@@ -8,6 +8,7 @@ pub fn eval_literal(lit: &Literal, ty: &ResolvedType) -> Result<SqlValue> {
         (Literal::Null, _) => Ok(SqlValue::Null),
         (Literal::Boolean(v), ResolvedType::Boolean) => Ok(SqlValue::Boolean(*v)),
         (Literal::String(s), ResolvedType::Text) => Ok(SqlValue::Text(s.clone())),
+        (Literal::Interval(s), ResolvedType::Interval) => super::timestamp::parse_interval(s),
         (Literal::Number(n), ResolvedType::Integer) => {
             let parsed = n.parse::<i32>().map_err(|_| {
                 ExecutorError::Evaluation(EvaluationError::TypeMismatch {

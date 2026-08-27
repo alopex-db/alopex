@@ -180,6 +180,9 @@ pub enum PersistedType {
         metric: PersistedVectorMetric,
     },
     Null,
+    Date,
+    Time,
+    Interval,
 }
 
 impl From<ResolvedType> for PersistedType {
@@ -193,6 +196,9 @@ impl From<ResolvedType> for PersistedType {
             ResolvedType::Blob => Self::Blob,
             ResolvedType::Boolean => Self::Boolean,
             ResolvedType::Timestamp => Self::Timestamp,
+            ResolvedType::Date => Self::Date,
+            ResolvedType::Time => Self::Time,
+            ResolvedType::Interval => Self::Interval,
             ResolvedType::Vector { dimension, metric } => Self::Vector {
                 dimension,
                 metric: metric.into(),
@@ -213,6 +219,9 @@ impl From<PersistedType> for ResolvedType {
             PersistedType::Blob => Self::Blob,
             PersistedType::Boolean => Self::Boolean,
             PersistedType::Timestamp => Self::Timestamp,
+            PersistedType::Date => Self::Date,
+            PersistedType::Time => Self::Time,
+            PersistedType::Interval => Self::Interval,
             PersistedType::Vector { dimension, metric } => Self::Vector {
                 dimension,
                 metric: metric.into(),

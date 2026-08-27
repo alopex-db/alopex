@@ -23,7 +23,7 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.11.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
-  isExactContractDescriptor(parserContractDescriptor, "0.15.0"),
+  isExactContractDescriptor(parserContractDescriptor, "0.16.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -185,7 +185,10 @@ proc normalizedDataTypeName(name: string): string =
   of "BLOB": "Blob"
   of "BOOLEAN": "Boolean"
   of "BOOL": "Bool"
-  of "TIMESTAMP", "DATE", "TIME": "Timestamp"
+  of "TIMESTAMP": "Timestamp"
+  of "DATE": "Date"
+  of "TIME": "Time"
+  of "INTERVAL": "Interval"
   of "VECTOR": "Vector"
   else: name
 

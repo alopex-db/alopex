@@ -356,9 +356,12 @@ fn build_segment_schema(table: &TableMetadata) -> Result<Schema> {
 
 fn logical_type_for(ty: &ResolvedType) -> Result<LogicalType> {
     match ty {
-        ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Timestamp => {
-            Ok(LogicalType::Int64)
-        }
+        ResolvedType::Integer
+        | ResolvedType::BigInt
+        | ResolvedType::Timestamp
+        | ResolvedType::Date
+        | ResolvedType::Time => Ok(LogicalType::Int64),
+        ResolvedType::Interval => Ok(LogicalType::Fixed(16)),
         ResolvedType::Vector { dimension, .. } => {
             Ok(LogicalType::Fixed(dimension.checked_mul(4).ok_or_else(|| {
                 ExecutorError::Columnar("vector dimension overflow when computing fixed len".into())
@@ -452,30 +455,39 @@ fn build_column(
             }
             Ok((Column::Int64(values), validity_bitmap(&validity)))
         }
-        ResolvedType::BigInt | ResolvedType::Timestamp => {
+        ResolvedType::BigInt
+        | ResolvedType::Timestamp
+        | ResolvedType::Date
+        | ResolvedType::Time => {
             let mut validity = Vec::with_capacity(rows.len());
             let mut values = Vec::with_capacity(rows.len());
             for row in rows {
-                match row
+                let value = row
                     .get(col_idx)
-                    .ok_or_else(|| ExecutorError::BulkLoad("row too short".into()))?
-                {
-                    SqlValue::Null => {
+                    .ok_or_else(|| ExecutorError::BulkLoad("row too short".into()))?;
+                match (&col_meta.data_type, value) {
+                    (_, SqlValue::Null) => {
                         validity.push(false);
                         values.push(0);
                     }
-                    SqlValue::BigInt(v) | SqlValue::Timestamp(v) => {
+                    (
+                        ResolvedType::BigInt | ResolvedType::Timestamp,
+                        SqlValue::BigInt(v) | SqlValue::Timestamp(v),
+                    )
+                    | (ResolvedType::Time, SqlValue::Time(v)) => {
                         validity.push(true);
                         values.push(*v);
                     }
-                    SqlValue::Integer(v) => {
+                    (ResolvedType::BigInt | ResolvedType::Timestamp, SqlValue::Integer(v))
+                    | (ResolvedType::Date, SqlValue::Date(v)) => {
                         validity.push(true);
                         values.push(*v as i64);
                     }
-                    other => {
+                    (_, other) => {
                         return Err(ExecutorError::BulkLoad(format!(
-                            "type mismatch for column '{}': expected BigInt/Timestamp, got {}",
+                            "type mismatch for column '{}': expected {}, got {}",
                             col_meta.name,
+                            col_meta.data_type.type_name(),
                             other.type_name()
                         )));
                     }
@@ -664,6 +676,44 @@ fn build_column(
                 validity_bitmap(&validity),
             ))
         }
+        ResolvedType::Interval => {
+            let mut validity = Vec::with_capacity(rows.len());
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                match row
+                    .get(col_idx)
+                    .ok_or_else(|| ExecutorError::BulkLoad("row too short".into()))?
+                {
+                    SqlValue::Null => {
+                        validity.push(false);
+                        values.push(vec![0; 16]);
+                    }
+                    SqlValue::Interval {
+                        months,
+                        days,
+                        micros,
+                    } => {
+                        validity.push(true);
+                        let mut value = Vec::with_capacity(16);
+                        value.extend_from_slice(&months.to_le_bytes());
+                        value.extend_from_slice(&days.to_le_bytes());
+                        value.extend_from_slice(&micros.to_le_bytes());
+                        values.push(value);
+                    }
+                    other => {
+                        return Err(ExecutorError::BulkLoad(format!(
+                            "type mismatch for column '{}': expected Interval, got {}",
+                            col_meta.name,
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok((
+                Column::Fixed { len: 16, values },
+                validity_bitmap(&validity),
+            ))
+        }
         ResolvedType::Null => Err(ExecutorError::Columnar(
             "NULL column type is not supported for columnar storage".into(),
         )),
@@ -806,6 +856,9 @@ pub(crate) fn parse_value(raw: &str, ty: &ResolvedType) -> Result<SqlValue> {
             .parse::<i64>()
             .map(SqlValue::Timestamp)
             .map_err(|e| parse_error(trimmed, ty, e)),
+        ResolvedType::Date | ResolvedType::Time | ResolvedType::Interval => {
+            crate::executor::evaluator::coerce_value(SqlValue::Text(trimmed.to_string()), ty)
+        }
         ResolvedType::Text => Ok(SqlValue::Text(trimmed.to_string())),
         ResolvedType::Blob => Ok(SqlValue::Blob(trimmed.as_bytes().to_vec())),
         ResolvedType::Vector { dimension, .. } => {
@@ -1040,6 +1093,18 @@ mod tests {
 
         let err = validate_schema(&schema, table).unwrap_err();
         assert!(matches!(err, ExecutorError::SchemaMismatch { .. }));
+    }
+
+    #[test]
+    fn temporal_columnar_builder_does_not_accept_sibling_integer_variants() {
+        let table = TableMetadata::new(
+            "events",
+            vec![ColumnMetadata::new("day", ResolvedType::Date)],
+        );
+        let schema = build_segment_schema(&table).unwrap();
+
+        build_record_batch(&schema, &table, &[vec![SqlValue::Date(19_782)]]).unwrap();
+        assert!(build_record_batch(&schema, &table, &[vec![SqlValue::Timestamp(19_782)]]).is_err());
     }
 
     #[test]

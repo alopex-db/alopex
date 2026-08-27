@@ -889,8 +889,11 @@ fn estimated_row_bytes(row: &[SqlValue]) -> usize {
             SqlValue::Integer(_)
             | SqlValue::BigInt(_)
             | SqlValue::Double(_)
-            | SqlValue::Timestamp(_) => 8,
+            | SqlValue::Timestamp(_)
+            | SqlValue::Time(_) => 8,
             SqlValue::Float(_) => 4,
+            SqlValue::Date(_) => 4,
+            SqlValue::Interval { .. } => 16,
             SqlValue::Boolean(_) => 1,
             SqlValue::Text(value) => value.len(),
             SqlValue::Blob(value) => value.len(),

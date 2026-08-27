@@ -152,6 +152,17 @@ fn encode_value(value: &SqlValue, buf: &mut Vec<u8>) {
                 buf.extend_from_slice(&f.to_bits().to_le_bytes());
             }
         }
+        SqlValue::Date(v) => buf.extend_from_slice(&v.to_le_bytes()),
+        SqlValue::Time(v) => buf.extend_from_slice(&v.to_le_bytes()),
+        SqlValue::Interval {
+            months,
+            days,
+            micros,
+        } => {
+            buf.extend_from_slice(&months.to_le_bytes());
+            buf.extend_from_slice(&days.to_le_bytes());
+            buf.extend_from_slice(&micros.to_le_bytes());
+        }
     }
 }
 
@@ -260,6 +271,17 @@ fn decode_value(tag: u8, bytes: &[u8], cursor: &mut usize) -> Result<SqlValue> {
             }
             Ok(SqlValue::Vector(values))
         }
+        0x0a => Ok(SqlValue::Date(i32::from_le_bytes(
+            take(4, "truncated Date value")?.try_into().unwrap(),
+        ))),
+        0x0b => Ok(SqlValue::Time(i64::from_le_bytes(
+            take(8, "truncated Time value")?.try_into().unwrap(),
+        ))),
+        0x0c => Ok(SqlValue::Interval {
+            months: i32::from_le_bytes(take(4, "truncated Interval months")?.try_into().unwrap()),
+            days: i32::from_le_bytes(take(4, "truncated Interval days")?.try_into().unwrap()),
+            micros: i64::from_le_bytes(take(8, "truncated Interval micros")?.try_into().unwrap()),
+        }),
         other => Err(StorageError::CorruptedData {
             reason: format!("unknown type tag: 0x{other:02x}"),
         }),
@@ -278,6 +300,9 @@ fn ensure_type(value: SqlValue, expected: &ResolvedType) -> Result<SqlValue> {
         (Blob, SqlValue::Blob(b)) => Ok(SqlValue::Blob(b)),
         (Boolean, SqlValue::Boolean(v)) => Ok(SqlValue::Boolean(v)),
         (Timestamp, SqlValue::Timestamp(v)) => Ok(SqlValue::Timestamp(v)),
+        (Date, SqlValue::Date(v)) => Ok(SqlValue::Date(v)),
+        (Time, SqlValue::Time(v)) => Ok(SqlValue::Time(v)),
+        (Interval, value @ SqlValue::Interval { .. }) => Ok(value),
         (Vector { dimension, .. }, SqlValue::Vector(values)) => {
             if values.len() as u32 == *dimension {
                 Ok(SqlValue::Vector(values))
@@ -336,6 +361,15 @@ mod tests {
             any::<bool>().prop_map(SqlValue::Boolean),
             any::<i64>().prop_map(SqlValue::Timestamp),
             proptest::collection::vec(any::<f32>(), 0..8).prop_map(SqlValue::Vector),
+            any::<i32>().prop_map(SqlValue::Date),
+            any::<i64>().prop_map(SqlValue::Time),
+            (any::<i32>(), any::<i32>(), any::<i64>()).prop_map(|(months, days, micros)| {
+                SqlValue::Interval {
+                    months,
+                    days,
+                    micros,
+                }
+            }),
         ]
     }
 
@@ -352,12 +386,34 @@ mod tests {
             SqlValue::Boolean(true),
             SqlValue::Timestamp(1_700_000_000),
             SqlValue::Vector(vec![0.1, 0.2, 0.3]),
+            SqlValue::Date(19_782),
+            SqlValue::Time(86_399_123_456),
+            SqlValue::Interval {
+                months: -1,
+                days: 2,
+                micros: 3,
+            },
         ];
 
         let encoded = RowCodec::encode(&row);
         let decoded = RowCodec::decode(&encoded).unwrap();
 
         assert!(row_equal(&row, &decoded));
+    }
+
+    #[test]
+    fn pre_temporal_row_bytes_remain_readable() {
+        let bytes = [
+            2, 0, // column count
+            0, // null bitmap
+            0x01, 42, 0, 0, 0, // Integer(42)
+            0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // Timestamp(-1)
+        ];
+
+        assert_eq!(
+            RowCodec::decode(&bytes).unwrap(),
+            vec![SqlValue::Integer(42), SqlValue::Timestamp(-1)]
+        );
     }
 
     #[test]

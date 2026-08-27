@@ -1555,6 +1555,9 @@ fn resolved_type_to_string(resolved_type: &ResolvedType) -> String {
         ResolvedType::Blob => "BLOB".to_string(),
         ResolvedType::Boolean => "BOOLEAN".to_string(),
         ResolvedType::Timestamp => "TIMESTAMP".to_string(),
+        ResolvedType::Date => "DATE".to_string(),
+        ResolvedType::Time => "TIME".to_string(),
+        ResolvedType::Interval => "INTERVAL".to_string(),
         ResolvedType::Vector { dimension, metric } => {
             let metric = match metric {
                 VectorMetric::Cosine => "COSINE",
@@ -1842,6 +1845,9 @@ pub enum CatalogManifestDataType {
         metric: CatalogManifestVectorMetric,
     },
     Null,
+    Date,
+    Time,
+    Interval,
 }
 
 impl From<&ResolvedType> for CatalogManifestDataType {
@@ -1855,6 +1861,9 @@ impl From<&ResolvedType> for CatalogManifestDataType {
             ResolvedType::Blob => Self::Blob,
             ResolvedType::Boolean => Self::Boolean,
             ResolvedType::Timestamp => Self::Timestamp,
+            ResolvedType::Date => Self::Date,
+            ResolvedType::Time => Self::Time,
+            ResolvedType::Interval => Self::Interval,
             ResolvedType::Vector { dimension, metric } => Self::Vector {
                 dimension: *dimension,
                 metric: (*metric).into(),
@@ -1875,6 +1884,9 @@ impl From<CatalogManifestDataType> for ResolvedType {
             CatalogManifestDataType::Blob => Self::Blob,
             CatalogManifestDataType::Boolean => Self::Boolean,
             CatalogManifestDataType::Timestamp => Self::Timestamp,
+            CatalogManifestDataType::Date => Self::Date,
+            CatalogManifestDataType::Time => Self::Time,
+            CatalogManifestDataType::Interval => Self::Interval,
             CatalogManifestDataType::Vector { dimension, metric } => Self::Vector {
                 dimension,
                 metric: metric.into(),

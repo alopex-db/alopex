@@ -42,6 +42,12 @@ pub enum ResolvedType {
     Boolean,
     /// Timestamp type
     Timestamp,
+    /// Calendar date without a time zone, stored as days from 1970-01-01.
+    Date,
+    /// Time of day without a time zone, stored as microseconds after midnight.
+    Time,
+    /// Calendar interval stored as independent month, day, and microsecond parts.
+    Interval,
     /// Vector type with dimension and metric
     /// Metric is always populated (defaults to Cosine if omitted in AST)
     Vector {
@@ -101,6 +107,9 @@ impl ResolvedType {
             DataType::Blob => Self::Blob,
             DataType::Boolean | DataType::Bool => Self::Boolean,
             DataType::Timestamp => Self::Timestamp,
+            DataType::Date => Self::Date,
+            DataType::Time => Self::Time,
+            DataType::Interval => Self::Interval,
             DataType::Vector { dimension, metric } => Self::Vector {
                 dimension: *dimension,
                 metric: metric.unwrap_or(VectorMetric::Cosine),
@@ -166,6 +175,7 @@ impl ResolvedType {
             // canonical UTC timestamp and numeric values must be integral
             // microseconds at execution time.
             (Text | Integer | BigInt | Float | Double, Timestamp) => true,
+            (Text, Date | Time | Interval) => true,
 
             // Vector types require dimension check (done separately in TypeChecker)
             (Vector { .. }, Vector { .. }) => false,
@@ -188,6 +198,9 @@ impl ResolvedType {
             Self::Blob => "Blob",
             Self::Boolean => "Boolean",
             Self::Timestamp => "Timestamp",
+            Self::Date => "Date",
+            Self::Time => "Time",
+            Self::Interval => "Interval",
             Self::Vector { .. } => "Vector",
             Self::Null => "Null",
         }
@@ -205,6 +218,9 @@ impl std::fmt::Display for ResolvedType {
             Self::Blob => write!(f, "BLOB"),
             Self::Boolean => write!(f, "BOOLEAN"),
             Self::Timestamp => write!(f, "TIMESTAMP"),
+            Self::Date => write!(f, "DATE"),
+            Self::Time => write!(f, "TIME"),
+            Self::Interval => write!(f, "INTERVAL"),
             Self::Vector { dimension, metric } => {
                 write!(f, "VECTOR({}, {:?})", dimension, metric)
             }

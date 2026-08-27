@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import date, time
 from typing import Any
 
 
@@ -126,6 +127,18 @@ def main() -> int:
             (
                 "SELECT JSON_GROUP_ARRAY(qty) AS quantities FROM sales",
                 [{"quantities": "[3,1,5,2,0]"}],
+            ),
+            (
+                "SELECT DATE_ADD(DATE '2024-01-31', INTERVAL '1 month') AS month_end, "
+                "TIME '23:59:59.123456' AS precise_time, "
+                "AGE(DATE '2024-03-01', DATE '2024-02-28') AS elapsed",
+                [
+                    {
+                        "month_end": date(2024, 2, 29),
+                        "precise_time": time(23, 59, 59, 123456),
+                        "elapsed": {"months": 0, "days": 2, "microseconds": 0},
+                    }
+                ],
             ),
             (
                 "SELECT j.fullkey, j.atom FROM JSON_TREE('[1,{\"x\":2}]') "

@@ -1,10 +1,12 @@
 use std::fs::File;
 
+use arrow_array::types::IntervalMonthDayNanoType;
 use arrow_array::{
-    Array, BinaryArray, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
-    LargeBinaryArray, StringArray, TimestampMicrosecondArray,
+    Array, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int32Array,
+    Int64Array, IntervalMonthDayNanoArray, LargeBinaryArray, StringArray, Time64MicrosecondArray,
+    TimestampMicrosecondArray,
 };
-use arrow_schema::DataType as ArrowDataType;
+use arrow_schema::{DataType as ArrowDataType, IntervalUnit, TimeUnit};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
 use crate::catalog::TableMetadata;
@@ -124,6 +126,9 @@ fn map_arrow_type(dt: &ArrowDataType) -> Result<ResolvedType> {
         ArrowDataType::Timestamp(arrow_schema::TimeUnit::Microsecond, _) => {
             Ok(ResolvedType::Timestamp)
         }
+        ArrowDataType::Date32 => Ok(ResolvedType::Date),
+        ArrowDataType::Time64(TimeUnit::Microsecond) => Ok(ResolvedType::Time),
+        ArrowDataType::Interval(IntervalUnit::MonthDayNano) => Ok(ResolvedType::Interval),
         other => Err(ExecutorError::BulkLoad(format!(
             "unsupported parquet/arrow type: {other:?}"
         ))),
@@ -202,6 +207,35 @@ fn arrow_value_to_sql(
                 .downcast_ref::<TimestampMicrosecondArray>()
                 .unwrap();
             Ok(SqlValue::Timestamp(arr.value(row_idx)))
+        }
+        (ArrowDataType::Date32, ResolvedType::Date) => {
+            let arr = array.as_any().downcast_ref::<Date32Array>().unwrap();
+            Ok(SqlValue::Date(arr.value(row_idx)))
+        }
+        (ArrowDataType::Time64(TimeUnit::Microsecond), ResolvedType::Time) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<Time64MicrosecondArray>()
+                .unwrap();
+            Ok(SqlValue::Time(arr.value(row_idx)))
+        }
+        (ArrowDataType::Interval(IntervalUnit::MonthDayNano), ResolvedType::Interval) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<IntervalMonthDayNanoArray>()
+                .unwrap();
+            let value = arr.value(row_idx);
+            let (months, days, nanos) = IntervalMonthDayNanoType::to_parts(value);
+            if nanos % 1_000 != 0 {
+                return Err(ExecutorError::BulkLoad(
+                    "interval nanoseconds cannot be represented as microseconds".into(),
+                ));
+            }
+            Ok(SqlValue::Interval {
+                months,
+                days,
+                micros: nanos / 1_000,
+            })
         }
         _ => Err(ExecutorError::BulkLoad(format!(
             "parquet field type {:?} does not match expected {:?}",

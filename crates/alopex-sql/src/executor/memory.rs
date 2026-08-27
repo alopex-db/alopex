@@ -30,6 +30,9 @@ impl ByteSized for SqlValue {
             SqlValue::Blob(blob) => blob.len() as u64,
             SqlValue::Boolean(_) => 1,
             SqlValue::Timestamp(_) => 8,
+            SqlValue::Date(_) => 4,
+            SqlValue::Time(_) => 8,
+            SqlValue::Interval { .. } => 16,
             SqlValue::Vector(values) => values.len() as u64 * 4,
         }
     }

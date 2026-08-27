@@ -32,6 +32,9 @@ fn eval_pg_typeof(values: &[SqlValue]) -> Result<SqlValue> {
         SqlValue::Blob(_) => "bytea",
         SqlValue::Boolean(_) => "boolean",
         SqlValue::Timestamp(_) => "timestamp",
+        SqlValue::Date(_) => "date",
+        SqlValue::Time(_) => "time",
+        SqlValue::Interval { .. } => "interval",
         SqlValue::Vector(_) => "vector",
         SqlValue::Null => "unknown",
     };

@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
+use arrow::array::types::IntervalMonthDayNanoType;
 use arrow::array::{
-    ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
-    NullArray, StringArray, TimestampMicrosecondArray,
+    ArrayRef, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int32Array,
+    Int64Array, IntervalMonthDayNanoArray, NullArray, StringArray, Time64MicrosecondArray,
+    TimestampMicrosecondArray,
 };
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use arrow::datatypes::{DataType, Field, IntervalUnit, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 
 use alopex_dataframe::{DataFrame, DataFrameError};
@@ -88,6 +90,9 @@ fn arrow_type_for(ty: &ResolvedType) -> DfResult<DataType> {
         ResolvedType::Blob => Ok(DataType::Binary),
         ResolvedType::Boolean => Ok(DataType::Boolean),
         ResolvedType::Timestamp => Ok(DataType::Timestamp(TimeUnit::Microsecond, None)),
+        ResolvedType::Date => Ok(DataType::Date32),
+        ResolvedType::Time => Ok(DataType::Time64(TimeUnit::Microsecond)),
+        ResolvedType::Interval => Ok(DataType::Interval(IntervalUnit::MonthDayNano)),
         ResolvedType::Null => Ok(DataType::Null),
         ResolvedType::Vector { .. } => Err(DataFrameError::invalid_operation(
             "vector columns are not supported for DataFrame conversion",
@@ -110,6 +115,9 @@ enum ColumnBuilderKind {
     Binary(Vec<Option<Vec<u8>>>),
     Boolean(Vec<Option<bool>>),
     Timestamp(Vec<Option<i64>>),
+    Date(Vec<Option<i32>>),
+    Time(Vec<Option<i64>>),
+    Interval(Vec<Option<<IntervalMonthDayNanoType as arrow::array::ArrowPrimitiveType>::Native>>),
     Null(usize),
 }
 
@@ -124,6 +132,9 @@ impl ColumnBuilder {
             ResolvedType::Blob => ColumnBuilderKind::Binary(Vec::with_capacity(row_count)),
             ResolvedType::Boolean => ColumnBuilderKind::Boolean(Vec::with_capacity(row_count)),
             ResolvedType::Timestamp => ColumnBuilderKind::Timestamp(Vec::with_capacity(row_count)),
+            ResolvedType::Date => ColumnBuilderKind::Date(Vec::with_capacity(row_count)),
+            ResolvedType::Time => ColumnBuilderKind::Time(Vec::with_capacity(row_count)),
+            ResolvedType::Interval => ColumnBuilderKind::Interval(Vec::with_capacity(row_count)),
             ResolvedType::Null => ColumnBuilderKind::Null(0),
             ResolvedType::Vector { .. } => {
                 return Err(DataFrameError::invalid_operation(
@@ -173,6 +184,30 @@ impl ColumnBuilder {
                 values.push(Some(v));
                 Ok(())
             }
+            (ColumnBuilderKind::Date(values), SqlValue::Date(v)) => {
+                values.push(Some(v));
+                Ok(())
+            }
+            (ColumnBuilderKind::Time(values), SqlValue::Time(v)) => {
+                values.push(Some(v));
+                Ok(())
+            }
+            (
+                ColumnBuilderKind::Interval(values),
+                SqlValue::Interval {
+                    months,
+                    days,
+                    micros,
+                },
+            ) => {
+                let nanos = micros.checked_mul(1_000).ok_or_else(|| {
+                    DataFrameError::invalid_operation("interval nanoseconds overflow Arrow i64")
+                })?;
+                values.push(Some(IntervalMonthDayNanoType::make_value(
+                    months, days, nanos,
+                )));
+                Ok(())
+            }
             (ColumnBuilderKind::Int32(values), SqlValue::Null) => {
                 values.push(None);
                 Ok(())
@@ -205,6 +240,18 @@ impl ColumnBuilder {
                 values.push(None);
                 Ok(())
             }
+            (ColumnBuilderKind::Date(values), SqlValue::Null) => {
+                values.push(None);
+                Ok(())
+            }
+            (ColumnBuilderKind::Time(values), SqlValue::Null) => {
+                values.push(None);
+                Ok(())
+            }
+            (ColumnBuilderKind::Interval(values), SqlValue::Null) => {
+                values.push(None);
+                Ok(())
+            }
             (ColumnBuilderKind::Null(count), SqlValue::Null) => {
                 *count += 1;
                 Ok(())
@@ -231,6 +278,11 @@ impl ColumnBuilder {
             ColumnBuilderKind::Boolean(values) => Arc::new(BooleanArray::from(values)),
             ColumnBuilderKind::Timestamp(values) => {
                 Arc::new(TimestampMicrosecondArray::from(values))
+            }
+            ColumnBuilderKind::Date(values) => Arc::new(Date32Array::from(values)),
+            ColumnBuilderKind::Time(values) => Arc::new(Time64MicrosecondArray::from(values)),
+            ColumnBuilderKind::Interval(values) => {
+                Arc::new(IntervalMonthDayNanoArray::from(values))
             }
             ColumnBuilderKind::Null(len) => Arc::new(NullArray::new(len)),
         };

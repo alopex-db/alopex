@@ -249,6 +249,85 @@ fn check_to_timestamp(args: &[TypedExpr]) -> Result<(), PlannerError> {
     check_text(args)
 }
 
+fn check_temporal_input(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    for arg in args {
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Text
+                | ResolvedType::Date
+                | ResolvedType::Time
+                | ResolvedType::Timestamp
+                | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Temporal or Text",
+                arg.resolved_type.type_name(),
+                arg.span,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_datetime(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_temporal_input(&args[..1])?;
+    check_text(&args[1..])
+}
+
+fn check_temporal_interval(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    let temporal = &args[0];
+    if !matches!(
+        temporal.resolved_type,
+        ResolvedType::Date | ResolvedType::Time | ResolvedType::Timestamp | ResolvedType::Null
+    ) {
+        return Err(PlannerError::type_mismatch(
+            "Date, Time, or Timestamp",
+            temporal.resolved_type.type_name(),
+            temporal.span,
+        ));
+    }
+    let interval = &args[1];
+    if matches!(
+        interval.resolved_type,
+        ResolvedType::Interval | ResolvedType::Null
+    ) {
+        Ok(())
+    } else {
+        Err(PlannerError::type_mismatch(
+            "Interval",
+            interval.resolved_type.type_name(),
+            interval.span,
+        ))
+    }
+}
+
+fn check_age(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    for arg in args {
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Date | ResolvedType::Timestamp | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Date or Timestamp",
+                arg.resolved_type.type_name(),
+                arg.span,
+            ));
+        }
+    }
+    if args.len() == 2
+        && args[0].resolved_type != ResolvedType::Null
+        && args[1].resolved_type != ResolvedType::Null
+        && args[0].resolved_type != args[1].resolved_type
+    {
+        return Err(PlannerError::type_mismatch(
+            args[0].resolved_type.type_name(),
+            args[1].resolved_type.type_name(),
+            args[1].span,
+        ));
+    }
+    Ok(())
+}
+
 pub fn check_bigint(args: &[TypedExpr]) -> Result<(), PlannerError> {
     for arg in args {
         if !matches!(arg.resolved_type, ResolvedType::BigInt | ResolvedType::Null) {
@@ -702,6 +781,86 @@ static SIGNATURES: &[ScalarSignature] = &[
         check_numeric,
         ReturnRule::Fixed(ResolvedType::Timestamp),
         STATEMENT_STABLE_META,
+    ),
+    sig_meta(
+        "current_date",
+        Arity::Exact(0),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Date),
+        STATEMENT_STABLE_META,
+    ),
+    sig_meta(
+        "current_time",
+        Arity::Exact(0),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Time),
+        STATEMENT_STABLE_META,
+    ),
+    sig(
+        "make_date",
+        Arity::Exact(3),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Date),
+    ),
+    sig(
+        "make_time",
+        Arity::Exact(3),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Time),
+    ),
+    sig(
+        "make_timestamp",
+        Arity::Exact(6),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Timestamp),
+    ),
+    sig(
+        "make_interval",
+        Arity::Range(0, 7),
+        check_numeric,
+        ReturnRule::Fixed(ResolvedType::Interval),
+    ),
+    sig(
+        "date",
+        Arity::Exact(1),
+        check_temporal_input,
+        ReturnRule::Fixed(ResolvedType::Date),
+    ),
+    sig(
+        "time",
+        Arity::Exact(1),
+        check_temporal_input,
+        ReturnRule::Fixed(ResolvedType::Time),
+    ),
+    sig(
+        "datetime",
+        Arity::Variadic(1),
+        check_datetime,
+        ReturnRule::Fixed(ResolvedType::Timestamp),
+    ),
+    sig(
+        "to_date",
+        Arity::Exact(2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Date),
+    ),
+    sig(
+        "age",
+        Arity::Range(1, 2),
+        check_age,
+        ReturnRule::Fixed(ResolvedType::Interval),
+    ),
+    sig(
+        "date_add",
+        Arity::Exact(2),
+        check_temporal_interval,
+        ReturnRule::FromArgs(return_arg0),
+    ),
+    sig(
+        "date_sub",
+        Arity::Exact(2),
+        check_temporal_interval,
+        ReturnRule::FromArgs(return_arg0),
     ),
     sig(
         "extract",

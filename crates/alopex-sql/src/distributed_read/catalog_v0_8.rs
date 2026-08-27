@@ -118,6 +118,30 @@ pub const REMOTE_DETERMINISTIC_SCALAR_FUNCTIONS: &[&str] = &[
 
 /// Registered scalar identities intentionally excluded from remote execution.
 pub const REMOTE_LOCAL_ONLY_SCALAR_FUNCTIONS: &[&str] = &[
+    "age",
+    "current_date",
+    "current_time",
+    "date",
+    "date_add",
+    "date_sub",
+    "datetime",
+    "json",
+    "json_array",
+    "json_array_length",
+    "json_extract",
+    "json_insert",
+    "json_object",
+    "json_remove",
+    "json_replace",
+    "json_set",
+    "json_type",
+    "json_valid",
+    "make_date",
+    "make_interval",
+    "make_time",
+    "make_timestamp",
+    "time",
+    "to_date",
     "vector_similarity",
     "vector_distance",
     "vector_dims",
@@ -1018,21 +1042,22 @@ mod tests {
     }
 
     #[test]
-    fn stateful_and_vector_expressions_remain_local_only() {
-        let random = TypedExpr::function_call(
-            "random".to_string(),
-            vec![],
-            false,
-            false,
-            ResolvedType::Double,
-            Span::default(),
-        );
-        let random_plan = LogicalPlan::filter(scan(), random);
-        assert!(matches!(
-            classify(&random_plan, &references()),
-            RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
-                if code == "stateful_function_local_only"
-        ));
+    fn explicitly_excluded_scalar_and_vector_expressions_remain_local_only() {
+        for name in ["random", "json_valid", "date_add"] {
+            let expression = TypedExpr::function_call(
+                name.to_string(),
+                vec![],
+                false,
+                false,
+                ResolvedType::Null,
+                Span::default(),
+            );
+            assert!(matches!(
+                classify(&LogicalPlan::filter(scan(), expression), &references()),
+                RemoteReadClassification::LocalOnly(RemoteReadRejection { code, .. })
+                    if code == "stateful_function_local_only"
+            ));
+        }
 
         let vector_plan = LogicalPlan::filter(
             scan(),

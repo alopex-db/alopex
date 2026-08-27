@@ -20,9 +20,47 @@ pub enum SqlValue {
     Boolean(bool),
     Timestamp(i64), // microseconds since epoch
     Vector(Vec<f32>),
+    Date(i32), // days since 1970-01-01
+    Time(i64), // microseconds since midnight
+    Interval { months: i32, days: i32, micros: i64 },
 }
 
 impl SqlValue {
+    /// Formats native temporal values for text-oriented public surfaces.
+    pub fn temporal_text(&self) -> Option<String> {
+        match self {
+            Self::Date(days) => {
+                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch");
+                Some(
+                    epoch
+                        .checked_add_signed(chrono::Duration::days(i64::from(*days)))
+                        .map(|date| date.format("%Y-%m-%d").to_string())
+                        .unwrap_or_else(|| format!("{days} days since 1970-01-01")),
+                )
+            }
+            Self::Time(micros) => {
+                let formatted = u32::try_from(micros.div_euclid(1_000_000))
+                    .ok()
+                    .zip(u32::try_from(micros.rem_euclid(1_000_000)).ok())
+                    .and_then(|(seconds, micros)| {
+                        chrono::NaiveTime::from_num_seconds_from_midnight_opt(
+                            seconds,
+                            micros * 1_000,
+                        )
+                    })
+                    .map(|time| time.format("%H:%M:%S%.6f").to_string())
+                    .unwrap_or_else(|| format!("{micros} microseconds after midnight"));
+                Some(formatted)
+            }
+            Self::Interval {
+                months,
+                days,
+                micros,
+            } => Some(format!("{months} months {days} days {micros} microseconds")),
+            _ => None,
+        }
+    }
+
     /// Returns the type tag for serialization (see design type tags).
     pub fn type_tag(&self) -> u8 {
         match self {
@@ -36,6 +74,9 @@ impl SqlValue {
             SqlValue::Boolean(_) => 0x07,
             SqlValue::Timestamp(_) => 0x08,
             SqlValue::Vector(_) => 0x09,
+            SqlValue::Date(_) => 0x0a,
+            SqlValue::Time(_) => 0x0b,
+            SqlValue::Interval { .. } => 0x0c,
         }
     }
 
@@ -57,6 +98,9 @@ impl SqlValue {
             SqlValue::Boolean(_) => "Boolean",
             SqlValue::Timestamp(_) => "Timestamp",
             SqlValue::Vector(_) => "Vector",
+            SqlValue::Date(_) => "Date",
+            SqlValue::Time(_) => "Time",
+            SqlValue::Interval { .. } => "Interval",
         }
     }
 
@@ -76,6 +120,9 @@ impl SqlValue {
                 dimension: v.len() as u32,
                 metric: VectorMetric::Cosine,
             },
+            SqlValue::Date(_) => ResolvedType::Date,
+            SqlValue::Time(_) => ResolvedType::Time,
+            SqlValue::Interval { .. } => ResolvedType::Interval,
         }
     }
 }
@@ -93,6 +140,20 @@ impl PartialOrd for SqlValue {
             (Blob(a), Blob(b)) => Some(a.cmp(b)),
             (Boolean(a), Boolean(b)) => Some(a.cmp(b)),
             (Timestamp(a), Timestamp(b)) => Some(a.cmp(b)),
+            (Date(a), Date(b)) => Some(a.cmp(b)),
+            (Time(a), Time(b)) => Some(a.cmp(b)),
+            (
+                Interval {
+                    months: am,
+                    days: ad,
+                    micros: au,
+                },
+                Interval {
+                    months: bm,
+                    days: bd,
+                    micros: bu,
+                },
+            ) => Some((am, ad, au).cmp(&(bm, bd, bu))),
             // Vector ordering is undefined for now.
             (Vector(_), Vector(_)) => None,
             _ => None,
@@ -210,6 +271,18 @@ mod tests {
             SqlValue::Text("a".into())
                 .partial_cmp(&SqlValue::Blob(vec![0x61]))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn temporal_text_preserves_out_of_range_public_values() {
+        assert_eq!(
+            SqlValue::Date(i32::MAX).temporal_text().as_deref(),
+            Some("2147483647 days since 1970-01-01")
+        );
+        assert_eq!(
+            SqlValue::Time(-1).temporal_text().as_deref(),
+            Some("-1 microseconds after midnight")
         );
     }
 

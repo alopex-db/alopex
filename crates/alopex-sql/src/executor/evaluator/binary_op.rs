@@ -2,6 +2,7 @@ use crate::ast::expr::BinaryOp;
 use crate::executor::{EvaluationError, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;
 use crate::storage::SqlValue;
+use chrono::{Duration, Months, NaiveDate};
 
 use super::evaluate;
 
@@ -100,6 +101,9 @@ fn add(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
     if left.is_null() || right.is_null() {
         return Ok(SqlValue::Null);
     }
+    if let Some(value) = temporal_add(&left, &right, false)? {
+        return Ok(value);
+    }
     match numeric_operands(&left, &right) {
         Some(NumericOperands::Integer(a, b)) => a
             .checked_add(b)
@@ -119,6 +123,9 @@ fn sub(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
     if left.is_null() || right.is_null() {
         return Ok(SqlValue::Null);
     }
+    if let Some(value) = temporal_add(&left, &right, true)? {
+        return Ok(value);
+    }
     match numeric_operands(&left, &right) {
         Some(NumericOperands::Integer(a, b)) => a
             .checked_sub(b)
@@ -132,6 +139,150 @@ fn sub(left: SqlValue, right: SqlValue) -> Result<SqlValue> {
         Some(NumericOperands::Double(a, b)) => Ok(SqlValue::Double(a - b)),
         None => type_mismatch("Numeric", &left, &right),
     }
+}
+
+fn temporal_add(left: &SqlValue, right: &SqlValue, subtract: bool) -> Result<Option<SqlValue>> {
+    let negate = |months: i32, days: i32, micros: i64| {
+        if subtract {
+            months
+                .checked_neg()
+                .zip(days.checked_neg())
+                .zip(micros.checked_neg())
+                .map(|((m, d), u)| (m, d, u))
+        } else {
+            Some((months, days, micros))
+        }
+    };
+    let interval = match right {
+        SqlValue::Interval {
+            months,
+            days,
+            micros,
+        } => negate(*months, *days, *micros),
+        _ => None,
+    };
+    if let Some((months, days, micros)) = interval {
+        return match left {
+            SqlValue::Date(value) => add_date_interval(*value, months, days, micros).map(Some),
+            SqlValue::Timestamp(value) => {
+                add_timestamp_interval(*value, months, days, micros).map(Some)
+            }
+            SqlValue::Time(value) if months == 0 => {
+                add_time_interval(*value, days, micros).map(Some)
+            }
+            SqlValue::Interval {
+                months: lm,
+                days: ld,
+                micros: lu,
+            } => Ok(Some(SqlValue::Interval {
+                months: lm
+                    .checked_add(months)
+                    .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?,
+                days: ld
+                    .checked_add(days)
+                    .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?,
+                micros: lu
+                    .checked_add(micros)
+                    .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?,
+            })),
+            _ => Ok(None),
+        };
+    }
+    if subtract {
+        return match (left, right) {
+            (SqlValue::Date(a), SqlValue::Date(b)) => Ok(Some(SqlValue::Interval {
+                months: 0,
+                days: a - b,
+                micros: 0,
+            })),
+            (SqlValue::Timestamp(a), SqlValue::Timestamp(b))
+            | (SqlValue::Time(a), SqlValue::Time(b)) => Ok(Some(SqlValue::Interval {
+                months: 0,
+                days: 0,
+                micros: a
+                    .checked_sub(*b)
+                    .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?,
+            })),
+            _ => Ok(None),
+        };
+    }
+    if let SqlValue::Interval {
+        months,
+        days,
+        micros,
+    } = left
+    {
+        return match right {
+            SqlValue::Date(value) => add_date_interval(*value, *months, *days, *micros).map(Some),
+            SqlValue::Timestamp(value) => {
+                add_timestamp_interval(*value, *months, *days, *micros).map(Some)
+            }
+            SqlValue::Time(value) if *months == 0 => {
+                add_time_interval(*value, *days, *micros).map(Some)
+            }
+            _ => Ok(None),
+        };
+    }
+    Ok(None)
+}
+
+fn add_time_interval(value: i64, days: i32, micros: i64) -> Result<SqlValue> {
+    let delta = i64::from(days)
+        .checked_mul(86_400_000_000)
+        .and_then(|days| days.checked_add(micros))
+        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+    value
+        .checked_add(delta)
+        .map(|value| SqlValue::Time(value.rem_euclid(86_400_000_000)))
+        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))
+}
+
+fn add_date_interval(value: i32, months: i32, days: i32, micros: i64) -> Result<SqlValue> {
+    if micros % 86_400_000_000 != 0 {
+        return type_mismatch(
+            "DATE with whole-day INTERVAL",
+            &SqlValue::Date(value),
+            &SqlValue::Interval {
+                months,
+                days,
+                micros,
+            },
+        );
+    }
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch");
+    let date = epoch
+        .checked_add_signed(Duration::days(i64::from(value)))
+        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+    let date = if months >= 0 {
+        date.checked_add_months(Months::new(months as u32))
+    } else {
+        date.checked_sub_months(Months::new(months.unsigned_abs()))
+    }
+    .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+    let total_days = i64::from(days) + micros / 86_400_000_000;
+    let date = date
+        .checked_add_signed(Duration::days(total_days))
+        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+    Ok(SqlValue::Date(
+        i32::try_from(date.signed_duration_since(epoch).num_days())
+            .map_err(|_| ExecutorError::Evaluation(EvaluationError::Overflow))?,
+    ))
+}
+
+fn add_timestamp_interval(value: i64, months: i32, days: i32, micros: i64) -> Result<SqlValue> {
+    let datetime = chrono::DateTime::from_timestamp_micros(value)
+        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?
+        .naive_utc();
+    let datetime = if months >= 0 {
+        datetime.checked_add_months(Months::new(months as u32))
+    } else {
+        datetime.checked_sub_months(Months::new(months.unsigned_abs()))
+    }
+    .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+    let datetime = datetime
+        .checked_add_signed(Duration::days(i64::from(days)) + Duration::microseconds(micros))
+        .ok_or(ExecutorError::Evaluation(EvaluationError::Overflow))?;
+    Ok(SqlValue::Timestamp(datetime.and_utc().timestamp_micros()))
 }
 
 fn mul(left: SqlValue, right: SqlValue) -> Result<SqlValue> {

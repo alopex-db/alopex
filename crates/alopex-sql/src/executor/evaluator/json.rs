@@ -187,7 +187,12 @@ pub(crate) fn sql_to_json(value: &SqlValue) -> Result<Value> {
             .ok_or_else(|| invalid("JSON", "non-finite floating-point value"))?,
         SqlValue::Text(value) => Value::String(value.clone()),
         SqlValue::Boolean(value) => Value::Bool(*value),
-        SqlValue::Blob(_) | SqlValue::Timestamp(_) | SqlValue::Vector(_) => {
+        SqlValue::Blob(_)
+        | SqlValue::Timestamp(_)
+        | SqlValue::Vector(_)
+        | SqlValue::Date(_)
+        | SqlValue::Time(_)
+        | SqlValue::Interval { .. } => {
             return Err(invalid(
                 "JSON",
                 format!("unsupported SQL type {}", value.type_name()),

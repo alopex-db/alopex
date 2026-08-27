@@ -13,7 +13,7 @@ add `DATE`, `TIME`, or `INTERVAL` storage types.
   boolean aggregates are listed in the SQL README.
 
 All SQL execution surfaces use the same parser, planner, and evaluator. The
-Nim/Rust parser wire contract for these expressions is `0.15.0`.
+Nim/Rust parser wire contract for these expressions is `0.16.0`.
 
 ## Timestamp contract
 

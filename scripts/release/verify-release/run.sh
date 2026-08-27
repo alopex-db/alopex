@@ -191,8 +191,8 @@ if not isinstance(distributions, list) or not distributions or any(
 parser = data.get("parser")
 if not isinstance(parser, dict):
     fail("parser public surface is missing")
-if parser.get("contract") != "0.15.0":
-    fail("parser contract must be 0.15.0")
+if parser.get("contract") != "0.16.0":
+    fail("parser contract must be 0.16.0")
 for field in ("manifest_sha256", "envelope_sha256"):
     if not isinstance(parser.get(field), str) or not sha64.fullmatch(parser[field]):
         fail(f"parser {field} is missing or invalid")

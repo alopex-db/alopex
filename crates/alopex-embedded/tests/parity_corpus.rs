@@ -168,6 +168,13 @@ fn normalize_value(value: &SqlValue) -> Result<Value, String> {
         )),
         // Timestamp の正規化表現はマイクロ秒の整数(コーパスは使用しない)
         SqlValue::Timestamp(t) => Ok(json!(t)),
+        SqlValue::Date(days) => Ok(json!(days)),
+        SqlValue::Time(micros) => Ok(json!(micros)),
+        SqlValue::Interval {
+            months,
+            days,
+            micros,
+        } => Ok(json!({ "months": months, "days": days, "microseconds": micros })),
         SqlValue::Blob(_) => {
             Err("BLOB 値の正規化表現は未定義(コーパスに BLOB を含めない前提)".to_string())
         }

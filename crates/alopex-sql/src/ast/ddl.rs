@@ -61,6 +61,9 @@ pub enum DataType {
     Boolean,
     Bool,
     Timestamp,
+    Date,
+    Time,
+    Interval,
     Vector {
         dimension: u32,
         metric: Option<VectorMetric>,

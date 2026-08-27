@@ -361,7 +361,7 @@ fn type_name(value: &Bound<'_, PyAny>) -> String {
 /// `SqlValue` を Python ネイティブ値へ変換する。
 ///
 /// CLI / Server と同じく値をそのまま返す（Timestamp はエポックマイクロ秒の int、
-/// Vector は float の list）。
+/// Date/Time は標準の datetime 値、Interval は成分 dict、Vector は float の list）。
 pub(crate) fn sql_value_to_py(py: Python<'_>, value: SqlValue) -> PyResult<Py<PyAny>> {
     match value {
         SqlValue::Null => Ok(py.None()),
@@ -373,6 +373,35 @@ pub(crate) fn sql_value_to_py(py: Python<'_>, value: SqlValue) -> PyResult<Py<Py
         SqlValue::Blob(v) => PyBytes::new(py, &v).into_py_any(py),
         SqlValue::Boolean(v) => v.into_py_any(py),
         SqlValue::Timestamp(v) => v.into_py_any(py),
+        SqlValue::Date(days) => PyModule::import(py, "datetime")?
+            .getattr("date")?
+            .call_method1("fromordinal", (i64::from(days) + 719_163,))?
+            .unbind()
+            .into_py_any(py),
+        SqlValue::Time(micros) => {
+            let seconds = micros.div_euclid(1_000_000);
+            PyModule::import(py, "datetime")?
+                .getattr("time")?
+                .call1((
+                    seconds / 3_600,
+                    seconds / 60 % 60,
+                    seconds % 60,
+                    micros.rem_euclid(1_000_000),
+                ))?
+                .unbind()
+                .into_py_any(py)
+        }
+        SqlValue::Interval {
+            months,
+            days,
+            micros,
+        } => {
+            let value = PyDict::new(py);
+            value.set_item("months", months)?;
+            value.set_item("days", days)?;
+            value.set_item("microseconds", micros)?;
+            value.into_py_any(py)
+        }
         SqlValue::Vector(values) => {
             let list = PyList::empty(py);
             for v in values {
@@ -390,7 +419,9 @@ mod tests {
     use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyTuple};
     use pyo3::IntoPyObjectExt;
 
-    use super::{bind_params, bind_sql_params_py};
+    use alopex_sql::SqlValue;
+
+    use super::{bind_params, bind_sql_params_py, sql_value_to_py};
 
     fn with_py<F: FnOnce(Python<'_>)>(f: F) {
         pyo3::Python::initialize();
@@ -406,6 +437,63 @@ mod tests {
         with_py(|_| {
             let sql = "SELECT * FROM users";
             assert_eq!(bind_params(sql, None).expect("bind"), sql);
+        });
+    }
+
+    #[test]
+    fn temporal_values_use_python_native_date_time_and_lossless_interval_mapping() {
+        with_py(|py| {
+            let date = sql_value_to_py(py, SqlValue::Date(19_782)).unwrap();
+            assert_eq!(date.bind(py).get_type().name().unwrap(), "date");
+            assert_eq!(
+                date.bind(py).str().unwrap().extract::<String>().unwrap(),
+                "2024-02-29"
+            );
+
+            let time = sql_value_to_py(py, SqlValue::Time(86_399_123_456)).unwrap();
+            assert_eq!(time.bind(py).get_type().name().unwrap(), "time");
+            assert_eq!(
+                time.bind(py).str().unwrap().extract::<String>().unwrap(),
+                "23:59:59.123456"
+            );
+
+            let interval = sql_value_to_py(
+                py,
+                SqlValue::Interval {
+                    months: 1,
+                    days: -2,
+                    micros: 3,
+                },
+            )
+            .unwrap();
+            let interval = interval.bind(py).cast::<PyDict>().unwrap();
+            assert_eq!(
+                interval
+                    .get_item("months")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<i32>()
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                interval
+                    .get_item("days")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<i32>()
+                    .unwrap(),
+                -2
+            );
+            assert_eq!(
+                interval
+                    .get_item("microseconds")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<i64>()
+                    .unwrap(),
+                3
+            );
         });
     }
 

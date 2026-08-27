@@ -229,6 +229,19 @@ suite "MessagePack output - contract shape":
       let create = payloadJson(sql).stmtKind()
       check create["columns"][0]["data_type"]["variant"].getStr() == "Float"
 
+  test "temporal data types and typed literals emit contract variants":
+    let create = payloadJson(
+      "CREATE TABLE events (day DATE, at TIME, elapsed INTERVAL)").stmtKind()
+    check create["columns"][0]["data_type"]["variant"].getStr() == "Date"
+    check create["columns"][1]["data_type"]["variant"].getStr() == "Time"
+    check create["columns"][2]["data_type"]["variant"].getStr() == "Interval"
+
+    let select = selectKind(
+      "SELECT DATE '2024-02-29', TIME '12:34:56', INTERVAL '1 day'")
+    check select["projection"][0]["expr"]["kind"]["target_type"]["variant"].getStr() == "Date"
+    check select["projection"][1]["expr"]["kind"]["target_type"]["variant"].getStr() == "Time"
+    check select["projection"][2]["expr"]["kind"]["variant"].getStr() == "IntervalLiteral"
+
   test "SELECT emits limit_with_ties and a detached OFFSET (issue #152)":
     let kind = selectKind(
       "SELECT id FROM t ORDER BY id OFFSET 2 ROWS FETCH FIRST 3 ROWS WITH TIES")

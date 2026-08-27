@@ -413,13 +413,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 (TypedExprKind::Literal(lit.clone()), resolved_type)
             }
             Literal::String(_) => (TypedExprKind::Literal(lit.clone()), ResolvedType::Text),
-            Literal::Interval(_) => {
-                return Err(PlannerError::unsupported_feature(
-                    "INTERVAL literals require a SQL-TS semantic layer",
-                    "0.9.0",
-                    span,
-                ));
-            }
+            Literal::Interval(_) => (TypedExprKind::Literal(lit.clone()), ResolvedType::Interval),
             Literal::Boolean(_) => (TypedExprKind::Literal(lit.clone()), ResolvedType::Boolean),
             Literal::Null => (TypedExprKind::Literal(lit.clone()), ResolvedType::Null),
         };
@@ -837,6 +831,9 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
         match op {
             // Arithmetic operators: require numeric types
             Add | Sub | Mul | Div => {
+                if let Some(result) = Self::temporal_arithmetic_type(op, left, right) {
+                    return Ok(result);
+                }
                 let result = self.check_arithmetic_op(left, right, span)?;
                 Ok(result)
             }
@@ -908,6 +905,27 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 line: span.start.line,
                 column: span.start.column,
             }),
+        }
+    }
+
+    fn temporal_arithmetic_type(
+        op: BinaryOp,
+        left: &ResolvedType,
+        right: &ResolvedType,
+    ) -> Option<ResolvedType> {
+        use ResolvedType::*;
+        match (op, left, right) {
+            (BinaryOp::Add | BinaryOp::Sub, Date, Interval) => Some(Date),
+            (BinaryOp::Add | BinaryOp::Sub, Timestamp, Interval) => Some(Timestamp),
+            (BinaryOp::Add | BinaryOp::Sub, Time, Interval) => Some(Time),
+            (BinaryOp::Add, Interval, Date) => Some(Date),
+            (BinaryOp::Add, Interval, Timestamp) => Some(Timestamp),
+            (BinaryOp::Add, Interval, Time) => Some(Time),
+            (BinaryOp::Sub, Date, Date)
+            | (BinaryOp::Sub, Timestamp, Timestamp)
+            | (BinaryOp::Sub, Time, Time)
+            | (BinaryOp::Add | BinaryOp::Sub, Interval, Interval) => Some(Interval),
+            _ => None,
         }
     }
 
@@ -987,6 +1005,7 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
 
             // Timestamp types
             (Timestamp, Timestamp) => true,
+            (Date, Date) | (Time, Time) | (Interval, Interval) => true,
 
             // Vector types (for equality only, dimension must match)
             (Vector { dimension: d1, .. }, Vector { dimension: d2, .. }) => d1 == d2,
@@ -3059,6 +3078,9 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                     | ResolvedType::Float
                     | ResolvedType::Double
                     | ResolvedType::Timestamp
+                    | ResolvedType::Date
+                    | ResolvedType::Time
+                    | ResolvedType::Interval
             )
         {
             TypedExpr::cast(value, expected.clone(), span)

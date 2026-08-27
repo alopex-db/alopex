@@ -5003,6 +5003,7 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
             // TIMESTAMP is stored as microseconds; text and numeric input is
             // converted by the assignment expression at execution time.
             (Text | Integer | BigInt | Float | Double, Timestamp) => true,
+            (Text, Date | Time | Interval) => true,
             // Vector dimensions must match
             (Vector { dimension: d1, .. }, Vector { dimension: d2, .. }) => d1 == d2,
             _ => false,
@@ -5024,6 +5025,9 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                     | ResolvedType::Float
                     | ResolvedType::Double
                     | ResolvedType::Timestamp
+                    | ResolvedType::Date
+                    | ResolvedType::Time
+                    | ResolvedType::Interval
             )
         {
             TypedExpr::cast(value, target_type.clone(), span)

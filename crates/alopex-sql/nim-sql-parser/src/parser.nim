@@ -24,7 +24,7 @@ const
                        tkNatural, tkUsing, tkOn}
   TypeTokens = {tkInt, tkBigint, tkSmallint, tkFloatType, tkReal, tkDouble, tkDecimal,
                 tkVarchar, tkChar, tkText, tkBlob, tkBoolean, tkBool,
-                tkTimestamp, tkDate, tkTime, tkVector}
+                tkTimestamp, tkDate, tkTime, tkInterval, tkVector}
   OptionValueTokens = {tkIdent, tkString, tkInteger, tkFloat, tkHnsw, tkBtree,
                        tkCosine, tkL2, tkInner, tkText, tkBoolean, tkBool}
   # FETCH pagination (issue #152) reserves FETCH/NEXT/TIES/ONLY/ROW in the
@@ -511,6 +511,29 @@ proc parsePrimary(p: var Parser): SqlNode =
     let valueTok = p.expect(tkString)
     result = newIntervalLit(valueTok.value,
       Span(start: tokenSpan(intervalTok).start, `end`: tokenSpan(valueTok).`end`))
+  of tkTimestamp:
+    let typeTok = p.advance()
+    let valueTok = p.expect(tkString)
+    let typeNode = newNode(nkTypeName, tokenSpan(typeTok))
+    typeNode.children.add(newIdent(typeTok.value, tokenSpan(typeTok)))
+    result = newNode(nkCast,
+      Span(start: tokenSpan(typeTok).start, `end`: tokenSpan(valueTok).`end`))
+    result.children.add(newStringLit(valueTok.value, tokenSpan(valueTok)))
+    result.children.add(typeNode)
+  of tkDate:
+    let tok = p.advance()
+    if p.check(tkString):
+      let valueTok = p.advance()
+      let typeNode = newNode(nkTypeName, tokenSpan(tok))
+      typeNode.children.add(newIdent(tok.value, tokenSpan(tok)))
+      result = newNode(nkCast,
+        Span(start: tokenSpan(tok).start, `end`: tokenSpan(valueTok).`end`))
+      result.children.add(newStringLit(valueTok.value, tokenSpan(valueTok)))
+      result.children.add(typeNode)
+    elif p.check(tkLParen):
+      result = p.parseFunctionCall(tok)
+    else:
+      result = newIdent(tok.value, tokenSpan(tok))
   of tkTrue:
     let tok = p.advance()
     result = newBoolLit(true, tokenSpan(tok))
@@ -572,15 +595,37 @@ proc parsePrimary(p: var Parser): SqlNode =
   of tkQuestion:
     p.error("bind parameters are not yet supported; pass literal values " &
       "instead (prepared statements are tracked by issue #166)")
-  of tkIdent, tkFirst, tkLast, tkTime, tkFetch, tkNext, tkTies, tkOnly, tkRow:
+  of tkTime:
+    let tok = p.advance()
+    if p.check(tkString):
+      let valueTok = p.advance()
+      let typeNode = newNode(nkTypeName, tokenSpan(tok))
+      typeNode.children.add(newIdent(tok.value, tokenSpan(tok)))
+      result = newNode(nkCast,
+        Span(start: tokenSpan(tok).start, `end`: tokenSpan(valueTok).`end`))
+      result.children.add(newStringLit(valueTok.value, tokenSpan(valueTok)))
+      result.children.add(typeNode)
+    elif p.check(tkLParen):
+      result = p.parseFunctionCall(tok)
+    elif p.check(tkDot):
+      discard p.advance()
+      let col = p.expectExprIdent("column name")
+      result = newNode(nkColumnRef, tokenSpan(tok))
+      result.children.add(newIdent(tok.value, tokenSpan(tok)))
+      result.children.add(newIdent(col.value, tokenSpan(col)))
+    else:
+      result = newIdent(tok.value, tokenSpan(tok))
+  of tkIdent, tkFirst, tkLast, tkFetch, tkNext, tkTies, tkOnly, tkRow:
     let tok = p.advance()
     if tok.value.cmpIgnoreCase("try_cast") == 0 and p.check(tkLParen):
       result = p.parseCastBody(tok, nkTryCast)
     elif p.check(tkLParen):
       result = p.parseFunctionCall(tok)
-    elif tok.value.cmpIgnoreCase("current_timestamp") == 0:
+    elif tok.value.cmpIgnoreCase("current_timestamp") == 0 or
+        tok.value.cmpIgnoreCase("current_date") == 0 or
+        tok.value.cmpIgnoreCase("current_time") == 0:
       result = newNode(nkFunctionCall, tokenSpan(tok))
-      result.children.add(newIdent("CURRENT_TIMESTAMP", tokenSpan(tok)))
+      result.children.add(newIdent(tok.value.toUpperAscii(), tokenSpan(tok)))
     elif p.check(tkDot):
       discard p.advance()
       if p.check(tkStar):

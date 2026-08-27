@@ -30,7 +30,7 @@ class TypeCapabilityGateTests(unittest.TestCase):
         gate = load_gate()
 
         with self.assertRaisesRegex(
-            gate.GateError, "decimal.*temporal.*json.*nested"
+            gate.GateError, "decimal.*json.*nested"
         ):
             gate.verify(ROOT / "docs/sql-type-capabilities.json", ROOT, "0.8.10")
 

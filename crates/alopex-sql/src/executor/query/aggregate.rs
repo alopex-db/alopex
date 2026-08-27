@@ -64,6 +64,24 @@ fn encode_group_value(value: &SqlValue, buf: &mut Vec<u8>) -> Result<()> {
             buf.extend_from_slice(&v.to_le_bytes());
             Ok(())
         }
+        SqlValue::Date(v) => {
+            buf.extend_from_slice(&v.to_le_bytes());
+            Ok(())
+        }
+        SqlValue::Time(v) => {
+            buf.extend_from_slice(&v.to_le_bytes());
+            Ok(())
+        }
+        SqlValue::Interval {
+            months,
+            days,
+            micros,
+        } => {
+            buf.extend_from_slice(&months.to_le_bytes());
+            buf.extend_from_slice(&days.to_le_bytes());
+            buf.extend_from_slice(&micros.to_le_bytes());
+            Ok(())
+        }
         SqlValue::Vector(values) => {
             let len = u32::try_from(values.len()).map_err(|_| ExecutorError::InvalidOperation {
                 operation: "aggregate".into(),

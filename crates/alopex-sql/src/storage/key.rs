@@ -147,6 +147,20 @@ fn encode_index_value(value: &SqlValue, buf: &mut Vec<u8>) -> Result<()> {
                 actual: "Vector".into(),
             });
         }
+        SqlValue::Date(v) => {
+            buf.push(0x0a);
+            buf.extend_from_slice(&((*v as u32) ^ 0x8000_0000).to_be_bytes());
+        }
+        SqlValue::Time(v) => {
+            buf.push(0x0b);
+            buf.extend_from_slice(&((*v as u64) ^ 0x8000_0000_0000_0000).to_be_bytes());
+        }
+        SqlValue::Interval { .. } => {
+            return Err(StorageError::TypeMismatch {
+                expected: "indexable scalar type".into(),
+                actual: "Interval".into(),
+            });
+        }
     }
     Ok(())
 }
