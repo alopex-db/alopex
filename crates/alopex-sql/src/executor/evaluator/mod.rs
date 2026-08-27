@@ -13,6 +13,7 @@ pub(crate) mod datetime;
 mod function_call;
 pub(crate) mod hash;
 mod is_null;
+pub(crate) mod json;
 mod literal;
 pub(crate) mod numeric;
 pub(crate) mod pattern;

@@ -23,8 +23,9 @@ missing row is a release-readiness blocker, not an implicit support claim.
 The [SQL type capability catalog](sql-type-capabilities.json) maps every planned
 v0.8.10 value-type family to its production owners and required evidence. Its
 release gate rejects a target version until every required surface is complete.
-JSON-on-TEXT functions in issue #160 reuse `TEXT`, so the value-type catalog
-tracks native JSON in issue #161 and leaves function coverage to its own tests.
+The [JSON-on-TEXT contract](sql-json-text.md) defines issue #160 separately
+because those functions reuse `TEXT`; the value-type catalog tracks native JSON
+in issue #161.
 
 ## Artifact identity
 
@@ -47,6 +48,7 @@ with a missing, mismatched, or unclassified artifact is `Blocked`.
 - [Distributed-read SQL/CLI coverage](distributed-read.md)
 - [DataFrame bounded and streaming contract](dataframe-streaming.md)
 - [Python embedded-local API](../crates/alopex-py/README.md)
+- [JSON-on-TEXT SQL contract](sql-json-text.md)
 - [v0.7.4 to v0.8 upgrade and recovery](upgrade-v0.7.4-to-v0.8.md)
 
 Post-release verification is intentionally `not_run` in every candidate report.

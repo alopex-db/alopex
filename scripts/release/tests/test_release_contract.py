@@ -275,6 +275,7 @@ class ReleaseContractTests(unittest.TestCase):
     def test_v08_demos_are_mandatory(self) -> None:
         run = (ROOT / "scripts/release/verify-release/run.sh").read_text(encoding="utf-8")
         self.assertIn("scripts/demo/v08/demo_sql_v08.py", run)
+        self.assertIn("JSON-on-TEXT", run)
         self.assertIn("scripts/demo/v074/demo_api_surfaces.py", run)
         self.assertIn("scripts/demo/v074/demo_vector_api.py", run)
         self.assertIn("--require-all", run)

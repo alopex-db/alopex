@@ -71,6 +71,29 @@ fn sql_integration_database_execute_sql_query() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn sql_integration_json_text_functions_share_the_embedded_surface() {
+    let db = Database::new();
+    let result = db
+        .execute_sql(
+            "SELECT JSON_SET('{\"a\":1}', '$.b', 2) AS document, \
+                    JSON_EXTRACT('{\"n\":9007199254740993}', '$.n') AS exact_integer;",
+        )
+        .unwrap();
+
+    let ExecutionResult::Query(query) = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        query.rows,
+        vec![vec![
+            SqlValue::Text(r#"{"a":1,"b":2}"#.into()),
+            SqlValue::BigInt(9_007_199_254_740_993),
+        ]]
+    );
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn sql_integration_cte_column_name_list_is_public_schema() {
     let db = Database::new();
     let result = db

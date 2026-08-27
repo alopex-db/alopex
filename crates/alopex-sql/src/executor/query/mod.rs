@@ -1625,6 +1625,14 @@ fn execute_table_function<'txn, S: KVStore + 'txn, C: Catalog + ?Sized, T: SqlTx
             }
         }
         TableFunctionKind::GenerateSeries => generate_integer_series(&values),
+        TableFunctionKind::JsonEach | TableFunctionKind::JsonTree => {
+            crate::executor::evaluator::json::table_rows(function.name(), &values).map(|rows| {
+                rows.into_iter()
+                    .enumerate()
+                    .map(|(index, values)| Row::new(index as u64, values))
+                    .collect()
+            })
+        }
     }
 }
 

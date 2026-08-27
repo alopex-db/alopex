@@ -56,6 +56,9 @@ SELECT t.id, top.qty AS top_qty FROM stdin_test AS t(id, qty) CROSS JOIN LATERAL
 (SELECT s.qty FROM stdin_test AS s WHERE s.qty <= t.qty ORDER BY s.qty DESC LIMIT 1) AS top
 ORDER BY t.id;
 SELECT u.unnest FROM UNNEST([1.0, 2.0]) AS u ORDER BY u.unnest;
+SELECT JSON_EXTRACT('{"a":[1,2]}', '$.a[1]') AS extracted,
+       JSON_GROUP_ARRAY(qty) AS grouped
+FROM stdin_test;
 "#;
 
     {
@@ -79,7 +82,7 @@ SELECT u.unnest FROM UNNEST([1.0, 2.0]) AS u ORDER BY u.unnest;
         .expect("json output should be an array of result sets");
     assert_eq!(
         sets.len(),
-        18,
+        19,
         "one result set per statement\nstdout:\n{stdout}"
     );
     let select_rows = sets[2].as_array().expect("SELECT result set");
@@ -264,6 +267,12 @@ SELECT u.unnest FROM UNNEST([1.0, 2.0]) AS u ORDER BY u.unnest;
             serde_json::json!({ "unnest": 1.0 }),
             serde_json::json!({ "unnest": 2.0 }),
         ]
+    );
+
+    let json_rows = sets[18].as_array().expect("JSON-on-TEXT result set");
+    assert_eq!(
+        json_rows,
+        &[serde_json::json!({ "extracted": 2, "grouped": "[3,1,5]" })]
     );
 }
 

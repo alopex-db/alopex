@@ -119,6 +119,24 @@ def main() -> int:
                 [{"parsed": 42, "rejected": None, "wrong_dimension": None}],
             ),
             (
+                "SELECT JSON_SET('{\"a\":1}', '$.b', 2) AS document, "
+                "JSON_EXTRACT('{\"n\":9007199254740993}', '$.n') AS exact_integer",
+                [{"document": '{"a":1,"b":2}', "exact_integer": 9007199254740993}],
+            ),
+            (
+                "SELECT JSON_GROUP_ARRAY(qty) AS quantities FROM sales",
+                [{"quantities": "[3,1,5,2,0]"}],
+            ),
+            (
+                "SELECT j.fullkey, j.atom FROM JSON_TREE('[1,{\"x\":2}]') "
+                "AS j(k, v, t, atom, id, parent, fullkey, path) "
+                "WHERE j.atom IS NOT NULL ORDER BY j.id",
+                [
+                    {"fullkey": "$[0]", "atom": 1},
+                    {"fullkey": "$[1].x", "atom": 2},
+                ],
+            ),
+            (
                 "SELECT id, label FROM (VALUES (2, 'b'), (1, 'a')) AS v(id, label) ORDER BY id",
                 [{"id": 1, "label": "a"}, {"id": 2, "label": "b"}],
             ),

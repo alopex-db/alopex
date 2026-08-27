@@ -148,6 +148,10 @@ pub enum TableFunctionKind {
     Unnest,
     /// `GENERATE_SERIES(start, stop [, step])` over integers.
     GenerateSeries,
+    /// `JSON_EACH(json [, path])` — immediate children of JSON TEXT.
+    JsonEach,
+    /// `JSON_TREE(json [, path])` — recursive JSON TEXT traversal.
+    JsonTree,
 }
 
 impl TableFunctionKind {
@@ -156,6 +160,8 @@ impl TableFunctionKind {
         match name.to_ascii_uppercase().as_str() {
             "UNNEST" => Some(Self::Unnest),
             "GENERATE_SERIES" => Some(Self::GenerateSeries),
+            "JSON_EACH" => Some(Self::JsonEach),
+            "JSON_TREE" => Some(Self::JsonTree),
             _ => None,
         }
     }
@@ -165,6 +171,8 @@ impl TableFunctionKind {
         match self {
             Self::Unnest => "UNNEST",
             Self::GenerateSeries => "GENERATE_SERIES",
+            Self::JsonEach => "JSON_EACH",
+            Self::JsonTree => "JSON_TREE",
         }
     }
 
@@ -174,6 +182,8 @@ impl TableFunctionKind {
         match self {
             Self::Unnest => "unnest",
             Self::GenerateSeries => "generate_series",
+            Self::JsonEach => "json_each",
+            Self::JsonTree => "json_tree",
         }
     }
 }

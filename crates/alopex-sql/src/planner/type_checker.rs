@@ -2192,6 +2192,8 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             "max" => self.check_min_max(args, distinct, star, span),
             "group_concat" => self.check_group_concat(args, distinct, star, span),
             "string_agg" => self.check_string_agg(args, distinct, star, span),
+            "json_group_array" => self.check_json_group_array(args, star, span),
+            "json_group_object" => self.check_json_group_object(args, star, span),
             name if is_portable_aggregate_name(name) => {
                 check_portable_aggregate(name, args, distinct, star, span)
             }
@@ -2625,6 +2627,48 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
                 "Text",
                 args[1].resolved_type.type_name().to_string(),
                 args[1].span,
+            ));
+        }
+        Ok(ResolvedType::Text)
+    }
+
+    fn check_json_group_array(
+        &self,
+        args: &[TypedExpr],
+        star: bool,
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        if star || args.len() != 1 {
+            return Err(PlannerError::type_mismatch(
+                "1 argument",
+                format!("{} arguments", args.len()),
+                span,
+            ));
+        }
+        Ok(ResolvedType::Text)
+    }
+
+    fn check_json_group_object(
+        &self,
+        args: &[TypedExpr],
+        star: bool,
+        span: Span,
+    ) -> Result<ResolvedType, PlannerError> {
+        if star || args.len() != 2 {
+            return Err(PlannerError::type_mismatch(
+                "2 arguments",
+                format!("{} arguments", args.len()),
+                span,
+            ));
+        }
+        if !matches!(
+            args[0].resolved_type,
+            ResolvedType::Text | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "Text",
+                args[0].resolved_type.type_name(),
+                args[0].span,
             ));
         }
         Ok(ResolvedType::Text)
@@ -3437,6 +3481,8 @@ fn is_aggregate_name(name: &str) -> bool {
             | "max"
             | "group_concat"
             | "string_agg"
+            | "json_group_array"
+            | "json_group_object"
             | "percentile_disc"
             | "percentile_cont"
             | "variance"
@@ -3572,6 +3618,18 @@ fn aggregate_signature_from_expr(expr: &AggregateExpr) -> AggregateSignature {
         AggregateFunction::StringAgg { separator } => (
             "string_agg".to_string(),
             separator.clone(),
+            false,
+            expr.arg.as_ref(),
+        ),
+        AggregateFunction::JsonGroupArray => (
+            "json_group_array".to_string(),
+            None,
+            false,
+            expr.arg.as_ref(),
+        ),
+        AggregateFunction::JsonGroupObject => (
+            "json_group_object".to_string(),
+            None,
             false,
             expr.arg.as_ref(),
         ),

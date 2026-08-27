@@ -1771,6 +1771,168 @@ impl Accumulator for BoolAccumulator {
     }
 }
 
+#[derive(Debug, Clone)]
+struct JsonArrayAccumulator {
+    values: Vec<SqlValue>,
+    distinct: bool,
+    seen: HashSet<Vec<u8>>,
+}
+
+impl JsonArrayAccumulator {
+    fn new(distinct: bool) -> Self {
+        Self {
+            values: Vec::new(),
+            distinct,
+            seen: HashSet::new(),
+        }
+    }
+}
+
+impl Accumulator for JsonArrayAccumulator {
+    fn update(&mut self, value: Option<SqlValue>) -> Result<()> {
+        let value = value.unwrap_or(SqlValue::Null);
+        if !self.distinct
+            || self
+                .seen
+                .insert(encode_group_key(std::slice::from_ref(&value))?)
+        {
+            self.values.push(value);
+        }
+        Ok(())
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        Ok(vec![SqlValue::Text(
+            crate::executor::evaluator::json::json_group_array(&self.values)?,
+        )])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("JSON_GROUP_ARRAY", state, 1)?;
+        let SqlValue::Text(json) = &state[0] else {
+            return Err(invalid_aggregate_state(
+                "JSON_GROUP_ARRAY",
+                "partial state must be TEXT",
+            ));
+        };
+        let serde_json::Value::Array(values) =
+            crate::executor::evaluator::json::parse_json("JSON_GROUP_ARRAY", json)?
+        else {
+            return Err(invalid_aggregate_state(
+                "JSON_GROUP_ARRAY",
+                "partial state must be a JSON array",
+            ));
+        };
+        for value in values {
+            self.update(Some(crate::executor::evaluator::json::json_to_sql(&value)?))?;
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        Ok(SqlValue::Text(
+            crate::executor::evaluator::json::json_group_array(&self.values)?,
+        ))
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+    fn retained_bytes(&self) -> u64 {
+        self.values.iter().map(ByteSized::estimated_bytes).sum()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct JsonObjectAccumulator {
+    values: Vec<(String, SqlValue)>,
+    distinct: bool,
+    seen: HashSet<Vec<u8>>,
+}
+
+impl JsonObjectAccumulator {
+    fn new(distinct: bool) -> Self {
+        Self {
+            values: Vec::new(),
+            distinct,
+            seen: HashSet::new(),
+        }
+    }
+}
+
+impl Accumulator for JsonObjectAccumulator {
+    fn update(&mut self, _value: Option<SqlValue>) -> Result<()> {
+        Err(invalid_aggregate_state(
+            "JSON_GROUP_OBJECT",
+            "requires two arguments",
+        ))
+    }
+
+    fn update_values(&mut self, values: &[SqlValue]) -> Result<()> {
+        expect_state_arity("JSON_GROUP_OBJECT", values, 2)?;
+        let key = match &values[0] {
+            SqlValue::Null => return Ok(()),
+            SqlValue::Text(key) => key.clone(),
+            other => {
+                return Err(invalid_aggregate_state(
+                    "JSON_GROUP_OBJECT",
+                    format!("object label must be TEXT, found {}", other.type_name()),
+                ));
+            }
+        };
+        if !self.distinct || self.seen.insert(encode_group_key(values)?) {
+            self.values.push((key, values[1].clone()));
+        }
+        Ok(())
+    }
+
+    fn state(&self) -> Result<Vec<SqlValue>> {
+        let state = serde_json::to_string(&self.values).map_err(|error| {
+            invalid_aggregate_state("JSON_GROUP_OBJECT", format!("cannot encode state: {error}"))
+        })?;
+        if state.len() > crate::executor::evaluator::json::MAX_JSON_BYTES {
+            return Err(invalid_aggregate_state(
+                "JSON_GROUP_OBJECT",
+                "partial state exceeds 1048576 bytes",
+            ));
+        }
+        Ok(vec![SqlValue::Text(state)])
+    }
+
+    fn merge(&mut self, state: &[SqlValue]) -> Result<()> {
+        expect_state_arity("JSON_GROUP_OBJECT", state, 1)?;
+        let SqlValue::Text(state) = &state[0] else {
+            return Err(invalid_aggregate_state(
+                "JSON_GROUP_OBJECT",
+                "partial state must be TEXT",
+            ));
+        };
+        let values: Vec<(String, SqlValue)> = serde_json::from_str(state).map_err(|error| {
+            invalid_aggregate_state("JSON_GROUP_OBJECT", format!("invalid state: {error}"))
+        })?;
+        for (key, value) in values {
+            self.update_values(&[SqlValue::Text(key), value])?;
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<SqlValue> {
+        Ok(SqlValue::Text(
+            crate::executor::evaluator::json::json_group_object(&self.values)?,
+        ))
+    }
+
+    fn clone_box(&self) -> Box<dyn Accumulator> {
+        Box::new(self.clone())
+    }
+    fn retained_bytes(&self) -> u64 {
+        self.values
+            .iter()
+            .map(|(key, value)| key.capacity() as u64 + value.estimated_bytes())
+            .sum()
+    }
+}
+
 /// Create a new accumulator instance for the aggregate function.
 pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<dyn Accumulator> {
     match function {
@@ -1788,6 +1950,8 @@ pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<d
             let sep = separator.clone().unwrap_or_else(|| ",".to_string());
             Box::new(StringAggAccumulator::with_distinct(sep, distinct))
         }
+        AggregateFunction::JsonGroupArray => Box::new(JsonArrayAccumulator::new(distinct)),
+        AggregateFunction::JsonGroupObject => Box::new(JsonObjectAccumulator::new(distinct)),
         AggregateFunction::PercentileDisc { fraction } => {
             Box::new(PercentileDiscAccumulator::new(*fraction, Vec::new()))
         }
@@ -2192,6 +2356,8 @@ impl<'a> AggregateIterator<'a> {
                                         agg.function,
                                         AggregateFunction::GroupConcat { .. }
                                             | AggregateFunction::StringAgg { .. }
+                                            | AggregateFunction::JsonGroupArray
+                                            | AggregateFunction::JsonGroupObject
                                             | AggregateFunction::PercentileDisc { .. }
                                             | AggregateFunction::PercentileCont { .. }
                                             | AggregateFunction::QuantileCont { .. }
@@ -2558,6 +2724,9 @@ fn aggregate_state_types(agg: &AggregateExpr) -> Vec<ResolvedType> {
         AggregateFunction::GroupConcat { .. } | AggregateFunction::StringAgg { .. } => {
             vec![ResolvedType::Text, ResolvedType::Text]
         }
+        AggregateFunction::JsonGroupArray | AggregateFunction::JsonGroupObject => {
+            vec![ResolvedType::Text]
+        }
         // Ordered-set aggregation never runs in Partial mode (D11); the
         // accumulator rejects state()/merge() with invalid_aggregate_state.
         AggregateFunction::PercentileDisc { .. } => vec![agg.result_type.clone()],
@@ -2655,6 +2824,8 @@ pub fn build_aggregate_schema(
             AggregateFunction::Max => format!("max_{idx}"),
             AggregateFunction::GroupConcat { .. } => format!("group_concat_{idx}"),
             AggregateFunction::StringAgg { .. } => format!("string_agg_{idx}"),
+            AggregateFunction::JsonGroupArray => format!("json_group_array_{idx}"),
+            AggregateFunction::JsonGroupObject => format!("json_group_object_{idx}"),
             AggregateFunction::PercentileDisc { .. } => format!("percentile_disc_{idx}"),
             AggregateFunction::PercentileCont { .. } => format!("percentile_cont_{idx}"),
             AggregateFunction::QuantileCont { .. } => format!("quantile_cont_{idx}"),

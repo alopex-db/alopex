@@ -159,6 +159,37 @@ pub fn check_text(args: &[TypedExpr]) -> Result<(), PlannerError> {
     Ok(())
 }
 
+fn check_json_object(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    if !args.len().is_multiple_of(2) {
+        return Err(PlannerError::invalid_expression(
+            "JSON_OBJECT expects label/value pairs".to_string(),
+        ));
+    }
+    for label in args.iter().step_by(2) {
+        if !matches!(label.resolved_type, ResolvedType::Text | ResolvedType::Null) {
+            return Err(PlannerError::type_mismatch(
+                "Text",
+                label.resolved_type.type_name(),
+                label.span,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_json_update(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    if args.len() < 3 || args.len().is_multiple_of(2) {
+        return Err(PlannerError::invalid_expression(
+            "JSON update expects JSON followed by path/value pairs".to_string(),
+        ));
+    }
+    check_text(&args[..1])?;
+    for path in args[1..].iter().step_by(2) {
+        check_text(std::slice::from_ref(path))?;
+    }
+    Ok(())
+}
+
 pub fn check_text_or_blob(args: &[TypedExpr]) -> Result<(), PlannerError> {
     for arg in args {
         if !matches!(
@@ -411,6 +442,72 @@ const fn sig_meta(
 }
 
 static SIGNATURES: &[ScalarSignature] = &[
+    sig(
+        "json",
+        Arity::Exact(1),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_valid",
+        Arity::Exact(1),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Boolean),
+    ),
+    sig(
+        "json_type",
+        Arity::Range(1, 2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_extract",
+        Arity::Variadic(2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_object",
+        Arity::Variadic(0),
+        check_json_object,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_array",
+        Arity::Variadic(0),
+        check_any,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_insert",
+        Arity::Variadic(3),
+        check_json_update,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_replace",
+        Arity::Variadic(3),
+        check_json_update,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_set",
+        Arity::Variadic(3),
+        check_json_update,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_remove",
+        Arity::Variadic(2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "json_array_length",
+        Arity::Range(1, 2),
+        check_text,
+        ReturnRule::Fixed(ResolvedType::Integer),
+    ),
     sig(
         "vector_similarity",
         Arity::Exact(3),
