@@ -167,6 +167,13 @@ fn encode_value(value: &SqlValue, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&value.coefficient.to_le_bytes());
             buf.push(value.scale);
         }
+        SqlValue::Json(value) => {
+            let bytes = value.as_str().as_bytes();
+            let len = u32::try_from(bytes.len())
+                .expect("JSON length exceeds u32::MAX (design limit for row encoding)");
+            buf.extend_from_slice(&len.to_le_bytes());
+            buf.extend_from_slice(bytes);
+        }
     }
 }
 
@@ -294,6 +301,25 @@ fn decode_value(tag: u8, bytes: &[u8], cursor: &mut usize) -> Result<SqlValue> {
             ),
             take(1, "truncated Decimal scale")?[0],
         ))),
+        0x0e => {
+            let len =
+                u32::from_le_bytes(take(4, "truncated JSON length")?.try_into().unwrap()) as usize;
+            if len > MAX_INLINE_BYTES {
+                return Err(StorageError::CorruptedData {
+                    reason: format!("JSON length exceeds limit: {len}"),
+                });
+            }
+            let text = std::str::from_utf8(take(len, "truncated JSON payload")?).map_err(|_| {
+                StorageError::CorruptedData {
+                    reason: "invalid UTF-8 in JSON".into(),
+                }
+            })?;
+            Ok(SqlValue::Json(super::JsonValue::parse(text).map_err(
+                |_| StorageError::CorruptedData {
+                    reason: "invalid JSON payload".into(),
+                },
+            )?))
+        }
         other => Err(StorageError::CorruptedData {
             reason: format!("unknown type tag: 0x{other:02x}"),
         }),
@@ -331,6 +357,7 @@ fn ensure_type(value: SqlValue, expected: &ResolvedType) -> Result<SqlValue> {
                 })
             }
         }
+        (Json, SqlValue::Json(value)) => Ok(SqlValue::Json(value)),
         (Vector { dimension, .. }, SqlValue::Vector(values)) => {
             if values.len() as u32 == *dimension {
                 Ok(SqlValue::Vector(values))

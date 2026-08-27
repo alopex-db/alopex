@@ -136,6 +136,14 @@ suite "Tokenizer":
     check lex.nextToken().kind == tkRParen
     check lex.nextToken().kind == tkEof
 
+  test "JSON operators are longest-match tokens":
+    var lex = initLexer("-> ->> #> #>>")
+    check lex.nextToken().kind == tkArrow
+    check lex.nextToken().kind == tkArrowText
+    check lex.nextToken().kind == tkPathArrow
+    check lex.nextToken().kind == tkPathArrowText
+    check lex.nextToken().kind == tkEof
+
   test "line comment is skipped":
     var lex = initLexer("SELECT -- this is a comment\nid")
     check lex.nextToken().kind == tkSelect
@@ -284,6 +292,17 @@ suite "Expressions — operator precedence":
     check expr.binRight.binOp == opBitXor
     check expr.binRight.binRight.binOp == opShiftLeft
     check expr.binRight.binRight.binRight.binOp == opAdd
+
+  test "JSON operators are left associative and bind before comparison":
+    let ast = parseSql("SELECT document -> 'a' ->> 'b' = 'ok'")
+    let comparison = ast.children[0].children[0]
+    check comparison.kind == nkBinaryOp
+    check comparison.binOp == opEq
+    let extractText = comparison.binLeft
+    check extractText.kind == nkFunctionCall
+    check extractText.children[0].strVal == "JSONB_EXTRACT_TEXT"
+    check extractText.children[1].kind == nkFunctionCall
+    check extractText.children[1].children[0].strVal == "JSONB_EXTRACT"
 
 suite "Set operations":
 

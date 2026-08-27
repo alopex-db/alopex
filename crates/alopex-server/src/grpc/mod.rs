@@ -823,6 +823,7 @@ fn sql_value_to_proto(value: &alopex_sql::storage::SqlValue) -> proto::Value {
             coefficient: value.coefficient.to_be_bytes().to_vec(),
             scale: u32::from(value.scale),
         })),
+        alopex_sql::storage::SqlValue::Json(value) => Some(Kind::JsonValue(value.to_string())),
         alopex_sql::storage::SqlValue::Vector(values) => Some(Kind::VectorValue(proto::Vector {
             values: values.clone(),
         })),
@@ -936,5 +937,20 @@ mod temporal_wire_tests {
         };
         assert_eq!(decimal.coefficient, (-12345_i128).to_be_bytes());
         assert_eq!(decimal.scale, 2);
+    }
+
+    #[test]
+    fn json_value_uses_appended_wire_variant() {
+        let value = sql_value_to_proto(&SqlValue::Json(
+            alopex_sql::storage::JsonValue::parse(r#"{"b":1,"a":2}"#).unwrap(),
+        ));
+        assert_eq!(
+            proto::Value::decode(value.encode_to_vec().as_slice()).unwrap(),
+            value
+        );
+        assert!(matches!(
+            value.kind,
+            Some(proto::value::Kind::JsonValue(ref json)) if json == r#"{"a":2,"b":1}"#
+        ));
     }
 }

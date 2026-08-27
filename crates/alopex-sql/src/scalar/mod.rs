@@ -177,6 +177,56 @@ fn check_json_object(args: &[TypedExpr]) -> Result<(), PlannerError> {
     Ok(())
 }
 
+fn check_json_input(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    for arg in args {
+        if !matches!(
+            arg.resolved_type,
+            ResolvedType::Text | ResolvedType::Json | ResolvedType::Null
+        ) {
+            return Err(PlannerError::type_mismatch(
+                "JSON or Text",
+                arg.resolved_type.type_name(),
+                arg.span,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_json_selector(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_json_input(&args[..1])?;
+    if matches!(
+        args[1].resolved_type,
+        ResolvedType::Text | ResolvedType::Integer | ResolvedType::BigInt | ResolvedType::Null
+    ) {
+        Ok(())
+    } else {
+        Err(PlannerError::type_mismatch(
+            "Text or Integer",
+            args[1].resolved_type.type_name(),
+            args[1].span,
+        ))
+    }
+}
+
+fn check_json_path(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    check_json_input(&args[..1])?;
+    check_text(&args[1..])
+}
+
+fn check_jsonb_update(args: &[TypedExpr]) -> Result<(), PlannerError> {
+    if args.len() < 3 || args.len().is_multiple_of(2) {
+        return Err(PlannerError::invalid_expression(
+            "JSON update expects JSON followed by path/value pairs".to_string(),
+        ));
+    }
+    check_json_input(&args[..1])?;
+    for path in args[1..].iter().step_by(2) {
+        check_text(std::slice::from_ref(path))?;
+    }
+    Ok(())
+}
+
 fn check_json_update(args: &[TypedExpr]) -> Result<(), PlannerError> {
     if args.len() < 3 || args.len().is_multiple_of(2) {
         return Err(PlannerError::invalid_expression(
@@ -522,6 +572,54 @@ const fn sig_meta(
 
 static SIGNATURES: &[ScalarSignature] = &[
     sig(
+        "jsonb_extract",
+        Arity::Exact(2),
+        check_json_selector,
+        ReturnRule::Fixed(ResolvedType::Json),
+    ),
+    sig(
+        "jsonb_extract_text",
+        Arity::Exact(2),
+        check_json_selector,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "jsonb_extract_path",
+        Arity::Exact(2),
+        check_json_path,
+        ReturnRule::Fixed(ResolvedType::Json),
+    ),
+    sig(
+        "jsonb_extract_path_text",
+        Arity::Exact(2),
+        check_json_path,
+        ReturnRule::Fixed(ResolvedType::Text),
+    ),
+    sig(
+        "jsonb_set",
+        Arity::Variadic(3),
+        check_jsonb_update,
+        ReturnRule::Fixed(ResolvedType::Json),
+    ),
+    sig(
+        "jsonb_insert",
+        Arity::Variadic(3),
+        check_jsonb_update,
+        ReturnRule::Fixed(ResolvedType::Json),
+    ),
+    sig(
+        "jsonb_build_object",
+        Arity::Variadic(0),
+        check_json_object,
+        ReturnRule::Fixed(ResolvedType::Json),
+    ),
+    sig(
+        "jsonb_build_array",
+        Arity::Variadic(0),
+        check_no_args,
+        ReturnRule::Fixed(ResolvedType::Json),
+    ),
+    sig(
         "json",
         Arity::Exact(1),
         check_text,
@@ -554,7 +652,7 @@ static SIGNATURES: &[ScalarSignature] = &[
     sig(
         "json_array",
         Arity::Variadic(0),
-        check_any,
+        check_no_args,
         ReturnRule::Fixed(ResolvedType::Text),
     ),
     sig(

@@ -18,6 +18,8 @@ pub enum AggregateFunction {
     },
     JsonGroupArray,
     JsonGroupObject,
+    JsonbAgg,
+    JsonbObjectAgg,
     /// Ordered-set aggregate `PERCENTILE_DISC(fraction) WITHIN GROUP
     /// (ORDER BY ...)` (issue #148). `fraction` is validated by the planner to
     /// be a literal in `[0, 1]`. Issue #154 (PERCENTILE_CONT / MODE) extends

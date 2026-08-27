@@ -1230,6 +1230,7 @@ fn sql_value_to_value(sql_value: alopex_sql::SqlValue) -> Value {
             Value::Text(value.temporal_text().expect("valid stored temporal value"))
         }
         SqlValue::Decimal(value) => Value::Text(value.to_string()),
+        SqlValue::Json(value) => Value::Text(value.to_string()),
     }
 }
 

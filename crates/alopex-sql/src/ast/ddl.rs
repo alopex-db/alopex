@@ -68,6 +68,7 @@ pub enum DataType {
         precision: u8,
         scale: u8,
     },
+    Json,
     Vector {
         dimension: u32,
         metric: Option<VectorMetric>,

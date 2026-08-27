@@ -24,7 +24,7 @@ const
                        tkNatural, tkUsing, tkOn}
   TypeTokens = {tkInt, tkBigint, tkSmallint, tkFloatType, tkReal, tkDouble, tkDecimal,
                 tkVarchar, tkChar, tkText, tkBlob, tkBoolean, tkBool,
-                tkTimestamp, tkDate, tkTime, tkInterval, tkVector}
+                tkTimestamp, tkDate, tkTime, tkInterval, tkVector, tkJson, tkJsonb}
   OptionValueTokens = {tkIdent, tkString, tkInteger, tkFloat, tkHnsw, tkBtree,
                        tkCosine, tkL2, tkInner, tkText, tkBoolean, tkBool}
   # FETCH pagination (issue #152) reserves FETCH/NEXT/TIES/ONLY/ROW in the
@@ -529,6 +529,20 @@ proc parsePrimary(p: var Parser): SqlNode =
       Span(start: tokenSpan(typeTok).start, `end`: tokenSpan(valueTok).`end`))
     result.children.add(newStringLit(valueTok.value, tokenSpan(valueTok)))
     result.children.add(typeNode)
+  of tkJson, tkJsonb:
+    let typeTok = p.advance()
+    if p.check(tkString):
+      let valueTok = p.advance()
+      let typeNode = newNode(nkTypeName, tokenSpan(typeTok))
+      typeNode.children.add(newIdent(typeTok.value, tokenSpan(typeTok)))
+      result = newNode(nkCast,
+        Span(start: tokenSpan(typeTok).start, `end`: tokenSpan(valueTok).`end`))
+      result.children.add(newStringLit(valueTok.value, tokenSpan(valueTok)))
+      result.children.add(typeNode)
+    elif p.check(tkLParen):
+      result = p.parseFunctionCall(typeTok)
+    else:
+      p.error("expected JSON literal or function call")
   of tkTimestamp:
     let typeTok = p.advance()
     let valueTok = p.expect(tkString)
@@ -715,6 +729,24 @@ proc parseConcat(p: var Parser): SqlNode =
     discard p.advance()
     result = newBinaryOp(opStringConcat, result, p.parseBitOr())
 
+proc newJsonOperator(name: string; opTok: Token; left, right: SqlNode): SqlNode =
+  result = newNode(nkFunctionCall,
+    Span(start: left.span.start, `end`: right.span.`end`))
+  result.children.add(newIdent(name, tokenSpan(opTok)))
+  result.children.add(left)
+  result.children.add(right)
+
+proc parseJsonOperator(p: var Parser): SqlNode =
+  result = p.parseConcat()
+  while p.current.kind in {tkArrow, tkArrowText, tkPathArrow, tkPathArrowText}:
+    let opTok = p.advance()
+    let name = case opTok.kind
+      of tkArrow: "JSONB_EXTRACT"
+      of tkArrowText: "JSONB_EXTRACT_TEXT"
+      of tkPathArrow: "JSONB_EXTRACT_PATH"
+      else: "JSONB_EXTRACT_PATH_TEXT"
+    result = newJsonOperator(name, opTok, result, p.parseConcat())
+
 proc comparisonOp(kind: TokenKind): BinaryOpKind =
   case kind
   of tkEq: opEq
@@ -767,7 +799,7 @@ proc parsePattern(p: var Parser; left: SqlNode; op: BinaryOpKind; allowEscape: b
   newBinaryOp(op, left, pattern)
 
 proc parseComparison(p: var Parser): SqlNode =
-  result = p.parseConcat()
+  result = p.parseJsonOperator()
 
   if p.check(tkNot):
     discard p.advance()

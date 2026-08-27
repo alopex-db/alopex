@@ -3,7 +3,7 @@
 use serde_json::{Number, Value};
 
 use crate::executor::{EvaluationError, ExecutorError, Result};
-use crate::storage::SqlValue;
+use crate::storage::{JsonValue, SqlValue};
 
 use super::registry::EvalFn;
 
@@ -30,6 +30,7 @@ fn text<'a>(function: &str, value: &'a SqlValue) -> Result<Option<&'a str>> {
     match value {
         SqlValue::Null => Ok(None),
         SqlValue::Text(value) => Ok(Some(value)),
+        SqlValue::Json(value) => Ok(Some(value.as_str())),
         other => Err(invalid(
             function,
             format!("expected TEXT, found {}", other.type_name()),
@@ -186,14 +187,16 @@ pub(crate) fn sql_to_json(value: &SqlValue) -> Result<Value> {
             .map(Value::Number)
             .ok_or_else(|| invalid("JSON", "non-finite floating-point value"))?,
         SqlValue::Text(value) => Value::String(value.clone()),
+        SqlValue::Json(value) => value.to_value(),
         SqlValue::Boolean(value) => Value::Bool(*value),
+        SqlValue::Decimal(value) => serde_json::from_str(&value.to_string())
+            .map_err(|error| invalid("JSON", format!("invalid decimal value: {error}")))?,
         SqlValue::Blob(_)
         | SqlValue::Timestamp(_)
         | SqlValue::Vector(_)
         | SqlValue::Date(_)
         | SqlValue::Time(_)
-        | SqlValue::Interval { .. }
-        | SqlValue::Decimal(_) => {
+        | SqlValue::Interval { .. } => {
             return Err(invalid(
                 "JSON",
                 format!("unsupported SQL type {}", value.type_name()),
@@ -377,6 +380,133 @@ fn eval_json_set(values: &[SqlValue]) -> Result<SqlValue> {
     eval_update(values, "JSON_SET", UpdateMode::Set)
 }
 
+fn native(function: &str, value: Value) -> Result<SqlValue> {
+    encode(function, &value)?;
+    Ok(SqlValue::Json(JsonValue::from_value(value)))
+}
+
+fn selector(function: &str, value: &SqlValue) -> Result<PathPart> {
+    match value {
+        SqlValue::Integer(index) if *index >= 0 => Ok(PathPart::Index(*index as usize)),
+        SqlValue::BigInt(index) if *index >= 0 => usize::try_from(*index)
+            .map(PathPart::Index)
+            .map_err(|_| invalid(function, "JSON array index is out of range")),
+        SqlValue::Text(key) => Ok(PathPart::Key(key.clone())),
+        other => Err(invalid(
+            function,
+            format!(
+                "expected TEXT or non-negative INTEGER selector, found {}",
+                other.type_name()
+            ),
+        )),
+    }
+}
+
+fn postgres_path(function: &str, value: &SqlValue) -> Result<Vec<PathPart>> {
+    let Some(path) = text(function, value)? else {
+        return Err(invalid(function, "JSON path must not be NULL"));
+    };
+    if path.starts_with('$') {
+        return parse_path(function, path);
+    }
+    let body = path
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .ok_or_else(|| invalid(function, "JSON path must use '{a,0}' or '$.a[0]' syntax"))?;
+    if body.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(body
+        .split(',')
+        .map(|part| {
+            part.parse::<usize>()
+                .map(PathPart::Index)
+                .unwrap_or_else(|_| PathPart::Key(part.to_string()))
+        })
+        .collect())
+}
+
+fn extracted_text(function: &str, value: &Value) -> Result<SqlValue> {
+    Ok(match value {
+        Value::Null => SqlValue::Null,
+        Value::String(value) => SqlValue::Text(value.clone()),
+        Value::Bool(value) => SqlValue::Text(value.to_string()),
+        Value::Number(value) => SqlValue::Text(value.to_string()),
+        Value::Array(_) | Value::Object(_) => SqlValue::Text(encode(function, value)?),
+    })
+}
+
+fn eval_jsonb_extract(
+    values: &[SqlValue],
+    function: &str,
+    path: bool,
+    as_text: bool,
+) -> Result<SqlValue> {
+    let Some(input) = text(function, &values[0])? else {
+        return Ok(SqlValue::Null);
+    };
+    if values[1].is_null() {
+        return Ok(SqlValue::Null);
+    }
+    let root = parse_json(function, input)?;
+    let parts = if path {
+        postgres_path(function, &values[1])?
+    } else {
+        vec![selector(function, &values[1])?]
+    };
+    let Some(value) = locate(&root, &parts) else {
+        return Ok(SqlValue::Null);
+    };
+    if as_text {
+        extracted_text(function, value)
+    } else {
+        native(function, value.clone())
+    }
+}
+
+fn eval_jsonb_extract_json(values: &[SqlValue]) -> Result<SqlValue> {
+    eval_jsonb_extract(values, "JSONB_EXTRACT", false, false)
+}
+fn eval_jsonb_extract_text(values: &[SqlValue]) -> Result<SqlValue> {
+    eval_jsonb_extract(values, "JSONB_EXTRACT_TEXT", false, true)
+}
+fn eval_jsonb_extract_path(values: &[SqlValue]) -> Result<SqlValue> {
+    eval_jsonb_extract(values, "JSONB_EXTRACT_PATH", true, false)
+}
+fn eval_jsonb_extract_path_text(values: &[SqlValue]) -> Result<SqlValue> {
+    eval_jsonb_extract(values, "JSONB_EXTRACT_PATH_TEXT", true, true)
+}
+
+fn jsonb_from_text(value: SqlValue, function: &str) -> Result<SqlValue> {
+    match value {
+        SqlValue::Null => Ok(SqlValue::Null),
+        SqlValue::Text(value) => native(function, parse_json(function, &value)?),
+        other => Err(invalid(
+            function,
+            format!("expected JSON output, found {}", other.type_name()),
+        )),
+    }
+}
+
+fn eval_jsonb_set(values: &[SqlValue]) -> Result<SqlValue> {
+    jsonb_from_text(
+        eval_update(values, "JSONB_SET", UpdateMode::Set)?,
+        "JSONB_SET",
+    )
+}
+fn eval_jsonb_insert(values: &[SqlValue]) -> Result<SqlValue> {
+    jsonb_from_text(
+        eval_update(values, "JSONB_INSERT", UpdateMode::Insert)?,
+        "JSONB_INSERT",
+    )
+}
+fn eval_jsonb_build_object(values: &[SqlValue]) -> Result<SqlValue> {
+    jsonb_from_text(eval_json_object(values)?, "JSONB_BUILD_OBJECT")
+}
+fn eval_jsonb_build_array(values: &[SqlValue]) -> Result<SqlValue> {
+    jsonb_from_text(eval_json_array(values)?, "JSONB_BUILD_ARRAY")
+}
+
 fn remove_at(current: &mut Value, parts: &[PathPart]) {
     if parts.len() == 1 {
         match (&parts[0], current) {
@@ -460,6 +590,14 @@ pub(crate) fn eval_for(name: &str) -> Option<EvalFn> {
         "json_set" => eval_json_set,
         "json_remove" => eval_json_remove,
         "json_array_length" => eval_json_array_length,
+        "jsonb_extract" => eval_jsonb_extract_json,
+        "jsonb_extract_text" => eval_jsonb_extract_text,
+        "jsonb_extract_path" => eval_jsonb_extract_path,
+        "jsonb_extract_path_text" => eval_jsonb_extract_path_text,
+        "jsonb_set" => eval_jsonb_set,
+        "jsonb_insert" => eval_jsonb_insert,
+        "jsonb_build_object" => eval_jsonb_build_object,
+        "jsonb_build_array" => eval_jsonb_build_array,
         _ => return None,
     })
 }

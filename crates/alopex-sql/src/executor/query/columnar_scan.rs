@@ -1193,6 +1193,16 @@ fn value_from_column(
                 .map(SqlValue::Text)
                 .map_err(|e| ExecutorError::Columnar(e.to_string()))
         }
+        (ResolvedType::Json, Column::Binary(values)) => {
+            let raw = values
+                .get(row_idx)
+                .ok_or_else(|| ExecutorError::Columnar("row index out of bounds".into()))?;
+            let text = std::str::from_utf8(raw)
+                .map_err(|error| ExecutorError::Columnar(error.to_string()))?;
+            crate::storage::JsonValue::parse(text)
+                .map(SqlValue::Json)
+                .map_err(|error| ExecutorError::Columnar(error.to_string()))
+        }
         (ResolvedType::Blob, Column::Binary(values)) => {
             let raw = values
                 .get(row_idx)

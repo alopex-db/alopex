@@ -1559,6 +1559,7 @@ fn resolved_type_to_string(resolved_type: &ResolvedType) -> String {
         ResolvedType::Time => "TIME".to_string(),
         ResolvedType::Interval => "INTERVAL".to_string(),
         ResolvedType::Decimal { precision, scale } => format!("DECIMAL({precision},{scale})"),
+        ResolvedType::Json => "JSON".to_string(),
         ResolvedType::Vector { dimension, metric } => {
             let metric = match metric {
                 VectorMetric::Cosine => "COSINE",
@@ -1853,6 +1854,7 @@ pub enum CatalogManifestDataType {
         precision: u8,
         scale: u8,
     },
+    Json,
 }
 
 impl From<&ResolvedType> for CatalogManifestDataType {
@@ -1873,6 +1875,7 @@ impl From<&ResolvedType> for CatalogManifestDataType {
                 precision: *precision,
                 scale: *scale,
             },
+            ResolvedType::Json => Self::Json,
             ResolvedType::Vector { dimension, metric } => Self::Vector {
                 dimension: *dimension,
                 metric: (*metric).into(),
@@ -1899,6 +1902,7 @@ impl From<CatalogManifestDataType> for ResolvedType {
             CatalogManifestDataType::Decimal { precision, scale } => {
                 Self::Decimal { precision, scale }
             }
+            CatalogManifestDataType::Json => Self::Json,
             CatalogManifestDataType::Vector { dimension, metric } => Self::Vector {
                 dimension,
                 metric: metric.into(),

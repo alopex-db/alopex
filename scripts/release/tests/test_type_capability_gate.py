@@ -40,6 +40,7 @@ class TypeCapabilityGateTests(unittest.TestCase):
             (ROOT / "docs/sql-type-capabilities.json").read_text(encoding="utf-8")
         )
         catalog["type_families"][0]["status"] = "complete"
+        catalog["type_families"][0]["evidence"]["parser_ast"] = []
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "catalog.json"

@@ -2227,6 +2227,12 @@ impl<'a, C: Catalog + ?Sized> TypeChecker<'a, C> {
             "string_agg" => self.check_string_agg(args, distinct, star, span),
             "json_group_array" => self.check_json_group_array(args, star, span),
             "json_group_object" => self.check_json_group_object(args, star, span),
+            "jsonb_agg" => self
+                .check_json_group_array(args, star, span)
+                .map(|_| ResolvedType::Json),
+            "jsonb_object_agg" => self
+                .check_json_group_object(args, star, span)
+                .map(|_| ResolvedType::Json),
             name if is_portable_aggregate_name(name) => {
                 check_portable_aggregate(name, args, distinct, star, span)
             }
@@ -3561,6 +3567,8 @@ fn is_aggregate_name(name: &str) -> bool {
             | "string_agg"
             | "json_group_array"
             | "json_group_object"
+            | "jsonb_agg"
+            | "jsonb_object_agg"
             | "percentile_disc"
             | "percentile_cont"
             | "variance"
@@ -3707,6 +3715,13 @@ fn aggregate_signature_from_expr(expr: &AggregateExpr) -> AggregateSignature {
         ),
         AggregateFunction::JsonGroupObject => (
             "json_group_object".to_string(),
+            None,
+            false,
+            expr.arg.as_ref(),
+        ),
+        AggregateFunction::JsonbAgg => ("jsonb_agg".to_string(), None, false, expr.arg.as_ref()),
+        AggregateFunction::JsonbObjectAgg => (
+            "jsonb_object_agg".to_string(),
             None,
             false,
             expr.arg.as_ref(),

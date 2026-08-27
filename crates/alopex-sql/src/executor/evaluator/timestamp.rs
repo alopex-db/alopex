@@ -3,7 +3,7 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use crate::executor::{EvaluationError, ExecutorError, Result};
 use crate::planner::typed_expr::TypedExpr;
 use crate::planner::types::ResolvedType;
-use crate::storage::{DecimalValue, SqlValue};
+use crate::storage::{DecimalValue, JsonValue, SqlValue};
 
 use super::{EvalContext, evaluate};
 
@@ -48,6 +48,7 @@ pub(crate) fn coerce_value(value: SqlValue, target_type: &ResolvedType) -> Resul
         ResolvedType::Decimal { precision, scale } => {
             coerce_decimal(value, target_type, *precision, *scale)
         }
+        ResolvedType::Json => coerce_json(value),
         ResolvedType::Integer | ResolvedType::BigInt => coerce_integer(value, target_type),
         ResolvedType::Float | ResolvedType::Double => coerce_double(value, target_type),
         ResolvedType::Text => coerce_text(value),
@@ -91,6 +92,21 @@ fn coerce_decimal(
         ));
     }
     Ok(SqlValue::Decimal(decimal))
+}
+
+fn coerce_json(value: SqlValue) -> Result<SqlValue> {
+    match value {
+        SqlValue::Null => Ok(SqlValue::Null),
+        value @ SqlValue::Json(_) => Ok(value),
+        SqlValue::Text(value) => JsonValue::parse(&value)
+            .map(SqlValue::Json)
+            .map_err(|error| cast_error_from("Text", &ResolvedType::Json, &error.to_string())),
+        other => Err(cast_error(
+            &other,
+            &ResolvedType::Json,
+            "conversion is not supported",
+        )),
+    }
 }
 
 fn cast_error(value: &SqlValue, target: &ResolvedType, reason: &str) -> ExecutorError {
@@ -208,6 +224,7 @@ fn coerce_text(value: SqlValue) -> Result<SqlValue> {
         SqlValue::Float(v) => Ok(SqlValue::Text(v.to_string())),
         SqlValue::Double(v) => Ok(SqlValue::Text(v.to_string())),
         SqlValue::Decimal(v) => Ok(SqlValue::Text(v.to_string())),
+        SqlValue::Json(v) => Ok(SqlValue::Text(v.to_string())),
         SqlValue::Boolean(b) => Ok(SqlValue::Text(if b { "true" } else { "false" }.to_string())),
         SqlValue::Date(days) => {
             let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch");

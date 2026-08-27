@@ -87,6 +87,16 @@ fn encode_group_value(value: &SqlValue, buf: &mut Vec<u8>) -> Result<()> {
             buf.push(value.scale);
             Ok(())
         }
+        SqlValue::Json(value) => {
+            let bytes = value.as_str().as_bytes();
+            let len = u32::try_from(bytes.len()).map_err(|_| ExecutorError::InvalidOperation {
+                operation: "aggregate".into(),
+                reason: "JSON length exceeds u32::MAX".into(),
+            })?;
+            buf.extend_from_slice(&len.to_le_bytes());
+            buf.extend_from_slice(bytes);
+            Ok(())
+        }
         SqlValue::Vector(values) => {
             let len = u32::try_from(values.len()).map_err(|_| ExecutorError::InvalidOperation {
                 operation: "aggregate".into(),
@@ -1849,14 +1859,16 @@ struct JsonArrayAccumulator {
     values: Vec<SqlValue>,
     distinct: bool,
     seen: HashSet<Vec<u8>>,
+    native: bool,
 }
 
 impl JsonArrayAccumulator {
-    fn new(distinct: bool) -> Self {
+    fn new(distinct: bool, native: bool) -> Self {
         Self {
             values: Vec::new(),
             distinct,
             seen: HashSet::new(),
+            native,
         }
     }
 }
@@ -1903,9 +1915,14 @@ impl Accumulator for JsonArrayAccumulator {
     }
 
     fn finalize(&self) -> Result<SqlValue> {
-        Ok(SqlValue::Text(
-            crate::executor::evaluator::json::json_group_array(&self.values)?,
-        ))
+        let value = crate::executor::evaluator::json::json_group_array(&self.values)?;
+        if self.native {
+            Ok(SqlValue::Json(
+                crate::storage::JsonValue::parse(&value).expect("aggregate emits JSON"),
+            ))
+        } else {
+            Ok(SqlValue::Text(value))
+        }
     }
 
     fn clone_box(&self) -> Box<dyn Accumulator> {
@@ -1921,14 +1938,16 @@ struct JsonObjectAccumulator {
     values: Vec<(String, SqlValue)>,
     distinct: bool,
     seen: HashSet<Vec<u8>>,
+    native: bool,
 }
 
 impl JsonObjectAccumulator {
-    fn new(distinct: bool) -> Self {
+    fn new(distinct: bool, native: bool) -> Self {
         Self {
             values: Vec::new(),
             distinct,
             seen: HashSet::new(),
+            native,
         }
     }
 }
@@ -1990,9 +2009,14 @@ impl Accumulator for JsonObjectAccumulator {
     }
 
     fn finalize(&self) -> Result<SqlValue> {
-        Ok(SqlValue::Text(
-            crate::executor::evaluator::json::json_group_object(&self.values)?,
-        ))
+        let value = crate::executor::evaluator::json::json_group_object(&self.values)?;
+        if self.native {
+            Ok(SqlValue::Json(
+                crate::storage::JsonValue::parse(&value).expect("aggregate emits JSON"),
+            ))
+        } else {
+            Ok(SqlValue::Text(value))
+        }
     }
 
     fn clone_box(&self) -> Box<dyn Accumulator> {
@@ -2023,8 +2047,10 @@ pub fn create_accumulator(function: &AggregateFunction, distinct: bool) -> Box<d
             let sep = separator.clone().unwrap_or_else(|| ",".to_string());
             Box::new(StringAggAccumulator::with_distinct(sep, distinct))
         }
-        AggregateFunction::JsonGroupArray => Box::new(JsonArrayAccumulator::new(distinct)),
-        AggregateFunction::JsonGroupObject => Box::new(JsonObjectAccumulator::new(distinct)),
+        AggregateFunction::JsonGroupArray => Box::new(JsonArrayAccumulator::new(distinct, false)),
+        AggregateFunction::JsonGroupObject => Box::new(JsonObjectAccumulator::new(distinct, false)),
+        AggregateFunction::JsonbAgg => Box::new(JsonArrayAccumulator::new(distinct, true)),
+        AggregateFunction::JsonbObjectAgg => Box::new(JsonObjectAccumulator::new(distinct, true)),
         AggregateFunction::PercentileDisc { fraction } => {
             Box::new(PercentileDiscAccumulator::new(*fraction, Vec::new()))
         }
@@ -2435,6 +2461,8 @@ impl<'a> AggregateIterator<'a> {
                                             | AggregateFunction::StringAgg { .. }
                                             | AggregateFunction::JsonGroupArray
                                             | AggregateFunction::JsonGroupObject
+                                            | AggregateFunction::JsonbAgg
+                                            | AggregateFunction::JsonbObjectAgg
                                             | AggregateFunction::PercentileDisc { .. }
                                             | AggregateFunction::PercentileCont { .. }
                                             | AggregateFunction::QuantileCont { .. }
@@ -2801,7 +2829,10 @@ fn aggregate_state_types(agg: &AggregateExpr) -> Vec<ResolvedType> {
         AggregateFunction::GroupConcat { .. } | AggregateFunction::StringAgg { .. } => {
             vec![ResolvedType::Text, ResolvedType::Text]
         }
-        AggregateFunction::JsonGroupArray | AggregateFunction::JsonGroupObject => {
+        AggregateFunction::JsonGroupArray
+        | AggregateFunction::JsonGroupObject
+        | AggregateFunction::JsonbAgg
+        | AggregateFunction::JsonbObjectAgg => {
             vec![ResolvedType::Text]
         }
         // Ordered-set aggregation never runs in Partial mode (D11); the
@@ -2903,6 +2934,8 @@ pub fn build_aggregate_schema(
             AggregateFunction::StringAgg { .. } => format!("string_agg_{idx}"),
             AggregateFunction::JsonGroupArray => format!("json_group_array_{idx}"),
             AggregateFunction::JsonGroupObject => format!("json_group_object_{idx}"),
+            AggregateFunction::JsonbAgg => format!("jsonb_agg_{idx}"),
+            AggregateFunction::JsonbObjectAgg => format!("jsonb_object_agg_{idx}"),
             AggregateFunction::PercentileDisc { .. } => format!("percentile_disc_{idx}"),
             AggregateFunction::PercentileCont { .. } => format!("percentile_cont_{idx}"),
             AggregateFunction::QuantileCont { .. } => format!("quantile_cont_{idx}"),

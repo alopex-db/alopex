@@ -7,6 +7,54 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{Result, StorageError};
 
+/// Canonical native JSON value. JSON and JSONB share this representation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct JsonValue(String);
+
+impl JsonValue {
+    pub fn parse(input: &str) -> std::result::Result<Self, serde_json::Error> {
+        let mut value: serde_json::Value = serde_json::from_str(input)?;
+        sort_json_keys(&mut value);
+        Ok(Self(
+            serde_json::to_string(&value).expect("JSON serialization cannot fail"),
+        ))
+    }
+
+    pub fn from_value(mut value: serde_json::Value) -> Self {
+        sort_json_keys(&mut value);
+        Self(serde_json::to_string(&value).expect("JSON serialization cannot fail"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::from_str(&self.0).expect("JsonValue is validated on construction")
+    }
+}
+
+impl std::fmt::Display for JsonValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn sort_json_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => values.iter_mut().for_each(sort_json_keys),
+        serde_json::Value::Object(values) => {
+            let mut entries: Vec<_> = std::mem::take(values).into_iter().collect();
+            entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            for (key, mut value) in entries {
+                sort_json_keys(&mut value);
+                values.insert(key, value);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Exact decimal value represented as a signed coefficient and base-10 scale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DecimalValue {
@@ -154,6 +202,7 @@ pub enum SqlValue {
     Time(i64), // microseconds since midnight
     Interval { months: i32, days: i32, micros: i64 },
     Decimal(DecimalValue),
+    Json(JsonValue),
 }
 
 impl SqlValue {
@@ -209,6 +258,7 @@ impl SqlValue {
             SqlValue::Time(_) => 0x0b,
             SqlValue::Interval { .. } => 0x0c,
             SqlValue::Decimal(_) => 0x0d,
+            SqlValue::Json(_) => 0x0e,
         }
     }
 
@@ -234,6 +284,7 @@ impl SqlValue {
             SqlValue::Time(_) => "Time",
             SqlValue::Interval { .. } => "Interval",
             SqlValue::Decimal(_) => "Decimal",
+            SqlValue::Json(_) => "Json",
         }
     }
 
@@ -260,6 +311,7 @@ impl SqlValue {
                 precision: 38,
                 scale: value.scale,
             },
+            SqlValue::Json(_) => ResolvedType::Json,
         }
     }
 }
@@ -292,6 +344,8 @@ impl PartialOrd for SqlValue {
                 },
             ) => Some((am, ad, au).cmp(&(bm, bd, bu))),
             (Decimal(a), Decimal(b)) => Some(a.cmp_numeric(*b)),
+            (Json(a), Json(b)) if a == b => Some(Ordering::Equal),
+            (Json(_), Json(_)) => None,
             // Vector ordering is undefined for now.
             (Vector(_), Vector(_)) => None,
             _ => None,

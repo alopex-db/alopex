@@ -23,7 +23,7 @@ static:
       isExactContractDescriptor(parserContractDescriptor, "0.11.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.12.0") or
       isExactContractDescriptor(parserContractDescriptor, "0.13.0") or
-  isExactContractDescriptor(parserContractDescriptor, "0.17.0"),
+  isExactContractDescriptor(parserContractDescriptor, "0.18.0"),
     "PARSER_CONTRACT_VERSION must select an exact supported contract"
 
 const parserContractVersion = parserContractDescriptor.strip()
@@ -190,6 +190,7 @@ proc normalizedDataTypeName(name: string): string =
   of "DATE": "Date"
   of "TIME": "Time"
   of "INTERVAL": "Interval"
+  of "JSON", "JSONB": "Json"
   of "VECTOR": "Vector"
   else: name
 

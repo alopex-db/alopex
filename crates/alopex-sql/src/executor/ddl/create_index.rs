@@ -37,7 +37,7 @@ pub fn execute_create_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
         .clone();
 
     let column_indices = resolve_column_indices(&table, &index)?;
-
+    ensure_indexable_columns(&table, &column_indices, "CREATE INDEX")?;
     let index_id = catalog.next_index_id();
     index.index_id = index_id;
     index.column_indices = column_indices.clone();
@@ -53,6 +53,25 @@ pub fn execute_create_index<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     persist_index(txn.inner_mut(), &index)?;
 
     Ok(ExecutionResult::Success)
+}
+
+pub(super) fn ensure_indexable_columns(
+    table: &TableMetadata,
+    column_indices: &[usize],
+    operation: &str,
+) -> Result<()> {
+    if column_indices.iter().any(|column| {
+        matches!(
+            table.columns[*column].data_type,
+            crate::planner::ResolvedType::Json
+        )
+    }) {
+        return Err(ExecutorError::InvalidOperation {
+            operation: operation.into(),
+            reason: "Alopex does not define a JSON sort order".into(),
+        });
+    }
+    Ok(())
 }
 
 fn resolve_column_indices(

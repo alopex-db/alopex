@@ -27,7 +27,7 @@ type
     tkUnique, tkCheck, tkDefault, tkConstraint, tkEscape, tkWith, tkRecursive
     tkInt, tkBigint, tkSmallint, tkFloatType, tkReal, tkDouble, tkDecimal
     tkVarchar, tkChar, tkText, tkBlob, tkBoolean, tkBool
-    tkTimestamp, tkDate, tkTime, tkVector, tkInterval
+    tkTimestamp, tkDate, tkTime, tkVector, tkInterval, tkJson, tkJsonb
     tkHnsw, tkBtree, tkCosine, tkL2
     tkIf, tkNotKw
     # Symbols
@@ -35,6 +35,7 @@ type
     tkLParen, tkRParen, tkLBracket, tkRBracket
     tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe
     tkPlus, tkMinus, tkSlash, tkPercent, tkPipePipe
+    tkArrow, tkArrowText, tkPathArrow, tkPathArrowText
     tkBitAnd, tkBitOr, tkBitXor, tkBitNot, tkShiftLeft, tkShiftRight
     tkQuestion
     # Special
@@ -93,6 +94,7 @@ const Keywords = {
   "blob": tkBlob, "boolean": tkBoolean, "bool": tkBool,
   "timestamp": tkTimestamp, "date": tkDate, "time": tkTime,
   "interval": tkInterval,
+  "json": tkJson, "jsonb": tkJsonb,
   "vector": tkVector, "hnsw": tkHnsw, "btree": tkBtree,
   "cosine": tkCosine, "l2": tkL2,
   "if": tkIf,
@@ -238,7 +240,22 @@ proc nextToken*(lex: var Lexer): Token =
     return lex.makeToken(tkPlus, "+", startLine, startCol)
   of '-':
     discard lex.advance()
+    if lex.peek() == '>':
+      discard lex.advance()
+      if lex.peek() == '>':
+        discard lex.advance()
+        return lex.makeToken(tkArrowText, "->>", startLine, startCol)
+      return lex.makeToken(tkArrow, "->", startLine, startCol)
     return lex.makeToken(tkMinus, "-", startLine, startCol)
+  of '#':
+    discard lex.advance()
+    if lex.peek() == '>':
+      discard lex.advance()
+      if lex.peek() == '>':
+        discard lex.advance()
+        return lex.makeToken(tkPathArrowText, "#>>", startLine, startCol)
+      return lex.makeToken(tkPathArrow, "#>", startLine, startCol)
+    return lex.makeToken(tkIdent, "#", startLine, startCol)
   of '/':
     discard lex.advance()
     return lex.makeToken(tkSlash, "/", startLine, startCol)

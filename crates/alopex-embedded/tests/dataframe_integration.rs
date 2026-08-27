@@ -75,6 +75,18 @@ fn dataframe_query_preserves_decimal128() {
 
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn dataframe_query_maps_native_json_to_canonical_utf8() {
+    let db = Database::new();
+    let frame = db
+        .query_df(r#"SELECT JSONB '{"b":1,"a":2}' AS document"#)
+        .unwrap();
+    let documents = frame.column("document").unwrap().to_arrow();
+    let documents = documents[0].as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(documents.value(0), r#"{"a":2,"b":1}"#);
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn dataframe_query_join_sort_supported_types() {
     let db = Database::new();
     db.execute_sql(

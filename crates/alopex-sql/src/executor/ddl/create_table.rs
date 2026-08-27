@@ -7,6 +7,7 @@ use crate::catalog::{
 use crate::executor::{ExecutionResult, ExecutorError, Result};
 use crate::storage::{KeyEncoder, SqlTxn};
 
+use super::create_index::ensure_indexable_columns;
 use super::create_pk_index_name;
 use super::persistence::{persist_index, persist_table};
 
@@ -32,6 +33,7 @@ pub fn execute_create_table<'txn, S: KVStore + 'txn, C: Catalog + ?Sized>(
     // Resolve PK column indices before mutating the catalog to avoid partial writes.
     let pk_index = if let Some(pk_columns) = table.primary_key.clone() {
         let column_indices = resolve_column_indices(&table, &pk_columns)?;
+        ensure_indexable_columns(&table, &column_indices, "PRIMARY KEY")?;
         let index_id = catalog.next_index_id();
         let index_name = create_pk_index_name(&table.name);
 

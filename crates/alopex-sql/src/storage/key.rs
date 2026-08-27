@@ -167,6 +167,12 @@ fn encode_index_value(value: &SqlValue, buf: &mut Vec<u8>) -> Result<()> {
                 actual: "Decimal".into(),
             });
         }
+        SqlValue::Json(_) => {
+            return Err(StorageError::TypeMismatch {
+                expected: "indexable scalar type".into(),
+                actual: "Json".into(),
+            });
+        }
     }
     Ok(())
 }

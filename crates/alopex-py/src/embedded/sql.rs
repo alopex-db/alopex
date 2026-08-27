@@ -414,6 +414,11 @@ pub(crate) fn sql_value_to_py(py: Python<'_>, value: SqlValue) -> PyResult<Py<Py
             .call1((value.to_string(),))?
             .unbind()
             .into_py_any(py),
+        SqlValue::Json(value) => PyModule::import(py, "json")?
+            .getattr("loads")?
+            .call1((value.as_str(),))?
+            .unbind()
+            .into_py_any(py),
         SqlValue::Vector(values) => {
             let list = PyList::empty(py);
             for v in values {

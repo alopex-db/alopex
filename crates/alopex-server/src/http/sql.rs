@@ -1211,6 +1211,7 @@ fn type_to_string(data_type: &alopex_sql::planner::ResolvedType) -> String {
         alopex_sql::planner::ResolvedType::Decimal { precision, scale } => {
             format!("DECIMAL({precision},{scale})")
         }
+        alopex_sql::planner::ResolvedType::Json => "JSON".to_string(),
         alopex_sql::planner::ResolvedType::Vector { dimension, metric } => {
             format!("VECTOR({dimension}, {metric:?})")
         }

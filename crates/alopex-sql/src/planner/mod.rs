@@ -4466,6 +4466,58 @@ impl<'a, C: Catalog + ?Sized> Planner<'a, C> {
                 );
                 Ok((agg, signature))
             }
+            "jsonb_agg" => {
+                let arg = self.require_single_aggregate_arg(args, expr.span)?;
+                let agg = AggregateExpr {
+                    function: AggregateFunction::JsonbAgg,
+                    arg: Some(arg.clone()),
+                    extra_args: Vec::new(),
+                    distinct,
+                    result_type: ResolvedType::Json,
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
+                };
+                let signature = aggregate_signature(
+                    name,
+                    distinct,
+                    star,
+                    Some(arg),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
+                Ok((agg, signature))
+            }
+            "jsonb_object_agg" => {
+                if args.len() != 2 {
+                    return Err(PlannerError::type_mismatch(
+                        "2 arguments",
+                        format!("{} arguments", args.len()),
+                        expr.span,
+                    ));
+                }
+                let agg = AggregateExpr {
+                    function: AggregateFunction::JsonbObjectAgg,
+                    arg: Some(args[0].clone()),
+                    extra_args: vec![args[1].clone()],
+                    distinct,
+                    result_type: ResolvedType::Json,
+                    filter: filter_owned,
+                    order_by: retained_order_by.clone(),
+                };
+                let signature = aggregate_signature(
+                    name,
+                    distinct,
+                    star,
+                    Some(&args[0]),
+                    None,
+                    expr,
+                    filter,
+                    &retained_order_by,
+                );
+                Ok((agg, signature))
+            }
             "percentile_disc" => {
                 if args.len() != 1 {
                     return Err(PlannerError::type_mismatch(
@@ -6242,6 +6294,8 @@ fn is_aggregate_function(name: &str) -> bool {
             | "string_agg"
             | "json_group_array"
             | "json_group_object"
+            | "jsonb_agg"
+            | "jsonb_object_agg"
             | "percentile_disc"
             | "percentile_cont"
     ) || type_checker::is_portable_aggregate_name(&name.to_ascii_lowercase())
@@ -6508,6 +6562,13 @@ fn build_aggregate_map(aggregates: &[AggregateExpr]) -> HashMap<AggregateSignatu
             ),
             AggregateFunction::JsonGroupObject => (
                 "json_group_object".to_string(),
+                None,
+                false,
+                agg.arg.as_ref(),
+            ),
+            AggregateFunction::JsonbAgg => ("jsonb_agg".to_string(), None, false, agg.arg.as_ref()),
+            AggregateFunction::JsonbObjectAgg => (
+                "jsonb_object_agg".to_string(),
                 None,
                 false,
                 agg.arg.as_ref(),
@@ -7140,6 +7201,8 @@ fn build_aggregate_schema(
             AggregateFunction::StringAgg { .. } => format!("string_agg_{idx}"),
             AggregateFunction::JsonGroupArray => format!("json_group_array_{idx}"),
             AggregateFunction::JsonGroupObject => format!("json_group_object_{idx}"),
+            AggregateFunction::JsonbAgg => format!("jsonb_agg_{idx}"),
+            AggregateFunction::JsonbObjectAgg => format!("jsonb_object_agg_{idx}"),
             AggregateFunction::PercentileDisc { .. } => format!("percentile_disc_{idx}"),
             _ => format!("aggregate_{idx}"),
         };

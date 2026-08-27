@@ -163,6 +163,7 @@ message Value {
     int64 time_value = 11;
     Interval interval_value = 12;
     Decimal decimal_value = 13;
+    string json_value = 14;
   }
 }
 

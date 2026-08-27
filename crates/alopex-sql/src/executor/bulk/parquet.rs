@@ -194,6 +194,12 @@ fn arrow_value_to_sql(
             let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
             Ok(SqlValue::Text(arr.value(row_idx).to_string()))
         }
+        (ArrowDataType::Utf8, ResolvedType::Json) => {
+            let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
+            crate::storage::JsonValue::parse(arr.value(row_idx))
+                .map(SqlValue::Json)
+                .map_err(|error| ExecutorError::BulkLoad(format!("invalid JSON: {error}")))
+        }
         (ArrowDataType::Binary, ResolvedType::Blob) => {
             let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
             Ok(SqlValue::Blob(arr.value(row_idx).to_vec()))

@@ -50,6 +50,8 @@ pub enum ResolvedType {
     Interval,
     /// Exact fixed-precision decimal with up to 38 digits.
     Decimal { precision: u8, scale: u8 },
+    /// Canonical native JSON value (`JSONB` is a dialect alias).
+    Json,
     /// Vector type with dimension and metric
     /// Metric is always populated (defaults to Cosine if omitted in AST)
     Vector {
@@ -116,6 +118,7 @@ impl ResolvedType {
                 precision: *precision,
                 scale: *scale,
             },
+            DataType::Json => Self::Json,
             DataType::Vector { dimension, metric } => Self::Vector {
                 dimension: *dimension,
                 metric: metric.unwrap_or(VectorMetric::Cosine),
@@ -183,6 +186,7 @@ impl ResolvedType {
             // microseconds at execution time.
             (Text | Integer | BigInt | Float | Double, Timestamp) => true,
             (Text, Date | Time | Interval) => true,
+            (Text, Json) | (Json, Text) => true,
 
             // Vector types require dimension check (done separately in TypeChecker)
             (Vector { .. }, Vector { .. }) => false,
@@ -209,6 +213,7 @@ impl ResolvedType {
             Self::Time => "Time",
             Self::Interval => "Interval",
             Self::Decimal { .. } => "Decimal",
+            Self::Json => "Json",
             Self::Vector { .. } => "Vector",
             Self::Null => "Null",
         }
@@ -230,6 +235,7 @@ impl std::fmt::Display for ResolvedType {
             Self::Time => write!(f, "TIME"),
             Self::Interval => write!(f, "INTERVAL"),
             Self::Decimal { precision, scale } => write!(f, "DECIMAL({precision},{scale})"),
+            Self::Json => write!(f, "JSON"),
             Self::Vector { dimension, metric } => {
                 write!(f, "VECTOR({}, {:?})", dimension, metric)
             }

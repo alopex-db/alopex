@@ -130,6 +130,17 @@ def main() -> int:
                 [{"quantities": "[3,1,5,2,0]"}],
             ),
             (
+                "SELECT JSONB_BUILD_OBJECT('b', 1, 'a', JSONB_BUILD_ARRAY(2, 3)) "
+                "#> '{a}' AS document, "
+                "JSONB '{\"n\":90071992547409931234567890}' ->> 'n' AS exact_number",
+                [
+                    {
+                        "document": [2, 3],
+                        "exact_number": "90071992547409931234567890",
+                    }
+                ],
+            ),
+            (
                 "SELECT DATE_ADD(DATE '2024-01-31', INTERVAL '1 month') AS month_end, "
                 "TIME '23:59:59.123456' AS precise_time, "
                 "AGE(DATE '2024-03-01', DATE '2024-02-28') AS elapsed",

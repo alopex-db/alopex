@@ -176,6 +176,8 @@ fn normalize_value(value: &SqlValue) -> Result<Value, String> {
             micros,
         } => Ok(json!({ "months": months, "days": days, "microseconds": micros })),
         SqlValue::Decimal(value) => Ok(json!(value.to_string())),
+        SqlValue::Json(value) => serde_json::from_str(value.as_str())
+            .map_err(|error| format!("invalid native JSON value: {error}")),
         SqlValue::Blob(_) => {
             Err("BLOB 値の正規化表現は未定義(コーパスに BLOB を含めない前提)".to_string())
         }

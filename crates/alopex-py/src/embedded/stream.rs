@@ -895,6 +895,7 @@ fn estimated_row_bytes(row: &[SqlValue]) -> usize {
             SqlValue::Date(_) => 4,
             SqlValue::Interval { .. } => 16,
             SqlValue::Decimal(_) => 17,
+            SqlValue::Json(value) => value.as_str().len(),
             SqlValue::Boolean(_) => 1,
             SqlValue::Text(value) => value.len(),
             SqlValue::Blob(value) => value.len(),

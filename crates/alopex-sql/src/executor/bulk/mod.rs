@@ -371,7 +371,7 @@ fn logical_type_for(ty: &ResolvedType) -> Result<LogicalType> {
         ResolvedType::Float => Ok(LogicalType::Float32),
         ResolvedType::Double => Ok(LogicalType::Float64),
         ResolvedType::Boolean => Ok(LogicalType::Bool),
-        ResolvedType::Text | ResolvedType::Blob => Ok(LogicalType::Binary),
+        ResolvedType::Text | ResolvedType::Blob | ResolvedType::Json => Ok(LogicalType::Binary),
         ResolvedType::Null => Err(ExecutorError::Columnar(
             "NULL column type is not supported for columnar storage".into(),
         )),
@@ -597,6 +597,33 @@ fn build_column(
                     other => {
                         return Err(ExecutorError::BulkLoad(format!(
                             "type mismatch for column '{}': expected Text, got {}",
+                            col_meta.name,
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok((Column::Binary(values), validity_bitmap(&validity)))
+        }
+        ResolvedType::Json => {
+            let mut validity = Vec::with_capacity(rows.len());
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                match row
+                    .get(col_idx)
+                    .ok_or_else(|| ExecutorError::BulkLoad("row too short".into()))?
+                {
+                    SqlValue::Null => {
+                        validity.push(false);
+                        values.push(Vec::new());
+                    }
+                    SqlValue::Json(value) => {
+                        validity.push(true);
+                        values.push(value.as_str().as_bytes().to_vec());
+                    }
+                    other => {
+                        return Err(ExecutorError::BulkLoad(format!(
+                            "type mismatch for column '{}': expected Json, got {}",
                             col_meta.name,
                             other.type_name()
                         )));
@@ -893,7 +920,8 @@ pub(crate) fn parse_value(raw: &str, ty: &ResolvedType) -> Result<SqlValue> {
         ResolvedType::Date
         | ResolvedType::Time
         | ResolvedType::Interval
-        | ResolvedType::Decimal { .. } => {
+        | ResolvedType::Decimal { .. }
+        | ResolvedType::Json => {
             crate::executor::evaluator::coerce_value(SqlValue::Text(trimmed.to_string()), ty)
         }
         ResolvedType::Text => Ok(SqlValue::Text(trimmed.to_string())),
